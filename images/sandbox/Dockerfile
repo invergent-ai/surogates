@@ -179,9 +179,11 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     XDG_CACHE_HOME="/home/sandbox/.cache"
 
 # ── The guest's kernel ──────────────────────────────────────────────
-# The kernel pin: KERNEL above and these four .debs, their version and hashes, change
-# together: the kernel, its modules, and the tools whose bpftool loads the guest-kernel rule.
-FROM python:3.12-slim AS kernel
+# The kernel pin: KERNEL above and each arch's four .debs, of one version for every arch, and
+# their hashes, change together: the kernel, its modules, and the tools whose bpftool loads the
+# guest-kernel rule. Each arch's .debs are in a stage of its own, kernel-<arch>, which only that
+# arch's build reads, and images/guest/inputs.sh keys each arch's image without the other's.
+FROM python:3.12-slim AS kernel-amd64
 ADD --checksum=sha256:1791405b126cb2ef8b969dc6706292a02c12da9f581bb3f8fac2d1272a419fd4 \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb /tmp/image.deb
 ADD --checksum=sha256:99536f44ce1802e63ed79a90d386bb1025ec12bf7a2f5af43287dbb4af247202 \
@@ -190,33 +192,60 @@ ADD --checksum=sha256:138d110a6ed5fd31ca2cecc5799216ca4fbe70648eebf1be7c7f2bf648
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb /tmp/tools.deb
 ADD --checksum=sha256:52e3f6673d57a155ece2ce5f0cce6c4374ef27782b03afb06cf0e18ab7b9b34d \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-38_7.0.0-38.38~24.04.4_amd64.deb /tmp/hwe-tools.deb
-# Of the modules, only those vm/init loads: the kernel loads no others (modules_disabled),
-# and the rest, compressed already, would add 170 MB to the download.
+
+FROM python:3.12-slim AS kernel-arm64
+ADD --checksum=sha256:b9e29fa6ae97704a05111c004642cd306461aebfd7336e3e2e00c6627b369018 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-38-generic_7.0.0-38.38~24.04.4_arm64.deb /tmp/image.deb
+ADD --checksum=sha256:ac32f2c3e295f22b76b22154c0f55068aa08c065ba5509fda95207071b4d93bd \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-38-generic_7.0.0-38.38~24.04.4_arm64.deb /tmp/modules.deb
+ADD --checksum=sha256:c61071b5f4e8d8dcf0df3e1458377c2860f51ce52e1fb3da7c329e9ca539961c \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-38-generic_7.0.0-38.38~24.04.4_arm64.deb /tmp/tools.deb
+ADD --checksum=sha256:95751940dd6469797292ba04221ffdd1f1f10f0a0769bda66975ddc0346ce77f \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-38_7.0.0-38.38~24.04.4_arm64.deb /tmp/hwe-tools.deb
+
+# The kernel boots without an initrd: kernel-config.sh fails the build on one that does not
+# build in what that needs. Of the modules, only those vm/init loads: the kernel loads no others
+# (modules_disabled), and the rest, compressed already, would add 170 MB to the download.
+FROM kernel-${TARGETARCH} AS kernel
+ARG KERNEL
+ARG TARGETARCH
+COPY --chmod=0755 images/guest/kernel-config.sh /usr/local/bin/kernel-config.sh
 RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
     && dpkg-deb -x /tmp/tools.deb /tools && dpkg-deb -x /tmp/hwe-tools.deb /tools \
+    && kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL" \
     && find /kernel/lib/modules/*/kernel -type f ! -name virtiofs.ko.zst ! -name overlay.ko.zst -delete
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
-# The BTF is the pinned vmlinuz's own: its zstd payload is a vmlinux that keeps .BTF.
+# The BTF is the pinned kernel's own, /btf as bpftool reads it. amd64's vmlinuz is a bzImage
+# whose zstd payload is a vmlinux that keeps .BTF. arm64's is an EFI zboot file whose payload is
+# the Image, which holds the .BTF section raw where System.map puts it (kernel-image.sh, kernel-btf.sh).
 FROM ubuntu:24.04 AS bpf
 ARG KERNEL
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev zstd \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=kernel /kernel/boot/vmlinuz-${KERNEL} /vmlinuz
 # bpftool, from the pinned kernel's own tools: /usr/lib/linux-tools/${KERNEL}/bpftool.
 COPY --from=kernel /tools/usr/lib/ /usr/lib/
 COPY desktop/vm/rule.bpf.c desktop/vm/rule-match.h /src/
-# zstd stops with an error at the bytes after the payload; bpftool refuses anything but a whole vmlinux.
+COPY --chmod=0755 images/guest/kernel-image.sh images/guest/kernel-btf.sh /usr/local/bin/
+# zstd stops with an error at the bytes after amd64's payload; bpftool refuses anything but a whole vmlinux.
+# The rule is compiled for the arch's own registers and calls (__TARGET_ARCH_<arch>, as libbpf's bpf_tracing.h names it).
 # Each lsm/<hook> program must take bpf_lsm_<hook>'s arguments in the BTF, type for type: the verifier
 # loads one that does not, which then reads the wrong ones, or the hook's return slot as one.
 # The check reads the BPF_PROG( line after each SEC, so it misjudges a declaration split
 # across lines, or one that also takes the optional trailing int ret: keep each on one line, without ret.
 # ctype names a BTF type as C writes it, for the pointers, qualifiers and types the hooks take; type 0 is void.
-RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1) \
-    && { tail -c +$((at + 1)) /vmlinuz | zstd -dcq > /vmlinux || true; } \
-    && { test -s /vmlinux || { echo "no vmlinux decompressed from /vmlinuz" >&2; exit 1; }; } \
-    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format c > /src/vmlinux.h \
-    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /vmlinux format raw | awk ' \
+RUN --mount=type=bind,from=kernel,source=/kernel/boot,target=/boot \
+    case "$TARGETARCH" in \
+        amd64) at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' "/boot/vmlinuz-$KERNEL" | head -1 | cut -d: -f1) \
+            && { tail -c +$((at + 1)) "/boot/vmlinuz-$KERNEL" | zstd -dcq > /btf || true; } \
+            && { test -s /btf || { echo "no vmlinux decompressed from vmlinuz-$KERNEL" >&2; exit 1; }; } \
+            && bpf_arch=x86 ;; \
+        arm64) kernel-image.sh "/boot/vmlinuz-$KERNEL" /Image && kernel-btf.sh /Image "/boot/System.map-$KERNEL" /btf && bpf_arch=arm64 ;; \
+        *) echo "no guest kernel for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /btf format c > /src/vmlinux.h \
+    && /usr/lib/linux-tools/${KERNEL}/bpftool btf dump file /btf format raw | awk ' \
         function ctype(id,   k, t) { if (id == 0) return "void"; k = kind[id]; t = target[id]; if (k == "PTR") return ctype(t) " *"; \
           if (k == "CONST" || k == "VOLATILE") return kind[t] == "PTR" ? ctype(t) " " tolower(k) : tolower(k) " " ctype(t); \
           if (k == "STRUCT" || k == "UNION" || k == "ENUM") return tolower(k) " " name[id]; return name[id]; } \
@@ -236,7 +265,7 @@ RUN at=$(LC_ALL=C grep -aboP '\x28\xb5\x2f\xfd' /vmlinuz | head -1 | cut -d: -f1
         /^SEC\("lsm\// { hook = $0; sub(/^SEC\("lsm\//, "", hook); sub(/".*/, "", hook); } \
         END { if (bad || !checked) exit 1; print checked " lsm programs take the arguments of their hooks, type for type"; }' \
         - /src/rule.bpf.c \
-    && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I/src -c /src/rule.bpf.c -o /rule.bpf.o
+    && clang -O2 -g -target bpf "-D__TARGET_ARCH_$bpf_arch" -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
 FROM tools AS guest
@@ -271,20 +300,28 @@ EOF
 
 # The guest's disks, made in the build so the tree keeps its owners and modes:
 # docker build --target guest-disk --output type=local,dest=<dir> (images/guest/build.sh).
+# The kernel as the VM boots it: amd64's vmlinuz as it is, and arm64's as the uncompressed
+# Image (kernel-image.sh), under the same name.
 FROM python:3.12-slim AS guest-disk-build
 ARG KERNEL
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs zstd \
     && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 images/guest/kernel-image.sh /usr/local/bin/kernel-image.sh
 # Sized from the tree: 10% and 64 MiB over its blocks, an inode for every entry and a fifth more.
 RUN --mount=type=bind,from=guest,target=/tree \
     --mount=type=bind,from=kernel,source=/kernel/boot,target=/boot \
     mkdir /out \
+    && case "$TARGETARCH" in \
+        amd64) zstd -q -19 -o /out/vmlinuz.zst "/boot/vmlinuz-$KERNEL" ;; \
+        arm64) kernel-image.sh "/boot/vmlinuz-$KERNEL" /out/vmlinuz && zstd -q -19 --rm -o /out/vmlinuz.zst /out/vmlinuz ;; \
+        *) echo "no guest kernel for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
     && blocks=$(du -sxm /tree | cut -f1) \
     && inodes=$(find /tree -xdev | wc -l) \
     && mke2fs -q -t ext4 -O ^has_journal -L surogate-guest -N $((inodes * 6 / 5)) \
         -d /tree /out/rootfs.img "$((blocks * 11 / 10 + 64))M" \
-    && zstd -q -T0 -19 --rm /out/rootfs.img \
-    && zstd -q -19 -o /out/vmlinuz.zst "/boot/vmlinuz-$KERNEL"
+    && zstd -q -T0 -19 --rm /out/rootfs.img
 
 FROM scratch AS guest-disk
 COPY --from=guest-disk-build /out/ /

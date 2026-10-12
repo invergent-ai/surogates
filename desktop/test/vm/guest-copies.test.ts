@@ -36,7 +36,7 @@ import type { Outcome } from "../../src/link/protocol.js";
 import { forkManager, type ManagerProcess, VmClient } from "../../src/vm/client.js";
 import type { HistoryRequest } from "../../src/vm/history.js";
 import type { Place } from "../../src/vm/manager.js";
-import { agentDisk, alive, IMAGE, KVM, needsKvm, signal, until, USER } from "./guest-support.js";
+import { agentDisk, alive, ARCH, IMAGE, KVM, needsKvm, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -92,7 +92,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's copy of its f
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
     client = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
       spawn: () => {
@@ -312,7 +312,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place another
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
     client = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
       spawn: () => {

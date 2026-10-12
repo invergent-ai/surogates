@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { NODE } from "../../src/hosts/tool-hosts.js";
 import { REPO_IMAGE, vmOptions } from "../../src/vm/client.js";
-import { readManifest } from "../../src/vm/image.js";
+import { imageArch, readManifest } from "../../src/vm/image.js";
 import { EMULATED_NOTICE } from "../../src/vm/manager.js";
 import { certificate } from "../certificates.js";
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
@@ -613,7 +613,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM's processes throu
 // *held*, rootfs.img.zst stops after its first 64 MiB; while *missing*, every file is a 404.
 // *heard*: each request for a file, its Range and the cookie it carried.
 async function installedFrom(state: { held: boolean; missing: boolean }) {
-  const { key } = readManifest(join(REPO_IMAGE, "manifest.json"));
+  const { key } = readManifest(join(REPO_IMAGE, "manifest.json"), imageArch()!);
   const heard: Array<{ name: string; range: string | undefined; cookie: string | undefined }> = [];
   let release = () => {};
   const released = new Promise<void>((resolve) => {
@@ -774,7 +774,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     // An image's folder whole by its sizes and its last step, and nothing but zeros: no kernel to boot.
     const image = join(home, "surogate", "vm", "images", served.key);
     mkdirSync(image, { recursive: true });
-    for (const file of readManifest(join(REPO_IMAGE, "manifest.json")).files) {
+    for (const file of readManifest(join(REPO_IMAGE, "manifest.json"), imageArch()!).files) {
       writeFileSync(join(image, file.name), "");
       truncateSync(join(image, file.name), file.size);
     }

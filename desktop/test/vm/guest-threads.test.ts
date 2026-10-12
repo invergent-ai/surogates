@@ -26,7 +26,7 @@ import { VmExecutor } from "../../src/vm/executor.js";
 import type { HistoryRequest } from "../../src/vm/history.js";
 import type { VmOperation } from "../../src/vm/manager.js";
 import { asItLies } from "../as-it-lies.js";
-import { agentDisk, background, IMAGE, KVM, needsKvm, signal, until, USER } from "./guest-support.js";
+import { agentDisk, ARCH, background, IMAGE, KVM, needsKvm, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -146,7 +146,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("threads on a folder, thr
     // The manager in a process of its own, as the app runs it: a place and its history go through its channel.
     vm = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
@@ -350,7 +350,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's checkpoints a
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
     vm = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
@@ -590,7 +590,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a thread's commands, its
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
     vm = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });

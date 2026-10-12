@@ -8,6 +8,7 @@ require "yaml"
 class ReleaseWorkflowTest < Minitest::Test
   ROLLOUT = ".github/workflows/update-images.yml"
   MACOS = ".github/workflows/desktop-macos.yml"
+  ARM64 = ".github/workflows/desktop-guest-arm64.yml"
 
   def setup
     @workflow = YAML.load_file(".github/workflows/release.yml")
@@ -172,10 +173,10 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal({ "group" => "desktop-vm-image", "cancel-in-progress" => false }, job.fetch("concurrency"))
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     assert_equal({ "state" => "${{ steps.published.outputs.state }}" }, job.fetch("outputs"))
-    kernel = runs.index { |run| run.include?("images/guest/kernel-current.sh") }
-    fetch = runs.index { |run| run.include?("images/guest/publish.sh fetch images/guest/out") }
-    build = runs.index { |run| run.include?("images/guest/build.sh --packed images/guest/out") }
-    send = runs.index { |run| run.include?("images/guest/publish.sh send images/guest/out") }
+    kernel = runs.index { |run| run.include?("images/guest/kernel-current.sh --arch amd64") }
+    fetch = runs.index { |run| run.include?("images/guest/publish.sh --arch amd64 fetch images/guest/out") }
+    build = runs.index { |run| run.include?("images/guest/build.sh --arch amd64 --packed images/guest/out") }
+    send = runs.index { |run| run.include?("images/guest/publish.sh --arch amd64 send images/guest/out") }
     refute_nil kernel
     assert_operator kernel, :<, fetch
     assert_operator fetch, :<, build
@@ -189,6 +190,21 @@ class ReleaseWorkflowTest < Minitest::Test
     %w[images/guest/inputs.sh images/guest/build.sh images/guest/publish.sh images/guest/kernel-current.sh].each do |script|
       assert File.executable?(script), "#{script} is not executable"
     end
+  end
+
+  def test_the_release_builds_the_linux_app_s_guest_alone
+    job = @workflow.fetch("jobs").fetch("desktop-vm-image")
+
+    # amd64's, the Linux app's, on an amd64 runner, and each of the guest's scripts told so. A job
+    # that needs a matrix waits for every leg of it: an arm64 leg that failed, or that no runner
+    # took, would hold the Linux app's release and the attach of amd64's manifest. arm64's image is
+    # built by hand (desktop-guest-arm64.yml) until the release ships the macOS app.
+    refute job.key?("strategy")
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+    guest = job.fetch("steps").flat_map { |step| step["run"].to_s.scan(%r{images/guest/\S+\.sh[^\n]*}) }
+    assert_equal 4, guest.size
+    guest.each { |run| assert_match(/ --arch amd64\b/, run) }
+    refute_match(/arm64/, @workflow.to_s)
   end
 
   def test_only_the_jobs_that_write_a_release_may_write_its_assets
@@ -220,9 +236,9 @@ class ReleaseWorkflowTest < Minitest::Test
     refute job.key?("env"), "the job's env reaches every step"
     job.fetch("steps").each do |step|
       run = step["run"].to_s
-      if run.include?("images/guest/publish.sh fetch")
+      if run.include?("images/guest/publish.sh --arch amd64 fetch")
         assert_equal r2.merge("GH_TOKEN" => "${{ github.token }}"), step.fetch("env")
-      elsif run.include?("images/guest/publish.sh send")
+      elsif run.include?("images/guest/publish.sh --arch amd64 send")
         assert_equal r2, step.fetch("env")
       else
         refute step.to_s.include?("secrets."), "#{step["name"] || step["uses"]} reads a secret"
@@ -502,6 +518,50 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
   end
 
+  def test_the_arm64_guest_is_built_and_tested_by_hand_on_an_arm64_runner_and_holds_nothing_to_leak
+    arm64 = YAML.load_file(ARM64)
+    on = triggers(arm64)
+    # Until the release ships the macOS app, arm64's guest is built only when someone asks, on the ref
+    # they name: never by a push or a pull request, whose code it would build and boot.
+    assert_equal %w[workflow_dispatch], on.keys
+    inputs = on.fetch("workflow_dispatch").fetch("inputs")
+    assert_equal %w[ref], inputs.keys
+    assert_equal [true, "string"], inputs.fetch("ref").values_at("required", "type")
+    assert_equal ["jobs", "name", "permissions", "true"], arm64.keys.map(&:to_s).sort
+    assert_equal({ "contents" => "read" }, arm64.fetch("permissions"))
+    jobs = arm64.fetch("jobs")
+    assert_equal %w[guest], jobs.keys
+    job = jobs.fetch("guest")
+    # Natively, on an arm64 runner: Docker runs the build's programs as the arch's own.
+    assert_equal "blacksmith-4vcpu-ubuntu-2404-arm", job.fetch("runs-on")
+    # Bounded early, once it has started: a cold build of the guest, and the VM suite.
+    assert_operator job.fetch("timeout-minutes"), :<=, 90
+    # It publishes nothing: no secret in any form, no Environment, no permission of its own, and
+    # nothing sent to R2, attached to a release or kept as an artifact.
+    refute_match(/secrets/i, arm64.to_s)
+    refute job.key?("environment")
+    refute job.key?("permissions")
+    refute_match(/publish\.sh|\bR2_|\bS3_|\baws\b|gh release|upload-artifact/, arm64.to_s)
+    steps = job.fetch("steps")
+    assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, steps.first.fetch("with"))
+    runs = steps.map { |step| step["run"].to_s }
+    build = runs.index { |run| run.include?("images/guest/build.sh --arch arm64 images/guest/out") }
+    image = runs.index { |run| run.include?("vitest run test/guest-image.test.ts") }
+    kvm = steps.index { |step| step["id"] == "kvm" }
+    suite = runs.index { |run| run.include?("vitest run test/vm") }
+    refute_nil build
+    refute_nil image
+    refute_nil kvm
+    assert_operator build, :<, suite
+    assert_operator kvm, :<, suite
+    # The VM suite boots the arm64 image only where the runner has KVM, and says when it has none.
+    assert_includes runs[kvm], "[ -c /dev/kvm ]"
+    assert_includes runs[kvm], "::notice"
+    assert_equal "steps.kvm.outputs.present == 'true'", steps[suite].fetch("if")
+    refute steps[suite].fetch("env", {}).key?("SUROGATE_VM_KVM"), "the suite runs emulated"
+    assert_equal "1", steps[suite].fetch("env").fetch("SUROGATE_VM_TESTS")
+  end
+
   def test_the_workflow_has_no_key_of_its_own_but_its_name_its_trigger_its_permissions_and_its_jobs
     # A shell, an environment or a concurrency of the workflow's own is every job's: a shell that
     # traces would print what a step reads, an env would be every step's, the release key's step
@@ -522,6 +582,7 @@ class ReleaseWorkflowTest < Minitest::Test
     # desktop/install.sh, which runs as root on each new install; the desktop's release key signs
     # what every installed app takes. A reader that is not here is one too many.
     allowed = {
+      "desktop-guest-arm64.yml" => {},
       "desktop-macos.yml" => {},
       "release.yml" => {
         ["images", "Log in to GHCR"] => %w[GITHUB_TOKEN],
@@ -586,6 +647,9 @@ class ReleaseWorkflowTest < Minitest::Test
     # to any of them fails here, and says the word to put in its place once the change is read:
     # that reading is what this test asks for, of whoever changes a job that can leak.
     read = {
+      "desktop-guest-arm64.yml" => {
+        "guest" => ["eca5e065813cef05", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 bd6e6df4eb2ca928 8c986439d5d86488 9443e3fdb92fa905 53a6f85d9c3376f6 8a9f74820350edf8 d20f5f9b98bf4212]],
+      },
       "desktop-macos.yml" => {
         "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed a2447334158f4627]],
       },
@@ -593,7 +657,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
         "images" => ["8ebea57277fdbb89", %w[87fcdec176307d16 0619e48968c28792 617ad6a92e3fd6a0 73c45f0486d37ee1 24a2521493be90fe d971c94aab8fd2bb]],
         "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
-        "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 1c8fad583502f38f c210483245b04521 04f76870922f0e0c 9cf23a5158e4d38d 4d2b3220158de0c1 b71b78b7115f448e]],
+        "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 4c034b1990bdc512 c7898d9ce9c764f9 04f76870922f0e0c b7eef4a1402a3c44 84bb50f2712c5cd6 b71b78b7115f448e]],
         "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
         "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
@@ -653,7 +717,8 @@ class ReleaseWorkflowTest < Minitest::Test
         end
       end
     end
-    assert_equal %w[desktop-macos.yml release.yml update-images.yml], run.keys
+    assert_equal %w[desktop-guest-arm64.yml desktop-macos.yml release.yml update-images.yml], run.keys
+    assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-guest-arm64.yml").uniq.sort
     assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
     assert_equal %w[
       actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action

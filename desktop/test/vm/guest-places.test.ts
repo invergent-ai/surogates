@@ -14,7 +14,7 @@ import { findOnPath } from "../../src/files/operations.js";
 import { readonlyFlag } from "../../src/vm/linux.js";
 import { type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
 import { VIRTIOFSD } from "../../src/vm/qemu.js";
-import { agentDisk, agentDiskWith, altered, DAEMON, folderOf, IMAGE, KVM, needsKvm, OTHER, ROOT, signal, until, USER } from "./guest-support.js";
+import { agentDisk, agentDiskWith, altered, ARCH, DAEMON, folderOf, IMAGE, KVM, needsKvm, OTHER, ROOT, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -68,7 +68,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place in the 
       writeFileSync(join(copyOf(thread), "Report.docx"), `${thread}'s copy\n`);
     }
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM, ...DAEMON,
     };
     manager = new VmManager(options);
@@ -209,7 +209,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the
     for (const name of ["Documents", "store"]) mkdirSync(join(dir, name));
     writeFileSync(join(dir, "Documents", "Report.docx"), "the real report\n");
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDiskWith(dir, altered([AGENT, `${AS_ROOT}${AGENT}`])),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDiskWith(dir, altered([AGENT, `${AS_ROOT}${AGENT}`])),
       sessions: join(dir, "sessions.img"), run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"),
       user: USER, kvm: KVM, ...DAEMON,
     };
@@ -278,7 +278,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place, to the
     dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-places-")));
     for (const name of ["Documents", "store"]) mkdirSync(join(dir, name));
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDiskWith(dir, altered([AGENT, `${AS_ROOT_ON_MOUNTS}${AGENT}`])),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDiskWith(dir, altered([AGENT, `${AS_ROOT_ON_MOUNTS}${AGENT}`])),
       sessions: join(dir, "sessions.img"), run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"),
       user: USER, kvm: KVM, ...DAEMON,
     };

@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { GUEST_ARCH, hostArch, QEMU_ARCH } from "../src/vm/qemu-arch.js";
 import { guestCpus, Qmp, qemuArgs, virtiofsdArgs } from "../src/vm/qemu.js";
 
 const DISKS = { kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: "/d/sessions.img" };
@@ -52,6 +53,38 @@ describe("QEMU's command line", () => {
       replaced(kvm, ["-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host"], ["-machine", "q35,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"]),
       [append], [`${append} surogate.emulated=1`],
     ));
+  });
+
+  it("is x86_64's for the Linux app's guest, unless it is told another arch", () => {
+    for (const emulated of [false, true]) {
+      expect(qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, emulated, "x86_64")).toEqual(qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, emulated));
+    }
+    expect(QEMU_ARCH.x86_64.program).toBe("qemu-system-x86_64");
+  });
+
+  it("runs an arm64 guest on QEMU's aarch64 virt machine, with a GIC of the newest kind there is, and nothing else of its command line changed", () => {
+    expect(QEMU_ARCH.aarch64.program).toBe("qemu-system-aarch64");
+    const swapped = (args: string[], from: string[], to: string[]) => {
+      const at = args.join("\0").indexOf(from.join("\0"));
+      expect(at).toBeGreaterThanOrEqual(0);
+      return args.join("\0").replace(from.join("\0"), to.join("\0")).split("\0");
+    };
+    // With KVM, on an arm64 computer: the host's CPU.
+    expect(qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, false, "aarch64")).toEqual(swapped(
+      qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, false),
+      ["-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host"], ["-machine", "virt,gic-version=max,accel=kvm,memory-backend=mem", "-cpu", "host"],
+    ));
+    // Emulated, on any other: TCG's, as an emulated x86_64 guest has it.
+    expect(qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, true, "aarch64")).toEqual(swapped(
+      qemuArgs(DISKS, "/run/vm", "/d/console.log", 4, true),
+      ["-machine", "q35,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"],
+      ["-machine", "virt,gic-version=max,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"],
+    ));
+  });
+
+  it("names each image's arch, as its manifest does, by the guest's, and this computer's own", () => {
+    expect(GUEST_ARCH).toEqual({ amd64: "x86_64", arm64: "aarch64" });
+    expect([hostArch("x64"), hostArch("arm64"), hostArch("ia32")]).toEqual(["x86_64", "aarch64", null]);
   });
 
   it("doubles a comma in a path, which QEMU would read as the next option", () => {

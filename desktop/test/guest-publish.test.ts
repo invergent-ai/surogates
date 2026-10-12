@@ -25,13 +25,16 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
   let bucket: string;
   let out: string;
   const key = spawnSync(join(REPO, "images/guest/inputs.sh"), { encoding: "utf8" }).stdout.trim();
+  const arm64 = spawnSync(join(REPO, "images/guest/inputs.sh"), ["arm64"], { encoding: "utf8" }).stdout.trim();
   // No credentials of this user's reach the container's start.
   const docker = (...args: string[]) => spawnSync("docker", args, { encoding: "utf8", env: { ...process.env, DOCKER_CONFIG: join(dir, "docker") } });
   const publishEnv = (env: Record<string, string>) => ({
     ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}`, RELEASES: join(dir, "releases.json"), GITHUB_REPOSITORY: REPOSITORY, GH_TOKEN: "unused",
     S3_ENDPOINT: endpoint, S3_BUCKET: bucket, ...CREDENTIALS, ...env,
   });
-  const publish = (verb: string, env: Record<string, string> = {}) => spawnSync(PUBLISH, [verb, out], { encoding: "utf8", env: publishEnv(env) });
+  // *arch*'s image, as the release's job for that arch names it; amd64's when it names none.
+  const publish = (verb: string, env: Record<string, string> = {}, arch?: string) =>
+    spawnSync(PUBLISH, [...(arch ? ["--arch", arch] : []), verb, out], { encoding: "utf8", env: publishEnv(env) });
   // The same, while this process goes on: what it waits for can change meanwhile.
   const publishing = (verb: string, env: Record<string, string> = {}) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
     execFile(PUBLISH, [verb, out], { env: publishEnv(env) }, (error, stdout, stderr) => {
@@ -52,10 +55,12 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
   // The repository's releases, as GitHub's API lists them, newest first: one that carries no
   // manifest, and one more for each of *manifests*, which carries it as desktop-vm-<key>.json, as
   // a release that ships the key attaches it.
-  const released = (...manifests: Buffer[]) => {
+  const released = (...manifests: Buffer[]) => releasedAs(key, ...manifests);
+  // The same, each manifest attached as the manifest of *named*.
+  const releasedAs = (named: string, ...manifests: Buffer[]) => {
     const releases = manifests.map((manifest, n) => {
       writeFileSync(join(dir, `released-${n}.json`), manifest);
-      return { tag_name: `v1.${manifests.length - n}.0`, assets: [{ name: `desktop-vm-${key}.json`, url: `file://${join(dir, `released-${n}.json`)}` }] };
+      return { tag_name: `v1.${manifests.length - n}.0`, assets: [{ name: `desktop-vm-${named}.json`, url: `file://${join(dir, `released-${n}.json`)}` }] };
     });
     releases.push({ tag_name: "v1.0.0", assets: [{ name: "surogates-1.0.0.tar.gz", url: "file:///nowhere" }] });
     // Whole at each read, as the API's list is.
@@ -107,8 +112,8 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     }
   });
 
-  // What build.sh leaves in *out*: the two downloads, zstd's, and the manifest that names *key*.
-  const built = (named = key) => {
+  // What build.sh leaves in *out*: the two downloads, zstd's, and the manifest that names *key* and *arch*.
+  const built = (named = key, arch = "amd64") => {
     const files = [["rootfs.img", 3 * 1024 * 1024], ["vmlinuz", 64 * 1024]] as const;
     const entries = files.map(([name, bytes]) => {
       const data = randomBytes(bytes);
@@ -117,7 +122,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       const download = readFileSync(join(out, `${name}.zst`));
       return { name, size: data.length, sha256: sha256(data), download: `${name}.zst`, downloadSize: download.length, downloadSha256: sha256(download) };
     });
-    writeFileSync(join(out, "manifest.json"), `${JSON.stringify({ key: named, files: entries })}\n`);
+    writeFileSync(join(out, "manifest.json"), `${JSON.stringify({ key: named, arch, files: entries })}\n`);
   };
   const sentFiles = () => Object.fromEntries(["rootfs.img.zst", "vmlinuz.zst", "manifest.json"].map((file) => [file, readFileSync(join(out, file))]));
 
@@ -139,6 +144,27 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     built();
     expect(publish("send")).toMatchObject({ status: 1, stderr: `publish.sh: desktop/vm/${key} is published already, and is not sent again\n` });
     expect(object(`desktop/vm/${key}/rootfs.img.zst`).equals(sent["rootfs.img.zst"]!)).toBe(true);
+  });
+
+  it("publishes each arch's image under its own key, and takes no build or manifest of the key that names another arch", () => {
+    expect(arm64).toMatch(/^[0-9a-f]{64}$/);
+    expect(arm64).not.toBe(key);
+    // arm64's build, sent by amd64's job: not its build. By arm64's: under arm64's key.
+    built(arm64, "arm64");
+    const sent = sentFiles();
+    expect(publish("send")).toMatchObject({ status: 1, stderr: `publish.sh: ${out}/manifest.json is not the build of desktop/vm/${key}\n` });
+    expect(publish("send", {}, "arm64")).toMatchObject({ status: 0, stdout: `published desktop/vm/${arm64}\n` });
+    for (const [file, bytes] of Object.entries(sent)) expect(object(`desktop/vm/${arm64}/${file}`).equals(bytes)).toBe(true);
+    releasedAs(arm64, sent["manifest.json"]!);
+    out = mkdtempSync(join(dir, "out-"));
+    expect(publish("fetch", {}, "arm64")).toMatchObject({ status: 0, stdout: "published\n" });
+    expect(publish("fetch")).toMatchObject({ status: 0, stdout: "missing\n" });
+    // A manifest of arm64's key that names amd64: the app reads the arch, so the key alone is not enough.
+    built(arm64, "amd64");
+    expect(publish("send", {}, "arm64")).toMatchObject({ status: 1, stderr: `publish.sh: ${out}/manifest.json is not the build of desktop/vm/${arm64}\n` });
+    releasedAs(arm64, Buffer.from(sent["manifest.json"]!.toString().replace('"arch":"arm64"', '"arch":"amd64"')));
+    expect(publish("fetch", {}, "arm64")).toMatchObject({ status: 1, stderr: `publish.sh: desktop-vm-${arm64}.json is not the manifest of desktop/vm/${arm64}\n` });
+    expect(publish("fetch", {}, "riscv64")).toMatchObject({ status: 2, stdout: "" });
   });
 
   it("takes nothing of the bucket's on trust: a key there that no release carries, and a file or a manifest there that is not the release's, fail the job", () => {
@@ -196,7 +222,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
   it("refuses a release's manifest that names no files, which would leave the bucket's files unchecked", () => {
     built();
     expect(publish("send").status).toBe(0);
-    for (const named of [{ key }, { key, files: [] }]) {
+    for (const named of [{ key, arch: "amd64" }, { key, arch: "amd64", files: [] }]) {
       // The bucket's manifest the same bytes, so only the list can fail it.
       const bytes = Buffer.from(`${JSON.stringify(named)}\n`);
       replace(`desktop/vm/${key}/manifest.json`, bytes);

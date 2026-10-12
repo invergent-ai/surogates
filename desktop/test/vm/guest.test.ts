@@ -17,9 +17,10 @@ import type { ProcessHandle } from "../../src/guest/processes.js";
 import { ControlLink } from "../../src/vm/control.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
+import { QEMU_ARCH } from "../../src/vm/qemu-arch.js";
 import {
-  agentDisk, agentDiskWith, altered, background, descriptors, FILES, FIRST_UID, folderOf, IMAGE, incompat, INIT, KVM, median, needsKvm, OTHER, R1, ROOT,
-  shareDaemons, signal, SOCKETS, STUCK, USER,
+  agentDisk, agentDiskWith, altered, ARCH, background, descriptors, FILES, FIRST_UID, folderOf, IMAGE, incompat, INIT, KVM, median, needsKvm, OTHER,
+  R1, ROOT, shareDaemons, signal, SOCKETS, STUCK, USER,
 } from "./guest-support.js";
 
 beforeAll(needsKvm);
@@ -44,7 +45,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     mkdirSync(folder);
     mkdirSync(other);
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "logs", "console.log"), user: USER, kvm: KVM,
     };
@@ -1004,7 +1005,8 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     // QEMU, with the bpf LSM left out of the guest kernel's command line: the rule has nothing to attach to.
     const bin = join(dir, "no-bpf");
     mkdirSync(bin);
-    writeFileSync(join(bin, "qemu-system-x86_64"), `#!/bin/sh\nfor arg; do shift; set -- "$@" "$(printf '%s' "$arg" | sed 's/,bpf$//')"; done\nexec /usr/bin/qemu-system-x86_64 "$@"\n`, { mode: 0o755 });
+    const { program } = QEMU_ARCH[ARCH];
+    writeFileSync(join(bin, program), `#!/bin/sh\nfor arg; do shift; set -- "$@" "$(printf '%s' "$arg" | sed 's/,bpf$//')"; done\nexec /usr/bin/${program} "$@"\n`, { mode: 0o755 });
     await guest.stop();
     const path = process.env.PATH;
     process.env.PATH = `${bin}:${path}`;
@@ -1154,7 +1156,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined)("the
     const run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
     runs.push(run);
     const options: VmOptions = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, `${name}-sessions.img`),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, `${name}-sessions.img`),
       run, console: join(dir, `${name}-console.log`), user: USER, kvm,
     };
     // The first boot formats the sessions disk; the one measured checks it, as every later boot does.

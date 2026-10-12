@@ -23,9 +23,14 @@ export interface ImageFile {
   downloadSha256: string;
 }
 
+// The arches an image is built for, as Docker and Debian name them (images/guest/inputs.sh).
+export type ImageArch = "amd64" | "arm64";
+const ARCHES: readonly ImageArch[] = ["amd64", "arm64"];
+
 // resources/vm/manifest.json, which images/guest/build.sh writes and the app's tarball carries.
 export interface ImageManifest {
   key: string;
+  arch: ImageArch;
   files: ImageFile[];
 }
 
@@ -34,8 +39,16 @@ const HASH = /^[0-9a-f]{64}$/;
 const NAMES = ["rootfs.img", "vmlinuz"];
 const size = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
-/** The manifest at *path*; throws when it is not one. Its names are never paths. */
-export function readManifest(path: string): ImageManifest {
+/** This computer's own image arch, by Node's name for its arch (*arch*), or null for one no image is built for. */
+export function imageArch(arch: NodeJS.Architecture = process.arch): ImageArch | null {
+  return arch === "x64" ? "amd64" : arch === "arm64" ? "arm64" : null;
+}
+
+/**
+ * The manifest at *path* of the image for *arch*, this computer's; throws when it is not one, and
+ * when it is another arch's, so that no app downloads an image its computer cannot boot. Its names are never paths.
+ */
+export function readManifest(path: string, arch: ImageArch): ImageManifest {
   let manifest: Partial<ImageManifest> = {};
   try {
     manifest = JSON.parse(readFileSync(path, "utf8")) as Partial<ImageManifest>;
@@ -43,12 +56,26 @@ export function readManifest(path: string): ImageManifest {
     // Not there, or not JSON: as one that names nothing.
   }
   const files = Array.isArray(manifest.files) ? manifest.files : [];
-  const valid = typeof manifest.key === "string" && HASH.test(manifest.key)
+  const valid = typeof manifest.key === "string" && HASH.test(manifest.key) && ARCHES.includes(manifest.arch as ImageArch)
     && files.map((file) => file?.name).sort().join() === NAMES.join()
     && files.every((file) => size(file.size) && size(file.downloadSize) && HASH.test(String(file.sha256)) && HASH.test(String(file.downloadSha256))
       && file.download === `${file.name}.zst`);
   if (!valid) throw new Error(`${path} is not the guest image's manifest`);
+  if (manifest.arch !== arch) throw new Error(`${path} is the manifest of the guest image for ${manifest.arch}, and this computer runs ${arch}'s`);
   return manifest as ImageManifest;
+}
+
+/**
+ * The arch of the image in *folder*, as the manifest beside it names it, which images/guest/build.sh
+ * writes: a test's or a development build's. Null where none is named.
+ */
+export function imageArchOf(folder: string): ImageArch | null {
+  try {
+    const { arch } = JSON.parse(readFileSync(join(folder, "manifest.json"), "utf8")) as { arch?: unknown };
+    return ARCHES.includes(arch as ImageArch) ? (arch as ImageArch) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

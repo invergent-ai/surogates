@@ -15,7 +15,7 @@ import { LET_GO_MS } from "../../src/guest/listeners.js";
 import { MAX_INBOUND } from "../../src/guest/protocol.js";
 import { DOOR } from "../../src/vm/inbound.js";
 import { type Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
-import { agentDisk, background, folderOf, IMAGE, KVM, median, needsKvm, OTHER, ROOT, signal, USER } from "./guest-support.js";
+import { agentDisk, ARCH, background, folderOf, IMAGE, KVM, median, needsKvm, OTHER, ROOT, signal, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -91,7 +91,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a chat's own servers, as
     dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-inbound-")));
     for (const name of ["a", "b"]) mkdirSync(join(dir, name));
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     manager = new VmManager(options);

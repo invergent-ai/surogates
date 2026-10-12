@@ -12,6 +12,7 @@ import {
   forkManager, type FromManager, type ManagerProcess, REPO_IMAGE, type ToManager, VmClient, type VmClientOptions, vmEnv, vmOptions,
 } from "../src/vm/client.js";
 import { type HistoryRequest, NOT_A_REQUEST } from "../src/vm/history.js";
+import { hostArch } from "../src/vm/qemu-arch.js";
 import { type Boot, type Place, unavailable, type VmOperation, type VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
@@ -486,6 +487,27 @@ describe("the VM's files", () => {
     expect(packaged.run).toMatch(/^\/run\/user\/1000\/surogate\//);
     const developed = vmOptions("/d", ana, vmEnv(env, false), delivered);
     expect([developed.rootfs, developed.kvm]).toEqual(["/mine/rootfs.img", "/nowhere"]);
+  });
+
+  it("boot an image of a test's or a development build's on the arch its manifest names, and the delivered image, this computer's own, as the Linux app's", () => {
+    const images = mkdtempSync(join(tmpdir(), "vm-arch-"));
+    try {
+      const arm64 = join(images, "arm64");
+      mkdirSync(arm64);
+      writeFileSync(join(arm64, "manifest.json"), JSON.stringify({ key: "a".repeat(64), arch: "arm64", files: [] }));
+      const unnamed = join(images, "unnamed");
+      mkdirSync(unnamed);
+      expect(vmOptions("/d", ana, { SUROGATE_VM_IMAGE: arm64 }).arch).toBe("aarch64");
+      expect(vmOptions("/d", ana, { SUROGATE_VM_IMAGE: unnamed }).arch).toBeUndefined();
+      // A delivered image is this computer's own arch's, which its delivery checked, and has no manifest beside it.
+      expect(vmOptions("/d", ana, {}, { image: "/d/vm/images/abc" }).arch).toBe(hostArch() ?? undefined);
+      // A packaged app takes no SUROGATE_VM_IMAGE: an arm64 image named there boots nowhere but in a development build.
+      const packaged = vmOptions("/d", ana, vmEnv({ SUROGATE_VM_IMAGE: arm64 }, true), { image: "/d/vm/images/abc" });
+      expect([packaged.rootfs, packaged.arch]).toEqual(["/d/vm/images/abc/rootfs.img", hostArch()]);
+      expect(vmOptions("/d", ana, vmEnv({ SUROGATE_VM_IMAGE: arm64 }, false), { image: "/d/vm/images/abc" }).arch).toBe("aarch64");
+    } finally {
+      rmSync(images, { recursive: true, force: true });
+    }
   });
 });
 

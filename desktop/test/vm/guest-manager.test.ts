@@ -13,8 +13,10 @@ import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import { vmOptions } from "../../src/vm/client.js";
 import { VmManager, type VmOptions } from "../../src/vm/manager.js";
+import { QEMU_ARCH } from "../../src/vm/qemu-arch.js";
 import {
-  agentDisk, alive, background, FIRST_UID, folderOf, IMAGE, incompat, KVM, needsKvm, newestDaemon, OTHER, ROOT, shareDaemons, signal, STUCK, until, USER,
+  agentDisk, alive, ARCH, background, FIRST_UID, folderOf, IMAGE, incompat, KVM, needsKvm, newestDaemon, OTHER, ROOT, shareDaemons, signal, STUCK,
+  until, USER,
 } from "./guest-support.js";
 
 beforeAll(needsKvm);
@@ -31,7 +33,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-manager-")));
     for (const name of ["a", "b"]) mkdirSync(join(dir, name));
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     managers = [];
@@ -97,7 +99,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
       process.env.PATH = path;
     }
     const qemu = qemuPid();
-    expect(readlinkSync(`/proc/${qemu}/exe`)).toBe("/usr/bin/qemu-system-x86_64");
+    expect(readlinkSync(`/proc/${qemu}/exe`)).toBe(`/usr/bin/${QEMU_ARCH[ARCH].program}`);
     expect(readdirSync(`/proc/${qemu}/fd`).filter((fd) => readlinkSync(`/proc/${qemu}/fd/${fd}`) === "anon_inode:[io_uring]")).toEqual([]);
   });
 

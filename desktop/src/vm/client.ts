@@ -16,8 +16,10 @@ import type { Outcome } from "../link/protocol.js";
 import { backendFor } from "./backends.js";
 import { Backoff, MOST_MS } from "./backoff.js";
 import { type HistoryRequest, named, NOT_A_REQUEST, REFUSED } from "./history.js";
+import { imageArch, imageArchOf } from "./image.js";
 import { DOOR, REACH_MS } from "./inbound.js";
 import { aborted, type Boot, late, LET_GO, type Place, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
+import { GUEST_ARCH } from "./qemu-arch.js";
 
 // The same from src/vm and from dist/vm.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -80,13 +82,17 @@ function outcomeOf(sent: unknown): Outcome | null {
  * is SUROGATE_VM_IMAGE's folder when it is set, else the one the app delivers
  * (*delivered.image*), else the repository's; the agent disk is the app's
  * (*delivered.agentDisk*), else this package's (npm run agent-disk). SUROGATE_VM_KVM
- * names another device to open for KVM, as a test with none does.
+ * names another device to open for KVM, as a test with none does. The guest's arch is this
+ * computer's for the delivered image, which its delivery checked (image.ts, readManifest), and
+ * otherwise the one the manifest beside the image names; x86_64, the Linux app's, where none is.
  */
 export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEnv = process.env, delivered: { image?: string; agentDisk?: string } = {}): VmOptions {
   const image = env.SUROGATE_VM_IMAGE || delivered.image || REPO_IMAGE;
+  const arch = env.SUROGATE_VM_IMAGE || !delivered.image ? imageArchOf(image) : imageArch();
   return {
     kernel: join(image, "vmlinuz"),
     rootfs: join(image, "rootfs.img"),
+    ...(arch ? { arch: GUEST_ARCH[arch] } : {}),
     agentDisk: delivered.agentDisk ?? join(PACKAGE, "dist", "agent.img"),
     ...(env.SUROGATE_VM_KVM ? { kvm: env.SUROGATE_VM_KVM } : {}),
     sessions: join(dataDir, "vm", "sessions.img"),

@@ -182,11 +182,13 @@ jobs:
         run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
 
   # Surogate Desktop's VM guest (images/guest/), published on R2 under desktop/vm/<key>/
-  # only when its inputs changed: images/guest/inputs.sh names the key. R2 is never the
-  # truth: each release that ships a key attaches its manifest to itself
+  # only when its inputs changed: images/guest/inputs.sh names the key, which carries the arch.
+  # R2 is never the truth: each release that ships a key attaches its manifest to itself
   # (desktop-vm-manifest, below), and later releases take it from there and check R2's
   # files against it. The manifest is kept for the desktop's tarball, published or found.
-  # The cloud's release does not wait for it; the desktop's does.
+  # The cloud's release does not wait for it; the desktop's does. amd64's image alone, the
+  # Linux app's: arm64's is built by hand (desktop-guest-arm64.yml) until the release ships the
+  # macOS app, as a job that waited for it would hold the Linux app's release.
   desktop-vm-image:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # Past a cold build of the guest, and past fetch's wait of up to 15 minutes for a key's manifest.
@@ -206,7 +208,7 @@ jobs:
       # The guest kernel is the only boundary between two chats' commands: a desktop
       # release does not ship while noble-security has a newer one than the pin.
       - name: Check the guest's kernel pin is current
-        run: images/guest/kernel-current.sh
+        run: images/guest/kernel-current.sh --arch amd64
 
       - name: Look for the image's key in our releases, and check R2 against it
         id: published
@@ -217,7 +219,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          state="$(images/guest/publish.sh fetch images/guest/out)"
+          state="$(images/guest/publish.sh --arch amd64 fetch images/guest/out)"
           echo "state=${state}" >> "$GITHUB_OUTPUT"
 
       # The guest stage adds LibreOffice, the Python data stack and Node, and the disk
@@ -231,7 +233,7 @@ jobs:
 
       - name: Build the image
         if: steps.published.outputs.state == 'missing'
-        run: images/guest/build.sh --packed images/guest/out
+        run: images/guest/build.sh --arch amd64 --packed images/guest/out
 
       - name: Publish the image
         if: steps.published.outputs.state == 'missing'
@@ -240,7 +242,7 @@ jobs:
           S3_BUCKET: ${{ secrets.R2_BUCKET }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: images/guest/publish.sh send images/guest/out
+        run: images/guest/publish.sh --arch amd64 send images/guest/out
 
       - name: Keep the image's manifest for the desktop's tarball
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

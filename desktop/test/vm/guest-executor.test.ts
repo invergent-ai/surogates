@@ -13,7 +13,7 @@ import { BOOT_ID } from "../../src/binding/folder.js";
 import type { Operation, Outcome } from "../../src/link/protocol.js";
 import { VmClient } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
-import { agentDisk, background, IMAGE, KVM, needsKvm, signal, USER } from "./guest-support.js";
+import { agentDisk, ARCH, background, IMAGE, KVM, needsKvm, signal, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -36,7 +36,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     // The manager in a process of its own, as the app runs it: what it tells of a root's processes comes through its channel.
     vm = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
     });
