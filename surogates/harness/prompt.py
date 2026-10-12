@@ -337,8 +337,14 @@ class PromptBuilder:
             and self._session.config.get("coordinator")
         ):
             if is_project_master(self._session.config):
+                # A project made on the user's computer works in its folder
+                # there, and the user starts each of its threads.
                 parts.append(self._prompts.get("guidance/project_coordinator"))
-                parts.append(self._prompts.get("guidance/project_threads_cloud"))
+                parts.append(self._prompts.get(
+                    "guidance/project_threads_on_computer"
+                    if device_of(self._session.config) is not None
+                    else "guidance/project_threads_cloud"
+                ))
             else:
                 parts.append(self._prompts.get("guidance/coordinator"))
 

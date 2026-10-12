@@ -115,6 +115,8 @@ class ProjectCreate(BaseModel):
     name: Name
     goal: Goal | None = None
     instructions: Instructions = ""
+    #: A folder its user confirmed in Surogate Desktop: the project works there, on that computer.
+    execution: DeviceExecution | None = None
 
 
 class ProjectChange(BaseModel):
@@ -163,6 +165,10 @@ class ProjectOut(ProjectSummaryOut):
     master_session_id: UUID
     coordinator_tier: str | None
     thread_tier: str | None
+    #: Where the project works, as a thread's place says it: the cloud, or a computer of the user's.
+    place: dict[str, Any] = {"kind": "cloud"}
+    #: Its folder on that computer, as its user chose it there; None in the cloud.
+    folder: str | None = None
 
 
 def _owner(tenant: TenantContext, ctx: AgentRuntimeContext) -> dict:
@@ -204,13 +210,15 @@ async def _described(request: Request, projects: list[Workstream]) -> list[Proje
         if project.master_session_id not in masters:
             # Deleted since the projects were read: its project went with it.
             continue
-        seen, asking = masters[project.master_session_id]
+        seen, asking, place = masters[project.master_session_id]
         latest, waiting, working = threads.get(project.id, (None, 0, 0))
         described.append(ProjectOut.model_validate(project).model_copy(update={
             "waiting": waiting + asking,
             "working": working,
             "updated_at": max(aware(moment) for moment in (project.updated_at, seen, latest) if moment is not None),
+            "place": place,
         }))
+    await _say_online(request, [project.place for project in described])
     return sorted(described, key=lambda project: project.updated_at, reverse=True)
 
 
@@ -220,23 +228,42 @@ async def create_project(
     _rate: None = Depends(rate_limit_dep),
 ):
     owner = _owner(tenant, ctx)
+    execution = body.execution
+    # Checked before anything is made, as a new local-folder chat's is: only the
+    # user's own live computer holds a project's folder.
+    device = None if execution is None else await _require_local_device(
+        request, tenant, ctx.agent_id, execution, channel="web", user_id=tenant.user_id,
+    )
     workstream_id = uuid4()
-    sessions = request.app.state.session_store
+    state = request.app.state
+    sessions = state.session_store
     master = await create_agent_session(
         store=sessions,
-        storage=request.app.state.storage,
-        settings=request.app.state.settings,
+        storage=state.storage,
+        settings=state.settings,
         org_id=tenant.org_id,
         user_id=tenant.user_id,
         agent_id=ctx.agent_id,
         channel="web",
         config=master_config(workstream_id, name=body.name, goal=body.goal, instructions=body.instructions),
+        device_id=device.id if device is not None else None,
+        device_name=device.name if device is not None else None,
+        folder=execution.folder if execution is not None else None,
     )
     try:
         await sessions.update_session_title(master.id, body.name)
+        if execution is not None:
+            # The coordinator works in the folder itself, never in a copy: its
+            # computer binds it as it binds a new chat, once its user confirmed it.
+            await DeviceOperations(state.session_factory, state.redis).bind(
+                session_id=master.id, device_id=device.id, folder=execution.folder, nonce=execution.nonce,
+            )
         project = await _store(request).create(
             id=workstream_id, master_session_id=master.id,
-            name=body.name, goal=body.goal, instructions=body.instructions, **owner,
+            name=body.name, goal=body.goal, instructions=body.instructions,
+            device_id=device.id if device is not None else None,
+            folder=execution.folder if execution is not None else None,
+            **owner,
         )
     except Exception:
         # A master with no project could be neither listed nor archived.
@@ -744,6 +771,24 @@ async def _card(request: Request, project: Workstream, proposal_id: UUID, key: s
     return card
 
 
+def _on_the_projects_folder(project: Workstream, master: Session, execution: DeviceExecution | None) -> None:
+    """Refuse a thread of *project*, which works on a computer, anywhere but in the project's folder there.
+
+    Every thread of such a project works there, in a copy of its own, and
+    none in the cloud: its user starts it in Surogate Desktop on that computer.
+    """
+    computer = master.config["execution"]["device_name"]
+    if execution is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This project works in a folder on {computer}, so its threads start there, in Surogate Desktop.",
+        )
+    if execution.device_id != project.device_id or execution.folder != project.folder:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"A thread of this project works in the project's folder on {computer}.",
+        )
+
+
 @router.post("/{workstream_id}/threads", status_code=status.HTTP_201_CREATED)
 async def start_proposed_thread(
     workstream_id: UUID, body: ProposedThreadStart, request: Request, ctx: AgentRuntime, tenant: Tenant,
@@ -756,17 +801,22 @@ async def start_proposed_thread(
     With *execution*, a folder its user confirmed on their computer, the
     thread is made there and its computer asked to bind it to a copy of the
     folder of its own, never to the folder itself.  It begins once bound,
-    from ``…/threads/{thread_id}/start``, and this answers its id.
+    from ``…/threads/{thread_id}/start``, and this answers its id.  Every
+    thread of a project made on a computer works in the project's folder
+    there, each in a copy of its own.
     """
     project = await _project(request, workstream_id, tenant, ctx)
-    # A card proposed for the user's computer runs in the cloud without one:
-    # the user chose it there, as a browser's card offers.
+    # In a project in the cloud, a card proposed for the user's computer runs
+    # in the cloud without one: the user chose it there, as a browser's card offers.
     card = await _card(request, project, body.proposal_id, body.key)
     # Checked before anything is made, as a new local-folder chat's is.
     device = None if body.execution is None else await _require_local_device(
         request, tenant, ctx.agent_id, body.execution, channel="web", user_id=tenant.user_id,
     )
     state = request.app.state
+    if project.device_id is not None:
+        master = await state.session_store.get_session(project.master_session_id)
+        _on_the_projects_folder(project, master, body.execution)
     proposal = {"proposal_id": str(body.proposal_id), "key": body.key}
     async with _card_held(request, project, body.proposal_id, body.key) as redis:
         master = await state.session_store.get_session(project.master_session_id)

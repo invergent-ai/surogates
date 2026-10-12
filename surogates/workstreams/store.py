@@ -408,9 +408,10 @@ class WorkstreamStore:
                             produced.append((thread_id, path, execution, at))
         return produced
 
-    async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool]]:
-        """Each master's last activity, and whether it waits on the user: a
-        question or an approval pending in the project's conversation."""
+    async def masters(self, master_ids: list[UUID]) -> dict[UUID, tuple[datetime, bool, dict[str, Any]]]:
+        """Each master's last activity, whether it waits on the user: a
+        question or an approval pending in the project's conversation; and
+        where it works, as a thread's place says it."""
         asking = (
             select(InboxItem.id)
             .where(
@@ -422,9 +423,12 @@ class WorkstreamStore:
         )
         async with self._sf() as db:
             found = await db.execute(
-                select(SessionRow.id, SessionRow.updated_at, asking).where(SessionRow.id == _any(master_ids))
+                select(SessionRow.id, SessionRow.updated_at, asking, SessionRow.config["execution"])
+                .where(SessionRow.id == _any(master_ids))
             )
-            return {master_id: (updated_at, asks) for master_id, updated_at, asks in found}
+            return {
+                master_id: (updated_at, asks, place_of(execution)) for master_id, updated_at, asks, execution in found
+            }
 
     async def proposal(self, master_id: UUID, proposal_id: UUID) -> dict[str, Any] | None:
         """The master's ``thread.proposed`` payload for *proposal_id*."""

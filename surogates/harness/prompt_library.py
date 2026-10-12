@@ -67,6 +67,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/coordinator",
     "guidance/project_coordinator",
     "guidance/project_threads_cloud",
+    "guidance/project_threads_on_computer",
     "guidance/project_thread",
     "guidance/execution_discipline",
     "guidance/working_principles",

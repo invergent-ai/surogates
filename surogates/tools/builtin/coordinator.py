@@ -143,6 +143,10 @@ PROJECT_MASTER_EXCLUDED_TOOLS: frozenset[str] = WORKER_EXCLUDED_TOOLS | {
     "delegate_task",
     "run_coding_agent",
 }
+# What the master of a project made on a computer is not sent besides: every
+# thread of such a project works in a copy of the project's folder there, and
+# only its user starts one, from its card.
+PROJECT_ON_COMPUTER_EXCLUDED_TOOLS: frozenset[str] = frozenset({"start_thread"})
 
 # ---------------------------------------------------------------------------
 # Schemas
