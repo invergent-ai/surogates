@@ -28,8 +28,8 @@ async def test_enrol_then_list_active(sf):
     await _enrol(sf, a, start_date=date(2026, 10, 1))
     await _enrol(sf, b)
     await _enrol(sf, uuid.uuid4(), protocol="other")
-    rows = await store.active_enrollments(
-        sf, org_id=ORG, agent_id=AGENT, protocol="post-op",
+    rows = await store.enrollments(
+        sf, org_id=ORG, agent_id=AGENT, protocol="post-op", status="active",
     )
     assert [r.user_id for r in rows] == [a, b]
     assert rows[0].start_date == date(2026, 10, 1)
@@ -82,7 +82,7 @@ async def test_update_of_a_missing_enrollment_returns_none(sf):
 
 
 @pytest.mark.asyncio
-async def test_offered_protocols_come_from_active_audience_programs(sf):
+async def test_protocols_come_from_active_audience_programs(sf):
     async with sf() as db:
         for active, audience in [
             (True, {"protocol": "post-op", "day_to": 30}),
@@ -101,16 +101,16 @@ async def test_offered_protocols_come_from_active_audience_programs(sf):
             active=True, config={"audience": {"protocol": "theirs"}},
         ))
         await db.commit()
-    assert await store.offered_protocols(
+    assert set(await store.protocol_timezones(
         sf, org_id=ORG, agent_id=AGENT,
-    ) == {"post-op", "risk"}
+    )) == {"post-op", "risk"}
 
 
 @pytest.mark.asyncio
 async def test_settings_round_trip_dedupes_recipients(sf):
     sa_id, doc = uuid.uuid4(), uuid.uuid4()
     assert await store.get_settings(sf, org_id=ORG, agent_id=AGENT) is None
-    saved = await store.save_settings(
+    saved = await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=sa_id,
         channel_identifier="pn1", alert_recipient_user_ids=[doc, str(doc)],
         alert_template_name="alert", alert_template_language="ro",
@@ -190,7 +190,7 @@ async def test_a_purchase_records_payer_and_source(sf):
 
 @pytest.mark.asyncio
 async def test_welcome_settings_and_package_protocols(sf):
-    saved = await store.save_settings(
+    saved = await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
         channel_identifier="pn1", alert_recipient_user_ids=[],
         alert_template_name=None, alert_template_language=None,
@@ -225,3 +225,30 @@ async def test_permission_records_how_it_was_given(sf):
     async with sf() as db:
         ident = (await db.execute(sa.select(ChannelIdentity))).scalar_one()
     assert ident.platform_meta["contact_permission"]["method"] == "purchase"
+
+
+@pytest.mark.asyncio
+async def test_the_care_team_is_never_enrolled_by_any_path(sf):
+    doctor = uuid.uuid4()
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[doctor],
+    )
+    with pytest.raises(store.CareTeamMember):
+        await _enrol(sf, doctor, enrolled_by="purchase")
+
+
+@pytest.mark.asyncio
+async def test_settings_change_only_the_fields_given(sf):
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, channel_identifier="pn1",
+        welcome_text="Bun venit", offer_protocols={"off_1": "post-op"},
+    )
+    saved = await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_template_name="alerta",
+    )
+    assert saved.channel_identifier == "pn1"
+    assert saved.welcome_text == "Bun venit"
+    assert saved.offer_protocols == {"off_1": "post-op"}
+    assert saved.alert_template_name == "alerta"
+    with pytest.raises(ValueError):
+        await store.update_settings(sf, org_id=ORG, agent_id=AGENT, colour="red")

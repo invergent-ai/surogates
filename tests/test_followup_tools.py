@@ -52,7 +52,7 @@ async def patient(sf):
 @pytest_asyncio.fixture
 async def care_team(sf):
     doctor, inbox_sa = uuid.uuid4(), uuid.uuid4()
-    await store.save_settings(
+    await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=inbox_sa,
         channel_identifier="pn1", alert_recipient_user_ids=[doctor],
         alert_template_name="alert", alert_template_language="ro",
@@ -90,7 +90,7 @@ async def test_enrol_records_consent_and_tells_the_care_team(sf, patient, care_t
     )
     assert "Enrolled in post-op from 2026-10-05" in result
     assert "notified (1)" in result
-    [enrollment] = await store.enrollments_for_user(
+    [enrollment] = await store.enrollments(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
     )
     assert enrollment.start_date == date(2026, 10, 5)
@@ -215,7 +215,7 @@ async def test_blank_fields_never_erase_what_is_recorded(sf, patient, care_team)
         **_kw(sf, session_id),
     )
     assert "status paused" in result
-    [row] = await store.enrollments_for_user(
+    [row] = await store.enrollments(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
     )
     assert row.start_date == date(2026, 10, 1)
@@ -288,7 +288,7 @@ async def test_escalate_with_nobody_configured_fails_visibly(sf, patient):
 @pytest.mark.asyncio
 async def test_the_care_team_member_is_not_alerted_about_themselves(sf, patient):
     user_id, session_id = patient
-    await store.save_settings(
+    await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
         channel_identifier="pn1", alert_recipient_user_ids=[user_id],
         alert_template_name=None, alert_template_language=None,
@@ -315,7 +315,7 @@ def test_every_registered_tool_runs_in_the_harness():
 @pytest.mark.asyncio
 async def test_the_care_team_is_recognised_and_never_enrolled(sf, patient):
     user_id, session_id = patient
-    await store.save_settings(
+    await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
         channel_identifier="pn1", alert_recipient_user_ids=[user_id],
         alert_template_name=None, alert_template_language=None,
@@ -328,6 +328,6 @@ async def test_the_care_team_is_recognised_and_never_enrolled(sf, patient):
         **_kw(sf, session_id),
     )
     assert "on the care team" in refused
-    assert await store.enrollments_for_user(
+    assert await store.enrollments(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
     ) == []

@@ -42,6 +42,8 @@ from surogates.channels.source import (
     SessionSource,
     build_session_key_for_config,
 )
+from surogates.followup import store as followup_store
+from surogates.followup.outreach import deliver_pending
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -629,12 +631,6 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         if deps.session_factory is not None and routing.identifier:
             try:
-                from surogates.followup import store as followup_store
-                from surogates.followup.outreach import (
-                    SUPPORTED_PLATFORMS,
-                    deliver_pending,
-                )
-
                 _org = UUID(str(routing.org_id))
                 await followup_store.record_inbound(
                     deps.session_factory,
@@ -643,17 +639,16 @@ class ChannelInboundPipeline:
                     platform_user_id=msg.platform_user_id,
                     channel_identifier=routing.identifier,
                 )
-                if routing.platform in SUPPORTED_PLATFORMS:
-                    await deliver_pending(
-                        deps.session_factory,
-                        deps.session_store,
-                        org_id=_org,
-                        agent_id=routing.agent_id,
-                        user_id=identity.user_id,
-                        platform=routing.platform,
-                        channel_identifier=routing.identifier,
-                        session_id=session_id,
-                    )
+                await deliver_pending(
+                    deps.session_factory,
+                    deps.session_store,
+                    org_id=_org,
+                    agent_id=routing.agent_id,
+                    user_id=identity.user_id,
+                    platform=routing.platform,
+                    channel_identifier=routing.identifier,
+                    session_id=session_id,
+                )
             except Exception:  # noqa: BLE001
                 # The person's own message must reach the agent whatever
                 # happens to the bookkeeping around it.

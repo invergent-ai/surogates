@@ -207,11 +207,7 @@ def make_opener_enqueue(
             raise OpenerUndeliverable("Program has no approved template to open with")
 
         wa_id = invitation.platform_user_id
-        source = SessionSource(
-            platform=platform, chat_id=wa_id, chat_type="dm", user_id=wa_id,
-            user_name="", thread_id=None, chat_name=wa_id,
-        )
-        session_key = build_session_key(source)
+        session_key = whatsapp_session_key(wa_id)
         session_id = await _session(
             invitation, platform, session_key, channel_id=wa_id, sender=sender,
         )

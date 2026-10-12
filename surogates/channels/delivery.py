@@ -304,20 +304,24 @@ class DeliveryService:
     async def _report_to_invitation(
         self, outbox_id: int, *, provider_message_id: str | None, error: str | None,
     ) -> None:
-        """Tell a check-in invitation, if one rides on this row, how it went.
+        """Tell whichever unprompted template rides on this row how it went.
 
         This is the only point at which the provider's message id is known,
-        and therefore the only way a later status webhook can ever match the
-        invitation. Best-effort: a bookkeeping failure must not fail the
-        delivery that already happened.
+        and therefore the only way a later status webhook can ever match it:
+        a check-in opener, or a template reopening a conversation for an
+        alert or an operator's message.  Best-effort: a bookkeeping failure
+        must not fail the delivery that already happened.
         """
+        from surogates.followup.outreach import record_outreach_delivery
         from surogates.programs.delivery import record_outbox_result
 
         try:
-            await record_outbox_result(
-                self._sf, outbox_id,
-                provider_message_id=provider_message_id, error=error,
-            )
+            for report in (record_outbox_result, record_outreach_delivery):
+                if await report(
+                    self._sf, outbox_id,
+                    provider_message_id=provider_message_id, error=error,
+                ):
+                    break
         except Exception:  # noqa: BLE001
             logger.warning(
                 "[programs] could not report outbox %d to its invitation",

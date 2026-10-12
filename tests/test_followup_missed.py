@@ -40,7 +40,7 @@ async def _setup(sf, *, threshold=3, text=None, recipients=True):
         ))
         await db.commit()
     if recipients:
-        await store.save_settings(
+        await store.update_settings(
             sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
             channel_identifier="pn1", alert_recipient_user_ids=[doctor],
             alert_template_name="alerta", alert_template_language="ro",

@@ -217,9 +217,9 @@ async def _roster(
 
     today = now.astimezone(ZoneInfo(str(config.get("timezone") or "UTC"))).date()
     sender = str(config.get("channel_identifier") or "")
-    enrollments = await followup_store.active_enrollments(
+    enrollments = await followup_store.enrollments(
         session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
-        protocol=audience.protocol,
+        protocol=audience.protocol, status="active",
     )
     identities = {
         e.user_id: await identity_lookup(schedule.org_id, platform, e.user_id)

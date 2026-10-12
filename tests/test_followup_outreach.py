@@ -285,18 +285,18 @@ async def test_a_failed_template_fails_its_texts_at_once(sf, doctor_session):
 
 @pytest.mark.asyncio
 async def test_a_late_provider_failure_is_recorded_too(sf, doctor_session):
-    from surogates.programs.delivery import apply_status_callback, record_outbox_result
+    from surogates.programs.delivery import _apply_status_anywhere
 
     doctor = uuid.uuid4()
     row = await _queue(sf, doctor)
     await _send(sf, _Store(), _Delivery())
     opener = await _row(sf, row.id)
-    # The dispatcher's verdict and the status webhook both route here.
-    assert await record_outbox_result(
+    assert await outreach.record_outreach_delivery(
         sf, opener.outbox_id, provider_message_id="wamid.T1", error=None,
     )
     assert (await _row(sf, row.id)).provider_message_id == "wamid.T1"
-    assert await apply_status_callback(
+    # The status webhook finds it among the unprompted templates it knows.
+    assert await _apply_status_anywhere(
         sf, provider_message_id="wamid.T1", status="failed",
         reason="131026 Message undeliverable",
     )
@@ -309,7 +309,7 @@ async def test_a_late_provider_failure_is_recorded_too(sf, doctor_session):
 async def test_unanswered_templates_expire(sf, doctor_session):
     row = await _queue(sf, uuid.uuid4())
     await _send(sf, _Store(), _Delivery())
-    expired = await outreach.expire_unanswered(sf, now=NOW + timedelta(hours=73))
+    expired = await outreach._expire_unanswered(sf, now=NOW + timedelta(hours=73))
     assert expired == 1
     saved = await _row(sf, row.id)
     assert saved.state == "failed"

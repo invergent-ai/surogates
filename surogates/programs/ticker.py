@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 import sqlalchemy as sa
 
 from surogates.db.models import ProgramInvitationRow
+from surogates.followup.missed import alert_missed_checkins
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +164,6 @@ class ProgramTicker:
         # Straight after the sweep: it is what turns silence into
         # "no reply", and a streak of those is what the care team must hear.
         try:
-            from surogates.followup.missed import alert_missed_checkins
-
             await alert_missed_checkins(self._sf, now=_utcnow())
         except Exception:
             logger.exception("program ticker failed to check missed check-ins")

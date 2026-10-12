@@ -171,7 +171,6 @@ class _Context:
     """Who and where the conversation is, read from the session itself."""
 
     def __init__(self, session: SessionRow, user: User | None) -> None:
-        self.session = session
         self.session_id: uuid.UUID = session.id
         self.org_id: uuid.UUID = session.org_id
         self.agent_id: str = session.agent_id
@@ -192,14 +191,19 @@ class _Context:
         return " · ".join(parts) or f"user {self.user_id}"
 
 
-async def _context(kwargs: dict) -> _Context | None:
+async def _context(kwargs: dict) -> tuple[_Context | None, Any]:
+    """The conversation's context and the agent's follow-up settings."""
     sf = kwargs["session_factory"]
     async with sf() as db:
         session = await db.get(SessionRow, uuid.UUID(str(kwargs["session_id"])))
         if session is None:
-            return None
+            return None, None
         user = await db.get(User, session.user_id) if session.user_id else None
-        return _Context(session, user)
+        ctx = _Context(session, user)
+    settings = await followup_store.get_settings(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
+    return ctx, settings
 
 
 def _parse_date(raw: Any) -> date | None:
@@ -216,56 +220,22 @@ def _parse_date(raw: Any) -> date | None:
     return parsed
 
 
-async def _is_care_team(sf: Any, ctx: _Context) -> bool:
-    """Whether the person talking is one the agent alerts — the doctor, say.
-
-    They write to the same business number as the patients, so nothing in
-    the channel tells them apart; the follow-up settings do.
-    """
-    if ctx.user_id is None:
-        return False
-    settings = await followup_store.get_settings(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+async def _tell_care_team(sf: Any, ctx: _Context, settings: Any, *, kind: str, text: str):
+    """The care team's phones, with who it is about, never the person talking."""
+    return await followup_store.notify_care_team(
+        sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
+        text=f"{text.strip()}\n\n— {ctx.person_label()}", created_by="agent",
+        subject_user_id=ctx.user_id, source_session_id=ctx.session_id,
+        exclude_user_id=ctx.user_id,
+        fallback_sender=ctx.sender if ctx.channel == "whatsapp" else None,
     )
-    recipients = {str(r) for r in (settings.alert_recipient_user_ids or [])} if settings else set()
-    return str(ctx.user_id) in recipients
 
 
-async def _notify_care_team(
-    sf: Any, ctx: _Context, *, kind: str, text: str,
-) -> tuple[int, str | None]:
-    """Queue *text* for every alert recipient.  Returns (queued, why-not)."""
-    settings = await followup_store.get_settings(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+def _told(queued: int, why_not: str | None) -> str:
+    return (
+        f"The care team was notified ({queued})."
+        if queued else f"The care team was not notified: {why_not}."
     )
-    if settings is None or not settings.alert_recipient_user_ids:
-        return 0, "no care-team phones are configured"
-    sender = settings.channel_identifier or (
-        ctx.sender if ctx.channel == "whatsapp" else ""
-    )
-    if not sender:
-        return 0, "no WhatsApp sender is configured for alerts"
-
-    body = f"{text.strip()}\n\n— {ctx.person_label()}"
-    queued = 0
-    for recipient in settings.alert_recipient_user_ids:
-        try:
-            recipient_id = uuid.UUID(str(recipient))
-        except ValueError:
-            logger.warning("[followup] ignoring malformed alert recipient %r", recipient)
-            continue
-        if recipient_id == ctx.user_id:
-            continue  # the care team member is the one talking; they know
-        await followup_store.queue_outreach(
-            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=recipient_id,
-            platform="whatsapp", channel_identifier=sender, kind=kind,
-            text=body, template_name=settings.alert_template_name,
-            template_language=settings.alert_template_language,
-            subject_user_id=ctx.user_id, source_session_id=ctx.session_id,
-            created_by="agent",
-        )
-        queued += 1
-    return queued, None if queued else "the only configured recipient is this person"
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +245,7 @@ async def _notify_care_team(
 
 async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx = await _context(kwargs)
+    ctx, settings = await _context(kwargs)
     if ctx is None or ctx.user_id is None:
         return "Enrolment needs a conversation with a known person."
     if ctx.channel != "whatsapp" or not ctx.platform_user_id:
@@ -284,7 +254,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
             "the check-ins will reach them. Ask them to message the practice "
             "there."
         )
-    if await _is_care_team(sf, ctx):
+    if followup_store.is_care_team(settings, ctx.user_id):
         return (
             "Not enrolled: this person is on the care team (they receive the "
             "alerts). They are not a patient."
@@ -296,7 +266,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
             "with consent=true only if they say yes."
         )
     protocol = str(arguments.get("protocol") or "").strip()
-    offered = await followup_store.offered_protocols(
+    offered = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
     )
     if protocol not in offered:
@@ -321,23 +291,19 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
         protocol=protocol, start_date=start, phase=phase, enrolled_by="agent",
     )
-    queued, why_not = await _notify_care_team(sf, ctx, kind="enrolment", text=summary)
+    queued, why_not = await _tell_care_team(sf, ctx, settings, kind="enrolment", text=summary)
 
     parts = [f"Enrolled in {protocol}"]
     if enrollment.start_date:
         parts.append(f"from {enrollment.start_date.isoformat()}")
     if enrollment.phase:
         parts.append(f"phase {enrollment.phase}")
-    told = (
-        f"The care team was notified ({queued})."
-        if queued else f"The care team was not notified: {why_not}."
-    )
-    return " ".join(parts) + ". Consent recorded. " + told
+    return " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
 
 
 async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx = await _context(kwargs)
+    ctx, settings = await _context(kwargs)
     if ctx is None or ctx.user_id is None:
         return "Updating an enrolment needs a conversation with a known person."
     protocol = str(arguments.get("protocol") or "").strip()
@@ -381,19 +347,16 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
         result += f", phase {row.phase}"
     result += "."
     if status in ("paused", "ended"):
-        queued, why_not = await _notify_care_team(
-            sf, ctx, kind="alert", text=f"{protocol} {status}: {reason}",
+        queued, why_not = await _tell_care_team(
+            sf, ctx, settings, kind="alert", text=f"{protocol} {status}: {reason}",
         )
-        result += (
-            f" The care team was notified ({queued})."
-            if queued else f" The care team was not notified: {why_not}."
-        )
+        result += " " + _told(queued, why_not)
     return result
 
 
 async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx = await _context(kwargs)
+    ctx, settings = await _context(kwargs)
     if ctx is None:
         return "No conversation context."
     zones = await followup_store.protocol_timezones(
@@ -404,13 +367,13 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     ]
     if ctx.user_id is None:
         return lines[0]
-    if await _is_care_team(sf, ctx):
+    if followup_store.is_care_team(settings, ctx.user_id):
         lines.append(
             "This person is on the care team: they receive the alerts and "
             "the practice's notices here. They are not a patient — do not "
             "enrol them or ask them check-in questions."
         )
-    rows = await followup_store.enrollments_for_user(
+    rows = await followup_store.enrollments(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
     )
     if not rows:
@@ -439,7 +402,6 @@ async def _inbox(
     event_type: str,
     reason: str,
     payload: dict,
-    invitation_id: uuid.UUID | None,
 ) -> bool:
     """Raise a hand in the operator's inbox.  False when the target is invalid."""
     async with sf() as db:
@@ -467,18 +429,12 @@ async def _inbox(
                 payload={**payload, "user_id": str(ctx.user_id)},
             )
         )
-        if invitation_id is not None:
-            row = await db.get(ProgramInvitationRow, invitation_id)
-            # Escalation is its own axis: raising a hand does not mean the
-            # person finished answering, so response_state is untouched.
-            row.escalation_state = "raised"
         try:
             await db.commit()
             return True
         except IntegrityError:
             # The target is not a service account this database knows — a
-            # human's id pasted where a principal belongs.  The insert rolled
-            # back, event included.
+            # human's id pasted where a principal belongs.
             await db.rollback()
             logger.warning(
                 "[followup] escalation target %s for agent %s is not a "
@@ -487,13 +443,20 @@ async def _inbox(
             return False
 
 
+def _uuid_or_none(value: Any) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(value)) if value else None
+    except ValueError:
+        return None
+
+
 async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     reason = str(arguments.get("reason") or "").strip()
     if not reason:
         return "reason is required — say what needs the care team's attention."
 
     sf = kwargs["session_factory"]
-    ctx = await _context(kwargs)
+    ctx, settings = await _context(kwargs)
     if ctx is None:
         return "Could not escalate: no conversation context."
 
@@ -520,64 +483,48 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
                 "escalation_service_account_id"
             )
 
-    settings = await followup_store.get_settings(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    # Inside a check-in the Program's operator; outside one the agent's.
+    target_id = _uuid_or_none(
+        program_target or (settings.escalation_service_account_id if settings else None)
     )
-    target = program_target or (
-        settings.escalation_service_account_id if settings else None
+    payload: dict[str, Any] = (
+        {"program_id": str(invitation.program_id),
+         "occurrence_id": str(invitation.occurrence_id)}
+        if invitation is not None else {}
     )
-    try:
-        target_id = uuid.UUID(str(target)) if target else None
-    except ValueError:
-        target_id = None
+    inboxed = target_id is not None and await _inbox(
+        sf, ctx, service_account_id=target_id,
+        event_type="checkin.escalation" if invitation is not None else "followup.escalation",
+        reason=reason, payload=payload,
+    )
+    queued, why_not = await _tell_care_team(sf, ctx, settings, kind="alert", text=reason)
 
-    payload: dict[str, Any] = {}
     if invitation is not None:
-        payload = {
-            "program_id": str(invitation.program_id),
-            "occurrence_id": str(invitation.occurrence_id),
-        }
-    inboxed = False
-    if target_id is not None:
-        inboxed = await _inbox(
-            sf, ctx, service_account_id=target_id,
-            event_type=(
-                "checkin.escalation" if invitation is not None
-                else "followup.escalation"
-            ),
-            reason=reason, payload=payload,
-            invitation_id=invitation.id if invitation is not None else None,
-        )
-
-    queued, why_not = await _notify_care_team(sf, ctx, kind="alert", text=reason)
-
-    if not inboxed and not queued:
-        if invitation is not None:
+        # One write records what happened, on the check-in's own history.
+        if inboxed:
+            state, note = "raised", None
+        elif queued:
+            state = "raised"
+            note = (
+                "Inbox target is not a valid service account; care-team phones notified"
+                if target_id is not None else "No inbox target; care-team phones notified"
+            )
+        else:
             # A visible failure, never a silent one: the agent saying it
             # escalated is not evidence that anyone was told.
-            async with sf() as db:
-                row = await db.get(ProgramInvitationRow, invitation.id)
-                row.escalation_state = "failed"
-                row.reason = "No escalation target or care-team phone configured"
-                await db.commit()
+            state, note = "failed", "No escalation target or care-team phone configured"
+        async with sf() as db:
+            row = await db.get(ProgramInvitationRow, invitation.id)
+            row.escalation_state = state
+            if note:
+                row.reason = note
+            await db.commit()
+
+    if not inboxed and not queued:
         return (
             "Could not escalate: nobody is configured to receive this "
             f"({why_not}). Tell the person to contact the practice directly."
         )
-
-    if invitation is not None and not inboxed:
-        # Someone was told, by phone; the check-in's history must say so, and
-        # why the inbox was not part of it.
-        async with sf() as db:
-            row = await db.get(ProgramInvitationRow, invitation.id)
-            row.escalation_state = "raised"
-            row.reason = (
-                "Inbox target is not a valid service account; care-team "
-                "phones notified" if target_id is not None
-                else "No inbox target; care-team phones notified"
-            )
-            await db.commit()
-
     told = []
     if inboxed:
         told.append("the responsible operator's inbox")

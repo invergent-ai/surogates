@@ -78,7 +78,7 @@ async def _care_team(sf, org_id, agent_id="a1"):
     from surogates.followup import store
 
     doctor = uuid.uuid4()
-    await store.save_settings(
+    await store.update_settings(
         sf, org_id=org_id, agent_id=agent_id,
         escalation_service_account_id=uuid.uuid4(), channel_identifier="pn1",
         alert_recipient_user_ids=[doctor], alert_template_name="alert",

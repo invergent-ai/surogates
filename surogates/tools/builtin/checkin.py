@@ -1,9 +1,9 @@
 """The tool an agent uses to close a check-in.
 
-Neither tool takes an occurrence id.  The open invitation is found **by
-session**, because the inbound path stamped ``session_id`` on it when the
-user replied.  That is what makes these unspoofable: an agent in an
-ordinary conversation cannot close a check-in it is not inside.
+It takes no occurrence id.  The open invitation is found **by session**,
+because the inbound path stamped ``session_id`` on it when the user replied.
+That is what makes it unspoofable: an agent in an ordinary conversation
+cannot close a check-in it is not inside.
 """
 
 from __future__ import annotations

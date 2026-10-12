@@ -1286,6 +1286,9 @@ class OutreachMessageRow(Base):
     session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(), nullable=True,
     )
+    #: The recipient's number, recorded when a template reopens their
+    #: conversation, so the send pass can tell in SQL whether they answered.
+    platform_user_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: On the row that sent a reopening template: the outbox row carrying it,
     #: and the provider's id once sent.  How a failed template is traced back
     #: to the texts waiting behind it.

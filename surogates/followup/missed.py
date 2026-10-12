@@ -13,7 +13,6 @@ completed the streak, so a re-scan never alerts twice.
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -45,14 +44,7 @@ DEFAULT_MISSED_TEXT = (
 
 def render_missed_text(template: str | None, **values: Any) -> str:
     """The alert text, never failing on a malformed operator template."""
-    text = (template or "").strip() or DEFAULT_MISSED_TEXT
-    try:
-        return text.format(**values)
-    except (KeyError, IndexError, ValueError):
-        # An unknown placeholder or a stray brace in the operator's wording
-        # must not cost the alert: fall back to the default sentence.
-        logger.warning("[followup] unusable missed-alert text; using the default")
-        return DEFAULT_MISSED_TEXT.format(**values)
+    return followup_store.render_text(template, DEFAULT_MISSED_TEXT, **values)
 
 
 def _threshold(config: dict) -> int | None:
@@ -65,9 +57,22 @@ def _threshold(config: dict) -> int | None:
 async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     """Queue alerts for every streak of unanswered openers.  Returns how many."""
     async with session_factory() as db:
+        # Only Programs that ask for it: everything else is never read.
+        watched = {
+            pid: cfg for pid, cfg in (
+                await db.execute(
+                    sa.select(ProgramScheduleRow.program_id, ProgramScheduleRow.config)
+                    .where(ProgramScheduleRow.active.is_(True))
+                )
+            ).all()
+            if _threshold(cfg) is not None
+        }
+        if not watched:
+            return 0
         candidates = (
             await db.execute(
                 sa.select(ProgramInvitationRow)
+                .where(ProgramInvitationRow.program_id.in_(list(watched)))
                 .where(ProgramInvitationRow.response_state == "no_reply_by_deadline")
                 .where(ProgramInvitationRow.escalation_state == "none")
                 .where(ProgramInvitationRow.deadline_at.isnot(None))
@@ -75,15 +80,6 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).scalars().all()
-        program_ids = {c.program_id for c in candidates}
-        configs = {
-            pid: cfg for pid, cfg in (
-                await db.execute(
-                    sa.select(ProgramScheduleRow.program_id, ProgramScheduleRow.config)
-                    .where(ProgramScheduleRow.program_id.in_(program_ids))
-                )
-            ).all()
-        } if program_ids else {}
 
     # Only the newest unanswered opener of each person in each Program can
     # complete a streak; the older ones were judged when they were newest.
@@ -91,14 +87,14 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     for inv in candidates:
         newest[(inv.program_id, inv.user_id)] = inv
 
+    settings_cache: dict[tuple, Any] = {}
     queued = 0
     for inv in newest.values():
-        config = configs.get(inv.program_id) or {}
-        threshold = _threshold(config)
-        if threshold is None:
-            continue
+        config = watched[inv.program_id]
         try:
-            queued += await _alert_if_streak(session_factory, inv, config, threshold)
+            queued += await _alert_if_streak(
+                session_factory, inv, config, _threshold(config), settings_cache,
+            )
         except Exception:  # noqa: BLE001 — one person, not the pass
             logger.exception(
                 "[followup] could not check the missed streak for invitation %s",
@@ -108,7 +104,7 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
 
 
 async def _alert_if_streak(
-    session_factory: Any, inv: Any, config: dict, threshold: int,
+    session_factory: Any, inv: Any, config: dict, threshold: int, settings_cache: dict,
 ) -> int:
     async with session_factory() as db:
         recent = (
@@ -126,21 +122,19 @@ async def _alert_if_streak(
                 .limit(threshold)
             )
         ).all()
+        if len(recent) < threshold or any(r != "no_reply_by_deadline" for r, _ in recent):
+            return 0
+        # A streak already reported does not count again: the next alert needs
+        # another full run of unanswered openers, not one more on top of it.
+        if any(e != "none" for _, e in recent[1:]):
+            return 0
         user = await db.get(User, inv.user_id)
-    if len(recent) < threshold or any(r != "no_reply_by_deadline" for r, _ in recent):
-        return 0
-    # A streak already reported does not count again: the next alert needs
-    # another full run of unanswered openers, not one more on top of it.
-    if any(e != "none" for _, e in recent[1:]):
-        return 0
 
-    settings = await followup_store.get_settings(
-        session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
-    )
-    recipients = list(settings.alert_recipient_user_ids or []) if settings else []
-    sender = (settings.channel_identifier if settings else None) or str(
-        config.get("channel_identifier") or ""
-    )
+    key = (inv.org_id, inv.agent_id)
+    if key not in settings_cache:
+        settings_cache[key] = await followup_store.get_settings(
+            session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
+        )
     text = render_missed_text(
         config.get("missed_alert_text"),
         name=(user.display_name if user else "") or "?",
@@ -148,23 +142,13 @@ async def _alert_if_streak(
         count=threshold,
         program=str(config.get("name") or "check-in"),
     )
-    queued = 0
-    if recipients and sender:
-        for recipient in recipients:
-            try:
-                recipient_id = uuid.UUID(str(recipient))
-            except ValueError:
-                continue
-            await followup_store.queue_outreach(
-                session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
-                user_id=recipient_id, platform="whatsapp",
-                channel_identifier=sender, kind="alert", text=text,
-                template_name=settings.alert_template_name,
-                template_language=settings.alert_template_language,
-                subject_user_id=inv.user_id, created_by="missed-checkins",
-                dedupe_key=f"missed:{inv.id}:{recipient_id}",
-            )
-            queued += 1
+    queued, _why_not = await followup_store.notify_care_team(
+        session_factory, settings_cache[key], org_id=inv.org_id,
+        agent_id=inv.agent_id, kind="alert", text=text,
+        created_by="missed-checkins", subject_user_id=inv.user_id,
+        dedupe_prefix=f"missed:{inv.id}",
+        fallback_sender=str(config.get("channel_identifier") or "") or None,
+    )
 
     async with session_factory() as db:
         row = await db.get(ProgramInvitationRow, inv.id)
