@@ -13,7 +13,8 @@ import { gzipSync } from "node:zlib";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { type Applied, AS_ROOT, helperRun, installedUpdates, newer, releaseKeys, signedRelease, updateLine, Updates, type UpdatesOptions } from "../src/shell/updates.js";
+import { AS_ROOT, helperRun, installedUpdates } from "../src/shell/installer-linux.js";
+import { type Applied, newer, releaseKeys, signedRelease, updateLine, Updates, type UpdatesOptions } from "../src/shell/updates.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const keys = generateKeyPairSync("ed25519");

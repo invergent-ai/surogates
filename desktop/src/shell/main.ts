@@ -27,6 +27,7 @@ import type { FolderPrompts } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
+import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { backendFor } from "../vm/backends.js";
@@ -62,7 +63,7 @@ import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAc
 import { ownSpelling } from "./spellcheck.js";
 import { appTools, appVm, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
-import { helperRun, installedUpdates, keepChecked, ROOT_RECORD, updateLine, Updates, type UpdatesOptions } from "./updates.js";
+import { keepChecked, updateLine, Updates, type UpdatesOptions } from "./updates.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -311,7 +312,7 @@ const stopDelivery = new AbortController();
 // Where the install script recorded the base the app was installed from: root's, in an installed
 // app. A development build reads only SUROGATE_INSTALL_JSON's, a test's, so it never downloads
 // from an installed app's base.
-const INSTALL_RECORD = app.isPackaged ? ROOT_RECORD : process.env.SUROGATE_INSTALL_JSON;
+const INSTALL_RECORD = app.isPackaged ? INSTALLER.record() : process.env.SUROGATE_INSTALL_JSON;
 // What the app downloads from that base: no cookie of its own session goes with it, and none of it
 // through the HTTP cache: a second copy of what is downloaded, and cached ranges in a resume.
 const fromBase = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) =>
@@ -351,12 +352,12 @@ function startUpdates(): void {
   const helper = process.env.SUROGATE_UPDATE_HELPER;
   let options: UpdatesOptions;
   if (app.isPackaged) {
-    options = installedUpdates(VERSION, cache, fromBase, stopDelivery.signal);
+    options = INSTALLER.updates(VERSION, cache, fromBase, stopDelivery.signal);
   } else if (INSTALL_RECORD && helper) {
     // A development build runs its test's helper itself: no pkexec, and no helper of an installed app's.
     options = {
       version: VERSION, record: INSTALL_RECORD, rootOwned: false, helper, installed: null, cache, fetch: fromBase, signal: stopDelivery.signal,
-      apply: helperRun([helper]),
+      apply: INSTALLER.helper([helper]),
     };
   } else {
     return;

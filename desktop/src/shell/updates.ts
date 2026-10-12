@@ -6,15 +6,12 @@
 // an installed app; the helper checks all of them again before it applies anything.
 // Electron-free.
 
-import type { ChildProcess } from "node:child_process";
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
 import {
   closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 
-import { spawnClean } from "../clean-child.js";
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
 import { type Target, type TargetFiles, TARGETS, targetOf } from "../platform.js";
 import { installBase, rootsOwn } from "../vm/image.js";
@@ -78,13 +75,6 @@ const ASK_MS = 30_000;
 // A version: x.y.z in the ten digits, and no part with a zero before it, as the root helper has it:
 // dpkg reads 1.2.03 as 1.2.3, and a version's folder is named as it is written.
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-// What the install script leaves an installed app, each root's alone: its record of where it was
-// installed from; the helper pkexec runs, whose list of release keys is the one this computer
-// trusts; and the mark of the version installed for every user now.
-export const ROOT_RECORD = "/etc/surogate/install.json";
-export const ROOT_HELPER = "/opt/surogate/bin/surogate-apply-update";
-const INSTALLED = "/opt/surogate/current/release.json";
-
 // A release, as its signed manifest names it (release/publish.sh sign).
 export interface Release {
   version: string;
@@ -140,10 +130,6 @@ const DISMISSED = 126;
 const NOT_AUTHORIZED = 127;
 const AS_ANOTHER_USER = "Error executing command as another user:";
 const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
-// The most that is kept of what a helper said, its end: its last lines are why it failed.
-const SAID_MAX = 4000;
-// How long what a helper says is waited for once the helper itself has ended.
-const OUTPUT_MS = 2_000;
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
 // The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest
@@ -172,13 +158,6 @@ function shown(why: string): string {
   const letters = [...why];
   return letters.length <= WHY_MAX ? why : `${letters.slice(0, WHY_MAX - 1).join("")}\u2026`;
 }
-// How an installed app runs the root helper: pkexec, by its whole path, on the helper at the path
-// with no link in it that the install script's polkit action names. Never with pkexec's own agent:
-// started from a terminal in a session with no polkit agent, pkexec would ask for a password on
-// that terminal and wait there, with the app's line at "Installing". Without it, pkexec ends at
-// once with 127, and the line says an administrator is needed.
-export const AS_ROOT = ["/usr/bin/pkexec", "--disable-internal-agent", ROOT_HELPER];
-
 // The update's line in the sidebar: what the user is told, and the button they act on it with.
 export interface UpdateLine {
   text: string;
@@ -225,51 +204,6 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
     default:
       return null;
   }
-}
-
-/**
- * What runs the root helper on a downloaded release: *command*, then --apply and the files'
- * paths, with no more of the app's environment than a PATH. In an installed app, pkexec and
- * the helper's path; polkit asks an administrator, and the helper checks the files again as root.
- */
-export function helperRun(command: string[]): (files: Staged) => Promise<Applied> {
-  return (files) => new Promise((resolve) => {
-    const [program, ...args] = command;
-    let child: ChildProcess;
-    try {
-      // With its three standard descriptors and nothing else the app has open: pkexec is root's
-      // process for as long as its prompt is.
-      child = spawnClean(program!, [...args, "--apply", files.manifest, files.signature, files.tarball], {
-        stdio: ["ignore", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" },
-      });
-    } catch (error) {
-      return resolve({ code: null, said: error instanceof Error ? error.message : String(error) });
-    }
-    // Before anything else is asked of it: one that could not be started, as for want of file
-    // descriptors, tells its error later, and has no output to read.
-    child.once("error", (error) => resolve({ code: null, said: error.message }));
-    // What it says is one stream, read as it comes: a letter may come in two reads. Its end alone
-    // is kept, cut at each read by the one rule, so that no more than a read of it is ever held.
-    const decoder = new StringDecoder("utf8");
-    const kept = (all: string) => all.slice(-SAID_MAX);
-    let said = "";
-    child.stderr?.on("data", (chunk: Buffer) => {
-      said = kept(said + decoder.write(chunk));
-    });
-    // One a signal ended has no exit code: how it ended is the last of what is said of it.
-    const answer = (code: number | null, signal: NodeJS.Signals | null): void => {
-      clearTimeout(waited);
-      said = kept(said + decoder.end());
-      resolve({ code, said: (code === null ? `${said.trim()}\nits helper was stopped by ${signal}` : said).trim() });
-    };
-    // Its exit is its answer. What it says ends with it, or a moment after; a program it left
-    // running holds that open for as long as it runs, and is not waited for beyond OUTPUT_MS.
-    let waited: NodeJS.Timeout | undefined;
-    child.once("exit", (code, signal) => {
-      waited = setTimeout(() => answer(code, signal), OUTPUT_MS);
-    });
-    child.once("close", answer);
-  });
 }
 
 /** Whether version *a* comes after *b*, each x.y.z, compared part by part as numbers. */
@@ -530,19 +464,11 @@ export interface UpdatesOptions {
   cache: string; // <cache>/surogate/updates
   fetch: Fetch;
   signal: AbortSignal; // the quit: a check or a download under way stops with the app
-  apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's
+  apply: (files: Staged) => Promise<Applied>; // the root helper's run: helperRun's (installer-linux.ts)
   log?: (words: string) => void; // told, whole, what pkexec and the helper said of an install that did not end well
   standing?: string; // a file of the app's own, where it keeps how long the newest release has been unsigned; in memory without
   now?: () => number; // the clock: Date.now
   target?: Target | null; // the releases taken, and where on the base they are: this computer's (targetOf)
-}
-
-/**
- * An installed app's updates: what the install script left it, where the user's downloads go, and
- * the root helper run under polkit.
- */
-export function installedUpdates(version: string, cache: string, fetch: Fetch, signal: AbortSignal): UpdatesOptions {
-  return { version, record: ROOT_RECORD, rootOwned: true, helper: ROOT_HELPER, installed: INSTALLED, cache, fetch, signal, apply: helperRun(AS_ROOT) };
 }
 
 /** The app's updates: one check at a time, each change told. */
