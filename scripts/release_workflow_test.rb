@@ -537,12 +537,17 @@ class ReleaseWorkflowTest < Minitest::Test
     # Bounded early, once it has started: a cold build of the guest, and the VM suite.
     assert_operator job.fetch("timeout-minutes"), :<=, 90
     # It publishes nothing: no secret in any form, no Environment, no permission of its own, and
-    # nothing sent to R2, attached to a release or kept as an artifact.
+    # nothing sent to R2 or attached to a release. It keeps one artifact alone, a week with the run:
+    # the packed image and its manifest, for a Mac's first boot of the guest by hand.
     refute_match(/secrets/i, arm64.to_s)
     refute job.key?("environment")
     refute job.key?("permissions")
-    refute_match(/publish\.sh|\bR2_|\bS3_|\baws\b|gh release|upload-artifact/, arm64.to_s)
+    refute_match(/publish\.sh|\bR2_|\bS3_|\baws\b|gh release|download-artifact/, arm64.to_s)
     steps = job.fetch("steps")
+    kept = steps.select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    assert_equal 1, kept.length
+    assert_equal({ "name" => "desktop-guest-arm64", "path" => "images/guest/out/*.zst\nimages/guest/out/manifest.json\n", "retention-days" => 7, "if-no-files-found" => "error" }, kept.first.fetch("with"))
+    steps.each { |step| refute_match(/upload-artifact|actions\/artifacts/, step["run"].to_s) }
     assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, steps.first.fetch("with"))
     runs = steps.map { |step| step["run"].to_s }
     build = runs.index { |run| run.include?("images/guest/build.sh --arch arm64 images/guest/out") }
@@ -648,7 +653,7 @@ class ReleaseWorkflowTest < Minitest::Test
     # that reading is what this test asks for, of whoever changes a job that can leak.
     read = {
       "desktop-guest-arm64.yml" => {
-        "guest" => ["eca5e065813cef05", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 bd6e6df4eb2ca928 8c986439d5d86488 9443e3fdb92fa905 53a6f85d9c3376f6 8a9f74820350edf8 d20f5f9b98bf4212]],
+        "guest" => ["eca5e065813cef05", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 bd6e6df4eb2ca928 8c986439d5d86488 9443e3fdb92fa905 6301448be0b1760c 53a6f85d9c3376f6 8a9f74820350edf8 d20f5f9b98bf4212]],
       },
       "desktop-macos.yml" => {
         "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed a2447334158f4627]],
@@ -718,7 +723,7 @@ class ReleaseWorkflowTest < Minitest::Test
       end
     end
     assert_equal %w[desktop-guest-arm64.yml desktop-macos.yml release.yml update-images.yml], run.keys
-    assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-guest-arm64.yml").uniq.sort
+    assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-guest-arm64.yml").uniq.sort
     assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
     assert_equal %w[
       actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action

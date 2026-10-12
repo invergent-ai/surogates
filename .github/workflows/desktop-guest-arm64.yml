@@ -58,6 +58,18 @@ jobs:
       - name: Build the image
         run: images/guest/build.sh --arch arm64 images/guest/out
 
+      # The packed image and its manifest kept a week with the run, for a Mac's first boot of the
+      # guest by hand: no release publishes the arm64 image yet.
+      - name: Keep the image for a Mac
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-guest-arm64
+          path: |
+            images/guest/out/*.zst
+            images/guest/out/manifest.json
+          retention-days: 7
+          if-no-files-found: error
+
       # Blacksmith's runners are VMs, and one may have no KVM: the VM suite then boots nothing, and the
       # run says so.
       - name: Look for KVM
