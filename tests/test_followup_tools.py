@@ -290,3 +290,24 @@ def test_every_registered_tool_runs_in_the_harness():
     for name in followup.FOLLOWUP_TOOL_NAMES:
         assert registry.has(name)
         assert TOOL_LOCATIONS[name] is ToolLocation.HARNESS
+
+
+@pytest.mark.asyncio
+async def test_the_care_team_is_recognised_and_never_enrolled(sf, patient):
+    user_id, session_id = patient
+    await store.save_settings(
+        sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
+        channel_identifier="pn1", alert_recipient_user_ids=[user_id],
+        alert_template_name=None, alert_template_language=None,
+        message_template_name=None, message_template_language=None,
+    )
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "on the care team" in status
+    refused = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x"},
+        **_kw(sf, session_id),
+    )
+    assert "on the care team" in refused
+    assert await store.enrollments_for_user(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
+    ) == []

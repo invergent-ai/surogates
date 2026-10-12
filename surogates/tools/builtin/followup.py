@@ -238,6 +238,21 @@ async def _protocol_timezones(sf: Any, org_id: uuid.UUID, agent_id: str) -> dict
     return zones
 
 
+async def _is_care_team(sf: Any, ctx: _Context) -> bool:
+    """Whether the person talking is one the agent alerts — the doctor, say.
+
+    They write to the same business number as the patients, so nothing in
+    the channel tells them apart; the follow-up settings do.
+    """
+    if ctx.user_id is None:
+        return False
+    settings = await followup_store.get_settings(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
+    recipients = {str(r) for r in (settings.alert_recipient_user_ids or [])} if settings else set()
+    return str(ctx.user_id) in recipients
+
+
 async def _notify_care_team(
     sf: Any, ctx: _Context, *, kind: str, text: str,
 ) -> tuple[int, str | None]:
@@ -290,6 +305,11 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
             "Enrolment happens in the person's WhatsApp conversation, where "
             "the check-ins will reach them. Ask them to message the practice "
             "there."
+        )
+    if await _is_care_team(sf, ctx):
+        return (
+            "Not enrolled: this person is on the care team (they receive the "
+            "alerts). They are not a patient."
         )
     if arguments.get("consent") is not True:
         return (
@@ -401,6 +421,12 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     ]
     if ctx.user_id is None:
         return lines[0]
+    if await _is_care_team(sf, ctx):
+        lines.append(
+            "This person is on the care team: they receive the alerts and "
+            "the practice's notices here. They are not a patient — do not "
+            "enrol them or ask them check-in questions."
+        )
     rows = await followup_store.enrollments_for_user(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
     )
