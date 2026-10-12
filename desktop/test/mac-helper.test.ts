@@ -2,12 +2,14 @@
 // what each of its commands answers.
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { X509Certificate } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { certificatesIn } from "../src/shell/company-ca.js";
 import { HELPER, helper, helperAt, helperSync } from "../src/mac-helper.js";
 import { spawnsCleanly } from "./clean-spawns.js";
 
@@ -63,8 +65,15 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("surogate-he
     expect(run("name")).toMatchObject({ status: 0, stdout: `${execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim()}\n` });
   });
 
+  it("prints the admin domain's roots for SSL as PEM certificates, each one a certificate authority's or a root's", () => {
+    const done = run("trust");
+    expect(done.status).toBe(0);
+    for (const pem of certificatesIn(done.stdout)) expect(() => new X509Certificate(pem)).not.toThrow();
+    expect(done.stdout.replace(/-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n/g, "")).toBe("");
+  });
+
   it("answers no other command", () => {
-    expect(run("apply")).toMatchObject({ status: 2, stdout: "", stderr: "usage: surogate-helper name\n" });
+    expect(run("apply")).toMatchObject({ status: 2, stdout: "", stderr: "usage: surogate-helper name | trust\n" });
     expect(run("name", "again").status).toBe(2);
   });
 });

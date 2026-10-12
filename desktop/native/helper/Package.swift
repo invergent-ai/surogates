@@ -12,7 +12,7 @@ let package = Package(
   targets: [
     .target(
       name: "SurogateHelper",
-      linkerSettings: [.linkedFramework("SystemConfiguration")]
+      linkerSettings: [.linkedFramework("Security"), .linkedFramework("SystemConfiguration")]
     ),
     .executableTarget(name: "surogate-helper", dependencies: ["SurogateHelper"]),
     .testTarget(name: "SurogateHelperTests", dependencies: ["SurogateHelper"]),
