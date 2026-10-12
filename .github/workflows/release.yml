@@ -182,35 +182,25 @@ jobs:
         run: node scripts/publish-sdk-packages.mjs --version="${GITHUB_REF_NAME#v}"
 
   # Surogate Desktop's VM guest (images/guest/), published on R2 under desktop/vm/<key>/
-  # only when its inputs changed: images/guest/inputs.sh names the key, each arch's its own.
+  # only when its inputs changed: images/guest/inputs.sh names the key, which carries the arch.
   # R2 is never the truth: each release that ships a key attaches its manifest to itself
   # (desktop-vm-manifest, below), and later releases take it from there and check R2's
   # files against it. The manifest is kept for the desktop's tarball, published or found.
-  # The cloud's release does not wait for it; the desktop's does.
+  # The cloud's release does not wait for it; the desktop's does. amd64's image alone, the
+  # Linux app's: arm64's is built by hand (desktop-guest-arm64.yml) until the release ships the
+  # macOS app, as a job that waited for it would hold the Linux app's release.
   desktop-vm-image:
-    # Each arch's image on a runner of that arch, natively: amd64's for the Linux app, kept under
-    # the artifact's name the desktop's build takes, and arm64's for the macOS app. A leg that
-    # fails leaves the other to finish its publish.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
-            artifact: desktop-vm-manifest
-          - arch: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
-            artifact: desktop-vm-manifest-arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Past a cold build of the guest, and past fetch's wait of up to 15 minutes for a key's manifest.
     timeout-minutes: 120
     permissions:
       contents: read
-    # One build of an arch's key at a time: a second release's finds it published. A third release
-    # pushed meanwhile cancels the second's run while it waits, as GitHub's groups do. A group
-    # for each arch, so neither arch's run waits behind, or cancels, the other's.
+    outputs:
+      state: ${{ steps.published.outputs.state }}
+    # One build of a key at a time: a second release's finds it published. A third release
+    # pushed meanwhile cancels the second's run while it waits, as GitHub's groups do.
     concurrency:
-      group: desktop-vm-image-${{ matrix.arch }}
+      group: desktop-vm-image
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -218,7 +208,7 @@ jobs:
       # The guest kernel is the only boundary between two chats' commands: a desktop
       # release does not ship while noble-security has a newer one than the pin.
       - name: Check the guest's kernel pin is current
-        run: images/guest/kernel-current.sh --arch ${{ matrix.arch }}
+        run: images/guest/kernel-current.sh --arch amd64
 
       - name: Look for the image's key in our releases, and check R2 against it
         id: published
@@ -229,7 +219,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          state="$(images/guest/publish.sh --arch ${{ matrix.arch }} fetch images/guest/out)"
+          state="$(images/guest/publish.sh --arch amd64 fetch images/guest/out)"
           echo "state=${state}" >> "$GITHUB_OUTPUT"
 
       # The guest stage adds LibreOffice, the Python data stack and Node, and the disk
@@ -243,7 +233,7 @@ jobs:
 
       - name: Build the image
         if: steps.published.outputs.state == 'missing'
-        run: images/guest/build.sh --arch ${{ matrix.arch }} --packed images/guest/out
+        run: images/guest/build.sh --arch amd64 --packed images/guest/out
 
       - name: Publish the image
         if: steps.published.outputs.state == 'missing'
@@ -252,16 +242,16 @@ jobs:
           S3_BUCKET: ${{ secrets.R2_BUCKET }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: images/guest/publish.sh --arch ${{ matrix.arch }} send images/guest/out
+        run: images/guest/publish.sh --arch amd64 send images/guest/out
 
       - name: Keep the image's manifest for the desktop's tarball
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.artifact }}
+          name: desktop-vm-manifest
           path: images/guest/out/manifest.json
           if-no-files-found: error
 
-  # The manifest of each image this release ships, an arch's, attached to the release as
+  # The manifest of the image this release ships, attached to the release as
   # desktop-vm-<key>.json once the release exists, whether this release published the key or
   # checked R2 against an earlier release's copy: the next releases' desktop-vm-image takes it
   # from any of them, never from R2, so deleting one release strands no key.
@@ -277,26 +267,19 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: desktop-vm-manifest
-          path: out/amd64
+          path: out
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: desktop-vm-manifest-arm64
-          path: out/arm64
-
-      - name: Attach each image's manifest to the release
+      - name: Attach the image's manifest to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for manifest in out/amd64/manifest.json out/arm64/manifest.json; do
-            key="$(jq -r .key "$manifest")"
-            cp "$manifest" "desktop-vm-${key}.json"
-            # A re-run finds it attached already: desktop-vm-image's fetch then took these bytes from here.
-            attached="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq "any(.assets[]; .name == \"desktop-vm-${key}.json\")")"
-            if [ "$attached" != true ]; then
-              gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
-            fi
-          done
+          key="$(jq -r .key out/manifest.json)"
+          cp out/manifest.json "desktop-vm-${key}.json"
+          # A re-run finds it attached already: desktop-vm-image's fetch then took these bytes from here.
+          attached="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq "any(.assets[]; .name == \"desktop-vm-${key}.json\")")"
+          if [ "$attached" != true ]; then
+            gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
+          fi
 
   # Surogate Desktop's release (desktop/release/), in three jobs, as every step of a job shares its
   # runner: a job is the boundary, and a step is none. desktop-build makes the tarball from this
@@ -368,15 +351,6 @@ jobs:
         with:
           name: desktop-tarball
           path: out/desktop/surogate-desktop-*-linux-x64.tar.gz
-          if-no-files-found: error
-
-      # The tarball's own agent disk (package.sh leaves it beside the tarball), for the macOS app,
-      # whose build has no mke2fs or debugfs to make one.
-      - name: Keep the agent's disk for the macOS app's build
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: desktop-agent-disk
-          path: out/desktop/agent.img
           if-no-files-found: error
 
   desktop-describe:
