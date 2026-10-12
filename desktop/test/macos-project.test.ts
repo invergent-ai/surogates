@@ -19,6 +19,11 @@ describe("the macOS workflow's files", () => {
     expect(MACOS.filter((file) => !/^test\/[^/]+\.test\.ts$/.test(file) || !existsSync(fileURLToPath(new URL(`../${file}`, import.meta.url))))).toEqual([]);
   });
 
+  it("hold the release target's own test, whose answers for macOS run on a Mac alone", async () => {
+    const { MACOS } = await import("../vitest.config.js");
+    expect(MACOS).toContain("test/platform.test.ts");
+  });
+
   it("are a project on macOS alone", async () => {
     const linux = projects((await importedOn("linux", () => import("../vitest.config.js"))).default);
     const darwin = await importedOn("darwin", () => import("../vitest.config.js"));
