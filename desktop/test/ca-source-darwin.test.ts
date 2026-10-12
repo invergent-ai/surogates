@@ -3,6 +3,7 @@
 // guest; Chromium has no step of the app's, macOS's verifier trusting them already. Node's half needs
 // Node 24's tls.setDefaultCACertificates, which the tests' Node 22 lacks: kept here as the app's Node keeps it.
 
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,8 +37,12 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "mac-ca-"));
   ca = readFileSync(certificate(dir, "Company Root"), "utf8");
   other = readFileSync(certificate(dir, "Second Root"), "utf8");
-  // A server's own certificate, which an administrator may trust as it is: no certificate authority's.
-  site = readFileSync(certificate(dir, "intranet", "Company Root"), "utf8");
+  // A server's own certificate, which an administrator may trust as it is: no certificate authority's. Made
+  // signed by itself, as the LibreSSL a Mac has makes one too.
+  const made = spawnSync("openssl", ["req", "-x509", "-subj", "/CN=intranet", "-addext", "basicConstraints=CA:FALSE", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+    "-nodes", "-keyout", join(dir, "intranet.key"), "-out", join(dir, "intranet.pem"), "-days", "2"], { encoding: "utf8" });
+  if (made.status !== 0) throw new Error(`openssl could not make intranet: ${made.stderr}`);
+  site = readFileSync(join(dir, "intranet.pem"), "utf8");
 });
 
 afterAll(() => {

@@ -105,8 +105,9 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
     const holding = join(home, "hold-keys.cjs");
     writeFileSync(holding, 'const { app, globalShortcut } = require("electron");\napp.whenReady().then(() => globalShortcut.register("Alt+Space", () => {}));\n');
     app = await launch(home, {}, [], [holding]);
-    const page = await shellPage(app);
-    await page.click("#open-settings");
+    await shellPage(app);
+    // From the app's menu: the first run shows no sidebar to open it from.
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("settings")!.click());
     let settings: Page | undefined;
     await expect.poll(() => {
       settings = app!.windows().find((found) => found.url().endsWith("/settings.html"));

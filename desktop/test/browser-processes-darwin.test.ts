@@ -53,12 +53,13 @@ it("are a Mac's", async () => {
 describe.runIf(process.platform === "darwin" && spawnsCleanly)("the processes on a profile, read on a Mac", () => {
   it("are found through surogate-helper procs", async () => {
     const profile = mkdtempSync(join(tmpdir(), "a profile "));
-    const sleeper = spawn("/bin/sleep", ["30", `--user-data-dir=${profile}`], { stdio: "ignore" });
+    // A program that takes any argument and waits, as BSD's sleep takes none but its time.
+    const waiting = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", `--user-data-dir=${profile}`], { stdio: "ignore" });
     try {
-      await new Promise((resolve) => sleeper.once("spawn", resolve));
-      expect(await holding(profile)).toEqual([sleeper.pid]);
+      await new Promise((resolve) => waiting.once("spawn", resolve));
+      expect(await holding(profile)).toEqual([waiting.pid]);
     } finally {
-      sleeper.kill();
+      waiting.kill();
       rmSync(profile, { recursive: true, force: true });
     }
   });

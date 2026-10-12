@@ -28,11 +28,12 @@ final class ProcsTests: XCTestCase {
     sleeper.arguments = ["30"]
     try sleeper.run()
     defer { sleeper.terminate() }
-    let found = runningProcesses().first { $0.pid == sleeper.processIdentifier }
+    let listed = runningProcesses()
+    let found = listed.first { $0.pid == sleeper.processIdentifier }
     XCTAssertEqual(found?.path, "/bin/sleep")
     XCTAssertEqual(found?.args, ["/bin/sleep", "30"])
     // This process too, the test runner, and none twice.
-    XCTAssertTrue(runningProcesses().contains { $0.pid == getpid() })
-    XCTAssertEqual(Set(runningProcesses().map(\.pid)).count, runningProcesses().count)
+    XCTAssertTrue(listed.contains { $0.pid == getpid() })
+    XCTAssertEqual(Set(listed.map(\.pid)).count, listed.count)
   }
 }
