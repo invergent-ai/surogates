@@ -639,16 +639,19 @@ class ChannelInboundPipeline:
                     platform_user_id=msg.platform_user_id,
                     channel_identifier=routing.identifier,
                 )
-                await deliver_pending(
-                    deps.session_factory,
-                    deps.session_store,
-                    org_id=_org,
-                    agent_id=routing.agent_id,
-                    user_id=identity.user_id,
-                    platform=routing.platform,
-                    channel_identifier=routing.identifier,
-                    session_id=session_id,
-                )
+                # Outreach is only ever queued on its platforms, so other
+                # channels have nothing held to look for.
+                if routing.platform in followup_store.OUTREACH_PLATFORMS:
+                    await deliver_pending(
+                        deps.session_factory,
+                        deps.session_store,
+                        org_id=_org,
+                        agent_id=routing.agent_id,
+                        user_id=identity.user_id,
+                        platform=routing.platform,
+                        channel_identifier=routing.identifier,
+                        session_id=session_id,
+                    )
             except Exception:  # noqa: BLE001
                 # The person's own message must reach the agent whatever
                 # happens to the bookkeeping around it.
