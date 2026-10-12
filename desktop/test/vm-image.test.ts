@@ -1,4 +1,4 @@
-// The guest image's delivery: its manifest, the install record's base, and the download,
+// The guest image's delivery: the arch its manifest names, the install record's base, and the download,
 // served by a local HTTP server as the install's base would serve it.
 
 import { spawnSync } from "node:child_process";
@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { deliver, ImageDelivery, imageArch, imageArchOf, type ImageManifest, installBase, readManifest } from "../src/vm/image.js";
+import { deliver, ImageDelivery, imageArchOf, type ImageManifest, installBase } from "../src/vm/image.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const KEY = "a".repeat(64);
@@ -397,35 +397,6 @@ describe("the guest image's delivery", () => {
 });
 
 describe("the image's manifest and the install record", () => {
-  it("reads the manifest build.sh writes, and refuses one that is not JSON, whose names are not the image's files, or whose key is not a hash", () => {
-    const path = join(dir, "manifest.json");
-    writeFileSync(path, JSON.stringify(manifest));
-    expect(readManifest(path, "amd64")).toEqual(manifest);
-    for (const bad of [
-      { ...manifest, key: "../x" },
-      { ...manifest, arch: "x86_64" },
-      { key: manifest.key, files: manifest.files },
-      { ...manifest, files: [manifest.files[0]] },
-      { ...manifest, files: manifest.files.map((file) => ({ ...file, download: "../../.bashrc" })) },
-      { ...manifest, files: manifest.files.map((file) => (file.name === "vmlinuz" ? { ...file, name: "../vmlinuz" } : file)) },
-      { ...manifest, files: manifest.files.map((file) => ({ ...file, size: -1 })) },
-    ]) {
-      writeFileSync(path, JSON.stringify(bad));
-      expect(() => readManifest(path, "amd64")).toThrow("is not the guest image's manifest");
-    }
-    writeFileSync(path, "{");
-    expect(() => readManifest(path, "amd64")).toThrow(`${path} is not the guest image's manifest`);
-  });
-
-  it("delivers only the image of this computer's arch: a packaged app whose manifest names another's is refused, and boots none", () => {
-    const path = join(dir, "manifest.json");
-    writeFileSync(path, JSON.stringify({ ...manifest, arch: "arm64" }));
-    expect(() => readManifest(path, "amd64")).toThrow(`${path} is the manifest of the guest image for arm64, and this computer runs amd64's`);
-    expect(readManifest(path, "arm64")).toEqual({ ...manifest, arch: "arm64" });
-    // This computer's own, by Node's names: the tests' is x64's or arm64's.
-    expect([imageArch("x64"), imageArch("arm64"), imageArch("ia32")]).toEqual(["amd64", "arm64", null]);
-  });
-
   it("says the arch of an image of a test's or a development build's by the manifest beside it", () => {
     expect(imageArchOf(dir)).toBeNull();
     for (const arch of ["arm64", "amd64"] as const) {
