@@ -45,7 +45,6 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "apply_outreach_status",
     "deliver_pending",
-    "make_outreach_sender",
     "record_outreach_delivery",
     "send_queued_outreach",
     "window_open",
@@ -511,25 +510,3 @@ async def apply_outreach_status(
             await db.commit()
     return True
 
-
-def make_outreach_sender(
-    *,
-    session_factory: Any,
-    session_store: Any,
-    redis: Any,
-    delivery_service: Any,
-    identity_lookup: Any,
-    storage: Any = None,
-    settings: Any = None,
-):
-    """The ticker's ``async (now) -> int`` outreach pass, wired for production."""
-
-    async def _send(now: datetime) -> int:
-        return await send_queued_outreach(
-            session_factory,
-            session_store=session_store, redis=redis,
-            delivery_service=delivery_service, identity_lookup=identity_lookup,
-            now=now, storage=storage, settings=settings,
-        )
-
-    return _send

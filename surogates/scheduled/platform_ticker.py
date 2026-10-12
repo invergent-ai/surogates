@@ -456,18 +456,10 @@ async def main(
                 row, next_run_at=upcoming[0] if upcoming else None,
             )
 
-        from surogates.followup.outreach import make_outreach_sender
+        from surogates.followup.outreach import send_queued_outreach
 
-        _send_outreach = make_outreach_sender(
-            session_factory=_session_factory(),
-            session_store=session_store,
-            redis=redis,
-            delivery_service=DeliveryService(
-                session_factory=_session_factory(), redis_client=redis,
-            ),
-            identity_lookup=_identity_lookup,
-            storage=storage,
-            settings=settings,
+        _outreach_delivery = DeliveryService(
+            session_factory=_session_factory(), redis_client=redis,
         )
 
         async def _program_send_openers():  # pragma: no cover - prod path
@@ -480,7 +472,13 @@ async def main(
             # Alerts and operator messages ride the same leader-checked send
             # phase as the openers: a second replica must never send them too.
             try:
-                await _send_outreach(_program_now())
+                await send_queued_outreach(
+                    _session_factory(),
+                    session_store=session_store, redis=redis,
+                    delivery_service=_outreach_delivery,
+                    identity_lookup=_identity_lookup, now=_program_now(),
+                    storage=storage, settings=settings,
+                )
             except Exception:
                 logger.exception("[outreach] send pass failed")
 
