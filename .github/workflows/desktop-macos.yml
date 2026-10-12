@@ -46,3 +46,76 @@ jobs:
 
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos
+
+  # The shell and the browser on a Mac: surogate-helper built, with its own tests; the admin trust domain read
+  # as an administrator's `sudo security add-trusted-cert -d` leaves it; the shell's and the browser's files of
+  # the macos project with the helper there to run; the app end to end, with no VM; and the browser host headed
+  # on the runner's own Chrome and Edge. Each step runs whatever came of the one before it.
+  shell:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      # npm ci leaves no Electron binary; its fuses flipped, it is signed ad hoc again.
+      - name: Install Electron
+        run: npm run electron:install
+
+      - name: Build the app for a Mac, surogate-helper with it
+        run: npm run build:darwin
+
+      - name: Run surogate-helper's own tests
+        if: ${{ !cancelled() }}
+        working-directory: desktop/native/helper
+        run: swift test
+
+      # An administrator's trust settings change only once they confirm it, which nobody can on a runner: the
+      # runner's own, thrown away with it, lets them change unasked.
+      - name: Read an administrator's trusted roots through surogate-helper
+        if: ${{ !cancelled() }}
+        run: |
+          sudo security authorizationdb write com.apple.trust-settings.admin allow
+          test/darwin/admin-trust.sh
+
+      - name: Run the shell's and the browser's files of the macos project
+        if: ${{ !cancelled() }}
+        run: >-
+          npx vitest run --project macos
+          test/shell-places-darwin.test.ts test/computer-name-darwin.test.ts test/backups-darwin.test.ts test/folders-held-darwin.test.ts
+          test/mac-helper.test.ts test/login-item-darwin.test.ts test/deep-link-darwin.test.ts test/credentials-darwin.test.ts
+          test/menus-darwin.test.ts test/main-window-darwin.test.ts test/quick-entry-darwin.test.ts test/ca-source-darwin.test.ts
+          test/browser-known-darwin.test.ts test/browser-processes-darwin.test.ts
+
+      - name: Run the app end to end on a Mac
+        if: ${{ !cancelled() }}
+        run: npx vitest run -c vitest.e2e.config.ts test/e2e/macos.e2e.ts
+
+      - name: Run the browser host on the runner's Chrome
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_MAC: "1"
+          SUROGATE_TEST_BROWSER: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+        run: npx vitest run --project macos test/browser-host-darwin.test.ts
+
+      - name: Run the browser host on the runner's Edge
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_MAC: "1"
+          SUROGATE_TEST_BROWSER: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+        run: npx vitest run --project macos test/browser-host-darwin.test.ts
