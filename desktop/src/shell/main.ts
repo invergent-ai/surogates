@@ -32,7 +32,7 @@ import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
-import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
+import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
@@ -328,11 +328,13 @@ const vmUser = () => {
 // The guest's image: a packaged app downloads it from where it was installed from (the install
 // script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
 // names an install record of a test's. SUROGATE_VM_IMAGE names an image to boot as it is, in a
-// development build only.
+// development build only. The image delivered is this computer's arch's, and no other.
 function imageDelivery(): ImageDelivery | null {
   if (VM_ENV.SUROGATE_VM_IMAGE || !INSTALL_RECORD) return null;
+  const arch = imageArch();
+  if (arch === null) throw new Error(`No guest image is built for this computer's ${process.arch}`);
   return new ImageDelivery({
-    manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json")),
+    manifest: readManifest(join(VM_RESOURCES ?? REPO_IMAGE, "manifest.json"), arch),
     // An installed app's record is root's alone to write, as the install script leaves it.
     base: () => installBase(INSTALL_RECORD, app.isPackaged),
     images: join(root, "vm", "images"),

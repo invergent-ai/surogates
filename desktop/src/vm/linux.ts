@@ -18,10 +18,13 @@ import { findOnPath } from "../files/operations.js";
 import type { Share } from "../guest/protocol.js";
 import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
+import { type GuestArch, hostArch, QEMU_ARCH } from "./qemu-arch.js";
 import { Qmp, qemuArgs, readOnlyDaemon, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 import { ended, reach, RETRY_MS } from "./sockets.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
+// QEMU's programs, one an arch: the last boot's may have been another arch's than the next's.
+const QEMUS = Object.values(QEMU_ARCH).map(({ program }) => program);
 // util-linux's, as setpriv is.
 const PRLIMIT = "/usr/bin/prlimit";
 
@@ -33,8 +36,8 @@ const late = (deadline: number) => new Promise<"late">((resolve) => {
 /**
  * What a manager that died left running, where its pdeathsig did not reach. Each
  * pidfile this backend writes in *run* names a process, killed only when it is that
- * QEMU or that virtiofsd: its program, one of *daemons* for a folder's (virtiofsd, or
- * the bwrap a folder read alone has it run in), and an argument that names its own
+ * QEMU, of any guest's arch, or that virtiofsd: its program, one of *daemons* for a folder's
+ * (virtiofsd, or the bwrap a folder read alone has it run in), and an argument that names its own
  * file in *run*, never a part of its command line. A pid used again since is left alone.
  * The folder is then emptied for the next guest's sockets.
  */
@@ -56,7 +59,7 @@ export function sweep(run: string, daemons: string[] = [VIRTIOFSD]): void {
       const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
       const ours = share
         ? daemons.includes(program) && argv.includes(`--socket-path=${join(run, `vfs-${share[1]}.sock`)}`)
-        : basename(program) === "qemu-system-x86_64" && argv.includes(join(run, "qemu.pid"));
+        : QEMUS.includes(basename(program)) && argv.includes(join(run, "qemu.pid"));
       if (ours) process.kill(pid, "SIGKILL");
     } catch {
       // Gone, or not ours to read.
@@ -77,8 +80,8 @@ type Held = Array<{ dev: number; ino: number }>;
 // newuidmap and newgidmap, and nothing else: the user's shell may export what either acts on,
 // OPENSSL_CONF and the loader's variables among them.
 const toolEnv = () => ({ PATH: toolPath() });
-// QEMU by its whole path, as that PATH finds it, or null: it is run by that path and no other.
-const qemuOn = (path: string) => findOnPath("qemu-system-x86_64", path, "/");
+// QEMU for *arch* by its whole path, as that PATH finds it, or null: it is run by that path and no other.
+const qemuOn = (path: string, arch: GuestArch = "x86_64") => findOnPath(QEMU_ARCH[arch].program, path, "/");
 
 // A child that dies with this process, and the end of what it said on stderr.
 function launch(argv: string[]): { child: ChildProcess; said: () => string } {
@@ -202,11 +205,12 @@ const KVM_FAILED = /failed to initialize kvm|Could not access KVM kernel module/
 /**
  * QEMU on *options*, once its control, net and inbound ports and its monitor have taken their
  * connections: with KVM when this user can open it, and emulated otherwise, or when
- * QEMU could not use it. Its runtime folder is swept first, and the sparse sessions
+ * QEMU could not use it. A guest of another arch than this computer's, a test's, runs emulated,
+ * as on a computer without KVM. Its runtime folder is swept first, and the sparse sessions
  * disk made at the first boot. Rejects with why not, QEMU's own words included.
  */
 export const bootLinux: BootVm = async (options, signal, deadline) => {
-  const emulated = emulation(options.kvm);
+  const emulated = (options.arch ?? "x86_64") === hostArch() ? emulation(options.kvm) : "no-kvm";
   try {
     return await launchVm(options, signal, deadline, emulated);
   } catch (error) {
@@ -228,12 +232,13 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
     closeSync(fd);
   }
   mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
-  const program = qemuOn(toolPath());
-  if (program === null) throw new Error("QEMU is not on the PATH (the qemu-system-x86 package)");
+  const arch = options.arch ?? "x86_64";
+  const program = qemuOn(toolPath(), arch);
+  if (program === null) throw new Error(`QEMU is not on the PATH (the ${QEMU_ARCH[arch].package} package)`);
   // With no locked memory allowed. QEMU 10.2 gives each of its event loops an io_uring ring, counted
   // against the locked memory of all the user's processes together, and exits when a later loop's is
   // refused; with none allowed, its first loop's is refused, and none of them uses io_uring.
-  const { child: qemu, said } = launch([PRLIMIT, "--memlock=0:0", "--", program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null)]);
+  const { child: qemu, said } = launch([PRLIMIT, "--memlock=0:0", "--", program, ...qemuArgs(options, options.run, options.console, options.cpus, emulated !== null, arch)]);
   const halt = () => qemu.kill("SIGKILL");
   signal?.addEventListener("abort", halt, { once: true });
   let control: Socket | null = null;

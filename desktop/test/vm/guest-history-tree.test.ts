@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
-import { agentDiskWith, altered, IMAGE, KVM, needsKvm, until, USER } from "./guest-support.js";
+import { agentDiskWith, altered, ARCH, IMAGE, KVM, needsKvm, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -35,7 +35,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's history in th
   beforeAll(async () => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-history-tree-")));
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDiskWith(dir, altered([/^exec /m, `${RUNS}\nexec `])),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDiskWith(dir, altered([/^exec /m, `${RUNS}\nexec `])),
       sessions: join(dir, "sessions.img"),
       // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,

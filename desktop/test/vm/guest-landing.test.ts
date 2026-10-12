@@ -24,7 +24,7 @@ import type { Outcome } from "../../src/link/protocol.js";
 import { forgettable } from "../../src/vm/history.js";
 import { type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
 import { built } from "../built.js";
-import { agentDisk, alive, folderOf, IMAGE, KVM, needsKvm, until, USER } from "./guest-support.js";
+import { agentDisk, alive, ARCH, folderOf, IMAGE, KVM, needsKvm, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -352,7 +352,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("two threads on one folde
     chmodSync(join(folder, "Budget.csv"), 0o600);
     chmodSync(join(folder, "notes", "keep.txt"), 0o640);
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
     manager = new VmManager(options);

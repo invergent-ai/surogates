@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import { forkManager, type ManagerProcess, VmClient } from "../../src/vm/client.js";
 import type { Place } from "../../src/vm/manager.js";
-import { agentDisk, alive, folderOf, IMAGE, KVM, needsKvm, signal, until, USER } from "./guest-support.js";
+import { agentDisk, alive, ARCH, folderOf, IMAGE, KVM, needsKvm, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -50,7 +50,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("a folder's place and its
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
     vm = new VmClient({
       vm: {
-        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
         run, console: join(dir, "console.log"), user: USER, kvm: KVM,
       },
       spawn: () => {

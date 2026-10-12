@@ -25,6 +25,7 @@ import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
 import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
+import type { GuestArch } from "./qemu-arch.js";
 
 // A ping every PING_MS, with KVM or emulated.
 const PING_MS = 10_000;
@@ -58,6 +59,8 @@ export type Emulated = "no-kvm" | "no-access" | "relogin" | "kvm-failed";
 export type Boot = { emulated: Emulated | null } | { failed: string };
 
 export interface VmOptions extends Disks {
+  // The guest's arch: x86_64, the Linux app's, unless the image is another's (vmOptions, client.ts).
+  arch?: GuestArch;
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
   console: string; // the guest's console log
   user: HostUser; // whom the roots run for: the name and home they see

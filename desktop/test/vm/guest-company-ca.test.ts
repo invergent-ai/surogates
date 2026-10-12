@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { VmManager, type VmOptions } from "../../src/vm/manager.js";
 import { certificate, versionOne } from "../certificates.js";
-import { agentDisk, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, USER } from "./guest-support.js";
+import { agentDisk, ARCH, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -58,7 +58,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the company's CA in the 
     v1root = readFileSync(versionOne(certs, "v1root", "v1site"), "utf8");
     for (const name of ["site.pem", "site.key", "itsite.pem", "v1site.pem"]) copyFileSync(join(certs, name), join(folder, name));
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,
     };
   });

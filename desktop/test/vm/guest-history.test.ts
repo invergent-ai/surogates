@@ -18,7 +18,7 @@ import type { Outcome } from "../../src/link/protocol.js";
 import { checked, forgettable, type HistoryRequest } from "../../src/vm/history.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type Place, VmManager, type VmOptions } from "../../src/vm/manager.js";
-import { agentDisk, DAEMON, folderOf, IMAGE, KVM, median, needsKvm, signal, until, USER, withHistory } from "./guest-support.js";
+import { agentDisk, ARCH, DAEMON, folderOf, IMAGE, KVM, median, needsKvm, signal, until, USER, withHistory } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
@@ -151,7 +151,7 @@ function world(prefix: string) {
   writeFileSync(join(folder, "notes", "todo.txt"), "one\n");
   // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
   const disks = (at: string, disk = agentDisk(at)): VmOptions => ({
-    kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: disk, sessions: join(at, "sessions.img"),
+    kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: disk, sessions: join(at, "sessions.img"),
     run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(at, "console.log"), user: USER, kvm: KVM, ...DAEMON,
   });
   const place: Place = { key: KEY, history: join(dir, "store"), real: folderOf(folder) };

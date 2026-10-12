@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -21,6 +21,7 @@ import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
   type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
 } from "../src/vm/manager.js";
+import { hostArch } from "../src/vm/qemu-arch.js";
 import { readOnlyDaemon, VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -46,12 +47,12 @@ const options = (): VmOptions => ({
   run: join(dir, "run"), console: join(dir, "logs", "console.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" }, kvm: join(dir, "kvm"),
 });
 
-// *script* as QEMU, first on the PATH, where setpriv looks it up, while *body* runs.
-async function withQemu(script: string, body: () => Promise<void>): Promise<void> {
+// *script* as QEMU, *program* (x86_64's unless it says another), first on the PATH, where setpriv looks it up, while *body* runs.
+async function withQemu(script: string, body: () => Promise<void>, program = "qemu-system-x86_64"): Promise<void> {
   const bin = join(dir, "bin");
   mkdirSync(bin);
-  writeFileSync(join(bin, "qemu-system-x86_64"), `#!/bin/sh\n${script}\n`);
-  chmodSync(join(bin, "qemu-system-x86_64"), 0o755);
+  writeFileSync(join(bin, program), `#!/bin/sh\n${script}\n`);
+  chmodSync(join(bin, program), 0o755);
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
@@ -151,6 +152,24 @@ describe("the VM manager on the host", () => {
       await until(() => !alive(daemon.pid!) && !serving());
     } finally {
       daemon.kill("SIGKILL");
+    }
+  });
+
+  it("ends the QEMU of an arm64 guest a manager that died left, as it ends x86_64's", async () => {
+    const run = join(dir, "vm");
+    mkdirSync(run);
+    // A program by QEMU's aarch64 name, whose command line names the folder's pidfile, as QEMU's does.
+    const program = join(dir, "qemu-system-aarch64");
+    copyFileSync(process.execPath, program);
+    chmodSync(program, 0o755);
+    const qemu = spawn(program, ["-e", "setInterval(() => {}, 1000)", join(run, "qemu.pid")], { stdio: "ignore" });
+    try {
+      writeFileSync(join(run, "qemu.pid"), String(qemu.pid));
+      sweep(run);
+      await until(() => !alive(qemu.pid!));
+      expect(readdirSync(run)).toEqual([]);
+    } finally {
+      qemu.kill("SIGKILL");
     }
   });
 
@@ -1645,7 +1664,8 @@ describe("the emulated VM", () => {
     expect(emulation(kvm, join(dir, "no-group-file"))).toBe("no-access");
   });
 
-  it("boots emulated when QEMU cannot use the KVM it could open, on the same disks", async () => {
+  // A QEMU that opens its sockets and answers its monitor, and writes down what it was run with.
+  const fakeQemu = () => {
     const fake = join(dir, "qemu.cjs");
     writeFileSync(fake, [
       'const net = require("node:net");',
@@ -1657,9 +1677,13 @@ describe("the emulated VM", () => {
       '  socket.once("data", () => socket.write(\'{"return": {}}\\n\'));',
       '}).listen(run + "/qmp.sock");',
     ].join("\n"));
+    return `exec '${process.execPath}' '${fake}' '${join(dir, "run")}' "$@"`;
+  };
+
+  it("boots emulated when QEMU cannot use the KVM it could open, on the same disks", async () => {
     const script = [
       'case "$*" in *accel=kvm*) echo "qemu-system-x86_64: failed to initialize kvm: Device or resource busy" >&2; exit 1;; esac',
-      `exec '${process.execPath}' '${fake}' '${join(dir, "run")}' "$@"`,
+      fakeQemu(),
     ].join("\n");
     await withQemu(script, async () => {
       const vm = await bootLinux(options(), undefined, performance.now() + 5_000);
@@ -1670,6 +1694,41 @@ describe("the emulated VM", () => {
         expect(argv[argv.indexOf("-append") + 1]).toMatch(/ surogate\.emulated=1$/);
       } finally {
         await vm.kill();
+      }
+    });
+  });
+
+  it("boots an arm64 guest with QEMU's aarch64 program on its virt machine, emulated on a computer of another arch however KVM opens", async () => {
+    await withQemu(fakeQemu(), async () => {
+      const vm = await bootLinux({ ...options(), arch: "aarch64" }, undefined, performance.now() + 5_000);
+      try {
+        // The KVM device opens: on an arm64 computer the guest has it, and on any other none runs an arm64 guest.
+        const kvm = hostArch() === "aarch64";
+        expect(vm.emulated).toBe(kvm ? null : "no-kvm");
+        const argv = JSON.parse(readFileSync(join(dir, "argv"), "utf8")) as string[];
+        expect(argv).toEqual(expect.arrayContaining(kvm
+          ? ["-machine", "virt,gic-version=max,accel=kvm,memory-backend=mem", "-cpu", "host"]
+          : ["-machine", "virt,gic-version=max,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"]));
+        expect(argv).not.toContain("q35,accel=kvm,memory-backend=mem");
+      } finally {
+        await vm.kill();
+      }
+    }, "qemu-system-aarch64");
+  });
+
+  it("names the package QEMU for an arm64 guest is in, where it is not on the PATH", async () => {
+    // x86_64's QEMU is there, and is not the one an arm64 guest runs on; virtiofsd's id-map tools beside it, and nothing else.
+    const tools = join(dir, "tools");
+    mkdirSync(tools);
+    for (const name of ["newuidmap", "newgidmap"]) symlinkSync(findOnPath(name, process.env.PATH, "/")!, join(tools, name));
+    await withQemu(fakeQemu(), async () => {
+      const path = process.env.PATH;
+      process.env.PATH = `${join(dir, "bin")}:${tools}`;
+      try {
+        await expect(bootLinux({ ...options(), arch: "aarch64" }, undefined, performance.now() + 5_000))
+          .rejects.toThrow("QEMU is not on the PATH (the qemu-system-arm package)");
+      } finally {
+        process.env.PATH = path;
       }
     });
   });

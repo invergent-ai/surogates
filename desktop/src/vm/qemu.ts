@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
+import { type GuestArch, QEMU_ARCH } from "./qemu-arch.js";
 
 // Ubuntu's, whose AppArmor profile lets its namespace sandbox work under 24.04's restriction.
 export const VIRTIOFSD = "/usr/libexec/virtiofsd";
@@ -35,15 +36,14 @@ export function guestCpus(threads = availableParallelism()): number {
 // *run* holds the control, net, inbound and QMP sockets and QEMU's pidfile; *console* is the guest's console log.
 // *emulated*: QEMU's TCG in place of KVM, a host thread a vCPU and a 256 MiB translation cache on
 // top of the guest's memory, the CPU TCG can give, and the agent told on the kernel's command line.
-export function qemuArgs(disks: Disks, run: string, console: string, cpus = guestCpus(), emulated = false): string[] {
+// *arch*: the guest's, whose machine and CPU these are (qemu-arch.ts): x86_64, the Linux app's.
+export function qemuArgs(disks: Disks, run: string, console: string, cpus = guestCpus(), emulated = false, arch: GuestArch = "x86_64"): string[] {
   const ports: string[] = [];
   for (let n = 1; n <= ROOT_PORTS; n += 1) ports.push("-device", `pcie-root-port,id=rp${n},chassis=${n}`);
-  const machine = emulated
-    ? ["-machine", "q35,memory-backend=mem", "-accel", "tcg,thread=multi,tb-size=256", "-cpu", "max"]
-    : ["-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host"];
+  const { machine, cpu } = QEMU_ARCH[arch];
   return [
     "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
-    ...machine, "-smp", String(cpus), "-m", MEMORY,
+    ...machine(!emulated), ...cpu(!emulated), "-smp", String(cpus), "-m", MEMORY,
     // vhost-user-fs needs the guest's memory shared with virtiofsd.
     "-object", `memory-backend-memfd,id=mem,size=${MEMORY},share=on`,
     "-kernel", disks.kernel,

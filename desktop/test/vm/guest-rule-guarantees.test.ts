@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
-import { agentDiskWith, altered, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, USER } from "./guest-support.js";
+import { agentDiskWith, altered, ARCH, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, USER } from "./guest-support.js";
 
 // The rule's own numbers, from its source: the first user it judges, and the one filesystem it judges on.
 const RULE = readFileSync(new URL("../../vm/rule.bpf.c", import.meta.url), "utf8");
@@ -57,7 +57,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("what the protected-names
     folder = join(dir, "my folder");
     mkdirSync(folder);
     options = {
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDiskWith(dir, altered([/^exec /m, `${SAYS_JIT}\nexec `])),
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), arch: ARCH, agentDisk: agentDiskWith(dir, altered([/^exec /m, `${SAYS_JIT}\nexec `])),
       sessions: join(dir, "sessions.img"),
       // Under $XDG_RUNTIME_DIR: a vhost-user socket's path must fit in 108 bytes.
       run: mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-")), console: join(dir, "console.log"), user: USER, kvm: KVM,

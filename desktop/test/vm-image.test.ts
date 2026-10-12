@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { deliver, ImageDelivery, type ImageManifest, installBase, readManifest } from "../src/vm/image.js";
+import { deliver, ImageDelivery, imageArch, imageArchOf, type ImageManifest, installBase, readManifest } from "../src/vm/image.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const KEY = "a".repeat(64);
@@ -56,7 +56,7 @@ beforeEach(async () => {
   // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away.
   rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300_000)]);
   kernel = randomBytes(200_000);
-  manifest = { key: KEY, files: [publish("rootfs.img", rootfs), publish("vmlinuz", kernel)] };
+  manifest = { key: KEY, arch: "amd64", files: [publish("rootfs.img", rootfs), publish("vmlinuz", kernel)] };
   server = createServer((request, response) => {
     heard.push({ url: request.url ?? "", range: request.headers.range });
     const body = served.get(request.url ?? "");
@@ -400,19 +400,42 @@ describe("the image's manifest and the install record", () => {
   it("reads the manifest build.sh writes, and refuses one that is not JSON, whose names are not the image's files, or whose key is not a hash", () => {
     const path = join(dir, "manifest.json");
     writeFileSync(path, JSON.stringify(manifest));
-    expect(readManifest(path)).toEqual(manifest);
+    expect(readManifest(path, "amd64")).toEqual(manifest);
     for (const bad of [
       { ...manifest, key: "../x" },
+      { ...manifest, arch: "x86_64" },
+      { key: manifest.key, files: manifest.files },
       { ...manifest, files: [manifest.files[0]] },
       { ...manifest, files: manifest.files.map((file) => ({ ...file, download: "../../.bashrc" })) },
       { ...manifest, files: manifest.files.map((file) => (file.name === "vmlinuz" ? { ...file, name: "../vmlinuz" } : file)) },
       { ...manifest, files: manifest.files.map((file) => ({ ...file, size: -1 })) },
     ]) {
       writeFileSync(path, JSON.stringify(bad));
-      expect(() => readManifest(path)).toThrow("is not the guest image's manifest");
+      expect(() => readManifest(path, "amd64")).toThrow("is not the guest image's manifest");
     }
     writeFileSync(path, "{");
-    expect(() => readManifest(path)).toThrow(`${path} is not the guest image's manifest`);
+    expect(() => readManifest(path, "amd64")).toThrow(`${path} is not the guest image's manifest`);
+  });
+
+  it("delivers only the image of this computer's arch: a packaged app whose manifest names another's is refused, and boots none", () => {
+    const path = join(dir, "manifest.json");
+    writeFileSync(path, JSON.stringify({ ...manifest, arch: "arm64" }));
+    expect(() => readManifest(path, "amd64")).toThrow(`${path} is the manifest of the guest image for arm64, and this computer runs amd64's`);
+    expect(readManifest(path, "arm64")).toEqual({ ...manifest, arch: "arm64" });
+    // This computer's own, by Node's names: the tests' is x64's or arm64's.
+    expect([imageArch("x64"), imageArch("arm64"), imageArch("ia32")]).toEqual(["amd64", "arm64", null]);
+  });
+
+  it("says the arch of an image of a test's or a development build's by the manifest beside it", () => {
+    expect(imageArchOf(dir)).toBeNull();
+    for (const arch of ["arm64", "amd64"] as const) {
+      writeFileSync(join(dir, "manifest.json"), JSON.stringify({ ...manifest, arch }));
+      expect(imageArchOf(dir)).toBe(arch);
+    }
+    for (const unnamed of ['{"key":"a"}', '{"arch":"riscv64"}', "{"]) {
+      writeFileSync(join(dir, "manifest.json"), unnamed);
+      expect(imageArchOf(dir)).toBeNull();
+    }
   });
 
   it("reads where the app was installed from, and says when it was not installed by its script", () => {

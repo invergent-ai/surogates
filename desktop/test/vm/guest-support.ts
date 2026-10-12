@@ -9,18 +9,26 @@ import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
 
 import type { HostUser, Share } from "../../src/guest/protocol.js";
+import { imageArchOf } from "../../src/vm/image.js";
 import { emulation } from "../../src/vm/linux.js";
 import type { Folder } from "../../src/vm/manager.js";
+import { GUEST_ARCH, hostArch } from "../../src/vm/qemu-arch.js";
 
 export const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
+// The image's arch, as the manifest images/guest/build.sh writes beside it names it: x86_64's,
+// the Linux app's, where none is. Each boot is given it.
+export const ARCH = GUEST_ARCH[imageArchOf(IMAGE) ?? "amd64"];
 // The device each guest opens for KVM: /dev/kvm, unless the job hides it.
 export const KVM = process.env.SUROGATE_VM_KVM;
 // Each folder's daemon, where a job names another than Ubuntu's: another release's, say.
 export const DAEMON = process.env.SUROGATE_VM_VIRTIOFSD ? { virtiofsd: process.env.SUROGATE_VM_VIRTIOFSD } : {};
 // Each file's beforeAll. Without KVM they fail, as Section 11 has a VM job do: a job runs them
 // emulated only by naming a device that does not exist in SUROGATE_VM_KVM, as the app takes it.
+// An image of another arch than this computer's runs emulated whatever KVM there is, and is
+// waited for as emulated only once the job says so too.
 export function needsKvm(): void {
   if (process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined) return;
+  expect(ARCH, `the image is ${ARCH}'s, which this computer runs emulated: name a device that does not exist in SUROGATE_VM_KVM`).toBe(hostArch());
   expect(emulation(), "the VM tests need KVM, or SUROGATE_VM_KVM naming a device that does not exist to run them emulated").toBeNull();
 }
 const AGENT_DISK = fileURLToPath(new URL("../../vm/agent-disk.sh", import.meta.url));
