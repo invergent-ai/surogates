@@ -23,7 +23,7 @@
 # directly. 6.8.0-146 fails every kernel read of an uncached virtiofs file with EFAULT,
 # exec's first read among them, so no program in a chat's folder could run. Its .debs
 # come from Launchpad, which keeps every published version, and are checked by hash.
-ARG KERNEL=7.0.0-34-generic
+ARG KERNEL=7.0.0-38-generic
 # The guest's revision, in the text images/guest/inputs.sh hashes: raise it to publish a new
 # image with what its unpinned bases (python:3.12-slim, ubuntu:24.04, uv), apt, pip and npm
 # give today, since an image is published once for its key and never rebuilt otherwise.
@@ -173,14 +173,14 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
 # The kernel pin: KERNEL above and these four .debs, their version and hashes, change
 # together: the kernel, its modules, and the tools whose bpftool loads the guest-kernel rule.
 FROM python:3.12-slim AS kernel
-ADD --checksum=sha256:2bd0e1fa6fd72b00041f4523b97b730c94a9c14198a8f07231d24d49d334bd37 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/image.deb
-ADD --checksum=sha256:e81f48d95ef2ee583b342836491cc77c7fe3fbe62735b3283bc43aec5d1c7e8c \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/modules.deb
-ADD --checksum=sha256:6228b31dd28232ee2823a0fc68744c5857eb53e96c3d8d12c594112e935104e6 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-34-generic_7.0.0-34.34~24.04.1_amd64.deb /tmp/tools.deb
-ADD --checksum=sha256:951c54d2fcbfa11a6bfe95614c8cd7d3d0135b42efc613c0b5726691c9525ca5 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-34_7.0.0-34.34~24.04.1_amd64.deb /tmp/hwe-tools.deb
+ADD --checksum=sha256:1791405b126cb2ef8b969dc6706292a02c12da9f581bb3f8fac2d1272a419fd4 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb /tmp/image.deb
+ADD --checksum=sha256:99536f44ce1802e63ed79a90d386bb1025ec12bf7a2f5af43287dbb4af247202 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb /tmp/modules.deb
+ADD --checksum=sha256:138d110a6ed5fd31ca2cecc5799216ca4fbe70648eebf1be7c7f2bf648a2b5ef \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb /tmp/tools.deb
+ADD --checksum=sha256:52e3f6673d57a155ece2ce5f0cce6c4374ef27782b03afb06cf0e18ab7b9b34d \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-38_7.0.0-38.38~24.04.4_amd64.deb /tmp/hwe-tools.deb
 # Of the modules, only those vm/init loads: the kernel loads no others (modules_disabled),
 # and the rest, compressed already, would add 170 MB to the download.
 RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \

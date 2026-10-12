@@ -18,7 +18,7 @@ const STAGES = new Map([...DOCKERFILE.matchAll(/^FROM \S+ AS (\S+)\n([\s\S]*?)(?
 it("fetches every package of the kernel pin from Launchpad by its hash, the kernel's tools too, and none from apt", () => {
   const kernel = /^ARG KERNEL=(\S+)$/m.exec(DOCKERFILE)?.[1] ?? "";
   const abi = kernel.replace(/-generic$/, "");
-  // The hardware-enablement series the tools package is named for: 7.0 for 7.0.0-34.
+  // The hardware-enablement series the tools package is named for: 7.0 for 7.0.0-38.
   const series = kernel.split(".").slice(0, 2).join(".");
   const fetched = [...(STAGES.get("kernel") ?? "").matchAll(/^ADD --checksum=sha256:[0-9a-f]{64} \\\n\s+(\S+) \S+$/gm)].map(([, url]) => url ?? "");
   expect(fetched.map((url) => url.replace(/^https:\/\/launchpad\.net\/ubuntu\/\+archive\/primary\/\+files\//, "").split("_")[0]).sort()).toEqual(
@@ -128,14 +128,16 @@ describe("the release's check of the guest's kernel", () => {
   });
 
   it("fails a release while noble-security carries a newer one, in any of its stanzas, and says which", async () => {
+    // Newer than any pin of the 7.0 series, so a pin moved to noble-security's current one stays older.
+    const later = "7.0.0-999.999~24.04.1";
     const newer = {
       status: 1,
-      stderr: `kernel-current.sh: noble-security carries linux-image-generic-hwe-24.04 7.0.0-38.38~24.04.4, newer than the guest's pin ${pin}: pin it in images/sandbox/Dockerfile\n`,
+      stderr: `kernel-current.sh: noble-security carries linux-image-generic-hwe-24.04 ${later}, newer than the guest's pin ${pin}: pin it in images/sandbox/Dockerfile\n`,
     };
-    packages = index(["linux-image-generic-hwe-24.04", "7.0.0-38.38~24.04.4"]);
+    packages = index(["linux-image-generic-hwe-24.04", later]);
     expect(await check()).toMatchObject(newer);
     // An index that lists two versions, the newer first.
-    packages = index(["linux-image-generic-hwe-24.04", "7.0.0-38.38~24.04.4"], ["linux-image-generic-hwe-24.04", pin]);
+    packages = index(["linux-image-generic-hwe-24.04", later], ["linux-image-generic-hwe-24.04", pin]);
     expect(await check()).toMatchObject(newer);
   });
 
