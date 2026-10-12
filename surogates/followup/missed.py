@@ -40,6 +40,13 @@ __all__ = [
 #: not re-read the same silence all day.
 LOOKBACK = timedelta(hours=6)
 
+#: Openers whose streak this process already judged, with their deadline.
+_JUDGED: dict[Any, datetime] = {}
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
 #: Used when the Program carries no wording of its own.  Placeholders:
 #: ``{name}``, ``{phone}``, ``{count}``, ``{program}``.
 DEFAULT_MISSED_TEXT = (
@@ -93,10 +100,20 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     newest: dict[tuple, Any] = {}
     for inv in candidates:
         newest[(inv.program_id, inv.user_id)] = inv
+    # A streak is judged once.  The lookback keeps an opener a candidate for
+    # hours, and without this every pass (each minute) would re-run the
+    # streak query for every one of them.  Kept per process and pruned with
+    # the lookback; a restart re-judges once, which is harmless because
+    # alerts are deduplicated.
+    for inv_id, deadline in list(_JUDGED.items()):
+        if deadline < now - LOOKBACK:
+            del _JUDGED[inv_id]
 
     settings_cache: dict[tuple, Any] = {}
     queued = 0
     for inv in newest.values():
+        if inv.id in _JUDGED:
+            continue
         config = watched[inv.program_id]
         try:
             queued += await _alert_if_streak(
@@ -107,6 +124,8 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
                 "[followup] could not check the missed streak for invitation %s",
                 inv.id,
             )
+            continue
+        _JUDGED[inv.id] = _aware(inv.deadline_at)
     return queued
 
 

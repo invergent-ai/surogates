@@ -205,3 +205,22 @@ async def test_no_pause_without_a_full_streak(sf):
     assert await paused_by_silence(
         sf, program_id=program_id, user_id=patient, count=2, last_inbound_at=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_streak_is_judged_once_not_every_pass(sf, monkeypatch):
+    import surogates.followup.missed as missed
+
+    program_id, patient, _ = await _setup(sf)
+    await _invitation(sf, program_id, patient, days_ago=0.1)  # not a streak yet
+    calls = []
+    real = missed._alert_if_streak
+
+    async def counting(*args, **kwargs):
+        calls.append(1)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(missed, "_alert_if_streak", counting)
+    await alert_missed_checkins(sf, now=NOW)
+    await alert_missed_checkins(sf, now=NOW + timedelta(minutes=1))
+    assert len(calls) == 1
