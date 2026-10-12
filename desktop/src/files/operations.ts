@@ -429,8 +429,25 @@ function remove(args: Record<string, unknown>, { folder, at }: Context): null {
   const key = keyInFolder(folder, text(args, "key"), at);
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
   if (key === folder) throw osError("EISDIR", key);
-  io(key, () => unlinkSync(key));
+  io(key, () => {
+    try {
+      unlinkSync(key);
+    } catch (error) {
+      // Darwin's unlink(2) refuses a folder with EPERM, where Linux's, and the cloud's, says EISDIR.
+      if ((error as NodeJS.ErrnoException).code === "EPERM" && isFolder(key)) throw osError("EISDIR", key);
+      throw error;
+    }
+  });
   return null;
+}
+
+// Whether *path* is a folder now, a link to one being none; false where it cannot be told.
+function isFolder(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // os.makedirs(dir, exist_ok=True): each missing parent first, so an error names
