@@ -11,6 +11,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -1082,6 +1083,180 @@ class ProgramInvitationRow(Base):
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Follow-up protocols
+# ---------------------------------------------------------------------------
+
+
+class FollowupEnrollmentRow(Base):
+    """One person following one protocol on one agent.
+
+    The anchor a Program audience measures days from.  ``protocol`` is the
+    operator's own slug; nothing in the runtime knows what any protocol means.
+    """
+
+    __tablename__ = "followup_enrollments"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id", "agent_id", "user_id", "protocol",
+            name="uq_followup_enrollment",
+        ),
+        # The materialize lookup: every active enrollment of a protocol.
+        Index(
+            "idx_followup_enrollments_protocol",
+            "org_id", "agent_id", "protocol", "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    protocol: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Day 0 of the protocol, e.g. the procedure date.  Null until known: a
+    #: person enrolled without one is reached only by audiences with no day
+    #: window.
+    start_date: Mapped[Optional[Any]] = mapped_column(Date, nullable=True)
+    phase: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active",
+    )
+    #: Why the enrollment is paused or ended, in operator words.
+    status_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: ``agent`` when the agent enrolled the person in conversation,
+    #: ``operator`` when someone did it from Studio.
+    enrolled_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class FollowupSettingsRow(Base):
+    """Where an agent's escalations go when no check-in carries a target."""
+
+    __tablename__ = "followup_settings"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: The Studio inbox escalations land in.  A service account, never a
+    #: human's id: inbox_items.service_account_id is a foreign key.
+    escalation_service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    #: End users on this agent who are told on their phone, e.g. the doctor.
+    alert_recipient_user_ids: Mapped[list[str]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=list,
+    )
+    #: The approved template that reopens a recipient's conversation when the
+    #: provider's customer-service window has closed.  One for alerts to the
+    #: care team, one for messages an operator sends a person.
+    alert_template_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    alert_template_language: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    message_template_name: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    message_template_language: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class ChannelContactRow(Base):
+    """When a person last wrote to one of our senders.
+
+    The provider's customer-service window and the silence filter both read
+    it.  A table of its own, not a key in ``channel_identities.platform_meta``:
+    that blob is rewritten whole by ops when permission changes, and a write
+    per inbound message would race it and could drop a permission.
+    """
+
+    __tablename__ = "channel_contacts"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True)
+    platform: Mapped[str] = mapped_column(Text, primary_key=True)
+    platform_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: The business sender, e.g. a WhatsApp phone_number_id: the window is
+    #: per sender, not per person.
+    channel_identifier: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_inbound_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False,
+    )
+
+
+class OutreachMessageRow(Base):
+    """A message the platform must get to one person, unprompted.
+
+    An alert to the care team, an operator's message to a patient, a notice
+    that someone enrolled.  Inside the provider's window it goes out as text;
+    outside it the approved template goes first and the text waits for the
+    reply.
+    """
+
+    __tablename__ = "outreach_messages"
+    __table_args__ = (
+        Index(
+            "idx_outreach_messages_pending",
+            "org_id", "agent_id", "user_id", "state",
+        ),
+        Index("idx_outreach_messages_state", "state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The recipient.
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The business sender to write from.
+    channel_identifier: Mapped[str] = mapped_column(Text, nullable=False)
+    #: ``alert`` · ``operator`` · ``enrolment``.
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    template_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    template_language: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: ``queued`` → ``sent`` (inside the window) or ``awaiting_reply``
+    #: (template sent) → ``delivered``; or ``failed``.
+    state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="queued",
+    )
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: What the message is about, for the run history: the person an alert
+    #: concerns, the session it came from.
+    subject_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    source_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    #: The recipient's session the text was or will be written into.
+    session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(),
+    )
+    sent_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
     )
 
 

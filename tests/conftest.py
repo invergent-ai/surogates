@@ -102,6 +102,8 @@ async def sf():
         "program_schedules", "program_occurrences", "program_invitations",
         "inbox_items", "events", "sessions", "orgs", "users",
         "channel_identities", "delivery_outbox",
+        "followup_enrollments", "followup_settings", "channel_contacts",
+        "outreach_messages",
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=tables)
