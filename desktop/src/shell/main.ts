@@ -27,9 +27,9 @@ import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js"
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
+import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, installBase, readManifest } from "../vm/image.js";
-import { missingTools } from "../vm/linux.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
@@ -402,7 +402,7 @@ function lookForTools(): void {
   // looks then hold the same folders, and the line and a file tool name the same tools.
   const held = boundFolders();
   const path = toolsPath();
-  vmLacking = Promise.all([held, path]).then(([folders, on]) => missingTools({}, unpacking, folders, on));
+  vmLacking = Promise.all([held, path]).then(([folders, on]) => backendFor(process.platform)?.requirements({ unpacking, held: folders, path: on }) ?? []);
   lookForFileTools(true, held, path);
 }
 
