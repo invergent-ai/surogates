@@ -27,6 +27,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import MAX_DAY, day_index
+from surogates.tools.builtin.checkin import _open_invitation_for_session
 from surogates.tools.registry import ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,6 @@ logger = logging.getLogger(__name__)
 FOLLOWUP_TOOL_NAMES: frozenset[str] = frozenset({
     "followup_enroll", "followup_update", "followup_status", "escalate",
 })
-
-#: Response states a check-in can still be escalated from.
-_OPEN_CHECKIN = ("replied", "in_progress")
 
 FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
     name="followup_enroll",
@@ -460,18 +458,10 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     if ctx is None:
         return "Could not escalate: no conversation context."
 
-    async with sf() as db:
-        invitation = (
-            await db.execute(
-                sa.select(ProgramInvitationRow)
-                .where(ProgramInvitationRow.session_id == ctx.session_id)
-                .where(ProgramInvitationRow.response_state.in_(_OPEN_CHECKIN))
-                .order_by(ProgramInvitationRow.created_at.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        program_target = None
-        if invitation is not None:
+    invitation = await _open_invitation_for_session(sf, ctx.session_id)
+    program_target = None
+    if invitation is not None:
+        async with sf() as db:
             sched = (
                 await db.execute(
                     sa.select(ProgramScheduleRow).where(

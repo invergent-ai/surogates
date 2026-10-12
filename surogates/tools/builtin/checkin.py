@@ -8,19 +8,14 @@ cannot close a check-in it is not inside.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import sqlalchemy as sa
 
-from surogates.db.models import (
-    ProgramInvitationRow,
-)
+from surogates.db.models import ProgramInvitationRow
 from surogates.tools.registry import ToolSchema
 
-logger = logging.getLogger(__name__)
-
-#: Response states a check-in can still be closed from.
+#: Response states a check-in can still be closed or escalated from.
 _OPEN = ("replied", "in_progress")
 
 _VALID_OUTCOMES = ("completed", "declined")
