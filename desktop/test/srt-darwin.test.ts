@@ -21,21 +21,6 @@ import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 const PROBE = fileURLToPath(new URL("./srt-probe.mjs", import.meta.url));
 
-// srt's line with one more rule at the end of its profile, the word after sandbox-exec's -p in '...', where srt writes a
-// quote as '"'"': what a measurement tries beside srt's own profile, never what the host runs.
-function withRule(line: string, rule: string): string {
-  if (rule === "") return line;
-  const start = line.indexOf("/usr/bin/sandbox-exec -p '");
-  if (start < 0) throw new Error("no profile in srt's line");
-  let end = start + "/usr/bin/sandbox-exec -p '".length;
-  for (;;) {
-    end = line.indexOf("'", end);
-    if (end < 0) throw new Error("no end to srt's profile");
-    if (!line.startsWith(`'"'"'`, end)) break;
-    end += 5;
-  }
-  return `${line.slice(0, end)}\n${rule}${line.slice(end)}`;
-}
 const NODE = join(PACKAGE, "bin", "node");
 const RG = join(PACKAGE, "bin", "rg");
 
@@ -79,11 +64,11 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
   });
 
   // The probe in the sandbox of *config*, as the host wraps the helper: what it said, or how it failed.
-  async function probe(config: SandboxRuntimeConfig = policy, rule = ""): Promise<{ said: Record<string, string> | null; status: number | null; stderr: string }> {
+  async function probe(config: SandboxRuntimeConfig = policy): Promise<{ said: Record<string, string> | null; status: number | null; stderr: string }> {
     SandboxManager.updateConfig(config);
     const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(PROBE)} ${quote(JSON.stringify(at))}`);
     const [file, flag, wrapped] = argv;
-    const ran = spawnSync(file!, ["--norc", "--noprofile", flag!, withRule(srtOs.line(wrapped!), rule)], {
+    const ran = spawnSync(file!, ["--norc", "--noprofile", flag!, srtOs.line(wrapped!)], {
       cwd: String(at.folder), env: { HOME: String(at.home), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, encoding: "utf8", timeout: 60_000,
     });
     const last = ran.stdout.trim().split("\n").at(-1) ?? "";
@@ -100,32 +85,26 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
     expect(SandboxManager.checkDependencies()).toEqual({ errors: [], warnings: [] });
   });
 
-  it("reads and writes the folder, writes its working folder, loads fsat and runs rg, and reaches nothing else of the computer", async () => {
+  it("reads and writes the folder, writes its working folder, links its files, loads fsat and runs rg, and reaches nothing else of the computer", async () => {
     const { said, status, stderr } = await probe();
     console.log(`Seatbelt: ${JSON.stringify(said)}`);
     expect(status, stderr).toBe(0);
     // Seatbelt as srt writes it lets a program map as code any file it may read, the folder's too (measured on
-    // macOS 15): the helper loads none but fsat. What it does with a hard link in the folder, which a landing makes,
-    // is measured too. Each is written out, not held to; a link to a file outside is never made.
-    const measured = ["load a copy of fsat in the folder", "hard-link a file in the folder", "hard-link a file of the folder into the working folder"];
+    // macOS 15): the helper loads none but fsat. Written out, not held to.
+    const measured = ["load a copy of fsat in the folder"];
     console.log(`Seatbelt measured: ${JSON.stringify(Object.fromEntries(measured.map((name) => [name, said?.[name]])))}`);
-    expect(said?.["hard-link a file outside into the folder"]).not.toBe("ok");
+    // A landing gives a file a second name in the folder, keeps the one it replaces in a folder it is given to write,
+    // and links it back from there (land.ts). A file it may only read, the app's own, or one it may not reach, is never
+    // given a name in the folder, where the helper could write it: as Linux's bind mounts refuse it (EXDEV).
+    for (const refused of ["hard-link a file of the app's into the folder", "hard-link a file outside into the folder"]) expect(said?.[refused], refused).not.toBe("ok");
     const reached = Object.entries(said ?? {}).filter(([name, what]) => what === "ok" && !measured.includes(name)).map(([name]) => name).sort();
     expect(reached).toEqual([
+      "hard-link a file in the folder", "hard-link a file of the folder into the working folder", "hard-link a file of the working folder into the folder",
       "list the folder", "load fsat", "read the folder", "run rg", "write the folder", "write the working folder",
     ]);
-    expect(Object.keys(said ?? {})).toHaveLength(23);
+    expect(Object.keys(said ?? {})).toHaveLength(25);
     expect(readFileSync(join(String(at.home), ".ssh", "id_ed25519"), "utf8")).toBe("a key\n");
     expect(statSync(join(String(at.folder), "made.txt")).isFile()).toBe(true);
-  });
-
-
-  it("measures what Seatbelt says of hard links given a rule for them in the folder and its working folder", async () => {
-    const rule = `(allow file-link (subpath ${JSON.stringify(String(at.folder))}) (subpath ${JSON.stringify(String(at.tmp))}))`;
-    const { said, status, stderr } = await probe(policy, rule);
-    const links = Object.fromEntries(Object.entries(said ?? {}).filter(([name]) => name.startsWith("hard-link")));
-    console.log(`Seatbelt with ${rule}: ${status === 0 ? JSON.stringify(links) : `no start, ${stderr.trim().slice(0, 300)}`}`);
-    expect((await probe()).status).toBe(0);
   });
 
   it("measures which of the system's folders the helper's node, fsat and rg need", async () => {
