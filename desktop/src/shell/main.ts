@@ -55,7 +55,7 @@ import { PreferencesStore } from "./preferences.js";
 import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
-import { QUICK_ENTRY_KEYS, QuickEntry, waylandSession } from "./quick-entry.js";
+import { QuickEntry, quickEntryKeys } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
@@ -2652,11 +2652,12 @@ if (!app.requestSingleInstanceLock()) {
     tray.on("click", () => main?.show());
     updateTray();
     quickEntry = new QuickEntry({ page: join(PAGES, "quick.html"), preload: PAGES_PRELOAD, send: sendQuickEntry });
-    // From anywhere on the display, where the X server grabs keys for an app: a Wayland session has
-    // its GlobalShortcuts portal instead, which Surogate does not ask. There the tray opens quick entry.
-    if (!waylandSession(process.env)) {
-      if (globalShortcut.register(QUICK_ENTRY_KEYS, toggleQuickEntry)) shortcut = QUICK_ENTRY_KEYS;
-      else report(new Error(`Another app holds ${QUICK_ENTRY_KEYS}: quick entry opens from the tray only`));
+    // From anywhere, where this OS's session gives the app keys of its own (quick-entry.ts). Where it
+    // gives none, the tray opens quick entry.
+    const keys = quickEntryKeys(process.env);
+    if (keys !== null) {
+      if (globalShortcut.register(keys, toggleQuickEntry)) shortcut = keys;
+      else report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
       updateTray();
     }
     main.window.on("focus", () => void refreshProjects());
