@@ -54,6 +54,8 @@ export const LINUX_SRT: SrtOs = {
     .filter(([, program]) => findOnPath(program!, path, "/") === null).map(([name]) => name!),
   toolsPath: (outside) => outside,
   line: hideSrtTmp,
+  // In the app's data, by the folder's key.
+  tempFolder: (dataDir, key) => join(dataDir, "srt", key),
   socketsFit: (dir) => Buffer.byteLength(join(dir, LONGEST_SOCKET)) <= SOCKET_MAX,
   // What a host killed together with the app left of srt: its bridges (socat, whose command line names their
   // socket), then its files.

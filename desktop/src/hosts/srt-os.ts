@@ -19,6 +19,11 @@ export interface SrtOs {
   toolsPath(outside: string): string;
   /** srt's line for the helper, as the host runs it. */
   line(line: string): string;
+  /**
+   * The folder srt keeps its own files in for the host of the folder *key* (its dev-ino), of the app's data *dataDir*:
+   * one only that host uses, the user's own, so that whatever a killed host left there is provably its own.
+   */
+  tempFolder(dataDir: string, key: string): string;
   /** Whether the sockets srt makes in its temp folder *dir* have paths this OS takes. */
   socketsFit(dir: string): boolean;
   /** Ends what a host killed with the app left of srt in its temp folder *dir*, and takes the folder away. */
@@ -31,7 +36,7 @@ const refused = (): never => notBuilt("The file host");
 // On an OS the file host is not built for, nothing of its sandbox is, and each part says so.
 const UNBUILT: SrtOs = {
   system: [], reserved: refused, toolsMissing: refused, fileToolsMissing: refused, toolsPath: refused, line: refused,
-  socketsFit: refused, sweep: refused, folderBytes: null,
+  tempFolder: refused, socketsFit: refused, sweep: refused, folderBytes: null,
 };
 
 export const srtOs: SrtOs = ({ linux: LINUX_SRT, darwin: DARWIN_SRT } as Partial<Record<NodeJS.Platform, SrtOs>>)[process.platform] ?? UNBUILT;

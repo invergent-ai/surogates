@@ -184,7 +184,7 @@ async function start(message: HostStart): Promise<void> {
   // srt's own temp files (its bridges' sockets, the empty folders it mounts) go
   // through os.tmpdir(), read at each call: here, in a folder only this folder's
   // host uses, so whatever a killed host left there is provably its own.
-  const srtTmp = join(message.dataDir, "srt", key);
+  const srtTmp = srtOs.tempFolder(message.dataDir, key);
   // srt's sockets there must have paths this OS takes.
   if (!srtOs.socketsFit(srtTmp)) throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
   lock = await lockFolder(dev, ino, message.lockWaitMs, message.dataDir);

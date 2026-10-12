@@ -5,8 +5,12 @@
 // lets the helper connect to srt's own proxy alone, which refuses every host. srt needs neither bwrap nor socat here,
 // and reads no seccomp option.
 
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+
+import { cleanly } from "../clean-child.js";
 
 import { findOnPath } from "../files/operations.js";
 import { inside } from "../files/paths.js";
@@ -17,6 +21,20 @@ import type { SrtOs } from "./srt-os.js";
 // most five digits there.
 const SOCKET_MAX = 103;
 const LONGEST_SOCKET = `srt-mux-${"9".repeat(5)}-${"z".repeat(4)}.sock`;
+
+// The user's own temp folder, /var/folders/<2>/<28>/T/, private to them: confstr(3)'s _CS_DARWIN_USER_TEMP_DIR, which
+// getconf(1) names DARWIN_USER_TEMP_DIR. Its path is 49 bytes, where the app's data, ~/Library/Application Support/
+// Surogate, takes a socket's 104 bytes beyond a long user name. Read once, as a host starts.
+let userTemp: string | null = null;
+function userTempFolder(): string {
+  if (userTemp !== null) return userTemp;
+  const [file, args] = cleanly("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"]);
+  const read = spawnSync(file, args, { encoding: "utf8", env: {}, stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 });
+  const path = read.status === 0 ? read.stdout.trim().replace(/\/+$/, "") : "";
+  if (!isAbsolute(path) || /[\n\r]/.test(path)) throw new Error(`this Mac did not say where its user's temp folder is: ${read.stderr.trim() || read.stdout.trim()}`);
+  userTemp = path;
+  return path;
+}
 
 // The user's own temp folders, which are Linux's /tmp: /tmp itself (a link to /private/tmp) and the per-user
 // folders under /private/var/folders that os.tmpdir() names. The rest of /private is the system's own.
@@ -47,6 +65,9 @@ export const DARWIN_SRT: SrtOs = {
   // As srt gives it: its profile lets the helper's node map fsat as code, as every file it may read (measured on
   // macOS 15: Seatbelt's file-map-executable is not refused there).
   line: (line) => line,
+  // In the user's own temp folder, by the app's data and the folder's key, so that two apps never share one: srt's
+  // socket there takes at most 98 bytes.
+  tempFolder: (dataDir, key) => join(userTempFolder(), `surogate-${createHash("sha256").update(`${dataDir}\0${key}`).digest("hex").slice(0, 16)}`),
   socketsFit: (dir) => Buffer.byteLength(join(dir, LONGEST_SOCKET)) <= SOCKET_MAX,
   // srt starts no process of its own on macOS, its proxy runs in the host itself: a host killed with the app leaves
   // its files alone.

@@ -2,6 +2,7 @@
 // the tools, the line, the sockets and the longest folder path. Each as the darwin side answers, here on any OS; on a
 // Mac, the folder's checks against real folders too.
 
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -76,6 +77,19 @@ describe("the file helper's sandbox on macOS", () => {
     writeFileSync(join(dir, "left"), "");
     srtOs.sweep(dir);
     expect(() => realpathSync(dir)).toThrow();
+  });
+});
+
+describe.runIf(process.platform === "darwin")("srt's own files on macOS", () => {
+  it("are in the user's own temp folder, one for each app's data and folder, where srt's socket fits a Mac's 104 bytes", async () => {
+    const [, { srtOs }] = await onMac();
+    const temp = spawnSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).stdout.trim().replace(/\/+$/, "");
+    const one = srtOs.tempFolder("/Users/someone/Library/Application Support/Surogate", "16777230-123456789");
+    expect(one).toMatch(new RegExp(`^${temp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/surogate-[0-9a-f]{16}$`));
+    expect(srtOs.tempFolder("/Users/someone/Library/Application Support/Surogate", "16777230-123456789")).toBe(one);
+    expect(srtOs.tempFolder("/Users/someone/dev-data", "16777230-123456789")).not.toBe(one);
+    expect(srtOs.tempFolder("/Users/someone/Library/Application Support/Surogate", "16777230-1")).not.toBe(one);
+    expect(srtOs.socketsFit(one)).toBe(true);
   });
 });
 
