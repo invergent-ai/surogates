@@ -28,7 +28,13 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from surogates.db.models import ChannelContactRow, OutreachMessageRow, SessionLease
+from surogates.db.models import (
+    ChannelContactRow,
+    DeliveryOutbox,
+    Event,
+    OutreachMessageRow,
+    SessionLease,
+)
 from surogates.followup import store as followup_store
 from surogates.programs.opener import dm_session, whatsapp_session_key
 from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
@@ -446,7 +452,10 @@ async def record_outreach_delivery(
             )
         ).scalar_one_or_none()
         if opener is None:
-            return False
+            opener = await _opener_of_outbox(db, outbox_id)
+            if opener is None:
+                return False
+            opener.outbox_id = outbox_id
         if error:
             # A template that never left is not a recipient who stayed
             # silent: say so, now, instead of 72 hours from now.
@@ -455,6 +464,25 @@ async def record_outreach_delivery(
             opener.provider_message_id = provider_message_id
         await db.commit()
     return True
+
+
+async def _opener_of_outbox(db: Any, outbox_id: int) -> Any:
+    """The outreach row a template's outbox row was written for.
+
+    The dispatcher can claim and report the template before ``_reopen`` has
+    stamped ``outbox_id`` on the row.  The outbox row delivers the opener
+    event, and that event names its outreach row, so the report still finds
+    it and a failed template fails its texts now, not 72 hours later.
+    """
+    event_id = await db.scalar(
+        sa.select(DeliveryOutbox.event_id).where(DeliveryOutbox.id == outbox_id)
+    )
+    if event_id is None:
+        return None
+    data = await db.scalar(sa.select(Event.data).where(Event.id == event_id)) or {}
+    if data.get("synthetic") != OUTREACH_OPENER_MARKER or not data.get("outreach_id"):
+        return None
+    return await db.get(OutreachMessageRow, uuid.UUID(str(data["outreach_id"])))
 
 
 async def apply_outreach_status(

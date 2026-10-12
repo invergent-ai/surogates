@@ -354,3 +354,33 @@ async def test_an_alert_never_rides_on_a_routine_notice(sf, doctor_session):
     await _queue(sf, doctor, text="Patient fainted")
     await _send(sf, _Store(), delivery, now=NOW + timedelta(minutes=5))
     assert len(delivery.sent) == 2  # the alert pinged on its own
+
+
+@pytest.mark.asyncio
+async def test_a_template_reported_before_its_outbox_id_is_stamped_still_fails_its_texts(sf):
+    """The dispatcher can send (or fail) a reopening template before _reopen
+    has written outbox_id on the row.  The report must still find it."""
+    from surogates.db.models import DeliveryOutbox, Event
+    from surogates.session.events import OUTREACH_OPENER_MARKER
+
+    doctor = uuid.uuid4()
+    row = await _queue(sf, doctor)
+    async with sf() as db:
+        saved = await db.get(OutreachMessageRow, row.id)
+        saved.state, saved.sent_at = "awaiting_reply", NOW.replace(tzinfo=None)
+        session_id = uuid.uuid4()
+        db.add(Event(id=901, session_id=session_id, type=EventType.USER_MESSAGE.value, data={
+            "synthetic": OUTREACH_OPENER_MARKER, "outreach_id": str(row.id),
+        }))
+        db.add(DeliveryOutbox(
+            id=77, session_id=session_id, event_id=901, channel="whatsapp",
+            destination={}, payload={}, status="pending",
+        ))
+        await db.commit()
+
+    assert await outreach.record_outreach_delivery(
+        sf, 77, provider_message_id=None, error="template paused by Meta",
+    )
+    failed = await _row(sf, row.id)
+    assert failed.state == "failed"
+    assert failed.outbox_id == 77
