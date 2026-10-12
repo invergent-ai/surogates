@@ -7,8 +7,6 @@ import { dirname, join } from "node:path";
 
 // What the app is started with at login: its window waits for the user.
 export const HIDDEN = "--hidden";
-// The installed app's launcher (spec, Section 9): it stays where it is through updates.
-export const LAUNCHER = "/usr/local/bin/surogate";
 
 // GNOME looks for the program of an Exec whose path holds a % before it reads %% as one, finds
 // none, and starts nothing. An argument's % it reads as written.
@@ -23,8 +21,8 @@ export const loginRefusal = (command: readonly string[]): string | null => {
   return command.some((word) => /[$`\\]/.test(word)) ? MISREAD : null;
 };
 
-/** The entry's place: the autostart folder of *configHome*, the user's XDG config folder. */
-export const autostartFile = (configHome: string): string => join(configHome, "autostart", "surogate.desktop");
+/** The entry's place in *folder*, the user's autostart folder (places.ts). */
+export const autostartFile = (folder: string): string => join(folder, "surogate.desktop");
 
 // One argument of Exec, as the Desktop Entry specification reads it: a percent sign doubled, an
 // argument with a reserved character quoted, with ", `, $ and \ escaped in it, then every

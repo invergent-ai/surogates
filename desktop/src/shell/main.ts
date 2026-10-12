@@ -36,7 +36,7 @@ import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
-import { autostartFile, HIDDEN, LAUNCHER, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
+import { autostartFile, HIDDEN, loginRefusal, setStartAtLogin, startsAtLogin } from "./autostart.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyCaFile, trustCompanyCa } from "./company-ca.js";
@@ -50,6 +50,7 @@ import { letWindowClose, MainWindow } from "./main-window.js";
 import { appMenu, trayIcon, trayMenu } from "./menus.js";
 import { Notifications } from "./notifications.js";
 import { type Fetch, OAuthError, revokeTokens, signInWithBrowser, type Tokens } from "./oauth.js";
+import { placesFor } from "./places.js";
 import { PreferencesStore } from "./preferences.js";
 import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
@@ -85,10 +86,9 @@ const DICTIONARIES = join(import.meta.dirname, "..", "..", "dictionaries");
 // The app's version, as its package names it.
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
 
-// Everything the app keeps lives under one root, Electron's own data too: the folder
-// guards refuse it as a chat's folder, so no agent reaches a device token through one.
-const dataHome = process.env.XDG_DATA_HOME?.startsWith("/") ? process.env.XDG_DATA_HOME : join(app.getPath("home"), ".local", "share");
-const root = join(dataHome, "surogate");
+// Where the app keeps what it keeps (places.ts): everything under one root, Electron's own data too.
+const places = placesFor(process.env, app.getPath("home"));
+const { root } = places;
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
 app.setPath("userData", join(root, "electron"));
@@ -98,12 +98,10 @@ ownSpelling(app, DICTIONARIES, console.error);
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
-// Start at login's entry, in the user's XDG config folder; and what it starts: the installed app's
+// Start at login's entry, in the user's autostart folder; and what it starts: the installed app's
 // launcher, or a development build's Electron on this main.
-// A relative XDG_CONFIG_HOME is ignored, as the XDG Base Directory specification says: Electron's appData takes it as it is.
-const configHome = process.env.XDG_CONFIG_HOME?.startsWith("/") ? process.env.XDG_CONFIG_HOME : join(app.getPath("home"), ".config");
-const autostart = autostartFile(configHome);
-const loginCommand = (): string[] => (app.isPackaged ? [LAUNCHER] : [process.execPath, import.meta.filename]);
+const autostart = autostartFile(places.autostartFolder!);
+const loginCommand = (): string[] => (app.isPackaged ? [places.launcher!] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
 const browserSetting = new BrowserSetting(join(root, "browser.json"));
@@ -345,12 +343,10 @@ function imageDelivery(): ImageDelivery | null {
 // from at its start and every 6 hours, trusting the release keys that the helper pkexec runs
 // lists, and downloads into the user's cache. A development build updates only when a test names
 // an install record and a helper of its own, SUROGATE_UPDATE_HELPER.
-// A relative XDG_CACHE_HOME is ignored, as the XDG Base Directory specification says.
-const cacheHome = process.env.XDG_CACHE_HOME?.startsWith("/") ? process.env.XDG_CACHE_HOME : join(app.getPath("home"), ".cache");
 let updates: Updates | null = null;
 
 function startUpdates(): void {
-  const cache = join(cacheHome, "surogate", "updates");
+  const cache = join(places.cache, "updates");
   const helper = process.env.SUROGATE_UPDATE_HELPER;
   let options: UpdatesOptions;
   if (app.isPackaged) {
@@ -812,7 +808,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
     tools: (bindings, network, changed) => new Browsing({
       tools: appTools({
-        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: join(cacheHome, "surogate"), env, vm: vmFor(), changed,
+        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed,
         // A thread's history is made in the name of the account signed in on this device.
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.

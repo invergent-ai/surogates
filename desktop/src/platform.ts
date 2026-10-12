@@ -34,6 +34,14 @@ export const TARGETS: Readonly<Record<Target, TargetFiles>> = {
   },
 };
 
+/**
+ * What a part of the app that has only Linux's side so far does on another OS: it refuses, saying
+ * that *what* is not built for that OS yet.
+ */
+export function notBuilt(what: string): never {
+  throw new Error(`${what} is not built for ${process.platform === "darwin" ? "macOS" : process.platform} yet`);
+}
+
 /** This app's target, or null on a platform and arch the app is not built for. */
 export function targetOf(platform: NodeJS.Platform = process.platform, arch: NodeJS.Architecture = process.arch): Target | null {
   const found = (Object.keys(TARGETS) as Target[]).find((target) => TARGETS[target].platform === platform && TARGETS[target].arch === arch);

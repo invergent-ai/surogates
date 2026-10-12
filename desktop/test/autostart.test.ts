@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { autostartEntry, autostartFile, LAUNCHER, loginRefusal, MISREAD, REFUSED, setStartAtLogin, startsAtLogin } from "../src/shell/autostart.js";
+import { autostartEntry, autostartFile, loginRefusal, MISREAD, REFUSED, setStartAtLogin, startsAtLogin } from "../src/shell/autostart.js";
+import { LAUNCHER } from "../src/shell/places-linux.js";
 
 let config: string;
 
@@ -45,7 +46,7 @@ describe("start at login", () => {
   });
 
   it("is on while its entry is in the user's autostart folder, which it makes when it must", () => {
-    const file = autostartFile(config);
+    const file = autostartFile(join(config, "autostart"));
     expect(file).toBe(join(config, "autostart", "surogate.desktop"));
     expect(startsAtLogin(file)).toBe(false);
     setStartAtLogin(file, true, [LAUNCHER]);
@@ -59,7 +60,7 @@ describe("start at login", () => {
   });
 
   it("leaves no temporary file in the user's autostart folder when its entry cannot be written", () => {
-    const file = autostartFile(config);
+    const file = autostartFile(join(config, "autostart"));
     // A folder where the entry goes: its rename fails, as its write fails on a full disk.
     mkdirSync(join(file, "taken"), { recursive: true });
     expect(() => setStartAtLogin(file, true, [LAUNCHER])).toThrow();
