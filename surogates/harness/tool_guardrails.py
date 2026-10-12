@@ -194,8 +194,10 @@ def classify_tool_failure(tool_name: str, result: str | None) -> bool:
         # commands that are working exactly as intended.
         return not parsed.get("exit_code_meaning")
     if isinstance(parsed, dict):
-        if parsed.get("error") or parsed.get("failed") is True:
-            return True
+        # Judged by its fields only: a success that carries ``"error": null``
+        # (the memory tool's every write) holds the key name the text match
+        # below looks for.
+        return bool(parsed.get("error")) or parsed.get("failed") is True
     lower = result[:500].lower()
     return '"error"' in lower or '"failed"' in lower or result.startswith("Error")
 
