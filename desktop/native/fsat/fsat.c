@@ -4,8 +4,8 @@
 // no counterpart of. Darwin has the *at calls instead, which Node does not expose: each here takes
 // the held folder's descriptor and one name in it, never a path through it, so nothing put on the
 // folder's path since is followed. The only path any call takes is an absolute one, with AT_FDCWD.
-// A held folder's entries need no call of fsat's: Node lists one by its /dev/fd entry, whose open
-// on macOS is a dup of the descriptor (fd(4)).
+// A held folder's entries are read through a descriptor of fsat's own on it, one at a time, as Node's
+// Dir reads a folder by its path.
 //
 // Loaded by the app's own node alone, in the file host and in its helper: Electron's processes never
 // load it. N-API 8, and nothing else. Each call is synchronous, as Node's *Sync calls are, and throws
@@ -16,10 +16,12 @@
 #define NAPI_VERSION 8
 #include <node_api.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
 #include <sys/stat.h>
@@ -228,6 +230,93 @@ static napi_value js_linkat(napi_env env, napi_callback_info info) {
   return NULL;
 }
 
+// A held folder's entries, as they are read: fdopendir(3) of a descriptor of its own on the folder
+// (openat of "."), so each listing reads from the folder's first entry and leaves *dir* as it is.
+typedef struct { DIR *dir; } listing_t;
+
+static void forget(napi_env env, void *data, void *hint) {
+  (void)env;
+  (void)hint;
+  listing_t *listing = data;
+  if (listing->dir != NULL) closedir(listing->dir);
+  free(listing);
+}
+
+static listing_t *listing_of(napi_env env, napi_value value) {
+  void *data = NULL;
+  napi_valuetype type;
+  if (napi_typeof(env, value, &type) != napi_ok || type != napi_external || napi_get_value_external(env, value, &data) != napi_ok) {
+    napi_throw_type_error(env, NULL, "fsat: not a listing of fsat's");
+    return NULL;
+  }
+  return data;
+}
+
+static napi_value js_opendir(napi_env env, napi_callback_info info) {
+  napi_value argv[MOST_ARGS];
+  int32_t dir;
+  if (!args(env, info, 1, argv) || !whole(env, argv[0], &dir)) return NULL;
+  int fd = openat(dir, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0) return fail(env, errno, "openat");
+  DIR *opened = fdopendir(fd);
+  if (opened == NULL) {
+    int code = errno;
+    close(fd);
+    return fail(env, code, "fdopendir");
+  }
+  listing_t *listing = malloc(sizeof *listing);
+  if (listing == NULL) {
+    closedir(opened);
+    return fail(env, ENOMEM, "opendir");
+  }
+  listing->dir = opened;
+  napi_value out;
+  if (napi_create_external(env, listing, forget, NULL, &out) != napi_ok) {
+    forget(env, listing, NULL);
+    return NULL;
+  }
+  return out;
+}
+
+// readdir(3): the next entry but "." and "..", as [its name's bytes, its d_type]; null at the end.
+static napi_value js_readdir(napi_env env, napi_callback_info info) {
+  napi_value argv[MOST_ARGS];
+  if (!args(env, info, 1, argv)) return NULL;
+  listing_t *listing = listing_of(env, argv[0]);
+  if (listing == NULL) return NULL;
+  if (listing->dir == NULL) return fail(env, EBADF, "readdir");
+  for (;;) {
+    errno = 0;
+    struct dirent *entry = readdir(listing->dir);
+    if (entry == NULL) {
+      if (errno != 0) return fail(env, errno, "readdir");
+      napi_value none;
+      napi_get_null(env, &none);
+      return none;
+    }
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    napi_value pair, name, type;
+    void *bytes = NULL;
+    napi_create_buffer_copy(env, strlen(entry->d_name), entry->d_name, &bytes, &name);
+    napi_create_uint32(env, entry->d_type, &type);
+    napi_create_array_with_length(env, 2, &pair);
+    napi_set_element(env, pair, 0, name);
+    napi_set_element(env, pair, 1, type);
+    return pair;
+  }
+}
+
+// closedir(3), at once rather than when the listing is collected.
+static napi_value js_closedir(napi_env env, napi_callback_info info) {
+  napi_value argv[MOST_ARGS];
+  if (!args(env, info, 1, argv)) return NULL;
+  listing_t *listing = listing_of(env, argv[0]);
+  if (listing == NULL) return NULL;
+  if (listing->dir != NULL) closedir(listing->dir);
+  listing->dir = NULL;
+  return NULL;
+}
+
 // fcntl(2) F_GETPATH: the path the file open as *fd* has now.
 static napi_value js_getpath(napi_env env, napi_callback_info info) {
   napi_value argv[MOST_ARGS];
@@ -284,6 +373,13 @@ NAPI_MODULE_INIT() {
   constant(env, constants, "AT_REMOVEDIR", AT_REMOVEDIR);
   constant(env, constants, "RENAME_EXCL", RENAME_EXCL);
   constant(env, constants, "FD_CLOEXEC", FD_CLOEXEC);
+  constant(env, constants, "DT_DIR", DT_DIR);
+  constant(env, constants, "DT_REG", DT_REG);
+  constant(env, constants, "DT_LNK", DT_LNK);
+  constant(env, constants, "DT_FIFO", DT_FIFO);
+  constant(env, constants, "DT_SOCK", DT_SOCK);
+  constant(env, constants, "DT_CHR", DT_CHR);
+  constant(env, constants, "DT_BLK", DT_BLK);
 #ifdef O_SEARCH
   // open(2): "O_SEARCH open directory for search only", where the SDK has it: not used yet, only measured.
   constant(env, constants, "O_SEARCH", O_SEARCH);
@@ -293,7 +389,7 @@ NAPI_MODULE_INIT() {
   const struct { const char *name; napi_callback call; } calls[] = {
     { "openat", js_openat }, { "fstatat", js_fstatat }, { "faccessat", js_faccessat }, { "fchmodat", js_fchmodat },
     { "mkdirat", js_mkdirat }, { "unlinkat", js_unlinkat }, { "renameatx", js_renameatx }, { "linkat", js_linkat },
-    { "getpath", js_getpath }, { "cloexec", js_cloexec },
+    { "opendir", js_opendir }, { "readdir", js_readdir }, { "closedir", js_closedir }, { "getpath", js_getpath }, { "cloexec", js_cloexec },
   };
   for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i += 1) {
     napi_value fn;

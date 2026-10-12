@@ -24,13 +24,15 @@ const SECOND_FS = process.env.XDG_RUNTIME_DIR ?? (existsSync("/dev/shm") ? "/dev
 // Loaded into a helper before its own code: it ends the process as a kill does, at the call of an fs function, by its
 // number among those whose argument matches. Nothing after that call runs, no handler and no cleanup. Given something
 // to do there instead, it does that before the call: what another program did meanwhile, or what the filesystem answers.
+// On macOS a name in a held folder is reached through fsat's calls instead (fd-paths-darwin.ts): each is cut as the
+// fs function it stands for, a name in a held folder as <descriptor>/<name>, counted with that function's own.
+const FSAT_LOADER = new URL("../dist/files/fsat.js", import.meta.url).href;
 const CUT = `data:text/javascript,${encodeURIComponent(`
   import fs from "node:fs";
   import { syncBuiltinESMExports } from "node:module";
   const [name, argument, pattern, nth, instead] = JSON.parse(process.env.LAND_CUT);
-  const real = fs[name];
   let seen = 0;
-  fs[name] = (...args) => {
+  const cut = (args) => {
     if (new RegExp(pattern).test(String(args[argument])) && (++seen === nth || nth === 0)) {
       if (instead) new Function("fs", "refuse", instead)(fs, (code) => { throw Object.assign(new Error(code), { code, errno: -1, syscall: name }); });
       else {
@@ -38,9 +40,38 @@ const CUT = `data:text/javascript,${encodeURIComponent(`
         for (;;);
       }
     }
+  };
+  const real = fs[name];
+  fs[name] = (...args) => {
+    cut(args);
     return real(...args);
   };
   syncBuiltinESMExports();
+  if (process.platform === "darwin") {
+    const { fsat } = await import(${JSON.stringify(FSAT_LOADER)});
+    const own = fsat();
+    const { AT_FDCWD, AT_REMOVEDIR } = own.constants;
+    const at = (dir, name) => (dir === AT_FDCWD ? name : dir + "/" + name);
+    // Each fs function by fsat's call, and that call's arguments as the function's: null where the call is another's.
+    const as = {
+      linkSync: ["linkat", (from, fromName, to, toName) => [at(from, fromName), at(to, toName)]],
+      renameSync: ["renameatx", (from, fromName, to, toName) => [at(from, fromName), at(to, toName)]],
+      unlinkSync: ["unlinkat", (dir, name, flags) => ((flags & AT_REMOVEDIR) === 0 ? [at(dir, name)] : null)],
+      rmdirSync: ["unlinkat", (dir, name, flags) => ((flags & AT_REMOVEDIR) !== 0 ? [at(dir, name)] : null)],
+      openSync: ["openat", (dir, name, flags, mode) => [at(dir, name), flags, mode]],
+      mkdirSync: ["mkdirat", (dir, name, mode) => [at(dir, name), mode]],
+      chmodSync: ["fchmodat", (dir, name, mode) => (name === null ? null : [at(dir, name), mode])],
+    }[name];
+    if (as) {
+      const [call, argsOf] = as;
+      const realCall = own[call];
+      own[call] = (...args) => {
+        const named = argsOf(...args);
+        if (named !== null) cut(named);
+        return realCall(...args);
+      };
+    }
+  }
 `)}`;
 // Where a helper is cut: before the call of this fs function, numbered from 1 among those whose argument at this place matches.
 // With *instead*, the helper lives, and runs that there: `refuse(code)` answers the call as the filesystem would. 0 is every such call.

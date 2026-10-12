@@ -27,9 +27,19 @@ export interface FsatConstants {
   readonly AT_REMOVEDIR: number;
   readonly RENAME_EXCL: number;
   readonly FD_CLOEXEC: number;
+  readonly DT_DIR: number;
+  readonly DT_REG: number;
+  readonly DT_LNK: number;
+  readonly DT_FIFO: number;
+  readonly DT_SOCK: number;
+  readonly DT_CHR: number;
+  readonly DT_BLK: number;
   /** Where the SDK defines it. */
   readonly O_SEARCH?: number;
 }
+
+/** A folder's entries as fsat reads them: its own, opaque. */
+export type FsatListing = { readonly __fsatListing: unique symbol };
 
 /** A stat as libuv gives Node one, each time as its seconds and nanoseconds. */
 export interface FsatStats {
@@ -68,6 +78,11 @@ export interface Fsat {
   unlinkat(dir: number, name: string, flags: number): void;
   renameatx(fromDir: number, from: string, toDir: number, to: string, flags: number): void;
   linkat(fromDir: number, from: string, toDir: number, to: string, flags: number): void;
+  /** A listing of the folder held as *dir*, on a descriptor of its own, from its first entry. */
+  opendir(dir: number): FsatListing;
+  /** The listing's next entry but "." and "..", its name's bytes and its d_type; null at its end. */
+  readdir(listing: FsatListing): [name: Buffer, type: number] | null;
+  closedir(listing: FsatListing): void;
   /** fcntl(F_GETPATH): the path the file open as *fd* has now. */
   getpath(fd: number): string;
   /** Whether *fd* is close-on-exec; null for one that is not open. */
@@ -110,6 +125,9 @@ export function fsat(): Fsat {
     unlinkat: named(raw.unlinkat, ([, name]) => name),
     renameatx: named(raw.renameatx, ([, from]) => from),
     linkat: named(raw.linkat, ([, from]) => from),
+    opendir: named(raw.opendir, () => undefined),
+    readdir: named(raw.readdir, () => undefined),
+    closedir: named(raw.closedir, () => undefined),
     getpath: named(raw.getpath, () => undefined),
     cloexec: named(raw.cloexec, () => undefined),
   };

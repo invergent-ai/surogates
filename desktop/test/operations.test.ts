@@ -86,21 +86,40 @@ vi.mock("node:fs", async (importOriginal) => {
   const mocked = { readSync, writeSync, readdirSync, opendirSync, openSync, lstatSync };
   return { ...fs, ...mocked, default: { ...fs, ...mocked } };
 });
-// On macOS a name in a held folder is opened and looked at through fsat (fd-paths-darwin.ts): each of those counted
-// as Node's own are, by the folder's descriptor and the name. A listing's own descriptor on its folder, ".", is not:
-// Linux's opendir makes one too, uncounted.
+// On macOS a held folder is listed, and a name in it opened and looked at, through fsat (fd-paths-darwin.ts): each of
+// those counted as Node's own are, a name by the folder's descriptor and the name.
 vi.mock("../src/files/fsat.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/files/fsat.js")>();
+  // The hidden folders each listing still lists before what is on disk.
+  const hiddenIn = new WeakMap<object, number>();
   const fsat = () => {
     const own = real.fsat();
     return {
       ...own,
+      opendir: (dir: number) => {
+        if (dirents.refuse > 0 && --dirents.refuse === 0) {
+          throw Object.assign(new Error("EMFILE: too many open files, openat"), { code: "EMFILE", errno: -24, syscall: "openat" });
+        }
+        const listing = own.opendir(dir);
+        hiddenIn.set(listing, dirents.hidden);
+        dirents.hidden = 0;
+        return listing;
+      },
+      readdir: (listing: Parameters<typeof own.readdir>[0]) => {
+        const hidden = hiddenIn.get(listing) ?? 0;
+        if (hidden > 0) {
+          hiddenIn.set(listing, hidden - 1);
+          dirents.read += 1;
+          return [Buffer.from(`.${hidden - 1}`), own.constants.DT_DIR] as [Buffer, number];
+        }
+        const entry = own.readdir(listing);
+        if (entry !== null) dirents.read += 1;
+        return entry;
+      },
       openat: (dir: number, name: string, flags: number, mode: number) => {
-        if (name !== ".") {
-          opens.made.push({ path: `fd ${dir}: ${name}`, flags });
-          if (opens.refuseAt > 0 && --opens.refuseAt === 0) {
-            throw Object.assign(new Error("EMFILE: too many open files, openat"), { code: "EMFILE", errno: -24, syscall: "openat" });
-          }
+        opens.made.push({ path: `fd ${dir}: ${name}`, flags });
+        if (opens.refuseAt > 0 && --opens.refuseAt === 0) {
+          throw Object.assign(new Error("EMFILE: too many open files, openat"), { code: "EMFILE", errno: -24, syscall: "openat" });
         }
         return own.openat(dir, name, flags, mode);
       },

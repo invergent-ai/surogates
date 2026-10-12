@@ -4,8 +4,8 @@
 // counterpart, so a folder this user may pass through but not list cannot be held here.
 
 import {
-  accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync,
-  opendirSync, openSync, readdirSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, type Dirent, fchmodSync, fstatSync, linkSync, lstatSync,
+  mkdirSync, openSync, readdirSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 
 import type { FdPaths, Listing, Where } from "./fd-paths.js";
@@ -69,6 +69,15 @@ function kinds(mode: bigint) {
     isBlockDevice: () => kind(mode, constants.S_IFBLK),
     isCharacterDevice: () => kind(mode, constants.S_IFCHR),
   };
+}
+
+// An entry as Node's Dirent has it, its kind told from its d_type; DT_UNKNOWN is none of them, as in Node.
+function dirent([name, type]: [Buffer, number]): Dirent<Buffer> {
+  const { DT_REG, DT_DIR, DT_LNK, DT_FIFO, DT_SOCK, DT_BLK, DT_CHR } = at();
+  return {
+    name, isFile: () => type === DT_REG, isDirectory: () => type === DT_DIR, isSymbolicLink: () => type === DT_LNK, isFIFO: () => type === DT_FIFO,
+    isSocket: () => type === DT_SOCK, isBlockDevice: () => type === DT_BLK, isCharacterDevice: () => type === DT_CHR,
+  } as unknown as Dirent<Buffer>;
 }
 
 // copyFileSync's work between two descriptors: the bytes, and the source's mode.
@@ -150,17 +159,16 @@ export const darwinFdPaths: FdPaths = {
       closeSync(source);
     }
   },
-  // Node's own Dir, on the held folder's /dev/fd entry, whose open on macOS is a dup of its descriptor (fd(4):
-  // "opening the files /dev/fd/0 through /dev/fd/# is equivalent to" a dup): of a descriptor of its own on the folder
-  // first, so that each listing reads from the folder's first entry, whatever was read through *dir* before.
+  // One entry at a time, as Node's Dir hands them: a folder is read no further than its caller looks.
   listing(dir) {
-    const own = fsat().openat(dir, ".", constants.O_RDONLY | constants.O_DIRECTORY, 0);
-    try {
-      // @types/node names a Dir's entries as strings, and takes no "buffer" encoding; Node reads them as bytes with it.
-      return opendirSync(`/dev/fd/${own}`, { encoding: "buffer" as BufferEncoding }) as unknown as Listing;
-    } finally {
-      closeSync(own);
-    }
+    const listing = fsat().opendir(dir);
+    return {
+      readSync() {
+        const entry = fsat().readdir(listing);
+        return entry === null ? null : dirent(entry);
+      },
+      closeSync: () => fsat().closedir(listing),
+    } satisfies Listing;
   },
   pathOf(fd) {
     let path: string;
