@@ -344,7 +344,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("gives a command the cloud's environment and the user's names, and nothing of how its root was made", async () => {
     expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
       ok: {
-        output: "ALL_PROXY GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME HTTPS_PROXY HTTP_PROXY LANG LOGNAME NO_PROXY NPM_CONFIG_PREFIX PATH PIP_USER PWD " +
+        output: "ALL_PROXY GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 HOME HTTPS_PROXY HTTP_PROXY LANG LOGNAME NODE_PATH NO_PROXY NPM_CONFIG_PREFIX PATH PIP_USER PWD " +
           "PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
           "USER UV_CACHE_DIR XDG_CACHE_HOME _ all_proxy http_proxy https_proxy no_proxy ",
         returncode: 0,
