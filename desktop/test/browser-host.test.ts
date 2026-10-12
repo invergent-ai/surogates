@@ -727,6 +727,20 @@ describe("the processes on a profile", () => {
     }
   });
 
+  it("finds one whose command line ends with the profile, and none on a profile whose name only begins with it", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "sb-holding-"));
+    const spawned = (profile: string) => spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(folder, profile)], { stdio: "ignore" });
+    const [on, beside] = [spawned("profile"), spawned("profile-other")];
+    try {
+      await Promise.all([on, beside].map((child) => new Promise((done) => child.once("spawn", done))));
+      expect(await holding(join(folder, "profile"))).toEqual([on.pid]);
+    } finally {
+      on.kill("SIGKILL");
+      beside.kill("SIGKILL");
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
   it("finds them on a computer too busy to answer its reads at once: each comes in its turn, the last long after a second, and none is taken for one that does not come", async () => {
     const folder = mkdtempSync(join(tmpdir(), "sb-holding-"));
     const on = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(folder, "profile", "x")], { stdio: "ignore" });

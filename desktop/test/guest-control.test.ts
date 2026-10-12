@@ -121,6 +121,9 @@ describe("the agent's control port", () => {
     tell({ type: "setup", id: 6, root: "root-1", folder: "/home/someone/project", tag: "r1", ended: [] });
     // Handles that are not a list of them.
     tell({ type: "setup", id: 7, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: {} });
+    // A tag that is not text, which a pattern's test would take for the text it turns into.
+    tell({ type: "setup", id: 8, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: ["r1"] }, ended: [] });
+    tell({ type: "setup", id: 9, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: 1 }, ended: [] });
     await settle();
     expect(sent).toEqual([
       { type: "failed", id: 1, message: "The agent cannot take this uid request" },
@@ -130,6 +133,8 @@ describe("the agent's control port", () => {
       { type: "failed", id: 5, message: "The agent cannot take this setup request" },
       { type: "failed", id: 6, message: "The agent cannot take this setup request" },
       { type: "failed", id: 7, message: "The agent cannot take this setup request" },
+      { type: "failed", id: 8, message: "The agent cannot take this setup request" },
+      { type: "failed", id: 9, message: "The agent cannot take this setup request" },
     ]);
     expect(calls).toEqual([]);
     agent.hello();
