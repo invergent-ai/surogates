@@ -105,6 +105,8 @@ not as an install leaves them. Do what it says:
 
 Your folders stay as they are.
 
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists each such message, and what an update says of a release this computer cannot trust.
+
 ## Building from source
 
     ../images/guest/build.sh     # the sandbox's image, once

@@ -382,7 +382,7 @@ describe("the install script's waits", () => {
 });
 
 describe("the install script's refusals that only a removal mends", () => {
-  it("are each said in the README as the script says them, and the README says none that the script does not", () => {
+  it("are each said on the troubleshooting page as the script says them, and the page says none that the script does not", () => {
     const script = readFileSync(SCRIPT, "utf8");
     // The two files that these refusals name, as the script's own settings place them.
     const placed = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && echo "$HELPER" && echo "$HELPER_MARK"`, "_", SCRIPT], { encoding: "utf8" }).stdout.trim().split("\n");
@@ -393,8 +393,8 @@ describe("the install script's refusals that only a removal mends", () => {
       .map((match) => (match[1] ?? "").replaceAll("$HELPER_MARK", mark).replaceAll("$HELPER", helper)))].sort();
     expect(said.length).toBe(4);
     for (const sentence of said) expect(sentence).not.toContain("$");
-    // The README's section quotes each on a line of its own, and no other line of that kind.
-    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    // The troubleshooting page's section quotes each on a line of its own, and no other line of that kind.
+    const readme = readFileSync(fileURLToPath(new URL("../TROUBLESHOOTING.md", import.meta.url)), "utf8");
     const section = readme.slice(readme.indexOf("\n## When Surogate Desktop says to remove it and install it again\n"));
     expect(section.startsWith("\n## ")).toBe(true);
     const quoted = [...new Set(section.split("\n").filter((line) => line.startsWith("    /opt/") && line.includes("--uninstall")).map((line) => line.trim()))].sort();
