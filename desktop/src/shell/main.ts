@@ -42,7 +42,7 @@ import { companyCaFile, trustCompanyCa } from "./company-ca.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { Copying } from "./copying.js";
-import { linkIn, type OpenLink } from "./deep-link.js";
+import { linkOfLaunch, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
 import { loginItemFor } from "./login-item.js";
@@ -2595,7 +2595,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
     if (!loginItem.startedHidden(argv)) main?.show();
-    const link = linkIn(argv);
+    const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);
   });
   // The device link stays up with the window closed (spec, Section 7).
@@ -2673,7 +2673,7 @@ if (!app.requestSingleInstanceLock()) {
       revokeLater(owed);
     }
     // The link the app was started with, or one a second launch handed it meanwhile, once its window can show it.
-    const launched = linkIn(process.argv) ?? linkEarly;
+    const launched = linkOfLaunch(process.argv) ?? linkEarly;
     const agent = agents.get();
     if (!agent) {
       if (launched) void openDeepLink(launched).catch(report);
