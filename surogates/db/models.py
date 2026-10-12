@@ -1129,8 +1129,16 @@ class FollowupEnrollmentRow(Base):
     #: Why the enrollment is paused or ended, in operator words.
     status_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: ``agent`` when the agent enrolled the person in conversation,
-    #: ``operator`` when someone did it from Studio.
+    #: ``operator`` when someone did it from Studio, ``purchase`` when a
+    #: paid package did.
     enrolled_by: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Who paid, when a purchase enrolled them: often a relative, so not
+    #: necessarily ``user_id``.
+    payer_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    #: What created the enrollment, e.g. ``checkout:cs_…``.
+    source_ref: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
     )
@@ -1173,6 +1181,20 @@ class FollowupSettingsRow(Base):
     message_template_language: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
     )
+    #: The approved template that opens a newly paid patient's
+    #: conversation, and the text that follows once they answer it.
+    welcome_template_name: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    welcome_template_language: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    welcome_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Which protocol each package enrols its buyer in:
+    #: ``{commerce offer id: protocol}``.  An offer not listed enrols nobody.
+    offer_protocols: Mapped[dict[str, str]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
         onupdate=func.now(),
@@ -1212,6 +1234,9 @@ class OutreachMessageRow(Base):
 
     __tablename__ = "outreach_messages"
     __table_args__ = (
+        # One message per cause: a retried webhook or a re-run sweep must not
+        # write to a person twice.  NULL keys never collide.
+        UniqueConstraint("org_id", "dedupe_key", name="uq_outreach_dedupe"),
         Index(
             "idx_outreach_messages_pending",
             "org_id", "agent_id", "user_id", "state",
@@ -1229,8 +1254,9 @@ class OutreachMessageRow(Base):
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     #: The business sender to write from.
     channel_identifier: Mapped[str] = mapped_column(Text, nullable=False)
-    #: ``alert`` · ``operator`` · ``enrolment``.
+    #: ``alert`` · ``operator`` · ``enrolment`` · ``welcome``.
     kind: Mapped[str] = mapped_column(Text, nullable=False)
+    dedupe_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     template_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     template_language: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

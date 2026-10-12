@@ -24,6 +24,7 @@ from surogates.db.models import (
 from surogates.followup.eligibility import Audience
 
 __all__ = [
+    "ENROLLMENT_SOURCES",
     "ENROLLMENT_STATUSES",
     "OUTREACH_KINDS",
     "OUTREACH_PLATFORMS",
@@ -43,7 +44,8 @@ __all__ = [
 ]
 
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
-OUTREACH_KINDS = ("alert", "operator", "enrolment")
+ENROLLMENT_SOURCES = ("agent", "operator", "purchase")
+OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome")
 #: Where outreach can reach a person.  WhatsApp only: it is the one channel
 #: whose rules (a template outside the 24-hour window) this module implements.
 OUTREACH_PLATFORMS = ("whatsapp",)
@@ -122,6 +124,8 @@ async def upsert_enrollment(
     start_date: date | None,
     phase: str | None,
     enrolled_by: str,
+    payer_user_id: uuid.UUID | None = None,
+    source_ref: str | None = None,
 ) -> FollowupEnrollmentRow:
     """Enrol a person, or refresh and reactivate their existing enrollment.
 
@@ -130,6 +134,8 @@ async def upsert_enrollment(
     date or phase leaves what is recorded untouched: the agent re-enrolling
     someone without restating the date must not erase it.
     """
+    if enrolled_by not in ENROLLMENT_SOURCES:
+        raise ValueError(f"enrolled_by must be one of {', '.join(ENROLLMENT_SOURCES)}")
     protocol = protocol.strip()
     for attempt in (1, 2):
         async with session_factory() as db:
@@ -147,6 +153,7 @@ async def upsert_enrollment(
                     org_id=org_id, agent_id=agent_id, user_id=user_id,
                     protocol=protocol, start_date=start_date, phase=phase,
                     status="active", enrolled_by=enrolled_by,
+                    payer_user_id=payer_user_id, source_ref=source_ref,
                 )
                 db.add(row)
             else:
@@ -154,6 +161,10 @@ async def upsert_enrollment(
                     row.start_date = start_date
                 if phase is not None:
                     row.phase = phase
+                if payer_user_id is not None:
+                    row.payer_user_id = payer_user_id
+                if source_ref is not None:
+                    row.source_ref = source_ref
                 row.status = "active"
                 row.status_reason = None
                 row.updated_at = _utcnow()
@@ -258,11 +269,13 @@ async def grant_contact_permission(
     platform: str,
     platform_user_id: str,
     recorded_by: str,
+    method: str = "consent",
 ) -> bool:
-    """Record that the person consented, in conversation, to be messaged.
+    """Record that the person consented to be messaged.
 
-    Same shape ops writes when an operator records permission, with
-    ``method: "consent"`` so the two can be told apart.  Merged into
+    Same shape ops writes when an operator records permission; ``method``
+    says how it was given — ``consent`` in conversation, ``purchase`` at
+    checkout — so it can always be told apart from an operator's say-so.  Merged into
     ``platform_meta`` under a row lock: that blob also carries the display
     name, and ops may be writing it at the same moment.  Returns ``False``
     when the person has no identity on that platform.
@@ -284,7 +297,7 @@ async def grant_contact_permission(
             "status": "granted",
             "recorded_at": _utcnow().replace(tzinfo=None).isoformat(),
             "recorded_by": recorded_by,
-            "method": "consent",
+            "method": method,
         }
         row.platform_meta = meta
         await db.commit()
@@ -315,6 +328,10 @@ async def save_settings(
     alert_template_language: str | None,
     message_template_name: str | None,
     message_template_language: str | None,
+    welcome_template_name: str | None = None,
+    welcome_template_language: str | None = None,
+    welcome_text: str | None = None,
+    offer_protocols: dict[str, str] | None = None,
 ) -> FollowupSettingsRow:
     recipients = list(dict.fromkeys(str(u) for u in alert_recipient_user_ids))
     async with session_factory() as db:
@@ -329,6 +346,13 @@ async def save_settings(
         row.alert_template_language = alert_template_language or None
         row.message_template_name = message_template_name or None
         row.message_template_language = message_template_language or None
+        row.welcome_template_name = welcome_template_name or None
+        row.welcome_template_language = welcome_template_language or None
+        row.welcome_text = (welcome_text or "").strip() or None
+        row.offer_protocols = {
+            str(k): str(v).strip() for k, v in (offer_protocols or {}).items()
+            if str(v).strip()
+        }
         row.updated_at = _utcnow()
         await db.commit()
         await db.refresh(row)
@@ -440,7 +464,10 @@ async def queue_outreach(
     subject_user_id: uuid.UUID | None = None,
     source_session_id: uuid.UUID | None = None,
     created_by: str | None = None,
+    dedupe_key: str | None = None,
 ) -> OutreachMessageRow:
+    """Queue one message.  With ``dedupe_key``, queuing the same cause twice
+    returns the first row instead of writing to the person again."""
     if kind not in OUTREACH_KINDS:
         raise ValueError(f"kind must be one of {', '.join(OUTREACH_KINDS)}")
     if platform not in OUTREACH_PLATFORMS:
@@ -456,8 +483,22 @@ async def queue_outreach(
             template_language=template_language or None, state="queued",
             subject_user_id=subject_user_id,
             source_session_id=source_session_id, created_by=created_by,
+            dedupe_key=dedupe_key,
         )
         db.add(row)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            if dedupe_key is None:
+                raise
+            existing = (
+                await db.execute(
+                    sa.select(OutreachMessageRow)
+                    .where(OutreachMessageRow.org_id == org_id)
+                    .where(OutreachMessageRow.dedupe_key == dedupe_key)
+                )
+            ).scalar_one()
+            return existing
         await db.refresh(row)
         return row

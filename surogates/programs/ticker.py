@@ -160,6 +160,14 @@ class ProgramTicker:
             await sweep_deadlines(self._sf, now=_utcnow())
         except Exception:
             logger.exception("program ticker failed to sweep deadlines")
+        # Straight after the sweep: it is what turns silence into
+        # "no reply", and a streak of those is what the care team must hear.
+        try:
+            from surogates.followup.missed import alert_missed_checkins
+
+            await alert_missed_checkins(self._sf, now=_utcnow())
+        except Exception:
+            logger.exception("program ticker failed to check missed check-ins")
 
         rows = await self._store.claim_due(
             worker_id=self._worker_id, limit=self._claim_limit,

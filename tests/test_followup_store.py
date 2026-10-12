@@ -155,3 +155,71 @@ async def test_queue_outreach_validates(sf):
     row = await store.queue_outreach(sf, **base, kind="alert", text=" fever ")
     assert row.state == "queued"
     assert row.text == "fever"
+
+
+@pytest.mark.asyncio
+async def test_queueing_the_same_cause_twice_writes_once(sf):
+    base = dict(
+        org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(), platform="whatsapp",
+        channel_identifier="pn1", kind="welcome", text="Bun venit",
+        template_name="welcome", template_language="ro",
+        dedupe_key="welcome:cs_1",
+    )
+    first = await store.queue_outreach(sf, **base)
+    again = await store.queue_outreach(sf, **base)
+    assert again.id == first.id
+    other = await store.queue_outreach(sf, **{**base, "dedupe_key": "welcome:cs_2"})
+    assert other.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_a_purchase_records_payer_and_source(sf):
+    patient, payer = uuid.uuid4(), uuid.uuid4()
+    row = await _enrol(sf, patient, enrolled_by="purchase")
+    assert row.payer_user_id is None
+    row = await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=patient, protocol="post-op",
+        start_date=None, phase=None, enrolled_by="purchase",
+        payer_user_id=payer, source_ref="checkout:cs_1",
+    )
+    assert row.payer_user_id == payer
+    assert row.source_ref == "checkout:cs_1"
+    with pytest.raises(ValueError):
+        await _enrol(sf, uuid.uuid4(), enrolled_by="robot")
+
+
+@pytest.mark.asyncio
+async def test_welcome_settings_and_package_protocols(sf):
+    saved = await store.save_settings(
+        sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
+        channel_identifier="pn1", alert_recipient_user_ids=[],
+        alert_template_name=None, alert_template_language=None,
+        message_template_name=None, message_template_language=None,
+        welcome_template_name="bun_venit", welcome_template_language="ro",
+        welcome_text="  Vă mulțumim.  ",
+        offer_protocols={"offer-1": " post-op ", "offer-2": ""},
+    )
+    assert saved.welcome_text == "Vă mulțumim."
+    assert saved.offer_protocols == {"offer-1": "post-op"}
+
+
+@pytest.mark.asyncio
+async def test_permission_records_how_it_was_given(sf):
+    import sqlalchemy as sa
+
+    from surogates.db.models import ChannelIdentity
+
+    user = uuid.uuid4()
+    async with sf() as db:
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=user, platform="whatsapp",
+            platform_user_id="40700000009", platform_meta={},
+        ))
+        await db.commit()
+    assert await store.grant_contact_permission(
+        sf, org_id=ORG, platform="whatsapp", platform_user_id="40700000009",
+        recorded_by="checkout", method="purchase",
+    )
+    async with sf() as db:
+        ident = (await db.execute(sa.select(ChannelIdentity))).scalar_one()
+    assert ident.platform_meta["contact_permission"]["method"] == "purchase"
