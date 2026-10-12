@@ -179,6 +179,26 @@ function useLocalDevice(adapter: AgentChatAdapter, wanted: boolean): string | nu
   return found?.adapter === adapter ? found.id : undefined;
 }
 
+/**
+ * Whether *projectId*'s folder can no longer be reached on its computer, asked of *adapter* while *wanted*, as by the
+ * cards of a project made on another computer: undefined until it answers. An adapter that cannot say says none is.
+ */
+function useFolderLost(adapter: AgentChatAdapter, projectId: string | null | undefined, wanted: boolean): boolean | undefined {
+  const [found, setFound] = useState<{ adapter: AgentChatAdapter; projectId: string; lost: boolean } | null>(null);
+  useEffect(() => {
+    if (!wanted || !projectId || !adapter.isProjectFolderLost) return;
+    let live = true;
+    void adapter.isProjectFolderLost({ projectId }).catch(() => false).then((lost) => {
+      if (live) setFound({ adapter, projectId, lost });
+    });
+    return () => {
+      live = false;
+    };
+  }, [adapter, projectId, wanted]);
+  if (!adapter.isProjectFolderLost) return false;
+  return found?.adapter === adapter && found.projectId === projectId ? found.lost : undefined;
+}
+
 /** The card a "worker" or "thread_proposal" system message draws, or nothing. */
 export function ThreadCards({ message }: { message: ChatMessage }) {
   if (message.worker) return <WorkerCard worker={message.worker} />;
@@ -345,6 +365,8 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
   // and none in the cloud.
   const here = useLocalDevice(adapter, !!projectComputer && canStartHere);
   const onItsComputer = !!projectComputer && canStartHere && here === projectComputer.deviceId;
+  // Not on its computer: whether that computer can still reach the folder, or its user must use another for it.
+  const lost = useFolderLost(adapter, projectId, !!projectComputer && !onItsComputer && !(canStartHere && here === undefined));
   // A card started here gives its View thread the focus its Start took away with it,
   // unless the user has put the focus elsewhere meanwhile; a card drawn anew owes it still,
   // when one was drawn as the start finished.
@@ -444,7 +466,14 @@ function ProposalCard({ proposal }: { proposal: AgentChatThreadProposal }) {
                         {starting(thread.key) ? "Starting…" : "Start"}
                       </Button>
                     </>
-                  ) : canStartHere && here === undefined ? null : (
+                  ) : (canStartHere && here === undefined) || lost === undefined ? null : lost ? (
+                    <span>
+                      This project's folder can no longer be reached on <bdi>{projectComputer.name}</bdi>.{" "}
+                      {canStartHere
+                        ? "Choose Use this computer for this project in its Overview to start its threads here."
+                        : "Open the project in Surogate Desktop and choose Use this computer for this project."}
+                    </span>
+                  ) : (
                     <span>
                       Start this thread in Surogate Desktop on <bdi>{projectComputer.name}</bdi>
                     </span>

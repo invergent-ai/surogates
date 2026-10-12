@@ -541,6 +541,37 @@ describe("the cards in the conversation", () => {
     });
   }
 
+  for (const [where, local, said] of [
+    ["in a browser", {}, "Open the project in Surogate Desktop and choose Use this computer for this project."],
+    [
+      "in Surogate Desktop on a computer that is not its own any more",
+      { startLocalThread: vi.fn(started), getLocalDeviceId: async () => "thinkpad-again" },
+      "Choose Use this computer for this project in its Overview to start its threads here.",
+    ],
+  ] as const) {
+    it(`says ${where} that a computer project's folder can no longer be reached there, and how to use another computer`, async () => {
+      const startProposedThread = vi.fn(started);
+      const isProjectFolderLost = vi.fn(async () => true);
+      const dom = mount(thread(applied(forTheFolder), "simple"), adapterStub({ startProposedThread, isProjectFolderLost, ...local }), onTheThinkPad);
+      await act(async () => {});
+      const card = dom.querySelector('[data-testid="proposed-thread"]')!;
+      expect(card.textContent).toBe(`Check the totalsCheck the totals in Budget.xlsx.This project's folder can no longer be reached on ThinkPad. ${said}`);
+      expect(card.textContent).not.toContain("Start this thread in Surogate Desktop on ThinkPad");
+      expect(dom.querySelector('[data-testid="thread-proposal-card"] button')).toBeNull();
+      expect(isProjectFolderLost).toHaveBeenCalledWith({ projectId: "project-1" });
+    });
+  }
+
+  it("asks nothing of whether a computer project's folder is lost while its cards start on this computer", async () => {
+    const isProjectFolderLost = vi.fn(async () => false);
+    const dom = mount(thread(applied(forTheFolder), "simple"), adapterStub({
+      startLocalThread: vi.fn(started), getLocalDeviceId: async () => "thinkpad", isProjectFolderLost,
+    }), onTheThinkPad);
+    await act(async () => {});
+    expect(dom.querySelector('[data-testid="proposed-thread"]')!.textContent).toContain("Works in its own copy of the project's folder");
+    expect(isProjectFolderLost).not.toHaveBeenCalled();
+  });
+
   it("offers no Start outside a project's master", () => {
     const dom = mount(thread(applied(proposed), "simple"), adapterStub({ startProposedThread: vi.fn() }));
     expect(dom.querySelector('[data-testid="thread-proposal-card"] button')).toBeNull();
