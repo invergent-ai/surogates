@@ -198,6 +198,7 @@ async def run_invalidator(
             mate_settings_cache=mate_settings_cache,
             channel_identity_cache=channel_identity_cache,
             agent_principal_cache=agent_principal_cache,
+            service_account_auth_cache=service_account_auth_cache,
         )
 
     await listen_forever(

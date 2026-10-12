@@ -11,12 +11,13 @@ import contextlib
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from surogates.channels.dispatcher import ChannelWebhookReconciler
 from surogates.channels.registry import ChannelRegistry
 from surogates.orchestrator.dispatcher import Orchestrator
-from surogates.runtime.invalidator import run_invalidator
+from surogates.runtime.invalidator import _CHANNEL_ROUTING, run_invalidator
 
 
 class _FakePubSub:
@@ -41,11 +42,15 @@ class _FakePubSub:
         await asyncio.Event().wait()
 
 
+def _message(channel: str, data: bytes = b"") -> dict:
+    return {"type": "pmessage", "pattern": None, "channel": channel.encode(), "data": data}
+
+
 def _redis_reset_once(channel: str, data: bytes = b"") -> SimpleNamespace:
     """A Redis whose first subscription is reset, and whose second hears *channel*."""
     pubsubs = [
         _FakePubSub([], RedisConnectionError("Connection reset by peer")),
-        _FakePubSub([{"type": "pmessage", "pattern": None, "channel": channel.encode(), "data": data}], None),
+        _FakePubSub([_message(channel, data)], None),
     ]
     redis = SimpleNamespace(opened=[])
 
@@ -100,6 +105,22 @@ async def test_the_cache_invalidator_hears_a_change_after_a_redis_restart() -> N
     await _until(heard, task)
 
     assert invalidated == ["agent-1"]
+
+
+@pytest.mark.parametrize(("prefix", "cache_kwarg"), _CHANNEL_ROUTING)
+async def test_the_cache_invalidator_hands_every_channel_to_its_cache(prefix: str, cache_kwarg: str) -> None:
+    heard = asyncio.Event()
+    invalidated: list[str] = []
+
+    def invalidate(identifier: str) -> None:
+        invalidated.append(identifier)
+        heard.set()
+
+    redis = SimpleNamespace(pubsub=lambda: _FakePubSub([_message(f"{prefix}id-1")], None))
+    task = asyncio.create_task(run_invalidator(redis, **{cache_kwarg: SimpleNamespace(invalidate=invalidate)}))
+    await _until(heard, task)
+
+    assert invalidated == ["id-1"]
 
 
 async def test_the_webhook_reconciler_hears_a_routing_change_after_a_redis_restart() -> None:
