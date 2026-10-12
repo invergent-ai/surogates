@@ -118,6 +118,12 @@ export interface DesktopBridge {
   // named on the sheet.
   prepareFolder(choice: "last" | "pick", thread?: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string): Promise<void>;
+  // A copy of a project's folder for a thread of the project, asking nothing: the folder its user chose for it
+  // when they made the project here, which its coordinator's chat, *masterSessionId*, works in on this computer.
+  // The thread asks as that chat does. Rejects with "This chat is no project's on this computer" for a chat
+  // whose folder here was confirmed for no project, and when the folder is no longer the one its user chose.
+  // Desktops built before it have none: the page looks first.
+  prepareThreadFolder?(masterSessionId: string): Promise<DesktopPreparedFolder>;
   // From now on the chat asks before each command, file change and input. The page can
   // make a chat only safer: "Work freely" is the desktop's own to grant.
   setMode(sessionId: string, mode: "ask"): Promise<void>;

@@ -132,6 +132,9 @@ export interface ProjectResponse extends ProjectSummaryResponse {
   // A later server may send a tier not known here: the page takes it as unknown.
   coordinator_tier: Tier | string;
   thread_tier: Tier | string;
+  // A server from before projects had folders sends neither.
+  place?: PlaceResponse | { kind: string };
+  folder?: string | null;
 }
 
 export function projectSummaryOf(project: ProjectSummaryResponse): ProjectSummary {
@@ -156,6 +159,8 @@ export function projectOf(project: ProjectResponse): Project {
     masterSessionId: project.master_session_id,
     coordinatorTier: tierOf(project.coordinator_tier),
     threadTier: tierOf(project.thread_tier),
+    place: placeOf(project.place),
+    folder: typeof project.folder === "string" ? project.folder : null,
   };
 }
 

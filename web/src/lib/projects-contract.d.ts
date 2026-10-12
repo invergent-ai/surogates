@@ -26,6 +26,19 @@ export interface Project extends ProjectSummary {
   // "unknown": a tier this client does not know, as a later server may send. Shown as unknown, and never sent back.
   coordinatorTier: Tier | "unknown";
   threadTier: Tier | "unknown";
+  // Where the project works: the cloud, or the computer it was made on in Surogate Desktop, whose folder its
+  // coordinator works in and its threads copy. null: a place this client does not know, or none.
+  place: ThreadPlace | null;
+  folder: string | null; // that folder, as its user chose it on that computer; null in the cloud
+}
+
+// What a project made in Surogate Desktop is made with: a folder of this computer its user confirmed there,
+// as the route takes it, and as a new chat's local folder is sent.
+export interface ProjectFolder {
+  kind: "device";
+  device_id: string;
+  folder: string;
+  nonce: string; // names the confirmation: the token that goes with it never leaves the desktop
 }
 
 export type ThreadPlace =
@@ -139,7 +152,7 @@ export interface Routine {
 export interface ProjectsSource {
   list(): Promise<ProjectSummary[]>;
   get(projectId: string): Promise<Project>;
-  create(input: { name: string; goal?: string; instructions?: string }): Promise<Project>;
+  create(input: { name: string; goal?: string; instructions?: string; execution?: ProjectFolder }): Promise<Project>;
   // A tier is sent only as one the client knows: one it shows as unknown is left as it is.
   update(
     projectId: string,

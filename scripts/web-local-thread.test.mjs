@@ -10,10 +10,18 @@ const CARD = { projectId: "p-1", proposalId: "pr-1", key: "2", title: "Check the
 const ROW = { id: "t-1", title: "Check the totals", group: "working" };
 const THIS_COMPUTER = { deviceId: "d-1", name: "Flavius's ThinkPad" };
 
-function bridge({ device = THIS_COMPUTER, localFolders = true, prepare = async () => PREPARED, bind = async () => {} } = {}) {
+function bridge({
+  device = THIS_COMPUTER, localFolders = true, prepare = async () => PREPARED, bind = async () => {}, projectFolders = true,
+} = {}) {
   const calls = [];
   return {
     calls,
+    ...(projectFolders ? {
+      prepareThreadFolder: async (masterSessionId) => {
+        calls.push(["prepareThreadFolder", masterSessionId]);
+        return prepare();
+      },
+    } : {}),
     getDevice: async () => {
       calls.push(["getDevice"]);
       return { device, localFolders };
@@ -33,7 +41,8 @@ function bridge({ device = THIS_COMPUTER, localFolders = true, prepare = async (
 }
 
 // The agent, as the page reaches it: the project routes, and whether it hears a computer. What each was asked.
-function routes({ refuse = null, online = true } = {}) {
+// A project in the cloud, unless *place* names the computer it was made on.
+function routes({ refuse = null, online = true, place = { kind: "cloud" } } = {}) {
   const asked = [];
   return {
     asked,
@@ -43,7 +52,7 @@ function routes({ refuse = null, online = true } = {}) {
     },
     get: async (projectId) => {
       asked.push(["get", projectId]);
-      return { name: "Q3 report" };
+      return { name: "Q3 report", masterSessionId: "m-1", place, folder: place.kind === "device" ? PREPARED.folder : null };
     },
     makeOnComputer: async (...args) => {
       asked.push(["makeOnComputer", ...args]);
@@ -68,8 +77,8 @@ test("confirms a folder on this computer for the project's thread, makes the thr
     ["bindSession", "t-1", "t".repeat(43)],
   ]);
   assert.deepEqual(agent.asked, [
-    ["online", "d-1"],
     ["get", "p-1"],
+    ["online", "d-1"],
     ["makeOnComputer", "p-1", "pr-1", "2", { kind: "device", device_id: "d-1", folder: "/home/flavius/Budget", nonce: "n".repeat(43) }],
     ["begin", "p-1", "t-1"],
   ]);
@@ -84,14 +93,14 @@ test("asks for no folder where this computer works on none for this account, and
   ]) {
     const agent = routes();
     await assert.rejects(startLocalThread(desktop, agent, CARD), { message });
-    assert.deepEqual([desktop.calls, agent.asked], [[["getDevice"]], []]);
+    assert.deepEqual([desktop.calls, agent.asked], [[["getDevice"]], [["get", "p-1"]]]);
   }
 });
 
 test("makes no thread when the user cancels the sheet", async () => {
   const agent = routes();
   await assert.rejects(startLocalThread(bridge({ prepare: async () => null }), agent, CARD), { message: NO_FOLDER });
-  assert.deepEqual(agent.asked, [["online", "d-1"], ["get", "p-1"]]);
+  assert.deepEqual(agent.asked, [["get", "p-1"], ["online", "d-1"]]);
 });
 
 test("asks for no folder while the agent does not hear this computer, and says so", async () => {
@@ -100,7 +109,7 @@ test("asks for no folder while the agent does not hear this computer, and says s
   await assert.rejects(startLocalThread(desktop, agent, CARD), {
     message: "Flavius's ThinkPad is not connected to the agent right now, so this thread was not started. Allow it again once it is.",
   });
-  assert.deepEqual([desktop.calls, agent.asked], [[["getDevice"]], [["online", "d-1"]]]);
+  assert.deepEqual([desktop.calls, agent.asked], [[["getDevice"]], [["get", "p-1"], ["online", "d-1"]]]);
 });
 
 test("lets the confirmation go when the thread cannot be made, and says why in the server's words", async () => {
@@ -129,9 +138,57 @@ test("says the desktop's refusals in its own words, without the name of the call
   assert.equal(desktop.calls.some(([name]) => name === "cancelPrepared"), false);
 });
 
-test("offers a thread on this computer only in Surogate Desktop", async () => {
+test("offers a thread on this computer only in Surogate Desktop, and says which computer it is", async () => {
   // In a browser there is no bridge: the card offers the cloud alone.
-  assert.equal(localThreads(undefined, routes()).startLocalThread, undefined);
-  const { startLocalThread: start } = localThreads(bridge(), routes());
+  assert.deepEqual(localThreads(undefined, routes()), {});
+  const { startLocalThread: start, getLocalDeviceId } = localThreads(bridge(), routes());
   assert.deepEqual(await start(CARD), ROW);
+  assert.equal(await getLocalDeviceId(), "d-1");
+  assert.equal(await localThreads(bridge({ device: null, localFolders: false }), routes()).getLocalDeviceId(), null);
+});
+
+// A project made in Surogate Desktop on this computer: its threads work in copies of its folder here.
+const ON_THIS_COMPUTER = { kind: "device", deviceId: "d-1", deviceName: "Flavius's ThinkPad", online: true };
+
+test("starts a computer project's thread at once in a copy of the project's folder, asking for no folder", async () => {
+  const desktop = bridge();
+  const agent = routes({ place: ON_THIS_COMPUTER });
+  assert.deepEqual(await startLocalThread(desktop, agent, CARD), ROW);
+  // The project's folder, as its coordinator's binding holds it here: no sheet asks again.
+  assert.deepEqual(desktop.calls, [["getDevice"], ["prepareThreadFolder", "m-1"], ["bindSession", "t-1", "t".repeat(43)]]);
+  assert.deepEqual(agent.asked, [
+    ["get", "p-1"],
+    ["online", "d-1"],
+    ["makeOnComputer", "p-1", "pr-1", "2", { kind: "device", device_id: "d-1", folder: "/home/flavius/Budget", nonce: "n".repeat(43) }],
+    ["begin", "p-1", "t-1"],
+  ]);
+});
+
+test("starts no computer project's thread anywhere but on its computer, and never offers the cloud", async () => {
+  const elsewhere = { ...ON_THIS_COMPUTER, deviceId: "d-2", deviceName: "Flavius's desktop" };
+  for (const [desktop, place, message] of [
+    [bridge(), elsewhere, "This project works in a folder on Flavius's desktop: start this thread in Surogate Desktop there."],
+    [bridge({ device: null, localFolders: false }), elsewhere,
+      "Surogate can't work on folders of this computer for this account. Start this thread in Surogate Desktop on Flavius's desktop."],
+    [bridge({ localFolders: false }), ON_THIS_COMPUTER,
+      "Local access to this computer was revoked. Restore it from Surogate's sidebar, then start this thread again."],
+    [bridge({ projectFolders: false }), ON_THIS_COMPUTER, "This Surogate Desktop cannot start a thread in its project's folder: update it."],
+  ]) {
+    const agent = routes({ place });
+    await assert.rejects(startLocalThread(desktop, agent, CARD), { message });
+    assert.equal(desktop.calls.some(([name]) => name === "prepareFolder" || name === "bindSession"), false);
+    assert.equal(agent.asked.some(([name]) => name === "makeOnComputer"), false);
+  }
+});
+
+test("says a computer project's thread is started again, never allowed, when its computer is away or its binding fails", async () => {
+  await assert.rejects(startLocalThread(bridge(), routes({ place: ON_THIS_COMPUTER, online: false }), CARD), {
+    message: "Flavius's ThinkPad is not connected to the agent right now, so this thread was not started. Start it again once it is.",
+  });
+  const refused = async () => {
+    throw new Error("This computer could not record the folder for this chat");
+  };
+  await assert.rejects(startLocalThread(bridge({ bind: refused }), routes({ place: ON_THIS_COMPUTER }), CARD), {
+    message: "Surogate could not set up this thread's folder on this computer: This computer could not record the folder for this chat. Start it again.",
+  });
 });
