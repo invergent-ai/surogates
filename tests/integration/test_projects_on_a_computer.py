@@ -10,14 +10,16 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from surogates.db.models import Session, Workstream
+from surogates.db.models import Device, DeviceOperation, Session, Workstream
 from surogates.devices.binding import Binding
 from surogates.devices.store import DeviceStore
+from surogates.workstreams.store import WorkstreamStore
 from surogates.session.events import EventType
 
 from .test_devices import (  # noqa: F401  (api is a fixture)
+    AGENT_ID,
     FOLDER,
     NONCE,
     add_user,
@@ -25,7 +27,7 @@ from .test_devices import (  # noqa: F401  (api is a fixture)
     binding,
     register,
 )
-from .test_local_threads import confirmed, journal, make_local
+from .test_local_threads import begin, confirmed, journal, make_local
 from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of
 from .test_workstreams import create, master_of, system_prompt, turn_calling, unknown
 
@@ -52,7 +54,7 @@ async def on_computer(api) -> tuple[dict, dict]:
 
 async def test_a_project_made_on_a_computer_works_in_the_folder_its_user_chose_there(api):
     project, device = await on_computer(api)
-    assert project["place"] == {"kind": "device", "device_id": device["id"], "device_name": COMPUTER, "online": False}
+    assert project["place"] == {"kind": "device", "device_id": device["id"], "device_name": COMPUTER, "online": False, "lost": False}
     assert project["folder"] == FOLDER
     async with api.app.state.session_factory() as db:
         row = await db.scalar(select(Workstream).where(Workstream.id == UUID(project["id"])))
@@ -203,9 +205,235 @@ async def test_a_computer_projects_prompt_has_it_work_in_its_folder_and_propose_
     assert "## The project's folder" in said
     assert "Your tools read, write and run commands in the folder itself, on that computer." in said
     assert "tell the user you cannot reach the folder until the computer is back." in said
+    assert (
+        "Should they say its access was revoked or the folder is no longer there, tell the user to open the project in "
+        "Surogate Desktop on the computer it should work on and choose Use this computer for this project."
+    ) in said
     assert 'Every piece of work is a thread on the project\'s folder: propose it with `propose_threads` and `where: "device"`.' in said
     assert "You cannot start a thread yourself: the user starts each from its card, in Surogate Desktop on that computer." in said
     # It is never told to start a thread itself, or of a thread in the cloud.
     assert "## Starting threads" not in said
     assert "`start_thread`" not in said
     assert 'where: "cloud"' not in said
+
+
+# -- Using this computer for a project whose own can no longer reach its folder ------------------------------------
+
+MOVED_TO = "/home/flavius/notes"
+
+
+def online(monkeypatch, *devices: dict) -> None:
+    """The agent hears *devices* now, and no other computer."""
+    from surogates.devices.presence import DevicePresence
+
+    heard = {UUID(device["id"]) for device in devices}
+
+    async def answer(self, asked):
+        return {device for device in asked if device in heard}
+
+    monkeypatch.setattr(DevicePresence, "online", answer)
+
+
+async def use_here(api, project: dict, execution: dict, token: str | None = None):
+    return await api.client.post(
+        f"/v1/workstreams/{project['id']}/computer", json={"execution": execution}, headers=api.auth(token),
+    )
+
+
+async def answer_bind(api, device: dict, outcome: dict | None = None) -> None:
+    """The computer answers the bind it was sent, as its app does: bound, unless *outcome* says otherwise."""
+    ops = journal(api)
+    [bind] = await ops.pending(UUID(device["id"]), 1)
+    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, outcome or {"ok": None}) == "completed"
+
+
+async def revoke(api, device: dict) -> None:
+    assert (await api.client.delete(f"/v1/devices/{device['id']}", headers=api.auth())).status_code == 204
+
+
+async def project_of(api, project: dict) -> dict:
+    return (await api.client.get(f"/v1/workstreams/{project['id']}", headers=api.auth())).json()
+
+
+async def test_a_project_whose_computer_was_revoked_moves_to_the_users_computer_here_with_the_folder_chosen_again(
+    api, monkeypatch,
+):
+    project, laptop = await on_computer(api)
+    await answer_bind(api, laptop)
+    master = await master_of(api, project)
+    threads = [{**PROPOSED[0], "where": "device"}, PROPOSED[1]]
+    proposal_id = (await held(api, master, "propose_threads", threads=threads))["proposal_id"]
+    old = await make_local(api, project, proposal_id, confirmed(laptop["id"]), key="1")
+    assert old.status_code == 201, old.text
+    await answer_bind(api, laptop, {"ok": {"history": {"thread": old.json()["thread_id"]}}})
+    assert (await begin(api, project, old.json()["thread_id"])).status_code == 201
+    # Logged out there: its access ends, and this computer joins the agent again under another id, by the same name.
+    await revoke(api, laptop)
+    here = await register(api)
+    online(monkeypatch, here)
+    assert (await project_of(api, project))["place"]["lost"] is True
+
+    moved = await use_here(api, project, confirmed(here["id"], folder=MOVED_TO))
+    assert moved.status_code == 200, moved.text
+    place = {"kind": "device", "device_id": here["id"], "device_name": COMPUTER, "online": True, "lost": False}
+    assert (moved.json()["place"], moved.json()["folder"]) == (place, MOVED_TO)
+    assert await project_of(api, project) == moved.json()
+    async with api.app.state.session_factory() as db:
+        row = await db.scalar(select(Workstream).where(Workstream.id == UUID(project["id"])))
+    assert (row.device_id, row.folder) == (UUID(here["id"]), MOVED_TO)
+    # Its coordinator works in the folder chosen here, which this computer is asked to bind afresh.
+    master = await master_of(api, project)
+    assert master.config["execution"] == {"kind": "device", "device_id": here["id"], "device_name": COMPUTER}
+    assert master.config["workspace_path"] == MOVED_TO
+    assert await binding(api, master.id) == Binding("pending")
+    [bind] = await journal(api).pending(UUID(here["id"]), 1)
+    assert (bind.kind, bind.root_session_id, bind.args) == ("bind", master.id, {"folder": MOVED_TO, "nonce": NONCE})
+    await answer_bind(api, here)
+    assert await binding(api, master.id) == Binding("bound")
+
+    # The thread started before stays with its copy on the old computer, and can be resolved.
+    old_thread = await api.app.state.session_store.get_session(UUID(old.json()["thread_id"]))
+    assert old_thread.config["execution"]["device_id"] == laptop["id"]
+    resolved = await api.client.post(
+        f"/v1/workstreams/{project['id']}/threads/{old_thread.id}/resolve", headers=api.auth(),
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["group"] == "resolved"
+    # A new one starts in the project's folder here, and nowhere else.
+    elsewhere = await make_local(api, project, proposal_id, confirmed(laptop["id"]), key="2")
+    assert elsewhere.status_code == 409
+    made = await make_local(api, project, proposal_id, confirmed(here["id"], folder=MOVED_TO), key="2")
+    assert made.status_code == 201, made.text
+    thread = await api.app.state.session_store.get_session(UUID(made.json()["thread_id"]))
+    assert (thread.config["execution"]["device_id"], thread.config["workspace_path"]) == (here["id"], MOVED_TO)
+
+
+async def test_a_project_moves_to_this_computer_once_its_own_is_gone_or_could_not_set_its_folder_up_or_is_this_one(
+    api, monkeypatch, session_factory,
+):
+    for case in ("gone", "could not set it up", "never asked to", "this computer"):
+        project, laptop = await on_computer(api)
+        if case == "never asked to":
+            # As a binding whose recording failed: no computer will ever answer it.
+            async with session_factory() as db:
+                await db.execute(delete(DeviceOperation).where(
+                    DeviceOperation.calling_session_id == UUID(project["master_session_id"]),
+                ))
+                await db.commit()
+        if case == "gone":
+            await answer_bind(api, laptop)
+            async with session_factory() as db:
+                await db.execute(delete(Device).where(Device.id == UUID(laptop["id"])))
+                await db.commit()
+        if case == "could not set it up":
+            await answer_bind(api, laptop, {"error": {"type": "binding", "message": "This computer could not record the folder"}})
+        if case != "this computer":
+            assert (await project_of(api, project))["place"]["lost"] is True, case
+        here = laptop if case == "this computer" else await register(api)
+        online(monkeypatch, here)
+        moved = await use_here(api, project, confirmed(here["id"], folder=MOVED_TO))
+        assert moved.status_code == 200, (case, moved.text)
+        assert (moved.json()["place"]["device_id"], moved.json()["folder"]) == (here["id"], MOVED_TO), case
+        assert await binding(api, UUID(project["master_session_id"])) == Binding("pending"), case
+
+
+async def test_a_project_moves_only_for_its_own_user_from_their_own_live_computer_here_and_never_from_one_that_reaches_it(
+    api, monkeypatch, session_factory,
+):
+    project, laptop = await on_computer(api)
+    await answer_bind(api, laptop)
+    _, their_token = await add_user(session_factory, api.org_id)
+    theirs = await register(api, token=their_token)
+    revoked = await register(api)
+    await revoke(api, revoked)
+    asleep = await register(api, name="Flavius's desktop")
+    desktop = await register(api, name="Flavius's desktop")
+    cloud = await create(api)
+    online(monkeypatch, theirs, revoked, desktop)
+    for case, (asked, execution, token, said) in {
+        "by another user": (project, confirmed(theirs["id"]), their_token, (404, "No such project.")),
+        "to another user's computer": (project, confirmed(theirs["id"]), None, (404, "Unknown device.")),
+        "to a revoked computer": (project, confirmed(revoked["id"]), None, (409, "Local access to this computer was revoked.")),
+        "to a computer the agent does not hear": (
+            project, confirmed(asleep["id"]), None,
+            (409, "Flavius's desktop is not connected to the agent right now: use it for this project once it is."),
+        ),
+        "away from a live computer that reaches its folder": (
+            project, confirmed(desktop["id"]), None,
+            (409, f"This project works in a folder on {COMPUTER}, which still reaches it: start its threads there, "
+                  f"or remove {COMPUTER} from your computers first."),
+        ),
+        "a project in the cloud": (cloud, confirmed(desktop["id"]), None, (409, "This project works in the cloud.")),
+        "with a nonce that is no nonce": (project, confirmed(desktop["id"], nonce="short"), None, (422, None)),
+    }.items():
+        response = await use_here(api, asked, execution, token)
+        detail = response.json()["detail"] if said[1] is not None else None
+        assert (response.status_code, detail) == said, case
+    # Nothing moved, and no computer was asked for a folder.
+    after = await project_of(api, project)
+    assert (after["place"]["device_id"], after["folder"]) == (laptop["id"], FOLDER)
+    assert (await master_of(api, project)).config["execution"]["device_id"] == laptop["id"]
+    assert await binding(api, UUID(project["master_session_id"])) == Binding("bound")
+    for device in (theirs, revoked, asleep, desktop):
+        assert await journal(api).pending(UUID(device["id"]), 1) == [], device["name"]
+
+
+async def test_a_project_never_moves_away_from_a_computer_that_is_not_its_users_own(api, monkeypatch, session_factory):
+    project, _ = await on_computer(api)
+    _, their_token = await add_user(session_factory, api.org_id)
+    theirs = await register(api, token=their_token)
+    await api.client.delete(f"/v1/devices/{theirs['id']}", headers=api.auth(their_token))
+    # Its row names another user's computer, revoked: not the user's to move away from.
+    async with session_factory() as db:
+        row = await db.get(Workstream, UUID(project["id"]))
+        row.device_id = UUID(theirs["id"])
+        await db.commit()
+    here = await register(api)
+    online(monkeypatch, here)
+    response = await use_here(api, project, confirmed(here["id"], folder=MOVED_TO))
+    assert response.status_code == 409, response.text
+    assert await journal(api).pending(UUID(here["id"]), 1) == []
+
+
+async def test_a_project_moved_meanwhile_is_not_moved_again(api, session_factory):
+    project, laptop = await on_computer(api)
+    here = await register(api)
+    store = WorkstreamStore(session_factory)
+    owner = {"org_id": api.org_id, "agent_id": AGENT_ID, "user_id": api.user_id}
+    moved = await store.move(
+        UUID(project["id"]), away_from=UUID(here["id"]), device_id=UUID(here["id"]), device_name=COMPUTER, folder=MOVED_TO,
+        **owner,
+    )
+    assert moved is None
+    after = await project_of(api, project)
+    assert (after["place"]["device_id"], after["folder"]) == (laptop["id"], FOLDER)
+    assert await binding(api, UUID(project["master_session_id"])) == Binding("pending")
+
+
+async def test_a_lost_computer_projects_card_says_where_to_use_another_computer_for_it(api):
+    project, laptop = await on_computer(api)
+    master = await master_of(api, project)
+    proposal_id = (await held(api, master, "propose_threads", threads=[PROPOSED[1]]))["proposal_id"]
+    await revoke(api, laptop)
+    here = await register(api)
+    said = (
+        f"This project's folder can no longer be reached on {COMPUTER}. Open the project in Surogate Desktop "
+        "and choose Use this computer for this project."
+    )
+    for execution in (None, confirmed(here["id"])):
+        response = await api.client.post(
+            f"/v1/workstreams/{project['id']}/threads",
+            json={"proposal_id": proposal_id, "key": "1", **({} if execution is None else {"execution": execution})},
+            headers=api.auth(),
+        )
+        assert (response.status_code, response.json()["detail"]) == (409, said)
+
+
+async def test_the_projects_list_says_where_each_project_works(api):
+    project, laptop = await on_computer(api)
+    cloud = await create(api, name="Budget")
+    listed = {row["id"]: row["place"] for row in (await api.client.get("/v1/workstreams", headers=api.auth())).json()}
+    assert listed == {
+        project["id"]: {"kind": "device", "device_id": laptop["id"], "device_name": COMPUTER, "online": False, "lost": False},
+        cloud["id"]: {"kind": "cloud"},
+    }

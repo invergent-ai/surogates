@@ -26,7 +26,7 @@ from starlette.types import Receive, Scope, Send
 from surogates.api.routes.sessions import DeviceExecution, _require_local_device, archive_session_tree
 from surogates.api.routes.workspace import _should_skip_dir
 from surogates.api.session_guards import require_device_access
-from surogates.db.models import Workstream
+from surogates.db.models import Device, Workstream
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
 from surogates.harness.loop_artifacts import _coerce_modified_to_datetime
@@ -137,6 +137,12 @@ class ProjectChange(BaseModel):
         return self
 
 
+class ProjectMove(BaseModel):
+    """The caller's own computer, and a folder its user confirmed there, for a project whose computer lost its folder."""
+
+    execution: DeviceExecution
+
+
 class ProposedThreadStart(BaseModel):
     """A card of a proposal: the thread is read from its ``thread.proposed`` event."""
 
@@ -157,6 +163,9 @@ class ProjectSummaryOut(BaseModel):
     # Threads waiting on the user, plus one for a question or approval open in the master.
     waiting: int = 0
     working: int = 0
+    #: Where the project works, as a thread's place says it: the cloud, or a computer of the user's, which is
+    #: ``lost`` once its folder can no longer be reached there.
+    place: dict[str, Any] = {"kind": "cloud"}
 
 
 class ProjectOut(ProjectSummaryOut):
@@ -165,8 +174,6 @@ class ProjectOut(ProjectSummaryOut):
     master_session_id: UUID
     coordinator_tier: str | None
     thread_tier: str | None
-    #: Where the project works, as a thread's place says it: the cloud, or a computer of the user's.
-    place: dict[str, Any] = {"kind": "cloud"}
     #: Its folder on that computer, as its user chose it there; None in the cloud.
     folder: str | None = None
 
@@ -205,12 +212,17 @@ async def _described(request: Request, projects: list[Workstream]) -> list[Proje
     store = _store(request)
     threads = await store.thread_counts([project.id for project in projects])
     masters = await store.masters([project.master_session_id for project in projects])
+    lost = await store.lost({
+        project.master_session_id: project.device_id for project in projects if project.device_id is not None
+    })
     described = []
     for project in projects:
         if project.master_session_id not in masters:
             # Deleted since the projects were read: its project went with it.
             continue
         seen, asking, place = masters[project.master_session_id]
+        if place["kind"] == "device":
+            place["lost"] = project.master_session_id in lost
         latest, waiting, working = threads.get(project.id, (None, 0, 0))
         described.append(ProjectOut.model_validate(project).model_copy(update={
             "waiting": waiting + asking,
@@ -297,6 +309,66 @@ async def change_project(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     [described] = await _described(request, [project])
     return described
+
+
+@router.post("/{workstream_id}/computer", response_model=ProjectOut)
+async def use_this_computer(
+    workstream_id: UUID, body: ProjectMove, request: Request, ctx: AgentRuntime, tenant: Tenant,
+):
+    """Move a project made on a computer to the caller's, in the folder its user confirmed there, and have that
+    computer bind its coordinator afresh.
+
+    Only the project's own user moves it, to a live computer of theirs that the agent hears now; and only away from
+    a computer of theirs that can no longer reach the folder: one removed, or its access revoked, or one that could
+    not set the folder up, or the caller's own, whose app says the folder it had there is lost.  A live computer that
+    still reaches the folder keeps the project.  Its threads stay where they were made, each in its copy on that
+    computer: a thread started from now on works in the new folder.
+    """
+    project = await _project(request, workstream_id, tenant, ctx)
+    if project.device_id is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This project works in the cloud.")
+    execution = body.execution
+    device = await _require_local_device(
+        request, tenant, ctx.agent_id, execution, channel="web", user_id=tenant.user_id,
+    )
+    state = request.app.state
+    # Its coordinator's binding reaches the computer through the agent: one it does not hear would wait in silence.
+    if device.id not in await DevicePresence(state.redis).online([device.id]):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{device.name} is not connected to the agent right now: use it for this project once it is.",
+        )
+    master = await state.session_store.get_session(project.master_session_id)
+    if device.id != project.device_id and not await _folder_lost(request, project):
+        computer = master.config["execution"]["device_name"]
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This project works in a folder on {computer}, which still reaches it: start its threads there, "
+            f"or remove {computer} from your computers first.",
+        )
+    moved = await _store(request).move(
+        project.id, away_from=project.device_id, device_id=device.id, device_name=device.name, folder=execution.folder,
+        **_owner(tenant, ctx),
+    )
+    if moved is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This project was moved meanwhile: open it again.")
+    # As the coordinator was bound when the project was made, once its user confirmed the folder.
+    await DeviceOperations(state.session_factory, state.redis).bind(
+        session_id=master.id, device_id=device.id, folder=execution.folder, nonce=execution.nonce,
+    )
+    [described] = await _described(request, [moved])
+    return described
+
+
+async def _folder_lost(request: Request, project: Workstream) -> bool:
+    """Whether *project*'s folder can no longer be reached on the computer it works on, which must be its user's own."""
+    async with request.app.state.session_factory() as db:
+        computer = await db.get(Device, project.device_id)
+    if computer is not None and (computer.org_id, computer.agent_id, computer.user_id) != (
+        project.org_id, project.agent_id, project.user_id,
+    ):
+        return False
+    return project.master_session_id in await _store(request).lost({project.master_session_id: project.device_id})
 
 
 @router.delete("/{workstream_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -771,13 +843,23 @@ async def _card(request: Request, project: Workstream, proposal_id: UUID, key: s
     return card
 
 
-def _on_the_projects_folder(project: Workstream, master: Session, execution: DeviceExecution | None) -> None:
+def _on_the_projects_folder(
+    project: Workstream, master: Session, execution: DeviceExecution | None, *, lost: bool,
+) -> None:
     """Refuse a thread of *project*, which works on a computer, anywhere but in the project's folder there.
 
     Every thread of such a project works there, in a copy of its own, and
     none in the cloud: its user starts it in Surogate Desktop on that computer.
+    Where the folder can no longer be reached there (*lost*), none starts
+    until its user uses another computer for the project.
     """
     computer = master.config["execution"]["device_name"]
+    if lost:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This project's folder can no longer be reached on {computer}. Open the project in Surogate Desktop "
+            "and choose Use this computer for this project.",
+        )
     if execution is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -816,7 +898,8 @@ async def start_proposed_thread(
     state = request.app.state
     if project.device_id is not None:
         master = await state.session_store.get_session(project.master_session_id)
-        _on_the_projects_folder(project, master, body.execution)
+        lost = await _store(request).lost({master.id: project.device_id})
+        _on_the_projects_folder(project, master, body.execution, lost=master.id in lost)
     proposal = {"proposal_id": str(body.proposal_id), "key": body.key}
     async with _card_held(request, project, body.proposal_id, body.key) as redis:
         master = await state.session_store.get_session(project.master_session_id)
