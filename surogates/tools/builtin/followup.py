@@ -26,7 +26,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store as followup_store
-from surogates.followup.eligibility import MAX_DAY, day_index
+from surogates.followup.eligibility import day_index, start_date_problem
 from surogates.tools.builtin.checkin import _open_invitation_for_session
 from surogates.tools.registry import ToolSchema
 
@@ -213,8 +213,9 @@ def _parse_date(raw: Any) -> date | None:
         parsed = date.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"start_date must be YYYY-MM-DD, got {text!r}") from exc
-    if abs((parsed - datetime.now(timezone.utc).date()).days) > MAX_DAY:
-        raise ValueError("start_date is too far from today to be a protocol start")
+    problem = start_date_problem(parsed, datetime.now(timezone.utc).date())
+    if problem:
+        raise ValueError(problem)
     return parsed
 
 

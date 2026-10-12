@@ -6,7 +6,13 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from surogates.followup.eligibility import Audience, day_index, ineligibility
+from surogates.followup.eligibility import (
+    MAX_DAY,
+    Audience,
+    day_index,
+    ineligibility,
+    start_date_problem,
+)
 
 NOW = datetime(2026, 10, 12, 8, 30, tzinfo=timezone.utc)
 TODAY = date(2026, 10, 12)
@@ -100,3 +106,28 @@ def test_parse_round_trip():
 def test_malformed_audiences_are_refused(raw):
     with pytest.raises(ValueError):
         Audience.from_config(raw)
+
+
+def test_an_audience_round_trips_through_its_config():
+    audience = Audience.from_config(
+        {"protocol": "post-op", "day_from": 0, "day_to": 30,
+         "phases": ["b", " a ", "b"], "silent_days": 2},
+    )
+    assert audience.to_config() == {
+        "protocol": "post-op", "day_from": 0, "day_to": 30,
+        "phases": ["a", "b"], "silent_days": 2,
+    }
+    assert Audience.from_config(audience.to_config()) == audience
+    assert Audience(protocol="p").to_config() == {
+        "protocol": "p", "day_from": None, "day_to": None,
+        "phases": [], "silent_days": None,
+    }
+
+
+@pytest.mark.parametrize("offset, ok", [
+    (0, True), (MAX_DAY, True), (-MAX_DAY, True),
+    (MAX_DAY + 1, False), (-MAX_DAY - 1, False),
+])
+def test_a_start_date_must_be_within_the_protocol_horizon(offset, ok):
+    problem = start_date_problem(TODAY + timedelta(days=offset), TODAY)
+    assert (problem is None) is ok

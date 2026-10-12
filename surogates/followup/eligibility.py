@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-__all__ = ["Audience", "as_utc", "day_index", "ineligibility"]
+__all__ = [
+    "Audience", "as_utc", "day_index", "ineligibility", "start_date_problem",
+]
 
 #: The longest a protocol can run, in days.  Bounds the window fields so a
 #: typo like 3650000 is refused rather than silently meaning "forever".
@@ -89,6 +91,28 @@ class Audience:
             protocol=protocol, day_from=day_from, day_to=day_to,
             phases=phases, silent_days=silent,
         )
+
+    def to_config(self) -> dict[str, Any]:
+        """The canonical projected ``audience``; :meth:`from_config` reads it back."""
+        return {
+            "protocol": self.protocol,
+            "day_from": self.day_from,
+            "day_to": self.day_to,
+            "phases": sorted(self.phases),
+            "silent_days": self.silent_days,
+        }
+
+
+def start_date_problem(start: date, today: date) -> str | None:
+    """Why *start* cannot be a protocol's day 0, or ``None`` when it can.
+
+    A start more than :data:`MAX_DAY` days from *today*, either way, is a
+    typo (a wrong year), not a protocol anyone is on.  Shared by the agent's
+    tools and ops' enrolment routes so both accept the same range.
+    """
+    if abs((start - today).days) > MAX_DAY:
+        return "start_date is too far from today to be a protocol start"
+    return None
 
 
 def day_index(start_date: date | None, today: date) -> int | None:

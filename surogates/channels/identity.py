@@ -41,6 +41,23 @@ class ResolvedIdentity:
     platform_user_id: str
 
 
+def channel_user_email(platform: str, platform_user_id: str, org_id: UUID | str) -> str:
+    """The synthetic email of the user a channel identity provisions.
+
+    Namespaced by org so the same platform user id in two orgs (or two ids
+    differing only by a stripped '@') can't collide.
+    ``uq_users_org_lower_email`` on (org_id, lower(email)) enforces this, and
+    downstream lookups treat the address as a key — so anything else that
+    provisions a channel user (ops does, at checkout) must build it here.
+
+    Only '@' is stripped, so an adapter must normalise anything else that
+    cannot sit in an email local part (e.g. a leading '+' on an E.164 id)
+    before it reaches here.
+    """
+    local_part = platform_user_id.lstrip("@")
+    return f"{platform}-{local_part}@{org_id}.channels.surogate.local"
+
+
 async def resolve_identity(
     session_factory: async_sessionmaker[AsyncSession],
     platform: str,
@@ -158,16 +175,7 @@ async def get_or_create_channel_identity(
     if existing is not None:
         return existing
 
-    # Synthetic address namespaced by org so the same platform user id in two
-    # orgs (or two ids differing only by a stripped '@') can't collide.
-    # ``uq_users_org_lower_email`` on (org_id, lower(email)) enforces this,
-    # and downstream lookups treat the address as a key.
-    #
-    # Only '@' is stripped, so an adapter must normalise anything else that
-    # cannot sit in an email local part (e.g. a leading '+' on an E.164 id)
-    # before it reaches here.
-    local_part = platform_user_id.lstrip("@")
-    email = f"{platform}-{local_part}@{org_id}.channels.surogate.local"
+    email = channel_user_email(platform, platform_user_id, org_id)
 
     async with session_factory() as db:
         user_id = (
