@@ -888,7 +888,8 @@ class PromptBuilder:
 
         - ``grounding`` (default): the KB is authoritative for its
           topics -- the agent is told to consult it before answering
-          in-scope questions instead of answering from memory.
+          in-scope questions, and not to answer them from memory, the
+          web or any other source when it does not cover them.
         - ``reference``: optional supporting material, consulted at the
           agent's judgment.
 
@@ -970,15 +971,28 @@ class PromptBuilder:
         if grounding:
             lines.append("")
             lines.append("## Authoritative (consult first)")
+            # The other sources are named because "your own knowledge" and
+            # "memory" were read as the only ones excluded. On a company
+            # knowledge base, an agent with web tools found the documents did
+            # not cover a question, recast it as a question about another
+            # company and researched that on the web for twenty minutes --
+            # after the user had asked for an answer from the documents. Web
+            # tools stay available for everything outside the KB's topics.
             lines.append(
                 "These knowledge bases are your authoritative source "
                 "for the topics they cover. Every factual claim must "
                 "come from a page you have read -- do not add "
-                "information from your own knowledge even when "
-                "confident, because the user chose this knowledge base "
-                "as the source of truth. If it genuinely does not "
-                "address the question, say so plainly rather than "
-                "answering from memory -- but do not reach for that too "
+                "information from your own knowledge, a web search, a "
+                "web page or any other source, even when confident, "
+                "because the user chose this knowledge base as the "
+                "source of truth. If it genuinely does not address the "
+                "question, say so plainly and stop: do not answer from "
+                "memory or look the answer up elsewhere instead, and do "
+                "not recast the question into one another source could "
+                "answer. Search elsewhere for it only when the user "
+                "explicitly asks you to. Questions and tasks outside "
+                "these topics are unaffected -- use your other tools for "
+                "them as usual. But do not reach for \"not covered\" too "
                 "quickly: declining when the material did cover the "
                 "question denies the user an answer that was there, "
                 "and is just as much a failure as answering from a page "
