@@ -124,12 +124,16 @@ class HarnessAPIClient:
     # Skills
     # ------------------------------------------------------------------
 
-    async def list_skills(self, category: str | None = None) -> str:
+    async def list_skills(
+        self, category: str | None = None, *, leave_out: frozenset[str] = frozenset(),
+    ) -> str:
         """List available skills.  Returns JSON string for tool result.
 
         Forwards the client's ``session_id`` (if set) so the API server
         resolves the session's ``skill_overrides`` and returns the same
-        catalog the worker's slash expansion will resolve against.
+        catalog the worker's slash expansion will resolve against.  The
+        skills named in *leave_out* are not listed: those the session
+        does not have.
         """
         params: dict[str, Any] = {}
         if category:
@@ -138,7 +142,7 @@ class HarnessAPIClient:
             params["session_id"] = self._session_id
         data = await self._get("/v1/skills", params=params or None)
         # Reshape to match the existing skills_list handler response.
-        skills = data.get("skills", [])
+        skills = [s for s in data.get("skills", []) if s.get("name") not in leave_out]
         return json.dumps({
             "success": True,
             "skills": skills,

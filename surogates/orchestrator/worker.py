@@ -1031,18 +1031,22 @@ async def _load_prompt_catalogs_entitled(
 
     A restricted ``skills`` dimension hides non-included skills from
     the system prompt; the skill tool and the API listing apply the
-    same allowlist per call, so a remembered name still refuses.
+    same allowlist per call, so a remembered name still refuses.  A
+    project's master has no skill that makes a document either: the skill
+    tools leave the same ones out.
     """
     from surogates.runtime.entitlements import (
         entitled_skills,
         filter_entitled_skills,
     )
+    from surogates.workstreams import skills_left_out
 
     agents_catalog, skills_catalog = await _load_prompt_catalogs(**kwargs)
     skills_catalog = filter_entitled_skills(
         skills_catalog, entitled_skills(session_config),
     )
-    return agents_catalog, skills_catalog
+    left_out = skills_left_out(session_config)
+    return agents_catalog, [s for s in skills_catalog if s.name not in left_out]
 
 
 def build_agent_principal_resolver(*, session_factory: Any):

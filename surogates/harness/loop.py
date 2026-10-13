@@ -5127,6 +5127,21 @@ class AgentHarness(
         base.difference_update(excluded)
         return base
 
+    def _drop_project_master_mcp_tools(
+        self, tool_filter: set[str] | None, session: Session,
+    ) -> set[str] | None:
+        """A project's master has no MCP tool: an MCP server's tools do work, and work is a thread's.
+
+        Runs after ``_apply_mcp_schema_filter`` on purpose: that filter
+        re-adds this agent's discovered MCP set to a session without an
+        explicit ``allowed_tools``, which would give the master back a
+        tool stripped earlier.  Beats an explicit ``allowed_tools`` too.
+        """
+        if not is_project_master(session.config):
+            return tool_filter
+        names = set(self._tools.tool_names) if tool_filter is None else tool_filter
+        return {name for name in names if not name.startswith("mcp__")}
+
     def _apply_mcp_schema_filter(
         self, tool_filter: set[str] | None, *, explicit_allowed: bool,
     ) -> set[str] | None:
@@ -5375,19 +5390,7 @@ class AgentHarness(
                 tool_filter.discard("loop_wait")
                 if "loop_complete" in self._tools.tool_names:
                     tool_filter.add("loop_complete")
-            tool_filter = self._apply_mcp_schema_filter(
-                tool_filter, explicit_allowed=explicit_allowed,
-            )
-            tool_filter = self._apply_entitlement_exclusions(tool_filter)
-            tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
-            return self._drop_eval_excluded_tools(
-                self._ensure_always_available_tools(
-                    tool_filter, explicit_allowed=explicit_allowed,
-                ),
-                session,
-            )
-
-        if tool_filter is not None and not explicit_allowed:
+        elif tool_filter is not None and not explicit_allowed:
             tool_filter = set(tool_filter)
             tool_filter.discard("loop_wait")
             tool_filter.discard("loop_complete")
@@ -5395,6 +5398,7 @@ class AgentHarness(
             tool_filter, explicit_allowed=explicit_allowed,
         )
         tool_filter = self._apply_entitlement_exclusions(tool_filter)
+        tool_filter = self._drop_project_master_mcp_tools(tool_filter, session)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
         return self._drop_eval_excluded_tools(
             self._ensure_always_available_tools(

@@ -75,6 +75,24 @@ def master_refusal(command: str) -> str:
     )
 
 
+#: The catalog's skills that make a document.  A document written to the
+#: user's request is a thread's work, so a project's master has none of them.
+DOCUMENT_SKILLS = frozenset({"docx", "xlsx", "pptx", "pdf", "doc-coauthoring"})
+
+
+def skills_left_out(config: dict[str, Any] | None) -> frozenset[str]:
+    """The skills a session with *config* does not have: a project's master has none that make a document."""
+    return DOCUMENT_SKILLS if is_project_master(config) else frozenset()
+
+
+def master_skill_refusal(name: str) -> str:
+    """What a master's ``skill_view`` answers for a skill that makes a document."""
+    return (
+        f"The {name} skill makes a document, and in a project a document is a thread's work. "
+        "Propose a thread for it with propose_threads, or start one with start_thread where this project allows."
+    )
+
+
 def master_instructions(name: str, goal: str | None, instructions: str) -> str:
     """The master's session instructions: the project's name, goal and instructions."""
     return "\n\n".join(part for part in (f"Project: {name}", goal and f"Goal: {goal}", instructions) if part)

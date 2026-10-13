@@ -201,7 +201,10 @@ async def test_a_computer_projects_prompt_has_it_work_in_its_folder_and_propose_
     prompt = await system_prompt(api, await master_of(api, project))
     said = " ".join(prompt.split())
     assert "# Running a project" in said
-    assert "Do a simple thing yourself, here: a quick answer, creating a file, a small edit, one quick command." in said
+    assert (
+        "Do a simple thing yourself, here: a quick answer, creating a file whose whole content the user gave you, "
+        "writing a few lines, a small edit, one quick command."
+    ) in said
     assert "## The project's folder" in said
     assert "Your tools read, write and run commands in the folder itself, on that computer." in said
     assert "tell the user you cannot reach the folder until the computer is back." in said
@@ -209,7 +212,7 @@ async def test_a_computer_projects_prompt_has_it_work_in_its_folder_and_propose_
         "Should they say its access was revoked or the folder is no longer there, tell the user to open the project in "
         "Surogate Desktop on the computer it should work on and choose Use this computer for this project."
     ) in said
-    assert 'Every piece of work is a thread on the project\'s folder: propose it with `propose_threads` and `where: "device"`.' in said
+    assert 'Give a thread\'s work to a thread on the project\'s folder: propose it with `propose_threads` and `where: "device"`.' in said
     assert "You cannot start a thread yourself: the user starts each from its card, in Surogate Desktop on that computer." in said
     # It is never told to start a thread itself, or of a thread in the cloud.
     assert "## Starting threads" not in said
