@@ -26,6 +26,7 @@ Paths are relative to this skill's directory — the `staged_at` path `skill_vie
 | `scripts/add_slide.py unpacked/ slide2.xml [--after slideN.xml]` | Duplicate a slide (or a `slideLayoutN.xml`) with all the package bookkeeping. Also takes a `.pptx` directly with `-o out.pptx` |
 | `scripts/clean.py unpacked/` | Delete slides, media, and rels no longer referenced. Run **after** `<p:sldIdLst>` is final |
 | `scripts/apply_theme.js` | Node module: `const { applyTheme } = require("<this skill's directory>/scripts/apply_theme.js")`. `await applyTheme("deck.pptx", THEME)` after `pres.writeFile()` writes `THEME`'s colors and name (escaped for XML) into the deck's theme, for [structured decks](#structured-decks). Also a CLI: `node scripts/apply_theme.js deck.pptx theme.json` |
+| `scripts/example_deck.js [out.pptx]` | A minimal [structured deck](#structured-decks) — theme, two layouts with named placeholders, sections, a native chart, notes — that passes `validate.py`. Copy it and change the content rather than rediscovering the API |
 | `scripts/office/validate.py deck.pptx [--original src.pptx]` | Schema, relationship, content-type, chart and slide checks; each failure names its fix. Pass `--original` for any template-derived deck — it baselines the schema checks against the template, so the template's own XSD errors don't read as yours |
 | `scripts/office/soffice.py --headless --convert-to pdf deck.pptx` | LibreOffice wrapper — bare `soffice` hangs in this sandbox |
 
@@ -47,6 +48,8 @@ Paths are relative to this skill's directory — the `staged_at` path `skill_vie
 - **Speaker notes go in `slide.addNotes("...")`** (plain text, once per slide), never in a text box on the slide.
 - **Keep charts native.** Use `addChart()` for everything PowerPoint can chart (pass an array of `{type, data, options}` for combos). For PowerPoint-native features the library doesn't expose (trendlines, error bars), compute the extra series yourself or post-process the generated OOXML — do not fall back to a rendered image. Only chart types PowerPoint has no native form for (Sankey, network, chord) go in as images.
 - **Default charts render bare** — no title, no data labels, dated palette. Set `showTitle` + `title`, `showValue: true` + `dataLabelPosition`, `chartColors: [...]` from your palette, and quiet the frame (`catAxisLabelColor`/`valAxisLabelColor`, `valGridLine: { color, size }`, `catGridLine: { style: "none" }`, `showLegend: false` for a single series).
+- **Data labels round to whole numbers** — the default format is `#,##0`, so 1.2, 2.4 and 4.1 label as 1, 2 and 4. Set `dataLabelFormatCode` (e.g. `"0.0"`) whenever a value has decimals.
+- **Plot-area fill and border go in `plotArea: { fill: { color }, border: { pt, color } }`.** Top-level `fill`/`border` objects pass `addChart()` and then crash `writeFile()` with `(colorStr || "").replace is not a function`.
 - **On a stacked bar or column chart, `dataLabelPosition` must be `ctr`, `inEnd`, or `inBase`.** `outEnd` **corrupts the file**.
 - **A combo series using `secondaryValAxis`/`secondaryCatAxis` needs both `valAxes` and `catAxes` on the chart options, two entries each.** Without them pptxgenjs writes axis *ids* it never declares, and PowerPoint **discards that chart** and reports the file as corrupt. Supplying only `valAxes` is not enough.
 - **After `writeFile()`, run `python scripts/office/validate.py deck.pptx`.** It reports the two chart faults above and the slide-XML defects PowerPoint refuses, and names the fix for each. Fix them in your generator, not by hand-editing the packed XML.
@@ -57,12 +60,12 @@ Paths are relative to this skill's directory — the `staged_at` path `skill_vie
 
 ### Structured decks
 
-A deck built on a theme, layouts, placeholders and sections can be restyled in one place and edited in PowerPoint without fighting it. Build every new deck this way unless the user asks for a quick throwaway.
+A deck built on a theme, layouts, placeholders and sections can be restyled in one place and edited in PowerPoint without fighting it. Build every new deck this way unless the user asks for a quick throwaway; `scripts/example_deck.js` is a working starting point.
 
 1. **Theme first:** `const THEME = { name, headFontFace, bodyFontFace, colors: { dk1, lt1, dk2, lt2, accent1 … accent6, hlink, folHlink } }`, colors in hex. `pres.theme` takes the two fonts and nothing else. Name no font after that — titles get the heading font, other text the body font — except on chart text, which is hard-coded Arial: give its `*FontFace` options `"+mn-lt"` (theme body font; `"+mj-lt"` is the heading font).
 2. **`const C = pres.SchemeColor` for every color** — `C.text1`/`C.text2` are `dk1`/`dk2`, `C.background1`/`C.background2` are `lt1`/`lt2`. These take hex only, read from `THEME`: `valGridLine.color`, `catGridLine.color`, `shadow.color`, and on a one-series bar chart `invertedColors` or more than one `chartColors`. A scheme color there is written as `<a:srgbClr val="bg2"/>` without complaint, and being hex, these will not follow a later change of theme.
 3. **Sections:** `pres.addSection({ title })` just before that section's first slide, then `sectionTitle` on every `addSlide`. A slide without one — or, when sections are all declared up front, a table's auto-paged continuation slides — lands in a stray "Default-N" section.
-4. **One layout per slide frame** (`defineSlideMaster()`): title, section divider, title only, chart + commentary, table; dark and light variants if the design alternates. Text regions are named placeholders carrying position, size, weight and `color` — chart, image and table placeholders need a `color` too, or prompt text and arrays of runs come out hard-coded `000000`. Footer text, logo and `slideNumber` go on the layout, never on a slide.
+4. **One layout per slide frame** (`defineSlideMaster()`): title, section divider, title only, chart + commentary, table; dark and light variants if the design alternates. Text regions are named placeholders carrying position, size, weight and `color` — chart, image and table placeholders need a `color` too, or prompt text and arrays of runs come out hard-coded `000000`. Footer text, logo and `slideNumber` go on the layout, never on a slide. **Title placeholders render centred** unless their options set `align: "left"`; body placeholders start left.
 5. **Fill by name:** `addSlide({ masterName, sectionTitle })`, then `addText("…", { placeholder: "title" })` with no position, size or color — the placeholder's own options win, and anything it doesn't set (italic, `align`, `fontFace`) still applies; style one run with `[{ text, options }]`. A misspelt `placeholder` or `masterName` fails silently (a stray text box at 0,0; the blank layout). Only `title`, `body` and `chart` placeholders fill by name alone: `addImage({ placeholder })` takes the placeholder's x and y but not its size (a 1" × 1" picture) — pass `w`/`h` too. `addTable({ placeholder })` takes its x and y only — always pass `w`; when it auto-pages it ignores the placeholder and runs off the slide, so also pass `x`, `y` and `autoPageSlideStartY` (same as `y`, or continuation pages are laid out from the top margin), give the layout a `margin` whose bottom clears the footer, and fill the continuation slides' titles through `slide.newAutoPagedSlides`.
 6. **A layout is the frame, not the "layout" Design Ideas means.** Cards, icons, stat callouts and images are still composed slide by slide on top of it, in scheme colors, each with an `objectName` — every Design Idea applies, and most content slides sit on the title-only layout.
 7. **Write, then apply the theme:** `await pres.writeFile({ fileName: "deck.pptx" })`, then `await applyTheme("deck.pptx", THEME)`. pptxgenjs cannot write theme colors: until this runs, scheme colors resolve to Office's stock palette. It throws, changing nothing, on a scheme color in a hex-only option — fix what it names and rebuild.
@@ -231,9 +234,19 @@ pptxgenjs emits chart XML PowerPoint refuses to open, and every other tool
 accepts: python-pptx opens those decks, LibreOffice renders them, the XSD
 passes them. Every failure names its fix. Fix it in the generator and rebuild.
 
+### Layout QA (required)
+
+After converting to PDF (see [Converting to Images](#converting-to-images)), read each slide's text as it was laid out:
+
+```bash
+pdftotext -layout -f 3 -l 3 output.pdf -      # one slide; drop -f/-l for all
+```
+
+Every line break and roughly where each line starts are in the output: a word wrapped onto a line of its own, a title centred that should sit left, text out of order. It is exact and cheap — check it before the images.
+
 ### Visual QA (required)
 
-Convert the slides to images (see [Converting to Images](#converting-to-images)) and inspect every one. After staring at the generating code you tend to see what you expect rather than what rendered, so look at the images fresh with `vision_analyze`, asking it about the defects below (or hand the image paths to a `delegate_task` worker). User-visible defects to look for:
+Convert the slides to images (see [Converting to Images](#converting-to-images)) and inspect every one. After staring at the generating code you tend to see what you expect rather than what rendered, so look at the images fresh with `vision_analyze`, asking it about the defects below (or hand the image paths to a `delegate_task` worker). `vision_analyze` sometimes reports defects that aren't there and misses real ones: confirm a reported wrap or overflow with `pdftotext -layout` before changing the deck, and use the images for what text can't show — overlaps, crops, contrast, shape alignment. User-visible defects to look for:
 
 - **Text overflow or text cut off at a box or slide boundary — check this first.** It is the most common defect and always user-visible. (For a font the previewer renders unreliably per Typography, the preview is approximate: trust the ~10% slack you left, not its apparent fit.)
 - Overlapping elements (text through shapes, lines through words, stacked elements)
