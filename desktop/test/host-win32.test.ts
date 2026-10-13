@@ -2,9 +2,11 @@
 // (clean-child.ts), on the app's node, and the host starts its helper with no sandbox, its walk the containment
 // (hosts/host.ts). Every folder it is given is named by its path in the guest. A chat's host answers its operations
 // and refuses a git hook a command left outright; a landing's host lands a thread's work from its copy and puts it back;
-// a recovery's host puts back what a landing cut short. On Windows alone, with the app built (npm run build:win32).
+// a recovery's host puts back what a landing cut short. Through the app's tool hosts, what a landing keeps is read by
+// this computer's own path: a forgetting that leaves out a step its helper recorded forgets nothing, and the landing's
+// host is the one a read of the folder finds. On Windows alone, with the app built (npm run build:win32).
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,7 +20,8 @@ import { ntat } from "../src/files/ntat.js";
 import { keyOf } from "../src/history/place.js";
 import { HOOKS_REFUSED_NOTICE } from "../src/hosts/hooks.js";
 import type { FromHost, HostStart } from "../src/hosts/messages.js";
-import { forkHost, type HostProcess } from "../src/hosts/tool-hosts.js";
+import { forkHost, type HostProcess, type Recovery, ToolHosts } from "../src/hosts/tool-hosts.js";
+import type { Operation } from "../src/link/protocol.js";
 import { guestPathOf } from "../src/session-path.js";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -175,5 +178,61 @@ describe.runIf(process.platform === "win32")("a file host on Windows", { timeout
     expect(await recovery.op("1", "land", { action: "recover" })).toEqual({ ok: { restored: [], beside: [], lost: [], unread: [] } });
     // A recovery's helper does nothing else.
     expect(await recovery.op("2", "read", { key: `${guest}/a.txt`, max_bytes: null })).toHaveProperty("error");
+  });
+
+  it("refuses, through the app's tool hosts, a landing's forgetting that leaves out a step its helper recorded, and finds that landing's host before the folder is read", async () => {
+    const key = keyOf(guest);
+    const history = join(data, "history", key);
+    const copy = join(history, "threads", THREAD);
+    mkdirSync(copy, { recursive: true });
+    writeFileSync(join(copy, "a.txt"), "alpha, by the thread\n");
+    const identity = { ...walkedIdentity(folder), boot: BOOT_ID };
+    // The folder's place's record, as the app writes it (history/place.ts): a recovery's host would be started on the folder it names.
+    writeFileSync(join(data, "history", `${key}.json`), JSON.stringify({ path: guest, dev: String(identity.dev), ino: String(identity.ino), boot: BOOT_ID }));
+    const told: Recovery[] = [];
+    const tools = new ToolHosts({
+      bindingOf: (root) => (root === THREAD ? { folder: guest, ...identity, history: THREAD } : undefined),
+      copies: {
+        open: async (root) => ({
+          copy: { place: { key, history, real: { path: guest, ...identity } }, folder: { path: guestPathOf(copy), ...walkedIdentity(copy), boot: BOOT_ID }, at: guest },
+          handle: Object.freeze({ root }),
+        }),
+        close: () => {},
+        // The folder's history: the landing may go, recorded.
+        ask: async () => ({ ok: { landing: "e".repeat(40) } }),
+      },
+      dataDir: data,
+      cacheDir: join(base, "cache"),
+      env: { HOME: join(base, "home"), LANG: "C.UTF-8" },
+      appDirs: [dirname(process.execPath), PACKAGE],
+      landWaitMs: 2_000,
+      recovered: (recovery) => void told.push(recovery),
+    });
+    const step = (action: string, more: Record<string, unknown> = {}): Operation => ({
+      id: randomUUID(), sessionId: THREAD, callingSessionId: THREAD, invocationId: "land:7", ordinal: 1, kind: "land", args: { action, ...more }, digest: "d",
+    });
+    const signal = new AbortController().signal;
+    try {
+      const looked = (await tools.land(step("revisions", { paths: ["a.txt"] }), signal)) as { ok: { revisions: Array<[string, string]> } };
+      const [[, expected]] = looked.ok.revisions as [[string, string]];
+      const applied = { step: 1, path: "a.txt", before: blob("alpha\n"), after: blob("alpha, by the thread\n") };
+      expect(await tools.land(step("apply", { saga: SAGA, ...applied, expected }), signal)).toMatchObject({ ok: { path: "a.txt" } });
+      const keeps = join(data, "landings", key, SAGA);
+      expect(existsSync(join(keeps, "1"))).toBe(true);
+      // Before the folder is read for a thread: the landing's host on it, whose helper has put back what was cut short,
+      // is the word, and no recovery's host is started to wait for the folder that host holds.
+      expect(await tools.recoverBefore(guest, signal)).toBeNull();
+      expect(told).toEqual([]);
+      // A forgetting that leaves out the step the helper recorded forgets nothing the landing kept.
+      expect(await tools.land(step("forget", { saga: SAGA, applied: [] }), signal)).toEqual({
+        error: { type: "conflict", message: "Step 1 of this landing, of a.txt, was applied on this computer, and the steps named to forget the landing leave it out, so nothing the landing kept was forgotten" },
+      });
+      expect(readFileSync(join(keeps, "1"), "utf8")).toBe("alpha\n");
+      // Named, it is forgotten, and what the landing kept goes.
+      expect(await tools.land(step("forget", { saga: SAGA, applied: [applied] }), signal)).toEqual({ ok: {} });
+      expect(existsSync(keeps)).toBe(false);
+    } finally {
+      await tools.stop();
+    }
   });
 });
