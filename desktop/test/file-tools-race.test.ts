@@ -1,4 +1,4 @@
-// Spike Q7's race (M8), on every OS the file host is built for: a program of this computer's, outside every sandbox,
+// The link-flip race, on every OS the file host is built for: a program of this computer's, outside every sandbox,
 // flips a folder in the chat's folder between a folder and a link to one beside it, while the file tools work through
 // it, in the file host the app starts (on its own node, bin/node, the helper in srt: bubblewrap on Linux, Seatbelt on
 // macOS), and in a bare control, the helper's own checks alone, outside srt, which the race beats.
@@ -128,7 +128,7 @@ describe("the file tools, against a process of this computer's racing them", { t
     if (process.platform === "linux") expect(bare.reached + bare.wroteOutside).toBeGreaterThan(0);
     const executor = toolHosts();
     const sandboxed = await race((kind, args) => executor.run(op(kind, args), signal()), folder, outside);
-    console.log(`M8: ${JSON.stringify({ bare, sandboxed })}`);
+    console.log(`the link-flip race: ${JSON.stringify({ bare, sandboxed })}`);
     // The file host worked in the folder: its writes landed while sub was a folder.
     expect(sandboxed).toEqual({ reached: 0, wrote: expect.any(Number), wroteOutside: 0, kept: "OUTSIDE\n" });
     expect(sandboxed.wrote).toBeGreaterThan(0);
