@@ -31,6 +31,8 @@ export interface KnownBrowsers {
   checked(real: string): Promise<void>;
   /** The kinds of file Custom…'s dialog offers, where this OS names its programs by one: none, any file. */
   pickFilters?: ReadonlyArray<{ name: string; extensions: string[] }>;
+  /** The version of the browser at *executable*, read without starting it, where `--version` would start it: else run so. */
+  version?(executable: string): Promise<string | null>;
 }
 
 const NONE: KnownBrowsers = {

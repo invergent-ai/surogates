@@ -71,6 +71,8 @@ export interface ProgramTools {
   verify(path: string): Promise<{ trusted: boolean; signer: string | null; remote: boolean }>;
   /** What the file at *path* is now, as far as a change of it shows. */
   stamp(path: string): string;
+  /** The program at *path*'s product version, from its own version resource, or null where it has none. */
+  version(path: string): Promise<string | null>;
 }
 
 /** What a file is now, as far as a change of it shows: an update replaces its program. */
@@ -99,6 +101,7 @@ export const SYSTEM: ProgramTools = {
     new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("no answer in time")), VERIFY_MS).unref()),
   ])),
   stamp: fileStamp,
+  version: (path) => helper(["version", path]).then((said) => said.trim() || null, () => null),
 };
 
 // A whole path on a drive, as the environment names a folder: neither relative nor on a network share.
@@ -186,6 +189,8 @@ export function windowsBrowsers(tools: ProgramTools = SYSTEM, env: NodeJS.Proces
     },
     // Windows names a program by its .exe, as the open dialog's filter does (Electron, dialog, filters).
     pickFilters: [{ name: "Programs", extensions: ["exe"] }],
+    // A browser on Windows starts a window of its own for --version, and prints nothing: its version is its file's.
+    version: (executable) => tools.version(executable),
   };
 }
 

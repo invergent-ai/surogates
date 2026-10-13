@@ -209,6 +209,35 @@ fn lists_the_roots_an_administrator_or_a_policy_gave_that_windows_trusts_for_tls
 }
 
 #[test]
+fn says_a_program_s_version_from_its_own_file_without_starting_it() {
+    let version = said(&["version", EDGE]);
+    let parts: Vec<u32> = version.trim_end().split('.').map(|part| part.parse().expect("a number")).collect();
+    assert_eq!(parts.len(), 4, "{version}");
+    assert!(parts[0] >= 100, "{version}");
+    assert!(version.ends_with('\n'));
+    // As Windows's own reading of the file says it.
+    let shown = Command::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+        .args(["-NoProfile", "-Command", &format!("(Get-Item '{EDGE}').VersionInfo.ProductVersion")])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&shown.stdout).trim(), version.trim_end());
+    let done = helper(&[OsStr::new("version"), OsStr::new("C:\\nowhere\\none.exe")]);
+    assert_eq!(done.status.code(), Some(1));
+}
+
+#[test]
+fn is_a_windows_subsystem_program_whose_answers_reach_its_caller_s_pipe() {
+    // Its PE's optional header names its subsystem (Microsoft, "PE Format", Windows-specific fields): 2, the GUI's,
+    // for which Windows makes no console.
+    let bytes = std::fs::read(HELPER).unwrap();
+    let pe = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[pe..pe + 4], b"PE\0\0");
+    assert_eq!(u16::from_le_bytes(bytes[pe + 0x5c..pe + 0x5e].try_into().unwrap()), 2);
+    // And what it says reaches the pipe it is given.
+    assert!(!said(&["procs"]).is_empty());
+}
+
+#[test]
 fn lists_this_user_s_processes_with_their_programs_and_arguments_and_no_one_else_s() {
     let marker = format!("surogate-helper-test-{}", std::process::id());
     let mut child = Command::new("C:\\Windows\\System32\\cmd.exe");

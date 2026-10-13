@@ -18,12 +18,16 @@ it("is in the installed app's bin folder on Windows, and its build's own in a de
 describe("a run of surogate-helper.exe on Windows", () => {
   // What the app hands child_process to start the helper with, as it is asked.
   async function windowsStart(run: (helper: typeof import("../src/native-helper.js")) => unknown) {
-    const asked: Array<{ file: string; args: string[]; env: unknown }> = [];
+    const asked: Array<{ file: string; args: string[]; env: unknown; windowsHide: unknown }> = [];
     vi.doMock("node:child_process", async (actual) => ({
       ...(await actual<typeof import("node:child_process")>()),
-      spawnSync: (file: string, args: string[], options: { env: unknown }) => {
-        asked.push({ file, args, env: options.env });
+      spawnSync: (file: string, args: string[], options: { env: unknown; windowsHide?: unknown }) => {
+        asked.push({ file, args, env: options.env, windowsHide: options.windowsHide });
         return { status: 0, stdout: "answered", stderr: "" };
+      },
+      execFile: (file: string, args: string[], options: { env: unknown; windowsHide?: unknown }, done: (error: null, stdout: string, stderr: string) => void) => {
+        asked.push({ file, args, env: options.env, windowsHide: options.windowsHide });
+        done(null, "answered", "");
       },
     }));
     const kept = process.env.SystemRoot;
@@ -38,11 +42,17 @@ describe("a run of surogate-helper.exe on Windows", () => {
     }
   }
 
-  it("starts the helper itself, the one program through which every other is started there, with no environment of the app's but the Windows folder", async () => {
+  it("starts the helper itself, the one program through which every other is started there, with no window and no environment of the app's but the Windows folder", async () => {
     const program = "C:\\Program Files\\Surogate\\bin\\surogate-helper.exe";
-    const { said, asked } = await windowsStart(({ helperSync }) => helperSync(["verify", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"], program));
+    const chrome = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    const { said, asked } = await windowsStart(({ helperSync }) => helperSync(["verify", chrome], program));
     expect(said).toBe("answered");
-    expect(asked).toEqual([{ file: program, args: ["verify", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"], env: { SystemRoot: "C:\\Windows" } }]);
+    const { said: later, asked: askedLater } = await windowsStart(({ helper }) => helper(["version", chrome], program));
+    expect(await later).toBe("answered");
+    // A run waited for and one that is not: each with no console window, which an app started from the Start menu
+    // would otherwise give it.
+    for (const run of [...asked, ...askedLater]) expect(run).toEqual({ file: program, args: run.args, env: { SystemRoot: "C:\\Windows" }, windowsHide: true });
+    expect([...asked, ...askedLater].map(({ args }) => args)).toEqual([["verify", chrome], ["version", chrome]]);
   });
 
   it("starts none named by a path that is not whole", async () => {

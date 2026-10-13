@@ -31,14 +31,17 @@ export const helperAt: (dir: string) => string = forThisOs({ linux: inBundle, da
 
 export const HELPER = helperAt(import.meta.dirname);
 
-// How the helper is started, and the environment it is given: Windows's own libraries read the Windows folder from
-// SystemRoot, and nothing else of the app's is given. Unsure: Microsoft does not say which of them read it; a process
-// started without it is said to fail in some (Python's documentation, subprocess.Popen, env).
+// How the helper is started, and what it is started with: the environment, which on Windows holds the Windows folder
+// alone, as Windows's own libraries read it from SystemRoot (Unsure: Microsoft does not say which of them read it; a
+// process started without it is said to fail in some, Python's documentation, subprocess.Popen, env); and on Windows
+// no window: an app with no console of its own, as the installed app started from the Start menu has none, would
+// otherwise give a console program a new console window at each run (Node, child_process, windowsHide; the helper is
+// a Windows-subsystem program besides, native/windows/helper).
 interface Start {
   start(program: string, args: string[]): [file: string, args: string[]];
-  env: NodeJS.ProcessEnv;
+  options: { env: NodeJS.ProcessEnv; windowsHide?: boolean };
 }
-const posixStart: Start = { start: (program, args) => cleanly(program, args), env: { PATH: "/usr/bin:/bin" } };
+const posixStart: Start = { start: (program, args) => cleanly(program, args), options: { env: { PATH: "/usr/bin:/bin" } } };
 const START: Start = forThisOs<Start>({
   linux: posixStart,
   darwin: posixStart,
@@ -47,9 +50,9 @@ const START: Start = forThisOs<Start>({
       if (!/^[A-Za-z]:\\/.test(program)) throw new Error(`${program} is not named by its whole path`);
       return [program, args];
     },
-    env: process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {},
+    options: { env: process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}, windowsHide: true },
   },
-}) ?? { start: () => notBuilt("Starting Surogate Desktop's helper"), env: {} };
+}) ?? { start: () => notBuilt("Starting Surogate Desktop's helper"), options: { env: {} } };
 
 // More than any answer of the helper's takes: a busy Mac's processes, with their arguments.
 const MAX_BYTES = 32 * 1024 * 1024;
@@ -61,7 +64,7 @@ const failed = (program: string, args: string[], stderr: string, error: Error | 
 
 /** What *program* (the helper) prints for *args*, waited for on this thread: for an answer a start needs before it goes on. */
 export function helperSync(args: string[], program = HELPER): string {
-  const done = spawnSync(...START.start(program, args), { encoding: "utf8", env: START.env, timeout: TIMEOUT_MS, maxBuffer: MAX_BYTES });
+  const done = spawnSync(...START.start(program, args), { ...START.options, encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: MAX_BYTES });
   if (done.status !== 0) throw failed(program, args, done.stderr ?? "", done.error);
   return done.stdout;
 }
@@ -69,7 +72,7 @@ export function helperSync(args: string[], program = HELPER): string {
 /** What *program* (the helper) prints for *args*. */
 export function helper(args: string[], program = HELPER): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(...START.start(program, args), { encoding: "utf8", env: START.env, timeout: TIMEOUT_MS, maxBuffer: MAX_BYTES }, (error, stdout, stderr) => {
+    execFile(...START.start(program, args), { ...START.options, encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: MAX_BYTES }, (error, stdout, stderr) => {
       if (error) reject(failed(program, args, stderr, error));
       else resolve(stdout);
     });

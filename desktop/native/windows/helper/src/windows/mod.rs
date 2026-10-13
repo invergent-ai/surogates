@@ -5,6 +5,7 @@ pub mod look;
 pub mod procs;
 pub mod trust;
 pub mod verify;
+pub mod version;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;

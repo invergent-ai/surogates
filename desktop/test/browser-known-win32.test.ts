@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Disk } from "../src/browser/choose.js";
 import {
@@ -34,6 +34,7 @@ function tools(registered: Record<string, string[]> = {}, signed: (path: string)
       return signed(path);
     },
     stamp: (path) => path,
+    version: async () => "1.0.0.0",
   };
   return { own, checks, asked, held, release: () => waiting.splice(0).forEach((go) => go()) };
 }
@@ -133,6 +134,7 @@ describe("a browser the app drives on Windows", () => {
         return verdict;
       },
       stamp: (path) => path,
+      version: async () => null,
     };
     const known = windowsBrowsers(own, ENV);
     for (const path of Object.keys(verdicts)) await known.checked(path);
@@ -164,5 +166,40 @@ describe("a browser the app drives on Windows", () => {
     const { KNOWN_BROWSERS } = await importedOn("win32", () => import("../src/browser/known.js"));
     expect(KNOWN_BROWSERS.refused("C:\\Tools\\notes.txt", disk)).toBe(NOT_A_PROGRAM);
     expect(win32.isAbsolute(KNOWN_BROWSERS.candidates("C:\\Users\\Ana")[0]!.paths[0] ?? "C:\\")).toBe(true);
+  });
+});
+
+describe("a browser's version on Windows", () => {
+  it("is read from its program's own version resource by the helper, and the browser is never started to say it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "windows-version-"));
+    const program = join(dir, "chrome.exe");
+    writeFileSync(program, "MZ");
+    const asked: string[][] = [];
+    vi.doMock("../src/native-helper.js", () => ({
+      helper: async (args: string[]) => {
+        asked.push(args);
+        return "154.0.8037.58\r\n";
+      },
+      helperSync: () => "",
+    }));
+    vi.doMock("node:child_process", async (actual) => ({
+      ...(await actual<typeof import("node:child_process")>()),
+      execFile: () => expect.unreachable("no browser is started for its version"),
+    }));
+    try {
+      const { browserVersion } = await importedOn("win32", () => import("../src/browser/choose.js"));
+      expect(await browserVersion(program)).toBe("154.0.8037.58");
+      expect(asked).toEqual([["version", program]]);
+    } finally {
+      vi.doUnmock("../src/native-helper.js");
+      vi.doUnmock("node:child_process");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is none where the helper says none", async () => {
+    const { own } = tools();
+    const known = windowsBrowsers({ ...own, version: async () => null }, ENV);
+    expect(await known.version!("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")).toBeNull();
   });
 });

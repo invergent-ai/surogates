@@ -72,9 +72,15 @@ pub fn for_server_auth(usages: &Usages) -> bool {
     }
 }
 
+/// A program's version, as its version resource's fixed part gives its product version in two words (Microsoft,
+/// VS_FIXEDFILEINFO, dwProductVersionMS and dwProductVersionLS): "major.minor.build.patch".
+pub fn version(most: u32, least: u32) -> String {
+    format!("{}.{}.{}.{}", most >> 16, most & 0xffff, least >> 16, least & 0xffff)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{for_server_auth, program_name, unquoted, Process, Usages, Verdict, SERVER_AUTH};
+    use super::{for_server_auth, program_name, unquoted, version, Process, Usages, Verdict, SERVER_AUTH};
 
     #[test]
     fn trusts_a_root_for_tls_only_where_its_purposes_allow_server_authentication() {
@@ -86,6 +92,12 @@ mod tests {
         assert!(!for_server_auth(&Usages::Only(vec!["1.3.6.1.5.5.7.3.10".into()])));
     }
 
+    #[test]
+    fn says_a_version_from_its_two_words() {
+        assert_eq!(version(154 << 16, (8037 << 16) | 58), "154.0.8037.58");
+        assert_eq!(version(0, 0), "0.0.0.0");
+        assert_eq!(version(u32::MAX, u32::MAX), "65535.65535.65535.65535");
+    }
 
     #[test]
     fn says_a_process_as_a_json_line() {
