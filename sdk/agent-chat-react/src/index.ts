@@ -174,6 +174,7 @@ export type {
   AgentChatThreadRow,
   AgentChatToolCallInfo,
   AgentChatWorker,
+  AgentChatWorkspaceEditor,
   AgentChatWorkspaceEntry,
   AgentChatWorkspaceFile,
   AgentChatWorkspaceTree,

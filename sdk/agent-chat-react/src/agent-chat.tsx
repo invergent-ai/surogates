@@ -643,6 +643,7 @@ export function AgentChat({
                   adapter={adapter}
                   sessionId={sessionId}
                   path={previewPath}
+                  view={effectiveDisabled}
                   onClose={() => setOpenPane(null)}
                 />
               )}

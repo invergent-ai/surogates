@@ -3,7 +3,9 @@ import type {
 	AgentChatAdapter,
 	AgentChatWorkspaceFile,
 } from "../../types";
+import { isOfficeDocument } from "../../lib/office";
 import { FileViewer } from "./file-viewer";
+import { OfficeEditorPane } from "./office-editor-pane";
 
 /**
  * The file preview as a right-column drawer.
@@ -19,10 +21,18 @@ interface WorkspaceFileDrawerProps {
 	adapter: AgentChatAdapter;
 	sessionId: string;
 	path: string;
+	view?: boolean;
 	onClose: () => void;
 }
 
-export function WorkspaceFileDrawer({
+export function WorkspaceFileDrawer({ adapter, sessionId, path, view = false, onClose }: WorkspaceFileDrawerProps) {
+	if (isOfficeDocument(path) && adapter.getWorkspaceEditorConfig) {
+		return <OfficeEditorPane adapter={adapter} sessionId={sessionId} path={path} view={view} onClose={onClose} />;
+	}
+	return <WorkspaceFilePreview adapter={adapter} sessionId={sessionId} path={path} onClose={onClose} />;
+}
+
+function WorkspaceFilePreview({
 	adapter,
 	sessionId,
 	path,
