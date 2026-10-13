@@ -33,6 +33,7 @@ from surogates.runtime.governance import (
     WORKER_SELF_TOOLS,
     build_governance_gate,
 )
+from surogates.tools.builtin.care_team import care_team_tool_exclusions
 from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
 from surogates.whiteboard.session import is_whiteboard_session
@@ -1981,6 +1982,13 @@ async def run_worker(settings: Settings) -> None:
             tool_registry=tool_registry,
             mcp_scope=mcp_entitlement_scope,
             browser_enabled=ctx.browser_enabled,
+        )
+        # Rides the exclusion set because the harness applies it to the
+        # schemas after everything else, beating an explicit allowed_tools:
+        # the care-team tools reach across patients, so a patient's
+        # session must never be offered them whatever its config says.
+        entitlement_excluded_tools |= await care_team_tool_exclusions(
+            session_factory, session, programs_enabled=ctx.programs_enabled,
         )
         if entitlement_excluded_tools:
             effective_tools.difference_update(entitlement_excluded_tools)
