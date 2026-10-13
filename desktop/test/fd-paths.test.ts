@@ -17,7 +17,7 @@ const calls = vi.hoisted(() => ({ made: [] as unknown[][] }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<Record<string, unknown>>();
   const names = [
-    "accessSync", "chmodSync", "copyFileSync", "linkSync", "lstatSync", "mkdirSync", "opendirSync", "openSync", "readdirSync",
+    "accessSync", "chmodSync", "copyFileSync", "existsSync", "linkSync", "lstatSync", "mkdirSync", "opendirSync", "openSync", "readdirSync",
     "readFileSync", "readlinkSync", "renameSync", "rmdirSync", "statSync", "unlinkSync",
   ];
   return {
@@ -80,6 +80,9 @@ describe("Linux's FdPaths", () => {
     const each: Array<[string, () => unknown, unknown[]]> = [
       ["lstatSync", () => linuxFdPaths.lstat({ dir: held, name: "a" }), [at("a"), { bigint: true }]],
       ["statSync", () => linuxFdPaths.stat({ dir: held, name: "a" }), [at("a")]],
+      ["statSync", () => linuxFdPaths.stat({ dir: held, name: "a" }, { bigint: true }), [at("a"), { bigint: true }]],
+      ["existsSync", () => linuxFdPaths.exists({ dir: held, name: "a" }), [at("a")]],
+      ["readdirSync", () => linuxFdPaths.readdir({ dir: held }), [at()]],
       ["accessSync", () => linuxFdPaths.access({ dir: held, name: "a" }, constants.R_OK | constants.W_OK), [at("a"), constants.R_OK | constants.W_OK]],
       ["linkSync", () => linuxFdPaths.link({ dir: held, name: "a" }, { dir: held, name: "c" }), [at("a"), at("c")]],
       ["renameSync", () => linuxFdPaths.rename({ dir: held, name: "c" }, join(dir, "d")), [at("c"), join(dir, "d")]],
@@ -142,21 +145,29 @@ describe("Linux's FdPaths", () => {
 });
 
 describe("the file host's FdPaths", () => {
-  it("are Linux's on Linux, and macOS's on macOS", async () => {
+  it("are Linux's on Linux, macOS's on macOS, and Windows's on Windows", async () => {
     expect((await import("../src/files/fd-paths.js")).fdPaths).toBe(linuxFdPaths);
     const [{ fdPaths }, { darwinFdPaths }] = await importedOn("darwin", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-darwin.js")]));
     expect(fdPaths).toBe(darwinFdPaths);
+    const [windows, { win32FdPaths }] = await importedOn("win32", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-win32.js")]));
+    expect(windows.fdPaths).toBe(win32FdPaths);
+  });
+
+  it("bind nothing on Linux, whose sandbox binds the folder, and give a program a path as it is", () => {
+    expect(linuxFdPaths.bind([dir])).toBeUndefined();
+    const outside = linuxFdPaths.outside(join(dir, "a"));
+    expect([outside.path, outside.empty]).toEqual([join(dir, "a"), false]);
+    expect(outside.release()).toBeUndefined();
   });
 
   it("refuse every call, in words, on a system the file host is not built for yet, and are shown there as any object is", async () => {
-    const { fdPaths } = await importedOn("win32", () => import("../src/files/fd-paths.js"));
-    const { notBuiltWords } = await importedOn("win32", () => import("../src/platform.js"));
-    const words = "The file host is not built for Windows yet";
+    const { fdPaths } = await importedOn("freebsd", () => import("../src/files/fd-paths.js"));
+    const { notBuiltWords } = await importedOn("freebsd", () => import("../src/platform.js"));
+    const words = "The file host is not built for freebsd yet";
     expect(words).toBe(notBuiltWords("The file host"));
     // files/ keeps its own copy of the OSes' names, as the agent's disk holds no platform.js: the two name each OS alike.
     const [own, app] = await Promise.all([import("../src/files/os-names.js"), import("../src/platform.js")]);
     expect(own.OS_NAMES).toEqual(app.OS_NAMES);
-    await expect(importedOn("freebsd", async () => (await import("../src/files/fd-paths.js")).fdPaths.hold(dir))).rejects.toThrow(new Error("The file host is not built for freebsd yet"));
     expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
     expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));
     expect(() => fdPaths.handed()).toThrow(new Error(words));

@@ -3,7 +3,7 @@
 // surogates/tools/utils/workspace_sandbox.py. In the file helper these run in the
 // sandbox's view of the filesystem, whose mounts are the real boundary.
 
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, readFileSync } from "node:fs";
 import { posix } from "node:path";
 
 import { Failure, NUL_REFUSED, osError, sandboxError, valueError } from "./answers.js";
@@ -80,7 +80,9 @@ function joinRealPath(path: string, rest: string, seen: Map<string, string | nul
     let link = false;
     try {
       link = lies !== null && fdPaths.lstat(lies).isSymbolicLink();
-    } catch {
+    } catch (error) {
+      // What the system answered is no link; a refusal of the file host's own, as Windows's names are, stands.
+      if (!systems(error)) throw error;
       link = false;
     }
     if (!link || lies === null) {
@@ -118,7 +120,7 @@ export function realpath(path: string, links = new Map<string, string | null>(),
 // Path.resolve() fails on a loop only when stat of the result runs into one.
 function stillLoops(path: string): boolean {
   try {
-    statSync(path);
+    fdPaths.stat(path);
     return false;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ELOOP";
@@ -147,7 +149,12 @@ export function expandUser(path: string, home: string): string {
 function homeOf(user: string): string | null {
   let passwd: string;
   try {
-    passwd = readFileSync("/etc/passwd", "utf8");
+    const fd = fdPaths.open("/etc/passwd", constants.O_RDONLY);
+    try {
+      passwd = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return null;
   }
@@ -157,6 +164,10 @@ function homeOf(user: string): string | null {
   }
   return null;
 }
+
+// Whether *error* is the system's answer to a look, with its errno's name, as every one of Node's is: not one of the file
+// host's own refusals, as an OS it is not built for answers, or as Windows's names are refused (fd-paths-win32.ts).
+const systems = (error: unknown): boolean => typeof (error as NodeJS.ErrnoException | null)?.code === "string";
 
 // Whether *path* is *folder* or lies inside it, by whole components.
 export function inside(path: string, folder: string): boolean {
@@ -168,8 +179,9 @@ function linkless(path: string): boolean {
   for (let end = path.indexOf("/", 1); ; end = path.indexOf("/", end + 1)) {
     try {
       if (fdPaths.lstat(end < 0 ? path : path.slice(0, end)).isSymbolicLink()) return false;
-    } catch {
-      // Not there, or not this user's to look at: no link that leads anywhere.
+    } catch (error) {
+      // Not there, or not this user's to look at: no link that leads anywhere. A refusal of the file host's own stands.
+      if (!systems(error)) throw error;
     }
     if (end < 0) return true;
   }

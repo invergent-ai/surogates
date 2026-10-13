@@ -62,9 +62,9 @@ describe("the guest's agent disk", () => {
     expect(missing).toEqual([]);
   });
 
-  it("loads nothing beside the app's code but fsat, which the file host loads on macOS alone", () => {
+  it("loads nothing beside the app's code but fsat and ntat, which the file host loads on macOS and on Windows alone", () => {
     const beside = modules.flatMap((file) => loaded(readFileSync(join(SRC, file), "utf8")).map((spec) => `${file}: ${spec}`));
-    expect(beside).toEqual(["files/fsat.ts: ../../dist/native/fsat.node"]);
+    expect(beside).toEqual(["files/fsat.ts: ../../dist/native/fsat.node", "files/ntat.ts: ../../dist/native/ntat.node"]);
     const flags = readFileSync(join(SRC, "files", "flags.ts"), "utf8");
     expect(code(flags)).toMatch(/process\.platform === "darwin" \? fsat\(\)\.constants : null/);
   });

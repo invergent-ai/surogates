@@ -136,7 +136,7 @@ it("finds what fs gives taken whole where a record of the two is, which then rea
   ]);
 });
 
-it("is a file's device and inode as fs gives them, on Linux and macOS, as numbers or as bigints", async () => {
+it("is a file's device and inode as fs gives them, on Linux and macOS, as numbers or as bigints; on Windows the walk's alone", async () => {
   const { statSync } = await import("node:fs");
   const stats = statSync(DESKTOP);
   const big = statSync(DESKTOP, { bigint: true });
@@ -145,5 +145,10 @@ it("is a file's device and inode as fs gives them, on Linux and macOS, as number
   const darwin = await importedOn("darwin", () => import("../src/files/identity.js"));
   expect(darwin.identityOf(stats)).toEqual({ dev: stats.dev, ino: stats.ino });
   const windows = await importedOn("win32", () => import("../src/files/identity.js"));
-  expect(() => windows.identityOf(stats)).toThrow(new Error("A folder's identity is not built for Windows yet"));
+  expect(() => windows.identityOf(stats)).toThrow(new Error("A file's identity on Windows is read through the file host's walk, not from Node's stats"));
+  // What the walk made carries the identity it read (fd-paths-win32.ts).
+  const made = windows.walked({ ...big, dev: 7n, ino: 9n } as typeof big);
+  expect(windows.identityOf(made)).toEqual({ dev: 7n, ino: 9n });
+  const other = await importedOn("freebsd", () => import("../src/files/identity.js"));
+  expect(() => other.identityOf(stats)).toThrow(new Error("A folder's identity is not built for freebsd yet"));
 });
