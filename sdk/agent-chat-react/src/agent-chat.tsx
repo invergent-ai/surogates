@@ -237,6 +237,9 @@ export function AgentChat({
     setFilesOpen(false);
   }, [runtime.viewMode]);
 
+  // The document the agent's live edits last opened in the file pane.
+  const officeAutoOpened = useRef<string | null>(null);
+
   // A different session is a different workspace: fold the accordion and
   // drop the old session's selection and preview rather than carrying them
   // where they refer to nothing.
@@ -245,6 +248,7 @@ export function AgentChat({
     setWorkspacePath(null);
     setPreviewPath(null);
     setOpenPane(null);
+    officeAutoOpened.current = null;
   }, [sessionId]);
   const readOnly = readOnlyReasonForSession(runtime.session);
   // The canvas view is offered only on a session that was created as a
@@ -391,16 +395,19 @@ export function AgentChat({
     setMobileView("file");
   }, []);
 
-  // A live office_edit opens its document beside the chat, unless the user is looking at another file;
-  // the phone's chat stays in view.
+  // A live office_edit opens its document beside the chat, once per document and unless the user is
+  // looking at another file; the phone's chat stays in view.
   const officeAutoOpen = runtime.state.officeAutoOpen;
   useEffect(() => {
     if (!officeAutoOpen || !isOfficeDocument(officeAutoOpen.path)) return;
     if (openPane === "file" && previewPath !== null && previewPath !== officeAutoOpen.path) return;
+    // A document the user closed stays closed while the agent goes on editing it.
+    if (officeAutoOpened.current === officeAutoOpen.path) return;
+    officeAutoOpened.current = officeAutoOpen.path;
     setWorkspacePath(officeAutoOpen.path);
     setPreviewPath(officeAutoOpen.path);
     setOpenPane("file");
-    // Only a new edit opens the pane: closing it is not undone until the agent edits again.
+    // Only a new edit opens the pane.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [officeAutoOpen?.eventId]);
 

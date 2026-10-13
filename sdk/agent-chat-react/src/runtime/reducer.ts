@@ -302,25 +302,25 @@ export function applyAgentChatEvent(
     case "stream.live":
       return { ...nextState, live: true };
 
-    case "tool.call": {
-      const withCall = applyToolCall(nextState, event);
-      const path = officeEditPath(event.data);
-      // Replayed history opens nothing: only an edit happening now opens its document.
-      return path && withCall.live ? { ...withCall, officeAutoOpen: { path, eventId: event.eventId } } : withCall;
-    }
+    case "tool.call":
+      return applyToolCall(nextState, event);
 
     case "tool.result": {
       const toolCallId = stringValue(event.data.tool_call_id);
-      const toolName = findToolNameById(nextState.messages, toolCallId);
+      const call = findToolCallById(nextState.messages, toolCallId);
+      const toolName = call?.toolName ?? null;
       const messages = applyToolResult(nextState.messages, event.data);
       const mutatesWorkspace =
         toolName !== null && WORKSPACE_MUTATING_TOOLS.has(toolName);
+      // Opened once the edit has run, for an edit that creates its document; replayed history opens nothing.
+      const officePath = nextState.live && call?.toolName === "office_edit" ? officeEditPath(call.args) : null;
       const withResult: AgentChatState = {
         ...nextState,
         messages,
         workspaceRefreshKey: mutatesWorkspace
           ? nextState.workspaceRefreshKey + 1
           : nextState.workspaceRefreshKey,
+        officeAutoOpen: officePath ? { path: officePath, eventId: event.eventId } : nextState.officeAutoOpen,
       };
       // research_memory(add) is the only event that surfaces a new
       // source for the citations/sources panel.  Other research tool
@@ -615,11 +615,14 @@ function parseUserMessageAttachments(
   return out.length > 0 ? out : undefined;
 }
 
-function officeEditPath(data: Record<string, unknown>): string | null {
-  if (data.name !== "office_edit") return null;
-  const args = data.arguments as Record<string, unknown> | undefined;
-  const path = typeof args?.path === "string" ? args.path.replace(/^__WORKSPACE__\//, "") : "";
-  return path || null;
+// The workspace path an office_edit call's arguments name.
+function officeEditPath(args: string): string | null {
+  try {
+    const path: unknown = JSON.parse(args)?.path;
+    return typeof path === "string" ? path.replace(/^__WORKSPACE__\//, "") || null : null;
+  } catch {
+    return null;
+  }
 }
 
 // A browser event of a local-folder chat, whose browser is on the user's computer.
@@ -1851,14 +1854,14 @@ function hasUserAfterIndex(messages: AgentChatMessage[], idx: number): boolean {
   return false;
 }
 
-function findToolNameById(
+function findToolCallById(
   messages: AgentChatMessage[],
   toolCallId: string,
-): string | null {
+): AgentChatToolCallInfo | null {
   if (!toolCallId) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const tc = messages[i]?.toolCalls?.find((c) => c.id === toolCallId);
-    if (tc) return tc.toolName;
+    if (tc) return tc;
   }
   return null;
 }

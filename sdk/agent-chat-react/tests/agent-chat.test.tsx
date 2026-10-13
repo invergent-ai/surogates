@@ -999,7 +999,7 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain("content of src/b.py");
   });
 
-  it("opens a document the agent starts editing live, and leaves replayed edits alone", async () => {
+  it("opens a document the agent edits live once the edit has run, once, and leaves replayed edits alone", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
     container = document.createElement("div");
@@ -1009,25 +1009,41 @@ describe("AgentChat", () => {
       root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
       await Promise.resolve();
     });
-    const editPlan = (eventId: number) =>
+    const editPlan = (eventId: number) => {
       stream.emit("tool.call", eventId, {
         tool_call_id: `tc${eventId}`,
         name: "office_edit",
         arguments: { path: "docs/Plan.docx", ops: [] },
       });
+      stream.emit("tool.result", eventId + 1, { tool_call_id: `tc${eventId}`, name: "office_edit", content: "{}" });
+    };
+    const panel = () => container!.querySelector('[data-testid="file-preview-panel"]');
 
     await act(async () => {
       editPlan(3);
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="file-preview-panel"]')).toBeNull();
+    expect(panel()).toBeNull();
 
     await act(async () => {
-      stream.emit("stream.live", 0, {});
-      editPlan(4);
+      // An SSE event without an id repeats the last one the stream sent.
+      stream.emit("stream.live", 4, {});
+      editPlan(5);
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="file-preview-panel"]')?.textContent).toContain("Plan.docx");
+    expect(panel()?.textContent).toContain("Plan.docx");
+
+    // Closed, it stays closed while the agent goes on editing it.
+    await act(async () => {
+      container!.querySelector<HTMLButtonElement>('button[aria-label="Close file"]')!.click();
+      await Promise.resolve();
+    });
+    expect(panel()).toBeNull();
+    await act(async () => {
+      editPlan(7);
+      await Promise.resolve();
+    });
+    expect(panel()).toBeNull();
   });
 
   it("keeps the file the user is looking at when the agent edits another", async () => {
@@ -1051,6 +1067,7 @@ describe("AgentChat", () => {
     await act(async () => {
       stream.emit("stream.live", 0, {});
       stream.emit("tool.call", 4, { tool_call_id: "tc4", name: "office_edit", arguments: { path: "docs/Plan.docx", ops: [] } });
+      stream.emit("tool.result", 5, { tool_call_id: "tc4", name: "office_edit", content: "{}" });
       await Promise.resolve();
     });
     const panel = container.querySelector('[data-testid="file-preview-panel"]');

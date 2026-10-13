@@ -748,7 +748,7 @@ export interface AgentChatState {
   officeEvents: Record<string, AgentChatOfficeEvent>;
   /** The stream has sent the session's backlog: what arrives from now on happens now. */
   live: boolean;
-  /** The office document the agent last began editing live: the chat opens it in the file pane. */
+  /** The office document a live edit of the agent last changed, once the edit ran: the chat opens it in the file pane. */
   officeAutoOpen: { path: string; eventId: number } | null;
 }
 

@@ -672,7 +672,7 @@ async def test_a_watch_whose_channel_fails_reads_the_chat_no_more_often_than_a_p
 
 async def test_the_stream_says_when_its_backlog_is_sent(session_factory, session_store, client):
     """stream.live comes once, after the replayed events and before the stream ends."""
-    session, token = await _create_completed_session(session_factory, session_store)
+    session, token, _last = await _completed_chat(session_factory, session_store)
 
     async with client.stream(
         "GET",
@@ -682,5 +682,4 @@ async def test_the_stream_says_when_its_backlog_is_sent(session_factory, session
         events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=2.0)
 
     types = [event_type for event_type, _ in events]
-    assert types.count("stream.live") == 1
-    assert types.index("stream.live") < types.index("session.done")
+    assert types == ["user.message", "session.complete", "stream.live", "session.done"]
