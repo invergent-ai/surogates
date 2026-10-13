@@ -3,9 +3,9 @@
 //! given, and starts no program. The app's TypeScript reads each answer (src/shell/ca-source-win32.ts,
 //! src/browser/processes-win32.ts, src/browser/known-win32.ts).
 //!
-//!   trust             the computer's root certificates, as PEM: the machine's Root stores, its own, Group Policy's and
-//!                     the enterprise's, and the user's Group Policy's; never the user's own Root store; nothing where
-//!                     there are none
+//!   trust             the company's root certificates, as PEM: those an administrator or a policy put in the
+//!                     computer's or Group Policy's Root stores that Windows would trust for TLS, none it distrusts
+//!                     (windows/trust.rs); nothing where there are none
 //!   procs             this user's processes, a JSON object a line: {"pid":…,"path":…,"args":[…]}
 //!   verify <path>     the program's Authenticode signature, one JSON object: {"trusted":…,"signer":…,"status":…,"remote":…}
 //!   app-path <name>   where the App Paths key says the program <name> is: HKLM's, then HKCU's, a line each

@@ -11,9 +11,10 @@ use surogate_helper::pem::certificate;
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError};
 use windows_sys::Win32::Security::Cryptography::{
     CertAddEncodedCertificateToStore, CertCloseStore, CertCreateCertificateContext, CertDeleteCertificateFromStore, CertEnumCertificatesInStore,
-    CertFindCertificateInStore, CertFreeCertificateContext, CertOpenStore, CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_REG,
-    CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID,
-    CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT, HCERTSTORE, X509_ASN_ENCODING,
+    CertFindCertificateInStore, CertFreeCertificateContext, CertOpenStore, CertSetCertificateContextProperty, CertSetEnhancedKeyUsage, CERT_DISALLOWED_FILETIME_PROP_ID,
+    CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_REG, CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID,
+    CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID,
+    CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT, CRYPT_INTEGER_BLOB, CTL_USAGE, HCERTSTORE, X509_ASN_ENCODING,
 };
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_NON_VOLATILE};
 
@@ -45,12 +46,20 @@ fn copy(from: &str, named: &str) -> PathBuf {
     to
 }
 
-// The Root store at *location*, opened for writing, made where it is not there; or, with *key*, the registry key's.
+// The store *name* at *location*, opened for writing, made where it is not there; or, with *key*, the registry key's.
 struct Store(HCERTSTORE);
 
+// What a root is given beside its store: its own purposes, or a distrust date, as certlm and Microsoft's program set them.
+#[derive(Clone, Copy)]
+enum Given {
+    AsItIs,
+    Purposes(&'static [&'static str]),
+    DistrustedFrom2020,
+}
+
 impl Store {
-    fn system(location: u32) -> Store {
-        let name = wide("Root");
+    fn system(location: u32, name: &str) -> Store {
+        let name = wide(name);
         // SAFETY: the name outlives the call.
         let store = unsafe { CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, location << CERT_SYSTEM_STORE_LOCATION_SHIFT, name.as_ptr().cast()) };
         assert!(!store.is_null(), "store {location} opens for writing: 0x{:08x}", unsafe { GetLastError() });
@@ -72,10 +81,31 @@ impl Store {
         Store(store)
     }
 
-    fn add(&self, der: &[u8]) {
-        // SAFETY: the bytes outlive the call.
-        let added = unsafe { CertAddEncodedCertificateToStore(self.0, X509_ASN_ENCODING, der.as_ptr(), der.len() as u32, CERT_STORE_ADD_REPLACE_EXISTING, std::ptr::null_mut()) };
-        assert_ne!(added, 0, "added: 0x{:08x}", unsafe { GetLastError() });
+    fn add(&self, der: &[u8], given: Given) {
+        let mut added = std::ptr::null_mut();
+        // SAFETY: the bytes outlive the call; the context it gives is the store's own, freed below.
+        let done = unsafe { CertAddEncodedCertificateToStore(self.0, X509_ASN_ENCODING, der.as_ptr(), der.len() as u32, CERT_STORE_ADD_REPLACE_EXISTING, &mut added) };
+        assert_ne!(done, 0, "added: 0x{:08x}", unsafe { GetLastError() });
+        // SAFETY: the context is the store's; what is set on it is kept in the store.
+        unsafe {
+            match given {
+                Given::AsItIs => {}
+                Given::Purposes(purposes) => {
+                    let names: Vec<std::ffi::CString> = purposes.iter().map(|purpose| std::ffi::CString::new(*purpose).unwrap()).collect();
+                    let mut pointers: Vec<*mut u8> = names.iter().map(|name| name.as_ptr().cast_mut().cast()).collect();
+                    let usage = CTL_USAGE { cUsageIdentifier: pointers.len() as u32, rgpszUsageIdentifier: pointers.as_mut_ptr() };
+                    assert_ne!(CertSetEnhancedKeyUsage(added, &usage), 0, "purposes set");
+                }
+                Given::DistrustedFrom2020 => {
+                    // 2020-01-01, in a FILETIME's hundreds of nanoseconds since 1601.
+                    let when: u64 = 132_223_104_000_000_000;
+                    let bytes = when.to_le_bytes();
+                    let blob = CRYPT_INTEGER_BLOB { cbData: 8, pbData: bytes.as_ptr().cast_mut() };
+                    assert_ne!(CertSetCertificateContextProperty(added, CERT_DISALLOWED_FILETIME_PROP_ID, 0, (&raw const blob).cast()), 0, "distrust date set");
+                }
+            }
+            CertFreeCertificateContext(added);
+        }
     }
 
     fn holds(&self, der: &[u8]) -> bool {
@@ -115,34 +145,63 @@ impl Drop for Store {
     }
 }
 
+// A root of the test's: what it is called, its DER, the stores it is put in, what it is given there, and whether it is listed.
+type Root = (&'static str, &'static [u8], Vec<(u32, &'static str)>, Given, bool);
+
+const SERVER_AUTH: &str = "1.3.6.1.5.5.7.3.1";
+const CLIENT_AUTH: &str = "1.3.6.1.5.5.7.3.2";
+const LOCAL_MACHINE: u32 = CERT_SYSTEM_STORE_LOCAL_MACHINE_ID;
+const CURRENT_USER: u32 = CERT_SYSTEM_STORE_CURRENT_USER_ID;
+const MACHINE_POLICY: u32 = CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID;
+const USER_POLICY: u32 = CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID;
+const ENTERPRISE: u32 = CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID;
+
 #[test]
 #[ignore = "adds test roots to this computer's stores: run elevated, on a CI runner or in a test account"]
-fn lists_the_computer_s_roots_and_group_policy_s_for_the_user_and_never_the_user_s_own() {
-    let given: [(u32, &[u8]); 4] = [
-        (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, include_bytes!("fixtures/machine.der")),
-        (CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID, include_bytes!("fixtures/machine-policy.der")),
-        (CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID, include_bytes!("fixtures/enterprise.der")),
-        (CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, include_bytes!("fixtures/user-policy.der")),
+fn lists_the_roots_an_administrator_or_a_policy_gave_that_windows_trusts_for_tls_and_no_other() {
+    let roots: Vec<Root> = vec![
+        // Taken: the computer's own Root store, Group Policy's for the computer and for the user, the enterprise's.
+        ("the computer's own", include_bytes!("fixtures/machine.der"), vec![(LOCAL_MACHINE, "Root")], Given::AsItIs, true),
+        ("Group Policy's for the computer", include_bytes!("fixtures/machine-policy.der"), vec![(MACHINE_POLICY, "Root")], Given::AsItIs, true),
+        ("the enterprise's", include_bytes!("fixtures/enterprise.der"), vec![(ENTERPRISE, "Root")], Given::AsItIs, true),
+        ("Group Policy's for the user", include_bytes!("fixtures/user-policy.der"), vec![(USER_POLICY, "Root")], Given::AsItIs, true),
+        ("one whose purposes include server authentication", include_bytes!("fixtures/server-too.der"), vec![(LOCAL_MACHINE, "Root")], Given::Purposes(&[CLIENT_AUTH, SERVER_AUTH]), true),
+        // Never read: Microsoft's program, which any user's chain fills, and the smart cards' roots.
+        ("Microsoft's program's", include_bytes!("fixtures/authroot.der"), vec![(LOCAL_MACHINE, "AuthRoot")], Given::AsItIs, false),
+        ("a smart card's", include_bytes!("fixtures/smartcard.der"), vec![(LOCAL_MACHINE, "SmartCardRoot")], Given::AsItIs, false),
+        // Not for TLS: client authentication alone, every purpose turned off, a distrust date.
+        ("one for client authentication alone", include_bytes!("fixtures/client-only.der"), vec![(LOCAL_MACHINE, "Root")], Given::Purposes(&[CLIENT_AUTH]), false),
+        ("one with every purpose turned off", include_bytes!("fixtures/no-purposes.der"), vec![(LOCAL_MACHINE, "Root")], Given::Purposes(&[]), false),
+        ("one with a distrust date", include_bytes!("fixtures/distrust-after.der"), vec![(LOCAL_MACHINE, "Root")], Given::DistrustedFrom2020, false),
+        // Distrusted, though a Root store holds it: in each Disallowed store.
+        ("one the computer distrusts", include_bytes!("fixtures/distrusted-machine.der"), vec![(LOCAL_MACHINE, "Root"), (LOCAL_MACHINE, "Disallowed")], Given::AsItIs, false),
+        ("one Group Policy distrusts for the computer", include_bytes!("fixtures/distrusted-policy.der"), vec![(MACHINE_POLICY, "Root"), (MACHINE_POLICY, "Disallowed")], Given::AsItIs, false),
+        ("one the user distrusts", include_bytes!("fixtures/distrusted-user.der"), vec![(ENTERPRISE, "Root"), (CURRENT_USER, "Disallowed")], Given::AsItIs, false),
+        ("one Group Policy distrusts for the user", include_bytes!("fixtures/distrusted-user-policy.der"), vec![(USER_POLICY, "Root"), (USER_POLICY, "Disallowed")], Given::AsItIs, false),
     ];
     let own: &[u8] = include_bytes!("fixtures/user.der");
-    for (location, der) in given {
-        Store::system(location).add(der);
+    for (_, der, stores, given, _) in &roots {
+        for (location, name) in stores {
+            Store::system(*location, name).add(der, if *name == "Disallowed" { Given::AsItIs } else { *given });
+        }
     }
     // The user's own root, in the registry key of the user's Root store. Windows lists from that store only the roots
     // the user agreed to at its question (its protected roots), which no test can answer: so a root a program put
     // there is read back by the registry's own provider alone, and whatever Windows would list, the helper lists none.
-    Store::user_registry().add(own);
+    Store::user_registry().add(own, Given::AsItIs);
     let held = Store::user_registry().holds(own);
     let listed = std::panic::catch_unwind(|| said(&["trust"]));
-    for (location, der) in given {
-        Store::system(location).remove(der);
+    for (_, der, stores, _, _) in &roots {
+        for (location, name) in stores {
+            Store::system(*location, name).remove(der);
+        }
     }
     Store::user_registry().remove(own);
     assert!(held, "the user's own root is in its store's registry key");
     let listed = listed.expect("listed");
-    for (location, der) in given {
-        assert!(listed.contains(&certificate(der)), "the root of store {location} is listed");
-    }
+    let said: Vec<(&str, bool)> = roots.iter().map(|(named, der, _, _, _)| (*named, listed.contains(&certificate(der)))).collect();
+    let wanted: Vec<(&str, bool)> = roots.iter().map(|(named, _, _, _, taken)| (*named, *taken)).collect();
+    assert_eq!(said, wanted);
     assert!(!listed.contains(&certificate(own)), "the user's own root is never listed");
     // PEM alone, each certificate whole.
     assert_eq!(listed.matches("-----BEGIN CERTIFICATE-----\n").count(), listed.matches("-----END CERTIFICATE-----\n").count());

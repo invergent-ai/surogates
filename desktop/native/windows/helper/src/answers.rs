@@ -52,9 +52,40 @@ pub fn unquoted(value: &str) -> &str {
     value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')).unwrap_or(value)
 }
 
+/// What a root's own properties let it be trusted for: every purpose where it has no extended-key-usage property, else
+/// the purposes the property names, none where it names none (Microsoft, CertGetEnhancedKeyUsage: "If
+/// GetLastError returns CRYPT_E_NOT_FOUND, the certificate is good for all uses. If it returns zero, the certificate
+/// has no valid uses").
+pub enum Usages {
+    Unrestricted,
+    Only(Vec<String>),
+}
+
+/// Server authentication's object identifier (RFC 5280, 4.2.1.12, id-kp-serverAuth).
+pub const SERVER_AUTH: &str = "1.3.6.1.5.5.7.3.1";
+
+/// Whether a root of *usages* may be trusted for TLS: unrestricted, or server authentication among its purposes.
+pub fn for_server_auth(usages: &Usages) -> bool {
+    match usages {
+        Usages::Unrestricted => true,
+        Usages::Only(purposes) => purposes.iter().any(|purpose| purpose == SERVER_AUTH),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{program_name, unquoted, Process, Verdict};
+    use super::{for_server_auth, program_name, unquoted, Process, Usages, Verdict, SERVER_AUTH};
+
+    #[test]
+    fn trusts_a_root_for_tls_only_where_its_purposes_allow_server_authentication() {
+        assert!(for_server_auth(&Usages::Unrestricted));
+        assert!(for_server_auth(&Usages::Only(vec!["1.3.6.1.5.5.7.3.2".into(), SERVER_AUTH.into()])));
+        // Client authentication alone, or every purpose turned off.
+        assert!(!for_server_auth(&Usages::Only(vec!["1.3.6.1.5.5.7.3.2".into()])));
+        assert!(!for_server_auth(&Usages::Only(vec![])));
+        assert!(!for_server_auth(&Usages::Only(vec!["1.3.6.1.5.5.7.3.10".into()])));
+    }
+
 
     #[test]
     fn says_a_process_as_a_json_line() {

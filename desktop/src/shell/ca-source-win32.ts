@@ -1,7 +1,9 @@
-// The company's certificate authority on Windows: the roots an administrator gave this computer, as a company's
-// Group Policy or Intune gives them, which surogate-helper.exe lists from the Root stores only an administrator
-// writes (native/windows/helper, trust.rs): the computer's own, Group Policy's for the computer, the enterprise's, and
-// Group Policy's for this user; never the user's own Root store, which any program of the user's may add to. Chromium,
+// The company's certificate authority on Windows: the roots an administrator or a policy gave this computer, as a
+// company's Group Policy or Intune gives them, which surogate-helper.exe lists (native/windows/helper, trust.rs): the
+// computer's own Root store, Group Policy's for the computer and for this user, and the enterprise's, each by its own
+// physical store; never Microsoft's root program's, which any user's program can have Windows fill, nor the user's
+// own Root store, which any program of the user's may add to; and of those, only each root Windows would trust for
+// TLS, which none of the Untrusted Certificates stores holds. Chromium,
 // the window's and net.fetch's, and the person's own Edge and Chrome trust them already, through Windows's own
 // verifier: the app has no step of its own for Chromium. Node's TLS, the device link's and the updater's, trusts them
 // as on Linux (company-ca.ts), and the guest is given them.

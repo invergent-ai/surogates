@@ -160,10 +160,12 @@ Make a test root with `New-SelfSignedCertificate -Subject "CN=Surogate test comp
 2. By Group Policy: `gpedit.msc` › Computer Configuration › Windows Settings › Security Settings › Public Key Policies › Trusted Root Certification Authorities › Import; then `gpupdate /force`.
 3. Where the PC is enrolled in Intune: a trusted certificate profile to the computer's Root store.
 4. As the user, in a PowerShell that is not elevated: `Import-Certificate -FilePath <the .cer> -CertStoreLocation Cert:\CurrentUser\Root`, answering Windows's question Yes.
+5. With the root in `Cert:\LocalMachine\Root` as in 1: in `certlm.msc`, open its Properties and choose "Disable all purposes for this certificate"; then, again, "Enable only the following purposes" with Server Authentication unticked.
+6. With the root in `Cert:\LocalMachine\Root` as in 1, its purposes as they were: import it into `Cert:\LocalMachine\Disallowed` too (certlm's Untrusted Certificates), then instead by Group Policy (Public Key Policies › Untrusted Certificates).
 
 After each, run `native\windows\target\release\surogate-helper.exe trust | Select-String -Pattern "BEGIN CERTIFICATE" | Measure-Object` before and after, and `certutil -store root "Surogate test company root"`.
 
-- Pass: the count goes up by one after 1, 2 and 3, and **not** after 4.
+- Pass: the count goes up by one after 1, 2 and 3, and **not** after 4, nor in either step of 5, nor in either step of 6.
 - Take each root out again (`certlm.msc` and `certmgr.msc`, or `Remove-Item` on its `Cert:\` path).
 - **Send back:** the counts.
 
