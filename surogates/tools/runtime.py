@@ -121,7 +121,7 @@ class ToolRuntime:
             whiteboard,  # whiteboard_draw (canvas chat surface)
             checkin,  # checkin_outcome (Program check-ins)
             followup,  # followup_enroll/update/status, escalate
-            care_team,  # care_team_overview (care team only)
+            care_team,  # care_team_overview / care_team_message_patient (care team only)
             voice_call,  # end_call (a phone call's agent hangs up)
         ]
 

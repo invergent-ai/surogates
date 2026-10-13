@@ -59,6 +59,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "followup_status": ToolLocation.HARNESS,
     "escalate": ToolLocation.HARNESS,
     "care_team_overview": ToolLocation.HARNESS,
+    "care_team_message_patient": ToolLocation.HARNESS,
     "web_search": ToolLocation.HARNESS,
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,

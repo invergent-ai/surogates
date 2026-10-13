@@ -1,11 +1,11 @@
 """Tools for the practice's care team when they write to the agent themselves.
 
 The follow-up tools act only on the person the conversation belongs to, so a
-patient's conversation can never reach another patient.  These are the
-deliberate exception: they read across every person enrolled with this agent.
-That is safe only because they work for nobody but an alert recipient of this
-agent, proved from the database on every call, and are withheld from every
-other session's tool list.
+patient's conversation can never reach another patient.  These two are the
+deliberate exception: they read across, and write to, every person enrolled
+with this agent.  That is safe only because they work for nobody but an alert
+recipient of this agent, proved from the database on every call, and are
+withheld from every other session's tool list.
 """
 
 from __future__ import annotations
@@ -28,11 +28,14 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc, day_index, next_contact
+from surogates.followup.outreach import window_open
 from surogates.session.events import EventType
 from surogates.tools.builtin.followup import _context
 from surogates.tools.registry import ToolSchema
 
-CARE_TEAM_TOOL_NAMES: frozenset[str] = frozenset({"care_team_overview"})
+CARE_TEAM_TOOL_NAMES: frozenset[str] = frozenset({
+    "care_team_overview", "care_team_message_patient",
+})
 
 NOT_CARE_TEAM = (
     "Refused: this tool is only for the practice's care team, and the person "
@@ -47,6 +50,7 @@ HISTORY = timedelta(days=60)
 MAX_PEOPLE = 60
 MAX_CHARS = 12_000
 CONVERSATION_LINES = 10
+MAX_MESSAGE = 4000
 
 CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
     name="care_team_overview",
@@ -78,6 +82,36 @@ CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
         },
     },
 )
+
+CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
+    name="care_team_message_patient",
+    description=(
+        "Care team only. Send an enrolled patient the doctor's message, word "
+        "for word, from the practice's WhatsApp number. First call without "
+        "confirmed: it shows who would receive what and sends nothing. Show "
+        "that to the doctor and call again with confirmed=true only after "
+        "they answer yes. Never reword the doctor's text."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "patient": {
+                "type": "string",
+                "description": "The patient's name or a fragment of their phone number.",
+            },
+            "text": {
+                "type": "string",
+                "description": "The doctor's message exactly as they wrote it.",
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": "True only after the doctor confirmed this exact preview.",
+            },
+        },
+        "required": ["patient", "text"],
+    },
+)
+
 
 async def care_team_tool_exclusions(
     session_factory: Any, session: Any, *, programs_enabled: bool,
@@ -173,6 +207,10 @@ def _ago(at: datetime | None, now: datetime) -> str:
 def _local(at: datetime, config: dict) -> str:
     zone = str(config.get("timezone") or "UTC")
     return f"{at.astimezone(ZoneInfo(zone)):%a %Y-%m-%d %H:%M} {zone}"
+
+
+def _masked(phone: str) -> str:
+    return f"+{phone[:2]}…{phone[-3:]}" if len(phone) > 5 else "no number"
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +454,97 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
     return out
 
 
+# ---------------------------------------------------------------------------
+# care_team_message_patient
+# ---------------------------------------------------------------------------
+
+
+async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> str:
+    sf = kwargs["session_factory"]
+    ctx, settings = await _context(kwargs)
+    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
+        return NOT_CARE_TEAM
+    fragment = str(arguments.get("patient") or "").strip()
+    text = str(arguments.get("text") or "").strip()
+    if not fragment:
+        return "Nothing sent: say which patient, by name or phone number."
+    if not text:
+        return "Nothing sent: the message is empty."
+    if len(text) > MAX_MESSAGE:
+        return f"Nothing sent: keep a message under {MAX_MESSAGE:,} characters."
+
+    matches = [
+        p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings)
+        if p.matches(fragment)
+    ]
+    if not matches:
+        return f"Nothing sent: nobody enrolled with this practice matches '{fragment}'."
+    if len(matches) > 1:
+        return (
+            f"Nothing sent: '{fragment}' matches more than one person. Ask the "
+            "doctor which one:\n" + "\n".join(
+                f"- {p.label} ({_masked(p.phone)})" for p in matches
+            )
+        )
+    [person] = matches
+
+    async with sf() as db:
+        identity = (
+            await db.execute(
+                sa.select(ChannelIdentity)
+                .where(ChannelIdentity.org_id == ctx.org_id)
+                .where(ChannelIdentity.platform == "whatsapp")
+                .where(ChannelIdentity.user_id == person.user_id)
+            )
+        ).scalars().first()
+    if identity is None:
+        return f"Nothing sent: {person.label} has no WhatsApp number."
+    if followup_store.permission_status(identity) != "granted":
+        return f"Nothing sent: {person.label} has not given permission to be messaged."
+    sender = _sender(ctx, settings)
+    if not sender:
+        return "Nothing sent: WhatsApp is not switched on for this practice."
+    template = settings.message_template_name if settings else None
+    if not template and not window_open(
+        await followup_store.last_inbound(
+            sf, org_id=ctx.org_id, platform="whatsapp",
+            platform_user_id=identity.platform_user_id, channel_identifier=sender,
+        ),
+        datetime.now(timezone.utc),
+    ):
+        return (
+            f"Nothing sent: {person.label} has not written in the last 24 hours, "
+            "so WhatsApp only lets an approved message template reach them, and "
+            "the practice has none chosen under Follow-up."
+        )
+
+    if arguments.get("confirmed") is not True:
+        return (
+            f"Will send to {person.label} ({_masked(identity.platform_user_id)}): "
+            f"«{text}». Ask the doctor to confirm with a yes before calling "
+            "again with confirmed=true. Nothing has been sent."
+        )
+
+    row = await followup_store.queue_outreach(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
+        platform="whatsapp", channel_identifier=sender, kind="operator",
+        text=text, template_name=template,
+        template_language=settings.message_template_language if settings else None,
+        created_by=f"care-team:{ctx.user_id}",
+    )
+    how = (
+        "it goes out as a message within a minute"
+        if not template else
+        "it goes out within a minute: as a message if they wrote in the last "
+        "24 hours, otherwise after the approved template and their answer to it"
+    )
+    return f"Queued for {person.label} (state {row.state}); {how}."
+
+
 def register(registry: Any) -> None:
     for name, schema, handler in (
         ("care_team_overview", CARE_TEAM_OVERVIEW_SCHEMA, handle_care_team_overview),
+        ("care_team_message_patient", CARE_TEAM_MESSAGE_PATIENT_SCHEMA,
+         handle_care_team_message_patient),
     ):
         registry.register(name=name, schema=schema, handler=handler, toolset="care_team")

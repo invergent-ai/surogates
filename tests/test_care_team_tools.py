@@ -1,4 +1,4 @@
-"""care_team_overview: the care team's view across patients."""
+"""care_team_overview / care_team_message_patient: the care team's view across patients."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+import sqlalchemy as sa
 
 from surogates.db.models import (
     ChannelIdentity,
     Event,
+    OutreachMessageRow,
     ProgramInvitationRow,
     ProgramScheduleRow,
     Session as SessionRow,
@@ -75,14 +77,24 @@ def _kw(sf, session_id):
     return {"session_id": str(session_id), "session_factory": sf}
 
 
+async def _outreach(sf):
+    async with sf() as db:
+        return (await db.execute(sa.select(OutreachMessageRow))).scalars().all()
+
+
 # --- gating -------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_patient_session_is_refused(sf, practice):
+async def test_a_patient_session_is_refused_by_both_tools(sf, practice):
     _, ion_session = practice.ion
     overview = await care_team.handle_care_team_overview({}, **_kw(sf, ion_session))
-    assert overview == care_team.NOT_CARE_TEAM
+    sent = await care_team.handle_care_team_message_patient(
+        {"patient": "Ioana", "text": "hi", "confirmed": True}, **_kw(sf, ion_session),
+    )
+    assert overview == sent == care_team.NOT_CARE_TEAM
+    assert "Ioana" not in overview
+    assert await _outreach(sf) == []
 
 
 @pytest.mark.asyncio
@@ -177,3 +189,81 @@ async def test_overview_focus_shows_one_person_with_their_conversation(sf, pract
     assert "them: Mă doare capul" in out
     assert "agent: Am notat." in out
     assert "[Check-in]" not in out
+
+
+# --- message ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_patient_returns_candidates_and_sends_nothing(sf, practice):
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "pop", "text": "Veniți mâine.", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "more than one person" in out
+    assert "Ion Popescu" in out and "Ioana Popa" in out
+    assert "40700000001" not in out  # masked
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_or_other_agents_patient_is_not_found(sf, practice):
+    await _person(sf, "Vasile Other", "40700000005", agent="a2")
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Vasile", "text": "x", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "nobody enrolled" in out
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_is_a_preview_and_sends_nothing(sf, practice):
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Ioana", "text": "Veniți mâine la 10."},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Will send to Ioana Popa (+40…002): «Veniți mâine la 10.»")
+    assert "confirmed=true" in out
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_queues_the_text_verbatim_like_studio(sf, practice):
+    ioana, _ = practice.ioana
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "0002", "text": "  Veniți mâine la 10.  ", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "Queued for Ioana Popa (state queued)" in out
+    [row] = await _outreach(sf)
+    assert row.user_id == ioana
+    assert row.kind == "operator"
+    assert row.text == "Veniți mâine la 10."
+    assert (row.template_name, row.template_language) == ("msg", "ro")
+    assert row.channel_identifier == "pn1"
+    assert row.created_by == f"care-team:{practice.doctor}"
+
+
+@pytest.mark.asyncio
+async def test_closed_window_without_a_template_is_refused(sf, practice):
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, message_template_name=None,
+    )
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Ioana", "text": "x", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "24 hours" in out
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_no_permission_is_refused(sf, practice):
+    await _person(sf, "Mihai Fără", "40700000006", permission=False)
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Mihai", "text": "x", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "permission" in out
+    assert await _outreach(sf) == []
