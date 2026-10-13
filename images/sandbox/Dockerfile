@@ -10,8 +10,8 @@
 #            build without --target builds it.
 #   guest    the desktop VM's root filesystem: no geesefs, no claude-code or
 #            codex (switched off for local folders); the stub init, the pinned
-#            kernel's modules, the guest-kernel rule and bpftool, iproute2,
-#            e2fsprogs and kmod.
+#            kernel's modules, the guest-kernel rule and bpftool, surogate-vsock,
+#            iproute2, e2fsprogs and kmod.
 #
 # Build (from repo root):
 #   docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:latest -f images/sandbox/Dockerfile .
@@ -294,6 +294,14 @@ RUN --mount=type=bind,from=kernel,source=/kernel/boot,target=/boot \
         - /src/rule.bpf.c \
     && clang -O2 -g -target bpf "-D__TARGET_ARCH_$bpf_arch" -I/src -c /src/rule.bpf.c -o /rule.bpf.o
 
+# ── surogate-vsock: the guest's streams to the host on Hyper-V's sockets (images/guest/surogate-vsock.c) ──
+# Static, so it needs nothing of the guest's own libraries.
+FROM ubuntu:24.04 AS vsock
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY images/guest/surogate-vsock.c /src/surogate-vsock.c
+RUN gcc -O2 -static -Wall -Wextra -Werror -o /surogate-vsock /src/surogate-vsock.c
+
 # ── Surogate Desktop's VM guest ─────────────────────────────────────
 FROM tools AS guest
 ARG KERNEL
@@ -304,6 +312,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fspr
 COPY --from=modules /image/lib/modules/ /usr/lib/modules/
 COPY --from=bpf /rule.bpf.o /usr/lib/surogate/rule.bpf.o
 COPY --from=bpf --chmod=0755 /usr/lib/linux-tools/${KERNEL}/bpftool /usr/sbin/bpftool
+COPY --from=vsock --chmod=0755 /surogate-vsock /usr/sbin/surogate-vsock
 COPY --chmod=0755 images/guest/surogate-init /usr/sbin/surogate-init
 # No setuid programs and no file capabilities: the image is mounted read-only,
 # so none comes back. /etc/surogate/environment is the commands' environment,

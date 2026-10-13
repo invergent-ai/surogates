@@ -28,6 +28,7 @@ FILES=(
   images/guest/kernel-image.sh
   images/guest/modules.sh
   images/guest/surogate-init
+  images/guest/surogate-vsock.c
   images/sandbox/pip-wrapper
   desktop/vm/rule.bpf.c
   desktop/vm/rule-match.h

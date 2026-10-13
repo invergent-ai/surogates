@@ -43,6 +43,13 @@ export interface GuestDevices {
   transport: Transport;
 }
 
+// Each of the agent's ports on vsock: the host's port it is a stream to, at the host's CID, 2. The host
+// listens and the guest connects (vm/init); the host's side reads them from here too.
+export const VSOCK_PORTS = { "ai.surogate.control": 5000, "ai.surogate.net": 5001, [INBOUND_PORT]: 5002 } as const;
+// The host's Plan 9 server's vsock port, which a p9 share is mounted from (root.ts): the one Hyper-V's guests
+// dial for it (hcsshim's internal/guest/storage/plan9).
+export const PLAN9_PORT = 564;
+
 // What a root's runner sends on the root's socket for a connection the agent asked it for (ToRunner's
 // dial): "/in/<id>", then the connection's bytes, or "/in/<id> <errno>" when nothing took it. No
 // destination a command names starts with '/' (network.ts).

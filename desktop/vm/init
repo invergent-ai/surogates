@@ -216,4 +216,11 @@ echo $(( (total - 262144) * 1024 )) > /sys/fs/cgroup/roots/memory.max
 echo 28672 > /sys/fs/cgroup/roots/pids.max
 echo -1000 > /proc/self/oom_score_adj
 
+# On vsock, each of the agent's three ports is a stream to its port of the host's (guest/protocol.ts,
+# VSOCK_PORTS), which surogate-vsock connects and relays to a socket the agent opens by its path, root's
+# alone (guest/port.ts), so nothing the agent runs inherits a port. Its words, if it cannot, are on the console.
+if [ "$transport" = vsock ]; then
+  mkdir -m 0700 /run/surogate/ports
+  /usr/sbin/surogate-vsock 2:5000=/run/surogate/ports/ai.surogate.control 2:5001=/run/surogate/ports/ai.surogate.net 2:5002=/run/surogate/ports/ai.surogate.inbound &
+fi
 exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js
