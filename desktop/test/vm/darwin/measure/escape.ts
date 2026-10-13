@@ -1,9 +1,9 @@
-// The guest's walls on a Mac, as a session's command meets them: every root runs as the host user's uid
-// there (Apple's share maps no owner), so the protected-names rule's scope is that one uid, named on the
-// kernel's command line (vm/init, guest/root.ts). A command sees no network interface but lo and reaches
+// The guest's walls on a Mac, as a session's command meets them: each root runs on a uid of its own from
+// 10000 up, as on Linux, where its folder on Apple's share shows it that uid (guest/root.ts, checkOwner),
+// and the protected-names rule judges those uids. A command sees no network interface but lo and reaches
 // nothing past the proxy unasked; sees neither the host's ~/.ssh nor another root's folder or processes;
-// runs as the host user's uid; and is refused a write to a protected name, and to one a case-insensitive
-// volume takes as one.
+// runs as its root's own uid, not root's and not the other root's; and is refused a write to a protected
+// name, and to one a case-insensitive volume takes as one.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts escape
 // PASS or FAIL for each wall. A FAIL of either protected write is a security finding: stop and report it.
 
@@ -27,6 +27,7 @@ it("keeps a session's command within its walls", async () => {
   const said = async (command: string) => (await booted.run(one, command, 60)).output.trim();
   const found = {
     uid: await said("id -u"),
+    "the other root's uid": (await booted.run(two, "id -u", 60)).output.trim(),
     interfaces: await said("ip -o link | awk -F': ' '{print $2}' | tr '\\n' ' '"),
     "the host's ~/.ssh": await said(`ls -d ${USER.home}/.ssh 2>&1 || true`),
     "the other root's folder": await said(`ls ${theirs} 2>&1 || true`),
@@ -39,7 +40,7 @@ it("keeps a session's command within its walls", async () => {
   };
   await booted.stop();
   const failed = record("escape", found, {
-    "a session runs as the host user's uid": found.uid === String(USER.uid),
+    "a session runs as a uid of its root's own, from 10000 up": Number(found.uid) >= 10_000 && found.uid !== found["the other root's uid"],
     "no network interface but lo": found.interfaces === "lo",
     "no host ~/.ssh": /No such file/.test(found["the host's ~/.ssh"]),
     "no other root's folder": /No such file/.test(found["the other root's folder"]),

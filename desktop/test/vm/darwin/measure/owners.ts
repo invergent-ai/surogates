@@ -3,11 +3,13 @@
 // device nodes, extended attributes and a rename over a file, by a root; a write by another guest uid
 // than the files', as the guest's root runs it (the measurements' agent disk, prepare.sh); and the names
 // APFS takes as one, on the host and through the share: ASCII case, ſ, ı, İ, the Kelvin sign, ß, the
-// ligatures, NFC and NFD. Decides the uid every root runs as, and checks the protected-names fold
-// (src/files/protect.ts, folded; vm/rule-match.h, sg_fold) against what APFS takes as one name.
+// ligatures, NFC and NFD. Checks that a root runs on its own uid there, which its folder shows it (guest/root.ts,
+// checkOwner), and the protected-names fold (src/files/protect.ts, folded; vm/rule-match.h, sg_fold) against what
+// APFS takes as one name. Another uid's write, with the share's owner shown as each asking uid's, is recorded alone:
+// a root's share is mounted in no other root's namespace.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts owners
-// PASS or FAIL: the guest sees the host user's uid, the host user owns what the guest makes, another guest
-// uid cannot write a 0644 file, and every pair of names APFS takes as one the fold takes as one too.
+// PASS or FAIL: a session runs as a uid from 10000 up and sees its folder as that uid's, the host user owns what the
+// guest makes, and every pair of names APFS takes as one the fold takes as one too.
 
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -72,10 +74,9 @@ it("shows the host user's files as theirs, and takes the names APFS takes as one
     "what a session could do": tried.trim().split("\n"), "made.txt on the host": made ? `uid ${made.uid} gid ${made.gid} mode ${(made.mode & 0o777).toString(8)}` : "not made",
     "what the guest's root could do": asRoot.trim().split("\n"), "names APFS takes as one that the fold does not": misses,
   }, {
-    "the guest sees the folder as the host user's uid": seen[2]?.split(" ")[0] === String(USER.uid),
-    "a session runs as that uid": seen[0] === String(USER.uid),
+    "a session runs as a uid from 10000 up": Number(seen[0]) >= 10_000,
+    "the session sees its folder and the Mac's file as its own uid's": [seen[2], seen[3]].every((line) => line?.split(" ")[0] === seen[0]),
     "the host user owns a file the guest makes": made?.uid === USER.uid,
-    "another guest uid cannot write a 0644 file": /another uid writes 0644: .*failed/.test(asRoot),
     "every pair of names APFS takes as one the fold takes as one": misses.length === 0,
   });
   expect(failed).toEqual([]);
