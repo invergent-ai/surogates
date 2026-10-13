@@ -410,6 +410,7 @@ function searchFiles(key: string, filter: Filter): FileSearch {
       levels.push({ fd: dir, entries: listing(dir), rel: "" });
       return;
     }
+    // The walk's paths are from the bound root, not from the searched subfolder: its own path from the root seeds them.
     const last = parts.at(-1)!;
     let node: number;
     try {
@@ -419,7 +420,7 @@ function searchFiles(key: string, filter: Filter): FileSearch {
       throw told(error, last);
     }
     closeSync(dir);
-    if (ntat().query(node).directory) levels.push({ fd: node, entries: listing(node), rel: "" });
+    if (ntat().query(node).directory) levels.push({ fd: node, entries: listing(node), rel: parts.join("/") });
     else single = { fd: node, path: `${rootHost}/${parts.join("/")}` };
   };
 
