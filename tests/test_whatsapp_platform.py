@@ -923,3 +923,44 @@ class TestQuestionNotRepeated:
     ])
     def test_anything_else_is_kept(self, content, questions, channel):
         assert self._payload(content, *questions, channel=channel)["content"] == content
+
+
+class TestBatchedWebhook:
+    """Meta batched "Bună ziua" / "am făcut TAVI" / "de azi am febră 38" into one
+    webhook and only the first reached the agent: the fever was lost."""
+
+    @staticmethod
+    def _batch(*messages):
+        body = _text_message()
+        body["entry"][0]["changes"][0]["value"]["messages"] = list(messages)
+        return body
+
+    @staticmethod
+    def _text(wamid, text, sender=WA_ID):
+        return {"from": sender, "id": wamid, "timestamp": "1758254144", "type": "text", "text": {"body": text}}
+
+    def test_every_message_from_the_person_reaches_the_agent_in_order(self):
+        msg = parse(self._batch(
+            self._text("w1", "Bună ziua"),
+            self._text("w2", "am făcut TAVI acum 8 zile"),
+            self._text("w3", "și de azi am febră 38"),
+        ), identifier=PNID)
+        assert msg.text == "Bună ziua\nam făcut TAVI acum 8 zile\nși de azi am febră 38"
+        assert msg.ts == "w1"
+        assert msg.source["wamid"] == "w3"
+
+    def test_a_photo_in_the_batch_keeps_its_file(self):
+        photo = {"from": WA_ID, "id": "w2", "timestamp": "1", "type": "image",
+                 "image": {"id": "media-1", "mime_type": "image/jpeg", "caption": "biletul"}}
+        msg = parse(self._batch(self._text("w1", "uitați"), photo), identifier=PNID)
+        assert msg.text == "uitați\nbiletul"
+        assert msg.kind == "image"
+        assert len(msg.files) == 1
+
+    def test_one_message_is_unchanged(self):
+        assert parse(_text_message(), identifier=PNID).text == "Hi!"
+
+    def test_another_sender_in_the_same_batch_is_not_merged_into_this_one(self):
+        msg = parse(self._batch(self._text("w1", "eu"), self._text("w2", "altcineva", sender="40700000000")),
+                    identifier=PNID)
+        assert msg.text == "eu"

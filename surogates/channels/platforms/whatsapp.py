@@ -32,6 +32,7 @@ so ``thread_key`` is always ``None`` and ``visibility`` is ``"dm"``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -429,22 +430,51 @@ def parse(
             raw_messages = [
                 m for m in value.get("messages") or [] if isinstance(m, dict)
             ]
-            for index, raw_message in enumerate(raw_messages):
-                message = _build_message(raw_message, names=names, identifier=body_pnid)
-                if message is not None:
-                    dropped = len(raw_messages) - index - 1
-                    if dropped:
-                        # The dispatcher runs one pipeline pass per webhook.
-                        # Meta rarely batches user messages (bursts, retry
-                        # backlogs) — but the loss must be visible when it
-                        # does.  Fan-out is a recorded v2 item.
-                        logger.warning(
-                            "[whatsapp] dropping %d additional batched "
-                            "message(s) for pnid=%s (one message per webhook)",
-                            dropped, body_pnid,
-                        )
-                    return message
+            built = [
+                m for m in (
+                    _build_message(raw, names=names, identifier=body_pnid)
+                    for raw in raw_messages
+                ) if m is not None
+            ]
+            if built:
+                return _merge_batch(built, pnid=body_pnid)
     return None
+
+
+def _merge_batch(messages: list[InboundMessage], *, pnid: str | None) -> InboundMessage:
+    """One message for a webhook that batched several from one person.
+
+    The dispatcher runs one pipeline pass per webhook, and Meta batches a
+    burst ("Bună ziua" / "am făcut TAVI" / "de azi am febră 38").  Keeping
+    only the first dropped the fever.  Same-sender messages are joined in
+    order, with every attachment; ``ts`` stays the first wamid so a retried
+    batch still deduplicates, while ``source.wamid`` is the last one, the
+    message a read receipt and the typing indicator should point at.
+    """
+    first = messages[0]
+    same = [m for m in messages if m.platform_user_id == first.platform_user_id]
+    if len(same) < len(messages):
+        logger.warning(
+            "[whatsapp] dropping %d batched message(s) from other senders for pnid=%s",
+            len(messages) - len(same), pnid,
+        )
+    if len(same) == 1:
+        return first
+    files = [f for m in same for f in (m.files or [])]
+    kind = next((m.kind for m in same if m.files), first.kind)
+    source = dict(first.source or {})
+    source["wamid"] = (same[-1].source or {}).get("wamid") or source.get("wamid")
+    for m in same[1:]:
+        for flag in ("flow_reply", "voice"):
+            if (m.source or {}).get(flag):
+                source[flag] = True
+    return dataclasses.replace(
+        first,
+        kind=kind,
+        text="\n".join(m.text for m in same if m.text),
+        files=files,
+        source=source,
+    )
 
 
 def _build_message(
