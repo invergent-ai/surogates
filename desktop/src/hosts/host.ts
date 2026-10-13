@@ -28,7 +28,7 @@ import { FolderBusy, type FolderRecord, lockFolder, readRecord, writeRecord } fr
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { closeHanded } from "./handed.js";
-import { fileToolsMissing, GLOB, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
+import { fileToolsMissing, GLOB, hostToolsPath, quote, sandboxPolicy, SHELL, toolsMissing } from "./policy.js";
 import { srtOs } from "./srt-os.js";
 import { isOf, startOn } from "./start.js";
 
@@ -219,17 +219,17 @@ async function start(message: HostStart): Promise<void> {
   const kept = checked.make();
   made = kept.made;
   const beside = [...checked.reads, ...checked.writes];
-  // srt and the shell it wraps the helper in run outside the sandbox, and look up which,
-  // rg and the shell through this process's PATH; the helper finds its rg through it in
+  // srt and the shell it wraps the helper in (SHELL, by its path) run outside the sandbox, and
+  // look up which and rg through this process's PATH; the helper finds its rg through it in
   // the sandbox. Each absolute entry is kept as the path it leads to now, so a link a command
   // swaps in later moves none, and is dropped when it is the folder or the working folder, or
   // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
   // .. through a folder in it. srt's own tools go by absolute path. So no program a command
-  // wrote runs, out here or in the helper. The rule is pathOutside's: the app looks for the
-  // helper's tools by it too. What a helper is given beside its folder is held as the folder is:
-  // a command wrote a landing's copy, and its helper writes what it keeps.
-  // On macOS the app's own rg comes first (srt-darwin.ts).
-  const hostPath = srtOs.toolsPath(pathOutside(process.env.PATH, [{ dev, ino }, statSync(tmp), ...beside.map((dir) => statSync(dir))]));
+  // wrote runs, out here or in the helper. The rule is hostToolsPath's: the app looks for the
+  // helper's tools by it too, by the node its hosts run on. What a helper is given beside its folder
+  // is held as the folder is: a command wrote a landing's copy, and its helper writes what it keeps.
+  // On macOS the app's own rg, beside that node, comes first (srt-darwin.ts).
+  const hostPath = hostToolsPath(process.env.PATH, [{ dev, ino }, statSync(tmp), ...beside.map((dir) => statSync(dir))], process.execPath);
   process.env.PATH = hostPath;
   // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
   const lacking = fileToolsMissing(message.bwrapPath, hostPath);
@@ -253,7 +253,7 @@ async function start(message: HostStart): Promise<void> {
   // temp folder and the user's folder stays as it was.
   process.chdir(tmp);
   // The helper runs on this host's node, the app's own, as plain Node, with no inspector on SIGUSR1.
-  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`);
+  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`, SHELL);
   const [file, flag, line] = argv;
   if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
   // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.

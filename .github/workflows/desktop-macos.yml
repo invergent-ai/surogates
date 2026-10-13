@@ -184,9 +184,12 @@ jobs:
       - name: Install Electron
         run: npm run electron:install
 
-      # The app's own programs with it: surogate-helper, and surogate-spawn, through which the app starts every program.
-      - name: Build the app for a Mac, surogate-helper and surogate-spawn with it
-        run: npm run build:darwin
+      # The app's own programs with it: surogate-helper, and surogate-spawn, through which the app starts every program;
+      # and the app's rg, where the app looks for the file helper's tools.
+      - name: Build the app for a Mac, surogate-helper and surogate-spawn with it, and fetch its rg
+        run: |
+          npm run build:darwin
+          scripts/rg.sh
 
       - name: Run surogate-helper's own tests
         if: ${{ !cancelled() }}

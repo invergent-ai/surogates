@@ -4,7 +4,7 @@
 // alone: the policy's darwin side is policy-darwin.test.ts's, on any OS.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FSAT } from "../src/files/fsat.js";
 import type { HostStart } from "../src/hosts/messages.js";
-import { quote, sandboxPolicy } from "../src/hosts/policy.js";
+import { quote, sandboxPolicy, SHELL } from "../src/hosts/policy.js";
 import { srtOs } from "../src/hosts/srt-os.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
 
@@ -66,7 +66,7 @@ describe.runIf(process.platform === "darwin")("the file helper in srt's Seatbelt
   // The probe in the sandbox of *config*, as the host wraps the helper: what it said, or how it failed.
   async function probe(config: SandboxRuntimeConfig = policy): Promise<{ said: Record<string, string> | null; status: number | null; stderr: string }> {
     SandboxManager.updateConfig(config);
-    const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(PROBE)} ${quote(JSON.stringify(at))}`);
+    const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(PROBE)} ${quote(JSON.stringify(at))}`, SHELL);
     const [file, flag, wrapped] = argv;
     const ran = spawnSync(file!, ["--norc", "--noprofile", flag!, srtOs.line(wrapped!)], {
       cwd: String(at.folder), env: { HOME: String(at.home), PATH: "/usr/bin:/bin", LANG: "C.UTF-8" }, encoding: "utf8", timeout: 60_000,
@@ -168,5 +168,31 @@ describe.runIf(process.platform === "darwin")("a tool host on macOS", { timeout:
     // Its lock is a file of the app's data.
     const { dev, ino } = statSync(folder);
     expect(statSync(join(base, "data", "locks", `${process.getuid?.()}-${dev}-${ino}`)).isFile()).toBe(true);
+  });
+
+  it("starts its helper through the system's bash, whatever bash comes first on its PATH", async () => {
+    // A bash a person installed, as Homebrew's is, outside every folder Seatbelt lets the helper read: sandbox-exec
+    // could not start it there (EPERM), and the host does not start it outside either.
+    const own = join(base, "installed-bash");
+    const [bashed, installed] = [join(own, "folder"), join(own, "bin")];
+    for (const dir of [bashed, installed]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(bashed, "a.txt"), "alpha\n");
+    const proof = join(own, "ran");
+    writeFileSync(join(installed, "bash"), `#!/bin/sh\ntouch '${proof}'\nexec /bin/bash "$@"\n`, { mode: 0o755 });
+    const start: HostStart = {
+      type: "start", folder: bashed, expect: bound(bashed), tmp: join(own, "data", "tmp", "root"), dataDir: join(own, "data"),
+      cacheDir: join(own, "cache", "surogate"), env: { HOME: process.env.HOME ?? "/Users/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
+      appDirs: [dirname(process.execPath), PACKAGE],
+    };
+    const bashHost = new Harness(undefined, { ...process.env, PATH: `${installed}:${process.env.PATH ?? ""}` }, NODE);
+    try {
+      bashHost.send(start);
+      const said = await bashHost.until((messages) => messages.find((message) => message.type === "ready" || message.type === "failed"));
+      expect(said.type === "ready" ? "ready" : `${JSON.stringify(said)} ${bashHost.stderr}`).toBe("ready");
+      expect(await bashHost.op("1", "read", { key: `${bashed}/a.txt`, max_bytes: null })).toEqual({ ok: Buffer.from("alpha\n").toString("base64") });
+      expect(existsSync(proof)).toBe(false);
+    } finally {
+      await bashHost.stop();
+    }
   });
 });

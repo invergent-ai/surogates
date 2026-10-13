@@ -3,9 +3,9 @@
 // Mac, the folder's checks against real folders too.
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -60,8 +60,26 @@ describe("the file helper's sandbox on macOS", () => {
       writeFileSync(join(bin, "rg"), "#!/bin/sh\n");
       chmodSync(join(bin, "rg"), 0o755);
       expect(fileToolsMissing(undefined, bin)).toEqual([]);
-      expect(srtOs.toolsPath("/usr/bin:/bin")).toBe(`${dirname(process.execPath)}:/usr/bin:/bin`);
+      expect(srtOs.toolsPath("/usr/bin:/bin", "/Applications/Surogate.app/Contents/MacOS/node")).toBe("/Applications/Surogate.app/Contents/MacOS:/usr/bin:/bin");
       expect(toolsMissing(["ripgrep"])).toBe("Surogate's sandbox tools are missing. Install Surogate again. It lacks ripgrep");
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it("looks for the helper's tools, from the app as from its file host, in the folder of the node the hosts run on first: on the bare PATH Finder and the Dock give an app, it lacks none", async () => {
+    const [{ fileToolsMissing, hostToolsPath }] = await onMac();
+    // The app's own folder of tools, with its node and its rg; the app itself runs on another program, Electron.
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), "app-tools-")));
+    try {
+      writeFileSync(join(bin, "rg"), "#!/bin/sh\n", { mode: 0o755 });
+      const bare = "/usr/bin:/bin:/usr/sbin:/sbin";
+      const looked = hostToolsPath(bare, [], join(bin, "node"));
+      expect(looked.split(":")[0]).toBe(bin);
+      expect(fileToolsMissing(undefined, looked)).toEqual([]);
+      // What a host holds is dropped from the app's PATH, never the app's own folder of tools before it.
+      const { dev, ino } = statSync("/usr/bin");
+      expect(hostToolsPath(bare, [{ dev, ino }], join(bin, "node")).split(":")).not.toContain("/usr/bin");
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }

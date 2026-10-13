@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
   type BigIntStats, chmodSync, closeSync, constants, type Dirent, linkSync, mkdirSync, mkdtempSync, openSync,
-  type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync,
+  type ReadPosition, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -869,36 +869,52 @@ describe("walk", () => {
   });
 
   // *depth* folders, each in the last, under *top*, a file at the bottom: built through handles, as a command in the VM
-  // could build it, past what a path can name.
-  const chain = (top: string, depth: number) => {
+  // could build it, past what a path can name. Its folders' handles, top first, each held until the chain is taken
+  // down through them (unchain).
+  const chain = (top: string, depth: number): number[] => {
     mkdirSync(top);
-    let fd = openSync(top, constants.O_RDONLY | constants.O_DIRECTORY);
+    const held = [openSync(top, constants.O_RDONLY | constants.O_DIRECTORY)];
     try {
       for (let level = 0; level < depth; level++) {
-        fdPaths.mkdir({ dir: fd, name: "d" });
-        const child = fdPaths.open({ dir: fd, name: "d" }, constants.O_RDONLY | constants.O_DIRECTORY);
-        closeSync(fd);
-        fd = child;
+        fdPaths.mkdir({ dir: held.at(-1)!, name: "d" });
+        held.push(fdPaths.open({ dir: held.at(-1)!, name: "d" }, constants.O_RDONLY | constants.O_DIRECTORY));
       }
-      closeSync(fdPaths.open({ dir: fd, name: "bottom.txt" }, constants.O_WRONLY | constants.O_CREAT, 0o666));
-    } finally {
-      closeSync(fd);
+      closeSync(fdPaths.open({ dir: held.at(-1)!, name: "bottom.txt" }, constants.O_WRONLY | constants.O_CREAT, 0o666));
+    } catch (error) {
+      unchain(top, held);
+      throw error;
     }
+    return held;
+  };
+  // The chain under *top* taken down from its bottom, each name through its folder's handle in *held*, which closes:
+  // rmSync names each path whole, past what a path can name, and rm -rf took the longest of the test on a Mac.
+  const unchain = (top: string, held: number[]) => {
+    try {
+      fdPaths.unlink({ dir: held.at(-1)!, name: "bottom.txt" });
+    } catch {
+      // A chain whose making failed before its bottom.
+    }
+    for (let level = held.length - 1; level > 0; level--) {
+      closeSync(held[level]!);
+      fdPaths.rmdir({ dir: held[level - 1]!, name: "d" });
+    }
+    closeSync(held[0]!);
+    rmdirSync(top);
   };
 
+  // A chain one folder deeper than the walk goes, made once: from its second folder it is the walk's depth, from its
+  // first one past it. On a Mac each call through a handle costs more the deeper its folder is, and making the chain
+  // alone takes over ten seconds: the bound is sized to that.
   it("goes no deeper than its depth, and says it stopped", async () => {
-    const whole = join(folder, "whole");
     const deep = join(folder, "deep");
+    const held = chain(deep, MAX_WALK_DEPTH + 1);
     try {
-      chain(whole, MAX_WALK_DEPTH);
-      chain(deep, MAX_WALK_DEPTH + 1);
-      expect((await walk({ key: whole })).ok).toMatchObject({ files: [[`${"d/".repeat(MAX_WALK_DEPTH)}bottom.txt`, 0]], truncated: false });
+      expect((await walk({ key: join(deep, "d") })).ok).toMatchObject({ files: [[`${"d/".repeat(MAX_WALK_DEPTH)}bottom.txt`, 0]], truncated: false });
       expect((await walk({ key: deep })).ok).toMatchObject({ files: [], truncated: true });
     } finally {
-      // rmSync names each path whole, and these are past what a path can name.
-      execFileSync("rm", ["-rf", whole, deep]);
+      unchain(deep, held);
     }
-  }, 60_000);
+  }, process.platform === "darwin" ? 180_000 : 60_000);
 
   it.skipIf(process.getuid?.() === 0)("skips a folder it may not read, and lists every other file whole", async () => {
     // A database's data folder bind-mounted into a project, owned by another user: as common as lost+found.

@@ -1,8 +1,8 @@
 // The app on a Mac, through the real app, as a development build runs there: its data in the user's
 // Library, the app's menu in the menu bar, the window's own buttons inset over its corner, a template
 // image in the menu bar, Option+Space for quick entry, links from Launch Services' open-url, the Dock's
-// click, sign-in tokens sealed, the Mac's own name, and a notification's click. With no VM: none boots on
-// the macOS runner. On a Mac alone.
+// click, sign-in tokens sealed, the file helper's tools on the PATH an app started from the Dock has, the
+// Mac's own name, and a notification's click. With no VM: none boots on the macOS runner. On a Mac alone.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -12,9 +12,14 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { clickNotice, dataHome, dataRoot, launch, notices, quit, secondLaunch, shellPage, stubNative, stubNotifications } from "./launch.js";
+import { clickNotice, dataHome, dataRoot, ELECTRON, launch, notices, quit, secondLaunch, shellPage, stubNative, stubNotifications } from "./launch.js";
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+// The bundle this package's Electron runs from, as Launch Services knows the app the tests launch, and the main
+// processes running its program.
+const BUNDLE = ELECTRON.replace(/\/Contents\/MacOS\/[^/]+$/, "");
+const electrons = () => execFileSync("/bin/ps", ["-axo", "pid=,command="], { encoding: "utf8" }).split("\n")
+  .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line)).filter((found) => found?.[2]?.startsWith(ELECTRON)).map((found) => Number(found![1]));
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 const link = (url: string) => `surogate://open?url=${encodeURIComponent(url)}`;
 
@@ -139,15 +144,39 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
   });
 
-  it("shows its window at a second launch and at a click on its Dock icon", async () => {
+  it("shows its window at a second launch", async () => {
     app = await launch(home);
     await shellPage(app);
     await hide(app);
     expect(await secondLaunch(home)).toBe(0);
     await expect.poll(() => visible(app!)).toBe(true);
-    await hide(app);
-    await app.evaluate(({ app: running }) => running.emit("activate"));
-    await expect.poll(() => visible(app!)).toBe(true);
+  });
+
+  it("shows its window, hidden by Cmd+W and never destroyed, at the reopen a click on its Dock icon sends", async () => {
+    app = await launch(home);
+    await shellPage(app);
+    // Cmd+W, File's Close window: the window's own close, as its close button's.
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.close());
+    await expect.poll(() => visible(app!)).toBe(false);
+    await app.evaluate(({ app: running }) => {
+      const came = { activate: 0, secondInstance: 0 };
+      running.on("activate", () => { came.activate += 1; });
+      running.on("second-instance", () => { came.secondInstance += 1; });
+      Object.assign(globalThis, { came });
+    });
+    // Launch Services hands an app it runs a reopen (kAEReopenApplication), as the Dock does at a click on its icon:
+    // Electron's activate (NSApplicationDelegate, applicationShouldHandleReopen:hasVisibleWindows:).
+    const before = electrons();
+    execFileSync("/usr/bin/open", ["-a", BUNDLE]);
+    try {
+      await expect.poll(() => visible(app!)).toBe(true);
+    } finally {
+      // Unsure: that Launch Services takes the app a test started for its bundle's, and reopens it rather than start another.
+      const started = electrons().filter((pid) => !before.includes(pid));
+      for (const pid of started) process.kill(pid, "SIGKILL");
+      expect(started, "Launch Services started another Electron in place of a reopen").toEqual([]);
+    }
+    expect(await app.evaluate(() => (globalThis as unknown as { came: object }).came)).toEqual({ activate: 1, secondInstance: 0 });
   });
 
   it("keeps its sign-in and its device token sealed, and says nothing of encryption", async () => {
@@ -158,6 +187,34 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
       expect(kept, file).not.toContain('"plain"');
     }
     expect(await page.isHidden("#notice")).toBe(true);
+  });
+
+  it("finds the file helper's tools, its own rg beside its node, on the bare PATH Finder and the Dock give an app", async () => {
+    // As scripts/rg.sh fetches it, or this test means nothing.
+    expect(existsSync(join(import.meta.dirname, "..", "..", "bin", "rg")), "the app's rg, by scripts/rg.sh").toBe(true);
+    app = await launch(home, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
+    const page = await shellPage(app);
+    // The line says what the sandbox lacks once its looks are done: this runner's VM, which none boots on, and no tool.
+    await expect.poll(() => page.textContent("#sandbox-text"), { timeout: 15_000 }).toMatch(/This Mac cannot run Surogate's sandbox|tools are missing/);
+    expect(await page.textContent("#sandbox-text")).not.toContain("tools are missing");
+  });
+
+  it("closes Settings from its close button: while Settings is open, nothing of the window beneath it drags the window", async () => {
+    const { shell, page } = await signedIn();
+    const dragging = () => page.evaluate(() => [...document.querySelectorAll("*")]
+      .filter((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region") === "drag").length);
+    expect(await dragging()).toBeGreaterThan(0);
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    await expect.poll(dragging).toBe(0);
+    await settings!.click("#close");
+    await expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.contentView.children
+      .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith("/settings.html"))))).toBe(false);
+    await expect.poll(dragging).toBeGreaterThan(0);
   });
 
   it("names this Mac in Settings by the name System Settings gives it", async () => {
