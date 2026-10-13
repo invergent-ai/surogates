@@ -307,13 +307,14 @@ export function applyAgentChatEvent(
 
     case "tool.result": {
       const toolCallId = stringValue(event.data.tool_call_id);
-      const call = findToolCallById(nextState.messages, toolCallId);
-      const toolName = call?.toolName ?? null;
       const messages = applyToolResult(nextState.messages, event.data);
+      const call = findToolCallById(messages, toolCallId);
+      const toolName = call?.toolName ?? null;
       const mutatesWorkspace =
         toolName !== null && WORKSPACE_MUTATING_TOOLS.has(toolName);
-      // Opened once the edit has run, for an edit that creates its document; replayed history opens nothing.
-      const officePath = nextState.live && call?.toolName === "office_edit" ? officeEditPath(call.args) : null;
+      // Opened once the edit has run, for an edit that creates its document; a failed edit and replayed history open nothing.
+      const officePath =
+        nextState.live && call?.toolName === "office_edit" && !toolCallFailed(call) ? officeEditPath(call.args) : null;
       const withResult: AgentChatState = {
         ...nextState,
         messages,
@@ -622,6 +623,16 @@ function officeEditPath(args: string): string | null {
     return typeof path === "string" ? path.replace(/^__WORKSPACE__\//, "") || null : null;
   } catch {
     return null;
+  }
+}
+
+// A finished tool call that did nothing: cancelled, or its result an error.
+function toolCallFailed(call: AgentChatToolCallInfo): boolean {
+  if (call.status === "error") return true;
+  try {
+    return JSON.parse(call.result ?? "")?.error != null;
+  } catch {
+    return false;
   }
 }
 

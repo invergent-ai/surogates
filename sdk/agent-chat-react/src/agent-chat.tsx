@@ -237,8 +237,8 @@ export function AgentChat({
     setFilesOpen(false);
   }, [runtime.viewMode]);
 
-  // The document the agent's live edits last opened in the file pane.
-  const officeAutoOpened = useRef<string | null>(null);
+  // The documents the agent's live edits have opened in the file pane.
+  const officeAutoOpened = useRef(new Set<string>());
 
   // A different session is a different workspace: fold the accordion and
   // drop the old session's selection and preview rather than carrying them
@@ -248,7 +248,7 @@ export function AgentChat({
     setWorkspacePath(null);
     setPreviewPath(null);
     setOpenPane(null);
-    officeAutoOpened.current = null;
+    officeAutoOpened.current.clear();
   }, [sessionId]);
   const readOnly = readOnlyReasonForSession(runtime.session);
   // The canvas view is offered only on a session that was created as a
@@ -402,8 +402,8 @@ export function AgentChat({
     if (!officeAutoOpen || !isOfficeDocument(officeAutoOpen.path)) return;
     if (openPane === "file" && previewPath !== null && previewPath !== officeAutoOpen.path) return;
     // A document the user closed stays closed while the agent goes on editing it.
-    if (officeAutoOpened.current === officeAutoOpen.path) return;
-    officeAutoOpened.current = officeAutoOpen.path;
+    if (officeAutoOpened.current.has(officeAutoOpen.path)) return;
+    officeAutoOpened.current.add(officeAutoOpen.path);
     setWorkspacePath(officeAutoOpen.path);
     setPreviewPath(officeAutoOpen.path);
     setOpenPane("file");

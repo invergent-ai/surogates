@@ -46,10 +46,10 @@ describe("live office edits", () => {
     eventId,
     data: { tool_call_id: `tc${eventId}`, name, arguments: { path, ops: [] } },
   });
-  const result = (eventId: number, callEventId: number, name = "office_edit") => ({
+  const result = (eventId: number, callEventId: number, name = "office_edit", content = "{}") => ({
     type: "tool.result" as const,
     eventId,
-    data: { tool_call_id: `tc${callEventId}`, name, content: "{}", elapsed_ms: 900 },
+    data: { tool_call_id: `tc${callEventId}`, name, content, elapsed_ms: 900 },
   });
 
   it("are listened to", () => {
@@ -71,6 +71,13 @@ describe("live office edits", () => {
     state = applyAgentChatEvent(state, call(11, "docs/notes.md", "write_file"));
     state = applyAgentChatEvent(state, result(12, 11, "write_file"));
     expect(state.officeAutoOpen).toEqual({ path: "docs/Plan.docx", eventId: 10 });
+  });
+
+  it("open nothing for an edit that failed", () => {
+    let state = applyAgentChatEvent(createInitialAgentChatState(), { type: "stream.live", eventId: 0, data: {} });
+    state = applyAgentChatEvent(state, call(5, "docs/New.docx"));
+    state = applyAgentChatEvent(state, result(6, 5, "office_edit", JSON.stringify({ error: "The editor could not do that" })));
+    expect(state.officeAutoOpen).toBeNull();
   });
 
   it("refresh the file tree when an edit finishes", () => {
