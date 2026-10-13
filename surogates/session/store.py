@@ -57,6 +57,7 @@ from surogates.session.acting_principal import (
 from surogates.session.events import OPENER_SYNTHETIC_MARKERS, EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
+    ASK_USER_QUESTION_RESCUE_PREFIX,
     apply_read_receipt,
     build_inbox_row,
 )
@@ -258,12 +259,18 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
     ):
         questions = data.get("questions") or []
         if questions:
+            tool_call_id = (data.get("tool_call_id") or "").strip()
             payload = {
                 "input_prompt": True,
-                "tool_call_id": (data.get("tool_call_id") or "").strip(),
+                "tool_call_id": tool_call_id,
                 "questions": questions,
-                "context": strip_next_action_blocks(data.get("context", "") or ""),
             }
+            # A model's own ``context`` narrates its reasoning for the
+            # operator inbox ("step 4 of the enrolment skill: ..."), and
+            # patients received it verbatim.  Only the harness rescue's
+            # context is the agent's reply to the person.
+            if tool_call_id.startswith(ASK_USER_QUESTION_RESCUE_PREFIX):
+                payload["context"] = strip_next_action_blocks(data.get("context", "") or "")
     return payload
 
 

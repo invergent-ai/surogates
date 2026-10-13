@@ -593,3 +593,44 @@ def test_input_prompt_carries_no_english_chrome() -> None:
         "questions": [{"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}]}],
     })
     assert text == "Am notat data procedurii.\nSunteți de acord?\n  • Da"
+
+
+def test_channel_prompt_drops_the_models_own_context() -> None:
+    """The model's ``context`` is its reasoning for the operator inbox: it
+    reached patients as "Pasul 4 din skill-ul de înrolare: ..."."""
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    payload = _build_channel_payload(
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "call_abc",
+            "questions": [{"prompt": "Când a avut loc procedura?"}],
+            "context": "Pasul 4 din skill-ul de înrolare: aflu data.",
+        },
+        "whatsapp",
+    )
+    assert payload["input_prompt"] is True
+    assert "context" not in payload
+
+    from surogates.channels.platforms.whatsapp import _render_input_prompt
+    assert "Pasul 4" not in _render_input_prompt(payload)
+
+
+def test_channel_prompt_keeps_the_rescued_reply() -> None:
+    """A rescued final reply is the agent talking to the person; dropping it
+    would leave only the bare question."""
+    from surogates.session.events import EventType
+    from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
+    from surogates.session.store import _build_channel_payload
+
+    payload = _build_channel_payload(
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": f"{ASK_USER_QUESTION_RESCUE_PREFIX}x",
+            "questions": [{"prompt": "Sunteți de acord?"}],
+            "context": "Am notat data procedurii.",
+        },
+        "telegram",
+    )
+    assert payload["context"] == "Am notat data procedurii."

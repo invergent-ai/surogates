@@ -113,6 +113,7 @@ from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
 from surogates.session.store import RERUN_WINDOW
 from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
 
@@ -4758,7 +4759,7 @@ class AgentHarness(
             return None
         context = str(decision.get("context") or content).strip()
 
-        tool_call_id = f"call_ask_user_question_rescue_{uuid4().hex[:24]}"
+        tool_call_id = f"{ASK_USER_QUESTION_RESCUE_PREFIX}{uuid4().hex[:24]}"
         assistant_message["content"] = None
         assistant_message["tool_calls"] = [
             {
