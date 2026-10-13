@@ -766,7 +766,7 @@ export class ToolHosts implements Executor {
     const works: Works = { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } };
     const lockWaitMs = this.options.landWaitMs ?? LAND_WAIT_MS;
     // A working folder of its own: the thread's host on its copy runs beside it, and each sandbox writes its own.
-    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${root}.land`)), landing: { copy: copy.folder.path, kept: guestPathOf(kept) }, lockWaitMs };
+    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${root}.land`)), landing: { copy: copy.folder.path, kept }, lockWaitMs };
     // Its wait for the folder, then a host's own start. What a landing there cut short its helper puts back in the first
     // step it is asked, which no stop of this host cuts (files/land.ts).
     const startMs = lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS);
@@ -920,7 +920,7 @@ export class ToolHosts implements Executor {
   private recoverer(folder: Folder, kept: string, name: string): Host {
     const works: Works = { folder };
     const lockWaitMs = this.options.landWaitMs ?? LAND_WAIT_MS;
-    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${name}.recover`)), recovery: { kept: guestPathOf(kept) }, lockWaitMs };
+    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${name}.recover`)), recovery: { kept }, lockWaitMs };
     const host = new Host(
       (this.options.spawnHost ?? forkHost)(), start, works, lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS), this.options.idleMs ?? IDLE_MS,
       () => {}, () => Promise.resolve("deny"), () => Promise.resolve(),
@@ -974,6 +974,18 @@ interface Starting {
   stopped: boolean;
 }
 
+// *start* as its helper is handed it. What a landing or a recovery keeps is the app's by this computer's own path, which
+// the app reads and compares as it keeps it (kept, below); the helper resolves it by its path in the guest, as it does
+// the folder (session-path.ts). On Linux and macOS the two are one.
+function handed(start: HostStart): HostStart {
+  const { landing, recovery } = start;
+  return {
+    ...start,
+    ...(landing ? { landing: { ...landing, kept: guestPathOf(landing.kept) } } : {}),
+    ...(recovery ? { recovery: { kept: guestPathOf(recovery.kept) } } : {}),
+  };
+}
+
 class Host {
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   // Null once it has started; otherwise why nothing runs.
@@ -998,7 +1010,8 @@ class Host {
   // Told to stop: what it was sent ends, and nothing of a landing's is sent after.
   private closing = false;
   // A landing's host, or a recovery's: its helper writes the user's folder itself, and no stop of it cuts a step it was
-  // sent. Where it keeps the files the folder's landings replace. Whether it is a recovery's, which lands nothing.
+  // sent. Where it keeps the files the folder's landings replace, by this computer's own path. Whether it is a
+  // recovery's, which lands nothing.
   private readonly lands: boolean;
   readonly kept: string | undefined;
   readonly recovers: boolean;
@@ -1055,7 +1068,7 @@ class Host {
       });
     });
     process.onMessage((message) => this.received(message));
-    this.send(start);
+    this.send(handed(start));
   }
 
   run(operation: Pick<Operation, "id" | "kind" | "args">, signal: AbortSignal): Promise<Outcome> {
