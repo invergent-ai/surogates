@@ -110,3 +110,58 @@ The guest image the Windows app boots is the x64 one Linux boots, with Hyper-V's
 
    **A file made in the folder under a protected name, an Explorer name or one of the aliases above, or a vsock socket made, is a security finding: stop and report it.**
 5. **The memory given back.** Leave the guest idle for ten minutes after a command that took 1 GiB (`python3 -c 'b = bytearray(1 << 30)'`). Pass: `vmmem`'s memory in Task Manager falls back within a minute of the command's end. Send back the two numbers.
+
+## The Windows VM backend, measured on a PC
+
+The VM backend boots the guest through the Host Compute Service: a LocalSystem service makes every HCS call, and `surogate-vm.exe`, as you, carries the guest's ports. These steps need a real PC: GitHub's runners have no nested virtualization. Work in a fresh local administrator account made for this, never your own.
+
+### Install the service and build the programs
+
+In an elevated PowerShell, from `desktop\native\windows`:
+
+```
+powershell -ExecutionPolicy Bypass -File dev-service.ps1
+```
+
+It builds `surogate-service.exe` and `surogate-vm.exe` (`cargo build --locked --release`), installs the development service as LocalSystem on demand, lets interactive users start it, and grants the VM group read on `desktop\dist\agent.vhd`. Remove it afterwards with `-Remove`.
+
+- Get milestone B's x64 guest image into `images\guest\out` (`gh run download` of the image, initrd and agent-disk artifacts), so nothing is built in a Linux container. Point the measurements at it: `$env:SUROGATE_VM_IMAGE = "<repo>\images\guest\out"`, and `$env:SUROGATE_VM_AGENT_DISK` at the agent disk with its VHD footer.
+
+### The measurements, in order
+
+Each is a vitest file under `desktop\test\vm\win32\measure`, run one at a time by its own config, each writing `test\vm\win32\measure\out\<name>.json` with this PC's CPU, edition and build. Run them in this order:
+
+```
+cd desktop
+npx vitest run -c test/vm/win32/measure/vitest.config.ts identity
+```
+
+1. **`identity` — whose rights the Plan 9 server serves a folder with. THE SECURITY STOP, FIRST.** A share added with your own token and `UseShareRootIdentity`: the guest reads your own file, cannot read a subfolder only an administrator can, and cannot write a file you may only read; another user's folder is refused at the service, and if forced, is unreadable in the guest. **A FAIL is a security finding: stop and report it before anything else. Folder sharing stays off, and the app's own Plan 9 server (C3b) is built.** Set `SUROGATE_OTHER_USER_FOLDER` to another user's folder, and run this on a standard account and on an administrator's. The admin-only subfolder is set with `icacls`; run elevated to set it, or have an administrator set it beforehand on the standard account.
+2. **`boot`** — the guest booted directly by HCS with its initrd, three SCSI disks, the rule attached, the console on COM1; median of three, under 1.5 s.
+3. **`ports`** — the agent's three ports relayed through the pipes: a round trip, a 261 KB result whole, and what an ended connection does.
+4. **`disks`** — the SCSI addresses `:0:0:0`, `:0:0:1`, `:0:0:2`, the read-only flags, and discard on the sessions disk.
+5. **`owners`** — the uid, gid and mode the guest sees; who owns what the guest makes; links, FIFOs, xattrs, a rename over. **And the security check: a junction and a symbolic link in the folder that lead outside it — a read through either that reaches outside is a security finding.** The names NTFS resolves to another are recorded.
+6. **`readonly`** — a place's folder shared read-only: the guest's root cannot write it, however it remounts. **A write that reaches the folder is a security finding.**
+7. **`shares`** — adding and removing shares while the guest runs: latency, 40 cycles with two roots, and a removal while a process holds the mount.
+8. **`coherence`** — a host write then a guest read, 1 000 times; `git status` on 50 000 files after the host changed 10.
+9. **`mmap`** — a shared map of a file in a share (EINVAL on 9p is the safe answer).
+10. **`folders`** — Documents in OneDrive, an exFAT USB drive, a ReFS Dev Drive, a `subst` drive, a compressed or encrypted folder; each by its environment variable (`SUROGATE_ONEDRIVE_FOLDER` and the rest). A network drive's refusal at binding is milestone D's.
+11. **`lifetime`** — `surogate-vm.exe` killed, the manager killed, the app ended, the service killed and restarted: look for a `vmmem` or `vmwp` left.
+12. **`sleep`** — by hand: start it, put the PC to sleep for about a minute, wake it, and read what the command saw across the sleep. Do this on a modern-standby laptop and an S3 desktop, and a hibernate.
+13. **`memory`** — `vmmem`'s working set idle, at a 1.5 GiB peak, and each minute after, for `MEASURE_MINUTES`.
+14. **`beside`** — the guest boots and runs a command beside WSL2, Docker Desktop, VirtualBox, VMware, Memory Integrity, Credential Guard and Windows Sandbox; set each up, then run it.
+15. **`defender`** — the unpack, the boot and an `npm install` in a share, with real-time protection on, and with a hand-set exclusion of the data and share folders; compare.
+16. **`requirements`** — on a PC with Virtual Machine Platform off, with virtualization off in the firmware, and on a VM without nested virtualization: each case's HCS answer and the backend's words.
+
+### The VM suite and the escape probes (C6)
+
+With the backend on win32 and the development service running:
+
+```
+$env:SUROGATE_VM_TESTS = "1"
+npx vitest run test/vm
+```
+
+Then the escape probes by hand: `ip link` shows only `lo`; `~/.ssh`, another root's folder and its processes are absent; a protected write fails; the network goes only through the proxy; a junction to `%USERPROFILE%` in the folder is refused by the file host. Record the counts.
+
+**Send back** the `out` folder, the VM suite's counts, and the console logs each step names. **`identity`, `owners`'s link check and `readonly` are security checks: a FAIL in any is a finding — stop and report it.**
