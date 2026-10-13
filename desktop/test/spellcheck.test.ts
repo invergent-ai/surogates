@@ -73,9 +73,10 @@ describe("the app's dictionary", () => {
     expect(scripts["build:darwin"]!.split(" && ")[0]).toBe("scripts/dictionary.sh");
   });
 
-  it("is kept as it is, with no fetch, where the computer has no sha256sum, as a Mac has none: shasum checks it there", async () => {
+  it("is kept as it is, with no fetch, on a Mac, whose sha256sum checks no list: shasum checks it there", async () => {
     // The script in a package of its own, with the pinned dictionary in place, on a PATH of every program of this
-    // computer's but sha256sum. Its connections go to a proxy of the test's, which refuses them.
+    // computer's but a Mac's own uname and sha256sum, BSD's, which says its usage at a list to check. Its connections go
+    // to a proxy of the test's, which refuses them.
     const own = mkdtempSync(join(dir, "dictionary-mac-"));
     mkdirSync(join(own, "scripts"));
     copyFileSync(join(PACKAGE, "scripts", "dictionary.sh"), join(own, "scripts", "dictionary.sh"));
@@ -83,7 +84,9 @@ describe("the app's dictionary", () => {
     copyFileSync(join(SHIPPED, DICTIONARY), join(own, "dictionaries", DICTIONARY));
     const bin = join(own, "bin");
     mkdirSync(bin);
-    for (const name of readdirSync("/usr/bin")) if (name !== "sha256sum") symlinkSync(join("/usr/bin", name), join(bin, name));
+    for (const name of readdirSync("/usr/bin")) if (name !== "sha256sum" && name !== "uname") symlinkSync(join("/usr/bin", name), join(bin, name));
+    writeFileSync(join(bin, "uname"), "#!/bin/sh\necho Darwin\n", { mode: 0o755 });
+    writeFileSync(join(bin, "sha256sum"), "#!/bin/sh\necho 'usage: sha256sum [-bctwz] [files ...]' >&2\nexit 1\n", { mode: 0o755 });
     let heard = 0;
     const proxy = createServer((socket) => {
       heard += 1;
