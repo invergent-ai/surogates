@@ -6117,6 +6117,13 @@ class AgentHarness(
         messages = [m for m in messages if m is not last_user]
         original_count = len(messages)
 
+        if original_count <= 5:
+            # Too short to be worth a pass; the compressor is not asked.
+            await self._emit_loop_response(
+                session, lease, "Nothing to compress yet.", notice=True,
+            )
+            return
+
         try:
             compressed, summary_data = await self._compressor.compress(
                 messages, self._llm,
