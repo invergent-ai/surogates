@@ -78,6 +78,16 @@ def test_the_schema_lists_the_agents_forms_without_touching_the_original():
     assert "enum" not in SEND_FORM_SCHEMA.parameters["properties"]["form"]
 
 
+def test_the_schema_tells_the_model_each_choice_fields_answers():
+    form = {**FORM, "fields": [
+        {"name": "site", "label": "Where?", "type": "Dropdown", "description": "Pick one",
+         "options": [{"id": "0_knee", "title": "Knee"}, {"id": "1_hip", "title": "Hip"}]},
+    ]}
+    schema = {"function": {"description": "d", "parameters": SEND_FORM_SCHEMA.parameters}}
+    described = describe_forms(schema, (form,))["function"]["description"]
+    assert "site (Where?; Pick one; answers: Knee | Hip)" in described
+
+
 async def test_a_form_goes_out_as_an_interactive_flow(window):
     store = _Store()
     result = await handle_send_form(

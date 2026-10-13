@@ -17,6 +17,7 @@ from surogates.channels.whatsapp_flows import (
     flow_interactive,
     form_by_name,
     new_flow_token,
+    option_titles,
 )
 from surogates.followup import store as followup_store
 from surogates.followup.outreach import window_open
@@ -65,6 +66,16 @@ SEND_FORM_SCHEMA = ToolSchema(
 )
 
 
+def _describe_field(field: dict[str, Any]) -> str:
+    detail = field.get("label") or field["name"]
+    if field.get("description"):
+        detail += f"; {field['description']}"
+    titles = option_titles(field)
+    if titles:
+        detail += "; answers: " + " | ".join(titles.values())
+    return f"{field['name']} ({detail})"
+
+
 def describe_forms(schema: dict[str, Any], forms: Any) -> dict[str, Any]:
     """*schema* with ``form`` limited to *forms*, each described.  Not mutated."""
     names = [f["name"] for f in forms]
@@ -72,7 +83,7 @@ def describe_forms(schema: dict[str, Any], forms: Any) -> dict[str, Any]:
         f"- {f['name']}: {f.get('title') or f['name']}"
         + (f" — {f['description']}" if f.get("description") else "")
         + " (fields: " + ", ".join(
-            f"{x['name']} ({x.get('label') or x['name']})" for x in f.get("fields") or ()
+            _describe_field(x) for x in f.get("fields") or ()
         ) + ")"
         for f in forms
     )

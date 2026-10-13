@@ -365,7 +365,7 @@ async def _form_reply(msg, *, deps, agent_id, session_id, runtime_payload) -> st
     the adapter's plain ``key: value`` text.
     """
     from surogates.channels.whatsapp_flows import (
-        form_by_name,
+        form_by_token_ref,
         form_reply_text,
         forms_from_payload,
         sent_in_session,
@@ -380,7 +380,7 @@ async def _form_reply(msg, *, deps, agent_id, session_id, runtime_payload) -> st
             return None
         if runtime_payload is None and deps.runtime_config is not None:
             runtime_payload = await deps.runtime_config(agent_id) or {}
-        form = form_by_name(
+        form = form_by_token_ref(
             forms_from_payload((runtime_payload or {}).get("whatsapp_forms")), name,
         )
     except Exception:  # noqa: BLE001

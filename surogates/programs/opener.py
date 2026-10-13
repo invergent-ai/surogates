@@ -222,7 +222,8 @@ def make_opener_enqueue(
         # form this conversation sent.
         button = config.get("template_flow_button")
         if isinstance(button, dict):
-            metadata["flow_token"] = new_flow_token(str(button.get("form") or "form"))
+            ref = button.get("form") or button.get("flow_id") or "form"
+            metadata["flow_token"] = new_flow_token(str(ref))
             template["flow_button"] = {
                 "index": str(button.get("index") or 0), "flow_token": metadata["flow_token"],
             }

@@ -584,6 +584,43 @@ async def test_a_template_with_a_flow_button_carries_a_token_the_reply_can_be_ch
 
 
 @pytest.mark.asyncio
+async def test_ops_projection_of_the_flow_button_by_flow_id_is_sent(monkeypatch, queued_invitation):
+    from surogates.programs import opener as opener_mod
+    from surogates.programs.opener import make_opener_enqueue
+
+    async def _session(*args, **kwargs):
+        return uuid.uuid4()
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", _session)
+    emitted, sent = {}, {}
+
+    class Store:
+        async def emit_synthetic_user_message(self, session_id, **kwargs):
+            emitted.update(kwargs["metadata"])
+            return 42
+
+    class Delivery:
+        async def enqueue(self, session_id, event_id, channel, destination, payload):
+            sent.update(payload)
+            return 99
+
+    async def _config(program_id):
+        return {
+            "template_name": "daily", "template_language": "ro", "channel_identifier": "127",
+            "template_flow_button": {"index": 1, "flow_id": "1187"},
+        }
+
+    await make_opener_enqueue(
+        session_store=Store(), redis=None, session_factory=None,
+        delivery_service=Delivery(), config_for_program=_config,
+    )(queued_invitation)
+
+    token = emitted["flow_token"]
+    assert token.startswith("1187:")
+    assert sent["template"]["flow_button"] == {"index": "1", "flow_token": token}
+
+
+@pytest.mark.asyncio
 async def test_the_flow_button_goes_out_as_a_template_button_component(monkeypatch):
     sent = {}
 

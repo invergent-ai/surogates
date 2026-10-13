@@ -107,3 +107,43 @@ async def test_a_token_counts_only_in_the_conversation_that_sent_it(sf):
     assert await sent_in_session(sf, other, "vitals:abc") is None
     assert await sent_in_session(sf, mine, "vitals:nope") is None
     assert await sent_in_session(sf, mine, "") is None
+
+
+def test_answers_read_as_the_options_the_person_picked():
+    from surogates.channels.whatsapp_flows import form_reply_text
+
+    form = {"name": "checkin", "title": "Check-in", "fields": [
+        {"name": "site", "label": "Unde doare?", "type": "Dropdown",
+         "options": [{"id": "0_knee", "title": "Genunchi"}, {"id": "1_hip", "title": "Șold"}]},
+        {"name": "meds", "label": "Medicamente", "type": "CheckboxGroup",
+         "options": [{"id": "a", "title": "Ibuprofen"}, {"id": "b", "title": "Paracetamol"}]},
+        {"name": "ok", "label": "Sunt de acord", "type": "OptIn"},
+        {"name": "no", "label": "Contact", "type": "OptIn"},
+        {"name": "note", "label": "Notă", "type": "TextArea"},
+        {"name": "mood", "label": "Stare", "type": "RadioButtonsGroup"},
+    ]}
+    assert form_reply_text(form, {
+        "site": "1_hip", "meds": ["a", "b"], "ok": True, "no": False, "note": "", "mood": "bine",
+    }) == (
+        "Form 'Check-in' submitted:\nUnde doare?: Șold\nMedicamente: Ibuprofen, Paracetamol\n"
+        "Sunt de acord: Da\nContact: Nu\nNotă: —\nStare: bine"
+    )
+
+
+async def test_a_program_button_token_names_the_form_by_its_flow_id(monkeypatch):
+    async def sent_in_session(sf, session_id, token):
+        return token.split(":", 1)[0]
+
+    monkeypatch.setattr("surogates.channels.whatsapp_flows.sent_in_session", sent_in_session)
+    deps = _make_deps()
+
+    async def runtime_config(agent_id):
+        return {"whatsapp_forms": [FORM]}
+
+    deps.runtime_config = runtime_config
+    await ChannelInboundPipeline().handle(
+        _flow_msg(token="1187:abc"), routing=_Routing(platform="whatsapp", identifier="A0APP"),
+        config=_make_config(), deps=deps,
+    )
+    said = [d for _, t, d in deps.session_store.events if t == EventType.USER_MESSAGE]
+    assert said[-1]["content"].startswith("Form 'Semne vitale' submitted:\nTensiune sistolică: 130")

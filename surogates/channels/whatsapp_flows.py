@@ -2,7 +2,7 @@
 
 ops projects each published flow the agent may send as ``whatsapp_forms`` in
 the runtime config: ``{name, flow_id, title, cta, first_screen, description,
-fields: [{name, label, type}]}``.
+fields: [{name, label, type, description?, options?: [{id, title}]}]}``.
 
 A send carries a ``flow_token`` of ``<form name>:<nonce>``.  The token is
 recorded on the event that sent it, so a reply's token is trusted only when
@@ -23,6 +23,8 @@ from surogates.db.models import Event
 __all__ = [
     "flow_interactive",
     "form_by_name",
+    "form_by_token_ref",
+    "option_titles",
     "form_reply_text",
     "forms_from_payload",
     "new_flow_token",
@@ -49,6 +51,14 @@ def forms_from_payload(raw: Any) -> tuple[dict[str, Any], ...]:
 
 def form_by_name(forms: Any, name: str) -> dict[str, Any] | None:
     return next((f for f in forms or () if f.get("name") == name), None)
+
+
+def form_by_token_ref(forms: Any, ref: str) -> dict[str, Any] | None:
+    """The form a token names: by form name, or by flow id for a Program's
+    template button, which ops projects as ``{index, flow_id}``."""
+    return form_by_name(forms, ref) or next(
+        (f for f in forms or () if str(f.get("flow_id")) == ref), None,
+    )
 
 
 def new_flow_token(form: str) -> str:
@@ -84,12 +94,26 @@ def flow_interactive(
     }
 
 
-def _value(value: Any) -> str:
+def option_titles(field: dict[str, Any]) -> dict[str, str]:
+    return {
+        str(o["id"]): str(o.get("title") or o["id"])
+        for o in field.get("options") or () if isinstance(o, dict) and o.get("id") is not None
+    }
+
+
+def _value(field: dict[str, Any], value: Any) -> str:
+    """An answer as the person saw it: option titles, not the ids Meta returns."""
+    if value is None or value == "" or value == []:
+        return "—"
+    # OptIn is the only boolean input; the care teams read these in Romanian.
+    if isinstance(value, bool):
+        return "Da" if value else "Nu"
+    titles = option_titles(field)
     if isinstance(value, list):
-        return ", ".join(str(v) for v in value)
+        return ", ".join(titles.get(str(v), str(v)) for v in value)
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False)
-    return str(value)
+    return titles.get(str(value), str(value))
 
 
 def form_reply_text(form: dict[str, Any], fields: dict[str, Any]) -> str:
@@ -98,11 +122,12 @@ def form_reply_text(form: dict[str, Any], fields: dict[str, Any]) -> str:
     The form's own fields come first, in its order; anything else the flow
     returned follows under its key, so no answer is lost to a stale projection.
     """
-    labels = {f["name"]: f.get("label") or f["name"] for f in form.get("fields") or ()}
+    known = {f["name"]: f for f in form.get("fields") or ()}
+    labels = {name: f.get("label") or name for name, f in known.items()}
     answered = {k: v for k, v in fields.items() if k != "flow_token"}
     ordered = [k for k in labels if k in answered] + [k for k in answered if k not in labels]
     lines = [f"Form '{form.get('title') or form.get('name')}' submitted:"]
-    lines += [f"{labels.get(k, k)}: {_value(answered[k])}" for k in ordered]
+    lines += [f"{labels.get(k, k)}: {_value(known.get(k, {}), answered[k])}" for k in ordered]
     return "\n".join(lines)
 
 
