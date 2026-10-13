@@ -67,6 +67,68 @@ jobs:
       - name: Run the suites that pass on Windows
         run: npx vitest run --project windows
 
+  # The file host on Windows, where no srt contains its helper and its walk does (desktop/native/ntat): what the
+  # runner's file system does recorded first, in the job's summary; then ntat built with Visual Studio's C++ tools,
+  # the app's code and the app's rg; then the walk's, the file kinds' and the lock's suites on the runner's own NTFS,
+  # and the race of a process of this computer's against the helper. Each suite a step of its own with a bound of its
+  # own, so that one that hangs leaves the others' results, and the log, to read.
+  file-host:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Record what the runner's file system does
+        run: powershell -NoProfile -File test/win32/ntfs-facts.ps1 >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Build the file host
+        run: |
+          npx tsc -p tsconfig.build.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -File native/ntat/build.ps1
+
+      - name: Fetch the app's rg
+        shell: bash
+        run: scripts/rg.sh
+
+      # As a PC's system volume does by default: the walk's refusal of a short name is tested on one NTFS made.
+      - name: Let the runner's volumes make short names
+        run: fsutil 8dot3name set 0
+
+      - name: The walk, and the folder lock
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/ntat-win32.test.ts test/folder-lock-win32.test.ts test/fs-through-walk.test.ts
+
+      - name: The file kinds and the helper
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/file-host-win32.test.ts
+
+      - name: The race
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: npx vitest run --project unit --reporter=verbose test/file-tools-race-win32.test.ts
+
   # What a Windows runner offers the VM, recorded and never gating: GitHub calls nested
   # virtualization on its runners experimental. Whether Virtual Machine Platform is on, and what the
   # Host Compute Service says of itself (desktop/test/vm/win32/hcs-probe).
