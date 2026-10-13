@@ -26,7 +26,11 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store as followup_store
-from surogates.followup.eligibility import day_index, start_date_problem
+from surogates.followup.eligibility import (
+    day_index,
+    next_contact,
+    start_date_problem,
+)
 from surogates.tools.builtin.checkin import _open_invitation_for_session
 from surogates.tools.registry import ToolSchema
 
@@ -312,6 +316,40 @@ async def _tell_care_team(sf: Any, ctx: _Context, settings: Any, *, kind: str, t
     )
 
 
+async def _next_contact_text(sf: Any, ctx: _Context, row: Any, configs: list[dict]) -> str:
+    """When the Programs will next write to this person, in the Program's zone.
+
+    Computed, never assumed: someone enrolled on day 40 is past every
+    first-month Program, and "tomorrow at 08:30" would be a broken promise.
+    """
+    if row.status != "active":
+        return f"No scheduled message: the enrolment is {row.status}."
+    last = None
+    if ctx.channel == "whatsapp" and ctx.platform_user_id and ctx.sender:
+        last = await followup_store.last_inbound(
+            sf, org_id=ctx.org_id, platform="whatsapp",
+            platform_user_id=ctx.platform_user_id, channel_identifier=ctx.sender,
+        )
+    found = next_contact(
+        configs, protocol=row.protocol, start_date=row.start_date,
+        phase=row.phase, enrolled_at=row.created_at, last_inbound_at=last,
+        now=datetime.now(timezone.utc),
+    )
+    if found is None:
+        return (
+            "No scheduled message ahead: no active Program reaches this person "
+            "at their start date and phase. Do not promise them a time."
+        )
+    at, config = found
+    zone = str(config.get("timezone") or "UTC")
+    name = str(config.get("name") or "").strip()
+    return (
+        f"Next scheduled message: {at.astimezone(ZoneInfo(zone)):%a %Y-%m-%d %H:%M} "
+        f"{zone}" + (f" (Program '{name}')" if name else "")
+        + ". When you tell the person, use this time, never one of your own."
+    )
+
+
 def _told(queued: int, why_not: str | None) -> str:
     return (
         f"The care team was notified ({queued})."
@@ -347,8 +385,11 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
             "with consent=true only if they say yes."
         )
     protocol = str(arguments.get("protocol") or "").strip()
-    offered = await followup_store.protocol_timezones(
+    configs = await followup_store.active_program_configs(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
+    offered = await followup_store.protocol_timezones(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
     if not offered:
         return (
@@ -402,7 +443,10 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         parts.append(f"from {_start_text(enrollment)}")
     if enrollment.phase:
         parts.append(f"phase {enrollment.phase}")
-    return " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
+    return (
+        " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
+        + " " + await _next_contact_text(sf, ctx, enrollment, configs)
+    )
 
 
 def _start_text(row: Any) -> str:
@@ -480,8 +524,11 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     ctx, settings = await _context(kwargs)
     if ctx is None:
         return "No conversation context."
-    zones = await followup_store.protocol_timezones(
+    configs = await followup_store.active_program_configs(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
+    zones = await followup_store.protocol_timezones(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
     lines = [
         "Protocols offered: " + ", ".join(sorted(zones)) + "."
@@ -523,7 +570,10 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
             detail.append(f"phase {row.phase}")
         if row.status_reason:
             detail.append(f"reason: {row.status_reason}")
-        lines.append(", ".join(detail) + ".")
+        lines.append(
+            ", ".join(detail) + ". "
+            + await _next_contact_text(sf, ctx, row, configs)
+        )
     return "\n".join(lines)
 
 

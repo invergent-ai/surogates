@@ -402,7 +402,7 @@ async def test_the_care_team_is_recognised_and_never_enrolled(sf, patient):
 @pytest.mark.asyncio
 async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     # The WhatsApp profile is the daughter's: alerts named her, never him.
-    user_id, session_id = patient
+    _, session_id = patient
     result = await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x",
          "patient_name": " Petre Marin ", "answered_by": "Ana, fiica"},
@@ -490,3 +490,50 @@ async def test_approximate_without_a_start_date_is_not_recorded(sf, patient):
     [row] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
     assert row.start_date is None
     assert row.start_date_approximate is False
+
+
+# --- next scheduled contact -------------------------------------------------
+
+
+async def _morning_program(sf):
+    async with sf() as db:
+        await db.execute(sa.update(ProgramScheduleRow).values(config={
+            "name": "Prima lună", "timezone": "Europe/Bucharest",
+            "weekdays": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            "times_local": ["08:30"],
+            "audience": {"protocol": "post-op", "day_from": 0, "day_to": 30},
+        }))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_enrol_and_status_say_when_the_next_message_comes(sf, patient):
+    _, session_id = patient
+    await _morning_program(sf)
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 2},
+        **_kw(sf, session_id),
+    )
+    assert "Next scheduled message: " in result
+    assert "08:30 Europe/Bucharest (Program 'Prima lună')" in result
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "08:30 Europe/Bucharest (Program 'Prima lună')" in status
+
+
+@pytest.mark.asyncio
+async def test_someone_past_every_program_is_promised_no_time(sf, patient):
+    _, session_id = patient
+    await _morning_program(sf)
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 40},
+        **_kw(sf, session_id),
+    )
+    assert "No scheduled message ahead" in result
+    assert "Do not promise them a time" in result
+    paused = await followup.handle_followup_update(
+        {"protocol": "post-op", "status": "paused", "reason": "internat"},
+        **_kw(sf, session_id),
+    )
+    assert "status paused" in paused
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "No scheduled message: the enrolment is paused." in status

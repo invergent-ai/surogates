@@ -35,6 +35,7 @@ __all__ = [
     "OUTREACH_KINDS",
     "OUTREACH_PLATFORMS",
     "SETTINGS_FIELDS",
+    "active_program_configs",
     "enrollments",
     "get_settings",
     "grant_contact_permission",
@@ -306,15 +307,10 @@ def labelling_enrollment(rows: Iterable[FollowupEnrollmentRow]) -> FollowupEnrol
     )
 
 
-async def protocol_timezones(
+async def active_program_configs(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
-) -> dict[str, str]:
-    """Each protocol some active Program of this agent speaks to, with the
-    timezone of the first such Program — the zone a person's day is counted in.
-
-    These are the only protocols a person can be enrolled in: an enrollment
-    no Program targets would never produce a single message.
-    """
+) -> list[dict]:
+    """The projected config of each of this agent's active Programs."""
     async with session_factory() as db:
         configs = (
             await db.execute(
@@ -325,6 +321,26 @@ async def protocol_timezones(
                 .order_by(ProgramScheduleRow.id)
             )
         ).scalars().all()
+    return [config or {} for config in configs]
+
+
+async def protocol_timezones(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    configs: list[dict] | None = None,
+) -> dict[str, str]:
+    """Each protocol some active Program of this agent speaks to, with the
+    timezone of the first such Program — the zone a person's day is counted in.
+
+    These are the only protocols a person can be enrolled in: an enrollment
+    no Program targets would never produce a single message.
+    """
+    if configs is None:
+        configs = await active_program_configs(
+            session_factory, org_id=org_id, agent_id=agent_id,
+        )
     zones: dict[str, str] = {}
     for config in configs:
         try:

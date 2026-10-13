@@ -11,6 +11,7 @@ from surogates.followup.eligibility import (
     Audience,
     day_index,
     ineligibility,
+    next_contact,
     start_date_problem,
 )
 
@@ -131,3 +132,63 @@ def test_an_audience_round_trips_through_its_config():
 def test_a_start_date_must_be_within_the_protocol_horizon(offset, ok):
     problem = start_date_problem(TODAY + timedelta(days=offset), TODAY)
     assert (problem is None) is ok
+
+
+# --- next_contact -----------------------------------------------------------
+
+_DAILY = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+FIRST_MONTH = {
+    "name": "TAVI — prima lună", "timezone": "Europe/Bucharest",
+    "weekdays": _DAILY, "times_local": ["08:30"],
+    "audience": {"protocol": "tavi", "day_from": 0, "day_to": 30},
+}
+LATER = {
+    "name": "TAVI — luna 2-3", "timezone": "Europe/Bucharest",
+    "weekdays": ["mon"], "times_local": ["09:00"],
+    "audience": {"protocol": "tavi", "day_from": 31, "day_to": 90},
+}
+AT_TUESDAY = datetime(2026, 10, 13, 10, 0, tzinfo=timezone.utc)  # Tue 13:00 Bucharest
+
+
+def _next(configs, **kw):
+    args = {
+        "protocol": "tavi", "start_date": AT_TUESDAY.date(), "phase": None,
+        "enrolled_at": AT_TUESDAY, "last_inbound_at": AT_TUESDAY, "now": AT_TUESDAY,
+    } | kw
+    return next_contact(configs, **args)
+
+
+def test_next_contact_is_the_next_slot_of_the_matching_program():
+    at, config = _next([LATER, FIRST_MONTH])
+    assert at == datetime(2026, 10, 14, 5, 30, tzinfo=timezone.utc)
+    assert config["name"] == "TAVI — prima lună"
+
+
+def test_someone_past_the_first_month_waits_for_the_later_program():
+    at, config = _next([FIRST_MONTH, LATER], start_date=date(2026, 9, 3))  # day 40
+    assert config["name"] == "TAVI — luna 2-3"
+    assert at == datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)  # Mon 09:00
+
+
+def test_a_window_that_opens_far_ahead_is_still_found():
+    far = FIRST_MONTH | {"audience": {"protocol": "tavi", "day_from": 500}}
+    at, _ = _next([far])
+    assert (at.date() - AT_TUESDAY.date()).days in (499, 500)
+
+
+@pytest.mark.parametrize("kw", [
+    {"start_date": None},  # windowed Programs need a start
+    {"start_date": date(2026, 1, 1)},  # past every window
+    {"protocol": "other"},
+])
+def test_nobody_is_reached_outside_every_program(kw):
+    assert _next([FIRST_MONTH, LATER], **kw) is None
+
+
+def test_phase_and_silence_are_respected():
+    phased = FIRST_MONTH | {"audience": {"protocol": "tavi", "phases": ["acute"]}}
+    assert _next([phased], phase="stable") is None
+    assert _next([phased], phase="acute") is not None
+    silent = FIRST_MONTH | {"audience": {"protocol": "tavi", "silent_days": 3}}
+    at, _ = _next([silent])
+    assert at == datetime(2026, 10, 17, 5, 30, tzinfo=timezone.utc)
