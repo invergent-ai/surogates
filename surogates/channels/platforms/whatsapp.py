@@ -333,6 +333,22 @@ def _file_ref(raw_message: dict, msg_type: str) -> InboundFileRef | None:
     )
 
 
+def _flow_reply_source(reply: dict) -> dict:
+    """The submitted fields and the token the flow was sent with.
+
+    The pipeline relabels the fields once it has checked the token against
+    the conversation, then drops the token.
+    """
+    try:
+        fields = json.loads(reply.get("response_json") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(fields, dict):
+        return {}
+    token = fields.pop("flow_token", None)
+    return {"flow_fields": fields, **({"flow_token": str(token)} if token else {})}
+
+
 def _flow_reply_text(response_json: Any) -> str:
     """A WhatsApp Flow's submitted fields as ``key: value`` lines."""
     try:
@@ -529,6 +545,7 @@ def _build_message(
     }
     if flow_reply:
         source["flow_reply"] = True
+        source.update(_flow_reply_source((raw_message.get("interactive") or {}).get("nfm_reply") or {}))
     if msg_type == "audio":
         source["voice"] = bool((raw_message.get("audio") or {}).get("voice"))
 

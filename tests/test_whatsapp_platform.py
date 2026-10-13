@@ -852,6 +852,9 @@ class TestInboundTaps:
             },
         )
         assert msg.text == "tensiune: 130/85\nsimptome: oboseală, amețeli"
+        assert msg.source["flow_reply"] is True
+        assert msg.source["flow_token"] == "tok-123"
+        assert msg.source["flow_fields"] == {"tensiune": "130/85", "simptome": ["oboseală", "amețeli"]}
 
     def test_tap_without_text_is_ignored(self):
         assert self._parse(

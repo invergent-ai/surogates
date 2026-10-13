@@ -358,6 +358,37 @@ def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
     }
 
 
+async def _form_reply(msg, *, deps, agent_id, session_id, runtime_payload) -> str | None:
+    """A submitted WhatsApp Flow under its form's title and field labels.
+
+    Only for a ``flow_token`` this conversation sent; any other reply keeps
+    the adapter's plain ``key: value`` text.
+    """
+    from surogates.channels.whatsapp_flows import (
+        form_by_name,
+        form_reply_text,
+        forms_from_payload,
+        sent_in_session,
+    )
+
+    source = msg.source or {}
+    try:
+        name = await sent_in_session(
+            deps.session_factory, session_id, str(source.get("flow_token") or ""),
+        )
+        if name is None:
+            return None
+        if runtime_payload is None and deps.runtime_config is not None:
+            runtime_payload = await deps.runtime_config(agent_id) or {}
+        form = form_by_name(
+            forms_from_payload((runtime_payload or {}).get("whatsapp_forms")), name,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[channels] form reply lookup failed", exc_info=True)
+        return None
+    return form_reply_text(form or {"name": name}, source.get("flow_fields") or {})
+
+
 def build_principal_stamp(*, user_id=None, service_account_id=None) -> dict:
     """The resolved-principal fields to merge onto a USER_MESSAGE event.
 
@@ -801,16 +832,22 @@ class ChannelInboundPipeline:
                 msg.platform_user_id, routing.agent_id, exc_info=True,
             )
 
+        if (msg.source or {}).get("flow_reply"):
+            _content = await _form_reply(
+                msg, deps=deps, agent_id=routing.agent_id, session_id=session_id,
+                runtime_payload=runtime_payload,
+            ) or _content
+
         # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.
         # ------------------------------------------------------------------
+        _source = build_message_source(msg, platform=routing.platform, chat_type=chat_type)
+        _source.pop("flow_token", None)
         event_data: dict = {
             "content": _content,
             "media_urls": msg.media_urls,
             "media_types": msg.media_types,
-            "source": build_message_source(
-                msg, platform=routing.platform, chat_type=chat_type,
-            ),
+            "source": _source,
         }
         if _unanswered:
             from surogates.tools.builtin.ask_user_question import DISMISSES_QUESTION
