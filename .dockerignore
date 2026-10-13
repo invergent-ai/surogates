@@ -4,3 +4,5 @@ web/dist/
 desktop/node_modules/
 desktop/dist/
 images/guest/out/
+runtime-office/node_modules/
+runtime-office/dist/
