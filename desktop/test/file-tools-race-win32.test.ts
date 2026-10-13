@@ -42,6 +42,8 @@ type Answer = (kind: string, args: Record<string, unknown>) => Promise<Outcome>;
 
 // The attacker: flips sub between a folder with a file in it and a junction to the folder beside it, as fast as it
 // can, until this process is gone. Each step that fails (the folder held, or in use) is tried again on the next round.
+// Its file goes only into a folder it has just made: where sub could not be removed, as while a search holds it, sub may
+// still be the junction, and the attacker's own write would go through it.
 const FLIPPER = `
 const fs = require("node:fs");
 const [sub, outside, parent] = process.argv.slice(1);
@@ -49,8 +51,7 @@ const step = (call) => { try { call(); } catch {} };
 for (;;) {
   try { process.kill(Number(parent), 0); } catch { process.exit(0); }
   step(() => fs.rmSync(sub, { recursive: true, force: true }));
-  step(() => fs.mkdirSync(sub));
-  step(() => fs.writeFileSync(sub + "\\\\inside", "inside\\n"));
+  step(() => { fs.mkdirSync(sub); fs.writeFileSync(sub + "\\\\inside", "inside\\n"); });
   step(() => fs.rmSync(sub, { recursive: true, force: true }));
   step(() => fs.symlinkSync(outside, sub, "junction"));
 }`;
@@ -84,7 +85,9 @@ async function race(answer: Answer, folder: string) {
   }
   const left = readdirSync(outside).sort();
   const kept = left.includes("only-outside") ? readFileSync(join(outside, "only-outside"), "utf8") : null;
-  return { reached: reached + (kept === null ? 1 : 0), wrote, wroteOutside: left.filter((name) => name !== "only-outside").length, kept };
+  const made = left.filter((name) => name !== "only-outside");
+  console.log(`made beside the folder: ${JSON.stringify(made.slice(0, 20))}`);
+  return { reached: reached + (kept === null ? 1 : 0), wrote, wroteOutside: made.length, kept };
 }
 
 // The same operations as Node's own fs does them on the folder's paths, as a program that trusts its path would.

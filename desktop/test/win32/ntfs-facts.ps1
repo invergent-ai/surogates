@@ -75,7 +75,8 @@ public static class InPlace {
   static extern bool DeviceIoControl(SafeFileHandle handle, uint code, byte[] input, int inputSize, IntPtr output, int outputSize, out int returned, IntPtr overlapped);
   // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING
   const uint FLAGS = 0x02000000 | 0x00200000;
-  public static SafeFileHandle Hold(string path, uint share) { return CreateFileW(path, 0x80, share, IntPtr.Zero, 3, FLAGS, IntPtr.Zero); }
+  // Held as the search's pin holds a folder: for its traversal, an access whose sharing Windows keeps.
+  public static SafeFileHandle Hold(string path, uint share) { return CreateFileW(path, 0x20 | 0x80, share, IntPtr.Zero, 3, FLAGS, IntPtr.Zero); }
   // A mount point's REPARSE_DATA_BUFFER (MS-FSCC 2.1.2.5) to *target*, set on *dir* opened with *access*.
   public static int Junction(string dir, string target, uint access) {
     byte[] sub = System.Text.Encoding.Unicode.GetBytes("\\??\\" + target), print = System.Text.Encoding.Unicode.GetBytes(target);
