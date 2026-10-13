@@ -12,7 +12,8 @@ use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError};
 use windows_sys::Win32::Security::Cryptography::{
     CertAddEncodedCertificateToStore, CertCloseStore, CertCreateCertificateContext, CertDeleteCertificateFromStore, CertEnumCertificatesInStore,
     CertFindCertificateInStore, CertFreeCertificateContext, CertOpenStore, CertSetCertificateContextProperty, CertSetEnhancedKeyUsage, CERT_DISALLOWED_FILETIME_PROP_ID,
-    CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_REG, CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID,
+    CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_PHYSICAL_W, CERT_STORE_PROV_REG,
+    CERT_STORE_PROV_SYSTEM_W, CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID,
     CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID,
     CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT, CRYPT_INTEGER_BLOB, CTL_USAGE, HCERTSTORE, X509_ASN_ENCODING,
 };
@@ -81,11 +82,38 @@ impl Store {
         Store(store)
     }
 
-    fn add(&self, der: &[u8], given: Given) {
+    // The physical store *name* at *location*, read-only, where it is there.
+    fn physical(location: u32, name: &str) -> Option<Store> {
+        let name = wide(name);
+        let flags = (location << CERT_SYSTEM_STORE_LOCATION_SHIFT) | CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG;
+        // SAFETY: the name outlives the call.
+        let store = unsafe { CertOpenStore(CERT_STORE_PROV_PHYSICAL_W, 0, 0, flags, name.as_ptr().cast()) };
+        (!store.is_null()).then_some(Store(store))
+    }
+
+    // The DER of each certificate the store holds.
+    fn all(&self) -> Vec<Vec<u8>> {
+        let mut found = Vec::new();
+        let mut context = std::ptr::null();
+        loop {
+            // SAFETY: the enumeration frees each context it moves past.
+            context = unsafe { CertEnumCertificatesInStore(self.0, context) };
+            if context.is_null() {
+                return found;
+            }
+            // SAFETY: a context of the store's, not yet freed.
+            found.push(unsafe { std::slice::from_raw_parts((*context).pbCertEncoded, (*context).cbCertEncoded as usize) }.to_vec());
+        }
+    }
+
+    // *der* added, with what it is *given*; Windows's error where it did not take it.
+    fn add(&self, der: &[u8], given: Given) -> Result<(), u32> {
         let mut added = std::ptr::null_mut();
         // SAFETY: the bytes outlive the call; the context it gives is the store's own, freed below.
         let done = unsafe { CertAddEncodedCertificateToStore(self.0, X509_ASN_ENCODING, der.as_ptr(), der.len() as u32, CERT_STORE_ADD_REPLACE_EXISTING, &mut added) };
-        assert_ne!(done, 0, "added: 0x{:08x}", unsafe { GetLastError() });
+        if done == 0 {
+            return Err(unsafe { GetLastError() });
+        }
         // SAFETY: the context is the store's; what is set on it is kept in the store.
         unsafe {
             match given {
@@ -106,6 +134,7 @@ impl Store {
             }
             CertFreeCertificateContext(added);
         }
+        Ok(())
     }
 
     fn holds(&self, der: &[u8]) -> bool {
@@ -145,6 +174,36 @@ impl Drop for Store {
     }
 }
 
+// What a test put in the computer's and the user's stores, each by its location and store, taken out again at its end
+// however it ends.
+// A system store by its location and name, or, as None, the registry key of the user's own Root store.
+type At = Option<(u32, &'static str)>;
+
+struct Planted(Vec<(At, &'static [u8])>);
+
+impl Planted {
+    fn add(&mut self, at: At, der: &'static [u8], given: Given) -> Result<(), u32> {
+        let store = match at {
+            Some((location, name)) => Store::system(location, name),
+            None => Store::user_registry(),
+        };
+        store.add(der, given)?;
+        self.0.push((at, der));
+        Ok(())
+    }
+}
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        for (at, der) in self.0.drain(..) {
+            match at {
+                Some((location, name)) => Store::system(location, name).remove(der),
+                None => Store::user_registry().remove(der),
+            }
+        }
+    }
+}
+
 // A root of the test's: what it is called, its DER, the stores it is put in, what it is given there, and whether it is listed.
 type Root = (&'static str, &'static [u8], Vec<(u32, &'static str)>, Given, bool);
 
@@ -180,28 +239,45 @@ fn lists_the_roots_an_administrator_or_a_policy_gave_that_windows_trusts_for_tls
         ("one Group Policy distrusts for the user", include_bytes!("fixtures/distrusted-user-policy.der"), vec![(USER_POLICY, "Root"), (USER_POLICY, "Disallowed")], Given::AsItIs, false),
     ];
     let own: &[u8] = include_bytes!("fixtures/user.der");
-    for (_, der, stores, given, _) in &roots {
+    let mut planted = Planted(Vec::new());
+    let mut refused: Vec<String> = Vec::new();
+    for (named, der, stores, given, _) in &roots {
         for (location, name) in stores {
-            Store::system(*location, name).add(der, if *name == "Disallowed" { Given::AsItIs } else { *given });
+            let given = if *name == "Disallowed" { Given::AsItIs } else { *given };
+            if let Err(error) = planted.add(Some((*location, name)), der, given) {
+                // Microsoft's program's store and the smart cards' may be Windows's own to write: what each holds
+                // already is checked below instead. Any other store is the test's to fill.
+                assert!(matches!(*name, "AuthRoot" | "SmartCardRoot"), "{named}: {name} at {location} took no root: 0x{error:08x}");
+                refused.push(format!("{name}: 0x{error:08x}"));
+            }
         }
     }
     // The user's own root, in the registry key of the user's Root store. Windows lists from that store only the roots
     // the user agreed to at its question (its protected roots), which no test can answer: so a root a program put
     // there is read back by the registry's own provider alone, and whatever Windows would list, the helper lists none.
-    Store::user_registry().add(own, Given::AsItIs);
-    let held = Store::user_registry().holds(own);
-    let listed = std::panic::catch_unwind(|| said(&["trust"]));
-    for (_, der, stores, _, _) in &roots {
-        for (location, name) in stores {
-            Store::system(*location, name).remove(der);
-        }
-    }
-    Store::user_registry().remove(own);
-    assert!(held, "the user's own root is in its store's registry key");
-    let listed = listed.expect("listed");
+    planted.add(None, own, Given::AsItIs).expect("the user's own root is planted");
+    assert!(Store::user_registry().holds(own), "the user's own root is in its store's registry key");
+    // What Microsoft's program and the smart cards' stores hold, besides what the stores read hold too.
+    let read: Vec<Vec<u8>> = [(LOCAL_MACHINE, "Root\\.Default"), (LOCAL_MACHINE, "Root\\.GroupPolicy"), (LOCAL_MACHINE, "Root\\.Enterprise"), (CURRENT_USER, "Root\\.GroupPolicy")]
+        .iter()
+        .filter_map(|(location, name)| Store::physical(*location, name))
+        .flat_map(|store| store.all())
+        .collect();
+    let unread = |name: &str| -> Vec<Vec<u8>> {
+        Store::physical(LOCAL_MACHINE, name).map(|store| store.all()).unwrap_or_default().into_iter().filter(|der| !read.contains(der)).collect()
+    };
+    let (program, cards) = (unread("Root\\.AuthRoot"), unread("Root\\.SmartCard"));
+    assert!(!program.is_empty(), "Microsoft's program's store holds no root to check, and took none: {refused:?}");
+    let listed = said(&["trust"]);
+    drop(planted);
     let said: Vec<(&str, bool)> = roots.iter().map(|(named, der, _, _, _)| (*named, listed.contains(&certificate(der)))).collect();
     let wanted: Vec<(&str, bool)> = roots.iter().map(|(named, _, _, _, taken)| (*named, *taken)).collect();
     assert_eq!(said, wanted);
+    for (store, found) in [("Root\\.AuthRoot", &program), ("Root\\.SmartCard", &cards)] {
+        for der in found {
+            assert!(!listed.contains(&certificate(der)), "a root of {store} is listed");
+        }
+    }
     assert!(!listed.contains(&certificate(own)), "the user's own root is never listed");
     // PEM alone, each certificate whole.
     assert_eq!(listed.matches("-----BEGIN CERTIFICATE-----\n").count(), listed.matches("-----END CERTIFICATE-----\n").count());
