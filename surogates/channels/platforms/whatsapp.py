@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 from typing import Any
 
@@ -77,7 +78,10 @@ _MAX_MESSAGE_CHARS = 4096
 #: reaction, system, unsupported, order, location, contacts — returns None
 #: rather than starting an agent turn with an empty prompt.
 _MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
-_MESSAGE_TYPES = ("text",) + _MEDIA_TYPES
+#: Taps: a reply button or list row from an interactive message, a WhatsApp
+#: Flow completion, or a quick-reply button on an approved template.
+_TAP_TYPES = ("interactive", "button")
+_MESSAGE_TYPES = ("text",) + _MEDIA_TYPES + _TAP_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +309,48 @@ def _file_ref(raw_message: dict, msg_type: str) -> InboundFileRef | None:
     )
 
 
+def _flow_reply_text(response_json: Any) -> str:
+    """A WhatsApp Flow's submitted fields as ``key: value`` lines."""
+    try:
+        fields = json.loads(response_json) if isinstance(response_json, str) else response_json
+    except ValueError:
+        return str(response_json or "")
+    if not isinstance(fields, dict):
+        return str(fields or "")
+    lines = []
+    for key, value in fields.items():
+        # Meta adds the token the flow was sent with; it is not an answer.
+        if key == "flow_token":
+            continue
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        elif isinstance(value, dict):
+            value = json.dumps(value, ensure_ascii=False)
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _tap_text(raw_message: dict, msg_type: str) -> str:
+    """The text a tap stands for.
+
+    A button or row title is the choice label verbatim, so the shared
+    ``resolve_text_answer`` matches it to the pending question; a list row's
+    description is left out for the same reason.
+    """
+    if msg_type == "button":
+        return str((raw_message.get("button") or {}).get("text") or "")
+    interactive = raw_message.get("interactive") or {}
+    kind = interactive.get("type")
+    reply = interactive.get(kind) if isinstance(kind, str) else None
+    if not isinstance(reply, dict):
+        return ""
+    if kind in ("button_reply", "list_reply"):
+        return str(reply.get("title") or "")
+    if kind == "nfm_reply":
+        return _flow_reply_text(reply.get("response_json"))
+    return ""
+
+
 def parse(
     body: Any,
     *,
@@ -407,9 +453,15 @@ def _build_message(
 
     wamid = raw_message.get("id") or ""
 
+    files: list[InboundFileRef] = []
     if msg_type == "text":
         text = ((raw_message.get("text") or {}).get("body")) or ""
-        files: list[InboundFileRef] = []
+    elif msg_type in _TAP_TYPES:
+        text = _tap_text(raw_message, msg_type).strip()
+        if not text:
+            logger.debug("[whatsapp] ignoring a tap with no text: %s", raw_message.get(msg_type))
+            return None
+        msg_type = "text"
     else:
         block = raw_message.get(msg_type) or {}
         text = block.get("caption") or ""

@@ -703,3 +703,80 @@ def test_channel_prompt_keeps_the_rescued_reply() -> None:
         "telegram",
     )
     assert payload["context"] == "Am notat data procedurii."
+
+
+class TestInboundTaps:
+    """Taps reach the agent as the text of what was tapped.  Shapes are
+    Meta's webhook samples for each message type."""
+
+    def _parse(self, **message):
+        return parse(_text_message(**message), identifier=PNID)
+
+    def test_reply_button_tap_is_its_title(self):
+        msg = self._parse(
+            type="interactive",
+            context={"from": "15551797781", "id": "wamid.prompt"},
+            interactive={
+                "type": "button_reply",
+                "button_reply": {"id": "choice:1", "title": "Obosit"},
+            },
+        )
+        assert msg is not None
+        assert msg.text == "Obosit"
+        assert msg.kind == "text"
+
+    def test_list_row_tap_is_its_title_without_the_description(self):
+        from surogates.channels.platforms.telegram_interactive import resolve_text_answer
+
+        msg = self._parse(
+            type="interactive",
+            interactive={
+                "type": "list_reply",
+                "list_reply": {
+                    "id": "choice:0",
+                    "title": "Durere în piept",
+                    "description": "La efort sau în repaus",
+                },
+            },
+        )
+        assert msg.text == "Durere în piept"
+        questions = _questions([{
+            "prompt": "Ce simptom aveți?",
+            "choices": [{"label": "Durere în piept"}, {"label": "Niciunul"}],
+        }])
+        [answer] = resolve_text_answer(questions, msg.text)
+        assert answer.get("is_other") is not True
+
+    def test_template_quick_reply_is_its_text(self):
+        # The check-in opener's "Încep acum": dropping it let the check-in
+        # expire as missed.
+        msg = self._parse(
+            type="button",
+            context={"from": "15551797781", "id": "wamid.opener"},
+            button={"payload": "Încep acum", "text": "Încep acum"},
+        )
+        assert msg is not None
+        assert msg.text == "Încep acum"
+
+    def test_flow_completion_is_rendered_as_key_value_lines(self):
+        msg = self._parse(
+            type="interactive",
+            interactive={
+                "type": "nfm_reply",
+                "nfm_reply": {
+                    "name": "flow",
+                    "body": "Sent",
+                    "response_json": _json.dumps({
+                        "flow_token": "tok-123",
+                        "tensiune": "130/85",
+                        "simptome": ["oboseală", "amețeli"],
+                    }),
+                },
+            },
+        )
+        assert msg.text == "tensiune: 130/85\nsimptome: oboseală, amețeli"
+
+    def test_tap_without_text_is_ignored(self):
+        assert self._parse(
+            type="interactive", interactive={"type": "button_reply", "button_reply": {}},
+        ) is None
