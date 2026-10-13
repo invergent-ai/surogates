@@ -718,3 +718,40 @@ async def test_an_outcome_is_marked_reported_and_never_read_again(sf, doctor_ses
     assert (await _row(sf, row.id)).reported_at is not None
     assert await outreach._report_outcomes(sf, now=NOW + timedelta(hours=26)) == 0
     assert len(await _notices(sf)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_reminder_that_could_not_be_queued_is_retried(sf, doctor_session, monkeypatch):
+    await _red_alert(sf, [uuid.uuid4()])
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=31))
+    await _at(sf, 31)
+    real = store.notify_team
+
+    async def down(*args, **kwargs):
+        if kwargs.get("created_by") == "reminder":
+            raise RuntimeError("database went away")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "notify_team", down)
+    await _send(sf, _Store(), _Delivery())
+    assert await _alerts(sf, "reminder") == []
+    assert all(r.reminded_at is None for r in await _alerts(sf, "agent"))
+
+    monkeypatch.setattr(store, "notify_team", real)
+    await _send(sf, _Store(), _Delivery())
+    assert len(await _alerts(sf, "reminder")) == 1
+    assert all(r.reminded_at is not None for r in await _alerts(sf, "agent"))
+
+
+@pytest.mark.asyncio
+async def test_a_failing_bookkeeping_pass_never_skips_the_send_pass(sf, doctor_session, monkeypatch):
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    for name in ("_expire_unanswered", "_report_outcomes", "_remind_unseen_red_alerts",
+                 "_surface_person_failures"):
+        monkeypatch.setattr(outreach, name, broken)
+    await _wrote(sf, NOW - timedelta(hours=2))
+    row = await _queue(sf, uuid.uuid4())
+    assert await _send(sf, _Store(), _Delivery()) == 1
+    assert (await _row(sf, row.id)).state == "sent"

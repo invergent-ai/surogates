@@ -420,9 +420,8 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
 
     "Not opened" is a held alert: its template went out and its recipient
     has not answered.  The reminder goes to the whole team, so a colleague
-    can act when the first recipient is away from their phone.  Claiming
-    the escalation's rows first makes it one reminder whichever pass gets
-    there, and never a second.
+    can act when the first recipient is away from their phone.  Keyed on
+    the escalation, it is one reminder whichever pass gets there.
     """
     async with session_factory() as db:
         rows = (
@@ -450,42 +449,53 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
 
     reminded = 0
     for escalation, (row, settings) in due.items():
-        async with session_factory() as db:
-            claimed = await db.execute(
-                sa.update(OutreachMessageRow)
-                .where(OutreachMessageRow.org_id == row.org_id)
-                .where(OutreachMessageRow.dedupe_key.like(f"{escalation}:%"))
-                .where(OutreachMessageRow.reminded_at.is_(None))
-                .values(reminded_at=now)
-            )
-            await db.commit()
-        if not int(claimed.rowcount or 0):
-            continue
-        minutes = red_alert_reminder_minutes(settings)
-        queued, why_not = await followup_store.notify_team(
-            session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
-            kind="alert", severity="red", created_by="reminder",
-            text=followup_store.render_text(
-                ((settings.texts or {}) if settings else {}).get("red_alert_reminder"),
-                DEFAULT_TEXTS["red_alert_reminder"], minutes=minutes, text=row.text,
-            ),
-            subject_user_id=row.subject_user_id,
-            dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
-            fallback_sender=row.channel_identifier,
-        )
-        reminded += queued
-        invitation_id = escalation.split(":")[1]
-        if invitation_id != "-":
-            async with session_factory() as db:
-                await db.execute(
-                    sa.update(ProgramInvitationRow)
-                    .where(ProgramInvitationRow.id == uuid.UUID(invitation_id))
-                    .values(reminder_state="reminded" if queued else "reminder_failed")
-                )
-                await db.commit()
-        if not queued:
-            logger.warning("[outreach] red alert reminder for %s reached nobody: %s", escalation, why_not)
+        try:
+            reminded += await _remind(session_factory, escalation, row, settings, now=now)
+        except Exception:  # noqa: BLE001 — one escalation, not the pass
+            logger.exception("[outreach] could not remind the team of %s", escalation)
     return reminded
+
+
+async def _remind(
+    session_factory: Any, escalation: str, row: Any, settings: Any, *, now: datetime,
+) -> int:
+    """Queue one escalation's reminder, then mark the escalation reminded.
+
+    Queued first and keyed on the escalation, so a pass that dies before
+    the mark retries without a second reminder, and one that dies before
+    the queue never loses it.
+    """
+    minutes = red_alert_reminder_minutes(settings)
+    queued, why_not = await followup_store.notify_team(
+        session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
+        kind="alert", severity="red", created_by="reminder",
+        text=followup_store.render_text(
+            ((settings.texts or {}) if settings else {}).get("red_alert_reminder"),
+            DEFAULT_TEXTS["red_alert_reminder"], minutes=minutes, text=row.text,
+        ),
+        subject_user_id=row.subject_user_id,
+        dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
+        fallback_sender=row.channel_identifier,
+    )
+    async with session_factory() as db:
+        claimed = await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.org_id == row.org_id)
+            .where(OutreachMessageRow.dedupe_key.like(f"{escalation}:%"))
+            .where(OutreachMessageRow.reminded_at.is_(None))
+            .values(reminded_at=now)
+        )
+        invitation_id = escalation.split(":")[1]
+        if int(claimed.rowcount or 0) and invitation_id != "-":
+            await db.execute(
+                sa.update(ProgramInvitationRow)
+                .where(ProgramInvitationRow.id == uuid.UUID(invitation_id))
+                .values(reminder_state="reminded" if queued else "reminder_failed")
+            )
+        await db.commit()
+    if not queued:
+        logger.warning("[outreach] red alert reminder for %s reached nobody: %s", escalation, why_not)
+    return queued if int(claimed.rowcount or 0) else 0
 
 
 async def _surface_person_failures(session_factory: Any, *, now: datetime) -> int:
@@ -610,10 +620,14 @@ async def send_queued_outreach(
     template went out — the inbound path delivers those too, but not while a
     turn is running.  A held row still waiting for its answer is not re-read.
     """
-    await _expire_unanswered(session_factory, now=now)
-    await _report_outcomes(session_factory, now=now)
-    await _remind_unseen_red_alerts(session_factory, now=now)
-    await _surface_person_failures(session_factory, now=now)
+    for bookkeeping in (
+        _expire_unanswered, _report_outcomes, _remind_unseen_red_alerts,
+        _surface_person_failures,
+    ):
+        try:
+            await bookkeeping(session_factory, now=now)
+        except Exception:  # noqa: BLE001 — never at the cost of the send pass
+            logger.exception("[outreach] %s failed; sending anyway", bookkeeping.__name__)
 
     answered = sa.exists().where(
         ChannelContactRow.org_id == OutreachMessageRow.org_id,
