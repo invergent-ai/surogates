@@ -98,6 +98,7 @@ from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrail
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.history import PRUNE_DAYS
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
@@ -280,9 +281,19 @@ def _format_loop_list(rows: list[Any]) -> str:
     for row in rows:
         reason = row.schedule.get("last_delay_reason") if row.schedule else None
         suffix = f" (last wait: {reason})" if reason else ""
+        # A model's routine is listed here too: its time in its own zone, and
+        # whether it ever ends, are what tell it apart from a short loop.
+        next_run = (
+            None if row.next_run_at is None
+            else f"{local_iso(row.next_run_at, row.timezone)} {row.timezone}"
+        )
+        until = (
+            "until cancelled" if row.expires_at is None
+            else f"expires {local_iso(row.expires_at, row.timezone)}"
+        )
         lines.append(
             f"- `{row.id}` {row.schedule_display}: {row.prompt} "
-            f"(next: {row.next_run_at}){suffix}"
+            f"(next: {next_run}; {until}){suffix}"
         )
     return "\n".join(lines)
 
@@ -2791,12 +2802,16 @@ class AgentHarness(
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
             **channel_tool_flags(getattr(session, "channel", None)),
-            # A master's routines are the project's, and its model makes
-            # them.  A scheduled run is never a master, and its filter
-            # already took the cron tools away.
+            # Any chat's model makes its routines, where they have an owner
+            # and someone it can ask first: not an anonymous visitor's, nor
+            # a thread's, helper's or run's (each has a parent; a scheduled
+            # run's filter already took the cron tools away), nor where no
+            # one is asked anything.
             makes_routines=(
-                is_project_master(session.config)
+                session.parent_id is None
+                and (session.user_id or session.service_account_id) is not None
                 and self._slash_command_enabled("loop", session)
+                and any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
             ),
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
