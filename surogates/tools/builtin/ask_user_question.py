@@ -35,6 +35,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.constants import INTERACTIVE_PROMPT_CHANNELS
 from surogates.channels.whatsapp_flows import BUTTON_CHARS, MAX_LIST_ROWS
 from surogates.harness.slash_skill import names_builtin_command
 from surogates.runtime.turn_slots import turn_waiting
@@ -488,17 +489,9 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
         else UUID(str(raw_session_id))
     )
 
-    from surogates.channels.constants import INTERACTIVE_PROMPT_CHANNELS
-
-    session = await session_store.get_session(session_id)
     try:
         questions = _validate_questions(
-            arguments.get("questions"),
-            max_choices=(
-                MAX_CHANNEL_CHOICES_PER_QUESTION
-                if getattr(session, "channel", None) in INTERACTIVE_PROMPT_CHANNELS
-                else MAX_CHOICES_PER_QUESTION
-            ),
+            arguments.get("questions"), max_choices=max_choices(kwargs.get("channel")),
         )
     except AskUserQuestionSchemaError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
@@ -563,8 +556,18 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
     )
 
 
-def widen_for_channel(schema: dict[str, Any]) -> dict[str, Any]:
-    """*schema* allowing a channel conversation's ten choices.  Not mutated."""
+def max_choices(channel: str | None) -> int:
+    """How many choices one question may offer in a conversation on *channel*."""
+    return (
+        MAX_CHANNEL_CHOICES_PER_QUESTION if channel in INTERACTIVE_PROMPT_CHANNELS
+        else MAX_CHOICES_PER_QUESTION
+    )
+
+
+def widen_for_channel(schema: dict[str, Any], channel: str | None) -> dict[str, Any]:
+    """*schema* allowing as many choices as *channel* takes.  Not mutated."""
+    if max_choices(channel) == MAX_CHOICES_PER_QUESTION:
+        return schema
     schema = copy.deepcopy(schema)
     function = schema["function"]
     choices = function["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]

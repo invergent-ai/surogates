@@ -2002,6 +2002,7 @@ async def _run_single_tool(
                     tool_call_id=tool_call_id,
                     lease_token=lease.lease_token,
                     session_config=session.config,
+                    channel=session.channel,
                     bundle=bundle,
                     platform_client=platform_client,
                     expert_transcript=expert_transcript,

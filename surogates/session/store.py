@@ -228,7 +228,7 @@ _MAX_LISTED_DESCENDANTS = 1000
 
 
 
-def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
+def _without_trailing_prompt(content: str, tool_calls: Any, channel: str) -> str:
     """*content* without a closing question its own ask_user_question asks.
 
     The channel prompt follows right after, so a reply ending in "Cum vă
@@ -237,10 +237,7 @@ def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
     a single question: anything else is not provably a repeat.  A call the
     tool will refuse asks nothing, so its text is delivered intact.
     """
-    from surogates.tools.builtin.ask_user_question import (
-        MAX_CHANNEL_CHOICES_PER_QUESTION,
-        _validate_questions,
-    )
+    from surogates.tools.builtin.ask_user_question import _validate_questions, max_choices
 
     asks = [
         call for call in tool_calls or []
@@ -251,7 +248,7 @@ def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
     try:
         questions = _validate_questions(
             json.loads(asks[0]["function"].get("arguments") or "{}").get("questions"),
-            max_choices=MAX_CHANNEL_CHOICES_PER_QUESTION,
+            max_choices=max_choices(channel),
         )
     except (TypeError, ValueError, AttributeError):
         return content
@@ -282,7 +279,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
         if content and isinstance(content, str):
             content = strip_next_action_blocks(content)
             if channel in INTERACTIVE_PROMPT_CHANNELS:
-                content = _without_trailing_prompt(content, msg.get("tool_calls"))
+                content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
         if content:
             payload["content"] = content
             # Delivered either way: the model writes to the person beside its

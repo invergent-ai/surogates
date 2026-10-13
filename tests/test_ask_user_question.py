@@ -550,6 +550,12 @@ async def test_the_web_widget_keeps_four_choices():
     assert result == {"error": "questions[0].choices supports at most 4 entries."}
 
 
+def test_the_limit_follows_the_channel_the_harness_passes():
+    from surogates.tools.builtin.ask_user_question import max_choices
+
+    assert (max_choices("whatsapp"), max_choices("web"), max_choices(None)) == (10, 4, 4)
+
+
 def test_a_channel_conversation_takes_up_to_ten_choices():
     from surogates.tools.builtin.ask_user_question import (
         AskUserQuestionSchemaError,
@@ -573,7 +579,8 @@ def test_the_channel_schema_offers_ten_choices_without_touching_the_original():
     registry = ToolRegistry()
     ask_user_question.register(registry)
     [schema] = registry.get_schemas()
-    wide = ask_user_question.widen_for_channel(schema)
+    wide = ask_user_question.widen_for_channel(schema, "whatsapp")
+    assert ask_user_question.widen_for_channel(schema, "web") is schema
     choices = lambda s: s["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]  # noqa: E731
     assert choices(wide)["maxItems"] == 10 and choices(schema)["maxItems"] == 4
     assert "up to 10 labeled options" in wide["function"]["description"]

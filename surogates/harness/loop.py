@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, INTERACTIVE_PROMPT_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.history import (
@@ -2827,10 +2827,7 @@ class AgentHarness(
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = [
             describe_forms(s, getattr(self, "_whatsapp_forms", ())) if s["function"]["name"] == "send_form"
-            else widen_for_channel(s) if (
-                s["function"]["name"] == "ask_user_question"
-                and session.channel in INTERACTIVE_PROMPT_CHANNELS
-            )
+            else widen_for_channel(s, session.channel) if s["function"]["name"] == "ask_user_question"
             else s
             for s in tool_schemas
         ]
