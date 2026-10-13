@@ -67,10 +67,10 @@ describe("the app's dictionary", () => {
     expect([code === 0, existsSync(join(own, "dictionaries"))]).toEqual([false, false]);
   });
 
-  it("is fetched and checked by the Mac's build as by Linux's, before the app's code is built", () => {
+  it("is fetched and checked by the Mac's and Windows's builds as by Linux's, before the app's code is built", () => {
     const { scripts } = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8")) as { scripts: Record<string, string> };
-    for (const build of ["build", "build:darwin"]) expect(scripts[build]!.split(" && "), build).toContain("scripts/dictionary.sh");
-    expect(scripts["build:darwin"]!.split(" && ")[0]).toBe("scripts/dictionary.sh");
+    for (const build of ["build", "build:darwin", "build:win32"]) expect(scripts[build]!.split(" && "), build).toContain("scripts/dictionary.sh");
+    for (const build of ["build:darwin", "build:win32"]) expect(scripts[build]!.split(" && ")[0], build).toBe("scripts/dictionary.sh");
   });
 
   it("is kept as it is, with no fetch, on a Mac, whose sha256sum checks no list: shasum checks it there", async () => {

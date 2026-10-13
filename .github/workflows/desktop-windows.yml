@@ -327,7 +327,8 @@ jobs:
           $found
           "### The runner's browsers`n``````n$($found -join "`n")`n``````" >> $env:GITHUB_STEP_SUMMARY
 
-      # Its own toolchain, as its rust-toolchain.toml pins it, and its crates as its Cargo.lock locks them.
+      # A member of the native workspace (native/windows): its toolchain, as the workspace's rust-toolchain.toml pins
+      # it, and its crates as the workspace's Cargo.lock locks them.
       - name: Lint surogate-helper.exe
         working-directory: desktop/native/windows/helper
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -337,7 +338,7 @@ jobs:
         working-directory: desktop/native/windows/helper
         run: cargo test --locked -- --include-ignored
 
-      - name: Build the app for Windows, surogate-helper.exe with it
+      - name: Build the app for Windows, with every native part of it
         if: ${{ !cancelled() }}
         env:
           NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe

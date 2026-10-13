@@ -40,6 +40,8 @@ export const WINDOWS = [
   "test/ca-source-win32.test.ts", "test/tools-look.test.ts",
   "test/browser-known-win32.test.ts", "test/browser-processes-win32.test.ts", "test/browser-host-win32.test.ts",
   "test/folders-held-win32.test.ts",
+  // The native programs' one workspace, and the one script that builds the Windows app.
+  "test/windows-native.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

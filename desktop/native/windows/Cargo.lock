@@ -104,6 +104,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "surogate-helper"
+version = "0.0.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

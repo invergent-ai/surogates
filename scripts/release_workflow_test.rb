@@ -745,7 +745,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
         "vm-boot" => ["61fe7ddc5fb5c138", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 24591223ab9a9cbb d1980ca93217776e 1edc8d7d3216b9d8]],
-        "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 b79c69cbcbdd1875 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
+        "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],

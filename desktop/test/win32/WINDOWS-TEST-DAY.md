@@ -269,7 +269,7 @@ $env:NPM_CONFIG_SCRIPT_SHELL = "C:\Program Files\Git\bin\bash.exe"
 npm run build:win32
 ```
 
-- This builds the app's code and `native\windows\target\release\surogate-helper.exe`. Pass: no error.
+- This builds the app's code and every native part of the Windows app: the app's `rg.exe` in `bin`, ntat beside the code, and the native programs, `surogate-helper.exe`, `surogate-service.exe` and `surogate-vm.exe`, in `native\windows\target\release`. Pass: no error.
 
 ### 8.1 The user's Group Policy certificates are not the user's to write (security)
 

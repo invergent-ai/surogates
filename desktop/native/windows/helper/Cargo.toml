@@ -1,11 +1,11 @@
 # surogate-helper.exe: the app's own program for what only Windows's own libraries answer, as the user and never
 # elevated: the company's root certificates, this user's processes, a program's Authenticode signer, and where
-# Windows says a program is installed. A crate of its own, built and locked apart.
+# Windows says a program is installed.
 [package]
 name = "surogate-helper"
-version = "0.0.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 license = "AGPL-3.0-only"
 
 [lib]
@@ -17,7 +17,7 @@ name = "surogate-helper"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = [
+windows-sys = { workspace = true, features = [
   "Wdk_System_Threading",
   "Win32_Foundation",
   "Win32_Security",
@@ -32,6 +32,3 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_WindowsProgramming",
   "Win32_UI_Shell",
 ] }
-
-[profile.release]
-panic = "abort"
