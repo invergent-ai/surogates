@@ -36,7 +36,7 @@ from surogates.harness.tool_guardrails import (
     toolguard_synthetic_result,
 )
 from surogates.tools.coerce import coerce_tool_args
-from surogates.runtime.governance import RENAMED_TOOLS, floor_gate
+from surogates.runtime.governance import floor_gate
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
@@ -1467,10 +1467,6 @@ async def _run_single_tool(
 
     fn = tc.get("function", {})
     tool_name: str = fn.get("name", "")
-    if tool_name in RENAMED_TOOLS:
-        # A streamed call skips the loop's repair; the old name still means
-        # the new tool, and governance must judge it under that name.
-        tool_name = fn["name"] = RENAMED_TOOLS[tool_name]
     tool_args_raw: str = fn.get("arguments", "")
     tool_call_id: str = tc.get("id", "")
 

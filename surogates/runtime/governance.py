@@ -167,7 +167,7 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
 #: stopped being limited to check-ins; the ``care_team_*`` tools became
 #: ``team_*`` when follow-up stopped being only for clinics.  Applied here,
 #: where ops' blobs are parsed, so the allow, deny and approval lists all
-#: honour it, and to a model's call by the harness.
+#: honour it, and to a model's calls by :func:`rename_tool_calls`.
 RENAMED_TOOLS = {
     "checkin_escalate": "escalate",
     "care_team_overview": "team_overview",
@@ -175,6 +175,14 @@ RENAMED_TOOLS = {
     "care_team_update_patient": "team_update_person",
     "care_team_enroll_patient": "team_enroll_person",
 }
+
+
+def rename_tool_calls(tool_calls: Any) -> None:
+    """Give a model's call of a renamed tool the tool's new name, in place."""
+    for tc in tool_calls or ():
+        fn = tc.get("function") or {}
+        if fn.get("name") in RENAMED_TOOLS:
+            fn["name"] = RENAMED_TOOLS[fn["name"]]
 
 
 def _tool_names(governance: dict[str, Any], key: str) -> set[str]:

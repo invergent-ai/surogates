@@ -20,6 +20,8 @@ import json
 import logging
 import re
 
+from surogates.runtime.governance import rename_tool_calls
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -72,6 +74,7 @@ def sanitize_response_message(message: dict) -> dict:
     treatment before they are written to the event store.
     """
     sanitize_messages([message])
+    rename_tool_calls(message.get("tool_calls"))
     for key in (
         "reasoning",
         "reasoning_content",

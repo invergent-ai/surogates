@@ -37,6 +37,7 @@ from surogates.harness.model_metadata import (
 from surogates.harness.prompt_cache import build_cache_extra_body, is_cacheable_model
 from surogates.harness.resilience import extract_api_error_context, summarize_api_error
 from surogates.harness.retry import jittered_backoff
+from surogates.runtime.governance import rename_tool_calls
 from surogates.harness.sanitize import (
     sanitize_messages,
     sanitize_response_message,
@@ -1274,6 +1275,12 @@ async def call_llm_streaming_inner(
     # generates tool calls sequentially).
     _notified_slots: set[int] = set()
     _highest_known_slot: int = -1
+    if on_tool_call_complete is not None:
+        notify = on_tool_call_complete
+
+        def on_tool_call_complete(entry: dict[str, Any]) -> None:
+            rename_tool_calls([entry])
+            notify(entry)
 
     # Usage data from the stream (some providers include it in the
     # final chunk via ``stream_options``).

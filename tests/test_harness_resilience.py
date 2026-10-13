@@ -283,14 +283,11 @@ def test_a_policy_naming_the_old_escalation_tool_still_allows_it() -> None:
     ("care_team_enroll_patient", "team_enroll_person"),
 ])
 def test_the_old_team_tool_names_still_mean_the_new_tools(old, new) -> None:
-    from surogates.harness.resilience import find_invalid_tool_calls, repair_tool_name
+    from surogates.harness.sanitize import sanitize_response_message
     from surogates.runtime.governance import build_governance_gate
 
     assert not build_governance_gate({"denied_tools": [old]}).check(new, {}).allowed
     assert build_governance_gate({"allowed_tools": [old]}).check(new, {}).allowed
-    assert repair_tool_name(old, {new, "memory"}, {new, "memory"}) == new
-    assert repair_tool_name(old, {"memory"}, {new, "memory"}) is None
 
-    call = {"function": {"name": old, "arguments": "{}"}}
-    assert find_invalid_tool_calls([call], {new}, {new}) == []
-    assert call["function"]["name"] == new
+    message = {"role": "assistant", "tool_calls": [{"function": {"name": old, "arguments": "{}"}}]}
+    assert sanitize_response_message(message)["tool_calls"][0]["function"]["name"] == new
