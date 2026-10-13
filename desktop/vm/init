@@ -6,6 +6,12 @@
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+# The entropy device's driver, before anything here draws on the kernel's randomness: QEMU's and
+# Apple's VMs have the device (Hyper-V's has none, and the driver loads and drives nothing there),
+# and the agent's node waits at its start until the kernel's random pool has been fed.
+# A CPU with no random-number instruction would leave it to timer jitter alone, which takes seconds.
+modprobe virtio-rng
+
 # What systemd's sysctl files set on a host, which the guest has none of, and no
 # io_uring, a large interface every root would share. First: the rule below loads under them.
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_disabled=1 \
@@ -51,38 +57,13 @@ esac
 # boot: bpftool takes about a second, and the sessions disk's check, the cgroups and the
 # agent's start go on meanwhile. Its outcome lands in /run/surogate/rule, and the agent
 # says hello only once that says the rule is attached (guest/agent.ts): no session runs
-# before it, and a rule that does not load still fails the boot. A session (uid >= 10000,
-# or the scope's uid) cannot unload it: unprivileged_bpf_disabled=1 is set above.
+# before it, and a rule that does not load still fails the boot. A session (uid >= 10000)
+# cannot unload it: unprivileged_bpf_disabled=1 is set above.
 mount -t securityfs -o nosuid,nodev,noexec securityfs /sys/kernel/security
 mount -t bpf -o nosuid,nodev,noexec bpf /sys/fs/bpf
 mkdir -p /sys/fs/bpf/surogate /sys/fs/bpf/surogate-maps
 want=16 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
 
-# The rule's scope (rule.bpf.c, scope): the one uid it judges besides those from 10000 up, as the
-# kernel's command line, given as $1, names it in surogate.uid=. A VM whose shares map no owner to
-# a session's uid names the host user's (src/vm/darwin.ts), and every session there runs as it;
-# Linux's names none. Printed, or nothing for none. Refused, with why printed: a uid no session
-# may run as (0, the guest's own root; 4294967295, which is no uid), and a second surogate.uid=.
-scope_uid() {
-  found=
-  set -f
-  # shellcheck disable=SC2086 # split into words, never into files
-  set -- $1
-  set +f
-  for word; do
-    case "$word" in
-      surogate.uid=*)
-        [ -z "$found" ] || { echo "the kernel's command line names surogate.uid= twice"; return 1; }
-        found=${word#surogate.uid=}
-        case "$found" in
-          '' | *[!0-9]* | 0*) echo "surogate.uid=$found is not a uid a session may run as"; return 1 ;;
-        esac
-        { [ "${#found}" -le 10 ] && [ "$found" -le 4294967294 ]; } || { echo "surogate.uid=$found is not a uid a session may run as"; return 1; }
-        ;;
-    esac
-  done
-  echo "$found"
-}
 # The rule's names besides the protected ones (rule.bpf.c, names), as the kernel's command line, $1, names
 # their set in surogate.names=: printed as the map takes it, 0 for posix, which adds none, and 1 for windows,
 # those Windows's Explorer acts on. Refused, with why printed: a line that names no set, two, or another.
@@ -94,26 +75,14 @@ name_set() {
     *) echo "surogate.names=$set_named is not a set of names this guest knows"; return 1 ;;
   esac
 }
-# A uid as the map takes it: its four bytes, the low first.
-le32() {
-  echo "$(($1 & 255)) $(($1 >> 8 & 255)) $(($1 >> 16 & 255)) $(($1 >> 24 & 255))"
-}
 (
   if ! grep -qw bpf /sys/kernel/security/lsm; then
     echo "failed: the bpf LSM is not active; refusing to run commands unprotected"
-  elif ! scope=$(scope_uid "$(cat /proc/cmdline)"); then
-    echo "failed: $scope"
   elif ! names=$(name_set "$(cat /proc/cmdline)"); then
     echo "failed: $names"
   elif ! /usr/sbin/bpftool prog loadall /usr/lib/surogate/rule.bpf.o /sys/fs/bpf/surogate pinmaps /sys/fs/bpf/surogate-maps autoattach >&2; then
     echo "failed: could not load the guest-kernel protected-names rule"
-  # Its scope set, then frozen before any session runs: nothing, the agent included, changes it after.
-  # The agent runs every session as it, where it is set (guest/root.ts).
-  # shellcheck disable=SC2046 # four bytes, four words
-  elif ! { /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/scope key 0 0 0 0 value $(le32 "${scope:-0}") \
-      && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/scope && echo "$scope" > /run/surogate/scope; } >&2; then
-    echo "failed: could not set the protected-names rule's scope"
-  # Its names set and frozen as its scope is.
+  # Its names set, then frozen before any session runs: nothing, the agent included, changes it after.
   elif ! { /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/names key 0 0 0 0 value "$names" 0 0 0 \
       && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/names; } >&2; then
     echo "failed: could not set the protected-names rule's names"

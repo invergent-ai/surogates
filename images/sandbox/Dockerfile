@@ -215,8 +215,8 @@ RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
 
 # ── The kernel's modules that each part of the guest loads ──────────
 # By the pinned kernel's own modules.dep, which depmod makes, the package shipping none (modules.sh). The
-# image keeps only those vm/init loads, each with those it needs: the virtio-fs and 9P clients', and
-# overlay's. The kernel loads no others (modules_disabled), and the rest, compressed already, would add
+# image keeps only those vm/init loads, each with those it needs: the entropy device's driver, the virtio-fs
+# and 9P clients', and overlay's. The kernel loads no others (modules_disabled), and the rest, compressed already, would add
 # 170 MB to the download. The initrd's, Hyper-V's drivers, are copied out for it.
 FROM ubuntu:24.04 AS modules
 ARG KERNEL
@@ -229,7 +229,7 @@ RUN --mount=type=bind,from=kernel,source=/kernel/lib/modules,target=/all \
     && depmod -b /image "$KERNEL" \
     && modules.sh copy "/image/lib/modules/$KERNEL" /initrd/lib $(sed 's/#.*//' /initrd/modules) \
     && modules.sh copy "/image/lib/modules/$KERNEL" /standin/lib vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport \
-    && modules.sh keep "/image/lib/modules/$KERNEL" netfs 9pnet 9pnet_fd 9p virtiofs overlay
+    && modules.sh keep "/image/lib/modules/$KERNEL" virtio-rng netfs 9pnet 9pnet_fd 9p virtiofs overlay
 
 # ── The initrd, for Hyper-V ─────────────────────────────────────────
 # Its init, Ubuntu's static busybox, and Hyper-V's drivers from the pinned kernel (images/guest/initrd),

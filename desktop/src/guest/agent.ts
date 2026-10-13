@@ -15,9 +15,7 @@ import { Network } from "./network.js";
 import { Places } from "./places.js";
 import { openPortOn, transportOf } from "./port.js";
 import { type FromAgent, INBOUND_PORT } from "./protocol.js";
-import {
-  admit, BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, SCOPE, scopeOf, SESSIONS, setClock, uidOf, unmountShare,
-} from "./root.js";
+import { admit, BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
 import { trust } from "./trust.js";
 
 // Anything the agent does not catch ends it at once, and with it tini and the guest
@@ -50,9 +48,6 @@ async function rule(): Promise<string> {
 const loaded = await rule();
 if (!loaded.startsWith("attached: ")) die(`surogate: ${loaded.replace(/^failed: /, "")}`);
 console.log(`surogate: ${loaded.slice("attached: ".length)}`);
-// The one uid the rule judges besides the roots' own, which vm/init set with it: every root runs as it on
-// Apple's share, which maps no owner (root.ts, sessionUid). None on Linux's.
-const scope = scopeOf(readFileSync(SCOPE, "utf8"));
 
 const transport = transportOf(readFileSync("/proc/cmdline", "utf8"));
 const port = await openPortOn(transport, "ai.surogate.control");
@@ -61,8 +56,7 @@ port.once("end", () => die("surogate: the host's control port closed"));
 const network = new Network(await openPortOn(transport, "ai.surogate.net"));
 const say = (message: FromAgent) => void port.write(`${JSON.stringify(message)}\n`);
 const roots = new Roots({
-  start: (root, place, share, user) => enter(root, place, share, user, scope), uid: (root) => uidOf(root, SESSIONS, scope),
-  kill: killRoot, contain, admit, cgroups: CGROUPS, unmount: unmountShare, flush: flushRoot,
+  start: enter, uid: uidOf, kill: killRoot, contain, admit, cgroups: CGROUPS, unmount: unmountShare, flush: flushRoot,
   tunnels: (root, uid) => network.listen(root, uid),
   arrivals: (root, id) => network.arrival(root, id),
   lost: (root) => say({ type: "lost", root }),

@@ -4,7 +4,8 @@
 // AND THE SECURITY CHECK: a junction and a symbolic link in the folder that lead outside it — what the guest sees,
 // and whether a read through them reaches outside the folder. Also the names NTFS resolves to another: ASCII case,
 // ſ, ı, İ, the Kelvin sign, a trailing dot, a trailing space, a colon, NUL, CON.txt and a short name (GIT~1), and
-// WSL's U+F000 mapping. Decides per-root uids or macOS's one uid, the fold's comment, and the owner's names finding.
+// WSL's U+F000 mapping. Decides whether the share takes each root's uid from its aname, or shows each file as the asking uid's,
+// as Apple's does, the fold's comment, and the owner's names finding.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts owners
 // A read through a junction or symlink that reaches outside the folder is a SECURITY finding: STOP and report it.
 

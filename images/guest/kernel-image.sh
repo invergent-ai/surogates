@@ -5,6 +5,8 @@
 # or for kernels without zboot a gzip of the Image, or the Image itself. What QEMU's virt machine
 # and Apple's VZLinuxBootLoader take is the Image, which "must support the CPU architecture of
 # your Mac": checked by its header's magic, "ARM\x64" at 56 (Documentation/arch/arm64/booting.rst).
+# Apple does not say which forms its loader takes; on a Mac, a gzip of the Image did not boot
+# ("Internal Virtualization error"), and the Image did (desktop/test/vm/darwin/measure/boot.ts).
 # Nothing is left at <Image> unless it is one.
 #
 # Usage:

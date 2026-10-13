@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { backendFor } from "../src/vm/backends.js";
-import { bootDarwin, commandLine, fitting, runtimeFolder } from "../src/vm/darwin.js";
+import { bootDarwin, COMMAND_LINE, fitting, runtimeFolder } from "../src/vm/darwin.js";
 import type { VmOptions } from "../src/vm/manager.js";
 
 const ANA = { uid: 501, gid: 20, name: "ana", home: "/Users/ana" };
@@ -55,8 +55,11 @@ describe("the macOS VM backend", () => {
     expect(runtimeFolder("/data", "/no/such/temp")).toMatch(/^\/no\/such\/temp\/surogate\/vm-[0-9a-f]{8}$/);
   });
 
-  it("tells the guest kernel the uid every root runs as, which the protected-names rule judges, on every OS's command line", () => {
-    expect(commandLine(ANA)).toBe(`root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.uid=501`);
+  it("tells the guest kernel the framework's devices, and no names refused but the protected ones, on every OS's command line", () => {
+    expect(COMMAND_LINE).toBe(`root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf`);
+  });
+
+  it("fits the sockets of a Mac's own temp folder", () => {
     expect(fitting(runtimeFolder("/Users/ana/Library/Application Support/Surogate", "/var/folders/ab/cdefghij/T"))).toBeNull();
   });
 });

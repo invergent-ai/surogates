@@ -1,7 +1,8 @@
 // The company's certificate authority on macOS: the certificates an administrator trusted as roots for
 // every user of this Mac, by `sudo security add-trusted-cert -d` or an MDM profile, which macOS keeps
 // in the admin trust domain. A user's own trust settings are not taken: they are not an administrator's
-// word, as Linux takes /etc/surogate/ca.pem only where root alone can write it.
+// word, as Linux takes /etc/surogate/ca.pem only where root alone can write it. A configuration profile the
+// user installs by a double-click puts its root in the user's domain, so it is not taken either.
 
 import Foundation
 import Security
@@ -88,22 +89,50 @@ func settings(of certificate: SecCertificate, in domain: SecTrustSettingsDomain)
   return read
 }
 
-/// The certificates of the admin trust domain whose settings make them roots for SSL (rootForSSL), each
-/// as its DER bytes; none where the domain holds none.
-public func adminRoots() throws -> [Data] {
+/// Every certificate with trust settings in *domain*; none where the domain holds none.
+func certificates(in domain: SecTrustSettingsDomain) throws -> [SecCertificate] {
   var copied: CFArray?
-  // SecTrustSettingsCopyCertificates(_:_:) (Apple, Security): every certificate with trust settings in
-  // kSecTrustSettingsDomainAdmin, or errSecNoTrustSettings where there are none.
-  let status = SecTrustSettingsCopyCertificates(.admin, &copied)
+  // SecTrustSettingsCopyCertificates(_:_:) (Apple, Security): every certificate with trust settings in the
+  // domain, or errSecNoTrustSettings where there are none.
+  let status = SecTrustSettingsCopyCertificates(domain, &copied)
   if status == errSecNoTrustSettings { return [] }
   guard status == errSecSuccess else { throw TrustError(status: status) }
   guard let copied else { return [] }
-  var roots: [Data] = []
+  var found: [SecCertificate] = []
   for item in copied as NSArray {
     let object = item as AnyObject
     guard CFGetTypeID(object) == SecCertificateGetTypeID() else { continue }
-    let certificate = object as! SecCertificate
-    guard let found = try settings(of: certificate, in: .admin), rootForSSL(found) else { continue }
+    found.append(object as! SecCertificate)
+  }
+  return found
+}
+
+/// Where adminRoots reads trust settings from: the certificates with settings in a domain, and a certificate's
+/// settings in a domain (settings(of:in:)). This Mac's own, through the Security framework, or a test's.
+public struct TrustStore {
+  public var certificatesIn: (SecTrustSettingsDomain) throws -> [SecCertificate]
+  public var settingsOf: (SecCertificate, SecTrustSettingsDomain) throws -> [TrustSetting]?
+
+  public init(
+    certificatesIn: @escaping (SecTrustSettingsDomain) throws -> [SecCertificate],
+    settingsOf: @escaping (SecCertificate, SecTrustSettingsDomain) throws -> [TrustSetting]?
+  ) {
+    self.certificatesIn = certificatesIn
+    self.settingsOf = settingsOf
+  }
+
+  /// This Mac's trust settings, as the Security framework reads them.
+  public static var keychains: TrustStore {
+    TrustStore(certificatesIn: certificates(in:), settingsOf: settings(of:in:))
+  }
+}
+
+/// The certificates of the admin trust domain whose settings make them roots for SSL (rootForSSL), each
+/// as its DER bytes; none where the domain holds none. The user's own trust domain is never asked.
+public func adminRoots(in store: TrustStore = .keychains) throws -> [Data] {
+  var roots: [Data] = []
+  for certificate in try store.certificatesIn(.admin) {
+    guard let found = try store.settingsOf(certificate, .admin), rootForSSL(found) else { continue }
     // SecCertificateCopyData(_:) (Apple, Security): the certificate's DER encoding.
     roots.append(SecCertificateCopyData(certificate) as Data)
   }

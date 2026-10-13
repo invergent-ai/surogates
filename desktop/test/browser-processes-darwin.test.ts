@@ -58,7 +58,9 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("the process
     const waiting = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", `--user-data-dir=${profile}`], { stdio: "ignore" });
     try {
       await new Promise((resolve) => waiting.once("spawn", resolve));
-      expect(await holding(profile)).toEqual([waiting.pid]);
+      // The helper reads the processes as they are at that moment, and a child's own arguments can show there a little
+      // after Node's spawn event: looked at again until they do, within a bound.
+      await expect.poll(() => holding(profile), { timeout: 10_000 }).toEqual([waiting.pid]);
     } finally {
       waiting.kill();
       rmSync(profile, { recursive: true, force: true });

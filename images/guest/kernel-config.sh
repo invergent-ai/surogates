@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Fails on a guest kernel whose configuration the guest cannot boot on. On virtio the VM boots it directly,
 # with no initrd, so what it reads its root from, and the rest of what the guest needs before its init can
-# load a module, is built in; and what vm/init loads, the virtio-fs and 9P clients and overlay, is there, as
-# a module or built in. On Hyper-V the VM boots it with the initrd (images/guest/initrd), so what unpacks
-# the initrd and finds the disks once its drivers have loaded is built in; and those drivers are there. Each
-# option missing is named. Run in the image's build on the pinned kernel's config-*, the modules package's,
-# for each arch.
+# load a module, is built in; and what vm/init loads, the entropy device's driver, the virtio-fs and 9P
+# clients and overlay, is there, as a module or built in. On Hyper-V the VM boots it with the initrd
+# (images/guest/initrd), so what unpacks the initrd and finds the disks once its drivers have loaded is built
+# in; and those drivers are there. Each option missing is named. Run in the image's build on the pinned
+# kernel's config-*, the modules package's, for each arch.
 #
 # Usage:
 #   images/guest/kernel-config.sh amd64|arm64 <config>
@@ -14,9 +14,10 @@ set -euo pipefail
 ARCH="${1:-}"
 CONFIG="${2:-}"
 # virtio-blk and ext4, the disks; the virtio console, hvc0 and the agent's ports; virtio on PCI,
-# where QEMU puts every device; BPF-LSM and the kernel's BTF, which the rule needs; and FUSE, which
-# virtiofs is.
-BUILT_IN=(VIRTIO_BLK EXT4_FS VIRTIO_CONSOLE VIRTIO_PCI BPF_LSM DEBUG_INFO_BTF FUSE_FS)
+# where QEMU puts every device; BPF-LSM and the kernel's BTF, which the rule needs; FUSE, which
+# virtiofs is; and the hardware random-number core, which the entropy device's driver plugs into,
+# since the image keeps no module but those vm/init loads.
+BUILT_IN=(VIRTIO_BLK EXT4_FS VIRTIO_CONSOLE VIRTIO_PCI BPF_LSM DEBUG_INFO_BTF FUSE_FS HW_RANDOM)
 # An initrd; Hyper-V's own core, which its drivers build on; and SCSI's disks, which storvsc's are.
 HYPERV_BUILT_IN=(BLK_DEV_INITRD HYPERV SCSI BLK_DEV_SD)
 case "$ARCH" in
@@ -26,7 +27,7 @@ case "$ARCH" in
   arm64) BUILT_IN+=(PCI_HOST_GENERIC) ;;
   *) echo "usage: images/guest/kernel-config.sh amd64|arm64 <config>" >&2; exit 2 ;;
 esac
-LOADED=(VIRTIO_FS OVERLAY_FS NETFS_SUPPORT NET_9P NET_9P_FD 9P_FS)
+LOADED=(VIRTIO_FS OVERLAY_FS NETFS_SUPPORT NET_9P NET_9P_FD 9P_FS HW_RANDOM_VIRTIO)
 # Hyper-V's bus, its SCSI controller with the transport class it needs, its sockets with the family they
 # are a transport of, and its balloon.
 INITRD=(HYPERV_VMBUS SCSI_FC_ATTRS HYPERV_STORAGE VSOCKETS HYPERV_VSOCKETS HYPERV_BALLOON)

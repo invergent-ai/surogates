@@ -270,13 +270,25 @@ it("keeps of the kernel's modules only those the guest's init loads, with those 
   const init = readFileSync(new URL("../vm/init", import.meta.url), "utf8");
   const loaded = [...init.matchAll(/^\s*modprobe (\S+)$/gm)].map(([, name]) => name);
   // The two the 9P client and its fd transport need, which the image's build checks against modules.dep (modules.sh).
-  expect(modulesGiven("keep")).toEqual(["netfs", "9pnet", "9pnet_fd", "9p", "virtiofs", "overlay"]);
+  expect(modulesGiven("keep")).toEqual(["virtio-rng", "netfs", "9pnet", "9pnet_fd", "9p", "virtiofs", "overlay"]);
   expect(modulesGiven("keep").filter((name) => !["netfs", "9pnet"].includes(name)).sort()).toEqual([...loaded].sort());
   // Never Hyper-V's time sync, which would set the guest's clock under the agent; the initrd's, from its list.
   expect(loaded).not.toContain("hv_utils");
   expect(runsOf("modules").flatMap(chain)).toContain('modules.sh copy "/image/lib/modules/$KERNEL" /initrd/lib $(sed \'s/#.*//\' /initrd/modules)');
   const listed = readFileSync(join(REPO, "images/guest/initrd/modules"), "utf8").replace(/#.*/g, "").split(/\s+/).filter(Boolean);
   expect(listed).toEqual(["hv_vmbus", "scsi_transport_fc", "hv_storvsc", "vsock", "hv_sock", "hv_balloon"]);
+});
+
+it("loads the entropy device's driver before anything of the guest's draws on the kernel's randomness", () => {
+  const init = readFileSync(new URL("../vm/init", import.meta.url), "utf8");
+  const lines = init.split("\n");
+  const at = (pattern: RegExp) => lines.findIndex((line) => pattern.test(line));
+  // Each VM has an entropy device (qemu.ts, virtio-rng-pci; surogate-vm, VZVirtioEntropyDeviceConfiguration), whose
+  // driver is a module: loaded first, before the rule's load, the sessions disk's mke2fs and the agent's node.
+  const driver = at(/^modprobe virtio-rng$/);
+  expect(driver).toBeGreaterThan(0);
+  expect(lines.slice(0, driver).filter((line) => /^\s*[^#\s]/.test(line) && !/^(set|export) /.test(line))).toEqual([]);
+  for (const later of [/bpftool prog loadall/, /mke2fs /, /^exec \/usr\/bin\/tini /]) expect(at(later), String(later)).toBeGreaterThan(driver);
 });
 
 // Each RUN of *stage* as its shell reads it: its continuations joined, and each run of spaces one space.
@@ -328,12 +340,13 @@ it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles
 });
 
 describe("the check of the kernel's configuration", () => {
-  // What the guest boots on without an initrd, built in; on arm64 the virt machine's PCIe host too.
-  const BUILT_IN = ["VIRTIO_BLK", "EXT4_FS", "VIRTIO_CONSOLE", "VIRTIO_PCI", "BPF_LSM", "DEBUG_INFO_BTF", "FUSE_FS"];
+  // What the guest boots on without an initrd, built in, with the core the entropy device's driver plugs into;
+  // on arm64 the virt machine's PCIe host too.
+  const BUILT_IN = ["VIRTIO_BLK", "EXT4_FS", "VIRTIO_CONSOLE", "VIRTIO_PCI", "BPF_LSM", "DEBUG_INFO_BTF", "FUSE_FS", "HW_RANDOM"];
   // What it boots on with Hyper-V's initrd, built in: on amd64 Hyper-V's clock and the UART too.
   const HYPERV_BUILT_IN = ["BLK_DEV_INITRD", "HYPERV", "SCSI", "BLK_DEV_SD"];
   // What vm/init loads, and what the initrd does, a module or built in.
-  const LOADED = ["VIRTIO_FS", "OVERLAY_FS", "NETFS_SUPPORT", "NET_9P", "NET_9P_FD", "9P_FS"];
+  const LOADED = ["VIRTIO_FS", "OVERLAY_FS", "NETFS_SUPPORT", "NET_9P", "NET_9P_FD", "9P_FS", "HW_RANDOM_VIRTIO"];
   const INITRD = ["HYPERV_VMBUS", "SCSI_FC_ATTRS", "HYPERV_STORAGE", "VSOCKETS", "HYPERV_VSOCKETS", "HYPERV_BALLOON"];
   const hyperv = (arch: string) => [...HYPERV_BUILT_IN, ...(arch === "amd64" ? ["HYPERV_TIMER", "SERIAL_8250_CONSOLE"] : [])];
   let dir: string;

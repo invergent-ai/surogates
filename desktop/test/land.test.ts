@@ -1893,7 +1893,7 @@ describe("a landing's helper in the file helper's sandbox", () => {
     const host = `
       import { spawnSync } from "node:child_process";
       import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-      const { pathOutside, quote, sandboxPolicy } = await import(${JSON.stringify(dist("hosts/policy.js"))});
+      const { pathOutside, quote, sandboxPolicy, SHELL } = await import(${JSON.stringify(dist("hosts/policy.js"))});
       const { srtOs } = await import(${JSON.stringify(dist("hosts/srt-os.js"))});
       const [folder, work, copy, kept, node, home] = process.argv.slice(1);
       const path = pathOutside(process.env.PATH, []);
@@ -1912,7 +1912,7 @@ describe("a landing's helper in the file helper's sandbox", () => {
       `)};
       process.chdir(work);
       const words = [node, "--input-type=module", "-e", asked, folder, copy, kept, process.env.STEPS].map(quote).join(" ");
-      const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words)).argv;
+      const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words, SHELL)).argv;
       const ran = spawnSync(file, ["--norc", "--noprofile", flag, srtOs.line(line)], { cwd: folder, env: { HOME: home, PATH: path }, encoding: "utf8", timeout: 30000 });
       await SandboxManager.reset().catch(() => {});
       process.stderr.write(ran.stderr);

@@ -47,7 +47,7 @@ it("shares a folder with the user's own rights, and nothing more", async () => {
   const write = (await booted.run(root, "echo x >> read-only.txt 2>&1 && echo wrote || echo refused")).output.trim();
   let outside = "not run: set SUROGATE_OTHER_USER_FOLDER to another user's folder";
   if (other) {
-    const forced = await booted.vm.share(other, booted.vm.rootUid ?? 1000, performance.now() + 15_000).then(() => "the service shared it", (error: Error) => `refused at the service: ${error.message}`);
+    const forced = await booted.vm.share(other, 1000, performance.now() + 15_000).then(() => "the service shared it", (error: Error) => `refused at the service: ${error.message}`);
     outside = forced;
   }
   await booted.stop();

@@ -2,7 +2,7 @@
 // the paths files/protect.ts protects, in a folder a chat shares into the guest, by
 // walking the dentry up and feeding each component to rule-match.h's stepper; and,
 // where the kernel's line names that set, of the names Windows's Explorer acts on. Loaded
-// once at boot (vm/init); a session (uid >= FIRST_UID, or the scope's one uid) cannot unload it.
+// once at boot (vm/init); a session (uid >= FIRST_UID) cannot unload it.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
@@ -58,22 +58,10 @@ static __noinline int judge(struct dentry *dentry, int dir, int windows)
 	return sg_end(&st) | (sg_in_dep(&st) << 1);
 }
 
-// The one uid besides those from FIRST_UID up that sessions run as: where the VM's shares map no owner
-// to a session's uid (macOS's), every session runs as the uid the share shows, the host user's (root.ts).
-// vm/init writes it from the kernel's command line (surogate.uid=), or leaves it 0 where that names none,
-// as Linux's never does, and freezes the map before it says the rule is attached: nothing writes it after.
-// A value of 0, or one above the last uid, judges no other uid: the guest's own root is never in scope.
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u32);
-	__uint(map_flags, RDONLY_PROG);
-} scope SEC(".maps");
-
 // The names refused besides the protected ones, a set the kernel's command line names (surogate.names=), which
-// vm/init writes and freezes as it does the scope: NAMES_POSIX, Linux's and macOS's, none more; NAMES_WINDOWS,
-// those Windows's Explorer acts on (rule-match.h, sg_explorer). A load whose line names neither fails the boot.
+// vm/init writes, then freezes before it says the rule is attached, so nothing writes it after: NAMES_POSIX, Linux's
+// and macOS's, none more; NAMES_WINDOWS, those Windows's Explorer acts on (rule-match.h, sg_explorer). A load whose
+// line names neither fails the boot.
 #define NAMES_POSIX 0
 #define NAMES_WINDOWS 1
 struct {
@@ -104,13 +92,6 @@ static __noinline int explorer_name(struct dentry *dentry)
 	return sg_explorer(&tail, len > SG_TAIL ? SG_TAIL : (int)len);
 }
 
-static __always_inline int in_scope(__u32 uid)
-{
-	__u32 key = 0;
-	__u32 *one = bpf_map_lookup_elem(&scope, &key);
-	return uid >= FIRST_UID || (one && *one != 0 && *one != (__u32)-1 && uid == *one);
-}
-
 // A share's filesystem: a guest mounts its shares as one kind, virtio-fs or 9p, and nothing else as either.
 static __noinline int share_sb(struct super_block *sb)
 {
@@ -123,7 +104,7 @@ static __noinline int share_sb(struct super_block *sb)
 static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry, int dir)
 {
 	__u32 uid = bpf_get_current_uid_gid();
-	if (!in_scope(uid) || !dentry || !share_sb(sb))
+	if (uid < FIRST_UID || !dentry || !share_sb(sb))
 		return 0;
 	int windows = windows_names();
 	if (windows && explorer_name(dentry))
@@ -280,5 +261,6 @@ int BPF_PROG(on_socket, int family, int type, int protocol, int kern)
 {
 	if (kern || family != AF_VSOCK)
 		return 0;
-	return DENY(in_scope(bpf_get_current_uid_gid()));
+	__u32 uid = bpf_get_current_uid_gid();
+	return DENY(uid >= FIRST_UID);
 }

@@ -21,7 +21,7 @@
     "test:e2e": "npm run build && npm run agent-disk && xvfb-run -a vitest run -c vitest.e2e.config.ts",
     "agent-disk": "vm/agent-disk.sh dist/agent.img",
     "native": "native/build.sh",
-    "build:darwin": "tsc -p tsconfig.build.json && tsc -p tsconfig.pages.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/ && native/helper/build.sh && native/spawn/build.sh",
+    "build:darwin": "scripts/dictionary.sh && tsc -p tsconfig.build.json && tsc -p tsconfig.pages.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/ && native/helper/build.sh && native/spawn/build.sh",
     "build:win32": "tsc -p tsconfig.build.json && tsc -p tsconfig.pages.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/ && npm run native:win32-helper",
     "native:win32-helper": "cd native/windows/helper && cargo build --release --locked --target-dir ../target"
   },

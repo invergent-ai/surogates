@@ -13,31 +13,21 @@ it("expects at boot as many attached hooks as the guest rule has lsm programs", 
   expect(Number(/^want=(\d+)/m.exec(vm("init"))?.[1])).toBe(programs.length);
 });
 
-// The rule's scope as init reads it from the kernel's command line: its function, run alone.
-const scopeOf = (cmdline: string) => {
-  const fn = /^scope_uid\(\) \{\n[\s\S]*?\n\}\n/m.exec(vm("init"))?.[0];
-  const ran = spawnSync("/bin/sh", ["-euc", `${fn}\nscope_uid "$1"`, "sh", cmdline], { encoding: "utf8" });
-  return ran.status === 0 ? { uid: ran.stdout.trim() } : { refused: ran.stdout.trim() };
-};
-
-it("judges the one uid the kernel's command line names as surogate.uid=, besides those from 10000 up, and none where it names none", () => {
-  const linux = "root=/dev/vda ro console=hvc0 panic=-1 lsm=landlock,lockdown,yama,integrity,apparmor,bpf";
-  expect(scopeOf(linux)).toEqual({ uid: "" });
-  expect(scopeOf(`${linux} surogate.uid=501`)).toEqual({ uid: "501" });
-  expect(scopeOf(`surogate.uid=1 ${linux}`)).toEqual({ uid: "1" });
-  expect(scopeOf(`${linux} surogate.uid=4294967294`)).toEqual({ uid: "4294967294" });
-  // A word that merely holds it is not it, and a glob is no file.
-  expect(scopeOf(`${linux} xsurogate.uid=0 * /*`)).toEqual({ uid: "" });
-});
-
-it("refuses a scope no session may run as, and a second one, which fails the boot", () => {
-  for (const value of ["0", "00", "0501", "-1", "501x", "", " ", "4294967295", "99999999999", "5e2", "+501"]) {
-    expect(scopeOf(`console=hvc0 surogate.uid=${value}`), value).toEqual({ refused: `surogate.uid=${value.trim()} is not a uid a session may run as` });
-  }
-  expect(scopeOf("surogate.uid=501 surogate.uid=501")).toEqual({ refused: "the kernel's command line names surogate.uid= twice" });
-  // The outcome the agent reads: a refused scope is a failed rule, and the scope it judges is what the agent runs sessions as.
-  expect(vm("init")).toContain('elif ! scope=$(scope_uid "$(cat /proc/cmdline)"); then\n    echo "failed: $scope"');
-  expect(vm("init")).toMatch(/map freeze pinned \/sys\/fs\/bpf\/surogate-maps\/scope && echo "\$scope" > \/run\/surogate\/scope/);
+// The rule judges a session by its uid alone, from 10000 up, on every OS: the reviewed rule of Linux's, with no map,
+// word of the kernel's command line or file the agent reads that could add another uid to what it judges.
+it("judges sessions from uid 10000 up alone, with nothing that adds a uid to them", () => {
+  const rule = vm("rule.bpf.c");
+  expect(rule).toMatch(/^#define FIRST_UID 10000u /m);
+  expect(rule).toContain("\tif (uid < FIRST_UID || !dentry || !share_sb(sb))\n\t\treturn 0;");
+  expect(rule).toContain("\t__u32 uid = bpf_get_current_uid_gid();\n\treturn DENY(uid >= FIRST_UID);");
+  // Its one map is the set of names the kernel's line names, which holds no uid.
+  expect([...rule.matchAll(/^\} (\w+) SEC\("\.maps"\);$/gm)].map(([, map]) => map)).toEqual(["names"]);
+  const init = vm("init");
+  expect(init).toContain("/usr/sbin/bpftool prog loadall /usr/lib/surogate/rule.bpf.o /sys/fs/bpf/surogate pinmaps /sys/fs/bpf/surogate-maps autoattach >&2");
+  expect([...init.matchAll(/bpftool map (\w+) pinned ([^\s;]+)/g)].map(([, verb, map]) => `${verb} ${map}`)).toEqual([
+    "update /sys/fs/bpf/surogate-maps/names", "freeze /sys/fs/bpf/surogate-maps/names",
+  ]);
+  for (const gone of ["surogate.uid", "/run/surogate/scope"]) expect(init, gone).not.toContain(gone);
 });
 
 // A function of init's, *name*, as the file *text* holds it: from its line to the first line that closes it.
@@ -143,7 +133,7 @@ describe("the rule's names, by the set the kernel's line names", () => {
     expect(setOf("surogate.names=posix surogate.names=windows")).toEqual({ refused: "the kernel's command line names surogate.names= twice" });
     expect(setOf("surogate.names=macos")).toEqual({ refused: "surogate.names=macos is not a set of names this guest knows" });
     expect(vm("init")).toContain('elif ! names=$(name_set "$(cat /proc/cmdline)"); then\n    echo "failed: $names"');
-    // Set and frozen before the rule is said to be attached, as the scope is.
+    // Set and frozen before the rule is said to be attached.
     expect(vm("init")).toContain('/usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/names key 0 0 0 0 value "$names" 0 0 0 \\\n'
       + '      && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/names; } >&2; then\n    echo "failed: could not set the protected-names rule\'s names"');
     expect(vm("rule.bpf.c")).toMatch(/^#define NAMES_POSIX 0\n#define NAMES_WINDOWS 1\n/m);

@@ -30,7 +30,7 @@ import { FolderBusy, type FolderRecord, lockFolder, readRecord, writeRecord } fr
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { closeHanded } from "./handed.js";
-import { fileToolsMissing, GLOB, hostToolsPath, quote, sandboxPolicy, toolsMissing } from "./policy.js";
+import { fileToolsMissing, GLOB, hostToolsPath, quote, sandboxPolicy, SHELL, toolsMissing } from "./policy.js";
 import { srtOs } from "./srt-os.js";
 import { isOf, startOn } from "./start.js";
 
@@ -224,8 +224,8 @@ async function start(message: HostStart): Promise<void> {
   const kept = checked.make();
   made = kept.made;
   const beside = [...checked.reads, ...checked.writes];
-  // srt and the shell it wraps the helper in run outside the sandbox, and look up which,
-  // rg and the shell through this process's PATH; the helper finds its rg through it in
+  // srt and the shell it wraps the helper in (SHELL, by its path) run outside the sandbox, and
+  // look up which and rg through this process's PATH; the helper finds its rg through it in
   // the sandbox. Each absolute entry is kept as the path it leads to now, so a link a command
   // swaps in later moves none, and is dropped when it is the folder or the working folder, or
   // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
@@ -258,7 +258,7 @@ async function start(message: HostStart): Promise<void> {
   // temp folder and the user's folder stays as it was.
   process.chdir(tmp);
   // The helper runs on this host's node, the app's own, as plain Node, with no inspector on SIGUSR1.
-  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`);
+  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`, SHELL);
   const [file, flag, line] = argv;
   if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
   // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.

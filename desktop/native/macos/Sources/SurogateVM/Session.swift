@@ -27,14 +27,25 @@ public struct Surroundings {
   /// The framework's bounds for this Mac's VMs.
   public var cpus: ClosedRange<Int>
   public var memory: ClosedRange<UInt64>
+  /// Milliseconds on a monotonic clock, for the started line's times.
+  public var now: () -> Double
 
-  public init(say: @escaping (Answer) -> Void, exit: @escaping (Int32) -> Void, machine: @escaping (MachinePlan, [Int32]) throws -> Machine, cpus: ClosedRange<Int>, memory: ClosedRange<UInt64>) {
+  public init(
+    say: @escaping (Answer) -> Void, exit: @escaping (Int32) -> Void, machine: @escaping (MachinePlan, [Int32]) throws -> Machine,
+    cpus: ClosedRange<Int>, memory: ClosedRange<UInt64>, now: @escaping () -> Double = uptimeMs
+  ) {
     self.say = say
     self.exit = exit
     self.machine = machine
     self.cpus = cpus
     self.memory = memory
+    self.now = now
   }
+}
+
+/// This computer's uptime in milliseconds (ProcessInfo.systemUptime), which no change of its clock moves.
+public func uptimeMs() -> Double {
+  ProcessInfo.processInfo.systemUptime * 1000
 }
 
 public final class Session {
@@ -47,6 +58,8 @@ public final class Session {
   private var pending: Boot?
   private var machine: Machine?
   private var book = ShareBook(layout: .multiple)
+  // When the boot line was read, on around.now's clock: the started line's times are from it.
+  private var asked = 0.0
 
   public init(places: Places, around: Surroundings) {
     self.places = places
@@ -73,6 +86,7 @@ public final class Session {
       around.say(.refused(id: refusal.id, why: refusal.why))
     case let .success(.boot(boot)):
       guard state == .waiting, pending == nil else { return around.say(.refused(id: nil, why: "a boot after the first")) }
+      asked = around.now()
       do {
         try checkBoot(boot, in: places)
       } catch {
@@ -137,17 +151,23 @@ public final class Session {
       let planned = try plan(boot, cpus: around.cpus, memory: around.memory)
       book = ShareBook(layout: boot.layout)
       let made = try around.machine(planned, ports ?? [])
+      let validated = since(asked)
       machine = made
       state = .booting
       made.start { [self] error in
         guard state == .booting else { return }
         if let error { return fail(error) }
         state = .running
-        around.say(.started)
+        around.say(.started(BootTimes(validated: validated, running: since(asked))))
       }
     } catch {
       fail(error)
     }
+  }
+
+  // Whole milliseconds from *then* to now.
+  private func since(_ then: Double) -> Int {
+    Int((around.now() - then).rounded())
   }
 
   private func fail(_ error: Error) {

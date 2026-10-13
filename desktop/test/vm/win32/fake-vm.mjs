@@ -9,7 +9,7 @@
 //   FAKE_VM_UNSHARE=silent each unshare is never answered
 //   FAKE_VM_KILL=ignore    a kill line is not heeded
 //   FAKE_VM_STOP=error     once started, the VM stops by itself for an error
-//   FAKE_VM_UID=<uid>      its agent gives each root that uid, not the kernel command line's surogate.uid= (none here)
+//   FAKE_VM_UID=<uid>      its agent gives each root that uid, not 10000, the first a root has
 //   FAKE_VM_LOG=<file>     each line read is written there
 // Node, and no Windows API: so it runs where the tests do, on Linux and on the Windows runner.
 

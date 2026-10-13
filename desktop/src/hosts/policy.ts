@@ -79,6 +79,12 @@ const SRT_TMP = ["/tmp/claude", "/private/tmp/claude"];
 // One word on a bash line: in '...', an embedded quote written as '\''.
 export const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
+// The shell srt starts the helper through, out here and in its sandbox: the system's own, given to srt by its path
+// (wrapWithSandboxArgv's binShell), where srt would take the first bash on the PATH. One a person installed, as
+// Homebrew's or Nix's, lies outside every folder the sandbox reads, so the sandbox could not start it: Seatbelt refuses
+// sandbox-exec's exec of it (EPERM), and bubblewrap finds nothing at its path (ENOENT).
+export const SHELL = "/bin/bash";
+
 // A folder the sandbox must never be given: this OS's own (srt-os.ts), and srt's temp folder, which the policy
 // makes read-only.
 export function isReserved(path: string): boolean {

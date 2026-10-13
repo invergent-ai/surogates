@@ -96,7 +96,7 @@ The guest image the Windows app boots is the x64 one Linux boots, with Hyper-V's
    ```
    ls /sys/class/scsi_disk/; for d in /sys/class/scsi_disk/*; do echo "$d $(ls $d/device/block) $(cat $d/device/block/*/ro)"; done
    cat /proc/modules | cut -d' ' -f1 | sort
-   cat /run/surogate/rule /run/surogate/scope; ls -l /run/surogate/ports
+   cat /run/surogate/rule; ls -l /run/surogate/ports
    ```
 
    Pass: three disks, at `…:0:0:0`, `…:0:0:1` and `…:0:0:2`, the first two read-only; the modules `hv_vmbus`, `hv_storvsc`, `scsi_transport_fc`, `vsock`, `hv_sock`, `hv_balloon`, `netfs`, `9pnet`, `9pnet_fd`, `9p` and `overlay`, and never `hv_utils` or `virtiofs`; the rule attached; no socket left in `/run/surogate/ports`, as each goes once the agent has connected. Send back the output.

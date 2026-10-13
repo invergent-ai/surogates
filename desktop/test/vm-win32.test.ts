@@ -86,7 +86,7 @@ describe("the Windows VM backend", () => {
   it("boots once its three ports are connected and it said started, its boot line naming the files and Windows's kernel line", async () => {
     const log = join(dir, "said.log");
     const vm = await boot({ FAKE_VM_LOG: log });
-    expect([vm.emulated, vm.rootUid]).toEqual([null, undefined]);
+    expect([vm.emulated, "rootUid" in vm]).toEqual([null, false]);
     const [line] = readFileSync(log, "utf8").trim().split("\n").map((text) => JSON.parse(text) as Record<string, unknown>);
     expect(line).toEqual({
       type: "boot", kernel: options.kernel, initrd: join(dir, "image", "initrd"), rootfs: options.rootfs, agentDisk: options.agentDisk,

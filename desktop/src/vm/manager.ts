@@ -121,12 +121,6 @@ export interface VmBackend {
   /** Null with the OS's hardware virtualization, else why the VM runs emulated. */
   readonly emulated: Emulated | null;
   /**
-   * The one guest uid every root runs as, where the backend's share maps no owner to a root's own uid:
-   * the host user's, which the guest's rule judges (darwin.ts). None where each root has its own, from
-   * FIRST_UID up, mapped by its folder's server (Linux's).
-   */
-  readonly rootUid?: number;
-  /**
    * *folder* shared into the running guest for the root whose guest uid is *uid*.
    * Resolves with how the agent mounts it, whose kind also says who maps the
    * folder's owner to *uid* (protocol.ts, Share), or rejects with why not, by
@@ -502,10 +496,9 @@ export class Guest {
       this.lose();
       throw new Error("the guest gave no uid in time");
     }
-    // A uid the agent cannot have given goes into no share: one from FIRST_UID up, or the backend's one uid for every root.
+    // A uid the agent cannot have given goes into no share.
     const uid = given.type === "done" ? given.uid : undefined;
-    const one = this.vm.rootUid;
-    if (uid === undefined || !Number.isInteger(uid) || (one === undefined ? uid < FIRST_UID : uid !== one)) {
+    if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
     return this.vm.share(folder.path, uid, deadline, { copy });
