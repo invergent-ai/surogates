@@ -1,6 +1,7 @@
 // On Windows nothing contains the file helper but its walk (src/files/fd-paths-win32.ts): Node's own fs calls on a path
 // follow every reparse point there. So no file kind reaches a folder's file by Node's own call on its path: every one
-// goes through fdPaths. A landing's (land.ts) does not run on Windows yet: its helper refuses to start there.
+// goes through fdPaths, a landing's (land.ts) among them, in the folder, in the thread's copy and where it keeps what it
+// replaces; and neither does the hook guard's look on Windows (hosts/hooks-win32.ts).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -33,6 +34,7 @@ function byPath(text: string): string[] {
 const KINDS: Record<string, string[]> = {
   "operations.ts": ["stat", "access"],
   "paths.ts": ["readFile"],
+  "land.ts": ["writeFile", "readFile", "writeFile"],
   "protect.ts": [],
   "edge.ts": [],
   "answers.ts": [],
@@ -49,6 +51,10 @@ it("reach no folder's file on Windows by Node's own call on its path, only throu
   const operations = code(readFileSync(join(FILES, "operations.ts"), "utf8"));
   const runnable = /function runnable\([^)]*\)[^{]*\{[\s\S]*?\n\}/.exec(operations)![0];
   expect(byPath(`import { accessSync, statSync } from "node:fs";\n${runnable}`)).toEqual(["stat", "access"]);
-  // paths.ts's reads what fdPaths opened.
+  // paths.ts's reads what fdPaths opened; so does land.ts's.
   expect(code(readFileSync(join(FILES, "paths.ts"), "utf8"))).toMatch(/fdPaths\.open\("\/etc\/passwd"[^)]*\);\s*try \{\s*passwd = readFileSync\(fd, "utf8"\)/);
+  const land = code(readFileSync(join(FILES, "land.ts"), "utf8"));
+  expect(land).toMatch(/const fd = fdPaths\.open\(path, [^)]*\);\s*try \{\s*return readFileSync\(fd, "utf8"\);/);
+  expect(land.match(/writeFileSync\([^,]*,/g)).toEqual(["writeFileSync(fd,", "writeFileSync(fd,"]);
+  expect(byPath(code(readFileSync(fileURLToPath(new URL("../src/hosts/hooks-win32.ts", import.meta.url)), "utf8")))).toEqual([]);
 });

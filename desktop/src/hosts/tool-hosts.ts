@@ -16,13 +16,13 @@
 // tools start, and before the folder is read for a thread where no landing's host is on it.
 
 import { randomUUID } from "node:crypto";
-import { readdirSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
 import { spawnClean } from "../clean-child.js";
-import { keepingOf, type Recovered, recordsOf, UNTOLD, untoldIn } from "../files/land.js";
+import { keepingOf, type KeptFiles, type Recovered, recordsOf, UNTOLD, untoldIn } from "../files/land.js";
 import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Copy, Handle, Opened } from "../history/copies.js";
 import { forgettingOf, NOT_A_FORGETTING_ASKED, notPutBack, RECORDS_UNREAD, unrecorded } from "../history/kinds.js";
@@ -49,6 +49,8 @@ export const NODE = join(PACKAGE, "bin", forThisOs({ linux: "node", darwin: "nod
 // Read-only folders a sandbox may read, and no chat's folder may hold: the running program's
 // (Electron's, in the app) and the app's files, its node among them.
 export const APP_DIRS = [dirname(process.execPath), PACKAGE];
+// What a folder's landings keep, read by the app outside any walk, by this computer's own paths, as the app keeps it.
+const OWN_FILES: KeptFiles = { join, readdir: (path) => readdirSync(path), lstat: (path) => lstatSync(path), readText: (path) => readFileSync(path, "utf8") };
 const STOP_TIMEOUT_MS = 5_000;
 export const START_TIMEOUT_MS = 30_000;
 // How long a host with nothing to do keeps its folder: another chat may want it.
@@ -399,8 +401,8 @@ export class ToolHosts implements Executor {
       if (leave) return leave;
       const recorded = (answer as { ok: { landing: string | null } }).ok.landing !== null;
       try {
-        const records = recordsOf(host.kept!, forgetting.saga);
-        return unrecorded(records, forgetting.applied) ?? (recorded ? null : notPutBack(keepingOf(host.kept!, forgetting.saga), records));
+        const records = recordsOf(host.kept!, forgetting.saga, OWN_FILES);
+        return unrecorded(records, forgetting.applied) ?? (recorded ? null : notPutBack(keepingOf(host.kept!, forgetting.saga, OWN_FILES), records));
       } catch {
         return RECORDS_UNREAD;
       }
@@ -481,7 +483,7 @@ export class ToolHosts implements Executor {
         continue;
       }
       // Nothing left to put back, and what an earlier put-back found not told yet: for whoever shows it.
-      const { restored, beside } = untoldIn(kept);
+      const { restored, beside } = untoldIn(kept, OWN_FILES);
       if (restored.length + beside.length > 0) {
         this.tell(name, { folder: recordedFolder(this.options.dataDir, name)?.path ?? null, state: "found", found: { restored, beside, lost: [], unread: [] } });
       }

@@ -5,7 +5,7 @@
 
 import {
   accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, type Dirent, existsSync, fchmodSync, fstatSync, linkSync,
-  lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
+  lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmdirSync, rmSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 
 import type { FdPaths, Listing, Where } from "./fd-paths.js";
@@ -143,11 +143,12 @@ export const darwinFdPaths: FdPaths = {
     const [dir, name] = split(where);
     fsat().faccessat(dir, named(name), mode, 0);
   },
-  mkdir(where) {
-    if (typeof where === "string") return void mkdirSync(where);
+  mkdir(where, mode) {
+    if (typeof where === "string") return void (mode === undefined ? mkdirSync(where) : mkdirSync(where, mode));
     const [dir, name] = split(where);
-    fsat().mkdirat(dir, named(name), FOLDER_MODE);
+    fsat().mkdirat(dir, named(name), mode ?? FOLDER_MODE);
   },
+  rmTree: (path) => rmSync(path, { recursive: true, force: true }),
   rmdir(where) {
     if (typeof where === "string") return rmdirSync(where);
     const [dir, name] = split(where);
@@ -201,6 +202,7 @@ export const darwinFdPaths: FdPaths = {
       closeSync: () => fsat().closedir(listing),
     } satisfies Listing;
   },
+  fstat: ((fd: number, options?: { bigint: true }) => (options ? fstatSync(fd, options) : fstatSync(fd))) as FdPaths["fstat"],
   pathOf(fd) {
     let path: string;
     try {

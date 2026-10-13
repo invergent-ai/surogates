@@ -11,7 +11,6 @@ import { fdPaths } from "./fd-paths.js";
 import { identityOf } from "./identity.js";
 import { ONLY_RECOVERS } from "./land.js";
 import { type Context, perform } from "./operations.js";
-import { notBuiltWords } from "./os-names.js";
 
 const {
   SUROGATE_FOLDER: folder, HOME: home, SUROGATE_AT: at, SUROGATE_COPY: copy, SUROGATE_KEPT: kept,
@@ -32,13 +31,6 @@ if (at !== undefined) {
     process.stderr.write(`${refused}\n`);
     process.exit(2);
   }
-}
-// Whether this OS's file helper lands a thread's work, or puts back what a landing cut short: Windows's does not yet. The
-// row is picked here, as BINDS is below.
-const LANDS: Partial<Record<NodeJS.Platform, boolean>> = { linux: true, darwin: true };
-if ((copy !== undefined || kept !== undefined) && LANDS[process.platform] !== true) {
-  process.stderr.write(`${notBuiltWords("Landing a thread's work")}\n`);
-  process.exit(2);
 }
 // The folders it works in, each held from here on where nothing else binds them (fd-paths.ts).
 try {

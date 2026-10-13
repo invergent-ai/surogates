@@ -585,6 +585,7 @@ export const win32FdPaths: FdPaths = {
       | ((mode & constants.X_OK) !== 0 ? k().FILE_TRAVERSE : 0);
     closeSync(within(where, "access", (at) => openIn(at, access, k().FILE_OPEN, 0)));
   },
+  // Windows keeps no mode for a folder: one made has its parent's ACL.
   mkdir: (where) => within(where, "mkdir", (at) => {
     if (at.name === null) throw nodeError("EEXIST", "mkdir", typeof where === "string" ? where : "");
     try {
@@ -597,6 +598,21 @@ export const win32FdPaths: FdPaths = {
   }),
   rmdir: (where) => removed(where, true),
   unlink: (where) => removed(where, false),
+  rmTree(path) {
+    let found: BigIntStats;
+    try {
+      found = win32FdPaths.lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (found.isDirectory()) for (const name of win32FdPaths.readdir(path)) win32FdPaths.rmTree(posix.join(path, name));
+    try {
+      removed(path, found.isDirectory());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  },
   // Windows keeps one mode bit, read-only (libuv's fs__fchmod sets FILE_ATTRIBUTE_READONLY by the owner's write bit).
   chmod(where, mode) {
     const fd = within(where, "chmod", (at) => openIn(at, k().FILE_WRITE_ATTRIBUTES, k().FILE_OPEN, 0));
@@ -626,6 +642,7 @@ export const win32FdPaths: FdPaths = {
     throw osError("ELOOP", path, "A link, which the file tools do not follow on Windows");
   },
   listing,
+  fstat: ((fd: number, options?: { bigint: true }) => (options ? statsOf(ntat().query(fd), true) : statsOf(ntat().query(fd), false))) as FdPaths["fstat"],
   pathOf(fd) {
     const raw = ntat().query(fd);
     if (raw.deletePending || raw.links === 0) return null;

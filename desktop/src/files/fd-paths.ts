@@ -69,9 +69,12 @@ export interface FdPaths {
   /** The names in the folder at *where*. */
   readdir(where: Where): string[];
   access(where: Where, mode: number): void;
-  mkdir(where: Where): void;
+  /** The folder *where*, made with *mode* where this OS keeps one, else its default. */
+  mkdir(where: Where, mode?: number): void;
   rmdir(where: Where): void;
   unlink(where: Where): void;
+  /** What is at *path* and everything below it, gone, no link followed; nothing where nothing is there. */
+  rmTree(path: string): void;
   chmod(where: Where, mode: number): void;
   link(from: Where, to: Where): void;
   rename(from: Where, to: Where): void;
@@ -82,6 +85,9 @@ export interface FdPaths {
   listing(dir: number): Listing;
   /** Where the file open as *fd* is now: null for one removed since. */
   pathOf(fd: number): string | null;
+  /** The stats of the file open as *fd*, its identity as this OS's walk reads one (identity.ts). */
+  fstat(fd: number): Stats;
+  fstat(fd: number, options: { bigint: true }): BigIntStats;
   /** Each descriptor above the standard three that this process holds without close-on-exec: a child of its would inherit it. */
   handed(): number[];
   /** *where* as a failure names it. */
@@ -109,8 +115,8 @@ const refused = (): never => {
 };
 const unbuilt: FdPaths = {
   bind: refused, hold: refused, open: refused, lstat: refused, stat: refused, exists: refused, readdir: refused, access: refused, mkdir: refused,
-  rmdir: refused, unlink: refused, chmod: refused, link: refused, rename: refused, copy: refused, readlink: refused, listing: refused,
-  pathOf: refused, handed: refused, shown: refused, outside: refused, searchFiles: refused,
+  rmdir: refused, unlink: refused, rmTree: refused, chmod: refused, link: refused, rename: refused, copy: refused, readlink: refused, listing: refused,
+  pathOf: refused, fstat: refused, handed: refused, shown: refused, outside: refused, searchFiles: refused,
 };
 
 export const fdPaths: FdPaths = ({ linux: linuxFdPaths, darwin: darwinFdPaths, win32: win32FdPaths } as Partial<Record<NodeJS.Platform, FdPaths>>)[

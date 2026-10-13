@@ -36,10 +36,7 @@
 // landing there cut short, and does nothing else.
 
 import { createHash, randomUUID } from "node:crypto";
-import {
-  type BigIntStats, chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, futimesSync, lstatSync,
-  mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync, writeSync,
-} from "node:fs";
+import { type BigIntStats, closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, futimesSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { posix } from "node:path";
 
 import { Failure, fromNode, io, osError, sandboxError, valueError } from "./answers.js";
@@ -430,7 +427,7 @@ function stage(from: number, temp: Where, path: string, after: string, mode: num
     }
     if (mode !== null) fchmodSync(to, mode);
     fsyncSync(to);
-    return spelled(fstatSync(to, { bigint: true }));
+    return spelled(fdPaths.fstat(to, { bigint: true }));
   } finally {
     closeSync(to);
   }
@@ -475,7 +472,7 @@ function keptBytes(store: string): number {
   bytes = 0;
   const list = (dir: string): string[] => {
     try {
-      return readdirSync(dir);
+      return fdPaths.readdir(dir);
     } catch {
       return [];
     }
@@ -523,16 +520,16 @@ class Landing {
   // Synced before the step moves the real file: a record that only names a file about to be staged need not be.
   private write(step: number, done: Step, sync = true): void {
     io(done.path, () => {
-      mkdirSync(this.kept, { recursive: true, mode: 0o700 });
+      madeOwn(this.kept);
       const temp = `${this.record(step)}.new`;
-      const fd = openSync(temp, "w", 0o600);
+      const fd = fdPaths.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
       try {
         writeFileSync(fd, JSON.stringify(done));
         if (sync) fsyncSync(fd);
       } finally {
         closeSync(fd);
       }
-      renameSync(temp, this.record(step));
+      fdPaths.rename(temp, this.record(step));
     });
     if (sync) syncDir(this.kept);
   }
@@ -543,7 +540,7 @@ class Landing {
   private read(step: number): Step | null {
     let text: string;
     try {
-      text = readFileSync(this.record(step), "utf8");
+      text = textOf(this.record(step));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw new Unreadable(this.saga, step, null);
@@ -592,7 +589,7 @@ class Landing {
   private twice(found: BigIntStats | null, path: string): Failure | null {
     let names: string[] = [];
     try {
-      names = readdirSync(this.kept);
+      names = fdPaths.readdir(this.kept);
     } catch {
       // It has written nothing yet.
     }
@@ -773,7 +770,7 @@ class Landing {
   private still(dir: Held, folders: string[], path: string): void {
     const now = enter(this.root(path), folders, path).dir;
     try {
-      const [held, there] = [fstatSync(dir.fd, { bigint: true }), now === null ? null : fstatSync(now.fd, { bigint: true })];
+      const [held, there] = [fdPaths.fstat(dir.fd, { bigint: true }), now === null ? null : fdPaths.fstat(now.fd, { bigint: true })];
       if (there === null || !sameFile(there, held)) throw conflict(path);
     } finally {
       now?.close();
@@ -797,19 +794,19 @@ class Landing {
       const part = `${to}.part`;
       fdPaths.copy(from, part);
       // Read-only: a file the user may only read is copied with that mode, and is theirs to date and sync all the same.
-      const fd = openSync(part, constants.O_RDONLY | FLAGS.NOFOLLOW);
+      const fd = fdPaths.open(part, constants.O_RDONLY | FLAGS.NOFOLLOW);
       try {
         dated(fd, from);
         fsyncSync(fd);
       } finally {
         closeSync(fd);
       }
-      renameSync(part, to);
+      fdPaths.rename(part, to);
       syncDir(this.kept);
     }
     // The user's file, in the app's data: this user's alone to open there, whatever its mode was in the folder.
-    chmodSync(to, 0o600);
-    const copy = lstatSync(to, { bigint: true });
+    fdPaths.chmod(to, 0o600);
+    const copy = fdPaths.lstat(to);
     const counted = keeping.get(this.store);
     if (counted !== undefined) keeping.set(this.store, counted + Number(copy.size));
     const as = left ?? copy;
@@ -901,7 +898,7 @@ class Landing {
           const flags = constants.O_RDWR | FLAGS.NOFOLLOW | constants.O_NONBLOCK | (to === null ? constants.O_CREAT | constants.O_EXCL : 0);
           const fd = io(did.path, () => fdPaths.open(staged, flags, 0o600));
           open.push(fd);
-          if (to !== null && !sameFile(fstatSync(fd), fstatSync(to))) throw conflict(did.path);
+          if (to !== null && !sameFile(fdPaths.fstat(fd), fdPaths.fstat(to))) throw conflict(did.path);
           let done = to === null ? 0 : at.copied;
           to = fd;
           ftruncateSync(fd, done);
@@ -1174,12 +1171,12 @@ class Landing {
     }
     const gone = join(this.store, `${FORGOTTEN}${randomUUID()}`);
     try {
-      renameSync(this.kept, gone);
+      fdPaths.rename(this.kept, gone);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw fromNode(error, this.kept);
     }
-    rmSync(gone, { recursive: true, force: true });
+    fdPaths.rmTree(gone);
     keeping.delete(this.store);
     return {};
   }
@@ -1226,7 +1223,7 @@ class Landing {
   private holdsKept(at: Where, step: number): boolean {
     const open: number[] = [];
     try {
-      open.push(fdPaths.open(at, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK), openSync(this.bytes(step), constants.O_RDONLY | FLAGS.NOFOLLOW));
+      open.push(fdPaths.open(at, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK), fdPaths.open(this.bytes(step), constants.O_RDONLY | FLAGS.NOFOLLOW));
       const size = fstatSync(open[0]!).size;
       return size === fstatSync(open[1]!).size && sameBytes(open[0]!, open[1]!, size);
     } catch {
@@ -1269,7 +1266,7 @@ class Landing {
   private steps(): number[] {
     let names: string[] = [];
     try {
-      names = readdirSync(this.kept);
+      names = fdPaths.readdir(this.kept);
     } catch {
       // It has written nothing yet.
     }
@@ -1292,7 +1289,7 @@ class Landing {
       }
     }
     try {
-      for (const name of readdirSync(this.kept)) if (name.endsWith(".json.new")) remove(join(this.kept, name));
+      for (const name of fdPaths.readdir(this.kept)) if (name.endsWith(".json.new")) remove(join(this.kept, name));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error);
     }
@@ -1301,20 +1298,57 @@ class Landing {
   }
 }
 
+/**
+ * How what a folder's landings keep is read: in a landing's helper, through the file host's walk, by the session's
+ * paths; in the app, which reads the records before it has a landing forgotten (hosts/tool-hosts.ts), by this
+ * computer's own paths, outside any walk.
+ */
+export interface KeptFiles {
+  join(...parts: string[]): string;
+  readdir(path: string): string[];
+  lstat(path: string): { isFile(): boolean; isDirectory(): boolean; size: number | bigint };
+  readText(path: string): string;
+}
+
+// The text of the file at *path*, through the walk.
+function textOf(path: Where): string {
+  const fd = fdPaths.open(path, constants.O_RDONLY | FLAGS.NOFOLLOW);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const WALKED: KeptFiles = { join, readdir: (path) => fdPaths.readdir(path), lstat: (path) => fdPaths.lstat(path), readText: textOf };
+
+// The folder *path* in the app's data, and each above it that is not there, this user's alone: as mkdir -p -m 700
+// makes them, through the walk.
+function madeOwn(path: string): void {
+  if (fdPaths.exists(path)) return;
+  const parent = posix.dirname(path);
+  if (parent !== path) madeOwn(parent);
+  try {
+    fdPaths.mkdir(path, 0o700);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+
 // The names in the landing *saga*'s folder in *kept*: none where either is not there, as where nothing was kept. Throws
 // where either is there and is anything but a folder, a link in its stead among them, or cannot be read.
-function sagaNames(kept: string, saga: string): string[] {
+function sagaNames(kept: string, saga: string, files: KeptFiles): string[] {
   if (!SAGA.test(saga)) throw valueError(BAD);
-  const folder = join(kept, saga);
+  const folder = files.join(kept, saga);
   for (const at of [kept, folder]) {
     try {
-      if (!lstatSync(at).isDirectory()) throw sandboxError("What this folder's landings keep is not in a folder of the app's own");
+      if (!files.lstat(at).isDirectory()) throw sandboxError("What this folder's landings keep is not in a folder of the app's own");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
   }
-  return readdirSync(folder);
+  return files.readdir(folder);
 }
 
 // What recoveries in a folder put back, or beside its name, that no landing has told yet, kept beside the records of
@@ -1326,10 +1360,10 @@ interface Untold {
 }
 
 /** What recoveries in the folder whose landings keep what they replace in *kept* put back or beside its name, untold yet. */
-export function untoldIn(kept: string): Untold {
+export function untoldIn(kept: string, files: KeptFiles = WALKED): Untold {
   let value: unknown = null;
   try {
-    value = JSON.parse(readFileSync(join(kept, UNTOLD), "utf8"));
+    value = JSON.parse(files.readText(files.join(kept, UNTOLD)));
   } catch {
     // Nothing untold, or nothing that can be read.
   }
@@ -1347,14 +1381,14 @@ function untell(kept: string, found: Partial<Untold>): void {
   const told: Untold = { restored: [...now.restored, ...(found.restored ?? [])], beside: [...now.beside, ...(found.beside ?? [])] };
   const at = join(kept, UNTOLD);
   io(at, () => {
-    const fd = openSync(`${at}.new`, "w", 0o600);
+    const fd = fdPaths.open(`${at}.new`, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
     try {
       writeFileSync(fd, JSON.stringify(told));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
-    renameSync(`${at}.new`, at);
+    fdPaths.rename(`${at}.new`, at);
   });
   syncDir(kept);
 }
@@ -1375,18 +1409,18 @@ function answered(report: Recovered, context: Context, tells: boolean): Recovere
  * before it has a landing forgotten (hosts/tool-hosts.ts): a record is all that names a file a step moved aside, so no
  * step its caller leaves out has what it kept forgotten. Throws where they cannot all be looked at (sagaNames).
  */
-export function recordsOf(kept: string, saga: string): Map<number, string | null> {
-  const folder = join(kept, saga);
-  const names = sagaNames(kept, saga);
+export function recordsOf(kept: string, saga: string, files: KeptFiles = WALKED): Map<number, string | null> {
+  const folder = files.join(kept, saga);
+  const names = sagaNames(kept, saga, files);
   const records = new Map<number, string | null>();
   for (const name of names) {
     const step = RECORD.exec(name)?.[1];
     if (step === undefined) continue;
-    const at = join(folder, name);
+    const at = files.join(folder, name);
     let did: Step | null = null;
     try {
-      const found = lstatSync(at);
-      if (found.isFile() && found.size <= RECORD_BYTES) did = stepOf(JSON.parse(readFileSync(at, "utf8")));
+      const found = files.lstat(at);
+      if (found.isFile() && found.size <= RECORD_BYTES) did = stepOf(JSON.parse(files.readText(at)));
     } catch (error) {
       // One that went since names nothing; anything else there is a record that cannot be read.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -1400,8 +1434,8 @@ export function recordsOf(kept: string, saga: string): Map<number, string | null
  * The steps of the landing *saga* that still keep, in *kept*, the file they replaced: a step put back, or refused
  * before it changed anything, keeps none. Throws as recordsOf does.
  */
-export function keepingOf(kept: string, saga: string): number[] {
-  return sagaNames(kept, saga).flatMap((name) => (KEPT.test(name) ? [Number(name)] : [])).sort((a, b) => a - b);
+export function keepingOf(kept: string, saga: string, files: KeptFiles = WALKED): number[] {
+  return sagaNames(kept, saga, files).flatMap((name) => (KEPT.test(name) ? [Number(name)] : [])).sort((a, b) => a - b);
 }
 
 // What each landing's helper found the first time it was asked, by the folder it lands in and where it keeps: one helper
@@ -1422,13 +1456,13 @@ export function recover(context: Context): Recovered {
   const report: Recovered = { restored: [], beside: [], lost: [], unread: [] };
   let sagas: string[] = [];
   try {
-    sagas = readdirSync(kept);
+    sagas = fdPaths.readdir(kept);
   } catch {
     // Nothing was ever kept.
   }
   const failures: unknown[] = [];
   for (const saga of sagas) {
-    if (saga.startsWith(FORGOTTEN)) rmSync(join(kept, saga), { recursive: true, force: true });
+    if (saga.startsWith(FORGOTTEN)) fdPaths.rmTree(join(kept, saga));
     if (!SAGA.test(saga)) continue;
     try {
       new Landing(context, saga, true).mend(report);

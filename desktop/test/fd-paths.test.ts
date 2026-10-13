@@ -17,8 +17,8 @@ const calls = vi.hoisted(() => ({ made: [] as unknown[][] }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<Record<string, unknown>>();
   const names = [
-    "accessSync", "chmodSync", "copyFileSync", "existsSync", "linkSync", "lstatSync", "mkdirSync", "opendirSync", "openSync", "readdirSync",
-    "readFileSync", "readlinkSync", "renameSync", "rmdirSync", "statSync", "unlinkSync",
+    "accessSync", "chmodSync", "copyFileSync", "existsSync", "fstatSync", "linkSync", "lstatSync", "mkdirSync", "opendirSync", "openSync", "readdirSync",
+    "readFileSync", "readlinkSync", "renameSync", "rmdirSync", "rmSync", "statSync", "unlinkSync",
   ];
   return {
     ...fs,
@@ -91,6 +91,10 @@ describe("Linux's FdPaths", () => {
       ["unlinkSync", () => linuxFdPaths.unlink({ dir: held, name: "e" }), [at("e")]],
       ["mkdirSync", () => linuxFdPaths.mkdir({ dir: held, name: "f" }), [at("f")]],
       ["rmdirSync", () => linuxFdPaths.rmdir({ dir: held, name: "f" }), [at("f")]],
+      ["mkdirSync", () => linuxFdPaths.mkdir({ dir: held, name: "g" }, 0o700), [at("g"), 0o700]],
+      ["rmSync", () => linuxFdPaths.rmTree(join(dir, "g")), [join(dir, "g"), { recursive: true, force: true }]],
+      ["fstatSync", () => linuxFdPaths.fstat(held), [held]],
+      ["fstatSync", () => linuxFdPaths.fstat(held, { bigint: true }), [held, { bigint: true }]],
       // The held folder itself.
       ["chmodSync", () => linuxFdPaths.chmod({ dir: held }, 0o755), [at(), 0o755]],
     ];
