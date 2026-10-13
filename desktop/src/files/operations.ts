@@ -702,7 +702,9 @@ async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Conte
   const base = [...fileOs.rgArgs, "--no-ignore"];
   if (mode === "files") base.push("--files");
   else {
-    if (mode === "count") base.push("-c");
+    // --with-filename: rg names the file in every line, as it does walking a folder; given one explicit file it would
+    // otherwise print the count or the match with no path, and the answer is keyed by path (--json always names it).
+    if (mode === "count") base.push("-c", "--with-filename");
     else base.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
     base.push("-e", pattern);
   }
