@@ -52,7 +52,11 @@ from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
-from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
+from surogates.harness.llm_call import (
+    apply_developer_role,
+    call_llm_with_retry,
+    sampling_kwargs,
+)
 from surogates.harness.message_utils import (
     coerce_message_content,
     content_as_text,
@@ -2964,8 +2968,7 @@ class AgentHarness(
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
                 "messages": api_messages,
-                "temperature": session.config.get("temperature", 0.3),
-                "max_tokens": session.config.get("max_tokens", 16384),
+                **sampling_kwargs(session.config),
             }
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
@@ -5569,8 +5572,7 @@ class AgentHarness(
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
                 "messages": api_messages,
-                "temperature": session.config.get("temperature", 0.7),
-                "max_tokens": session.config.get("max_tokens", 16384),
+                **sampling_kwargs(session.config),
                 # No tools -- force a text-only response.
             }
 
