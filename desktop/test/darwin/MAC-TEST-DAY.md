@@ -17,7 +17,7 @@ Each step says what a pass looks like. When something fails, keep going where yo
 
 ```
 git clone -b test/macos-cde https://github.com/invergent-ai/surogates.git && cd surogates
-gh run download 38387826404 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+gh run download 38392091602 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
 cd desktop && npm ci
 ```
 
@@ -56,7 +56,7 @@ swift test --package-path native/macos && native/out/surogate-vm check
 
 - `prepare.sh` builds the app's code and `native/out/surogate-vm`, signed ad hoc. In a container, it makes `dist/agent.img`, and the measurements' own agent disk, `test/vm/darwin/measure/probing/agent.img`. Its last lines say "ready".
 - The check passes with 28 tests, 0 failures, and `{"supported":true}`.
-- Until a session can run on Apple's share (the second day's `share-owners` decides how), every measurement that runs a command stops at "This chat's folder shows as root's in the sandbox, so no command runs in it": `escape`, `ports`, `disks`, `shares`, `coherence`, `owners`, `mmap`, `descriptors`, `tcc`, `network`, `sleep` and `memory`. That refusal is expected, not a finding.
+- Each root runs on a uid of its own from 10000 up, as on Linux, where its folder shows it that uid. A measurement that runs a command and stops at "This chat's folder shows as root's in the sandbox, so no command runs in it", or "… as another user's …", means Apple's share did not show that uid: report it with `share-owners`' findings.
 
 Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`. Each prints `MEASURE …` lines and a `PASS` or `FAIL` for each check, and writes `test/vm/darwin/measure/out/<name>.json`.
 
@@ -68,6 +68,7 @@ Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/me
 
    If it fails, its words name the reason, and `out/boot.json` says where the time went.
 2. **`escape`:** the guest's walls, as a session meets them. Pass:
+   - a session runs as a uid of its own, from 10000 up;
    - only `lo`, and no host `~/.ssh`;
    - no other root's folder or processes;
    - `.git/hooks/pre-commit` and `.git/hookſ/pre-commit` refused, with nothing reaching `.git/hooks`;
@@ -78,7 +79,7 @@ Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/me
 4. **`disks`:** vda, vdb and vdc in that order, read-only 1, 1, 0, and vdc 32 GiB.
 5. **`shares`:** for each of `multiple` and `single`, every root reads its own folder and no other. If only `single` passes, say so: the backend then switches layout.
 6. **`coherence`:** 0 stale reads of 1,000, the large file seen whole, and `git status` sees the 10 changes.
-7. **`owners`:** the guest sees your uid, a session runs as it, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
+7. **`owners`:** a session runs as a uid from 10000 up, sees its folder as that uid's, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
 8. **`mmap`:** recorded only.
 9. **`descriptors`:** all 150,000 files found, 1,000 read, git commits them, and no EMFILE.
 10. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, and the folder on the Mac is unchanged. It runs whether or not its chat's setup is refused.
@@ -151,35 +152,33 @@ The same Mac and the same test account as the first day, on the branch you are s
 
 ### The VM
 
-1. **A new guest image.** The image now loads its entropy device's driver at boot, so the first day's image no longer boots. From the checkout's top:
+1. **The new guest image.** Each root now runs on its own uid, and the image loads its entropy device's driver, so the first day's image no longer boots. From the checkout's top:
    ```
    rm -rf images/guest/out
-   gh run download 38387826404 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
-   cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh
+   gh run download 38392091602 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
    ```
-   Pass: `prepare.sh` ends with "ready", and `test/vm/darwin/measure/probing/agent.img` is there.
-2. **surogate-vm's tests on this Xcode:** `swift test --package-path native/macos`. Pass: "Executed 28 tests, with 0 failures".
-3. **The boot and its timings:** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts boot`.
+   Pass: `images/guest/out` holds `rootfs.img.zst`, `vmlinuz.zst` and `manifest.json`.
+2. **Prepare:** `cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh`. Pass: it ends with "ready", and `test/vm/darwin/measure/probing/agent.img` is there.
+3. **surogate-vm's tests on this Xcode:** `swift test --package-path native/macos`. Pass: "Executed 28 tests, with 0 failures".
+4. **The boot and its timings:** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts boot`.
    - Pass: as the first day's step 3.1 says.
-   - Whatever it says, send back `test/vm/darwin/measure/out/boot.json`: its "where the kernel's boot went", its timelines and its console say where the time goes.
-4. **Owners on Apple's share, in this account (uid 502):** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts share-owners`.
-   - It takes a few minutes, and runs although the chat's setup is refused.
-   - Pass: `PASS the probe ran to its end`.
-   - Then `cp test/vm/darwin/measure/out/share-owners.json ~/share-owners-502.json`.
-5. **The same in the Mac's first account (uid 501).**
-   - In this account, copy the prepared checkout and its Node where the other account can use them:
+   - Whatever it says, keep `test/vm/darwin/measure/out/boot.json`: its "where the kernel's boot went", its timelines and its console say where the time goes.
+5. **Owners on Apple's share, in both accounts.**
+   - In this account (uid 502): `npx vitest run -c test/vm/darwin/measure/vitest.config.ts share-owners`. It takes a few minutes. Pass: `PASS the probe ran to its end`, and `the root's setup` says `set up`. Then `cp test/vm/darwin/measure/out/share-owners.json ~/share-owners-502.json`.
+   - In the Mac's first account (uid 501). In this account, copy the prepared checkout and its Node where the other account can use them:
      ```
      mkdir -p /Users/Shared/surogate-measure
      cp -Rc ~/surogates "$(dirname "$(dirname "$(command -v node)")")" /Users/Shared/surogate-measure/
      chmod -R a+rwX /Users/Shared/surogate-measure
      ```
-   - Log in to the first account, and in its Terminal:
+     Log in to the first account, and in its Terminal:
      ```
      cd /Users/Shared/surogate-measure/surogates/desktop
      PATH=/Users/Shared/surogate-measure/v22.14.0/bin:$PATH npx vitest run -c test/vm/darwin/measure/vitest.config.ts share-owners
      ```
-   - Pass: `PASS the probe ran to its end`, and its `the Mac user` line says uid 501.
-   - Copy `test/vm/darwin/measure/out/share-owners.json` there to `share-owners-501.json`. Then remove `/Users/Shared/surogate-measure` and that account's `~/SurogateMeasure`.
-6. **The read-only share:** back in the test account, `npx vitest run -c test/vm/darwin/measure/vitest.config.ts readonly`. Pass: every write refused, and the folder on the Mac as it was. **A write that is allowed is a security finding: stop and report it before anything else.**
+     Pass: the same, and its `the Mac user` line says uid 501. Copy that `test/vm/darwin/measure/out/share-owners.json` to `share-owners-501.json`, then remove `/Users/Shared/surogate-measure` and that account's `~/SurogateMeasure`.
+6. **Every measurement of the first day's step 3, the rest after `boot`,** back in the test account, each as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`, in this order:
+   1. **`escape` first.** Pass: as the first day's step 3.2 says. **A FAIL of a protected write is a security finding: stop and report it before anything else.**
+   2. Then `ports`, `disks`, `shares`, `coherence`, `owners`, `mmap`, `descriptors`, `readonly`, `tcc`, `network`, `lifetime`, `sleep` (by hand) and `memory`, each with the first day's pass lines. For `owners`: a session runs as a uid from 10000 up and sees its folder as that uid's. **A write `readonly` allows is a security finding: stop and report it before anything else.**
 
-**Send back:** `boot.json`, `share-owners-502.json`, `share-owners-501.json` and `readonly.json`, and every FAIL with its words.
+**Send back:** the whole `test/vm/darwin/measure/out/` folder, `share-owners-502.json` and `share-owners-501.json`, and every FAIL with its words.
