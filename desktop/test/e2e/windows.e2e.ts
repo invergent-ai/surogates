@@ -295,7 +295,10 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
       await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
       const prepared = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
       const sheet = await prompt(shell);
-      await sheet.check('input[value="free"]');
+      // A sheet that refuses the folder offers no mode: its words say why.
+      await sheet.check('input[value="free"]', { timeout: 15_000 }).catch(async (error: Error) => {
+        throw new Error(`${error.message}; the sheet says: ${await sheet.innerText("body")}`);
+      });
       await press(sheet, "accept");
       const ready = (await prepared)!;
       expect(ready.folder).toBe(`/mnt/${folder[0]!.toLowerCase()}/${folder.slice(3).split("\\").join("/")}`);
