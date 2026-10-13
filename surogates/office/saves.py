@@ -83,6 +83,17 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
         try:
             await files.write_if(key, data, expected=row.base_version)
         except RevisionConflict:
+            # An earlier landing may have written these bytes and stopped before its row
+            # change committed. The etag comes first: a write between the two then shows
+            # as a conflict at the next save, never as landed.
+            version = await files.etag(key)
+            try:
+                current = await files.read(key)
+            except FileNotFoundError:
+                current = None
+            if current == data:
+                office_sessions.mark_landed(row, version)
+                return blob
             copy_path = await _write_copy(files, row.path, data)
             await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
                             {"path": row.path, "conflict_path": copy_path})

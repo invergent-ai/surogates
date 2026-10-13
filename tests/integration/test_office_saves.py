@@ -133,3 +133,26 @@ async def test_one_failing_row_does_not_stop_the_others(session_factory, redis_c
     assert await storage.read("b", key) == b"v2"
     retried = await office_sessions.get_open(session_factory, broken.id)
     assert retried.pending_save["attempts"] == 1  # tried once this pass, not again and again
+
+
+async def test_a_save_already_written_lands_without_a_copy(session_factory, redis_client, storage, monkeypatch):
+    """A landing whose write went through but whose row change never committed (the worker stopped)."""
+    dropped: list[str] = []
+
+    async def fake_drop(office, doc_key, users):
+        dropped.append(doc_key)
+
+    monkeypatch.setattr(office_saves, "drop_editors", fake_drop)
+    store, session, key, document = await _chat_with_document(session_factory, storage)
+    await office_sessions.record_editors(session_factory, document.id, ["user:1"])
+    await storage.write("b", key, b"v2")  # the earlier landing's write
+    await _pend(session_factory, storage, document, b"v2")
+    assert await _land(session_factory, redis_client, storage, store) == 1
+    landed = await office_sessions.get_open(session_factory, document.id)
+    assert landed is not None and landed.pending_save is None
+    assert landed.base_version == (await storage.stat("b", key))["etag"]
+    copies = [entry for entry in await storage.list_entries("b", prefix=session_workspace_key(session.id))
+              if entry["key"].startswith(session_workspace_key(session.id, "a (edited "))]
+    assert copies == []
+    assert dropped == []
+    assert not any(e.type == "office.conflict" for e in await store.get_events(session.id))
