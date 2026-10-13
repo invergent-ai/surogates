@@ -654,7 +654,10 @@ function runnable(path: string): boolean {
 // begins and ends like it is theirs.
 const NOT_OWN = "!.surogate-????????-????-????-????-????????????.tmp";
 
-// The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-"; and no file of the helper's own.
+// The cloud's command line: --no-ignore, -e so a pattern may start with "-", and no file of the helper's own. Where rg
+// walks the folder (Linux, macOS, in the sandbox) it is given the folder and its own -g globs; where it does not
+// (Windows), the helper lists the tree itself and gives rg only files, never a folder, with the glob already applied
+// (fd-paths-win32.ts, searchFiles; fileOs.rgWalks).
 async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Context, signal: AbortSignal): Promise<string> {
   const key = keyInFolder(folder, text(args, "key"), at);
   const mode = text(args, "mode");
@@ -665,31 +668,58 @@ async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Conte
   if (pattern.includes("\0") || glob?.includes("\0")) throw valueError(NUL_REFUSED);
   const rg = fileOs.rg(env.PATH, folder, findOnPath);
   if (!rg) throw new Failure({ type: "ripgrep", message: RG_MISSING });
-  const argv = ["--no-ignore"];
-  if (mode === "files") {
-    argv.push("--files", "-g", pattern, "-g", NOT_OWN);
-  } else {
-    if (glob) argv.push("-g", glob);
-    argv.push("-g", NOT_OWN);
-    if (mode === "count") argv.push("-c");
-    else argv.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
-    argv.push("-e", pattern);
-  }
-  // rg opens the key by its path, so it is given the path this computer has for it, held there until rg ends: on Linux
-  // and macOS the key itself, in the sandbox that binds the folder; on Windows its path there, each folder on the way
-  // held (fd-paths-win32.ts). A folder that held nothing has nothing to find.
-  const outside = io(key, () => fdPaths.outside(key));
-  if (outside.empty) {
-    outside.release();
-    return "";
-  }
-  argv.push(...fileOs.rgArgs, outside.path);
   // A user's rg config could change the results or add --pre, which runs a program.
   const { RIPGREP_CONFIG_PATH: _config, ...clean } = env;
-  // rg names what it finds from the path it is given: on a copy, by the copy's path, and on Windows by this computer's.
-  const named = edgeOf(outside.path.slice(0, outside.path.length - (key.length - folder.length)), at ?? folder);
+
+  if (fileOs.rgWalks) {
+    const argv = ["--no-ignore"];
+    if (mode === "files") {
+      argv.push("--files", "-g", pattern, "-g", NOT_OWN);
+    } else {
+      if (glob) argv.push("-g", glob);
+      argv.push("-g", NOT_OWN);
+      if (mode === "count") argv.push("-c");
+      else argv.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
+      argv.push("-e", pattern);
+    }
+    // rg opens the key by its path, so it is given the path this computer has for it, held there until rg ends: the key
+    // itself, in the sandbox that binds the folder. A folder that held nothing has nothing to find.
+    const outside = io(key, () => fdPaths.outside(key));
+    if (outside.empty) {
+      outside.release();
+      return "";
+    }
+    argv.push(...fileOs.rgArgs, outside.path);
+    // rg names what it finds from the path it is given: on a copy, by the copy's path.
+    const named = edgeOf(outside.path.slice(0, outside.path.length - (key.length - folder.length)), at ?? folder);
+    const edge = named && fileOs.rgPrinted ? { ...named, printed: fileOs.rgPrinted } : named;
+    let used = false;
+    const nextBatch = () => (used ? null : ((used = true), { argv, release: () => {} }));
+    return runSearch(rg, nextBatch, clean, signal, edge && { mode, edge }).finally(outside.release);
+  }
+
+  // Windows: rg is given explicit files, never a folder (it would walk one and follow a link swapped in behind it).
+  const base = [...fileOs.rgArgs, "--no-ignore"];
+  if (mode === "files") base.push("--files");
+  else {
+    if (mode === "count") base.push("-c");
+    else base.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
+    base.push("-e", pattern);
+  }
+  const search = io(key, () => fdPaths.searchFiles(key, { filesMode: mode === "files", glob: mode === "files" ? pattern : glob, own: OWN_FILE }));
+  // rg names each file by this computer's path for it; the folder's own path maps those back to its key space.
+  const named = edgeOf(search.root, at ?? folder);
   const edge = named && fileOs.rgPrinted ? { ...named, printed: fileOs.rgPrinted } : named;
-  return searchWith(rg, argv, clean, signal, edge && { mode, edge }).finally(outside.release);
+  // Each batch's files are given to rg after --, so no path is taken for an option, and are held while rg runs on them.
+  const nextBatch = () => {
+    const batch = search.next();
+    return batch && { argv: [...base, "--", ...batch.paths], release: batch.release };
+  };
+  try {
+    return await runSearch(rg, nextBatch, clean, signal, edge && { mode, edge });
+  } finally {
+    search.close();
+  }
 }
 
 // ENOENT is no rg to run (or no interpreter for it); any other spawn error
@@ -700,27 +730,25 @@ function spawnFailure(error: unknown, rg: string): unknown {
     : fromNode(error, rg);
 }
 
-// *copy*: a search of a thread's copy, in its mode. What rg says of it is answered by the folder's path (edge.ts).
-function searchWith(
-  rg: string, argv: string[], env: Record<string, string | undefined>, signal: AbortSignal, copy?: { mode: string; edge: Edge },
+// A batch of a search: rg's whole command line for it, and what to let go of once rg has run on it. A search is one
+// batch where rg walks the folder (Linux, macOS), or a batch of pinned files at a time where the helper lists the tree
+// (Windows); *nextBatch* gives the next, or null at the end. The batches' outputs join, as rg's one walk's lines would.
+interface Batch {
+  argv: string[];
+  release(): void;
+}
+
+// *copy*: a search of a thread's copy, or on Windows of the folder by its own path, answered by the folder's path
+// (edge.ts). rg runs on each batch in turn; its output, its errors and the cap carry across them, and the edge maps the
+// whole once it is done.
+function runSearch(
+  rg: string, nextBatch: () => Batch | null, env: Record<string, string | undefined>, signal: AbortSignal, copy?: { mode: string; edge: Edge },
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(CANCELLED);
       return;
     }
-    let child: ChildProcess;
-    try {
-      child = spawn(rg, argv, { env, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      reject(spawnFailure(error, rg));
-      return;
-    }
-    // At once: an error event nobody listens for crashes the helper.
-    child.on("error", (error) => {
-      signal.removeEventListener("abort", onAbort);
-      reject(spawnFailure(error, rg));
-    });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let size = 0;
@@ -729,57 +757,92 @@ function searchWith(
     // What each line of a copy's search loses of its length as it is answered, and the lines so far, the one being written too.
     const spare = copy ? spared(copy.mode, copy.edge) : 0;
     let lines = 1;
+    let child: ChildProcess | null = null;
+    let done = false;
     const kill = () => {
       try {
-        child.kill("SIGKILL");
+        child?.kill("SIGKILL");
       } catch {
         // Already gone.
       }
     };
+    const settle = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      signal.removeEventListener("abort", onAbort);
+      fn();
+    };
     function onAbort() {
       kill();
-      reject(CANCELLED);
+      settle(() => reject(CANCELLED));
     }
-    signal.addEventListener("abort", onAbort, { once: true });
-    // A child that could not start (EMFILE) has no streams.
-    child.stdout?.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (spare > 0) for (const byte of chunk) if (byte === 10) lines += 1;
-      // Every byte costs at least one character on the wire, so past the cap in
-      // bytes the answer is already known.
-      if (size - lines * spare > OUTPUT_CAP_CHARS) {
-        over = true;
-        kill();
-      } else {
-        out.push(chunk);
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (errSize < STDERR_BYTES) err.push(chunk.subarray(0, STDERR_BYTES - errSize));
-      errSize += chunk.length;
-    });
-    child.on("close", (code, killedBy) => {
-      signal.removeEventListener("abort", onAbort);
-      if (signal.aborted) {
-        reject(CANCELLED);
-        return;
-      }
-      if (over) {
-        reject(NARROW);
-        return;
-      }
-      const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
-      if (status !== 0 && status !== 1) {
-        const wrote = copy
-          ? saidInFailing(Buffer.concat(err), errSize > STDERR_BYTES, (bytes) => UTF8.decode(bytes), copy.edge)
-          : UTF8.decode(Buffer.concat(err));
-        const refusal = { type: "ripgrep", message: `rg exited ${status}: ${[...wrote].slice(0, 200).join("")}` };
-        reject(new Failure(refusal, copy && (() => refusal)));
-        return;
-      }
+    signal.addEventListener("abort", onAbort);
+    const finish = () => {
       const found = copy ? searched(copy.mode, UTF8.decode(Buffer.concat(out)), copy.edge) : UTF8.decode(Buffer.concat(out));
-      if (pyJsonLength(found) > OUTPUT_CAP_CHARS) reject(NARROW);
-      else resolve(found);
-    });
+      if (pyJsonLength(found) > OUTPUT_CAP_CHARS) settle(() => reject(NARROW));
+      else settle(() => resolve(found));
+    };
+    const pull = () => {
+      const batch = nextBatch();
+      if (!batch) {
+        finish();
+        return;
+      }
+      run(batch);
+    };
+    function run(batch: Batch) {
+      try {
+        child = spawn(rg, batch.argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+      } catch (error) {
+        batch.release();
+        settle(() => reject(spawnFailure(error, rg)));
+        return;
+      }
+      // At once: an error event nobody listens for crashes the helper.
+      child.on("error", (error) => {
+        batch.release();
+        settle(() => reject(spawnFailure(error, rg)));
+      });
+      // A child that could not start (EMFILE) has no streams.
+      child.stdout?.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (spare > 0) for (const byte of chunk) if (byte === 10) lines += 1;
+        // Every byte costs at least one character on the wire, so past the cap in
+        // bytes the answer is already known.
+        if (size - lines * spare > OUTPUT_CAP_CHARS) {
+          over = true;
+          kill();
+        } else {
+          out.push(chunk);
+        }
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (errSize < STDERR_BYTES) err.push(chunk.subarray(0, STDERR_BYTES - errSize));
+        errSize += chunk.length;
+      });
+      child.on("close", (code, killedBy) => {
+        batch.release();
+        if (done) return;
+        if (signal.aborted) {
+          settle(() => reject(CANCELLED));
+          return;
+        }
+        if (over) {
+          settle(() => reject(NARROW));
+          return;
+        }
+        const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
+        if (status !== 0 && status !== 1) {
+          const wrote = copy
+            ? saidInFailing(Buffer.concat(err), errSize > STDERR_BYTES, (bytes) => UTF8.decode(bytes), copy.edge)
+            : UTF8.decode(Buffer.concat(err));
+          const refusal = { type: "ripgrep", message: `rg exited ${status}: ${[...wrote].slice(0, 200).join("")}` };
+          settle(() => reject(new Failure(refusal, copy && (() => refusal))));
+          return;
+        }
+        pull();
+      });
+    }
+    pull();
   });
 }

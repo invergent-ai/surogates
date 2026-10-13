@@ -56,4 +56,8 @@ export const linuxFdPaths: FdPaths = {
   shown: path,
   // In the sandbox, which binds the folder for the helper's life.
   outside: (path) => ({ path, empty: false, release: () => {} }),
+  // rg walks the folder here, inside the sandbox.
+  searchFiles: () => {
+    throw new Error("the file host lists the tree itself only where no sandbox binds the folder");
+  },
 };

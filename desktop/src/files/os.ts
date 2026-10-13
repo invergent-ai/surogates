@@ -20,9 +20,15 @@ export interface FileOs {
   readonly rgArgs: readonly string[];
   /** A path rg's JSON names, as the file kinds name it, where rgArgs do not reach it; null where they do. */
   readonly rgPrinted: ((path: string) => string) | null;
+  /**
+   * Whether rg walks the folder it is given and applies its own globs: true on Linux and macOS, in the sandbox. False
+   * on Windows, where the helper lists the tree itself and gives rg only files (fd-paths-win32.ts, searchFiles), since
+   * rg would otherwise open each path it walks and follow a link swapped in behind it.
+   */
+  readonly rgWalks: boolean;
 }
 
-const POSIX: FileOs = { explorer: () => false, rg: (path, folder, find) => find("rg", path, folder), rgArgs: [], rgPrinted: null };
+const POSIX: FileOs = { explorer: () => false, rg: (path, folder, find) => find("rg", path, folder), rgArgs: [], rgPrinted: null, rgWalks: true };
 
 // Windows's PATH: absolute entries apart by ';', each looked in for rg.exe, as the app's own rg is beside its node
 // (hosts' toolsPath). A relative entry would be the helper's working folder, which is the user's folder: none is read.
@@ -46,7 +52,8 @@ const ROWS: Partial<Record<NodeJS.Platform, FileOs>> = {
   // start alone (edge.ts), so it prints '/'. Its JSON keeps '\' below the path it was given (measured with 15.2.0),
   // and no name on Windows holds one (names-win32.ts): each is a '/'.
   win32: {
-    explorer: explorerActsOn, rg: (path) => windowsRg(path), rgArgs: ["--path-separator", "/"], rgPrinted: (path) => path.replaceAll("\\", "/"),
+    explorer: explorerActsOn, rg: (path) => windowsRg(path), rgArgs: ["--no-config", "--path-separator", "/"],
+    rgPrinted: (path) => path.replaceAll("\\", "/"), rgWalks: false,
   },
 };
 // On an OS the file host is not built for yet, in notBuilt's words (os-names.ts).
@@ -55,4 +62,4 @@ const refused = (): never => {
   throw new Error(NOT_BUILT);
 };
 
-export const fileOs: FileOs = ROWS[process.platform] ?? { explorer: refused, rg: refused, rgArgs: [], rgPrinted: null };
+export const fileOs: FileOs = ROWS[process.platform] ?? { explorer: refused, rg: refused, rgArgs: [], rgPrinted: null, rgWalks: true };

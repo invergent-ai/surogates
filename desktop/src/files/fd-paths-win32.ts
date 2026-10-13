@@ -23,8 +23,9 @@ import { posix } from "node:path";
 import { getSystemErrorMap, getSystemErrorMessage } from "node:util";
 
 import { osError, sandboxError } from "./answers.js";
-import type { FdPaths, Listing, Outside, Where } from "./fd-paths.js";
+import type { FdPaths, FileSearch, Filter, Listing, Where } from "./fd-paths.js";
 import { WIN32_FLAGS } from "./flags.js";
+import { descendsHidden, included } from "./glob.js";
 import { walked } from "./identity.js";
 import { nameRefusal, windowsTakes } from "./names-win32.js";
 import { type FileId, ntat, type NtatConstants, type NtatEntry, type NtatError, type NtatQuery } from "./ntat.js";
@@ -338,61 +339,170 @@ function copyBetween(from: number, to: number): void {
   fchmodSync(to, fstatSync(from).mode & 0o777);
 }
 
-// The search's pin: each folder from the bound one down to *path* held without delete sharing, and *path* itself, so
-// none can be renamed, removed or replaced until it ends ("a directory cannot be renamed if it or any of its
-// subdirectories contains a file that has open handles", FILE_RENAME_INFORMATION's remarks). A folder that holds a name
-// can take no reparse point (FSCTL_SET_REPARSE_POINT: a mount point's folder must be empty), so each folder on the way
-// holds one, the next on the way, and the searched folder one of its own entries, held too: none of them can be
-// emptied and made a junction in place. A searched folder with no entry has nothing to find.
-function pinned(path: string): Outside {
-  const found = located(path);
-  if (found === null || found === ABOVE) throw nodeError("ENOENT", "open", path);
+// A search gives ripgrep only files, never a folder: ripgrep opens each path it is given, and a folder it was given it
+// would list and then open each entry by path, following a link swapped in behind it. So the helper lists the tree
+// itself here, by handle (the walk refuses every reparse point), and holds each file it gives ripgrep without delete
+// sharing, with each folder on the way held too, so that nothing ripgrep opens can be renamed, removed or made a link
+// until the batch ends ("a directory cannot be renamed if it or any of its subdirectories contains a file that has open
+// handles", FILE_RENAME_INFORMATION's remarks). The glob is applied as ripgrep applies its -g on Linux (glob.ts): the
+// oracle is ripgrep's own output (file-host-win32.test.ts). Files come in batches, so the open handles stay bounded.
+const BATCH_FILES = 256;
+// Room for the batch's paths on a command line, under the 32 767-unit limit, leaving the base arguments their share.
+const BATCH_CHARS = 24_000;
+
+// A directory the walk is in: its handle, held without delete sharing; its entries; and its path from the search root.
+interface WalkLevel {
+  fd: number;
+  entries: Listing;
+  rel: string;
+}
+
+function searchFiles(key: string, filter: Filter): FileSearch {
+  const found = located(key);
+  if (found === null || found === ABOVE) throw nodeError("ENOENT", "open", key);
   const { root, parts } = found;
-  const held: number[] = [];
-  const release = () => {
-    for (const fd of held.splice(0)) closeSync(fd);
+  const rootHost = root.host.replaceAll("\\", "/");
+  const positive = filter.glob !== null && !filter.glob.startsWith("!");
+  const levels: WalkLevel[] = [];
+  let single: { fd: number; path: string } | null = null;
+  let pending: number[] = [];
+  let started = false;
+
+  const closeLevel = (level: WalkLevel) => {
+    try {
+      level.entries.closeSync();
+    } catch {
+      // Gone.
+    }
+    try {
+      closeSync(level.fd);
+    } catch {
+      // Gone.
+    }
   };
-  try {
+  const drop = (fds: number[]) => {
+    for (const fd of fds.splice(0)) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Gone.
+      }
+    }
+  };
+
+  // The key's own node, reached by the walk from the bound root, each component held without delete sharing: a folder
+  // the walk lists, a file the batch of one. Each component is checked as every name is (openAt), and no reparse point
+  // on the way is followed.
+  const begin = () => {
     let dir = ntat().reopen(root.fd, k().FILE_TRAVERSE, SHARE_PINNED());
-    held.push(dir);
-    for (const [i, name] of parts.entries()) {
-      // What rg reads, the searched folder's entries or the searched file, it must be able to read; above it, to pass.
-      const access = i === parts.length - 1 ? k().FILE_READ_DATA : k().FILE_TRAVERSE;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      let next: number;
       try {
-        dir = ntat().openAt(dir, name, access, k().FILE_OPEN, 0, SHARE_PINNED(), 0, false);
+        next = ntat().openAt(dir, parts[i]!, k().FILE_TRAVERSE, k().FILE_OPEN, k().FILE_DIRECTORY_FILE, SHARE_PINNED(), 0, false);
       } catch (error) {
-        throw told(error, name);
+        closeSync(dir);
+        throw told(error, parts[i]!);
       }
-      held.push(dir);
+      closeSync(dir);
+      dir = next;
     }
-    let empty = false;
-    if (ntat().query(dir).directory) {
-      const entries = listing(dir);
-      try {
-        // The first entry that can be held; one that cannot be (another's, or gone) leaves the next.
-        empty = true;
-        let pin: number | null = null;
-        for (let entry = entries.readSync(); entry !== null && pin === null; entry = entries.readSync()) {
-          empty = false;
-          const access = entry.isFile() ? k().FILE_READ_DATA : k().FILE_TRAVERSE;
-          try {
-            pin = ntat().openAt(dir, entry.name.toString("utf8"), access, k().FILE_OPEN, 0, SHARE_PINNED(), 0, true);
-          } catch {
-            // The next.
-          }
+    if (parts.length === 0) {
+      levels.push({ fd: dir, entries: listing(dir), rel: "" });
+      return;
+    }
+    const last = parts.at(-1)!;
+    let node: number;
+    try {
+      node = ntat().openAt(dir, last, k().FILE_READ_DATA, k().FILE_OPEN, 0, SHARE_PINNED(), 0, false);
+    } catch (error) {
+      closeSync(dir);
+      throw told(error, last);
+    }
+    closeSync(dir);
+    if (ntat().query(node).directory) levels.push({ fd: node, entries: listing(node), rel: "" });
+    else single = { fd: node, path: `${rootHost}/${parts.join("/")}` };
+  };
+
+  return {
+    root: rootHost,
+    next() {
+      drop(pending);
+      if (!started) {
+        started = true;
+        begin();
+      }
+      if (single) {
+        const one = single;
+        single = null;
+        pending = [one.fd];
+        return { paths: [one.path], release: () => drop(pending) };
+      }
+      const paths: string[] = [];
+      const fds: number[] = [];
+      let chars = 0;
+      while (levels.length > 0 && paths.length < BATCH_FILES && chars < BATCH_CHARS) {
+        const level = levels.at(-1)!;
+        let entry: Dirent<Buffer> | null;
+        try {
+          entry = level.entries.readSync();
+        } catch {
+          entry = null; // what it could not read of a folder is left out, as the walk kind leaves it
         }
-        if (!empty && pin === null) throw nodeError("EACCES", "open", path);
-        if (pin !== null) held.push(pin);
-      } finally {
-        entries.closeSync();
+        if (entry === null) {
+          levels.pop();
+          closeLevel(level);
+          continue;
+        }
+        const name = entry.name.toString("utf8");
+        // A name that is not valid UTF-8 does not survive the round trip, as the walk kind and ripgrep both leave it out.
+        if (!Buffer.from(name, "utf8").equals(entry.name)) continue;
+        const rel = level.rel ? `${level.rel}/${name}` : name;
+        // A reparse point is not followed, as ripgrep follows no link in its walk.
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          // A hidden folder is skipped, as ripgrep skips one, unless the glob whitelists it.
+          if (name.startsWith(".") && !descendsHidden(`/${rel}`, filter.glob)) continue;
+          let fd: number;
+          try {
+            fd = ntat().openAt(level.fd, name, k().FILE_TRAVERSE, k().FILE_OPEN, k().FILE_DIRECTORY_FILE, SHARE_PINNED(), 0, false);
+          } catch {
+            continue; // gone, another's, or a reparse point met as the open resolves
+          }
+          levels.push({ fd, entries: listing(fd), rel });
+          continue;
+        }
+        if (!entry.isFile() || filter.own.test(name)) continue;
+        // A hidden file is skipped, as ripgrep skips one, unless a positive glob matches it.
+        if (name.startsWith(".") && !positive) continue;
+        if (!included(`/${rel}`, filter.glob)) continue;
+        let fd: number;
+        try {
+          fd = ntat().openAt(level.fd, name, k().FILE_READ_DATA, k().FILE_OPEN, k().FILE_NON_DIRECTORY_FILE, SHARE_PINNED(), 0, false);
+        } catch {
+          continue; // gone, another's, or a reparse point
+        }
+        fds.push(fd);
+        const path = `${rootHost}/${rel}`;
+        paths.push(path);
+        chars += path.length + 3;
       }
-    }
-    // rg takes its path as given and prints what it finds from there; with forward slashes, as it is told to print them.
-    return { path: `${root.host}${parts.length > 0 ? `\\${parts.join("\\")}` : ""}`.replaceAll("\\", "/").replace(/\/$/, ""), empty, release };
-  } catch (error) {
-    release();
-    throw error;
-  }
+      if (paths.length === 0) return null;
+      pending = fds;
+      return { paths, release: () => drop(pending) };
+    },
+    close() {
+      drop(pending);
+      if (single) {
+        try {
+          closeSync(single.fd);
+        } catch {
+          // Gone.
+        }
+        single = null;
+      }
+      for (const level of levels.splice(0)) closeLevel(level);
+    },
+  };
 }
 
 export const win32FdPaths: FdPaths = {
@@ -512,5 +622,9 @@ export const win32FdPaths: FdPaths = {
     }
     return where.name === undefined ? folder : `${folder}/${where.name}`;
   },
-  outside: pinned,
+  // On Windows a program walks nothing in the folder: a search lists the tree itself and is given files (searchFiles).
+  outside() {
+    throw new Error("the Windows file host gives a program the files it lists, not a folder to walk");
+  },
+  searchFiles,
 };

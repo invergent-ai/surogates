@@ -242,4 +242,8 @@ export const darwinFdPaths: FdPaths = {
   },
   // In the sandbox, which judges each access by its path.
   outside: (path) => ({ path, empty: false, release: () => {} }),
+  // rg walks the folder here, inside the sandbox.
+  searchFiles: () => {
+    throw new Error("the file host lists the tree itself only where no sandbox binds the folder");
+  },
 };
