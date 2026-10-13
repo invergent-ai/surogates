@@ -50,10 +50,10 @@ describe("the app as Windows knows it", () => {
     expect(app.asked).toEqual([["links", "surogate", "C:\\Program Files\\Surogate\\Surogate.exe", ["--"]]]);
     takeLinks(app, ["C:\\Program Files\\Surogate\\Surogate.exe"]);
     expect(app.asked).toHaveLength(1);
-    // A development build's Electron, on its main, quoted as the Run key's command is.
+    // A development build's Electron, on its main, as it is: Electron quotes it (windows.e2e.ts).
     const development = electronApp();
     takeLinks(development, ["C:\\a\\electron.exe", "C:\\my work\\dist\\shell\\main.js"]);
-    expect(development.asked).toEqual([["links", "surogate", "C:\\a\\electron.exe", ['"C:\\my work\\dist\\shell\\main.js"', "--"]]]);
+    expect(development.asked).toEqual([["links", "surogate", "C:\\a\\electron.exe", ["C:\\my work\\dist\\shell\\main.js", "--"]]]);
   });
 
   it("says where Windows did not take the links", async () => {

@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LoginSystem } from "../src/shell/login-item.js";
-import { LOGIN, loginItem, quoted } from "../src/shell/login-item-win32.js";
+import { LOGIN, loginItem } from "../src/shell/login-item-win32.js";
 import { WIN32 } from "../src/shell/places-win32.js";
 import { importedOn } from "./platforms.js";
 
@@ -43,9 +43,9 @@ describe("start at login on Windows", () => {
       { openAtLogin: true, path: "C:\\Program Files\\Surogate\\Surogate.exe", args: [LOGIN] },
       { openAtLogin: false, path: "C:\\Program Files\\Surogate\\Surogate.exe", args: [LOGIN] },
     ]);
-    // A development build's Electron on its main, each argument quoted as Windows reads a command line back.
+    // A development build's Electron on its main, each argument as it is: Electron quotes it (windows.e2e.ts).
     item.set(true, DEVELOPMENT);
-    expect(kept.set.at(-1)).toEqual({ openAtLogin: true, path: DEVELOPMENT[0], args: ['"C:\\Users\\Ana\\my work\\surogates\\desktop\\dist\\shell\\main.js"', LOGIN] });
+    expect(kept.set.at(-1)).toEqual({ openAtLogin: true, path: DEVELOPMENT[0], args: [DEVELOPMENT[1], LOGIN] });
   });
 
   it("is on while Windows would start the app's program at login, and off once its Startup apps switch is off", () => {
@@ -74,19 +74,5 @@ describe("start at login on Windows", () => {
   it("is a Windows PC's", async () => {
     const { loginItemFor } = await importedOn("win32", () => import("../src/shell/login-item.js"));
     expect(loginItemFor(PLACES, system()).startedHidden([LOGIN])).toBe(true);
-  });
-});
-
-describe("an argument on a Windows command line", () => {
-  // As CommandLineToArgvW reads one back (Microsoft, "Parsing C++ command-line arguments").
-  it("is quoted where it holds a space, a tab or a quote, or is empty, its backslashes doubled only before a quote", () => {
-    expect(quoted("--login")).toBe("--login");
-    expect(quoted("C:\\Users\\Ana\\main.js")).toBe("C:\\Users\\Ana\\main.js");
-    expect(quoted("C:\\my work\\main.js")).toBe('"C:\\my work\\main.js"');
-    expect(quoted("a\tb")).toBe('"a\tb"');
-    expect(quoted("")).toBe('""');
-    expect(quoted('say "hi"')).toBe('"say \\"hi\\""');
-    expect(quoted('a\\"b')).toBe('"a\\\\\\"b"');
-    expect(quoted("C:\\my work\\")).toBe('"C:\\my work\\\\"');
   });
 });

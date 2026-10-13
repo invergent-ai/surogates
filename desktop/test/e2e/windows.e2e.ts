@@ -111,6 +111,14 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
     expect(command?.startsWith(`"${ELECTRON}" `), command ?? "none").toBe(true);
     expect(command).toContain(MAIN);
     expect(command?.endsWith(' -- "%1"'), command ?? "none").toBe(true);
+    // Each argument of a scheme's command, as Electron writes it: a path with a space quoted, as Windows reads it back.
+    const probe = "HKCU\\Software\\Classes\\surogate-quoting-test";
+    try {
+      expect(await app.evaluate(({ app: running }) => running.setAsDefaultProtocolClient("surogate-quoting-test", "C:\\a b\\x.exe", ["C:\\a b\\main.js", "--"]))).toBe(true);
+      expect(registry(`${probe}\\shell\\open\\command`, null)).toBe('"C:\\a b\\x.exe" "C:\\a b\\main.js" -- "%1"');
+    } finally {
+      spawnSync(REG, ["delete", probe, "/f"], { stdio: "ignore" });
+    }
   });
 
   it("puts File first and Help last, as on Linux, with no app menu", async () => {
@@ -161,7 +169,7 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
     await expect.poll(async () => (await mainWindow(app!))?.visible).toBe(false);
     expect(await secondLaunch(home)).toBe(0);
     await expect.poll(async () => (await mainWindow(app!))?.visible).toBe(true);
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.minimize());
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.minimize());
     await expect.poll(async () => (await mainWindow(app!))?.minimized).toBe(true);
     expect(await secondLaunch(home)).toBe(0);
     await expect.poll(async () => (await mainWindow(app!))?.minimized).toBe(false);
@@ -203,8 +211,9 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
     await settings.click('[data-setting="startAtLogin"] [data-value="on"]');
     await expect.poll(() => pressed(settings, "startAtLogin")).toBe("on");
     try {
-      // A development build starts itself: its Electron, on its main, named by its own AppUserModelID.
-      expect(registry(RUN, DEVELOPMENT_ID)).toBe(`"${ELECTRON}" ${MAIN.includes(" ") ? `"${MAIN}"` : MAIN} --login`);
+      // A development build starts itself: its Electron, on its main, named by its own AppUserModelID; Electron
+      // quotes a path, as CommandLineToArgvW reads it back.
+      expect(registry(RUN, DEVELOPMENT_ID)).toBe(`"${ELECTRON}" "${MAIN}" --login`);
     } finally {
       await settings.click('[data-setting="startAtLogin"] [data-value="off"]');
     }

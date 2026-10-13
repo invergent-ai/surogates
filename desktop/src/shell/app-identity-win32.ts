@@ -11,14 +11,13 @@
 //
 // Its surogate:// links, taken per user, in the user's own classes (HKCU\Software\Classes\surogate; Microsoft,
 // "Registering an Application to a URI Scheme"), by the command that starts it, at each start where Windows does not
-// name that command already (Electron, app.setAsDefaultProtocolClient). Windows starts the command with the link as
-// its last argument, "%1", after "--": a link is no switch of Chromium's, whatever it holds (base::CommandLine reads
-// none after "--").
+// name that command already (Electron, app.setAsDefaultProtocolClient), each of its arguments quoted by Electron as
+// the Run key's are (login-item-win32.ts; a test on the Windows runner measures both). Windows starts the command
+// with the link as its last argument, "%1", after "--": a link is no switch of Chromium's, whatever it holds
+// (base::CommandLine reads none after "--").
 //
 // And a launch with QUIT among its arguments, which asks the running app to quit as its menu's Quit does, as a script
 // that removes a development build asks it (dev-app.ps1); where none runs, it quits at once.
-
-import { quoted } from "./login-item-win32.js";
 
 export const APP_ID = "ai.invergent.surogate";
 export const APP_ACTIVATOR = "{6E271D8E-0539-4AF2-8B3D-57150B0C7113}";
@@ -47,7 +46,7 @@ export function nameTheApp(app: NamedApp, packaged: boolean): void {
 /** surogate:// links, for this user, started by *command*, the app's own; said where Windows did not take them. */
 export function takeLinks(app: LinkTaker, command: readonly string[]): void {
   const [path, ...rest] = command;
-  const args = [...rest.map(quoted), "--"];
+  const args = [...rest, "--"];
   if (app.isDefaultProtocolClient("surogate", path, args)) return;
   if (!app.setAsDefaultProtocolClient("surogate", path, args)) throw new Error("Windows did not give Surogate its surogate:// links");
 }
