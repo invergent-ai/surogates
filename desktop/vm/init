@@ -48,7 +48,7 @@ esac
 mount -t securityfs -o nosuid,nodev,noexec securityfs /sys/kernel/security
 mount -t bpf -o nosuid,nodev,noexec bpf /sys/fs/bpf
 mkdir -p /sys/fs/bpf/surogate /sys/fs/bpf/surogate-maps
-want=15 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
+want=16 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
 
 # The rule's scope (rule.bpf.c, scope): the one uid it judges besides those from 10000 up, as the
 # kernel's command line, given as $1, names it in surogate.uid=. A VM whose shares map no owner to
