@@ -50,6 +50,8 @@ Inspect each image `ls` printed with `vision_analyze` (it reads workspace files 
 
 `pdftoppm` zero-pads page numbers to the width of the page count (`page-01.jpg`…`page-12.jpg`).
 
+Arial, Calibri, Cambria, Times New Roman and Courier New render true-to-width here (metric-compatible stand-ins), so pagination matches Word's to within a line or so. Other fonts are approximated — leave a few lines of slack when the page count matters.
+
 ## Editing existing documents
 
 Legacy `.doc` files must be converted first: `python scripts/office/soffice.py --headless --convert-to docx file.doc`.
