@@ -73,7 +73,17 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                     "Day 0 as a number of days before today, when the person "
                     "answers that way (\"5 days ago\" is 5, \"yesterday\" is "
                     "1, \"today\" is 0). Counted in the protocol's timezone; "
-                    "do not work out the date yourself."
+                    "do not work out the date yourself. For a rough period "
+                    "(\"about two weeks\", \"a month ago\") pass the nearest "
+                    "whole number of days (14, 30) with "
+                    "start_date_approximate=true."
+                ),
+            },
+            "start_date_approximate": {
+                "type": "boolean",
+                "description": (
+                    "True when the person only knew the start roughly, so the "
+                    "care team knows to confirm it."
                 ),
             },
             "phase": {
@@ -132,6 +142,13 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
             "start_date": {
                 "type": "string",
                 "description": "The corrected day 0, as YYYY-MM-DD.",
+            },
+            "start_date_approximate": {
+                "type": "boolean",
+                "description": (
+                    "Whether the start date is only approximate. A corrected "
+                    "start_date counts as exact unless you pass true."
+                ),
             },
             "phase": {"type": "string", "description": "The new phase."},
             "patient_name": {
@@ -357,6 +374,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     except ValueError as exc:
         return f"Not enrolled: {exc}."
     phase = str(arguments.get("phase") or "").strip() or None
+    approximate = arguments.get("start_date_approximate") is True if start else None
     patient_name = str(arguments.get("patient_name") or "").strip() or None
     answered_by = str(arguments.get("answered_by") or "").strip() or None
 
@@ -370,6 +388,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
         protocol=protocol, start_date=start, phase=phase, enrolled_by="agent",
         patient_name=patient_name, answered_by=answered_by,
+        start_date_approximate=approximate,
     )
     ctx.enrollment = enrollment
     queued, why_not = await _tell_care_team(sf, ctx, settings, kind="enrolment", text=summary)
@@ -380,10 +399,19 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     if enrollment.answered_by:
         parts.append(f"(answered by {enrollment.answered_by})")
     if enrollment.start_date:
-        parts.append(f"from {enrollment.start_date.isoformat()}")
+        parts.append(f"from {_start_text(enrollment)}")
     if enrollment.phase:
         parts.append(f"phase {enrollment.phase}")
     return " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
+
+
+def _start_text(row: Any) -> str:
+    if row.start_date_approximate:
+        return (
+            f"about {row.start_date.isoformat()} (approximate: the person gave "
+            f"a rough period; confirm the date when you can)"
+        )
+    return row.start_date.isoformat()
 
 
 async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
@@ -401,6 +429,8 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
             changes["start_date"] = _parse_date(arguments.get("start_date"))
         except ValueError as exc:
             return f"Not updated: {exc}."
+    if isinstance(arguments.get("start_date_approximate"), bool):
+        changes["start_date_approximate"] = arguments["start_date_approximate"]
     for field in ("phase", "patient_name", "answered_by"):
         if str(arguments.get(field) or "").strip():
             changes[field] = str(arguments[field]).strip()
@@ -433,7 +463,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     if row.answered_by:
         result += f", answered by {row.answered_by}"
     if row.start_date:
-        result += f", start {row.start_date.isoformat()}"
+        result += f", start {_start_text(row)}"
     if row.phase:
         result += f", phase {row.phase}"
     result += "."
@@ -486,7 +516,7 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         if row.answered_by:
             detail.append(f"answered by {row.answered_by}")
         detail.append(
-            f"start {row.start_date.isoformat()} (day {index} today)"
+            f"start {_start_text(row)} (day {index} today)"
             if row.start_date else "no start date"
         )
         if row.phase:

@@ -452,3 +452,41 @@ def test_patient_label_prefers_the_enrollment_over_the_profile():
     assert store.patient_label(
         "Ana (fiica)", SimpleNamespace(patient_name="Petre Marin", answered_by=None),
     ) == "Petre Marin"
+
+
+@pytest.mark.asyncio
+async def test_a_rough_period_is_enrolled_as_approximate(sf, patient):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    user_id, session_id = patient
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x",
+         "days_ago": 14, "start_date_approximate": True},
+        **_kw(sf, session_id),
+    )
+    expected = datetime.now(ZoneInfo("Europe/Bucharest")).date() - timedelta(days=14)
+    assert f"from about {expected.isoformat()} (approximate" in result
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert f"start about {expected.isoformat()} (approximate" in status
+
+    corrected = await followup.handle_followup_update(
+        {"protocol": "post-op", "start_date": expected.isoformat()},
+        **_kw(sf, session_id),
+    )
+    assert "approximate" not in corrected
+    [row] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
+    assert row.start_date_approximate is False
+
+
+@pytest.mark.asyncio
+async def test_approximate_without_a_start_date_is_not_recorded(sf, patient):
+    user_id, session_id = patient
+    await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x",
+         "start_date_approximate": True},
+        **_kw(sf, session_id),
+    )
+    [row] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
+    assert row.start_date is None
+    assert row.start_date_approximate is False
