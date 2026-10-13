@@ -857,3 +857,51 @@ class TestInboundTaps:
         assert self._parse(
             type="interactive", interactive={"type": "button_reply", "button_reply": {}},
         ) is None
+
+
+class TestQuestionNotRepeated:
+    """The reply ended in "Cum vă numiți? (numele și prenumele)" and the
+    ask_user_question beside it asked exactly that: the patient saw it twice."""
+
+    @staticmethod
+    def _payload(content, *questions, channel="whatsapp"):
+        from surogates.session.events import EventType
+        from surogates.session.store import _build_channel_payload
+
+        return _build_channel_payload(
+            EventType.LLM_RESPONSE,
+            {"message": {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {
+                    "name": "ask_user_question",
+                    "arguments": _json.dumps({"questions": list(questions)}),
+                }}],
+            }},
+            channel,
+        )
+
+    def test_the_closing_repeat_is_cut(self):
+        payload = self._payload(
+            "Mulțumesc.\n\nCum  vă numiți?\n(numele și prenumele)\n",
+            {"prompt": "Cum vă numiți? (numele și prenumele)"},
+        )
+        assert payload["content"] == "Mulțumesc."
+
+    def test_a_reply_that_is_only_the_question_sends_nothing(self):
+        assert self._payload(
+            "Sunteți de acord?",
+            {"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}, {"label": "Nu"}]},
+        ) == {}
+
+    @pytest.mark.parametrize("content, questions, channel", [
+        # A paraphrase is not provably a repeat.
+        ("Mulțumesc. Sunteți de acord?", [{"prompt": "Sunteți de acord să vă scriu?"}], "whatsapp"),
+        # Only a whole closing sentence, never the tail of a word.
+        ("Mulțumesc. NuSunteți de acord?", [{"prompt": "Sunteți de acord?"}], "whatsapp"),
+        ("Mulțumesc. A? B?", [{"prompt": "A?"}, {"prompt": "B?"}], "whatsapp"),
+        # The web chat shows no separate prompt text.
+        ("Mulțumesc. Sunteți de acord?", [{"prompt": "Sunteți de acord?"}], "web"),
+    ])
+    def test_anything_else_is_kept(self, content, questions, channel):
+        assert self._payload(content, *questions, channel=channel)["content"] == content

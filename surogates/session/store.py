@@ -8,7 +8,9 @@ counter increments).
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -223,6 +225,35 @@ _MAX_LISTED_DESCENDANTS = 1000
 
 
 
+def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
+    """*content* without a closing question its own ask_user_question asks.
+
+    The channel prompt follows right after, so a reply ending in "Cum vă
+    numiți?" beside a call asking "Cum vă numiți?" showed the person the
+    same question twice.  Exact match only (whitespace aside), and only for
+    a single question: anything else is not provably a repeat.
+    """
+    asks = [
+        call for call in tool_calls or []
+        if isinstance(call, dict) and (call.get("function") or {}).get("name") == "ask_user_question"
+    ]
+    if len(asks) != 1:
+        return content
+    try:
+        questions = json.loads(asks[0]["function"].get("arguments") or "{}").get("questions")
+    except (TypeError, ValueError, AttributeError):
+        return content
+    if not isinstance(questions, list) or len(questions) != 1 or not isinstance(questions[0], dict):
+        return content
+    words = str(questions[0].get("prompt") or "").split()
+    if not words:
+        return content
+    repeat = re.search(r"\s+".join(map(re.escape, words)) + r"\s*\Z", content)
+    if repeat is None or (repeat.start() and not content[repeat.start() - 1].isspace()):
+        return content
+    return content[: repeat.start()].rstrip()
+
+
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
     deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
@@ -233,6 +264,8 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
         content = msg.get("content", "") if isinstance(msg, dict) else ""
         if content and isinstance(content, str):
             content = strip_next_action_blocks(content)
+            if channel in INTERACTIVE_PROMPT_CHANNELS:
+                content = _without_trailing_prompt(content, msg.get("tool_calls"))
         if content:
             payload["content"] = content
             # Delivered either way: the model writes to the person beside its
