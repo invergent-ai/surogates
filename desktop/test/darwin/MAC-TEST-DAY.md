@@ -17,11 +17,11 @@ Each step says what a pass looks like. When something fails, keep going where yo
 
 ```
 git clone -b test/macos-cde https://github.com/invergent-ai/surogates.git && cd surogates
-gh run download 38293661923 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+gh run download 38387826404 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
 cd desktop && npm ci
 ```
 
-- The guest image is the arm64 one built from this branch. With it in `images/guest/out`, step 3 doesn't build the image itself, which takes about an hour.
+- The guest image is the arm64 one built from this branch. With it in `images/guest/out`, step 3 doesn't build the image itself, which takes about an hour. GitHub keeps it a week after its run: once it is gone, leave `images/guest/out` empty and let step 3 build it.
 - Pass: no error, and `images/guest/out` holds `rootfs.img.zst` and `manifest.json`.
 
 ## 2. The file host under Seatbelt (security first)
@@ -154,7 +154,7 @@ The same Mac and the same test account as the first day, on the branch you are s
 1. **A new guest image.** The image now loads its entropy device's driver at boot, so the first day's image no longer boots. From the checkout's top:
    ```
    rm -rf images/guest/out
-   gh run download IMAGE_RUN -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+   gh run download 38387826404 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
    cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh
    ```
    Pass: `prepare.sh` ends with "ready", and `test/vm/darwin/measure/probing/agent.img` is there.
