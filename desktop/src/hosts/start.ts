@@ -263,7 +263,7 @@ function onLanding(message: HostStart, guards: FolderGuards, uid: number): Start
       }
       const there = own(kept, uid);
       if (there === null || there === "missing") throw new Error(notOwn);
-      return { made, env: { SUROGATE_KEPT_IS: isOf(there) } };
+      return { made, env: { SUROGATE_KEPT_IS: isOf(identityOf(there)) } };
     } catch (error) {
       for (const dir of made) {
         try {
@@ -309,7 +309,7 @@ function onRecovery(message: HostStart, guards: FolderGuards, uid: number): Star
   const make = (): ReturnType<Start["make"]> => {
     const found = there();
     if (found === null) throw new Error(notOwn);
-    return { made: [], env: { SUROGATE_KEPT_IS: isOf(found) } };
+    return { made: [], env: { SUROGATE_KEPT_IS: isOf(identityOf(found)) } };
   };
   return {
     ...held, reads: [], writes: [kept], env: { SUROGATE_KEPT: kept }, commands: false, only: "land", readyMs: READY_MS, make,
