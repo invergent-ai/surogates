@@ -14,7 +14,8 @@
 # It builds dist/, surogate-vm (native/build.sh), the arm64 guest image into images/guest/out (unless
 # one is there, or SUROGATE_VM_IMAGE names one), and the agent disks in a Linux container: the app's,
 # and one for the measurements whose init also runs, as the guest's root, a probe a measurement leaves
-# in a shared folder (.measure-probe). That one is never the app's.
+# in a shared folder (.measure-probe). That one is never the app's: it is made in probing/ here, never
+# in dist/.
 set -euo pipefail
 
 DESKTOP="$(cd "$(dirname "$0")/../../../.." && pwd)"
@@ -59,8 +60,10 @@ docker run --rm --platform linux/arm64 -v "$REPO:/repo" -w /repo/desktop ubuntu:
   ln -s /repo/desktop/vm/agent-disk.sh /repo/desktop/vm/enter-root "$tree/vm/"
   awk "FNR == NR { probe = probe \$0 \"\\n\"; next } /^exec \\/usr\\/bin\\/tini/ { printf \"%s\", probe } { print }" test/vm/darwin/measure/probe.sh vm/init > "$tree/vm/init"
   chmod 755 "$tree/vm/init" && grep -q measure-probe "$tree/vm/init"
-  "$tree/vm/agent-disk.sh" dist/agent-measure.img
-  chown "$(stat -c %u:%g dist)" dist/agent.img dist/agent-measure.img
+  # Out of dist/, which the app is built from: the probing disk is never in an app.
+  mkdir -p test/vm/darwin/measure/probing
+  "$tree/vm/agent-disk.sh" test/vm/darwin/measure/probing/agent.img
+  chown "$(stat -c %u:%g dist)" dist/agent.img test/vm/darwin/measure/probing test/vm/darwin/measure/probing/agent.img
 '
 say "ready: each measurement runs from desktop/ as"
 say "  npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>"

@@ -21,9 +21,12 @@ import type { Egress } from "../../../../src/vm/proxy.js";
 export const DESKTOP = realpathSync(fileURLToPath(new URL("../../../../", import.meta.url)));
 /** The arm64 guest image (prepare.sh builds it): SUROGATE_VM_IMAGE, else the repository's images/guest/out. */
 export const IMAGE = realpathSync(process.env.SUROGATE_VM_IMAGE ?? join(DESKTOP, "..", "images", "guest", "out"));
-/** The agent disk prepare.sh makes from dist/: the app's, or the one whose init runs a measurement's probe as root. */
+/**
+ * The agent disks prepare.sh makes from dist/: the app's, in dist/; and the one whose init runs a measurement's
+ * probe as the guest's root (probe.sh), kept out of dist/, which the app is built from, in a folder of this one's.
+ */
 export const AGENT_DISK = join(DESKTOP, "dist", "agent.img");
-export const PROBING_DISK = join(DESKTOP, "dist", "agent-measure.img");
+export const PROBING_DISK = join(DESKTOP, "test", "vm", "darwin", "measure", "probing", "agent.img");
 /** surogate-vm as native/build.sh signs it. */
 export const PROGRAM = process.env.SUROGATE_VM_PROGRAM ?? join(DESKTOP, "native", "out", "surogate-vm");
 /** Where each measurement writes what it found. */
