@@ -536,7 +536,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit vm-probe], jobs.keys
+    assert_equal %w[unit vm-probe vm-native vm-boot], jobs.keys
     jobs.each do |name, job|
       assert_equal "windows-2025", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -563,6 +563,12 @@ class ReleaseWorkflowTest < Minitest::Test
     runs = probe.fetch("steps").map { |step| step["run"].to_s }
     assert(runs.any? { |run| run.include?("Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform") })
     assert(runs.any? { |run| run.include?("cargo build --release --locked") })
+    # The native programs gate; the real boot never does.
+    native = jobs.fetch("vm-native")
+    refute native.key?("continue-on-error")
+    assert(native.fetch("steps").map { |step| step["run"].to_s }.any? { |run| run.include?("cargo clippy --locked --workspace --all-targets -- -D warnings") })
+    assert(native.fetch("steps").map { |step| step["run"].to_s }.any? { |run| run.include?("cargo test --locked --workspace") })
+    assert_equal true, jobs.fetch("vm-boot").fetch("continue-on-error")
   end
 
   def test_the_arm64_guest_is_built_and_tested_by_hand_on_an_arm64_runner_and_holds_nothing_to_leak
@@ -712,6 +718,8 @@ class ReleaseWorkflowTest < Minitest::Test
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
+        "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
+        "vm-boot" => ["61fe7ddc5fb5c138", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 24591223ab9a9cbb d1980ca93217776e 1edc8d7d3216b9d8]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
@@ -780,7 +788,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal %w[desktop-guest-arm64.yml desktop-macos.yml desktop-windows.yml release.yml update-images.yml], run.keys
     assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-guest-arm64.yml").uniq.sort
     assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
-    assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-windows.yml").uniq.sort
+    assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-windows.yml").uniq.sort
     assert_equal %w[
       actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action
       docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release

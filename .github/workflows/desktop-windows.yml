@@ -98,3 +98,89 @@ jobs:
           $said
           "### HcsGetServiceProperties, exit $code`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
           exit $code
+
+  # The Windows native programs: the HCS document and the service's protocol, checked and tested. It builds on
+  # windows-2025 with its Visual Studio Build Tools and the toolchain the repository pins (rust-toolchain.toml), with
+  # no secret. It gates: these are the service's parsing and the document that crosses into the guest.
+  vm-native:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop/native/windows
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check the native programs with clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test the native programs
+        run: cargo test --locked --workspace
+
+  # One real boot through the development service, experimental and never gating: GitHub does not promise nested
+  # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
+  # fetches milestone B's guest image if a run of it is named, and runs the boot and requirements measurements. If the
+  # guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's own words. Either
+  # way the result is kept, and the job does not fail the branch.
+  vm-boot:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Build the native programs
+        working-directory: desktop/native/windows
+        run: cargo build --locked --release
+
+      - name: Install the desktop's packages
+        working-directory: desktop
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Build the desktop
+        working-directory: desktop
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build
+
+      - name: Install the development VM service
+        working-directory: desktop/native/windows
+        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
+
+      - name: Try one real boot, and record what happened
+        working-directory: desktop
+        continue-on-error: true
+        run: |
+          $said = npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot 2>&1 | Out-String
+          $said
+          "### A real boot on a GitHub runner`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep what the boot found
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-win-vm-boot
+          path: desktop/test/vm/win32/measure/out
+          if-no-files-found: ignore
+          retention-days: 7
