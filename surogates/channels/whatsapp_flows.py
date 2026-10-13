@@ -121,16 +121,18 @@ def form_reply_text(form: dict[str, Any], fields: dict[str, Any]) -> str:
 
     The form's own fields come first, in its order; anything else the flow
     returned follows under its key, so no answer is lost to a stale projection.
+    Without a form (a reply whose token is not checked yet) there is no
+    header.  *fields* never carry the ``flow_token``: the adapter took it out.
     A multi-line answer continues on lines indented by two spaces, so a reader
     never mistakes an answer line containing ": " for the next field.
     """
     known = {f["name"]: f for f in form.get("fields") or ()}
     labels = {name: f.get("label") or name for name, f in known.items()}
-    answered = {k: v for k, v in fields.items() if k != "flow_token"}
-    ordered = [k for k in labels if k in answered] + [k for k in answered if k not in labels]
-    lines = [f"Form '{form.get('title') or form.get('name')}' submitted:"]
+    ordered = [k for k in labels if k in fields] + [k for k in fields if k not in labels]
+    title = form.get("title") or form.get("name")
+    lines = [f"Form '{title}' submitted:"] if title else []
     lines += [
-        f"{labels.get(k, k)}: " + "\n  ".join(_value(known.get(k, {}), answered[k]).splitlines())
+        f"{labels.get(k, k)}: " + "\n  ".join(_value(known.get(k, {}), fields[k]).splitlines())
         for k in ordered
     ]
     return "\n".join(lines)

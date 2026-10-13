@@ -59,6 +59,7 @@ from surogates.channels.platforms.whatsapp_api import (
 from surogates.channels.platforms.whatsapp_format import render_whatsapp
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 from surogates.channels.text_split import split_text
+from surogates.channels.whatsapp_flows import form_reply_text
 from surogates.programs.delivery import schedule_status_apply
 
 __all__ = [
@@ -334,41 +335,25 @@ def _file_ref(raw_message: dict, msg_type: str) -> InboundFileRef | None:
     )
 
 
-def _flow_reply_source(reply: dict) -> dict:
-    """The submitted fields and the token the flow was sent with.
+def _flow_reply(reply: dict) -> tuple[str, dict]:
+    """A Flow completion's text, and its submitted fields with the token the
+    flow was sent with taken out of them.
 
-    The pipeline relabels the fields once it has checked the token against
-    the conversation, then drops the token.
+    The text is the fields as ``label: value`` lines under their keys; the
+    pipeline relabels them once it has checked the token against the
+    conversation, then drops the token.
     """
+    raw = reply.get("response_json")
     try:
-        fields = json.loads(reply.get("response_json") or "{}")
-    except (TypeError, ValueError):
-        return {}
-    if not isinstance(fields, dict):
-        return {}
-    token = fields.pop("flow_token", None)
-    return {"flow_fields": fields, **({"flow_token": str(token)} if token else {})}
-
-
-def _flow_reply_text(response_json: Any) -> str:
-    """A WhatsApp Flow's submitted fields as ``key: value`` lines."""
-    try:
-        fields = json.loads(response_json) if isinstance(response_json, str) else response_json
+        fields = json.loads(raw) if isinstance(raw, str) else raw
     except ValueError:
-        return str(response_json or "")
+        return str(raw or ""), {}
     if not isinstance(fields, dict):
-        return str(fields or "")
-    lines = []
-    for key, value in fields.items():
-        # Meta adds the token the flow was sent with; it is not an answer.
-        if key == "flow_token":
-            continue
-        if isinstance(value, list):
-            value = ", ".join(str(v) for v in value)
-        elif isinstance(value, dict):
-            value = json.dumps(value, ensure_ascii=False)
-        lines.append(f"{key}: {value}")
-    return "\n".join(lines)
+        return str(fields or ""), {}
+    token = fields.pop("flow_token", None)
+    return form_reply_text({}, fields), {
+        "flow_fields": fields, **({"flow_token": str(token)} if token else {}),
+    }
 
 
 def _tap_text(raw_message: dict, msg_type: str) -> str:
@@ -387,8 +372,6 @@ def _tap_text(raw_message: dict, msg_type: str) -> str:
         return ""
     if kind in ("button_reply", "list_reply"):
         return str(reply.get("title") or "")
-    if kind == "nfm_reply":
-        return _flow_reply_text(reply.get("response_json"))
     return ""
 
 
@@ -524,12 +507,14 @@ def _build_message(
     wamid = raw_message.get("id") or ""
 
     files: list[InboundFileRef] = []
+    interactive = raw_message.get("interactive") or {}
     # A Flow's form fields are never a pending question's answer.
-    flow_reply = (raw_message.get("interactive") or {}).get("type") == "nfm_reply"
+    flow_reply = msg_type == "interactive" and interactive.get("type") == "nfm_reply"
+    flow_text, flow_source = _flow_reply(interactive.get("nfm_reply") or {}) if flow_reply else ("", {})
     if msg_type == "text":
         text = ((raw_message.get("text") or {}).get("body")) or ""
     elif msg_type in _TAP_TYPES:
-        text = _tap_text(raw_message, msg_type).strip()
+        text = (flow_text if flow_reply else _tap_text(raw_message, msg_type)).strip()
         if not text:
             logger.debug("[whatsapp] ignoring a tap with no text: %s", raw_message.get(msg_type))
             return None
@@ -546,7 +531,7 @@ def _build_message(
     }
     if flow_reply:
         source["flow_reply"] = True
-        source.update(_flow_reply_source((raw_message.get("interactive") or {}).get("nfm_reply") or {}))
+        source.update(flow_source)
     if msg_type == "audio":
         source["voice"] = bool((raw_message.get("audio") or {}).get("voice"))
 
