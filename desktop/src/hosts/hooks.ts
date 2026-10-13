@@ -14,13 +14,13 @@
 import { randomUUID } from "node:crypto";
 import { close, fstat, open as openFile, readFile, type Stats, writeFile } from "node:fs";
 import { access, constants, lstat, open, readdir, realpath, stat } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { fdPaths, type Where } from "../files/fd-paths.js";
 import { inside, realpath as followed } from "../files/paths.js";
 import { dependencyFolder, folded, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
+import { basename, dirname, join, relative } from "../session-path.js";
 
 const SCAN_TIMEOUT_MS = 30_000;
 export const HOOKS_NOTICE = "The computer stopped these git hooks from running, because git would run them outside the sandbox (where it closed a hooks folder, that repository's other hooks are off until you make it searchable again): ";

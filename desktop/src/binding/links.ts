@@ -5,7 +5,8 @@
 // writes through such files itself: this is about commands.
 
 import { lstat, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+
+import { join, relative } from "../host-path.js";
 
 // ponytail: walked in the main process through fs/promises, two requests at a time. A child
 // process killed at the deadline is the robust upgrade: worker threads share the same libuv pool.

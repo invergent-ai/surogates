@@ -7,7 +7,6 @@
 // lost guest was running.
 
 import { readFileSync, renameSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
@@ -16,6 +15,7 @@ import { confirmedFolder } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
 import { type FromAgent, HELD, type HostUser, PLACE_KEY, type Share } from "../guest/protocol.js";
+import { join, sep } from "../host-path.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { backendFor } from "./backends.js";

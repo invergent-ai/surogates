@@ -3,8 +3,8 @@
 
 import type { ChildProcess } from "node:child_process";
 import { connect, type Socket } from "node:net";
-import { join } from "node:path";
 
+import { join } from "../host-path.js";
 import type { Addresses } from "./backends.js";
 import { DOOR } from "./inbound.js";
 

@@ -34,11 +34,11 @@
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
-import { basename, dirname, join, sep } from "node:path";
 
 import { confirmedFolder } from "../binding/folder.js";
 import { strerror } from "../files/answers.js";
 import { PLACE_KEY } from "../guest/protocol.js";
+import { basename, dirname, join, sep } from "../host-path.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
 import { THREAD } from "../vm/history.js";
 import type { Folder, Place } from "../vm/manager.js";

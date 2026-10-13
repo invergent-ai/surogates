@@ -9,8 +9,8 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmdirSync } from "node:fs";
 import { lstat } from "node:fs/promises";
-import { join } from "node:path";
 
+import { join } from "../host-path.js";
 import { type NoCopyAt, noCopyAt } from "../hosts/start.js";
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
 import type { Binding, Bindings, Mode } from "../journal/bindings.js";

@@ -25,11 +25,11 @@
 // is there works on in it.
 
 import { lstat, realpath, rm } from "node:fs/promises";
-import { basename, join } from "node:path";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { strerror } from "../files/answers.js";
 import { CANCELLED } from "../guest/command.js";
+import { basename, join } from "../host-path.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
 import type { Outcome } from "../link/protocol.js";

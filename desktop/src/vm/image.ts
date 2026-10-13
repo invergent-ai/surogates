@@ -8,10 +8,10 @@
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, type Stats, writeFileSync } from "node:fs";
 import { open, statfs } from "node:fs/promises";
-import { dirname, join } from "node:path";
 
 import { spawnClean } from "../clean-child.js";
 import { download, type DownloadOptions, hashOf, sizeOf } from "../download.js";
+import { dirname, join } from "../host-path.js";
 
 // Each file the image has, as the manifest names it: unpacked, and as downloaded.
 export interface ImageFile {

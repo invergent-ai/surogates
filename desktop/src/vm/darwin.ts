@@ -13,12 +13,12 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { cleanly, spawnClean } from "../clean-child.js";
 import type { HostUser, Share } from "../guest/protocol.js";
 import { MAX_SHARES } from "../guest/protocol.js";
+import { basename, dirname, join } from "../host-path.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
 import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
 import { ended, reach, socketsIn } from "./sockets.js";

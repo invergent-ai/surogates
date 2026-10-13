@@ -11,11 +11,11 @@ import {
 } from "node:fs";
 import type { Socket } from "node:net";
 import { userInfo } from "node:os";
-import { basename, dirname, join } from "node:path";
 
 import { cleanly, spawnClean } from "../clean-child.js";
 import { findOnPath } from "../files/operations.js";
 import type { Share } from "../guest/protocol.js";
+import { basename, dirname, join } from "../host-path.js";
 import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
 import { type GuestArch, hostArch, QEMU_ARCH } from "./qemu-arch.js";

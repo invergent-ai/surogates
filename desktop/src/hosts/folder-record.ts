@@ -3,9 +3,9 @@
 // app's data, the lock in the kernel (on macOS, a file of the app's data the kernel locks).
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 
 import type { ProcessHandle } from "../guest/processes.js";
+import { dirname } from "../host-path.js";
 import { type FolderLock, takeLock } from "./folder-lock.js";
 
 // How long a host waits for another host on the same folder to let it go.

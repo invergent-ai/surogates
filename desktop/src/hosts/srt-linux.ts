@@ -2,10 +2,10 @@
 // socat's bridges, under seccomp's unix-socket filter.
 
 import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
 
 import { findOnPath } from "../files/operations.js";
 import { inside } from "../files/paths.js";
+import { join } from "../host-path.js";
 import type { SrtOs } from "./srt-os.js";
 
 // srt binds its own /tmp/claude into every sandbox whenever it exists, whatever

@@ -14,7 +14,7 @@ import {
   openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { posix } from "node:path";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
@@ -28,6 +28,10 @@ import { FLAGS } from "./flags.js";
 import { land } from "./land.js";
 import { type Edge, edgeOf, keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
+
+// A session's paths, POSIX on every OS (session-path.ts): files/ is on the agent disk, which holds no module of the
+// app's but its own.
+const { dirname, join, resolve } = posix;
 
 export interface Context {
   folder: string; // resolved

@@ -13,11 +13,11 @@ import { timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { type ClientHttp2Session, type ClientHttp2Stream, connect as connectH2, constants } from "node:http2";
 import { createServer, type Server, type Socket } from "node:net";
-import { dirname } from "node:path";
 import type { Duplex } from "node:stream";
 
 import { SANDBOX_PORTS } from "../guest/listeners.js";
 import { MAX_INBOUND } from "../guest/protocol.js";
+import { dirname } from "../host-path.js";
 
 // The door's name in the VM's runtime folder, this user's own.
 export const DOOR = "browser.sock";

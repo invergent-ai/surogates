@@ -5,9 +5,9 @@
 // macOS's the Virtualization framework through surogate-vm (darwin.ts).
 
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 
 import type { HostUser } from "../guest/protocol.js";
+import { join } from "../host-path.js";
 import { forThisOs } from "../platform.js";
 import { bootDarwin, requirementsDarwin, runtimeFolder, SOCKET_MAX } from "./darwin.js";
 import { bootLinux, missingTools } from "./linux.js";

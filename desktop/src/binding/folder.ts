@@ -2,9 +2,9 @@
 // confirms one, and again by its tool host before anything runs there.
 
 import { realpathSync, type Stats, statSync } from "node:fs";
-import { join, resolve } from "node:path";
 
 import { inside, realpath } from "../files/paths.js";
+import { join, resolve } from "../host-path.js";
 import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
 import { bootId } from "./boot-id.js";
 

@@ -15,7 +15,6 @@
 // answers the same things of itself (Start), and the host goes by those alone.
 
 import { lstatSync, mkdirSync, realpathSync, rmdirSync, type Stats } from "node:fs";
-import { join, resolve } from "node:path";
 
 import { checkFolder, type FolderCheck, type FolderGuards } from "../binding/folder.js";
 import { said, whole } from "../files/edge.js";
@@ -23,6 +22,7 @@ import { inside, realpath } from "../files/paths.js";
 import { PLACE_KEY } from "../guest/protocol.js";
 import { KEPT_NAME, keyOf } from "../history/place.js";
 // A thread's id, as the app names its copy by: the one spelling the folder's place has too (history/place.ts).
+import { join, resolve } from "../host-path.js";
 import { THREAD } from "../vm/history.js";
 import type { HostStart } from "./messages.js";
 import { GLOB, isReserved, sandboxPolicy } from "./policy.js";

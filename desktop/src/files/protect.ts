@@ -5,10 +5,14 @@
 // existed when a sandbox started, so the file API checks them on every write,
 // and the rest of what git reads its config and hooks from (see protectedInFolder).
 
-import { join } from "node:path";
+import { posix } from "node:path";
 
 import { NUL_REFUSED, valueError } from "./answers.js";
 import { edgeOn, expandUser, inside, ledTo, realpath } from "./paths.js";
+
+// A session's paths, POSIX on every OS (session-path.ts): files/ is on the agent disk, which holds no module of the
+// app's but its own.
+const { join } = posix;
 
 const HOME_FILES = [
   ".ssh/authorized_keys", ".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/config", ".bashrc", ".zshrc",

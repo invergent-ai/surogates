@@ -5,12 +5,12 @@
 
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser } from "../guest/protocol.js";
+import { join } from "../host-path.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { backendFor } from "./backends.js";

@@ -40,13 +40,17 @@ import {
   type BigIntStats, chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, futimesSync, lstatSync,
   mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, type Stats, writeFileSync, writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { posix } from "node:path";
 
 import { Failure, fromNode, io, osError, sandboxError, valueError } from "./answers.js";
 import { fdPaths, type Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
 import { type Context, OWN_FILE, ownFile, revisionOf } from "./operations.js";
 import { inFolderRefusal, protectedInFolder } from "./protect.js";
+
+// A session's paths, POSIX on every OS (session-path.ts): files/ is on the agent disk, which holds no module of the
+// app's but its own.
+const { join } = posix;
 
 // The most files one look answers for: its answer is one message.
 const MAX_LOOKED = 2_000;

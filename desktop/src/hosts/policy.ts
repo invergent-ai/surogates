@@ -5,9 +5,9 @@
 // What of it is each OS's own is in srt-os.ts.
 
 import { statSync } from "node:fs";
-import { dirname } from "node:path";
 
 import { inside, realpath } from "../files/paths.js";
+import { dirname } from "../host-path.js";
 import { srtOs } from "./srt-os.js";
 
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";

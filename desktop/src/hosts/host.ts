@@ -13,7 +13,6 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, rmdirSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +20,7 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 import { confirmedFolder } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
+import { isAbsolute, join, resolve } from "../host-path.js";
 import type { Outcome } from "../link/protocol.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
 import type { FolderLock } from "./folder-lock.js";

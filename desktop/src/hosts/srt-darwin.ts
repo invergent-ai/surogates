@@ -8,12 +8,12 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
 
 import { cleanly } from "../clean-child.js";
 
 import { findOnPath } from "../files/operations.js";
 import { inside } from "../files/paths.js";
+import { dirname, isAbsolute, join } from "../host-path.js";
 import type { SrtOs } from "./srt-os.js";
 
 // The most bytes of a unix socket's path, without its NUL: Darwin's sun_path is 104 bytes (<sys/un.h>). srt's only

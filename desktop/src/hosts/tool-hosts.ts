@@ -18,7 +18,6 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
@@ -28,6 +27,7 @@ import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Copy, Handle, Opened } from "../history/copies.js";
 import { forgettingOf, NOT_A_FORGETTING_ASKED, notPutBack, RECORDS_UNREAD, unrecorded } from "../history/kinds.js";
 import { KEPT_NAME, keptOf, keyOf, recordedFolder } from "../history/place.js";
+import { basename, dirname, join } from "../host-path.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";

@@ -4,10 +4,10 @@
 
 import type { Socket } from "node:net";
 import { availableParallelism } from "node:os";
-import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
+import { dirname, join } from "../host-path.js";
 import { type GuestArch, QEMU_ARCH } from "./qemu-arch.js";
 import { socketsIn } from "./sockets.js";
 
