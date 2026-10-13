@@ -1026,22 +1026,23 @@ class TestNoEarlyStart:
 
 
 @pytest.mark.asyncio
-async def test_a_question_waits_for_the_response_to_be_saved() -> None:
-    """Started mid-stream, the question's channel prompt overtook the text the
-    model wrote beside it: patients got the question before the introduction."""
+@pytest.mark.parametrize("tool_name", ["ask_user_question", "send_form"])
+async def test_a_question_or_form_waits_for_the_response_to_be_saved(tool_name) -> None:
+    """Started mid-stream, the question's channel prompt (or the form's) overtook
+    the text the model wrote beside it: patients got it before the introduction."""
     started: list[str] = []
 
     async def dispatch(name, args, **kwargs):
         started.append(name)
         return json.dumps({"ok": True})
 
-    tools = _make_registry("ask_user_question")
+    tools = _make_registry(tool_name)
     tools.dispatch = dispatch
     executor = _make_executor(tools=tools)
 
-    executor.add_tool(_make_tool_call("ask_user_question", call_id="tc_q"))
+    executor.add_tool(_make_tool_call(tool_name, call_id="tc_q"))
     await asyncio.sleep(0)
     assert started == []
 
     await executor.get_all_results()
-    assert started == ["ask_user_question"]
+    assert started == [tool_name]

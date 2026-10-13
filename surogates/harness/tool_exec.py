@@ -609,10 +609,10 @@ def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:
 THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOLS)
 
 # Tools the streaming executor holds until the response is saved.  A question
-# started mid-stream wrote its channel prompt to the outbox before the text
-# the model wrote beside it, so patients got the question before the
-# introduction leading up to it.
-HELD_UNTIL_SAVED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS | frozenset({"ask_user_question"})
+# or a form started mid-stream wrote its channel row to the outbox before the
+# text the model wrote beside it, so patients got the question or form before
+# the introduction leading up to it.
+HELD_UNTIL_SAVED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS | frozenset({"ask_user_question", "send_form"})
 
 
 def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
