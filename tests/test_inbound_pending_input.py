@@ -1,4 +1,5 @@
 import dataclasses
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,6 +9,7 @@ from surogates.session.events import EventType
 
 from tests.test_channel_pipeline import (
     SESSION_ID,
+    USER_ID,
     _make_config,
     _make_deps,
     _make_msg,
@@ -23,8 +25,9 @@ _CONSENT = {
         "choices": [{"label": "Da, sunt de acord"}, {"label": "Nu acum"}],
     }],
     "context": "",
+    "user_id": USER_ID,
 }
-_OPEN = {"tool_call_id": "tc1", "questions": [{"prompt": "Când a fost procedura?"}], "context": ""}
+_OPEN = {"tool_call_id": "tc1", "questions": [{"prompt": "Când a fost procedura?"}], "context": "", "user_id": USER_ID}
 
 
 async def _handle_while_pending(monkeypatch, pending, msg, platform="whatsapp"):
@@ -130,7 +133,7 @@ async def test_a_command_typed_while_a_question_waits_goes_on_as_a_message(monke
     nudges = []
 
     async def pending_input(session_id):
-        return {"tool_call_id": "tc1", "questions": [{"prompt": "Which quarter?"}], "context": ""}
+        return {"tool_call_id": "tc1", "questions": [{"prompt": "Which quarter?"}], "context": "", "user_id": USER_ID}
 
     async def input_nudge(session_id, msg, said):
         nudges.append(said)
@@ -158,7 +161,7 @@ async def test_a_command_typed_while_a_question_waits_goes_on_as_a_message(monke
 
 @pytest.mark.parametrize("pending, expected", [
     # An answer resumes the waiting turn: the person sees it working again.
-    ({"tool_call_id": "tc1", "questions": [{"prompt": "Da sau nu?"}], "context": ""}, InboundOutcome.DROPPED),
+    ({"tool_call_id": "tc1", "questions": [{"prompt": "Da sau nu?"}], "context": "", "user_id": USER_ID}, InboundOutcome.DROPPED),
     (None, InboundOutcome.PROCESSED),
 ])
 async def test_typing_starts_for_a_new_turn_and_for_an_answer(monkeypatch, pending, expected):
@@ -185,3 +188,18 @@ async def test_typing_starts_for_a_new_turn_and_for_an_answer(monkeypatch, pendi
     )
 
     assert (result, len(typing)) == (expected, 1)
+
+
+@pytest.mark.parametrize("platform", ["whatsapp", "telegram", "slack"])
+@pytest.mark.parametrize("text", ["Da, sunt de acord", "Pot să opresc aspirina?"])
+async def test_only_the_person_asked_answers_or_dismisses_the_question(monkeypatch, platform, text):
+    """In a shared Slack thread a colleague's message answered or dismissed the
+    question the agent had asked someone else."""
+    asked_someone_else = {**_CONSENT, "user_id": uuid.uuid4()}
+    result, resolve, said = await _handle_while_pending(
+        monkeypatch, asked_someone_else, _make_msg(is_dm=True, text=text, ts="714.0"), platform,
+    )
+    assert result == InboundOutcome.PROCESSED
+    resolve.assert_not_awaited()
+    assert [d["content"] for d in said] == [text]
+    assert "dismisses_question" not in said[0]

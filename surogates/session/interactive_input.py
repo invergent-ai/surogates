@@ -55,6 +55,9 @@ async def pending_input_for_session(
         "tool_call_id": (row.action_ref or {}).get("tool_call_id", ""),
         "questions": payload.get("questions") or [],
         "context": payload.get("context", ""),
+        # Who was asked: the turn's acting principal, which in a shared
+        # thread is not every participant.
+        "user_id": row.user_id,
         # The blocked tool waits at most its own timeout; callers that
         # convert free-text messages into answers use this to ignore
         # rows orphaned by a tool timeout on a still-active session

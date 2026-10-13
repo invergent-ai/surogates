@@ -772,6 +772,7 @@ class ChannelInboundPipeline:
         ):
             intercepted, _unanswered = await self._intercept_pending_input(
                 msg, routing=routing, deps=deps, session_id=session_id,
+                sender_user_id=identity.user_id,
             )
             if intercepted is not None:
                 return intercepted
@@ -1042,6 +1043,7 @@ class ChannelInboundPipeline:
         routing: Any,
         deps: PipelineDeps,
         session_id: Any,
+        sender_user_id: Any,
     ) -> tuple[InboundOutcome | None, str | None]:
         """Handle a message that arrives while ``ask_user_question`` waits.
 
@@ -1055,6 +1057,10 @@ class ChannelInboundPipeline:
 
         A built-in command is never the answer either: it goes on as a
         message, whose command dismisses the question.
+
+        Only the person the question was asked of answers or dismisses it:
+        in a shared Slack thread anyone else's message goes on as a plain
+        message and leaves the question waiting for them.
 
         Returns ``(outcome, None)`` when the message was consumed as the
         answer, ``(None, tool_call_id)`` when it goes on and dismisses that
@@ -1073,7 +1079,8 @@ class ChannelInboundPipeline:
                 "[channels] pending input lookup failed - continuing", exc_info=True,
             )
             return None, None
-        if not pending:
+        asked = pending.get("user_id") if pending else None
+        if asked is None or str(asked) != str(sender_user_id):
             return None, None
 
         from surogates.channels.platforms.telegram_interactive import (
