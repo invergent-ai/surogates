@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import errno
 import os
+import tempfile
 from collections.abc import Collection
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
-from surogates.storage.backend import StorageBackend
+from surogates.storage.backend import Changed, StorageBackend
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io.base import FileStat, Walk, refuse_nul
+from surogates.tools.workspace_io.base import FileStat, RevisionConflict, Walk, refuse_nul
 
 
 def _missing(key: str) -> FileNotFoundError:
@@ -69,6 +70,37 @@ class StorageWorkspaceIO:
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
         # expected_revision is not checked: cloud behaviour does not change.
         await self._storage.write(self._bucket, self._prefix + key, data)
+
+    def location(self, key: str) -> str:
+        """Where the object is, the same however the file is reached."""
+        return f"bucket:{self._bucket}/{self._prefix}{key}"
+
+    async def etag(self, key: str) -> str | None:
+        try:
+            info = await self._storage.stat(self._bucket, self._prefix + key)
+        except KeyError:
+            return None
+        tag = info.get("etag")
+        return str(tag) if tag else None
+
+    async def write_if(self, key: str, data: bytes, *, expected: str | None) -> None:
+        """Write only over the version *expected* (an etag), or only where nothing
+        is when it is None; :class:`RevisionConflict` otherwise.
+
+        Used by saves from the document editor; every other write keeps
+        :meth:`write`'s unconditional behaviour.
+        """
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(data)
+            source = Path(handle.name)
+        try:
+            await self._storage.upload(
+                self._bucket, self._prefix + key, source, if_tag=expected, if_absent=expected is None,
+            )
+        except Changed as exc:
+            raise RevisionConflict(f"{key} changed since it was opened") from exc
+        finally:
+            source.unlink(missing_ok=True)
 
     async def delete(self, key: str) -> None:
         if not await self._storage.exists(self._bucket, self._prefix + key):
