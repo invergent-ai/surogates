@@ -50,7 +50,6 @@ RUN uv venv /opt/venv \
         matplotlib \
         tabulate \
         pyfiglet \
-        nano-pdf \
         reportlab \
         pdfplumber \
         pypdfium2 \

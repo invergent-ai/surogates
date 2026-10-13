@@ -1,5 +1,6 @@
 // A minimal structured deck: theme, two layouts with named placeholders,
-// sections, scheme colours, a native chart and speaker notes.  It passes
+// sections, scheme colours, text on a shape, a native chart and speaker
+// notes.  It passes
 // scripts/office/validate.py.  Copy it, change THEME and the slides, keep
 // the shape.   usage: node example_deck.js [out.pptx]
 const path = require("path");
@@ -44,7 +45,7 @@ const THEME = {
     objects: [
       { placeholder: { options: { name: "title", type: "title", x: 0.6, y: 0.4, w: 12.1, h: 0.9,
         fontSize: 32, bold: true, color: C.text1, align: "left", valign: "middle", margin: 0 }, text: "" } },
-      { placeholder: { options: { name: "body", type: "body", x: 0.6, y: 1.6, w: 5.6, h: 5.0,
+      { placeholder: { options: { name: "body", type: "body", x: 0.6, y: 1.6, w: 5.6, h: 4.0,
         fontSize: 16, color: C.text1, align: "left", valign: "top", margin: 0 }, text: "" } },
     ],
   });
@@ -63,6 +64,14 @@ const THEME = {
     { text: "Three in four loaves are industrial", options: { bullet: true, breakLine: true } },
     { text: "No branded fresh-bake chain yet", options: { bullet: true } },
   ], { placeholder: "body", paraSpaceAfter: 8 });
+  // Text on a filled shape is ONE addText with shape + fill.  margin is in points,
+  // [left, right, bottom, top]; with 0 the text sits on the shape's edge.
+  s.addText("Raising EUR 500k for three new bakeries", {
+    shape: pres.ShapeType.rect, fill: { color: C.accent1 },
+    x: 0.6, y: 5.9, w: 5.6, h: 0.6, margin: [14, 14, 0, 0], valign: "middle",
+    fontSize: 16, bold: true, color: C.background1, objectName: "ask-callout",
+  });
+  // Columns are ChartType.bar + barDir "col"; there is no ChartType.col (it writes an empty chart).
   // Plot-area styling lives under plotArea; top-level fill/border objects crash writeFile().
   s.addChart(pres.ChartType.bar, [{ name: "Revenue", labels: ["2024", "2025", "2026"], values: [1.2, 2.4, 4.1] }], {
     x: 6.7, y: 1.6, w: 6.0, h: 5.0, barDir: "col",

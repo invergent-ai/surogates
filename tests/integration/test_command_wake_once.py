@@ -490,7 +490,7 @@ async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_w
 
 
 @pytest.mark.parametrize("command, answer", [
-    ("/compress", "Context compressed to 2 messages. Strategy: summary."), ("/clear", "Conversation cleared."),
+    ("/compress", "Context compressed to 2 messages."), ("/clear", "Conversation cleared."),
 ])
 async def test_a_conversation_is_compacted_once_also_when_the_worker_dies_before_it_says_so(workers, command, answer):
     chat = await workers.chat()
@@ -1103,7 +1103,7 @@ async def test_a_question_asked_after_compress_reaches_the_model_after_the_compr
 
     assert workers.requests == [[
         {"role": "user", "content": "Thanks."}, {"role": "assistant", "content": "Any time."},
-        {"role": "assistant", "content": "Context compressed: 9 → 2 messages (7 removed). Strategy: summary."},
+        {"role": "assistant", "content": "Context compressed: 8 → 2 messages."},
         {"role": "user", "content": "And Q1?"},
     ]]
     assert (workers.ran, await workers.status(chat)) == (["_handle_compress_command"], "completed")
@@ -1175,7 +1175,7 @@ async def test_compress_typed_during_a_turn_compresses_the_conversation_with_tha
     # The turn went on to its end before the command was run: it is compressed with the rest, once.
     assert workers.compressed == [SAID + THE_TURN]
     assert workers.requests == [THE_TURN[-2:] + [
-        {"role": "assistant", "content": "Context compressed: 13 → 2 messages (11 removed). Strategy: summary."},
+        {"role": "assistant", "content": "Context compressed: 12 → 2 messages."},
         {"role": "user", "content": "And Q1?"},
     ]]
 
@@ -2036,7 +2036,7 @@ async def test_a_coordinators_chat_is_not_brought_to_rest_when_its_mission_canno
     # The wake the dispatcher retries does not run the command again, and the chat is its mission's still.
     await workers.wake(chat)
     assert (workers.ran, await workers.status(chat)) == (["_handle_compress_command"], "active")
-    assert (await workers.said(chat)).count("Context is too small to compress — only 4 messages.") <= 1
+    assert (await workers.said(chat)).count("Nothing to compress yet.") <= 1
 
 
 async def test_a_report_no_turn_has_read_is_not_passed_over_by_a_commands_end(workers):
