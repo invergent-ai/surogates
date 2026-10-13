@@ -40,6 +40,7 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
+import { nameTheApp, quitAsked, takeLinks } from "./app-identity.js";
 import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
@@ -96,6 +97,8 @@ const places = placesFor(process.env, app.getPath("home"));
 const { root } = places;
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
+// Before the first window: the OS groups the app's windows, and names its notifications and login item, by it (app-identity.ts).
+nameTheApp(app, app.isPackaged);
 app.setPath("userData", join(root, "electron"));
 // Before ready too: the default session is made then, and spell-checks with the app's own dictionary.
 ownSpelling(app, DICTIONARIES, console.error);
@@ -2746,7 +2749,8 @@ async function quit(): Promise<void> {
   }
 }
 
-if (!app.requestSingleInstanceLock()) {
+// A launch that asks the app to quit, where this OS's launches can, hands that to the running app, or quits at once.
+if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
   app.quit();
 } else {
   // The company's CA, as an administrator gave it for every user of this computer (ca-source.ts), or a
@@ -2755,10 +2759,18 @@ if (!app.requestSingleInstanceLock()) {
   // a CA it refuses is trusted no more than none.
   const { certificates, untrusted } = companyTrust(app.isPackaged, process.env, app.getPath("home"));
   companyCertificates = certificates;
+  // surogate:// links, for this user, where the app takes them itself (app-identity.ts): by the command that starts it.
+  try {
+    takeLinks(app, loginCommand());
+  } catch (error) {
+    report(error);
+  }
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
+    // As the menu's Quit asks: through the quit's questions.
+    if (quitAsked(argv)) return void app.quit();
     if (!loginItem.startedHidden(argv)) main?.show();
     const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);
