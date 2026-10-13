@@ -12,12 +12,15 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { createServer } from "node:net";
+
 import { PLAN9_PORT } from "../src/guest/protocol.js";
 import { socketsIn } from "../src/vm/sockets.js";
 import { backendFor } from "../src/vm/backends.js";
+import { Door, Forwarded } from "../src/vm/inbound.js";
 import { Guest, type VmBackend, type VmOptions } from "../src/vm/manager.js";
 import type { Start } from "../src/vm/vm-helper.js";
-import { addressesWin32, bootWin32, checkWin32, commandLine, requirementsWin32, runtimeFolderWin32, win32Boot } from "../src/vm/win32.js";
+import { addressesWin32, bootWin32, checkWin32, commandLine, freshDoorWin32, requirementsWin32, runtimeFolderWin32, win32Boot } from "../src/vm/win32.js";
 import { built } from "./built.js";
 
 const FAKE = fileURLToPath(new URL("./vm/win32/fake-vm.mjs", import.meta.url));
@@ -184,5 +187,54 @@ describe("what this Windows computer lacks of its sandbox", () => {
 
   it("says the tools are missing where surogate-vm does not run", async () => {
     expect(await checkWin32(join(dir, "missing.exe"))).toEqual({ virtualMachinePlatform: false, service: "missing", hostCompute: "absent" });
+  });
+});
+
+describe("the browser's door on Windows", () => {
+  it("is a fresh pipe name each start, 128 random bits, not derivable from the data folder", () => {
+    const a = freshDoorWin32();
+    const b = freshDoorWin32();
+    expect(a).toMatch(/^\\\\\.\\pipe\\surogate-door-[0-9a-f]{32}$/);
+    expect(a).not.toBe(b);
+    // The data folder's own derivable name (addressesWin32) is never the door the app uses.
+    for (const run of ["C:\\Users\\ana\\AppData\\Local\\Surogate\\run\\vm-0b6c1d3e", `${sep}run${sep}vm-0b6c1d3e`]) {
+      expect(a).not.toBe(addressesWin32(run).door);
+      expect(b).not.toBe(addressesWin32(run).door);
+    }
+  });
+
+  // The door's pipe behaviour needs a real Windows named pipe; it runs on the Windows runner.
+  const onWindows = it.skipIf(process.platform !== "win32");
+
+  onWindows("listens on the fresh name though a pipe of the old derivable name was made first", async () => {
+    const run = `${sep}run${sep}vm-abcdef01`;
+    // A squatter pre-creates the old, derivable door name: it must not matter, because the app's door is the fresh one.
+    const squat = createServer();
+    await new Promise<void>((resolve, reject) => {
+      squat.once("error", reject);
+      squat.listen(addressesWin32(run).door, resolve);
+    });
+    const fresh = freshDoorWin32();
+    const open = await new Promise<boolean>((resolve) => {
+      const door = new Door(fresh, new Forwarded(), async () => "", {}, resolve);
+      void door;
+    });
+    expect(open).toBe(true);
+    squat.close();
+  });
+
+  onWindows("closes the door when its listen fails, so the browser is told it is closed", async () => {
+    const name = freshDoorWin32();
+    const first = await new Promise<boolean>((resolve) => {
+      const door = new Door(name, new Forwarded(), async () => "", {}, resolve);
+      void door;
+    });
+    expect(first).toBe(true);
+    // A second listen on the same name is the first-instance conflict a squatter would cause: fatal, door closed.
+    const second = await new Promise<boolean>((resolve) => {
+      const door = new Door(name, new Forwarded(), async () => "", {}, resolve);
+      void door;
+    });
+    expect(second).toBe(false);
   });
 });

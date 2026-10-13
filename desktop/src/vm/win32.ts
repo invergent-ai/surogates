@@ -11,7 +11,7 @@
 // a 9P server of the app's own is built instead. surogate-vm.exe stops the VM when its stdin ends; the service ends it
 // besides when surogate-vm.exe, the VM manager or the service itself goes.
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 
@@ -48,10 +48,23 @@ const mark = (run: string): string => {
  * Where the VM manager reaches the guest's three ports, and where the browser's door is, for the runtime folder *run*:
  * named pipes only this user may open, which reach() and Node's net take by name. The backend's tests drive it against
  * the fake over Unix sockets on Linux by giving win32Boot their own address maker (test/vm/win32).
+ *
+ * The door's name here is a stand-in, for tests and the measurements; the app's door name is a fresh random one made
+ * at each start (freshDoorWin32), so no other local user can work it out and listen on it first.
  */
 export function addressesWin32(run: string): Addresses {
   const pipe = (port: string) => `\\\\.\\pipe\\surogate-${mark(run)}-${port}`;
   return { control: pipe("control"), net: pipe("net"), inbound: pipe("inbound"), door: pipe("door") };
+}
+
+/**
+ * A fresh door pipe name, 128 random bits, for one start of the app. Pipe names are global and the data folder's
+ * are derivable, so the door -- which the browser's proxy hands its key to -- must be a name no other local user can
+ * guess and so cannot create or listen on first. Made just before the door's listen and told to the browser as the
+ * door address is now. Nothing but randomness is in the name.
+ */
+export function freshDoorWin32(): string {
+  return `\\\\.\\pipe\\surogate-door-${randomBytes(16).toString("hex")}`;
 }
 
 /** The VM's runtime folder for *dataDir*: %LOCALAPPDATA%\Surogate\run\vm-<8 hex>, this user's own, one per data folder. */

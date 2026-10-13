@@ -11,7 +11,7 @@ import { join } from "../host-path.js";
 import { forThisOs, notBuilt } from "../platform.js";
 import { bootDarwin, requirementsDarwin, runtimeFolder, SOCKET_MAX } from "./darwin.js";
 import { bootLinux, missingTools } from "./linux.js";
-import { addressesWin32, bootWin32, requirementsWin32, runtimeFolderWin32 } from "./win32.js";
+import { addressesWin32, bootWin32, freshDoorWin32, requirementsWin32, runtimeFolderWin32 } from "./win32.js";
 import type { BootVm } from "./manager.js";
 import { socketsIn } from "./sockets.js";
 
@@ -35,6 +35,12 @@ export interface Backend {
   runtimeFolder(user: HostUser, env: NodeJS.ProcessEnv, dataDir: string): string;
   /** Where the VM manager reaches the guest's three ports, and where the browser's door is, for the runtime folder *run*. */
   addresses(run: string, user: HostUser): Addresses;
+  /**
+   * A fresh door address for one start of the app, where the door must be unguessable to other local users (a global
+   * pipe name on Windows), or null where the door is a socket in this user's own private folder (Linux, macOS) and
+   * `addresses(...).door` is used. Made just before the door's listen; told to the browser as the door address is.
+   */
+  freshDoor(): string | null;
   /** The longest Unix socket path this OS takes, in bytes, without the NUL, or null where the ports are not Unix sockets. */
   socketMax: number | null;
 }
@@ -48,6 +54,8 @@ const LINUX: Backend = {
   runtimeFolder: (user, env, dataDir) => join(env.XDG_RUNTIME_DIR || `/run/user/${user.uid}`, "surogate", `vm-${createHash("sha256").update(dataDir).digest("hex").slice(0, 8)}`),
   // QEMU's chardevs, made where the boot names them (qemu.ts), and the manager's door.
   addresses: (run) => socketsIn(run),
+  // The door is a socket in this user's own 0700 runtime folder: no other user can reach it, so no fresh name is needed.
+  freshDoor: () => null,
   socketMax: 107,
 };
 
@@ -58,6 +66,7 @@ const DARWIN: Backend = {
   runtimeFolder: (_user, env, dataDir) => (env.TMPDIR ? runtimeFolder(dataDir, env.TMPDIR) : runtimeFolder(dataDir)),
   // The sockets surogate-vm makes where it is told (darwin.ts), and the manager's door.
   addresses: (run) => socketsIn(run),
+  freshDoor: () => null,
   socketMax: SOCKET_MAX,
 };
 
@@ -69,6 +78,8 @@ const WIN32: Backend = {
   runtimeFolder: (_user, env, dataDir) => runtimeFolderWin32(env, dataDir),
   // The named pipes surogate-vm.exe makes, only this user's to open, and the manager's door.
   addresses: (run) => addressesWin32(run),
+  // A fresh random door pipe name each start: pipe names are global and the data folder's are derivable.
+  freshDoor: () => freshDoorWin32(),
   // The ports are named pipes, not Unix sockets: no path-length limit.
   socketMax: null,
 };

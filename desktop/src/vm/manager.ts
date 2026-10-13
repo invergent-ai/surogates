@@ -64,6 +64,10 @@ export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
   console: string; // the guest's console log
   user: HostUser; // whom the roots run for: the name and home they see
+  // Where the browser's proxy knocks for a connection into a chat's sandbox: the fresh door address the app made for
+  // this start (client.ts), unguessable to other users where the door is a global pipe name (Windows). None in the
+  // tests and the measurements, which take the backend's own address.
+  door?: string;
   // The company's CA certificates, PEM, that the app's own connections trust from its start: each
   // boot's guest trusts them for its commands' TLS, given as data in hello's answer. None without.
   ca?: string[];
@@ -322,6 +326,7 @@ export class Guest {
     private readonly told: Told,
     egress: Egress,
     forwarded: Forwarded,
+    onDoor: (open: boolean) => void = () => {},
   ) {
     this.gone = new Promise((resolve) => {
       this.leave = resolve;
@@ -357,8 +362,11 @@ export class Guest {
     this.proxy = new NetProxy(vm.net, { egress });
     // Each connection made into a root from outside the guest.
     this.carrier = new Carrier(vm.inbound, options.reachMs);
-    // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to.
-    this.door = new Door(backendHere().addresses(options.run, options.user).door, forwarded, (root, port, first) => this.reach(root, port, first));
+    // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to. Its door
+    // is the fresh random pipe name the app made (options.door), else the backend's address for the tests and the
+    // measurements. onDoor tells the app whether the door's listen took, so a door that could not listen is closed to
+    // the browser rather than left for it to knock at.
+    this.door = new Door(options.door ?? backendHere().addresses(options.run, options.user).door, forwarded, (root, port, first) => this.reach(root, port, first), {}, onDoor);
   }
 
   /**
@@ -366,7 +374,7 @@ export class Guest {
    * not start, its hypervisor's words included. *signal* stops a boot under way.
    */
   static async boot(
-    boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING, forwarded = new Forwarded(),
+    boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING, forwarded = new Forwarded(), onDoor: (open: boolean) => void = () => {},
   ): Promise<Guest> {
     const launched = performance.now();
     // The backend's own part, QEMU's sockets and monitor, is as quick emulated: the guest has not begun.
@@ -378,7 +386,7 @@ export class Guest {
     try {
       const deadline = launched + WAITS[vm.emulated ? "emulated" : "kvm"].helloMs;
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited, options.ca);
-      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress, forwarded);
+      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress, forwarded, onDoor);
     } catch (error) {
       await vm.kill();
       throw new Error([describe(error), await vm.exited].filter(Boolean).join(": "));
@@ -767,6 +775,8 @@ export class VmManager {
     private readonly told: Told = () => {},
     private readonly egress: Egress = REFUSING,
     private readonly report: (boot: Boot) => void = () => {},
+    // Whether the browser's door took its listen (true) or could not and is closed (false); told at each boot.
+    private readonly onDoor: (open: boolean) => void = () => {},
   ) {}
 
   /**
@@ -973,11 +983,11 @@ export class VmManager {
       // What the console says is then this boot's alone.
       rmSync(this.options.console, { force: true });
       try {
-        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded);
+        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded, this.onDoor);
       } catch (error) {
         if (this.stopping || !this.unchecked()) throw error;
         renameSync(this.options.sessions, `${this.options.sessions}.unchecked`);
-        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded);
+        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded, this.onDoor);
       }
     })();
     booting.then(async (guest) => {
