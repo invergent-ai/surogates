@@ -851,6 +851,40 @@ class ApprovalGrant(Base):
     )
 
 
+class OfficeSession(Base):
+    """A document open in the document server: one open row per file."""
+
+    __tablename__ = "office_sessions"
+    __table_args__ = (
+        Index(
+            "uq_office_sessions_open_location", "location", unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+        Index("idx_office_sessions_pending", "updated_at", postgresql_where=text("pending_save IS NOT NULL")),
+        CheckConstraint("status IN ('open', 'closed')", name="ck_office_sessions_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    # Where the file is, so one file has one row however it is reached.
+    location: Mapped[str] = mapped_column(Text, nullable=False)
+    # The chats whose panes opened the document (UUID strings); events go to all.
+    session_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    doc_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # The file's version when the document server fetched it or a save landed.
+    base_version: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="open")
+    editors: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # A save waiting to land: {"bucket", "key", "close", "attempts"}.
+    pending_save: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
+    )
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AmbientScheduleRow(Base):
     """One ambient-review schedule per followed channel.
 
