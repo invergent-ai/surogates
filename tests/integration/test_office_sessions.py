@@ -100,6 +100,8 @@ async def test_landing_records_the_new_version(session_factory):
         office_sessions.mark_landed(row, "etag-9")
     after = await office_sessions.get_open(session_factory, document.id)
     assert after.base_version == "etag-9" and after.pending_save is None
+    async with office_sessions.claim_pending(session_factory) as again:
+        assert again is None  # SQL NULL, not a JSON null the next claim would pick up
 
 
 async def test_each_claim_locks_one_row(session_factory):
