@@ -31,6 +31,14 @@ describe("compileOps", () => {
     ]);
   });
 
+  it("takes a thread id given as a number", () => {
+    expect(compileOps([{ op: "reply", thread: 1184659669, body: "Done." }, { op: "resolve", thread: 1184659669 }])).toEqual([
+      { op: "reply", thread: "1184659669", body: "Done." },
+      { op: "resolve", thread: "1184659669" },
+    ]);
+    expect(() => compileOps([{ op: "resolve" }])).toThrow(/"thread" is required/);
+  });
+
   it("refuses an empty or oversized batch", () => {
     expect(() => compileOps([])).toThrow(ContentError);
     expect(() => compileOps("insert")).toThrow(ContentError);

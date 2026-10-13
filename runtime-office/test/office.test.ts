@@ -67,6 +67,24 @@ describe("Office edits", () => {
     expect(method.mock.calls).toEqual([["StartAction", ["GroupActions"]]]);
   });
 
+  it("closes a page that stopped answering as the edit was committed, and says to read again", async () => {
+    const { office, method, pool } = officeAnswering({ results: [{ op: 0 }] });
+    method.mockResolvedValueOnce({ sentAt: 0, value: undefined }).mockResolvedValueOnce({ sentAt: 0, value: { __timeout: true } });
+    const error = await office.edit("p", ops).catch((e: unknown) => e);
+    expect(error).toEqual(new EditorError("the editor stopped answering as the edit was committed; read the document again before editing"));
+    expect(error).not.toBeInstanceOf(PageGone);
+    expect(method.mock.calls.at(-1)).toEqual(["EndAction", ["GroupActions", ""]]);
+    expect(pool.close).toHaveBeenCalledWith("p");
+  });
+
+  it("keeps the refusal of an edit whose cancel went unanswered", async () => {
+    const refused = { op: 0, reason: "gone", block: null };
+    const { office, method, pool } = officeAnswering({ refused });
+    method.mockResolvedValueOnce({ sentAt: 0, value: undefined }).mockResolvedValueOnce({ sentAt: 0, value: { __timeout: true } });
+    expect(await office.edit("p", ops)).toEqual({ applied: false, refused });
+    expect(pool.close).not.toHaveBeenCalled();
+  });
+
   it("closes a page that stopped answering before the edit ran, so a fresh page may run it", async () => {
     const { office, command, method, pool } = officeAnswering();
     method.mockResolvedValueOnce({ sentAt: 0, value: { __timeout: true } });

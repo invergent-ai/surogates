@@ -89,7 +89,7 @@ export class Office {
   // Runs the command in a group of actions: the editor holds its changes, sending none, until the group ends, and a
   // cancel takes them all back before any co-editor saw them. (An Undo after the command cannot: the change is sent
   // within 40 ms, and an Undo while the server has not acknowledged it does nothing.) A page that stopped answering is
-  // closed by the caller, its group never ended.
+  // closed by the caller, its group never ended; so is one that stopped answering the commit.
   private async inGroup(id: string, page: EditorPage, scope: unknown): Promise<{ sentAt: number; value: unknown }> {
     const started = await page.method("StartAction", ["GroupActions"]);
     if ((started.value as { __timeout?: true } | undefined)?.__timeout) {
@@ -97,7 +97,8 @@ export class Office {
       await this.pool.close(id);
       throw new PageGone("the editor stopped answering");
     }
-    let end: string[] | null = ["GroupActions", "", "cancel"];
+    const cancel = ["GroupActions", "", "cancel"];
+    let end: string[] | null = cancel;
     try {
       const reply = await this.run(page, scope);
       const result = reply.value as Record<string, unknown> | null | undefined;
@@ -105,7 +106,13 @@ export class Office {
       else if (result && !result.refused && result.__error === undefined) end = ["GroupActions", ""];
       return reply;
     } finally {
-      if (end) await page.method("EndAction", end);
+      if (end) {
+        const ended = await page.method("EndAction", end);
+        if (end !== cancel && (ended.value as { __timeout?: true } | undefined)?.__timeout) {
+          await this.pool.close(id);
+          throw new EditorError("the editor stopped answering as the edit was committed; read the document again before editing");
+        }
+      }
     }
   }
 

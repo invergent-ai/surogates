@@ -66,9 +66,9 @@ function compileOp(input: unknown): EditorOp {
       return { op: "comment", anchor, body: text(raw.body, "body", 2000) };
     }
     case "reply":
-      return { op: "reply", thread: text(raw.thread, "thread", 64), body: text(raw.body, "body", 2000) };
+      return { op: "reply", thread: thread(raw.thread), body: text(raw.body, "body", 2000) };
     case "resolve":
-      return { op: "resolve", thread: text(raw.thread, "thread", 64) };
+      return { op: "resolve", thread: thread(raw.thread) };
     default:
       throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use insert, replace, delete, move, comment, reply or resolve.`);
   }
@@ -110,6 +110,11 @@ function side(input: unknown): Side {
   if (input === undefined) return "after";
   if (input === "before" || input === "after") return input;
   throw new ContentError('"side" is "before" or "after".');
+}
+
+// Thread ids are all digits: a number is taken as its string, as a block id is.
+function thread(input: unknown): string {
+  return text(typeof input === "number" ? String(input) : input, "thread", 64);
 }
 
 function text(input: unknown, name: string, max: number): string {
