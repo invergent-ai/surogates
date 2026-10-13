@@ -13,7 +13,7 @@ from typing import Any
 
 from surogates.channels.whatsapp_flows import (
     BODY_CHARS,
-    CTA_CHARS,
+    BUTTON_CHARS,
     flow_interactive,
     form_by_name,
     new_flow_token,
@@ -54,10 +54,10 @@ SEND_FORM_SCHEMA = ToolSchema(
             },
             "cta": {
                 "type": "string",
-                "maxLength": CTA_CHARS,
+                "maxLength": BUTTON_CHARS,
                 "description": (
                     "Optional button text in the person's language, at most "
-                    f"{CTA_CHARS} characters. Defaults to the form's own."
+                    f"{BUTTON_CHARS} characters. Defaults to the form's own."
                 ),
             },
         },

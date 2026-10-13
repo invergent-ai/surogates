@@ -31,10 +31,15 @@ __all__ = [
     "sent_in_session",
 ]
 
-#: Meta's cap on ``flow_cta``.
-CTA_CHARS = 20
-#: Meta's cap on an interactive message's body.
+# Cloud API limits for interactive messages.
+#: An interactive message's body.
 BODY_CHARS = 1024
+#: A button's text: ``flow_cta``, a reply button's title, a list's button.
+BUTTON_CHARS = 20
+MAX_REPLY_BUTTONS = 3
+MAX_LIST_ROWS = 10
+ROW_TITLE_CHARS = 24
+ROW_DESCRIPTION_CHARS = 72
 
 
 def forms_from_payload(raw: Any) -> tuple[dict[str, Any], ...]:
@@ -86,7 +91,7 @@ def flow_interactive(
                 "flow_message_version": "3",
                 "flow_token": token,
                 "flow_id": str(form["flow_id"]),
-                "flow_cta": (cta or form.get("cta") or form.get("title") or "")[:CTA_CHARS],
+                "flow_cta": (cta or form.get("cta") or form.get("title") or "")[:BUTTON_CHARS],
                 "flow_action": "navigate",
                 "flow_action_payload": action_payload,
             },

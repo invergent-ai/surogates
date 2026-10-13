@@ -35,6 +35,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.whatsapp_flows import BUTTON_CHARS, MAX_LIST_ROWS
 from surogates.harness.slash_skill import names_builtin_command
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
@@ -48,12 +49,12 @@ MAX_QUESTIONS = 5
 MAX_CHOICES_PER_QUESTION = 4
 #: A messaging app's list holds ten rows (WhatsApp's interactive list), so a
 #: channel conversation may offer that many; the web widget keeps four.
-MAX_CHANNEL_CHOICES_PER_QUESTION = 10
+MAX_CHANNEL_CHOICES_PER_QUESTION = MAX_LIST_ROWS
 MAX_PROMPT_LENGTH = 1000
 MAX_LABEL_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
 #: WhatsApp's cap on a list message's button text.
-MAX_BUTTON_LABEL_LENGTH = 20
+MAX_BUTTON_LABEL_LENGTH = BUTTON_CHARS
 
 # Polling / lease renewal --------------------------------------------------
 _POLL_INTERVAL_SECONDS = 1.0

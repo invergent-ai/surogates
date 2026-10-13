@@ -59,7 +59,15 @@ from surogates.channels.platforms.whatsapp_api import (
 from surogates.channels.platforms.whatsapp_format import render_whatsapp
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 from surogates.channels.text_split import split_text
-from surogates.channels.whatsapp_flows import form_reply_text
+from surogates.channels.whatsapp_flows import (
+    BODY_CHARS,
+    BUTTON_CHARS,
+    MAX_LIST_ROWS,
+    MAX_REPLY_BUTTONS,
+    ROW_DESCRIPTION_CHARS,
+    ROW_TITLE_CHARS,
+    form_reply_text,
+)
 from surogates.programs.delivery import schedule_status_apply
 from surogates.session.interactive_input import fold_label
 
@@ -595,16 +603,6 @@ def _render_input_prompt(payload: dict) -> str:
     return "\n".join(line for line in lines if line)
 
 
-#: Cloud API limits for interactive messages.  A prompt that exceeds any of
-#: them goes out as text instead: a truncated label would no longer match the
-#: choice it stands for when the tap comes back.
-_INTERACTIVE_BODY_CHARS = 1024
-_MAX_REPLY_BUTTONS = 3
-_BUTTON_TITLE_CHARS = 20
-_MAX_LIST_ROWS = 10
-_ROW_TITLE_CHARS = 24
-_ROW_DESCRIPTION_CHARS = 72
-
 #: The list message's button text when the agent gives none.  A glyph, not a
 #: word: people read the prompt in their own language and an English
 #: "Choose" would be the only foreign text on the screen.
@@ -643,13 +641,15 @@ def _interactive_prompt(payload: dict) -> dict | None:
     Up to three short labels without descriptions become reply buttons;
     otherwise up to ten rows become a list.  Either way the tap comes back
     carrying the label as its title, which ``resolve_text_answer`` matches.
+    A prompt over any Cloud API limit goes out as text instead: a truncated
+    label would no longer match the choice it stands for.
     """
     questions = [q for q in payload.get("questions") or [] if isinstance(q, dict)]
     if len(questions) != 1:
         return None
     question = questions[0]
     choices = [c for c in question.get("choices") or [] if isinstance(c, dict) and c.get("label")]
-    if not choices or len(choices) > _MAX_LIST_ROWS:
+    if not choices or len(choices) > MAX_LIST_ROWS:
         return None
     # Meta refuses repeated button or row titles, and a tap carries only the
     # title, so two equal labels could not tell their choices apart anyway.
@@ -662,13 +662,13 @@ def _interactive_prompt(payload: dict) -> dict | None:
             (question.get("prompt") or "").strip(),
         ) if part
     )
-    if not body or len(body) > _INTERACTIVE_BODY_CHARS:
+    if not body or len(body) > BODY_CHARS:
         return None
 
     if (
-        len(choices) <= _MAX_REPLY_BUTTONS
+        len(choices) <= MAX_REPLY_BUTTONS
         and not any(c.get("description") for c in choices)
-        and all(len(c["label"]) <= _BUTTON_TITLE_CHARS for c in choices)
+        and all(len(c["label"]) <= BUTTON_CHARS for c in choices)
     ):
         return {
             "type": "button",
@@ -682,8 +682,8 @@ def _interactive_prompt(payload: dict) -> dict | None:
         }
 
     if any(
-        len(c["label"]) > _ROW_TITLE_CHARS
-        or len(c.get("description") or "") > _ROW_DESCRIPTION_CHARS
+        len(c["label"]) > ROW_TITLE_CHARS
+        or len(c.get("description") or "") > ROW_DESCRIPTION_CHARS
         for c in choices
     ):
         return None
@@ -693,12 +693,11 @@ def _interactive_prompt(payload: dict) -> dict | None:
         if c.get("description"):
             row["description"] = c["description"]
         rows.append(row)
-    button = (question.get("button_label") or "").strip()[:_BUTTON_TITLE_CHARS]
     return {
         "type": "list",
         "body": {"text": body},
         "action": {
-            "button": button or _DEFAULT_LIST_BUTTON,
+            "button": question.get("button_label") or _DEFAULT_LIST_BUTTON,
             "sections": [{"rows": rows}],
         },
     }
