@@ -122,7 +122,7 @@ class ToolRuntime:
             whiteboard,  # whiteboard_draw (canvas chat surface)
             checkin,  # checkin_outcome (Program check-ins)
             followup,  # followup_enroll/update/status, escalate
-            care_team,  # care_team_overview / care_team_message_patient (care team only)
+            care_team,  # care_team_* (care team only)
             send_form,  # send_form (a WhatsApp Flow, for agents with published forms)
             voice_call,  # end_call (a phone call's agent hangs up)
         ]

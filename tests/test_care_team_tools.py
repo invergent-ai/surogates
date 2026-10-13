@@ -267,3 +267,89 @@ async def test_no_permission_is_refused(sf, practice):
     )
     assert "permission" in out
     assert await _outreach(sf) == []
+
+
+# --- update -------------------------------------------------------------------
+
+
+async def _enrollment(sf, user_id):
+    [row] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_update_is_refused_outside_the_care_team(sf, practice):
+    ioana, _ = practice.ioana
+    out = await care_team.handle_care_team_update_patient(
+        {"patient": "Ioana", "status": "ended", "reason": "x", "confirmed": True},
+        **_kw(sf, practice.ion[1]),
+    )
+    assert out == care_team.NOT_CARE_TEAM
+    assert (await _enrollment(sf, ioana)).status == "active"
+
+
+@pytest.mark.asyncio
+async def test_update_with_an_ambiguous_patient_changes_nothing(sf, practice):
+    out = await care_team.handle_care_team_update_patient(
+        {"patient": "pop", "status": "paused", "reason": "spital", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "more than one person" in out and "Ion Popescu" in out and "Ioana Popa" in out
+    assert {(await _enrollment(sf, u)).status for u in (practice.ion[0], practice.ioana[0])} == {"active"}
+
+
+@pytest.mark.asyncio
+async def test_pausing_needs_a_reason(sf, practice):
+    out = await care_team.handle_care_team_update_patient(
+        {"patient": "Ioana", "status": "paused", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "why" in out
+    assert (await _enrollment(sf, practice.ioana[0])).status == "active"
+
+
+@pytest.mark.asyncio
+async def test_update_preview_changes_nothing(sf, practice):
+    ioana, _ = practice.ioana
+    out = await care_team.handle_care_team_update_patient(
+        {"patient": "Ioana", "status": "paused", "reason": "internată", "days_ago": 3,
+         "answered_by": "Ana, fiica"},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Will change Ioana Popa's post-op:")
+    assert "status active → paused (internată)" in out
+    assert "answered by none → Ana, fiica" in out
+    assert "Nothing has been changed" in out
+    row = await _enrollment(sf, ioana)
+    assert (row.status, row.answered_by) == ("active", None)
+    assert row.start_date == date.today() - timedelta(days=5)
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_update_writes_and_tells_the_rest_of_the_care_team(sf, practice):
+    colleague, _ = await _person(sf, "Asistenta Maria", "40700000098", enrol=False)
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT,
+        alert_recipient_user_ids=[practice.doctor, colleague],
+    )
+    ioana, _ = practice.ioana
+    out = await care_team.handle_care_team_update_patient(
+        {"patient": "0002", "status": "paused", "reason": "internată",
+         "start_date": (date.today() - timedelta(days=2)).isoformat(),
+         "start_date_approximate": True, "patient_name": "Ioana M. Popa",
+         "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert "Updated Ioana" in out and "status paused" in out
+    row = await _enrollment(sf, ioana)
+    assert row.status == "paused"
+    assert row.status_reason == "internată (by Dr. Ionescu)"
+    assert row.start_date == date.today() - timedelta(days=2)
+    assert row.start_date_approximate is True
+    assert row.patient_name == "Ioana M. Popa"
+    [alert] = await _outreach(sf)
+    assert alert.user_id == colleague  # not the doctor who did it
+    assert alert.kind == "alert" and alert.subject_user_id == ioana
+    assert alert.text.startswith("post-op paused by Dr. Ionescu: internată")
+    assert alert.created_by == f"care-team:{practice.doctor}"

@@ -30,11 +30,11 @@ from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc, day_index, next_contact
 from surogates.followup.outreach import window_open
 from surogates.session.events import EventType
-from surogates.tools.builtin.followup import _context
+from surogates.tools.builtin.followup import _context, _start_date, _start_text, _told
 from surogates.tools.registry import ToolSchema
 
 CARE_TEAM_TOOL_NAMES: frozenset[str] = frozenset({
-    "care_team_overview", "care_team_message_patient",
+    "care_team_overview", "care_team_message_patient", "care_team_update_patient",
 })
 
 NOT_CARE_TEAM = (
@@ -109,6 +109,72 @@ CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
             },
         },
         "required": ["patient", "text"],
+    },
+)
+
+CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
+    name="care_team_update_patient",
+    description=(
+        "Care team only. Change an enrolled patient's follow-up on the "
+        "doctor's word: pause, end or resume it, correct the start date, the "
+        "patient's name or who answers for them. First call without "
+        "confirmed: it shows exactly what would change and changes nothing. "
+        "Show that to the doctor and call again with confirmed=true only "
+        "after they answer yes."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "patient": {
+                "type": "string",
+                "description": "The patient's name or a fragment of their phone number.",
+            },
+            "protocol": {
+                "type": "string",
+                "description": "The protocol slug. Omit when the patient has only one.",
+            },
+            "status": {
+                "type": "string",
+                "enum": list(followup_store.ENROLLMENT_STATUSES),
+                "description": "active to resume, paused or ended.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why, in the doctor's words. Required when pausing or ending.",
+            },
+            "start_date": {
+                "type": "string",
+                "description": "The corrected day 0, as YYYY-MM-DD. Give this or days_ago.",
+            },
+            "days_ago": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "The corrected day 0 as days before today, when the doctor "
+                    "says it that way. Do not work out the date yourself."
+                ),
+            },
+            "start_date_approximate": {
+                "type": "boolean",
+                "description": "True when the doctor gave the start only roughly.",
+            },
+            "patient_name": {
+                "type": "string",
+                "description": "The corrected patient's full name.",
+            },
+            "answered_by": {
+                "type": "string",
+                "description": (
+                    "Who now answers the check-ins for the patient, with their "
+                    "relation, e.g. \"Ana, daughter\"."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": "True only after the doctor confirmed this exact preview.",
+            },
+        },
+        "required": ["patient"],
     },
 )
 
@@ -211,6 +277,26 @@ def _local(at: datetime, config: dict) -> str:
 
 def _masked(phone: str) -> str:
     return f"+{phone[:2]}…{phone[-3:]}" if len(phone) > 5 else "no number"
+
+
+async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Person | str:
+    """The one enrolled person *fragment* names, or why there is not one."""
+    matches = [
+        p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings)
+        if p.matches(fragment)
+    ]
+    if not matches:
+        return f"nobody enrolled with this practice matches '{fragment}'."
+    if len(matches) > 1:
+        return (
+            f"'{fragment}' matches more than one person. Ask the doctor which "
+            "one:\n" + "\n".join(f"- {p.label} ({_masked(p.phone)})" for p in matches)
+        )
+    return matches[0]
+
+
+def _doctor(ctx: Any) -> str:
+    return ctx.display_name or f"user {ctx.user_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -474,20 +560,9 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
     if len(text) > MAX_MESSAGE:
         return f"Nothing sent: keep a message under {MAX_MESSAGE:,} characters."
 
-    matches = [
-        p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings)
-        if p.matches(fragment)
-    ]
-    if not matches:
-        return f"Nothing sent: nobody enrolled with this practice matches '{fragment}'."
-    if len(matches) > 1:
-        return (
-            f"Nothing sent: '{fragment}' matches more than one person. Ask the "
-            "doctor which one:\n" + "\n".join(
-                f"- {p.label} ({_masked(p.phone)})" for p in matches
-            )
-        )
-    [person] = matches
+    person = await _one_person(sf, ctx, settings, fragment)
+    if isinstance(person, str):
+        return f"Nothing sent: {person}"
 
     async with sf() as db:
         identity = (
@@ -542,10 +617,125 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
     return f"Queued for {person.label} (state {row.state}); {how}."
 
 
+# ---------------------------------------------------------------------------
+# care_team_update_patient
+# ---------------------------------------------------------------------------
+
+
+def _enrollment_of(person: _Person, protocol: str) -> Any:
+    if protocol:
+        row = next((r for r in person.rows if r.protocol == protocol), None)
+        return row or (
+            f"{person.label} is not enrolled in '{protocol}'; enrolled in "
+            + ", ".join(r.protocol for r in person.rows) + "."
+        )
+    if len(person.rows) == 1:
+        return person.rows[0]
+    return (
+        f"{person.label} is enrolled in several protocols ("
+        + ", ".join(r.protocol for r in person.rows) + "); say which."
+    )
+
+
+async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str:
+    sf = kwargs["session_factory"]
+    ctx, settings = await _context(kwargs)
+    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
+        return NOT_CARE_TEAM
+    fragment = str(arguments.get("patient") or "").strip()
+    if not fragment:
+        return "Nothing changed: say which patient, by name or phone number."
+    person = await _one_person(sf, ctx, settings, fragment)
+    if isinstance(person, str):
+        return f"Nothing changed: {person}"
+    row = _enrollment_of(person, str(arguments.get("protocol") or "").strip())
+    if isinstance(row, str):
+        return f"Nothing changed: {row}"
+
+    zones = await followup_store.protocol_timezones(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
+    changes: dict[str, Any] = {}
+    described: list[str] = []
+    try:
+        start = _start_date(arguments, zones.get(row.protocol, "UTC"))
+    except ValueError as exc:
+        return f"Nothing changed: {exc}."
+    approximate = arguments.get("start_date_approximate")
+    if start is not None:
+        changes["start_date"] = start
+        described.append(
+            f"start date {row.start_date or 'none'} → {start}"
+            + (" (approximate)" if approximate is True else "")
+        )
+    if isinstance(approximate, bool):
+        changes["start_date_approximate"] = approximate
+        if start is None:
+            described.append(f"start date marked {'approximate' if approximate else 'exact'}")
+    for field, label in (("patient_name", "patient name"), ("answered_by", "answered by")):
+        value = str(arguments.get(field) or "").strip()
+        if value:
+            changes[field] = value
+            described.append(f"{label} {getattr(row, field) or 'none'} → {value}")
+    status = arguments.get("status")
+    reason = str(arguments.get("reason") or "").strip()
+    if status is not None:
+        if status not in followup_store.ENROLLMENT_STATUSES:
+            return (
+                "Nothing changed: status must be one of "
+                f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
+            )
+        if status in ("paused", "ended") and not reason:
+            return "Nothing changed: ask the doctor why before pausing or ending."
+        changes["status"] = status
+        # No column records who changed an enrolment; the reason carries it.
+        changes["status_reason"] = f"{reason} (by {_doctor(ctx)})" if reason else None
+        described.append(f"status {row.status} → {status}" + (f" ({reason})" if reason else ""))
+    if not changes:
+        return "Nothing to change: say what to change."
+
+    if arguments.get("confirmed") is not True:
+        return (
+            f"Will change {person.label}'s {row.protocol}: " + "; ".join(described)
+            + ". Ask the doctor to confirm with a yes before calling again with "
+            "confirmed=true. Nothing has been changed."
+        )
+
+    updated = await followup_store.update_enrollment(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
+        protocol=row.protocol, **changes,
+    )
+    if updated is None:
+        return f"Nothing changed: {person.label} is no longer enrolled in {row.protocol}."
+    result = f"Updated {person.label}'s {row.protocol}: status {updated.status}"
+    if updated.patient_name:
+        result += f", patient {updated.patient_name}"
+    if updated.answered_by:
+        result += f", answered by {updated.answered_by}"
+    if updated.start_date:
+        result += f", start {_start_text(updated)}"
+    result += "."
+    if status in ("paused", "ended"):
+        label = followup_store.patient_label(person.display_name, updated)
+        queued, why_not = await followup_store.notify_care_team(
+            sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="alert",
+            text=(
+                f"{row.protocol} {status} by {_doctor(ctx)}: {reason}"
+                f"\n\n— {label or person.label}"
+            ),
+            created_by=f"care-team:{ctx.user_id}", subject_user_id=person.user_id,
+            exclude_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
+        )
+        result += " " + _told(queued, why_not)
+    return result
+
+
 def register(registry: Any) -> None:
     for name, schema, handler in (
         ("care_team_overview", CARE_TEAM_OVERVIEW_SCHEMA, handle_care_team_overview),
         ("care_team_message_patient", CARE_TEAM_MESSAGE_PATIENT_SCHEMA,
          handle_care_team_message_patient),
+        ("care_team_update_patient", CARE_TEAM_UPDATE_PATIENT_SCHEMA,
+         handle_care_team_update_patient),
     ):
         registry.register(name=name, schema=schema, handler=handler, toolset="care_team")
