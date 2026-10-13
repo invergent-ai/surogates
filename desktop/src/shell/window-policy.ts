@@ -1,7 +1,7 @@
 // What an agent's web client may do with its window (spec, Section 1): stay on its
 // origin, open the one popup the web client needs, and send every other web address
-// to the system browser. Claude Desktop keeps its own view the same way (index.js:
-// will-navigate, will-redirect, and a window-open handler that denies and opens outside).
+// to the system browser. Its view is held to that on will-navigate, will-redirect, and a
+// window-open handler that denies and opens outside (main-window.ts).
 
 import { fileURLToPath } from "node:url";
 

@@ -158,7 +158,7 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
   const mark = projectMark(project.id);
   open.append(mark, element("span", "name", project.name));
   if (project.waiting > 0) {
-    // On the mark, as Claude Desktop puts it.
+    // The dot, on the project's mark.
     mark.append(element("span", "waiting"));
     open.setAttribute("aria-label", `${project.name}, waiting on you`);
   }

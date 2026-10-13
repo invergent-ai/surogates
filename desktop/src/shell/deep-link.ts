@@ -1,8 +1,8 @@
 // A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux, in the
-// arguments it starts with, or in a second launch's, which the running app is given, as Claude
-// Desktop's second-instance hands its argv to its link handler (index.js). Only
-// surogate://open?url=<agent address> is one: it opens that agent, at a page of its web client
-// when the address names one. A link names no local path, and grants nothing.
+// arguments it starts with, or in a second launch's, which the running app's second-instance
+// hands to its link handler. Only surogate://open?url=<agent address> is one: it opens that
+// agent, at a page of its web client when the address names one. A link names no local path,
+// and grants nothing.
 
 import { notBuilt } from "../platform.js";
 import { canonicalOrigin } from "./agents.js";

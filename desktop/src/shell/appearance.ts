@@ -1,7 +1,6 @@
 // How the app looks (Progress, decisions of 2026-10-06): Light, Dark or Match system,
-// the default, as Claude Desktop offers it, and the transcript's text size, width and
-// motion, which the web client reads. Kept in the app-state root, and in effect
-// before the first window paints.
+// the default, and the transcript's text size, width and motion, which the web client
+// reads. Kept in the app-state root, and in effect before the first window paints.
 
 import { readState, writeState } from "./state-file.js";
 
@@ -46,9 +45,9 @@ const DIM = 0.55;
 const dimmed = (hex: string): string =>
   `#${[1, 3, 5].map((at) => Math.round(Number.parseInt(hex.slice(at, at + 2), 16) * (1 - DIM)).toString(16).padStart(2, "0")).join("")}`;
 
-// What the shell paints outside its pages, as Claude Desktop does: the window's background, and the
-// system's controls over the top right corner, 36 px high, on the Overview pane's colour. Under
-// Settings the controls' strip is dimmed with the window, as Claude dims it under a modal, and its
+// What the shell paints outside its pages: the window's background, and the system's controls
+// over the top right corner, 36 px high, on the Overview pane's colour. Under Settings the
+// controls' strip is dimmed with the window, as Settings' backdrop dims the rest of it, and its
 // symbols stay there to use, at WCAG's 3:1 for controls or better: the dark theme's keep their
 // colour (10.7:1), and the light theme's take its background (4.9:1), as its own would read at 2.1:1.
 export function chrome(dark: boolean, dim = false): { background: string; overlay: { color: string; symbolColor: string; height: number } } {

@@ -1,12 +1,12 @@
-// Quick entry's shortcut on Linux: Claude Desktop's own, from anywhere on the display, where the X
-// server grabs keys for an app. A Wayland session has its GlobalShortcuts portal instead, which
-// Surogate does not ask: there the tray opens quick entry.
+// Quick entry's shortcut on Linux, from anywhere on the display, where the X server grabs keys
+// for an app. A Wayland session has its GlobalShortcuts portal instead, which Surogate does not
+// ask: there the tray opens quick entry.
 
-// Its shortcut, Claude Desktop's own on Linux.
+// Its shortcut on Linux.
 const KEYS = "Ctrl+Alt+Space";
 
 /**
- * A Wayland session, as Claude Desktop tells one: by its session type, or else by a Wayland display.
+ * A Wayland session, told by its session type, or else by a Wayland display.
  * Electron's globalShortcut grabs keys from the X server, and no app's grab is global there.
  */
 const waylandSession = (env: NodeJS.ProcessEnv): boolean => (env.XDG_SESSION_TYPE ? env.XDG_SESSION_TYPE === "wayland" : Boolean(env.WAYLAND_DISPLAY));

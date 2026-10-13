@@ -1,6 +1,6 @@
-// The desktop shell's main process (spec, Sections 1 and 7): one window, as Claude
-// Desktop has, signed in to one agent, and this computer's device link to that agent,
-// which stays up with the window closed. It never runs what a tool call asks for.
+// The desktop shell's main process (spec, Sections 1 and 7): one window, signed in to
+// one agent, and this computer's device link to that agent, which stays up with the
+// window closed. It never runs what a tool call asks for.
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
@@ -1937,7 +1937,7 @@ async function sendQuickEntry(text: string): Promise<string | null> {
   });
 }
 
-// The window's menu button opens the app's own menu, as Claude Desktop's does; the project's opens its own.
+// The window's menu button opens the app's own menu; the project's opens its own.
 function popup(which: unknown): void {
   const shown = main;
   const agent = agents.get();
@@ -2643,8 +2643,8 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:update", updateAction);
 }
 
-// Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
-// computer, the user is asked first, and may wait for them; then the device stops in its order.
+// Quitting: with threads working on this computer, whose work a quit interrupts, the user is
+// asked first, and may wait for them; then the device stops in its order.
 async function confirmQuit(working: number): Promise<"quit" | "wait" | "cancel"> {
   const options = {
     type: "warning" as const,
