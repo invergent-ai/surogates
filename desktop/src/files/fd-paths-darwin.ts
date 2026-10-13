@@ -11,6 +11,7 @@ import {
 import type { FdPaths, Listing, Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
 import { fsat, type FsatStats } from "./fsat.js";
+import { sameFile } from "./identity.js";
 
 const at = () => fsat().constants;
 const HOLD = () => constants.O_RDONLY | constants.O_DIRECTORY | FLAGS.NOFOLLOW;
@@ -188,7 +189,7 @@ export const darwinFdPaths: FdPaths = {
     } catch {
       return null;
     }
-    return open.nlink > 0n && there.dev === open.dev && there.ino === open.ino ? path : null;
+    return open.nlink > 0n && sameFile(there, open) ? path : null;
   },
   handed() {
     const handed: number[] = [];

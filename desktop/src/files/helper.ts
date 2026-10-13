@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 
 import { FOLDER_UNAVAILABLE } from "./answers.js";
 import { edgeRefused } from "./edge.js";
+import { identityOf } from "./identity.js";
 import { ONLY_RECOVERS } from "./land.js";
 import { type Context, perform } from "./operations.js";
 
@@ -40,7 +41,9 @@ if (at !== undefined) {
 const found = (path: string | undefined): string | null => {
   try {
     const is = lstatSync(path ?? "");
-    return is.isDirectory() ? `${is.dev}:${is.ino}` : null;
+    if (!is.isDirectory()) return null;
+    const { dev, ino } = identityOf(is);
+    return `${dev}:${ino}`;
   } catch {
     return null;
   }

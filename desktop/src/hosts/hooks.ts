@@ -17,6 +17,7 @@ import { access, constants, lstat, open, readdir, realpath, stat } from "node:fs
 import { promisify } from "node:util";
 
 import { fdPaths, type Where } from "../files/fd-paths.js";
+import { identityOf, sameFile } from "../files/identity.js";
 import { inside, realpath as followed } from "../files/paths.js";
 import { dependencyFolder, folded, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
@@ -88,12 +89,12 @@ function listed(folder: string, paths: readonly string[]): string {
 async function describe(path: string): Promise<string | null> {
   const stats = await lstat(path).catch(() => null);
   if (!stats) return null;
-  const own = `${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}:${stats.mode}`;
+  const own = `${identityOf(stats).ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}:${stats.mode}`;
   if (!stats.isSymbolicLink()) return own;
   const target = await realpath(path).catch(() => null);
   const pointed = target ? await stat(target).catch(() => null) : null;
   return pointed
-    ? `${own}>${target}:${pointed.ino}:${pointed.size}:${pointed.mtimeMs}:${pointed.ctimeMs}:${pointed.mode}`
+    ? `${own}>${target}:${identityOf(pointed).ino}:${pointed.size}:${pointed.mtimeMs}:${pointed.ctimeMs}:${pointed.mode}`
     : `${own}>`;
 }
 
@@ -293,7 +294,7 @@ async function stripTodo(path: string, keep: ReadonlySet<string>, folders: reado
     // Changed since it was read, as by a git going on: judged again at the next look.
     // ponytail: a write between this and the rename is lost; taking git's own lock file would close that.
     const now = fdPaths.stat(todo);
-    if (now.ino !== read.stats.ino || now.dev !== read.stats.dev || now.size !== read.stats.size || now.mtimeMs !== read.stats.mtimeMs) return "stuck";
+    if (!sameFile(now, read.stats) || now.size !== read.stats.size || now.mtimeMs !== read.stats.mtimeMs) return "stuck";
     fdPaths.rename(temp, todo);
     made = false;
     return "stripped";

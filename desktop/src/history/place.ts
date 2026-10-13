@@ -37,6 +37,7 @@ import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
 
 import { confirmedFolder } from "../binding/folder.js";
 import { strerror } from "../files/answers.js";
+import { identityOf } from "../files/identity.js";
 import { PLACE_KEY } from "../guest/protocol.js";
 import { basename, dirname, join, sep } from "../host-path.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
@@ -233,7 +234,7 @@ async function seen(path: string): Promise<Looked> {
   try {
     // lstat: a link at its path is never the folder.
     const found = await lstat(path);
-    return { found: { directory: found.isDirectory(), dev: found.dev, ino: found.ino }, real: await realpath(path) };
+    return { found: { directory: found.isDirectory(), ...identityOf(found) }, real: await realpath(path) };
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     if (code !== undefined && NOTHING_THERE.has(code)) return { found: null, real: null };
@@ -433,7 +434,7 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
   const place: Place = { key, history, real };
   // The place as it lies: its folder, its record as text, which folder that names, and whether it is this one.
   const read = () => {
-    const there = own(histories) && own(history) ? lstatSync(history).ino : null;
+    const there = own(histories) && own(history) ? identityOf(lstatSync(history)).ino : null;
     const text = textOf(record);
     const recorded = recordedIn(text);
     // One folder's, whichever of the two was read in an earlier boot: only an identity read in this one says which device it is on.
@@ -449,7 +450,8 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     if (there !== null) await options.letGo(was, there);
     // Looked at again: while the folder was looked at and the sandbox let the place go, another thread of the
     // folder may have done all of this. From here to the place's making nothing waits.
-    if ((lstatSync(history, { throwIfNoEntry: false })?.ino ?? null) !== there || textOf(record) !== text) continue;
+    const now = lstatSync(history, { throwIfNoEntry: false });
+    if ((now === undefined ? null : identityOf(now).ino) !== there || textOf(record) !== text) continue;
     const stamp = stamped([history, kept], latestAside(data, key) + 1);
     let aside: Placed["aside"];
     let setAside = false;

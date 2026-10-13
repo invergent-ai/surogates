@@ -6,6 +6,7 @@
 
 import { lstat, readdir } from "node:fs/promises";
 
+import { identityOf } from "../files/identity.js";
 import { join, relative } from "../host-path.js";
 
 // ponytail: walked in the main process through fs/promises, two requests at a time. A child
@@ -101,7 +102,8 @@ export async function scanLinks(folder: string, options: LinkScanOptions = {}): 
               && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
             if (name.toLowerCase() !== "node_modules" && !store) folders.push({ dir: path, inGit: inGit || name === ".git" });
           } else if (stats.isFile() && stats.nlink >= 2n) {
-            const key = `${stats.dev}:${stats.ino}`;
+            const { dev, ino } = identityOf(stats);
+            const key = `${dev}:${ino}`;
             const file = files.get(key) ?? { nlink: stats.nlink, paths: [] };
             file.paths.push(path);
             files.set(key, file);

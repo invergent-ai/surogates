@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 import { confirmedFolder } from "../binding/folder.js";
+import { identityOf } from "../files/identity.js";
 import { findOnPath } from "../files/operations.js";
 import { isAbsolute, join, resolve } from "../host-path.js";
 import type { Outcome } from "../link/protocol.js";
@@ -336,7 +337,7 @@ function save(change: Partial<FolderRecord>): void {
 function sameFolder(): boolean {
   if (!folder) return false;
   try {
-    const { dev, ino } = statSync(folder.path);
+    const { dev, ino } = identityOf(statSync(folder.path));
     return dev === folder.dev && ino === folder.ino;
   } catch {
     return false;

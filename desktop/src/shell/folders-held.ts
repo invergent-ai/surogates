@@ -14,6 +14,7 @@ import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 
 import { cleanly } from "../clean-child.js";
+import { identityOf } from "../files/identity.js";
 import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./folders-held-darwin.js";
 import * as linux from "./folders-held-linux.js";
@@ -120,7 +121,7 @@ export class FolderLooks {
       });
     }
     const began = Date.now();
-    const answer = this.look(folder).then(({ dev, ino }) => ({ dev, ino }), () => null).finally(() => {
+    const answer = this.look(folder).then((stats) => identityOf(stats), () => null).finally(() => {
       this.running.delete(folder);
       const waiting = this.waiting;
       this.waiting = [];

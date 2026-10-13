@@ -28,6 +28,7 @@ import { lstat, realpath, rm } from "node:fs/promises";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { strerror } from "../files/answers.js";
+import { identityOf } from "../files/identity.js";
 import { CANCELLED } from "../guest/command.js";
 import { basename, join } from "../host-path.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
@@ -176,7 +177,7 @@ async function look(path: string): Promise<Identity | "other" | null> {
     try {
       const found = await lstat(path);
       if (!found.isDirectory() || (await realpath(path)) !== path) return "other";
-      return { dev: found.dev, ino: found.ino };
+      return identityOf(found);
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "other";
     }

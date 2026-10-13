@@ -38,13 +38,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type BigIntStats, chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, futimesSync, lstatSync,
-  mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, type Stats, writeFileSync, writeSync,
+  mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync, writeSync,
 } from "node:fs";
 import { posix } from "node:path";
 
 import { Failure, fromNode, io, osError, sandboxError, valueError } from "./answers.js";
 import { fdPaths, type Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
+import { identityOf, sameFile } from "./identity.js";
 import { type Context, OWN_FILE, ownFile, revisionOf } from "./operations.js";
 import { inFolderRefusal, protectedInFolder } from "./protect.js";
 
@@ -126,12 +127,13 @@ export interface Recovered {
 }
 
 // As a revision spells them: unsigned.
-const identityOf = (st: BigIntStats): Identity => ({
-  dev: String(BigInt.asUintN(64, st.dev)), ino: String(BigInt.asUintN(64, st.ino)), size: String(st.size), mtimeNs: String(st.mtimeNs),
-});
+const spelled = (st: BigIntStats): Identity => {
+  const { dev, ino } = identityOf(st);
+  return { dev: String(BigInt.asUintN(64, dev)), ino: String(BigInt.asUintN(64, ino)), size: String(st.size), mtimeNs: String(st.mtimeNs) };
+};
 function same(st: BigIntStats | null, id: Identity | null): boolean {
   if (st === null || id === null) return st === null && id === null;
-  const found = identityOf(st);
+  const found = spelled(st);
   return found.dev === id.dev && found.ino === id.ino && found.size === id.size && found.mtimeNs === id.mtimeNs;
 }
 // The same file, or its copy brought back from another filesystem: its size, and its time to the microsecond.
@@ -141,8 +143,11 @@ function alike(st: BigIntStats | null, id: Identity | null): boolean {
 }
 const plain = (st: BigIntStats): boolean => st.isFile() && st.nlink === 1n;
 // The very file *id* names, by its device and its inode, whatever its size or time now.
-const sameInode = (st: BigIntStats | null, id: Identity | null): boolean =>
-  st !== null && id !== null && String(BigInt.asUintN(64, st.dev)) === id.dev && String(BigInt.asUintN(64, st.ino)) === id.ino;
+const sameInode = (st: BigIntStats | null, id: Identity | null): boolean => {
+  if (st === null || id === null) return false;
+  const { dev, ino } = identityOf(st);
+  return String(BigInt.asUintN(64, dev)) === id.dev && String(BigInt.asUintN(64, ino)) === id.ino;
+};
 // A revision as an identity: its change time is left out, which a move changes.
 function expectedIdentity(revision: string): Identity {
   const [dev = "", ino = "", size = "", mtimeNs = ""] = revision.split(":");
@@ -332,7 +337,7 @@ function restore(dir: Held, own: string, name: string): string | null {
     const there = look(dir.at(to));
     if (there !== null) {
       // Its own second name, from a restore cut short after its link.
-      if (there.dev === held.dev && there.ino === held.ino) {
+      if (sameFile(there, held)) {
         remove(from);
         return count === 0 ? null : to;
       }
@@ -369,7 +374,6 @@ function ownAt(path: Where): number | null {
   remove(path);
   return null;
 }
-const sameFile = (a: Stats, b: Stats): boolean => a.dev === b.dev && a.ino === b.ino;
 
 // Whether the first *bytes* bytes of the files open at *a* and *b* are the same, each read where it is: one shorter
 // than that is not.
@@ -426,7 +430,7 @@ function stage(from: number, temp: Where, path: string, after: string, mode: num
     }
     if (mode !== null) fchmodSync(to, mode);
     fsyncSync(to);
-    return identityOf(fstatSync(to, { bigint: true }));
+    return spelled(fstatSync(to, { bigint: true }));
   } finally {
     closeSync(to);
   }
@@ -686,7 +690,7 @@ class Landing {
       const pathTo = (count: number) => folders.slice(0, count).join("/");
       const mode = found === null ? null : Number(found.mode & 0o7777n);
       let did: Step = {
-        path, was: found === null ? null : identityOf(found), wrote: null, mode,
+        path, was: found === null ? null : spelled(found), wrote: null, mode,
         made: folders.slice(way.depth).map((_, index) => pathTo(way.depth + index + 1)).reverse(),
         // A deletion takes the folders it empties with it: each one's mode, for its put-back to make it again as it was.
         above: after === null ? way.modes.map((one, index) => [pathTo(index + 1), one]) : [],
@@ -770,7 +774,7 @@ class Landing {
     const now = enter(this.root(path), folders, path).dir;
     try {
       const [held, there] = [fstatSync(dir.fd, { bigint: true }), now === null ? null : fstatSync(now.fd, { bigint: true })];
-      if (there === null || there.dev !== held.dev || there.ino !== held.ino) throw conflict(path);
+      if (there === null || !sameFile(there, held)) throw conflict(path);
     } finally {
       now?.close();
     }
@@ -809,7 +813,7 @@ class Landing {
     const counted = keeping.get(this.store);
     if (counted !== undefined) keeping.set(this.store, counted + Number(copy.size));
     const as = left ?? copy;
-    return { kept: { ...identityOf(as), ctimeNs: String(as.ctimeNs) }, left: left !== null };
+    return { kept: { ...spelled(as), ctimeNs: String(as.ctimeNs) }, left: left !== null };
   }
 
   // The file *held*, the one a step replaced, takes *name* in *dir* again, only where nothing holds it: a link,
@@ -858,7 +862,7 @@ class Landing {
       // Given it already by a put-back cut short here.
       const there = code === "EEXIST" ? look(probe) : null;
       const kept = look(held);
-      if (there === null || kept === null || there.dev !== kept.dev || there.ino !== kept.ino) throw fromNode(error, did.path);
+      if (there === null || kept === null || !sameFile(there, kept)) throw fromNode(error, did.path);
     }
     remove(probe);
     return true;
@@ -1184,7 +1188,7 @@ class Landing {
   // program of the user's holds open.
   private changedSince(now: BigIntStats | null, did: Step): boolean {
     if (now === null || did.kept === null || did.was === null) return false;
-    const { dev, ino, size, mtimeNs } = identityOf(now);
+    const { dev, ino, size, mtimeNs } = spelled(now);
     if (dev !== did.was.dev || ino !== did.was.ino) return false;
     return size !== did.kept.size || mtimeNs !== did.kept.mtimeNs || String(now.ctimeNs) !== did.kept.ctimeNs;
   }
@@ -1243,7 +1247,7 @@ class Landing {
       for (let count = 1; count < 100; count += 1) {
         const to = besideName(name, count);
         const there = look(dir.at(to));
-        if (there !== null && (there.dev !== held.dev || there.ino !== held.ino)) continue;
+        if (there !== null && !sameFile(there, held)) continue;
         try {
           if (there === null) fdPaths.link(from, dir.at(to));
         } catch (error) {

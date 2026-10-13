@@ -3,6 +3,7 @@
 
 import { realpathSync, type Stats, statSync } from "node:fs";
 
+import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
 import { join, resolve } from "../host-path.js";
 import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
@@ -89,5 +90,5 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
       guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)) || links.some((link) => inside(link, candidate)),
   );
   if (held) return refused(`the folder ${path} holds this computer's home folder or the app's own data`);
-  return { ok: true, path, dev: stats.dev, ino: stats.ino };
+  return { ok: true, path, ...identityOf(stats) };
 }

@@ -25,6 +25,7 @@ import {
 import { retold, saidInFailing, searched, spared } from "./edge.js";
 import { fdPaths, type Listing, type Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
+import { identityOf } from "./identity.js";
 import { land } from "./land.js";
 import { type Edge, edgeOf, keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -147,8 +148,10 @@ function textOrNull(args: Record<string, unknown>, name: string): string | null 
 // This version of the file, as LocalWorkspaceIO.stat names it (surogates/tools/workspace_io/local.py):
 // the ctime moves with every change, and utimes cannot set it back. dev and ino are unsigned there, and
 // Node reads them from a signed array, so an inode at or above 2^63 is put back to the number Python gives.
-export const revisionOf = (st: BigIntStats): string =>
-  `${BigInt.asUintN(64, st.dev)}:${BigInt.asUintN(64, st.ino)}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+export const revisionOf = (st: BigIntStats): string => {
+  const { dev, ino } = identityOf(st);
+  return `${BigInt.asUintN(64, dev)}:${BigInt.asUintN(64, ino)}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+};
 
 // The file's revision now, or null when it cannot be stat'ed.
 function revisionAt(key: string): string | null {

@@ -18,6 +18,7 @@ import { lstatSync, mkdirSync, realpathSync, rmdirSync, type Stats } from "node:
 
 import { checkFolder, type FolderCheck, type FolderGuards } from "../binding/folder.js";
 import { said, whole } from "../files/edge.js";
+import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
 import { PLACE_KEY } from "../guest/protocol.js";
 import { KEPT_NAME, keyOf } from "../history/place.js";
@@ -133,7 +134,7 @@ function checkCopy(path: unknown, dataDir: string, folder: string, at: string, u
   const found = own(path, uid);
   if (found === "missing") return no(`${what} is not there`, true);
   if (found === null) return no(`${what} is not a folder of the app's own`);
-  return { ok: true, path, dev: found.dev, ino: found.ino };
+  return { ok: true, path, ...identityOf(found) };
 }
 
 // What the sandbox of a helper would be given of *apart*, folders it must hold nothing of, beside

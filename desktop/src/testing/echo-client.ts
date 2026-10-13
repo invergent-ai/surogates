@@ -30,6 +30,7 @@ import { parseArgs } from "node:util";
 import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
+import { identityOf } from "../files/identity.js";
 import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -78,7 +79,7 @@ const env: Record<string, string> = { HOME: homedir(), LANG: process.env.LANG ||
 // With --folder, every session works on that folder, as if each had been bound to it there.
 let everyRoot: { folder: string; dev: number; ino: number; boot: string } | undefined;
 if (values.folder) {
-  const { dev, ino } = statSync(values.folder);
+  const { dev, ino } = identityOf(statSync(values.folder));
   everyRoot = { folder: values.folder, dev, ino, boot: BOOT_ID };
 }
 // The binder's approvals decide the network as they decide operations; a host asks

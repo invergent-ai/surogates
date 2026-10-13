@@ -6,6 +6,7 @@
 
 import { statSync } from "node:fs";
 
+import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
 import { dirname } from "../host-path.js";
 import { srtOs } from "./srt-os.js";
@@ -44,7 +45,8 @@ export function pathOutside(path: string | undefined, held: Array<{ dev: number;
       } catch {
         return true; // a folder that cannot be judged (ENOTDIR, EACCES, ELOOP): its entry is dropped
       }
-      if (stats && ids.includes(`${stats.dev}:${stats.ino}`)) return true;
+      const id = stats && identityOf(stats);
+      if (id && ids.includes(`${id.dev}:${id.ino}`)) return true;
       if (at === dirname(at)) return false;
     }
   };
