@@ -1,7 +1,7 @@
 // The browsers the app knows on Linux, where each one's package puts it, and what it refuses: the
 // list and the rules the app has always had, now Linux's own beside each other OS's.
 
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { LINUX } from "../src/browser/known-linux.js";
 import { importedOn } from "./platforms.js";
@@ -36,8 +36,10 @@ it("runs what the user picked in Custom… as it is, resolved, and refuses Snap 
 });
 
 it("knows none on a system the app drives no browser on yet, and refuses each one picked there in the words every such part says", async () => {
-  const { KNOWN_BROWSERS } = await importedOn("win32", () => import("../src/browser/known.js"));
+  // An OS with no helper either: the helper's path is never asked for there.
+  vi.doMock("../src/native-helper.js", () => ({ helper: () => expect.unreachable(), helperSync: () => expect.unreachable() }));
+  const { KNOWN_BROWSERS } = await importedOn("freebsd", () => import("../src/browser/known.js")).finally(() => vi.doUnmock("../src/native-helper.js"));
   const disk = { realpath: (path: string) => path, executable: () => true, head: () => "" };
-  expect(KNOWN_BROWSERS.candidates("C:\\Users\\ana")).toEqual([]);
-  expect(KNOWN_BROWSERS.refused("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", disk)).toBe("driving a browser is not built for Windows yet");
+  expect(KNOWN_BROWSERS.candidates("/home/ana")).toEqual([]);
+  expect(KNOWN_BROWSERS.refused("/usr/local/bin/chrome", disk)).toBe("driving a browser is not built for freebsd yet");
 });

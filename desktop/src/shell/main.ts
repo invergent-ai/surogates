@@ -19,7 +19,7 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
+  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, pickFilters, profileOf, profilesOf,
   unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
@@ -2024,7 +2024,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserSetting.set({ choice: value } as BrowserChoice);
       return;
     }
-    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const] };
+    const filters = pickFilters();
+    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const], ...(filters.length > 0 ? { filters } : {}) };
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;

@@ -64,6 +64,9 @@ export function unsupportedAt(real: string, disk: Disk = DISK): string | null {
   return KNOWN_BROWSERS.refused(real, disk);
 }
 
+/** The kinds of file Custom…'s dialog offers, by this OS: none where it offers any. */
+export const pickFilters = (): Array<{ name: string; extensions: string[] }> => (KNOWN_BROWSERS.pickFilters ?? []).map(({ name, extensions }) => ({ name, extensions: [...extensions] }));
+
 /** The program to run for what the user picked in Custom…, resolved, or null where it cannot be read. */
 export function pickedProgram(picked: string, disk: Disk = DISK): string | null {
   return KNOWN_BROWSERS.programOf(picked, disk);
