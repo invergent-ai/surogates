@@ -1,7 +1,7 @@
-// Quick entry, through the real app: Claude Desktop's frameless box over every other window,
-// opened from the tray, whose text starts the chat New starts. The agent's page hears the text
-// through the bridge, as the web client's chat page does, sends it as that chat's first message, and
-// says so: until then the box keeps the text.
+// Quick entry, through the real app: a frameless box over every other window, opened from the
+// tray, whose text starts the chat New starts. The agent's page hears the text through the
+// bridge, as the web client's chat page does, sends it as that chat's first message, and says
+// so: until then the box keeps the text.
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
@@ -217,7 +217,7 @@ describe("quick entry", () => {
     await pickInTray(app!, "Quick entry");
     await expect.poll(async () => (await quickWindow(app!))?.shown).toBe(true);
     expect(await quick.inputValue("#text")).toBe("Draft the March invoices");
-    // The app's own window takes the focus: the box goes, as Claude's does.
+    // The app's own window takes the focus: the box goes.
     await expect.poll(() => app!.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.webContents.getURL().endsWith("/quick.html") ?? false)).toBe(true);
     await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.focus());
     await expect.poll(async () => (await quickWindow(app!))?.shown).toBe(false);

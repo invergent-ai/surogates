@@ -206,7 +206,12 @@ class ResearchStore:
         """
         for key in values:
             if key not in META_KEYS:
-                raise MetaKeyError(f"unknown meta key: {key}")
+                # Name what may be set: a coordinator that guessed a key
+                # otherwise guesses again.
+                raise MetaKeyError(
+                    f"unknown meta key: {key}; settable keys: "
+                    + ", ".join(sorted(META_KEYS - MACHINE_KEYS))
+                )
             if key in MACHINE_KEYS and not allow_machine_keys:
                 raise MetaKeyError(
                     f"meta key {key!r} is machine-written only "

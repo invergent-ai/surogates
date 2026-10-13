@@ -8,14 +8,33 @@ license: Proprietary. LICENSE.txt has complete terms
 
 | Task | Approach |
 |---|---|
-| **Create** or **edit** with formulas/formatting | `openpyxl` — see gotchas below |
+| **Create** a workbook with formulas | Copy `scripts/example_model.py`, replace its inputs and columns, run it — see below |
+| **Edit** with formulas/formatting | `openpyxl` — see gotchas below |
 | **Bulk data** in or out | `pandas` (`read_excel`, `to_excel`) |
 | **Quick look** at a sheet | `read_file(path="file.xlsx")` — the harness parses it natively, `## SheetName` per sheet with cached values; `.csv`/`.tsv` are plain text it reads too. No cell coordinates, so don't plan edits from it |
-| **Read** a model (formulas *and* values) | two `load_workbook` passes — see gotchas |
+| **Read** cells: formula *and* value, with coordinates | `python scripts/show.py file.xlsx [Sheet] [A1:H20]` — don't write your own dump script |
 
 > `openpyxl` and `pandas` are preinstalled — do not run `pip install` first; write the script and import directly. Only if an import fails: `pip install` the missing package. The sandbox runs as a non-root user without `sudo`, so `apt-get install` always fails.
 
 > Script paths below are relative to this skill's directory — the `staged_at` path `skill_view` returns.
+
+## Creating a workbook
+
+Start from `scripts/example_model.py`. It builds an Inputs sheet, a Monthly sheet in a loop and a Summary of model years, with every number a formula, and it recalculates with zero errors.
+
+```bash
+cp scripts/example_model.py build.py   # into the workspace
+# edit build.py: replace the INPUTS block and the Monthly / Summary columns
+python build.py out.xlsx
+python scripts/recalc.py out.xlsx 60
+python scripts/show.py out.xlsx Summary
+```
+
+Keep its three helpers. They exist because hand-written cell addresses are the usual source of wrong or broken formulas:
+
+- `inp(label, value, fmt, note)` writes one input on the Inputs sheet and returns its reference, e.g. `'Inputs'!$B$4`. Put that string in formulas (`f"={cust}{r}*{price}"`). **Never type an input's address yourself**: every input you add moves the ones below it.
+- `put(ws, "B5", "=…", fmt)` writes a formula and stops with an error if it doesn't start with `=`. Without the `=` the cell is saved as text and computes nothing.
+- `header(ws, labels)` writes row 1 and returns `{label: column letter}`. Build addresses from it (`f"{C['Total revenue']}{r}"`), never from counted columns.
 
 ## Requirements for every output
 
@@ -40,14 +59,16 @@ python scripts/recalc.py output.xlsx [timeout_seconds]   # default 30
 LibreOffice computes every formula, the file is **rewritten in place**, and you get JSON:
 `status` (`success` | `errors_found`), `total_formulas`, `total_errors`, and an
 `error_summary` naming up to 100 cells per error type (`locations_truncated` says how many it
-withheld — trust `total_errors`, not the length of the list). Fix what it names and run it
-again. **JSON with an `error` key instead of a `status` means nothing was recalculated**, and
+withheld — trust `total_errors`, not the length of the list). Besides `#VALUE!`, `#REF!` and the
+other error values, it reports text cells that read like a formula as
+`formula saved as text (no leading '=')`. Fix what it names and run it again. **JSON with an `error` key instead of a `status` means nothing was recalculated**, and
 only that case exits non-zero — `errors_found` exits 0, so never treat a clean exit as a clean
 workbook.
 
 **A green recalc proves your formulas *evaluate*, not that they are *right*.** An off-by-one
 range or a reference to the wrong row yields a clean, error-free file with wrong numbers.
-Write 2–3 formulas first and check they pull the values you expect, before building out a grid.
+Write 2–3 formulas first and check they pull the values you expect, before building out a grid:
+`python scripts/show.py out.xlsx Monthly A1:H3` prints each formula next to its value.
 
 **A workbook that links to another file loses those links** if you re-save it with openpyxl and
 then recalculate. Such a formula reads `='[1]Returns Analysis'!$B$2` — the `[1]` is an index
@@ -70,11 +91,12 @@ literal `#NAME?` baked into the file you deliver.
 
 ## openpyxl gotchas
 
-- **Reading a model takes two loads.** `data_only=True` yields cached values with the formulas gone; the default yields formula strings with no values. One pass cannot give you both.
+- **Reading a model takes two loads.** `data_only=True` yields cached values with the formulas gone; the default yields formula strings with no values. One pass cannot give you both; `scripts/show.py` does both for you.
 - **`data_only=True` is destructive if you save.** That workbook has no formulas left, so saving replaces every one with a literal — permanently.
 - **`data_only=True` on a file openpyxl just wrote returns `None` everywhere** — run `recalc.py` first. (A formula whose result is `""` also reads back as `None`.)
 - **Merged cells: write the top-left anchor only.** Every other cell in the range is a `MergedCell` whose `.value` is read-only.
 - **`.xlsm` loses its macros unless you pass `keep_vba=True`** to `load_workbook`.
+- **Write dates as `datetime.date` / `datetime`, never strings.** `"2026-01-01"` is stored as text: its number format never applies, and date formulas (`EDATE`, `YEAR`) work on it only where the spreadsheet converts text to a date — Excel does that by locale, so the same file can break on another machine.
 - **A sheet name containing a space must be quoted** in a cross-sheet reference: `='Assumptions Inputs'!$B$5`. Unquoted, it evaluates to `#VALUE!`.
 
 ## Financial models

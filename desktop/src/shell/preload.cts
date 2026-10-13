@@ -1,7 +1,6 @@
-// The bridge of the agent's web client (spec, Section 8), given as Claude Desktop gives
-// claude.ai its own (mainView.js): only in the top frame, and only on the agent's origin,
-// which the main process names in the view's arguments. Each call goes to the handlers
-// registered on this view in the main process, which check it again.
+// The bridge of the agent's web client (spec, Section 8), given only in the top frame, and
+// only on the agent's origin, which the main process names in the view's arguments. Each call
+// goes to the handlers registered on this view in the main process, which check it again.
 
 import { contextBridge, ipcRenderer } from "electron";
 

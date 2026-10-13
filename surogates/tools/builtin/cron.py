@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -8,29 +9,45 @@ from surogates.scheduled.prompt_guard import (
     ScheduledPromptBlocked,
     validate_scheduled_prompt,
 )
-from surogates.scheduled.schedule import parse_schedule
+from surogates.scheduled.schedule import local_iso, parse_schedule
 from surogates.scheduled.store import ScheduledSessionStore
+from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 
 _CRON_CREATE_SCHEMA = ToolSchema(
     name="cron_create",
     description=(
-        "Schedule a user-owned prompt or slash command to run later or on a "
-        "recurring cron cadence."
+        "Schedule a prompt to run later or on a recurring cron cadence, as a "
+        "fresh session whose answer appears in this chat. Turn the user's "
+        "request, in whatever language, into a 5-field cron and an IANA "
+        "timezone. Nothing is made until the user has confirmed it in this "
+        "turn by answering ask_user_question: until then this returns what it "
+        "would make, with its next run on the schedule's own clock, and makes "
+        "nothing. Ask them in their language, giving the cadence in plain "
+        "words, the timezone, the next run, a one-line summary of the prompt, "
+        "and that it runs until they cancel it (once, when recurring is "
+        "false); then call again with the same arguments."
     ),
     parameters={
         "type": "object",
         "properties": {
             "cron": {
                 "type": "string",
-                "description": "5-field cron expression, for example */10 * * * *",
+                "description": "5-field cron expression, for example 30 8 * * 1-5 (08:30 Monday to Friday)",
             },
-            "prompt": {"type": "string"},
+            "prompt": {
+                "type": "string",
+                "description": "Self-contained instructions for the run, which cannot see this conversation.",
+            },
             "recurring": {"type": "boolean", "default": True},
             "durable": {"type": "boolean", "default": False},
             "name": {"type": "string"},
-            "timezone": {"type": "string", "default": "UTC"},
+            "timezone": {
+                "type": "string",
+                "default": "UTC",
+                "description": "IANA timezone the cron is read in, for example Europe/Bucharest",
+            },
         },
         "required": ["cron", "prompt"],
     },
@@ -38,7 +55,7 @@ _CRON_CREATE_SCHEMA = ToolSchema(
 
 _CRON_DELETE_SCHEMA = ToolSchema(
     name="cron_delete",
-    description="Cancel a user-owned scheduled prompt by id.",
+    description="Cancel one of the user's scheduled prompts by id, when they ask to stop or change it.",
     parameters={
         "type": "object",
         "properties": {"id": {"type": "string"}},
@@ -48,7 +65,7 @@ _CRON_DELETE_SCHEMA = ToolSchema(
 
 _CRON_LIST_SCHEMA = ToolSchema(
     name="cron_list",
-    description="List active user-owned scheduled prompts for this agent.",
+    description="List the user's active scheduled prompts for this agent.",
     parameters={"type": "object", "properties": {}},
 )
 
@@ -75,7 +92,7 @@ def register(registry: ToolRegistry) -> None:
 
 
 async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    context = _tool_context(kwargs)
+    context = await _tool_context(kwargs)
     if isinstance(context, str):
         return context
 
@@ -92,15 +109,31 @@ async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     except (ScheduledPromptBlocked, ValueError) as exc:
         return _json({"success": False, "error": str(exc)})
 
+    if not await _answered_this_turn(context.session_store, context.session_id):
+        return _json({
+            "success": False,
+            "error": (
+                "Not made yet. Confirm it with the user by ask_user_question, in their "
+                "language, then call cron_create again with the same arguments."
+            ),
+            "would_create": {
+                "cron": schedule.cron,
+                "timezone": schedule.timezone_name,
+                "next_run_at": local_iso(schedule.next_after(datetime.now(timezone.utc)), timezone_name),
+                "runs": "until cancelled" if recurring else "once",
+            },
+        })
+
     created = await context.store.create(
-        org_id=context.tenant.org_id,
-        user_id=context.tenant.user_id,
+        org_id=context.org_id,
+        user_id=context.principal.user_id,
+        service_account_id=context.principal.service_account_id,
         agent_id=context.agent_id,
         name=name,
         prompt=prompt,
         schedule=schedule,
         source="tool",
-        created_from_session_id=_uuid_or_none(kwargs.get("session_id")),
+        created_from_session_id=context.session_id,
         repeat_limit=None if recurring else 1,
     )
     return _json({
@@ -112,7 +145,7 @@ async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 
 async def _cron_delete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    context = _tool_context(kwargs)
+    context = await _tool_context(kwargs)
     if isinstance(context, str):
         return context
 
@@ -122,8 +155,9 @@ async def _cron_delete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _json({"success": False, "error": "Invalid schedule id"})
 
     deleted = await context.store.delete(
-        org_id=context.tenant.org_id,
-        user_id=context.tenant.user_id,
+        org_id=context.org_id,
+        user_id=context.principal.user_id,
+        service_account_id=context.principal.service_account_id,
         agent_id=context.agent_id,
         schedule_id=schedule_id,
     )
@@ -131,13 +165,14 @@ async def _cron_delete_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 
 async def _cron_list_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    context = _tool_context(kwargs)
+    context = await _tool_context(kwargs)
     if isinstance(context, str):
         return context
 
     rows = await context.store.list_for_user(
-        org_id=context.tenant.org_id,
-        user_id=context.tenant.user_id,
+        org_id=context.org_id,
+        user_id=context.principal.user_id,
+        service_account_id=context.principal.service_account_id,
         agent_id=context.agent_id,
     )
     return _json({
@@ -147,32 +182,65 @@ async def _cron_list_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 
 class _Context:
-    def __init__(self, *, tenant: Any, agent_id: str, store: Any) -> None:
-        self.tenant = tenant
+    def __init__(
+        self, *, org_id: Any, principal: Any, agent_id: str, session_id: UUID,
+        session_store: Any, store: Any,
+    ) -> None:
+        self.org_id = org_id
+        self.principal = principal
         self.agent_id = agent_id
+        self.session_id = session_id
+        self.session_store = session_store
         self.store = store
 
 
-def _tool_context(kwargs: dict[str, Any]) -> _Context | str:
+async def _tool_context(kwargs: dict[str, Any]) -> _Context | str:
     tenant = kwargs.get("tenant")
-    if tenant is None or getattr(tenant, "user_id", None) is None:
-        return _json({"success": False, "error": "Cron schedules are user-owned only"})
+    session_store = kwargs.get("session_store")
+    session_id = _uuid_or_none(kwargs.get("session_id"))
+    if tenant is None or session_store is None or session_id is None:
+        return _json({"success": False, "error": "Schedules are made from a session"})
     agent_id = str(kwargs.get("agent_id") or "")
     if not agent_id:
         return _json({"success": False, "error": "agent_id is required"})
+    # The schedule is its sender's, as a /loop is: not ``tenant``, which on a
+    # managed channel is the agent's own service account.
+    principal = await session_store.resolve_acting_principal(session_id)
+    if principal.user_id is None and principal.service_account_id is None:
+        return _json({
+            "success": False,
+            "error": "Schedules need a signed-in user or a service account; this session has neither.",
+        })
     store = kwargs.get("scheduled_store")
     if store is None:
         store = ScheduledSessionStore(kwargs["session_factory"])
-    return _Context(tenant=tenant, agent_id=agent_id, store=store)
+    return _Context(
+        org_id=tenant.org_id, principal=principal, agent_id=agent_id,
+        session_id=session_id, session_store=session_store, store=store,
+    )
+
+
+async def _answered_this_turn(session_store: Any, session_id: UUID) -> bool:
+    """Whether the user answered an ``ask_user_question`` since their last
+    message: someone was there, and was asked, before something that
+    outlives the chat is made.  What they were asked is the model's part."""
+    said = await session_store.get_events(
+        session_id,
+        types=[EventType.USER_MESSAGE, EventType.ASK_USER_QUESTION_RESPONSE],
+    )
+    return bool(said) and said[-1].type == EventType.ASK_USER_QUESTION_RESPONSE.value
 
 
 def _schedule_payload(row: Any) -> dict[str, Any]:
+    timezone_name = getattr(row, "timezone", None) or "UTC"
     return {
         "id": str(row.id),
         "name": row.name,
         "prompt": row.prompt,
         "schedule": getattr(row, "schedule_display", None),
-        "next_run_at": getattr(row, "next_run_at", None),
+        "timezone": timezone_name,
+        "next_run_at": local_iso(getattr(row, "next_run_at", None), timezone_name),
+        "expires_at": local_iso(getattr(row, "expires_at", None), timezone_name),
         "status": row.status,
     }
 

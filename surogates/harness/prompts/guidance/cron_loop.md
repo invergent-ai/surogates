@@ -4,7 +4,8 @@ description: Guidance for sessions running as one iteration of a cron `/loop` sc
 ---
 # Cron Loop Iteration
 
-This session was started by a cron schedule the user set up with `/loop`.
+This session was started by a cron schedule the user set up, with `/loop`
+or by confirming one an agent made for them.
 You are running **one iteration** of that schedule — the runner will wake
 a fresh session on the configured cadence (e.g. every minute) and replay
 the same prompt each time.

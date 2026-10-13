@@ -65,6 +65,17 @@ def resolve_timezone(timezone_name: str) -> ZoneInfo:
         raise ValueError(f"Unknown timezone: {timezone_name}") from exc
 
 
+def local_iso(moment: datetime | None, timezone_name: str) -> str | None:
+    """*moment* on *timezone_name*'s clock, with its offset
+    (``2026-10-14T08:30:00+03:00``): what a model restates in its user's
+    language without converting anything."""
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(resolve_timezone(timezone_name)).isoformat(timespec="seconds")
+
+
 def parse_loop_command(raw: str) -> LoopCommand:
     text = raw.strip()
     if not text:

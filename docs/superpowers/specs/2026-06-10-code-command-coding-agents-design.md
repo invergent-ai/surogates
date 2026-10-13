@@ -38,8 +38,9 @@ Research into the mid-2026 state of both providers established the single most
 important constraint on this design:
 
 - **Anthropic (Feb 2026 ToS):** Subscription OAuth tokens may be used **only**
-  inside Claude Code, Claude.ai, and Claude Desktop. Using them in a third-party
-  API client violates the Consumer ToS, and Anthropic enforces this server-side.
+  inside Anthropic's own apps, such as Claude Code and Claude.ai. Using them in a
+  third-party API client violates the Consumer ToS, and Anthropic enforces this
+  server-side.
   **The sanctioned headless path is to run the *actual* `claude` binary** with a
   token the binary itself minted via `claude setup-token` (a ~1-year token
   consumed as `CLAUDE_CODE_OAUTH_TOKEN`).

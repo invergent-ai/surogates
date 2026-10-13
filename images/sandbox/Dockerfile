@@ -50,7 +50,6 @@ RUN uv venv /opt/venv \
         matplotlib \
         tabulate \
         pyfiglet \
-        nano-pdf \
         reportlab \
         pdfplumber \
         pypdfium2 \
@@ -85,7 +84,13 @@ FROM python:3.12-slim AS tools
 # imagemagick is used by liteparse to rasterise image inputs (tiff/
 # webp/svg/etc.) before parsing.  pdfgrep is a nice CLI for full-text
 # PDF search.  zip/unzip pack and unpack the OOXML archives the
-# docx/pptx skills edit in place.
+# docx/pptx skills edit in place.  The fonts are metric-compatible
+# stand-ins for Office's (Liberation: Arial, Times New Roman, Courier
+# New; Carlito: Calibri; Caladea: Cambria; TeX Gyre: Bookman, Century
+# Schoolbook), which fontconfig aliases by name.  Without them
+# LibreOffice renders every Office font in the much wider DejaVu, and
+# the skills' page-fit and overflow checks measure text Word and
+# PowerPoint never draw.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git openssh-client \
         ripgrep \
@@ -109,6 +114,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-impress \
         imagemagick \
         pdfgrep \
+        fonts-liberation2 \
+        fonts-crosextra-carlito \
+        fonts-crosextra-caladea \
+        fonts-texgyre \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \

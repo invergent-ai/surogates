@@ -28,6 +28,11 @@ MAX_LOCATIONS = 100
 
 EXTERNAL_REF_RE = re.compile(r"""(?<![\w"\[])'?\[\d+\][^!"\[\]]*'?!""")
 
+# A text cell that reads like a formula -- a sheet reference ('Sheet'!$B$2)
+# or a whole FUNCTION(...) -- is one written without its leading '='.
+TEXT_FORMULA_RE = re.compile(r"(?:'[^']+'|\b[A-Za-z_][\w.]*)!\$?[A-Z]{1,3}\$?\d|^[A-Z][A-Z0-9.]*\(.*\)$")
+TEXT_FORMULA = "formula saved as text (no leading '=')"
+
 RECALCULATE_MACRO = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
 <script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic">
@@ -278,6 +283,7 @@ def _recalc_with_profile(filename, abs_path, timeout, profile_dir: Path):
 
         wb_formulas = load_workbook(filename, data_only=False)
         formula_count = 0
+        text_formulas = []
         for sheet_name in wb_formulas.sheetnames:
             ws = wb_formulas[sheet_name]
             for cell in _existing_cells(ws):
@@ -286,9 +292,18 @@ def _recalc_with_profile(filename, abs_path, timeout, profile_dir: Path):
                     v = v.text
                 if isinstance(v, str) and v.startswith("="):
                     formula_count += 1
+                elif isinstance(v, str) and TEXT_FORMULA_RE.search(v.strip()):
+                    text_formulas.append(f"{sheet_name}!{cell.coordinate}")
         wb_formulas.close()
 
         result["total_formulas"] = formula_count
+        if text_formulas:
+            result["status"] = "errors_found"
+            result["total_errors"] += len(text_formulas)
+            result["error_summary"][TEXT_FORMULA] = {
+                "count": len(text_formulas),
+                "locations": text_formulas[:MAX_LOCATIONS],
+            }
 
         return result
 

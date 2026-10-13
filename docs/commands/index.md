@@ -265,6 +265,13 @@ Behavior notes:
 Schedules a user-owned loop. The scheduled prompt becomes a fresh
 `channel="scheduled"` session each time it fires.
 
+`/loop` is for short polling and self-paced loops. For a lasting schedule at
+a time of day ("every weekday at 08:30, send me…", in any language), ask the
+agent: it confirms the cadence, timezone and next run with you and makes it
+with `cron_create` (see [Tools](../tools/index.md)). That schedule runs until
+cancelled, and `/loop list` and `/loop cancel <id>` show and cancel it like
+any loop.
+
 Examples:
 
 ```text
@@ -309,13 +316,16 @@ Loop behavior:
   next delay between 1 minute and 1 hour; if it does not, Surogates applies a
   10-minute fallback delay. Setting `completed: true` on `loop_wait` ends the
   schedule early.
-- Accepts slash commands as prompts, so `/loop 5m /some-skill args` works.
+- Accepts slash commands as prompts, so `/loop 5m /some-skill args` works,
+  except another `/loop`: every run would make a schedule of its own.
 - Scans prompts before persistence for prompt-injection markers, invisible
   Unicode, secret-exfiltration patterns, and destructive command patterns.
 
 ### `/loop list`
 
-Lists active loops for the current user and agent.
+Lists active loops for the current user and agent, the agent-made schedules
+among them, each with its next run on its own timezone's clock and whether it
+expires or runs until cancelled.
 
 ### `/loop cancel <id>`
 

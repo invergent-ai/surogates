@@ -8,6 +8,7 @@ export type AgentChatSystemKind =
   | "error"
   | "browser_marker"
   | "browser_marker_warning"
+  | "notice"
   | "worker"
   | "thread_proposal";
 
@@ -646,7 +647,9 @@ export type AgentChatEventType =
   | "worker.spawned"
   | "worker.complete"
   | "worker.failed"
-  | "thread.proposed";
+  | "thread.proposed"
+  | "office.conflict"
+  | "office.save_failed";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
@@ -740,6 +743,16 @@ export interface AgentChatState {
   /** The session is waiting for a local-folder computer to come online.
    *  Null when no local operation awaits a device. */
   deviceWait: AgentChatDeviceWaitState | null;
+  /** The latest save trouble the document editor reported, by workspace path. */
+  officeEvents: Record<string, AgentChatOfficeEvent>;
+}
+
+/** A save from the document editor that met trouble: the file changed outside it, or it could not land yet. */
+export interface AgentChatOfficeEvent {
+  type: "office.conflict" | "office.save_failed";
+  eventId: number;
+  /** office.conflict: where the editor's edits were saved instead. */
+  conflictPath?: string;
 }
 
 /**
@@ -883,6 +896,14 @@ export interface AgentChatWorkspaceFile {
   mime_type?: string | null;
   encoding: "utf-8" | "base64";
   truncated: boolean;
+}
+
+/** A document opened in the document server's editor. */
+export interface AgentChatWorkspaceEditor {
+  /** Where the browser loads the editor (`<url>/web-apps/apps/api/documents/api.js`). */
+  document_server_url: string;
+  /** The signed editor config, passed to `DocsAPI.DocEditor` unchanged. */
+  config: Record<string, unknown>;
 }
 
 export interface AgentChatWorkspaceUpload {
@@ -1156,6 +1177,17 @@ export interface AgentChatAdapter {
     sessionId: string;
     path: string;
   }): string;
+  /**
+   * Opens an office document (.docx, .xlsx, .pptx, .pdf; older formats read-only) in the
+   * document server's editor. *theme* is the app's, signed into the config. Optional: a
+   * host without a document server leaves it out, and office files show no preview.
+   */
+  getWorkspaceEditorConfig?(input: {
+    sessionId: string;
+    path: string;
+    theme: "light" | "dark";
+    view?: boolean;
+  }): Promise<AgentChatWorkspaceEditor>;
   openEventStream(input: {
     sessionId: string;
     after: number;

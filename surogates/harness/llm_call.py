@@ -154,15 +154,6 @@ def _interrupted_result(model: str) -> tuple[dict[str, Any], dict[str, Any]]:
             {"model": model, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
              "finish_reason": "interrupted"})
 
-# Maximum reasoning_content characters allowed before any visible
-# content or tool-call delta has arrived.  Above this, the stream is
-# treated as a runaway-reasoning failure and cancelled so the outer
-# retry layer can retry with thinking disabled.  ~4 chars/token on
-# GLM-5.1, so 16 000 chars ≈ 4 000 reasoning tokens.  PROD iter-6
-# dead-end was ~60 KB (well over); iter-4 legitimate was ~5 KB (well
-# under).  Configurable for testing only -- no env var.
-RUNAWAY_REASONING_CHAR_THRESHOLD: int = 16_000
-
 # Non-streaming fallback request timeouts.  The ``read`` budget is the
 # same reasoning-aware ceiling the streaming watchdog uses
 # (``compute_stream_stale_timeout``) so a non-streaming call gets the
@@ -302,6 +293,20 @@ def _should_use_developer_role(model_id: str) -> bool:
     """Return ``True`` if the model prefers 'developer' over 'system' role."""
     model_lower = model_id.lower()
     return any(m in model_lower for m in DEVELOPER_ROLE_MODELS)
+
+
+def sampling_kwargs(config: dict[str, Any]) -> dict[str, Any]:
+    """The sampling values a session sets, for a main-loop request.
+
+    Nothing by default: a value is sent only when the session config
+    carries one. Otherwise the model's own defaults apply, or the ones a
+    user set for it, which the platform proxy merges in.
+    """
+    return {
+        key: config[key]
+        for key in ("temperature", "max_tokens")
+        if config.get(key) is not None
+    }
 
 
 def apply_developer_role(messages: list[dict], model_id: str) -> list[dict]:
@@ -603,9 +608,6 @@ async def call_llm_with_retry(
     compression_attempts = 0
     max_compression_attempts = 3
     active_on_tool_call_complete = on_tool_call_complete
-    # Runaway-reasoning soft retry: we allow at most one in-flight
-    # thinking-off retry per call.  See the success-path branch below.
-    runaway_retry_used: bool = False
 
     # Pre-call sanitization: clean surrogates and fix orphaned tool pairs.
     if "messages" in create_kwargs:
@@ -718,36 +720,6 @@ async def call_llm_with_retry(
                     )
                     continue
                 raise ValueError("LLM returned empty response")
-
-            # Runaway-reasoning soft retry: model produced > threshold
-            # of reasoning_content without any visible content/tool_call.
-            # Re-issue once with enable_thinking=False; the same task
-            # plus thinking-on would runaway again.  Per-call budget of
-            # one silent retry; further runaways fall through as
-            # interrupted responses (the loop layer surfaces them).
-            if (
-                usage_data.get("stream_error_reason") == "runaway_reasoning"
-                and not runaway_retry_used
-                and attempt < MAX_LLM_RETRIES
-            ):
-                runaway_retry_used = True
-                from surogates.harness.expert_routing import (
-                    build_thinking_extra_body,
-                    merge_extra_body,
-                )
-                thinking_extra = build_thinking_extra_body(
-                    enable_thinking=False,
-                )
-                create_kwargs["extra_body"] = merge_extra_body(
-                    create_kwargs.get("extra_body"),
-                    thinking_extra,
-                )
-                logger.warning(
-                    "Runaway reasoning on session %s iter %d; retrying "
-                    "with enable_thinking=False (attempt %d).",
-                    session.id, iteration, attempt + 1,
-                )
-                continue
 
             return result
 
@@ -1315,14 +1287,6 @@ async def call_llm_streaming_inner(
     # the stream is considered stale and will be cancelled.
     last_chunk_time: float = time.monotonic()
 
-    # Runaway-reasoning detection: count reasoning_content chars
-    # received and whether any content or tool-call delta has landed.
-    # If the model emits a large amount of reasoning_content before
-    # any visible output, the stream is cancelled and the outer retry
-    # re-issues with enable_thinking=False.
-    reasoning_char_count: int = 0
-    content_or_tool_emitted: bool = False
-
     async def _close_stream() -> None:
         close_method = getattr(response, "aclose", None) or getattr(
             response, "close", None,
@@ -1496,7 +1460,6 @@ async def call_llm_streaming_inner(
             )
             if reasoning_text:
                 reasoning_parts.append(reasoning_text)
-                reasoning_char_count += len(reasoning_text)
                 # Emit LLM_DELTA event for reasoning so the frontend can
                 # stream reasoning content incrementally (same as text deltas).
                 await store.emit_event(
@@ -1517,7 +1480,6 @@ async def call_llm_streaming_inner(
                     context_scrubber.feed(think_scrubber.feed(text_delta))
                 )
                 if visible_delta:
-                    content_or_tool_emitted = True
                     content_parts.append(visible_delta)
                     # Emit LLM_DELTA event.
                     await store.emit_event(
@@ -1538,7 +1500,6 @@ async def call_llm_streaming_inner(
             # call starting at the same index and redirect it to a fresh slot.
             tc_deltas = getattr(delta, "tool_calls", None)
             if tc_deltas:
-                content_or_tool_emitted = True
                 for tc_delta in tc_deltas:
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = getattr(tc_delta, "id", None) or ""
@@ -1594,26 +1555,6 @@ async def call_llm_streaming_inner(
                                     on_tool_call_complete(prev_entry)
                         _highest_known_slot = idx
 
-            # Runaway-reasoning: model has emitted > threshold chars of
-            # reasoning_content without any visible content or tool call.
-            # Cancel; the outer retry will reissue with thinking disabled.
-            if (
-                not content_or_tool_emitted
-                and reasoning_char_count > RUNAWAY_REASONING_CHAR_THRESHOLD
-            ):
-                logger.warning(
-                    "Runaway reasoning: %d chars of reasoning_content with no "
-                    "content/tool_call (threshold %d). Cancelling stream for "
-                    "session %s (iteration %d).",
-                    reasoning_char_count,
-                    RUNAWAY_REASONING_CHAR_THRESHOLD,
-                    session.id,
-                    iteration,
-                )
-                stop_reason = "runaway_reasoning"
-                await _close_stream()
-                interrupted = True
-                break
     except Exception as exc:
         # The watchdog closed the stream (stale or interrupt) -- the
         # SDK's iterator raises when the underlying response is closed

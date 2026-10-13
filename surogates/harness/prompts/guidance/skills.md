@@ -52,6 +52,6 @@ The skill itself tells you which.
 
 ## Maintaining skills
 
-After completing a complex task (5+ tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill with `skill_manage(action='create')` so you can reuse it next time.
+Create a skill with `skill_manage(action='create')` only when your human partner asks for one. A procedure from a single run carries that run's mistakes along with its steps.
 
 When using a skill and finding it outdated, incomplete, or wrong, patch it immediately with `skill_manage(action='patch')` — don't wait to be asked. Skills that aren't maintained become liabilities.

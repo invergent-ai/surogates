@@ -301,7 +301,7 @@ describe("Settings", () => {
     expect(await texts(settings, ".settings-nav h3")).toEqual(["Settings", "Customize"]);
   });
 
-  it("dims the system's controls with the window while it is open, and fills the window as Claude's does", async () => {
+  it("dims the system's controls with the window while it is open, and fills the window but for 48 px at each edge", async () => {
     const { shell, page } = await signedIn();
     await shell.evaluate(({ BrowserWindow, nativeTheme }) => {
       const window = BrowserWindow.getAllWindows()[0]!;

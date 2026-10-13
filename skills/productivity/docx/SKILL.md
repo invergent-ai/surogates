@@ -10,7 +10,7 @@ A `.docx` is a ZIP archive of XML files. Choose your approach by task:
 
 | Task | Approach |
 |---|---|
-| **Create** a new document | Write a `docx` (npm) script — see gotchas below |
+| **Create** a new document | Copy `scripts/example_doc.js`, replace its content, run it — see below |
 | **Edit** an existing document | `unzip` → edit `word/document.xml` → `zip` (docx-js cannot open existing files) |
 | **Read** content | `read_file(path="file.docx")` — the harness parses it natively into markdown (headings, paragraphs, lists, tables) |
 | **Read** tracked changes or comments | `pandoc --track-changes=all -t markdown file.docx` (`read_file` shows the accepted text only) |
@@ -19,35 +19,83 @@ A `.docx` is a ZIP archive of XML files. Choose your approach by task:
 
 Everything this skill uses is preinstalled in the sandbox. The sandbox runs as a non-root user without `sudo`, so `apt-get install` always fails; if a CLI tool is missing, use the Python or JavaScript route on this page instead.
 
-## Creating with docx-js — gotchas
+## Creating a document
 
-`docx` is preinstalled — do not run `npm install` first; write the script and `require('docx')` directly. Only if that require fails: `npm install docx`. The model knows the API; these are the footguns:
+Start from `scripts/example_doc.js`. It is a one-page agreement that passes `validate.py`, and it already has everything most documents need: US Letter, the font and size set once for the whole document, numbered clauses with (a)/(b) sub-clauses, bullets, a table, a signature table and a "Page X of Y" footer.
 
-- **Page size defaults to A4.** For US Letter set `page: { size: { width: 12240, height: 15840 } }` (DXA; 1440 = 1″).
+```bash
+cp scripts/example_doc.js make_doc.js   # into the workspace
+# edit make_doc.js: replace the CONTENT array, nothing else
+node make_doc.js out.docx
+```
+
+`docx` is preinstalled: do not run `npm install`.
+
+Build CONTENT from the helpers the script defines:
+
+| Helper | Produces |
+|---|---|
+| `title("TEXT")` | centred bold title |
+| `heading("Text")` | bold section heading (appears in a TOC) |
+| `para("Text with **bold**")` | plain paragraph; `**…**` marks bold |
+| `clause("**Term.** Text")` | numbered clause: 1. 2. 3. |
+| `clause("text", 1)` | lettered sub-clause under the clause above: (a) (b) |
+| `bullet("text")` | bullet item |
+| `table(header, rows, [5, 2, 2])` | grid table; the widths are relative, the script converts them |
+| `signatures(["Party A", "Party B"])` | signature block: Signature / Name / Title / Date lines per party |
+
+Write a blank to fill in as underscores in the text (`"____________"`), as the example does. Change the helpers or the `Document` options only when the content needs something they cannot express. For A4, set `PAGE` to `{ width: 11906, height: 16838 }`; the text and table widths follow from `PAGE` and `MARGIN`.
+
+Rules that apply when you go beyond the example:
+
+- **Never type numbers or bullets into the text** (`"1. "`, `"(a) "`, `"•"`). Numbering comes from the `numbering` config (`LevelFormat.DECIMAL`, `LevelFormat.BULLET`); a typed number won't renumber and won't indent.
+- **Set the font and size once** in `styles.default.document.run`. Don't repeat `font`/`size` on every `TextRun`.
+- **The table-layout enum is `TableLayoutType.FIXED`.** docx has no `LayoutType`.
+- **Bold in a heading or the title goes on the `TextRun`.** LibreOffice ignores `bold` in the Title/Heading styles.
 - **Landscape:** pass portrait dimensions and `orientation: PageOrientation.LANDSCAPE` — docx-js swaps width/height internally.
 - **Tables need dual widths:** set `columnWidths` on the table AND `width` on every cell, both in `WidthType.DXA` (PERCENTAGE breaks in Google Docs). Column widths must sum to the table width.
 - **Table shading:** use `ShadingType.CLEAR`, never `SOLID` (renders black).
-- **Lists:** never insert `•` literally; use a `numbering` config with `LevelFormat.BULLET`.
 - **`ImageRun` requires `type:`** (`"png"`, `"jpg"`, …).
 - **`PageBreak` must be inside a `Paragraph`.**
 - **Never use `\n`** — use separate `Paragraph` elements.
 - **TOC:** headings must use built-in `HeadingLevel.*`; custom heading styles need `outlineLevel` set or they won't appear.
 - **Don't use a table as a horizontal rule** — use a paragraph bottom border instead.
+- **Consecutive paragraphs with identical borders merge into one box** — Word and LibreOffice draw only the group's outer edges, so four bottom-bordered "Signature: / Name: / Title: / Date:" paragraphs show a single rule. Give each signature line its own table cell with a bottom border, as `signatures()` does.
 - **Dot-leader / right-aligned-on-same-line:** use `PositionalTab` (`alignment: PositionalTabAlignment.RIGHT`, `leader: PositionalTabLeader.DOT`) inside a `TextRun`, not literal `.` or space padding.
 
 ## Verify the output
 
-After writing a `.docx`, render it and look at it:
+After writing a `.docx`, convert it to PDF and check the facts with text tools first:
 
 ```bash
 python scripts/office/soffice.py --headless --convert-to pdf output.docx
+pdfinfo output.pdf | grep -E 'Pages|Page size'   # page count and paper size
+pdftotext -layout output.pdf - | head -120       # the text in reading order, with its numbering
+```
+
+These two are exact. Answer page count, wording, numbering, order and "is everything there" from them, not from images.
+
+Then look at the pages once, for what only an image shows: alignment, table borders, spacing, overlapping text.
+
+```bash
 pdftoppm -jpeg -r 100 output.pdf page
 ls -1 "$PWD"/page-*.jpg
 ```
 
-Inspect each image `ls` printed with `vision_analyze` (it reads workspace files only — render into the workspace, never `/tmp`), asking about the defects you would check by eye: overflowing tables, wrong page size, broken lists, missing images.
+Ask `vision_analyze` about each image `ls` printed, once per page (it reads workspace files only — render into the workspace, never `/tmp`). It misreads small text and miscounts rows, so don't ask it what `pdftotext` already answered, and don't re-ask the same question at a higher resolution.
 
 `pdftoppm` zero-pads page numbers to the width of the page count (`page-01.jpg`…`page-12.jpg`).
+
+**Fitting a page limit.** If `pdfinfo` shows too many pages, make these changes in order, re-checking `pdfinfo` after each:
+
+1. Shorten the wording.
+2. Lower the paragraph spacing in `styles.default.document.paragraph.spacing.after` (120 → 60).
+3. Lower `SIZE` to 20 (10 pt). Never below 20.
+4. Lower `MARGIN` to 1080 (0.75″). Never below 1080.
+
+Never set line spacing below single (`spacing.line` under 240): the lines overlap.
+
+Arial, Calibri, Cambria, Times New Roman and Courier New render true-to-width here (metric-compatible stand-ins), so pagination matches Word's to within a line or so. Other fonts are approximated — leave a few lines of slack when the page count matters.
 
 ## Editing existing documents
 

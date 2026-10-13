@@ -163,15 +163,34 @@ plan", and a merge on top of that would persist the truncation.
 
 ### `cron_create` / `cron_delete` / `cron_list` -- Scheduled Sessions
 
-Manage user-owned scheduled prompts. These are the tool equivalents behind
-cron-backed work such as reminders and fixed polling workflows. Schedules are
-stored in PostgreSQL, scoped to the current `org_id`, `user_id`, and `agent_id`,
-then picked up by that agent's worker and enqueued as fresh
-`channel="scheduled"` sessions.
+Manage scheduled prompts from any chat: "every weekday at 08:30, send me…",
+in whatever language, becomes a cron and an IANA timezone the model writes.
+Schedules are stored in PostgreSQL, scoped to the current `org_id`, the
+sender's `user_id` or `service_account_id`, and `agent_id`, then picked up by
+the platform ticker and enqueued as fresh `channel="scheduled"` sessions whose
+answers appear in the chat that made them.
+
+Who is offered them: a top-level session with an owner (a user or a service
+account), with `/loop` enabled for the agent, that is also offered
+`ask_user_question`. Anonymous visitors, scheduled runs, project threads and
+their helpers, workers and delegated tasks, and evaluation rows are not.
+
+`cron_create` makes nothing until the user has answered an
+`ask_user_question` in the current turn (since their last message). Until
+then it returns `would_create` — the cron, the timezone, the next run as an
+ISO timestamp with its offset on the schedule's own clock, and whether it runs
+until cancelled or once — so the model can confirm the details with the user,
+in their language, and call again with the same arguments. What the question
+says is the model's part (the `schedule` skill and the tool description);
+the harness checks that someone answered.
+
+Model-made schedules never expire: they run until `cron_delete`,
+`/loop cancel <id>`, or a run's `loop_complete`. `/loop list` lists them with
+the user's `/loop` schedules.
 
 For user-facing slash commands, see [Commands](../commands/index.md).
 
-`cron_create` schedules a prompt or slash command.
+`cron_create` schedules a prompt or slash command (not another `/loop`).
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -188,10 +207,12 @@ For user-facing slash commands, see [Commands](../commands/index.md).
 |---|---|---|
 | `id` | string | Scheduled session ID |
 
-`cron_list` lists active schedules for the current user and agent.
+`cron_list` lists active schedules for the current sender and agent, each
+with its `timezone`, `next_run_at` and `expires_at` on its own clock.
 
-Scheduled prompts are user-owned only. Service-account, anonymous, or
-system-only sessions cannot create user schedules. Prompts are scanned before
+A schedule belongs to the sender of the turn that made it, as a `/loop` does
+— on a managed channel the human, not the agent's own service account.
+Anonymous sessions cannot create schedules. Prompts are scanned before
 persistence for prompt-injection markers, invisible Unicode, secret-exfiltration
 patterns, and destructive command patterns.
 

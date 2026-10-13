@@ -85,9 +85,12 @@ genuinely novel direction and can say why it breaks the plateau.
 ## INIT (first turn)
 
 Your first action is `idea_tree(action=set_meta, values={...})` with the
-contract values from the kickoff (eval_cmd, eval_cmd_test, metric_direction,
-eval_timeout, max_cycles, max_tree_depth, max_parallel, and any
-protected_paths / required_outputs). Then OBSERVE → IDEATE → DISPATCH.
+contract values from the kickoff: `eval_cmd`, `eval_cmd_test`,
+`metric_direction`, and any of `eval_timeout`, `max_cycles`,
+`max_tree_depth`, `max_parallel`, `protected_paths`. Don't set the
+baselines: the command's `baseline=` / `baseline_test=` are already
+recorded as `baseline_score` / `test_baseline_score`. Then OBSERVE →
+IDEATE → DISPATCH.
 
 ## FINALIZE
 

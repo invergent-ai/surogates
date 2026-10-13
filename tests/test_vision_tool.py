@@ -88,6 +88,61 @@ async def test_vision_analyze_sends_workspace_image_as_data_url(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_vision_analyze_sends_no_temperature_and_turns_thinking_off(
+    tmp_path: Path,
+) -> None:
+    """Reading an image is perception: the calling agent does the reasoning,
+    so the vision call skips thinking and leaves sampling to the model."""
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
+    _png(tmp_path / "sample.png")
+    create = AsyncMock(return_value=_fake_response())
+    llm_client = SimpleNamespace(
+        base_url="https://ops.example/proxy/services/_model/m-1/v1",
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+
+    await _vision_analyze_handler(
+        {"image": "sample.png"},
+        workspace_path=str(tmp_path),
+        llm_client=llm_client,
+        model="surogate3.7",
+    )
+
+    call_kwargs = create.await_args.kwargs
+    assert "temperature" not in call_kwargs
+    assert call_kwargs["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+@pytest.mark.asyncio
+async def test_vision_analyze_retries_without_a_rejected_thinking_switch(
+    tmp_path: Path,
+) -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+
+    _png(tmp_path / "sample.png")
+    create = AsyncMock(side_effect=[
+        TypeError("unexpected keyword argument 'chat_template_kwargs'"),
+        _fake_response("described"),
+    ])
+    llm_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+
+    result = await _vision_analyze_handler(
+        {"image": "sample.png"},
+        workspace_path=str(tmp_path),
+        llm_client=llm_client,
+        model="surogate3.7",
+    )
+
+    assert json.loads(result)["analysis"] == "described"
+    assert "extra_body" not in create.await_args_list[1].kwargs
+
+
+@pytest.mark.asyncio
 async def test_vision_analyze_prefers_vision_client_over_primary(
     tmp_path: Path,
 ) -> None:

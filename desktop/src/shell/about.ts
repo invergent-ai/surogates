@@ -1,7 +1,7 @@
-// About Surogate, as Claude Desktop shows its own (index.chunk-B33tFrRY.js, renderer/about_window/):
-// a small modal window over the app's, 320 by 400, one at a time, with the app's name and its
-// version, which a click copies with what it runs on, and its documentation. Its page is one
-// of the app's files, and draws the window as a whole: no frame, moved by its bare parts.
+// About Surogate: a small modal window over the app's, 320 by 400, one at a time, with the
+// app's name and its version, which a click copies with what it runs on, and its documentation.
+// Its page is one of the app's files, and draws the window as a whole: no frame, moved by its
+// bare parts.
 
 import { BrowserWindow, clipboard } from "electron";
 

@@ -23,6 +23,7 @@ from surogates.runtime import (
     build_agent_runtime_context,
 )
 from surogates.runtime.rate_limiter import PerTenantRateLimiter
+from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_service_account_session_token
@@ -549,7 +550,14 @@ async def turn_calling(
     monkeypatch.setattr(registry, "dispatch", ran)
     store = AsyncMock()
     store.emit_event = AsyncMock(side_effect=range(100, 300))
-    store.get_events = AsyncMock(return_value=[])
+    # The user has answered a question in this turn, as a routine's confirmation is.
+    answered = SimpleNamespace(id=1, type=EventType.ASK_USER_QUESTION_RESPONSE.value, data={})
+    store.get_events = AsyncMock(
+        side_effect=lambda *_, types=None, **__: [answered] if EventType.ASK_USER_QUESTION_RESPONSE in (types or ()) else [],
+    )
+    store.resolve_acting_principal = AsyncMock(
+        return_value=ActingPrincipal(user_id=session.user_id, service_account_id=session.service_account_id),
+    )
     harness = _make_loop_harness(session_store=store)
     harness._tools = registry
     harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")
@@ -642,7 +650,10 @@ async def test_a_masters_prompt_runs_the_project(api):
     # The master does a simple thing itself, and gives anything more to a thread, which it starts in the cloud.
     said = " ".join(prompt.split())
     assert "Do no work yourself beyond a quick answer." not in said
-    assert "Do a simple thing yourself, here: a quick answer, creating a file, a small edit, one quick command." in said
+    assert (
+        "Do a simple thing yourself, here: a quick answer, creating a file whose whole content the user gave you, "
+        "writing a few lines, a small edit, one quick command."
+    ) in said
     assert "Never do complex work yourself." in said
     assert "Never do the work and then give it to a thread" in said
     assert "## Starting threads - Give it to a new thread with `start_thread`." in said

@@ -228,31 +228,31 @@ class ContextCompressor:
         browser_state_keep_last: int = 2,
         quiet_mode: bool = False,
         summary_model_override: str | None = None,
-        base_url: str = "",
-        api_key: str = "",
+        context_window: int | None = None,
         model_overrides: dict[str, dict] | None = None,
         summary_client: Any | None = None,
     ) -> None:
         self._model_id = model_id
+        # The endpoint's declared window wins: the management plane sends
+        # it for models the catalog cannot know (a builder's own server).
         info: ModelInfo | None = resolve_model_info(
-            model_id,
-            base_url=base_url,
-            api_key=api_key,
-            overrides=model_overrides,
+            model_id, overrides=model_overrides,
         )
-        if info is None and not quiet_mode:
+        if not context_window and info is None and not quiet_mode:
             # Fallback is a correctness hazard — the compressor will
             # under- or over-compact relative to the real window.  Warn
-            # so operators can add a config override rather than
+            # so operators can set the model's context window rather than
             # silently running with a default.
             logger.warning(
-                "Model %r not found in the static catalog, provider /models "
-                "discovery, or config overrides — falling back to %d-token "
-                "context window.  Add llm.models.%s.context_window in "
-                "config.yaml to set the correct value.",
+                "Model %r has no context window from its endpoint, the "
+                "static catalog, or config overrides — falling back to "
+                "%d tokens.  Set the model's context window in ops (or "
+                "llm.models.%s.context_window in config.yaml).",
                 model_id, _DEFAULT_CONTEXT_WINDOW, model_id,
             )
-        self.context_length: int = info.context_window if info else _DEFAULT_CONTEXT_WINDOW
+        self.context_length: int = context_window or (
+            info.context_window if info else _DEFAULT_CONTEXT_WINDOW
+        )
 
         self.threshold_percent = threshold_percent
         self.protect_first_n = protect_first_n

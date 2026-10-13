@@ -1,5 +1,4 @@
-// Where each window opens: where the user left it, as Claude Desktop keeps its main
-// window's place (electron-window-state). One file for every window, by key.
+// Where each window opens: where the user left it. One file for every window, by key.
 
 import { readState, writeState } from "./state-file.js";
 

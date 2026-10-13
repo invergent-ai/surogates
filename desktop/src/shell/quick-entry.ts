@@ -1,9 +1,8 @@
-// Quick entry, as Claude Desktop's (index.chunk-C3wD9rT7.js, renderer/quick_window/): a frameless,
-// transparent window of 606 by 470 over every other (alwaysOnTop "pop-up-menu"), in the middle of the
-// screen the pointer is on, whose box takes a message for a new chat. Enter sends it; Escape, a
-// click beside the box, or another window taking the focus hides the window, its text kept until the
-// new chat's page says it went. Made at its first opening, then hidden, never closed until the app
-// quits. Its page is one of the app's files.
+// Quick entry: a frameless, transparent window of 606 by 470 over every other (alwaysOnTop
+// "pop-up-menu"), in the middle of the screen the pointer is on, whose box takes a message for
+// a new chat. Enter sends it; Escape, a click beside the box, or another window taking the focus
+// hides the window, its text kept until the new chat's page says it went. Made at its first
+// opening, then hidden, never closed until the app quits. Its page is one of the app's files.
 
 import { app, BrowserWindow, screen } from "electron";
 
@@ -80,7 +79,7 @@ export class QuickEntry {
     window.setAlwaysOnTop(true, "pop-up-menu");
     // Linux gives every window the app's menu: its keys would act on the agent's page behind this one.
     dropMenu(window);
-    // Another window taking the focus hides it, as Claude's does.
+    // Another window taking the focus hides it.
     window.on("blur", () => window.hide());
     window.once("closed", () => {
       if (this.window === window) this.window = null;

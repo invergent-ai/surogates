@@ -45,6 +45,7 @@ class ResolvedLLM:
 
     client: Any
     model: str
+    context_window: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +230,10 @@ async def build_session_llm_clients(
             service_account_id=service_account_id,
         )
         client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url)
-        slot = ResolvedLLM(client=client, model=endpoint.model)
+        slot = ResolvedLLM(
+            client=client, model=endpoint.model,
+            context_window=endpoint.context_window,
+        )
         resolved.append(slot)
         return slot
 

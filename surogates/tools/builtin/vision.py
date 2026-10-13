@@ -15,6 +15,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from surogates.devices.workspace import DeviceOperationError, said
+from surogates.harness.auxiliary_llm import (
+    reasoning_disabled_extra_body,
+    rejects_reasoning_controls,
+)
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import has_copy, read_copy
@@ -146,11 +150,21 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         max_dimension=max_dimension,
     )
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0,
+    # Reading an image is perception; the calling agent reasons over the
+    # answer with its own thinking. So no thinking here, and no sampling
+    # values: the model's defaults (or what a user set for it) apply.
+    request: dict[str, Any] = {"model": model, "messages": messages}
+    extra_body = reasoning_disabled_extra_body(
+        model, str(getattr(client, "base_url", "") or ""),
     )
+    try:
+        response = await client.chat.completions.create(
+            **request, **({"extra_body": extra_body} if extra_body else {}),
+        )
+    except Exception as exc:
+        if not extra_body or not rejects_reasoning_controls(exc):
+            raise
+        response = await client.chat.completions.create(**request)
     content = _extract_response_content(response)
     if not content:
         return _json_error("Vision model returned an empty response")
