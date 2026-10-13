@@ -68,11 +68,35 @@ describe.skipIf(!itEnabled)("reading a document", () => {
     const found: Any = await office.read(agent, { view: "search", query: "revenue target" });
     expect(found.total).toBe(1);
     expect(found.matches[0]).toMatchObject({ kind: "paragraph", match: "revenue target" });
+    const block = (await outline(agent)).blocks.find((b: Any) => b.text?.includes("revenue target"));
+    expect(found.matches[0].id).toBe(block.id);
   });
 
   it("says a block is gone", async () => {
     expect(await office.read(agent, { view: "block", target: "no-such-id" })).toEqual({
       error: "No block no-such-id: read the outline again.",
     });
+    // A table cell has an id, but it is not a block.
+    const table = (await outline(agent)).blocks.find((b: Any) => b.kind === "table");
+    const cell = await (await pool.get(agent)).command(
+      "function () { return String(Api.GetByInternalId(scope.id).GetCell(0, 0).GetInternalId()); }",
+      { id: table.id },
+    );
+    expect(await office.read(agent, { view: "block", target: cell.value as string })).toEqual({
+      error: `No block ${cell.value}: read the outline again.`,
+    });
+  });
+
+  // Last: it adds a paragraph. A quote copied from a view must find the same text again.
+  it("views a block's exact text, tabs and spaces kept", async () => {
+    const north = (await outline(agent)).blocks.find((b: Any) => b.text?.startsWith("North grew"));
+    expect(((await office.read(agent, { view: "block", target: north.id })) as Any).text).toBe("North grew fastest, then the east.");
+    const text = "Tab\there,  two spaces";
+    const page = await pool.get(agent);
+    const added = await page.command(
+      "function () { var p = Api.CreateParagraph(); p.AddText(scope.text); Api.GetDocument().Push(p); return String(p.GetInternalId()); }",
+      { text },
+    );
+    expect(((await office.read(agent, { view: "block", target: added.value as string })) as Any).text).toBe(text);
   });
 });

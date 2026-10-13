@@ -25,8 +25,14 @@
     return all.length > count ? all.slice(0, count).join(" ") + " …" : all.join(" ");
   }
 
+  function clip(text, max) {
+    return text.length > max ? text.slice(0, max) + " …" : text;
+  }
+
   // An id the editor still knows can be a block someone deleted: a block is in the document only at its position.
+  // Rows, cells, drawings and inline controls have ids too, but no position: they are not blocks.
   function attached(el) {
+    if (typeof el.GetPosInParent !== "function") return false;
     var pos = el.GetPosInParent(), top = pos >= 0 ? doc.GetElement(pos) : null;
     return !!top && String(top.GetInternalId()) === String(el.GetInternalId());
   }
@@ -96,7 +102,7 @@
   }
 
   // A page of the outline, or one table, stays well under the 50,000 characters a tool result may hold.
-  var OUTLINE_BUDGET = 30000, VIEW_BUDGET = 30000;
+  var OUTLINE_BUDGET = 30000, VIEW_BUDGET = 30000, CELL_BUDGET = 2000;
 
   function outline(start, limit) {
     var n = doc.GetElementsCount(), blocks = [], size = 0;
@@ -120,13 +126,15 @@
       var el = content.GetElement(i);
       if (el.GetClassType() === "paragraph") parts.push(String(el.GetText({ Numbering: false })).replace(/\s+$/, ""));
     }
-    return parts.join("\n");
+    return clip(parts.join("\n"), CELL_BUDGET);
   }
 
   function view(id) {
     var el = Api.GetByInternalId(String(id));
     if (!el || !attached(el)) return { error: "No block " + id + ": read the outline again." };
-    var block = describe(el, 4000);
+    var block = describe(el, 0);
+    // The exact text, whitespace kept: a quote copied from it must find the same words again.
+    if (block.text !== undefined) block.text = clip(textOf(el), VIEW_BUDGET);
     if (block.kind === "table") {
       block.cells = [];
       var size = 0;
