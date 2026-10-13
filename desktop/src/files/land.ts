@@ -1312,7 +1312,7 @@ export interface KeptFiles {
 
 // The text of the file at *path*, through the walk.
 function textOf(path: Where): string {
-  const fd = fdPaths.open(path, constants.O_RDONLY | FLAGS.NOFOLLOW);
+  const fd = fdPaths.open(path, constants.O_RDONLY);
   try {
     return readFileSync(fd, "utf8");
   } finally {

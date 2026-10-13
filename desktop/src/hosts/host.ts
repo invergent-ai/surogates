@@ -183,9 +183,9 @@ async function start(message: HostStart): Promise<void> {
   named = checked.named;
   if (!confirmedFolder(message.expect, checked)) throw new FolderUnavailable(checked.replaced);
   folder = { path, dev, ino };
-  // The folders it works in, held from here on where nothing else binds them: on Windows the walk the hook guard looks
-  // through reaches no folder but these (fd-paths.ts).
-  fdPaths.bind([path, ...checked.reads, ...checked.writes]);
+  // The folder, held from here on where nothing else binds it: on Windows the walk the hook guard looks through reaches
+  // no folder but this one (fd-paths.ts). What its helper is given beside it, the helper holds itself.
+  fdPaths.bind([path]);
   only = checked.only ?? null;
   commands = checked.commands;
   // One host per folder.
@@ -238,7 +238,9 @@ async function start(message: HostStart): Promise<void> {
   // helper's tools by it too, by the node its hosts run on. What a helper is given beside its folder
   // is held as the folder is: a command wrote a landing's copy, and its helper writes what it keeps.
   // On macOS the app's own rg, beside that node, comes first (srt-darwin.ts).
-  const hostPath = hostToolsPath(process.env.PATH, [{ dev, ino }, identityOf(hostStat(tmp)), ...beside.map((dir) => identityOf(hostStat(hostPathOf(dir))))], process.execPath);
+  const hostPath = hostToolsPath(process.env.PATH, [
+    { dev, ino }, identityOf(hostStat(tmp)), ...beside.map((dir) => identityOf(hostStat(hostPathOf(dir)))),
+  ], process.execPath);
   process.env.PATH = hostPath;
   // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
   const lacking = fileToolsMissing(message.bwrapPath, hostPath);
