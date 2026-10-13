@@ -295,6 +295,20 @@ def _should_use_developer_role(model_id: str) -> bool:
     return any(m in model_lower for m in DEVELOPER_ROLE_MODELS)
 
 
+def sampling_kwargs(config: dict[str, Any]) -> dict[str, Any]:
+    """The sampling values a session sets, for a main-loop request.
+
+    Nothing by default: a value is sent only when the session config
+    carries one. Otherwise the model's own defaults apply, or the ones a
+    user set for it, which the platform proxy merges in.
+    """
+    return {
+        key: config[key]
+        for key in ("temperature", "max_tokens")
+        if config.get(key) is not None
+    }
+
+
 def apply_developer_role(messages: list[dict], model_id: str) -> list[dict]:
     """Swap 'system' role to 'developer' for models that require it.
 
