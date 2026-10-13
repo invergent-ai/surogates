@@ -4,7 +4,7 @@
 // notification area's icon and by a second launch, Ctrl+Alt+Space for quick entry, the login item in the Run key,
 // sign-in tokens sealed, the PC's own name, a toast's click, Settings' close button, a launch that asks it to quit, a
 // chat's folder bound by its path in the guest and worked in through its file host, and test/win32/dev-app.ps1, whose
-// scheme opens a link and whose removal quits the app. With no VM: none boots on the Windows runner.
+// scheme opens a link and whose removal quits the app, signed in or not. With no VM: none boots on the Windows runner.
 // On Windows alone.
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -28,6 +28,9 @@ const SYSTEM32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32");
 const REG = join(SYSTEM32, "reg.exe");
 const POWERSHELL = join(SYSTEM32, "WindowsPowerShell", "v1.0", "powershell.exe");
 const RUN = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+// How long a signed-in app takes to quit at most: its device's link, the threads' suspension, its tools and its VM each
+// stop within their own bounds (shell/device-stack.ts).
+const QUIT_MS = 30_000;
 const LINKS = "HKCU\\Software\\Classes\\surogate\\shell\\open\\command";
 
 let home: string;
@@ -356,6 +359,22 @@ describe.runIf(process.platform === "win32" && process.env.CI === "true")("a dev
     expect(opened.status, opened.stderr).toBe(0);
     await expect.poll(async () => (await mainWindow(shell))?.visible, { timeout: 30_000 }).toBe(true);
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
+  }, 180_000);
+
+  it("quits within its bound when signed in, at its removal's --quit, as its own Quit does", async () => {
+    const { shell } = await signedIn();
+    const env = { ...process.env, ...shellEnv(home) };
+    const began = Date.now();
+    const removed = powershell(`& '${SCRIPT}' -Remove`, env);
+    const took = Date.now() - began;
+    // What the app still waited on where it had not gone: its main process's handles and requests, for the failure's words.
+    const held = removed.status === 0 ? null : await shell.evaluate(() => {
+      const own = process as unknown as { _getActiveHandles(): object[]; _getActiveRequests(): object[] };
+      return { handles: own._getActiveHandles().map((one) => one.constructor.name), requests: own._getActiveRequests().map((one) => one.constructor.name) };
+    }).catch((error: Error) => error.message);
+    expect({ status: removed.status, said: `${removed.stdout}${removed.stderr}`.trim(), held }).toEqual({ status: 0, said: expect.stringMatching(/^Removed /), held: null });
+    expect(took).toBeLessThan(QUIT_MS);
+    app = undefined;
   }, 180_000);
 
   it("has a Start menu shortcut with its own AppUserModelID; its removal quits the app it started, and takes out its login item, its scheme and the shortcut", async () => {

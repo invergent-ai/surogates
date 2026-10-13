@@ -34,8 +34,11 @@ if ($Remove) {
     Start-Process -FilePath $electron -ArgumentList "`"$main`" --quit" -Wait
     $until = (Get-Date).AddSeconds(60)
     while ((Get-DevApp) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 250 }
-    if (Get-DevApp) {
-      Write-Error "Surogate Dev is still running: answer its question, or quit it from its icon in the notification area, then run this again."
+    $left = @(Get-DevApp)
+    if ($left) {
+      # Which of this checkout's Electron's processes are left, and what started each.
+      $named = ($left | ForEach-Object { "$($_.ProcessId) (from $($_.ParentProcessId)): $($_.CommandLine)" }) -join "`n"
+      Write-Error "Surogate Dev is still running: answer its question, or quit it from its icon in the notification area, then run this again.`n$named"
     }
   }
   # Its login item: Electron's value in the user's Run key, named by its AppUserModelID, and its Startup apps switch.
