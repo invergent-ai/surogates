@@ -983,7 +983,7 @@ class ChannelInboundPipeline:
                         f"[Check-in] Run the '{_skill_ref}' skill with this "
                         "person now. Record the result with checkin_outcome "
                         "when the check-in ends; use escalate if "
-                        "anything needs the care team's attention."
+                        "anything needs the team's attention."
                     ),
                     synthetic="checkin",
                     metadata={

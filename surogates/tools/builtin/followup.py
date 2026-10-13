@@ -1,7 +1,7 @@
 """Tools an agent uses to follow a person through a protocol, and to escalate.
 
 Every tool acts on the person the conversation belongs to — the session's
-user — never on someone named in the arguments.  That is what lets a patient
+user — never on someone named in the arguments.  That is what lets anyone
 talk to these tools safely: there is no argument through which one person
 could enrol, pause or read another.
 """
@@ -47,11 +47,11 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
     name="followup_enroll",
     description=(
         "Enrol the person you are talking to in a follow-up protocol, so the "
-        "practice's scheduled check-ins start reaching them. Only call this "
+        "business's scheduled check-ins start reaching them. Only call this "
         "after the person has clearly agreed to be contacted on this channel; "
         "pass consent=true to record that agreement. Enrolling again updates "
         "the start date or phase and reactivates a paused or ended enrolment. "
-        "The care team is told about every enrolment."
+        "The team is told about every enrolment."
     ),
     parameters={
         "type": "object",
@@ -60,14 +60,14 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "The protocol slug. Call followup_status first to see the "
-                    "protocols this practice offers."
+                    "protocols this business offers."
                 ),
             },
             "start_date": {
                 "type": "string",
                 "description": (
-                    "Day 0 of the protocol as YYYY-MM-DD, e.g. the procedure "
-                    "date. Give this or days_ago, not both. Without either "
+                    "Day 0 of the protocol as YYYY-MM-DD, e.g. the day the "
+                    "programme started. Give this or days_ago, not both. Without either "
                     "the person is not enrolled unless date_unknown is true."
                 ),
             },
@@ -88,7 +88,7 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "type": "boolean",
                 "description": (
                     "True when the person only knew the start roughly, so the "
-                    "care team knows to confirm it."
+                    "team knows to confirm it."
                 ),
             },
             "date_unknown": {
@@ -103,10 +103,11 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "The phase to start in, when the protocol uses phases.",
             },
-            "patient_name": {
+            "person_name": {
                 "type": "string",
                 "description": (
-                    "The patient's full name, as they or their relative gave "
+                    "The followed person's full name, as they or whoever "
+                    "writes for them gave "
                     "it. Ask for it: the WhatsApp profile name is whoever is "
                     "writing, which may be a relative. Required unless "
                     "name_unknown is true."
@@ -115,30 +116,30 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
             "name_unknown": {
                 "type": "boolean",
                 "description": (
-                    "True only when the person would not give the patient's "
+                    "True only when the person would not give the followed person's "
                     "name after you asked."
                 ),
             },
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who will answer the check-ins when it is not the patient, "
+                    "Who will answer the check-ins when it is not the person followed, "
                     "with their relation, e.g. \"Ana, daughter\". Omit when "
-                    "the patient answers."
+                    "the person answers themselves."
                 ),
             },
             "consent": {
                 "type": "boolean",
                 "description": (
                     "True only when the person agreed, in this conversation, "
-                    "to receive messages from the practice here."
+                    "to receive messages from the business here."
                 ),
             },
             "summary": {
                 "type": "string",
                 "description": (
-                    "One or two sentences for the care team about this person "
-                    "and this enrolment, in the care team's language."
+                    "One or two sentences for the team about this person "
+                    "and this enrolment, in the team's language."
                 ),
             },
         },
@@ -150,10 +151,10 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
     name="followup_update",
     description=(
         "Change the enrolment of the person you are talking to: correct the "
-        "start date or the patient's name, record who answers for them, move "
+        "start date or the person's name, record who answers for them, move "
         "to another phase, or pause or end it (for example "
-        "while they are in hospital). Pausing or ending tells the care team, "
-        "with your reason. Only change what the person or the practice has "
+        "while they are away). Pausing or ending tells the team, "
+        "with your reason. Only change what the person or the business has "
         "told you; never move a phase on your own judgement."
     ),
     parameters={
@@ -172,14 +173,14 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
                 ),
             },
             "phase": {"type": "string", "description": "The new phase."},
-            "patient_name": {
+            "person_name": {
                 "type": "string",
-                "description": "The corrected patient's full name.",
+                "description": "The corrected full name of the person followed.",
             },
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who now answers the check-ins for the patient, with their "
+                    "Who now answers the check-ins for the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
@@ -191,7 +192,7 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
             "reason": {
                 "type": "string",
                 "description": (
-                    "Why, in the care team's language. Required when pausing "
+                    "Why, in the team's language. Required when pausing "
                     "or ending."
                 ),
             },
@@ -203,8 +204,8 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
 FOLLOWUP_STATUS_SCHEMA = ToolSchema(
     name="followup_status",
     description=(
-        "Show the protocols this practice offers and the enrolments of the "
-        "person you are talking to: patient, who answers for them, start date, "
+        "Show the protocols this business offers and the enrolments of the "
+        "person you are talking to: whose follow-up it is, who answers for them, start date, "
         "the day they are on today, phase and status."
     ),
     parameters={"type": "object", "properties": {}},
@@ -213,11 +214,11 @@ FOLLOWUP_STATUS_SCHEMA = ToolSchema(
 ESCALATE_SCHEMA = ToolSchema(
     name="escalate",
     description=(
-        "Raise something to the care team now. Use it whenever what the "
-        "person says needs a human: a symptom or reading the protocol lists, "
+        "Raise something to the team now. Use it whenever what the "
+        "person says needs a human: something the protocol lists, "
         "something the protocol does not cover, distress, or a request only "
-        "the practice can answer. It reaches the responsible operator's inbox "
-        "and the care team's phones. It does not end a check-in; record the "
+        "the business can answer. It reaches the responsible operator's inbox "
+        "and the team's phones. It does not end a check-in; record the "
         "outcome separately."
     ),
     parameters={
@@ -227,7 +228,7 @@ ESCALATE_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "What needs attention, quoting the person where it "
-                    "matters, in one to three sentences the care team can "
+                    "matters, in one to three sentences the team can "
                     "act on, in their language."
                 ),
             },
@@ -235,9 +236,9 @@ ESCALATE_SCHEMA = ToolSchema(
                 "type": "string",
                 "enum": ["red", "yellow"],
                 "description": (
-                    "red when you gave the person an emergency script (call "
-                    "the emergency number, go to the emergency room); "
-                    "yellow otherwise. Default yellow."
+                    "red when you gave the person an emergency script (urgent "
+                    "instructions to get help now); yellow otherwise. "
+                    "Default yellow."
                 ),
             },
         },
@@ -266,12 +267,12 @@ class _Context:
             config.get(f"{self.channel}_channel_id") or ""
         )
         self.display_name: str = (user.display_name if user else "") or ""
-        #: The enrollment that names the patient, when there is one.
+        #: The enrollment that names the person, when there is one.
         self.enrollment: Any = None
 
     def person_label(self) -> str:
-        """How the care team recognises who an alert is about."""
-        name = followup_store.patient_label(self.display_name, self.enrollment)
+        """How the team recognises who an alert is about."""
+        name = followup_store.person_label(self.display_name, self.enrollment)
         parts = [name] if name else []
         if self.channel == "whatsapp" and self.platform_user_id:
             parts.append(readable_phone(self.platform_user_id))
@@ -332,11 +333,11 @@ def _start_date(arguments: dict, timezone_name: str) -> date | None:
     return _parse_date((today - timedelta(days=int(str(raw_days).strip()))).isoformat())
 
 
-async def _tell_care_team(
+async def _tell_team(
     sf: Any, ctx: _Context, settings: Any, *, kind: str, text: str, **extra: Any,
 ):
-    """The care team's phones, with who it is about, never the person talking."""
-    return await followup_store.notify_care_team(
+    """The team's phones, with who it is about, never the person talking."""
+    return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
         text=f"{text.strip()}\n\n— {ctx.person_label()}", created_by="agent",
         subject_user_id=ctx.user_id, exclude_user_id=ctx.user_id,
@@ -381,8 +382,8 @@ async def _next_contact_text(sf: Any, ctx: _Context, row: Any, configs: list[dic
 
 def _told(queued: int, why_not: str | None) -> str:
     return (
-        f"The care team was notified ({queued})."
-        if queued else f"The care team was not notified: {why_not}."
+        f"The team was notified ({queued})."
+        if queued else f"The team was not notified: {why_not}."
     )
 
 
@@ -391,7 +392,14 @@ def _told(queued: int, why_not: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def with_person_name(arguments: dict) -> dict:
+    """``person_name`` is the argument; ``patient_name`` is its older name."""
+    name = arguments.get("person_name")
+    return {**arguments, "patient_name": name} if name else arguments
+
+
 async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
+    arguments = with_person_name(arguments)
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
     if ctx is None or ctx.user_id is None:
@@ -399,18 +407,18 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     if ctx.channel != "whatsapp" or not ctx.platform_user_id:
         return (
             "Enrolment happens in the person's WhatsApp conversation, where "
-            "the check-ins will reach them. Ask them to message the practice "
+            "the check-ins will reach them. Ask them to message the business "
             "there."
         )
-    if followup_store.is_care_team(settings, ctx.user_id):
+    if followup_store.is_team_member(settings, ctx.user_id):
         return (
-            "Not enrolled: this person is on the care team (they receive the "
-            "alerts). They are not a patient."
+            "Not enrolled: this person is on the team (they receive the "
+            "alerts). They are not someone followed."
         )
     if arguments.get("consent") is not True:
         return (
             "Not enrolled: consent is required. Ask the person whether they "
-            "agree to receive the practice's messages here, and call again "
+            "agree to receive the business's messages here, and call again "
             "with consent=true only if they say yes."
         )
     protocol = str(arguments.get("protocol") or "").strip()
@@ -422,23 +430,23 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     )
     if not offered:
         return (
-            f"Not enrolled: the practice has no active Program, so nobody can "
+            f"Not enrolled: the business has no active Program, so nobody can "
             f"be enrolled in '{protocol}' or any other protocol. This is a "
-            f"configuration problem at the practice, not something the person "
-            f"did: tell them follow-up is not set up yet and the care team will "
+            f"configuration problem at the business, not something the person "
+            f"did: tell them follow-up is not set up yet and the team will "
             f"be told, then call escalate with the reason \"No active follow-up "
             f"Program for protocol '{protocol}'\"."
         )
     if protocol not in offered:
         return (
             f"Not enrolled: '{protocol}' is not offered here. Offered: "
-            f"{', '.join(sorted(offered))}. If the practice told you to use "
+            f"{', '.join(sorted(offered))}. If the business told you to use "
             f"'{protocol}', it has no active Program for it: that is a "
-            f"configuration problem at the practice, so escalate saying so."
+            f"configuration problem at the business, so escalate saying so."
         )
     summary = str(arguments.get("summary") or "").strip()
     if not summary:
-        return "Not enrolled: write a short summary for the care team."
+        return "Not enrolled: write a short summary for the team."
     try:
         start = _start_date(arguments, offered[protocol])
     except ValueError as exc:
@@ -464,7 +472,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         start_date_approximate=approximate,
     )
     ctx.enrollment = enrollment
-    queued, why_not = await _tell_care_team(sf, ctx, settings, kind="enrolment", text=summary)
+    queued, why_not = await _tell_team(sf, ctx, settings, kind="enrolment", text=summary)
 
     parts = [f"Enrolled in {protocol}"]
     if enrollment.patient_name:
@@ -479,7 +487,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         return (
             " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
             + " No start date is recorded, so no Program will message this "
-            "person until the date is set. Call escalate so the care team can "
+            "person until the date is set. Call escalate so the team can "
             "set it, and do not promise the person any message."
         )
     return (
@@ -510,7 +518,7 @@ def _enrol_missing(arguments: dict) -> list[str]:
         and arguments.get("name_unknown") is not True
     ):
         missing.append(
-            "pass patient_name (the patient's full name; ask for it if you "
+            "pass person_name (the followed person's full name; ask for it if you "
             "do not have it), or name_unknown: true if the person will not "
             "give it."
         )
@@ -527,6 +535,7 @@ def _start_text(row: Any) -> str:
 
 
 async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
+    arguments = with_person_name(arguments)
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
     if ctx is None or ctx.user_id is None:
@@ -571,7 +580,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
 
     result = f"Updated {protocol}: status {row.status}"
     if row.patient_name:
-        result += f", patient {row.patient_name}"
+        result += f", name {row.patient_name}"
     if row.answered_by:
         result += f", answered by {row.answered_by}"
     if row.start_date:
@@ -580,7 +589,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
         result += f", phase {row.phase}"
     result += "."
     if status in ("paused", "ended"):
-        queued, why_not = await _tell_care_team(
+        queued, why_not = await _tell_team(
             sf, ctx, settings, kind="alert", text=f"{protocol} {status}: {reason}",
         )
         result += " " + _told(queued, why_not)
@@ -601,18 +610,18 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     lines = [
         "Protocols offered: " + ", ".join(sorted(zones)) + "."
         if zones else
-        "Protocols offered: none. The practice has no active Program, so "
+        "Protocols offered: none. The business has no active Program, so "
         "nobody can be enrolled. This is a configuration problem at the "
-        "practice, not something the person did: if they want follow-up, tell "
+        "business, not something the person did: if they want follow-up, tell "
         "them it is not set up yet and call escalate with the reason \"No "
         "active follow-up Program\"."
     ]
     if ctx.user_id is None:
         return lines[0]
-    if followup_store.is_care_team(settings, ctx.user_id):
+    if followup_store.is_team_member(settings, ctx.user_id):
         lines.append(
-            "This person is on the care team: they receive the alerts and "
-            "the practice's notices here. They are not a patient — do not "
+            "This person is on the team: they receive the alerts and "
+            "the business's notices here. They are not someone followed — do not "
             "enrol them or ask them check-in questions."
         )
     rows = await followup_store.enrollments(
@@ -625,8 +634,8 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         index = day_index(row.start_date, today)
         detail = [f"{row.protocol}: {row.status}"]
         detail.append(
-            f"patient {row.patient_name}" if row.patient_name
-            else "patient's name not recorded"
+            f"name {row.patient_name}" if row.patient_name
+            else "name not recorded"
         )
         if row.answered_by:
             detail.append(f"answered by {row.answered_by}")
@@ -704,7 +713,7 @@ def _uuid_or_none(value: Any) -> uuid.UUID | None:
 async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     reason = str(arguments.get("reason") or "").strip()
     if not reason:
-        return "reason is required — say what needs the care team's attention."
+        return "reason is required — say what needs the team's attention."
     severity = arguments.get("severity") or "yellow"
     if severity not in followup_store.ALERT_SEVERITIES:
         return "severity must be red or yellow."
@@ -746,7 +755,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     # The key groups this escalation's alerts so an unopened red one is
     # reminded once, and names the check-in whose history records it.
     escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{uuid.uuid4().hex}"
-    queued, why_not = await _tell_care_team(
+    queued, why_not = await _tell_team(
         sf, ctx, settings, kind="alert",
         text=f"🔴 {reason}" if severity == "red" else reason,
         severity=severity, dedupe_prefix=escalation,
@@ -759,13 +768,13 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         elif queued:
             state = "raised"
             note = (
-                "Inbox target is not a valid service account; care-team phones notified"
-                if target_id is not None else "No inbox target; care-team phones notified"
+                "Inbox target is not a valid service account; team phones notified"
+                if target_id is not None else "No inbox target; team phones notified"
             )
         else:
             # A visible failure, never a silent one: the agent saying it
             # escalated is not evidence that anyone was told.
-            state, note = "failed", "No escalation target or care-team phone configured"
+            state, note = "failed", "No escalation target or team phone configured"
         async with sf() as db:
             row = await db.get(ProgramInvitationRow, invitation.id)
             row.escalation_state = state
@@ -776,13 +785,13 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     if not inboxed and not queued:
         return (
             "Could not escalate: nobody is configured to receive this "
-            f"({why_not}). Tell the person to contact the practice directly."
+            f"({why_not}). Tell the person to contact the business directly."
         )
     told = []
     if inboxed:
         told.append("the responsible operator's inbox")
     if queued:
-        told.append(f"{queued} care-team phone(s)")
+        told.append(f"{queued} team phone(s)")
     return "Escalated to " + " and ".join(told) + "."
 
 

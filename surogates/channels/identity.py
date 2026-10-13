@@ -60,7 +60,7 @@ def channel_user_email(platform: str, platform_user_id: str, org_id: UUID | str)
 
 
 def readable_phone(wa_id: str) -> str:
-    """A bare-digit WhatsApp id as the care team reads and taps it.
+    """A bare-digit WhatsApp id as a team member reads and taps it.
 
     "+40 712 000 403": WhatsApp links it as a number to call or message, and
     the spaces keep event redaction, which masks a run of seven or more

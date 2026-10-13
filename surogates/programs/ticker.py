@@ -162,7 +162,7 @@ class ProgramTicker:
         except Exception:
             logger.exception("program ticker failed to sweep deadlines")
         # Straight after the sweep: it is what turns silence into
-        # "no reply", and a streak of those is what the care team must hear.
+        # "no reply", and a streak of those is what the team must hear.
         try:
             await alert_missed_checkins(self._sf, now=_utcnow())
         except Exception:

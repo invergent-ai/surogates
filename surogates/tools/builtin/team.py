@@ -1,7 +1,7 @@
-"""Tools for the practice's care team when they write to the agent themselves.
+"""Tools for the team behind an agent when they write to it themselves.
 
 The follow-up tools act only on the person the conversation belongs to, so a
-patient's conversation can never reach another patient.  These two are the
+person's conversation can never reach another's.  These are the
 deliberate exception: they read across, and write to, every person enrolled
 with this agent.  That is safe only because they work for nobody but an alert
 recipient of this agent, proved from the database on every call, and are
@@ -44,15 +44,15 @@ from surogates.tools.registry import ToolSchema
 
 logger = logging.getLogger(__name__)
 
-CARE_TEAM_TOOL_NAMES: frozenset[str] = frozenset({
-    "care_team_overview", "care_team_message_patient", "care_team_update_patient",
-    "care_team_enroll_patient",
+TEAM_TOOL_NAMES: frozenset[str] = frozenset({
+    "team_overview", "team_message_person", "team_update_person",
+    "team_enroll_person",
 })
 
-NOT_CARE_TEAM = (
-    "Refused: this tool is only for the practice's care team, and the person "
+NOT_TEAM = (
+    "Refused: this tool is only for the business's team, and the person "
     "in this conversation is not on it. Nothing about anyone else can be shown "
-    "or sent from here; do not mention other patients."
+    "or sent from here; do not mention other people."
 )
 
 ALERT_WINDOW = timedelta(hours=72)
@@ -64,20 +64,20 @@ MAX_CHARS = 12_000
 CONVERSATION_LINES = 10
 MEMORY_CHARS = 3000
 MAX_MESSAGE = 4000
-#: ops' default ``texts.welcome_text``, used when the practice set none.
+#: ops' default ``texts.welcome_text``, used when the business set none.
 WELCOME_TEXT = (
     "Thank you. To start your follow-up, could you tell me the date of your procedure?"
 )
 
-CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
-    name="care_team_overview",
+TEAM_OVERVIEW_SCHEMA = ToolSchema(
+    name="team_overview",
     description=(
-        "Care team only. A digest of everyone enrolled with this practice's "
+        "Team only. A digest of everyone enrolled with this business's "
         "follow-up: protocol, day, status, when they last wrote, their last "
         "check-in and its outcome, alerts in the last 72 hours, unanswered "
         "check-ins in a row and the next scheduled message, with a header of "
         "recent enrolments, pauses and people silent for 3 days or more. "
-        "Summarise it for the doctor using only what it says; never rank or "
+        "Summarise it for the team member using only what it says; never rank or "
         "interpret clinical values."
     ),
     parameters={
@@ -89,7 +89,7 @@ CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
                 "maximum": 720,
                 "description": "How far back the header looks. Default 24.",
             },
-            "patient": {
+            "person": {
                 "type": "string",
                 "description": (
                     "A name or phone fragment to show only that person, with "
@@ -101,31 +101,31 @@ CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
     },
 )
 
-CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
-    name="care_team_message_patient",
+TEAM_MESSAGE_PERSON_SCHEMA = ToolSchema(
+    name="team_message_person",
     description=(
-        "Care team only. Send an enrolled patient the doctor's message, word "
-        "for word, from the practice's WhatsApp number. First call without "
+        "Team only. Send an enrolled person the team member's message, word "
+        "for word, from the business's WhatsApp number. First call without "
         "confirmation: it shows who would receive what, sends nothing and "
-        "gives a confirmation code. Show that to the doctor and only after "
+        "gives a confirmation code. Show that to the team member and only after "
         "they answer yes call again with the same arguments and that code. "
-        "Never reword the doctor's text."
+        "Never reword the team member's text."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "patient": {
+            "person": {
                 "type": "string",
-                "description": "The patient's name or a fragment of their phone number.",
+                "description": "The person's name or a fragment of their phone number.",
             },
             "text": {
                 "type": "string",
-                "description": "The doctor's message exactly as they wrote it.",
+                "description": "The team member's message exactly as they wrote it.",
             },
             "even_if_paused": {
                 "type": "boolean",
                 "description": (
-                    "Only true after you told the doctor the patient's "
+                    "Only true after you told the team member the person's "
                     "follow-up is paused or ended and they still want this sent."
                 ),
             },
@@ -133,35 +133,35 @@ CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "The code the preview of this exact action gave, only "
-                    "after the doctor answered yes to that preview."
+                    "after the team member answered yes to that preview."
                 ),
             },
         },
-        "required": ["patient", "text"],
+        "required": ["person", "text"],
     },
 )
 
-CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
-    name="care_team_update_patient",
+TEAM_UPDATE_PERSON_SCHEMA = ToolSchema(
+    name="team_update_person",
     description=(
-        "Care team only. Change an enrolled patient's follow-up on the "
-        "doctor's word: pause, end or resume it, correct the start date, the "
-        "patient's name or who answers for them. First call without "
+        "Team only. Change an enrolled person's follow-up on a team "
+        "member's word: pause, end or resume it, correct the start date, the "
+        "person's name or who answers for them. First call without "
         "confirmation: it shows exactly what would change, changes nothing "
-        "and gives a confirmation code. Show that to the doctor and only "
+        "and gives a confirmation code. Show that to the team member and only "
         "after they answer yes call again with the same arguments and that "
         "code."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "patient": {
+            "person": {
                 "type": "string",
-                "description": "The patient's name or a fragment of their phone number.",
+                "description": "The person's name or a fragment of their phone number.",
             },
             "protocol": {
                 "type": "string",
-                "description": "The protocol slug. Omit when the patient has only one.",
+                "description": "The protocol slug. Omit when the person has only one.",
             },
             "status": {
                 "type": "string",
@@ -170,7 +170,7 @@ CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
             },
             "reason": {
                 "type": "string",
-                "description": "Why, in the doctor's words. Required when pausing or ending.",
+                "description": "Why, in the team member's words. Required when pausing or ending.",
             },
             "start_date": {
                 "type": "string",
@@ -180,22 +180,22 @@ CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
                 "type": "integer",
                 "minimum": 0,
                 "description": (
-                    "The corrected day 0 as days before today, when the doctor "
+                    "The corrected day 0 as days before today, when the team member "
                     "says it that way. Do not work out the date yourself."
                 ),
             },
             "start_date_approximate": {
                 "type": "boolean",
-                "description": "True when the doctor gave the start only roughly.",
+                "description": "True when the team member gave the start only roughly.",
             },
-            "patient_name": {
+            "person_name": {
                 "type": "string",
-                "description": "The corrected patient's full name.",
+                "description": "The corrected person's full name.",
             },
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who now answers the check-ins for the patient, with their "
+                    "Who now answers the check-ins for the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
@@ -203,23 +203,23 @@ CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "The code the preview of this exact action gave, only "
-                    "after the doctor answered yes to that preview."
+                    "after the team member answered yes to that preview."
                 ),
             },
         },
-        "required": ["patient"],
+        "required": ["person"],
     },
 )
 
-CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
-    name="care_team_enroll_patient",
+TEAM_ENROLL_PERSON_SCHEMA = ToolSchema(
+    name="team_enroll_person",
     description=(
-        "Care team only. Enrol a new patient by their WhatsApp number on the "
-        "doctor's word: it records their permission to be messaged as the "
-        "doctor's say-so and sends them the practice's welcome message. First "
-        "call without confirmation: it shows who would be enrolled and how, "
-        "changes nothing and gives a confirmation code. Show that to the "
-        "doctor and only after they answer yes call again with the same "
+        "Team only. Enrol a new person by their WhatsApp number on a team "
+        "member's word: it records their permission to be messaged as the "
+        "team member's say-so and sends them the business's welcome message. "
+        "First call without confirmation: it shows who would be enrolled and "
+        "how, changes nothing and gives a confirmation code. Show that to the "
+        "team member and only after they answer yes call again with the same "
         "arguments and that code."
     ),
     parameters={
@@ -227,12 +227,12 @@ CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
         "properties": {
             "phone": {
                 "type": "string",
-                "description": "The patient's WhatsApp number with country code, e.g. +40 746 148 303.",
+                "description": "The person's WhatsApp number with country code, e.g. +40 746 148 303.",
             },
-            "patient_name": {"type": "string", "description": "The patient's full name."},
+            "person_name": {"type": "string", "description": "The person's full name."},
             "protocol": {
                 "type": "string",
-                "description": "The protocol slug. Omit when the practice offers only one.",
+                "description": "The protocol slug. Omit when the business offers only one.",
             },
             "start_date": {
                 "type": "string",
@@ -242,22 +242,22 @@ CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
                 "type": "integer",
                 "minimum": 0,
                 "description": (
-                    "Day 0 as days before today, when the doctor says it that "
+                    "Day 0 as days before today, when the team member says it that "
                     "way. Do not work out the date yourself."
                 ),
             },
             "start_date_approximate": {
                 "type": "boolean",
-                "description": "True when the doctor gave the start only roughly.",
+                "description": "True when the team member gave the start only roughly.",
             },
             "date_unknown": {
                 "type": "boolean",
-                "description": "True only when the doctor does not know day 0.",
+                "description": "True only when the team member does not know day 0.",
             },
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who answers the check-ins when not the patient, with their "
+                    "Who answers the check-ins when not the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
@@ -265,26 +265,26 @@ CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "The code the preview of this exact action gave, only "
-                    "after the doctor answered yes to that preview."
+                    "after the team member answered yes to that preview."
                 ),
             },
         },
-        "required": ["phone", "patient_name"],
+        "required": ["phone", "person_name"],
     },
 )
 
 
-async def care_team_tool_exclusions(
+async def team_tool_exclusions(
     session_factory: Any, session: Any, *, programs_enabled: bool,
 ) -> frozenset[str]:
-    """The care-team tools, unless this session's user is on the care team."""
+    """The team tools, unless this session's user is on the team."""
     if programs_enabled and getattr(session, "user_id", None) is not None:
         settings = await followup_store.get_settings(
             session_factory, org_id=session.org_id, agent_id=session.agent_id,
         )
-        if followup_store.is_care_team(settings, session.user_id):
+        if followup_store.is_team_member(settings, session.user_id):
             return frozenset()
-    return CARE_TEAM_TOOL_NAMES
+    return TEAM_TOOL_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +298,7 @@ class _Person:
         self.rows = rows
         self.display_name = (user.display_name if user else "") or ""
         self.phone = phone
-        self.label = followup_store.patient_label(
+        self.label = followup_store.person_label(
             self.display_name, followup_store.labelling_enrollment(rows),
         ) or f"user {user_id}"
 
@@ -312,10 +312,10 @@ class _Person:
 
 
 async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> list[_Person]:
-    """Everyone enrolled with this agent, never the care team itself."""
+    """Everyone enrolled with this agent, never the team itself."""
     by_user: dict[uuid.UUID, list] = {}
     for row in await followup_store.enrollments(sf, org_id=org_id, agent_id=agent_id):
-        if not followup_store.is_care_team(settings, row.user_id):
+        if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
     if not by_user:
         return []
@@ -371,21 +371,21 @@ async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Perso
         if p.matches(fragment)
     ]
     if not matches:
-        return f"nobody enrolled with this practice matches '{fragment}'."
+        return f"nobody enrolled with this business matches '{fragment}'."
     if len(matches) > 1:
         return (
-            f"'{fragment}' matches more than one person. Ask the doctor which "
+            f"'{fragment}' matches more than one person. Ask the team member which "
             "one:\n" + "\n".join(f"- {p.label} ({readable_phone(p.phone) if p.phone else 'no number'})" for p in matches)
         )
     return matches[0]
 
 
-def _doctor(ctx: Any) -> str:
+def _member(ctx: Any) -> str:
     return ctx.display_name or f"user {ctx.user_id}"
 
 
 # ---------------------------------------------------------------------------
-# care_team_overview
+# team_overview
 # ---------------------------------------------------------------------------
 
 
@@ -410,7 +410,7 @@ async def _invitations(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list]:
 async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]]:
     """Each person's alerts and escalations of the last 72 hours, once each.
 
-    An alert is queued once per care-team phone, and an escalation is also an
+    An alert is queued once per team phone, and an escalation is also an
     event on the person's session, so the same reason is read several times.
     """
     since = now - ALERT_WINDOW
@@ -526,7 +526,7 @@ async def _conversation(sf, org_id, agent_id, user_id) -> list[str]:
                 continue  # the platform's instruction to the agent, not the person
             who, content = "them", data.get("content")
         else:
-            who = "practice" if data.get("synthetic") == "outreach" else "agent"
+            who = "business" if data.get("synthetic") == "outreach" else "agent"
             content = (data.get("message") or {}).get("content")
         if not isinstance(content, str) or not content.strip():
             continue
@@ -553,7 +553,7 @@ async def _memory(kwargs: dict, sf: Any, ctx: Any, user_id: uuid.UUID) -> list[s
     try:
         bucket = _memory_bucket()
     except Exception:
-        logger.warning("[care_team] no memory bucket configured", exc_info=True)
+        logger.warning("[team] no memory bucket configured", exc_info=True)
         return None
     async with sf() as db:
         sessions = (
@@ -582,7 +582,7 @@ async def _memory(kwargs: dict, sf: Any, ctx: Any, user_id: uuid.UUID) -> list[s
             try:
                 found = await read_user_memory(backend, bucket=bucket, key=key)
             except Exception:
-                logger.warning("[care_team] memory read failed for %s", key, exc_info=True)
+                logger.warning("[team] memory read failed for %s", key, exc_info=True)
                 continue
             if found:
                 entries.extend(e.strip() for e in found[0].split("\n---\n") if e.strip())
@@ -605,11 +605,11 @@ def _memory_lines(entries: list[str] | None) -> list[str]:
     return lines
 
 
-async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
+async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
-    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
-        return NOT_CARE_TEAM
+    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
+        return NOT_TEAM
     try:
         since_hours = int(arguments.get("since_hours") or 24)
     except (TypeError, ValueError):
@@ -619,13 +619,13 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
     since = now - timedelta(hours=since_hours)
 
     people = await _people(sf, ctx.org_id, ctx.agent_id, settings)
-    fragment = str(arguments.get("patient") or "").strip()
+    fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
     if fragment:
         people = [p for p in people if p.matches(fragment)]
         if not people:
-            return f"Nobody enrolled with this practice matches '{fragment}'."
+            return f"Nobody enrolled with this business matches '{fragment}'."
     if not people:
-        return "Nobody is enrolled with this practice's follow-up yet."
+        return "Nobody is enrolled with this business's follow-up yet."
 
     ids = [p.user_id for p in people]
     configs = await followup_store.active_program_configs(
@@ -721,7 +721,7 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
     if shown < len(blocks):
         out += (
             f"\n\n… {len(blocks) - shown} more not shown; ask about one person "
-            "with the patient argument."
+            "with the person argument."
         )
     return out
 
@@ -734,7 +734,7 @@ CONFIRM_TTL_SECONDS = 15 * 60
 
 
 def _confirm_key(session_id: Any, tool: str, code: str) -> str:
-    return f"surogates:care_team:confirm:{session_id}:{tool}:{code}"
+    return f"surogates:team:confirm:{session_id}:{tool}:{code}"
 
 
 async def _unconfirmed(
@@ -743,7 +743,7 @@ async def _unconfirmed(
     """None when *arguments* carry the code that a preview of this exact
     action issued in this session; otherwise the preview with a fresh code.
 
-    The preview text is what the doctor said yes to, so its hash is the
+    The preview text is what the team member said yes to, so its hash is the
     binding: any change to who, what or the record's current state since
     the preview makes the old code worthless.
     """
@@ -771,26 +771,26 @@ async def _unconfirmed(
     fresh = secrets.token_hex(3).upper()
     await redis.set(_confirm_key(session_id, tool, fresh), digest, ex=CONFIRM_TTL_SECONDS)
     return (
-        f"{lead}{preview} Show this to the doctor; only after they answer yes, "
+        f"{lead}{preview} Show this to the team member; only after they answer yes, "
         f"call again with the same arguments and confirmation=\"{fresh}\". "
         f"{nothing_done}"
     )
 
 
 # ---------------------------------------------------------------------------
-# care_team_message_patient
+# team_message_person
 # ---------------------------------------------------------------------------
 
 
-async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> str:
+async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
-    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
-        return NOT_CARE_TEAM
-    fragment = str(arguments.get("patient") or "").strip()
+    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
+        return NOT_TEAM
+    fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
     text = str(arguments.get("text") or "").strip()
     if not fragment:
-        return "Nothing sent: say which patient, by name or phone number."
+        return "Nothing sent: say which person, by name or phone number."
     if not text:
         return "Nothing sent: the message is empty."
     if len(text) > MAX_MESSAGE:
@@ -821,7 +821,7 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
         )
         return (
             f"Nothing sent: {person.label}'s follow-up is not active ({status}). "
-            "Ask the doctor whether to message them anyway; only if they say "
+            "Ask the team member whether to message them anyway; only if they say "
             f"yes, call again with even_if_paused: true. {call}"
         )
     if followup_store.permission_status(identity) != "granted":
@@ -831,7 +831,7 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
         )
     sender = _sender(ctx, settings)
     if not sender:
-        return f"Nothing sent: WhatsApp is not switched on for this practice. {call}"
+        return f"Nothing sent: WhatsApp is not switched on for this business. {call}"
     template = settings.message_template_name if settings else None
     is_open = window_open(
         await followup_store.last_inbound(
@@ -844,11 +844,11 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
         return (
             f"Nothing sent: {person.label} has not written in the last 24 hours, "
             "so WhatsApp only lets an approved message template reach them, and "
-            f"the practice has none chosen under Follow-up. {call}"
+            f"the business has none chosen under Follow-up. {call}"
         )
 
     refused = await _unconfirmed(
-        kwargs, "care_team_message_patient", arguments,
+        kwargs, "team_message_person", arguments,
         f"Will send to {person.label} ({phone}): «{text}»"
         + (
             ", now, as a normal WhatsApp message." if is_open else
@@ -865,7 +865,7 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
         platform="whatsapp", channel_identifier=sender, kind="operator",
         text=text, template_name=template,
         template_language=settings.message_template_language if settings else None,
-        subject_user_id=person.user_id, created_by=f"care-team:{ctx.user_id}",
+        subject_user_id=person.user_id, created_by=f"team:{ctx.user_id}",
     )
     if is_open:
         return (
@@ -881,7 +881,7 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
 
 
 # ---------------------------------------------------------------------------
-# care_team_update_patient
+# team_update_person
 # ---------------------------------------------------------------------------
 
 
@@ -900,14 +900,14 @@ def _enrollment_of(person: _Person, protocol: str) -> Any:
     )
 
 
-async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str:
+async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
-    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
-        return NOT_CARE_TEAM
-    fragment = str(arguments.get("patient") or "").strip()
+    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
+        return NOT_TEAM
+    fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
     if not fragment:
-        return "Nothing changed: say which patient, by name or phone number."
+        return "Nothing changed: say which person, by name or phone number."
     person = await _one_person(sf, ctx, settings, fragment)
     if isinstance(person, str):
         return f"Nothing changed: {person}"
@@ -935,8 +935,12 @@ async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str
         changes["start_date_approximate"] = approximate
         if start is None:
             described.append(f"start date marked {'approximate' if approximate else 'exact'}")
-    for field, label in (("patient_name", "patient name"), ("answered_by", "answered by")):
-        value = str(arguments.get(field) or "").strip()
+    given = {
+        "patient_name": arguments.get("person_name") or arguments.get("patient_name"),
+        "answered_by": arguments.get("answered_by"),
+    }
+    for field, label in (("patient_name", "name"), ("answered_by", "answered by")):
+        value = str(given[field] or "").strip()
         if value:
             changes[field] = value
             described.append(f"{label} {getattr(row, field) or 'none'} → {value}")
@@ -949,16 +953,16 @@ async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str
                 f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
             )
         if status in ("paused", "ended") and not reason:
-            return "Nothing changed: ask the doctor why before pausing or ending."
+            return "Nothing changed: ask the team member why before pausing or ending."
         changes["status"] = status
         # No column records who changed an enrolment; the reason carries it.
-        changes["status_reason"] = f"{reason} (by {_doctor(ctx)})" if reason else None
+        changes["status_reason"] = f"{reason} (by {_member(ctx)})" if reason else None
         described.append(f"status {row.status} → {status}" + (f" ({reason})" if reason else ""))
     if not changes:
         return "Nothing to change: say what to change."
 
     refused = await _unconfirmed(
-        kwargs, "care_team_update_patient", arguments,
+        kwargs, "team_update_person", arguments,
         f"Will change {person.label}'s {row.protocol}: " + "; ".join(described) + ".",
         "Nothing has been changed.",
     )
@@ -973,21 +977,21 @@ async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str
         return f"Nothing changed: {person.label} is no longer enrolled in {row.protocol}."
     result = f"Updated {person.label}'s {row.protocol}: status {updated.status}"
     if updated.patient_name:
-        result += f", patient {updated.patient_name}"
+        result += f", name {updated.patient_name}"
     if updated.answered_by:
         result += f", answered by {updated.answered_by}"
     if updated.start_date:
         result += f", start {_start_text(updated)}"
     result += "."
     if status in ("paused", "ended"):
-        label = followup_store.patient_label(person.display_name, updated)
-        queued, why_not = await followup_store.notify_care_team(
+        label = followup_store.person_label(person.display_name, updated)
+        queued, why_not = await followup_store.notify_team(
             sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="alert",
             text=(
-                f"{row.protocol} {status} by {_doctor(ctx)}: {reason}"
+                f"{row.protocol} {status} by {_member(ctx)}: {reason}"
                 f"\n\n— {label or person.label}"
             ),
-            created_by=f"care-team:{ctx.user_id}", subject_user_id=person.user_id,
+            created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
             exclude_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
         )
         result += " " + _told(queued, why_not)
@@ -995,7 +999,7 @@ async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str
 
 
 # ---------------------------------------------------------------------------
-# care_team_enroll_patient
+# team_enroll_person
 # ---------------------------------------------------------------------------
 
 
@@ -1024,7 +1028,7 @@ async def _number_holder(sf: Any, org_id: uuid.UUID, wa_id: str) -> User | None:
         ).scalar_one_or_none()
 
 
-async def _patient_account(
+async def _person_account(
     sf: Any, ctx: Any, wa_id: str, name: str, holder: User | None,
 ) -> uuid.UUID | str:
     """The account behind *wa_id*, created phone-only when there is none, in
@@ -1056,7 +1060,7 @@ async def _patient_account(
             # Never move a person's number, as the Users page refuses to.
             return f"that person's account already has the number {readable_phone(bound)}."
         # Someone who wrote first has a runtime shadow account, which the
-        # linked identity policy refuses; the doctor vouching makes them known.
+        # linked identity policy refuses; the team member vouching makes them known.
         if user.auth_provider == "whatsapp":
             user.auth_provider = "external"
         await ensure_agent_user(
@@ -1071,18 +1075,18 @@ async def _patient_account(
         return user.id
 
 
-async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str:
+async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
-    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
-        return NOT_CARE_TEAM
+    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
+        return NOT_TEAM
     try:
         wa_id = normalize_wa_id(str(arguments.get("phone") or ""))
     except ValueError as exc:
         return f"Not enrolled: {exc}"
-    name = str(arguments.get("patient_name") or "").strip()
+    name = str(arguments.get("person_name") or arguments.get("patient_name") or "").strip()
     if not name:
-        return "Not enrolled: ask the doctor for the patient's full name."
+        return "Not enrolled: ask the team member for the person's full name."
     zones = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
     )
@@ -1101,17 +1105,17 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
         return f"Not enrolled: {exc}."
     if start is None and arguments.get("date_unknown") is not True:
         return (
-            "Not enrolled: ask the doctor for day 0 and pass days_ago or "
+            "Not enrolled: ask the team member for day 0 and pass days_ago or "
             "start_date, or date_unknown: true if they do not know it."
         )
     approximate = arguments.get("start_date_approximate") is True if start else None
     answered_by = str(arguments.get("answered_by") or "").strip() or None
 
     holder = await _number_holder(sf, ctx.org_id, wa_id)
-    if holder is not None and followup_store.is_care_team(settings, holder.id):
+    if holder is not None and followup_store.is_team_member(settings, holder.id):
         return (
-            f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the care team, "
-            "who receives the alerts and is not a patient. Check the number."
+            f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the team, "
+            "who receives the alerts and is not followed. Check the number."
         )
     sender = _sender(ctx, settings)
 
@@ -1120,34 +1124,34 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
         if start else "with no start date, so no Program reaches them until one is set"
     )
     refused = await _unconfirmed(
-        kwargs, "care_team_enroll_patient", arguments,
+        kwargs, "team_enroll_person", arguments,
         f"Will enrol {name} ({readable_phone(wa_id)}) in {protocol} {when}"
         + (f", answered by {answered_by}" if answered_by else "")
         + (f"; the number is already known as {holder.display_name}" if holder else "")
         + "; record their permission to be messaged on your say-so"
-        + ("; and send them the practice's welcome message" if sender else "")
+        + ("; and send them the business's welcome message" if sender else "")
         + ".",
         "Nothing has been changed.",
     )
     if refused:
         return refused
 
-    user_id = await _patient_account(sf, ctx, wa_id, name, holder)
+    user_id = await _person_account(sf, ctx, wa_id, name, holder)
     if isinstance(user_id, str):
         return f"Not enrolled: {user_id}"
     await followup_store.grant_contact_permission(
         sf, org_id=ctx.org_id, platform="whatsapp", platform_user_id=wa_id,
-        recorded_by=f"care-team:{ctx.user_id}", method="care_team",
+        recorded_by=f"team:{ctx.user_id}", method="care_team",
     )
     try:
         row = await followup_store.upsert_enrollment(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
             protocol=protocol, start_date=start, phase=None, enrolled_by="care_team",
-            source_ref=f"care-team:{ctx.user_id}", patient_name=name,
+            source_ref=f"team:{ctx.user_id}", patient_name=name,
             answered_by=answered_by, start_date_approximate=approximate,
         )
-    except followup_store.CareTeamMember:
-        return f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the care team."
+    except followup_store.TeamMember:
+        return f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the team."
     result = f"Enrolled {name} ({readable_phone(wa_id)}) in {protocol}"
     if row.start_date:
         result += f" from {_start_text(row)}"
@@ -1162,22 +1166,22 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
             ),
             template_name=settings.welcome_template_name,
             template_language=settings.welcome_template_language,
-            subject_user_id=user_id, created_by=f"care-team:{ctx.user_id}",
+            subject_user_id=user_id, created_by=f"team:{ctx.user_id}",
             dedupe_key=(
-                f"welcome:care-team:{ctx.agent_id}:{user_id}:{protocol}:"
+                f"welcome:team:{ctx.agent_id}:{user_id}:{protocol}:"
                 f"{datetime.now(timezone.utc):%Y-%m-%d}"
             ),
         )
         result += f" Welcome message queued (state {welcome.state})."
     else:
-        result += " No welcome sent: WhatsApp is not switched on for this practice."
-    queued, why_not = await followup_store.notify_care_team(
+        result += " No welcome sent: WhatsApp is not switched on for this business."
+    queued, why_not = await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="enrolment",
         text=(
-            f"{name} enrolled in {protocol} by {_doctor(ctx)}."
-            f"\n\n— {followup_store.patient_label(name, row)} · {readable_phone(wa_id)}"
+            f"{name} enrolled in {protocol} by {_member(ctx)}."
+            f"\n\n— {followup_store.person_label(name, row)} · {readable_phone(wa_id)}"
         ),
-        created_by=f"care-team:{ctx.user_id}", subject_user_id=user_id,
+        created_by=f"team:{ctx.user_id}", subject_user_id=user_id,
         exclude_user_id=ctx.user_id, fallback_sender=sender,
     )
     return result + " " + _told(queued, why_not)
@@ -1185,12 +1189,12 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
 
 def register(registry: Any) -> None:
     for name, schema, handler in (
-        ("care_team_overview", CARE_TEAM_OVERVIEW_SCHEMA, handle_care_team_overview),
-        ("care_team_message_patient", CARE_TEAM_MESSAGE_PATIENT_SCHEMA,
-         handle_care_team_message_patient),
-        ("care_team_update_patient", CARE_TEAM_UPDATE_PATIENT_SCHEMA,
-         handle_care_team_update_patient),
-        ("care_team_enroll_patient", CARE_TEAM_ENROLL_PATIENT_SCHEMA,
-         handle_care_team_enroll_patient),
+        ("team_overview", TEAM_OVERVIEW_SCHEMA, handle_team_overview),
+        ("team_message_person", TEAM_MESSAGE_PERSON_SCHEMA,
+         handle_team_message_person),
+        ("team_update_person", TEAM_UPDATE_PERSON_SCHEMA,
+         handle_team_update_person),
+        ("team_enroll_person", TEAM_ENROLL_PERSON_SCHEMA,
+         handle_team_enroll_person),
     ):
-        registry.register(name=name, schema=schema, handler=handler, toolset="care_team")
+        registry.register(name=name, schema=schema, handler=handler, toolset="team")

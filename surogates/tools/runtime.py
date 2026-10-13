@@ -53,10 +53,10 @@ class ToolRuntime:
             browser,
             channel_files,
             channel_messages,
-            care_team,
             checkin,
             followup,
             send_form,
+            team,
             voice_call,
             coding_agent,
             coordinator,
@@ -122,7 +122,7 @@ class ToolRuntime:
             whiteboard,  # whiteboard_draw (canvas chat surface)
             checkin,  # checkin_outcome (Program check-ins)
             followup,  # followup_enroll/update/status, escalate
-            care_team,  # care_team_* (care team only)
+            team,  # team_* (only for the agent's alert recipients)
             send_form,  # send_form (a WhatsApp Flow, for agents with published forms)
             voice_call,  # end_call (a phone call's agent hangs up)
         ]

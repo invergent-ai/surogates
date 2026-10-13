@@ -306,7 +306,7 @@ async def describe_person(
         session_factory, org_id=org_id, agent_id=agent_id,
     )
     zone = zones.get(getattr(enrollment, "protocol", None)) or next(iter(zones.values()), "UTC")
-    name = followup_store.patient_label(user.display_name if user else None, enrollment)
+    name = followup_store.person_label(user.display_name if user else None, enrollment)
     return name or "?", readable_phone(wa_id) if wa_id else "?", zone
 
 
@@ -386,7 +386,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                     texts.get("undelivered_notice"), DEFAULT_TEXTS["undelivered_notice"],
                     name=name, why=plain_reason(row.reason), phone=phone,
                 )
-            queued, _ = await followup_store.notify_care_team(
+            queued, _ = await followup_store.notify_team(
                 session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
                 kind="notice", text=text, created_by="outreach",
                 subject_user_id=row.user_id, dedupe_prefix=f"outcome:{row.id}",
@@ -450,7 +450,7 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
         if not int(claimed.rowcount or 0):
             continue
         minutes = red_alert_reminder_minutes(settings)
-        queued, why_not = await followup_store.notify_care_team(
+        queued, why_not = await followup_store.notify_team(
             session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
             kind="alert", severity="red", created_by="reminder",
             text=followup_store.render_text(
@@ -550,12 +550,12 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
             settings = await followup_store.get_settings(
                 session_factory, org_id=org_id, agent_id=agent_id,
             )
-            if followup_store.is_care_team(settings, user_id):
+            if followup_store.is_team_member(settings, user_id):
                 continue
             name, phone, _zone = await describe_person(
                 session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
             )
-            queued, _ = await followup_store.notify_care_team(
+            queued, _ = await followup_store.notify_team(
                 session_factory, settings, org_id=org_id, agent_id=agent_id,
                 kind="notice", created_by="outreach", subject_user_id=user_id,
                 text=followup_store.render_text(
@@ -704,7 +704,7 @@ async def _reopen(
 
     # The burst's template carries every text queued behind it.  An alert
     # rides only on an earlier alert: behind a routine notice it would reach
-    # the care team whenever they next happened to reply.
+    # the team whenever they next happened to reply.
     earlier = (
         sa.select(OutreachMessageRow.id)
         .where(OutreachMessageRow.org_id == row.org_id)

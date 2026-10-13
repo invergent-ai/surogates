@@ -1,4 +1,4 @@
-"""Tell the care team when someone has stopped answering.
+"""Tell the team when someone has stopped answering.
 
 A Program can set ``alert_after_missed: N``.  When a person's last ``N``
 openers from that Program all went unanswered, every alert recipient of the
@@ -174,14 +174,14 @@ async def _alert_if_streak(
     )
     text = render_missed_text(
         config.get("missed_alert_text"),
-        name=followup_store.patient_label(
+        name=followup_store.person_label(
             user.display_name if user else "", enrollment,
         ) or "?",
         phone=readable_phone(inv.platform_user_id) if inv.platform_user_id else "?",
         count=threshold,
         program=str(config.get("name") or "check-in"),
     )
-    queued, _why_not = await followup_store.notify_care_team(
+    queued, _why_not = await followup_store.notify_team(
         session_factory, settings_cache[key], org_id=inv.org_id,
         agent_id=inv.agent_id, kind="alert", text=text,
         created_by="missed-checkins", subject_user_id=inv.user_id,
@@ -193,13 +193,13 @@ async def _alert_if_streak(
         row = await db.get(ProgramInvitationRow, inv.id)
         if queued:
             row.escalation_state = "raised"
-            row.reason = f"No answer to {threshold} openers in a row; care team alerted"
+            row.reason = f"No answer to {threshold} openers in a row; team alerted"
         else:
             # Visible, never silent: the streak happened and nobody could
             # be told.  Marked so the history says so and the pass moves on.
             row.escalation_state = "failed"
             row.reason = (
-                f"No answer to {threshold} openers in a row; no care-team "
+                f"No answer to {threshold} openers in a row; no team "
                 "phone is configured to tell"
             )
         await db.commit()

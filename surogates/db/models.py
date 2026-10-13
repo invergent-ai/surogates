@@ -1150,7 +1150,7 @@ class FollowupEnrollmentRow(Base):
     status_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: ``agent`` when the agent enrolled the person in conversation,
     #: ``operator`` when someone did it from Studio, ``purchase`` when a
-    #: paid package did, ``care_team`` when a doctor did it from WhatsApp.
+    #: paid package did, ``care_team`` when a team member did it from WhatsApp.
     enrolled_by: Mapped[str] = mapped_column(Text, nullable=False)
     #: Who paid, when a purchase enrolled them: often a relative, so not
     #: necessarily ``user_id``.
@@ -1223,7 +1223,7 @@ class FollowupSettingsRow(Base):
     texts: Mapped[dict[str, str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )
-    #: How long a care-team message held behind a template waits for the
+    #: How long a team member's message held behind a template waits for the
     #: patient's answer before the doctor is told it did not arrive.  NULL
     #: is the platform default; other held texts always wait 72 hours.
     operator_unanswered_hours: Mapped[Optional[int]] = mapped_column(

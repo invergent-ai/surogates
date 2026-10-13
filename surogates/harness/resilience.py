@@ -20,6 +20,8 @@ import time
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
+from surogates.runtime.governance import RENAMED_TOOLS
+
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
@@ -119,8 +121,13 @@ def repair_tool_name(
     A *registered* tool the session was not offered is not a typo, so it
     is never repaired: ``write_file`` must not become ``read_file``.
 
+    A renamed tool's old name is its new one.
+
     Returns the repaired name, or ``None`` if no match.
     """
+    if RENAMED_TOOLS.get(name) in offered:
+        return RENAMED_TOOLS[name]
+
     # 1. Lowercase
     lowered = name.lower()
     if lowered in offered:

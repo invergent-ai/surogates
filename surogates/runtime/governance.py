@@ -164,9 +164,17 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
 
 #: Tools that were renamed: a policy written with the old name keeps meaning
 #: the same tool.  ``checkin_escalate`` became ``escalate`` when escalation
-#: stopped being limited to check-ins.  Applied here, where ops' blobs are
-#: parsed, so the allow, deny and approval lists all honour it.
-_RENAMED_TOOLS = {"checkin_escalate": "escalate"}
+#: stopped being limited to check-ins; the ``care_team_*`` tools became
+#: ``team_*`` when follow-up stopped being only for clinics.  Applied here,
+#: where ops' blobs are parsed, so the allow, deny and approval lists all
+#: honour it, and to a model's call by the harness.
+RENAMED_TOOLS = {
+    "checkin_escalate": "escalate",
+    "care_team_overview": "team_overview",
+    "care_team_message_patient": "team_message_person",
+    "care_team_update_patient": "team_update_person",
+    "care_team_enroll_patient": "team_enroll_person",
+}
 
 
 def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
@@ -186,7 +194,7 @@ def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
             t.strip() for t in value if isinstance(t, str) and t.strip()
         }
         return names | {
-            new for old, new in _RENAMED_TOOLS.items() if old in names
+            new for old, new in RENAMED_TOOLS.items() if old in names
         }
     if value not in (None, []):
         logger.warning(

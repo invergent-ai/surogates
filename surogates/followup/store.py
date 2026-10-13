@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CareTeamMember",
+    "TeamMember",
     "ENROLLMENT_SOURCES",
     "ENROLLMENT_STATUSES",
     "OUTREACH_KINDS",
@@ -41,11 +42,14 @@ __all__ = [
     "get_settings",
     "grant_contact_permission",
     "is_care_team",
+    "is_team_member",
     "labelling_enrollment",
     "last_inbound",
     "last_inbound_by_user",
     "notify_care_team",
+    "notify_team",
     "patient_label",
+    "person_label",
     "permission_status",
     "protocol_timezones",
     "queue_outreach",
@@ -75,8 +79,8 @@ SETTINGS_FIELDS = frozenset({
 ALERT_SEVERITIES = ("red", "yellow")
 
 
-class CareTeamMember(ValueError):
-    """The person is an alert recipient of this agent, not a patient."""
+class TeamMember(ValueError):
+    """The person is an alert recipient of this agent, not someone followed."""
 
 
 def _utcnow() -> datetime:
@@ -84,16 +88,16 @@ def _utcnow() -> datetime:
 
 
 def render_text(custom: str | None, default: str, **values: Any) -> str:
-    """The practice's wording with *values* filled in, else the default.
+    """The business's wording with *values* filled in, else the default.
 
-    A stray brace or an unknown placeholder in the practice's text must not
+    A stray brace or an unknown placeholder in the business's text must not
     cost the message: it falls back to the platform's own sentence.
     """
     text = (custom or "").strip() or default
     try:
         return text.format(**values)
     except (KeyError, IndexError, ValueError):
-        logger.warning("[followup] unusable practice wording; using the default")
+        logger.warning("[followup] unusable business wording; using the default")
         return default.format(**values)
 
 
@@ -168,17 +172,17 @@ async def upsert_enrollment(
     an existing row is reactivated rather than refused.  A ``None`` start
     date or phase leaves what is recorded untouched: re-enrolling someone
     without restating the date must not erase it; the same goes for the
-    patient's name and who answers.
+    person's name and who answers.
 
-    Raises :class:`CareTeamMember` for an alert recipient of this agent —
+    Raises :class:`TeamMember` for an alert recipient of this agent —
     whichever path tries it: the agent in conversation, Studio, or a checkout
-    that was given the doctor's own number.
+    that was given a team member's own number.
     """
     if enrolled_by not in ENROLLMENT_SOURCES:
         raise ValueError(f"enrolled_by must be one of {', '.join(ENROLLMENT_SOURCES)}")
     settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
-    if is_care_team(settings, user_id):
-        raise CareTeamMember("this person is on the care team, not a patient")
+    if is_team_member(settings, user_id):
+        raise TeamMember("this person is on the team, not someone followed")
     protocol = protocol.strip()
     patient_name = (patient_name or "").strip() or None
     answered_by = (answered_by or "").strip() or None
@@ -288,10 +292,10 @@ async def update_enrollment(
         return row
 
 
-def patient_label(display_name: str | None, enrollment: Any = None) -> str:
-    """Who an enrollment is about, as the care team knows them.
+def person_label(display_name: str | None, enrollment: Any = None) -> str:
+    """Who an enrollment is about, as the team knows them.
 
-    The enrollment's patient name wins over *display_name*: that is the
+    The enrollment's person name wins over *display_name*: that is the
     WhatsApp profile of whoever is writing, often a relative.
     """
     name = (getattr(enrollment, "patient_name", None) or display_name or "").strip()
@@ -409,7 +413,7 @@ async def grant_contact_permission(
 
 
 # ---------------------------------------------------------------------------
-# Settings and the care team
+# Settings and the team
 # ---------------------------------------------------------------------------
 
 
@@ -456,14 +460,14 @@ async def update_settings(
         return row
 
 
-def is_care_team(settings: Any, user_id: uuid.UUID | None) -> bool:
+def is_team_member(settings: Any, user_id: uuid.UUID | None) -> bool:
     """Whether *user_id* is one of the agent's alert recipients."""
     if settings is None or user_id is None:
         return False
     return str(user_id) in {str(r) for r in (settings.alert_recipient_user_ids or [])}
 
 
-async def notify_care_team(
+async def notify_team(
     session_factory: Any,
     settings: Any,
     *,
@@ -481,17 +485,17 @@ async def notify_care_team(
 ) -> tuple[int, str | None]:
     """Queue *text* for every alert recipient.  Returns (queued, why none).
 
-    The one place an alert fans out to the care team's phones, whatever
+    The one place an alert fans out to the team's phones, whatever
     raised it: the agent, a silence streak, a purchase.  With
     *dedupe_prefix*, each recipient's message is keyed on it, so a retried
     cause never writes twice.  With *only_user_id*, the one person it
-    concerns (the doctor who asked for something) is told instead.
+    concerns (the team member who asked for something) is told instead.
     """
     recipients = list(settings.alert_recipient_user_ids or []) if settings else []
     if only_user_id is not None:
         recipients = [only_user_id]
     if not recipients:
-        return 0, "no care-team phones are configured"
+        return 0, "no team phones are configured"
     sender = (settings.channel_identifier if settings else None) or fallback_sender
     if not sender:
         return 0, "no WhatsApp sender is configured for alerts"
@@ -503,7 +507,7 @@ async def notify_care_team(
             logger.warning("[followup] ignoring malformed alert recipient %r", recipient)
             continue
         if recipient_id == exclude_user_id:
-            continue  # the care-team member is the one talking; they know
+            continue  # the team member is the one talking; they know
         await queue_outreach(
             session_factory, org_id=org_id, agent_id=agent_id,
             user_id=recipient_id, platform="whatsapp", channel_identifier=sender,
@@ -658,3 +662,10 @@ async def queue_outreach(
             ).scalar_one()
         await db.refresh(row)
         return row
+
+
+# The names ops imports from a pinned runtime wheel; kept until ops moves.
+CareTeamMember = TeamMember
+is_care_team = is_team_member
+notify_care_team = notify_team
+patient_label = person_label

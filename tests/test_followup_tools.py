@@ -147,13 +147,13 @@ async def test_no_active_program_is_named_a_practice_configuration_problem(sf, p
     )
     assert result.startswith("Not enrolled")
     assert "no active Program" in result
-    assert "configuration problem at the practice" in result
+    assert "configuration problem at the business" in result
     assert "escalate" in result
     assert "post-op" in result
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert status.startswith("Protocols offered: none.")
-    assert "configuration problem at the practice" in status
+    assert "configuration problem at the business" in status
     assert "escalate" in status
 
 
@@ -227,7 +227,7 @@ async def test_enrol_without_a_care_team_still_enrols_and_says_so(sf, patient):
         **_kw(sf, session_id),
     )
     assert "Enrolled in post-op" in result
-    assert "not notified: no care-team phones are configured" in result
+    assert "not notified: no team phones are configured" in result
 
 
 # --- update -----------------------------------------------------------------
@@ -330,7 +330,7 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
         {"reason": "Spune că a leșinat azi-dimineață."}, **_kw(sf, session_id),
     )
     assert result == (
-        "Escalated to the responsible operator's inbox and 1 care-team phone(s)."
+        "Escalated to the responsible operator's inbox and 1 team phone(s)."
     )
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
@@ -365,7 +365,7 @@ async def test_escalate_with_nobody_configured_fails_visibly(sf, patient):
         {"reason": "durere în piept"}, **_kw(sf, session_id),
     )
     assert result.startswith("Could not escalate")
-    assert "contact the practice directly" in result
+    assert "contact the business directly" in result
 
 
 @pytest.mark.asyncio
@@ -405,12 +405,12 @@ async def test_the_care_team_is_recognised_and_never_enrolled(sf, patient):
         message_template_name=None, message_template_language=None,
     )
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
-    assert "on the care team" in status
+    assert "on the team" in status
     refused = await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x"},
         **_kw(sf, session_id),
     )
-    assert "on the care team" in refused
+    assert "on the team" in refused
     assert await store.enrollments(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
     ) == []
@@ -425,7 +425,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     _, session_id = patient
     result = await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x",
-         "patient_name": " Petre Marin ", "answered_by": "Ana, fiica", "date_unknown": True},
+         "person_name": " Petre Marin ", "answered_by": "Ana, fiica", "date_unknown": True},
         **_kw(sf, session_id),
     )
     assert "for Petre Marin (answered by Ana, fiica)" in result
@@ -433,7 +433,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     assert note.text.endswith("— Petre Marin · via Ana, fiica · +40 700 000 001")
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
-    assert "patient Petre Marin, answered by Ana, fiica" in status
+    assert "name Petre Marin, answered by Ana, fiica" in status
 
     await followup.handle_escalate({"reason": "durere"}, **_kw(sf, session_id))
     async with sf() as db:
@@ -451,13 +451,13 @@ async def test_update_names_the_patient_and_reenrolling_keeps_the_name(sf, patie
         start_date=None, phase=None, enrolled_by="agent",
     )
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
-    assert "patient's name not recorded" in status
+    assert "name not recorded" in status
     result = await followup.handle_followup_update(
         {"protocol": "post-op", "patient_name": "Petre Marin",
          "answered_by": "Ana, fiica"},
         **_kw(sf, session_id),
     )
-    assert "patient Petre Marin, answered by Ana, fiica" in result
+    assert "name Petre Marin, answered by Ana, fiica" in result
     row = await store.upsert_enrollment(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id, protocol="post-op",
         start_date=None, phase=None, enrolled_by="agent",
@@ -524,7 +524,7 @@ async def test_enrol_without_a_date_or_a_name_says_what_to_pass(sf, patient, car
     )
     assert result.startswith("Not enrolled: pass days_ago")
     assert "date_unknown: true" in result
-    assert "pass patient_name" in result and "name_unknown: true" in result
+    assert "pass person_name" in result and "name_unknown: true" in result
     assert await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id) == []
     assert await _outreach(sf) == []
 
@@ -532,7 +532,7 @@ async def test_enrol_without_a_date_or_a_name_says_what_to_pass(sf, patient, car
         {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 3},
         **_kw(sf, session_id),
     )
-    assert "days_ago" not in result and "pass patient_name" in result
+    assert "days_ago" not in result and "pass person_name" in result
 
 
 @pytest.mark.asyncio
