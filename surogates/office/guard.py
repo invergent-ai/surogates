@@ -16,7 +16,8 @@ WRITING_TOOLS = frozenset({"write_file", "patch"})
 
 
 def _applies(session: Any, session_factory: Any) -> bool:
-    return session_factory is not None and device_of(session.config) is None and load_settings().office.enabled
+    # Only where office_read and office_edit are offered: every word here sends the model to them.
+    return session_factory is not None and device_of(session.config) is None and load_settings().office.agent_editing
 
 
 async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
@@ -53,6 +54,8 @@ async def hold_open_documents(session_factory: Any, session: Any, turn: dict[str
     The landing then writes none of them, and the thread is told a file it changed was changed by you, and
     redoes the change where the document is: through office_edit.
     """
+    if not load_settings().office.agent_editing:
+        return
     candidates = {location_of(session, change["path"]): change for change in turn["changes"] if office_kind(change["path"])}
     if not candidates:
         return

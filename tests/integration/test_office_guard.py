@@ -74,3 +74,23 @@ async def test_a_threads_change_to_an_open_document_is_held_for_a_redo(session_f
     await guard.hold_open_documents(session_factory, session, turn)
     assert turn["changes"] == [{"path": "notes.md", "before": "r2", "after": "t2"}]
     assert turn["overlapped"] == [{"path": "docs/a.docx", "reason": "changed", "before": "r1", "after": "t1", "by": {"kind": "you"}}]
+
+
+async def test_without_runtime_office_the_guard_stands_aside(session_factory, monkeypatch):
+    # office_read and office_edit are not offered there, so nothing may send the model to them.
+    no_runtime = OFFICE.model_copy(update={"runtime_office_url": "", "runtime_office_token": ""})
+    monkeypatch.setattr(guard, "load_settings", lambda: SimpleNamespace(office=no_runtime))
+    session = await _session_with_open(session_factory)
+    assert await guard.refused_open_document("write_file", {"path": "docs/a.docx", "content": "x"}, session,
+                                             session_factory=session_factory) is None
+    assert await guard.open_document_note({"path": "docs/a.docx"}, session, session_factory=session_factory) is None
+    turn = {"changes": [{"path": "docs/a.docx", "before": "r1", "after": "t1"}], "overlapped": []}
+    await guard.hold_open_documents(session_factory, session, turn)
+    assert turn == {"changes": [{"path": "docs/a.docx", "before": "r1", "after": "t1"}], "overlapped": []}
+
+
+async def test_a_path_through_home_is_the_open_document(session_factory):
+    session = await _session_with_open(session_factory)
+    for path in ("~/docs/a.docx", "$HOME/docs/a.docx", "./docs//a.docx"):
+        assert await guard.refused_open_document("write_file", {"path": path, "content": "x"}, session,
+                                                 session_factory=session_factory), path
