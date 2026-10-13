@@ -146,8 +146,12 @@ describe("the file host's FdPaths", () => {
   it("refuse every call, in words, on a system the file host is not built for yet, and are shown there as any object is", async () => {
     const { fdPaths } = await importedOn("win32", () => import("../src/files/fd-paths.js"));
     const { notBuiltWords } = await importedOn("win32", () => import("../src/platform.js"));
-    const words = "The file host is not built for win32 yet";
+    const words = "The file host is not built for Windows yet";
     expect(words).toBe(notBuiltWords("The file host"));
+    // files/ keeps its own copy of the OSes' names, as the agent's disk holds no platform.js: the two name each OS alike.
+    const [own, app] = await Promise.all([import("../src/files/fd-paths.js"), import("../src/platform.js")]);
+    expect(own.OS_NAMES).toEqual(app.OS_NAMES);
+    await expect(importedOn("freebsd", async () => (await import("../src/files/fd-paths.js")).fdPaths.hold(dir))).rejects.toThrow(new Error("The file host is not built for freebsd yet"));
     expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
     expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));
     expect(() => fdPaths.handed()).toThrow(new Error(words));

@@ -205,6 +205,37 @@ describe("an update", () => {
     expect(heard).toEqual([]);
   });
 
+  it("refuses Windows's release on Linux in the words for another platform's, and takes it for Windows from Windows's own folders, its MSI by name", async () => {
+    const win32 = (version: string) => ({
+      version, channel: "stable", platform: "win32", arch: "x64", url: `releases/${version}/win32-x64/surogate-desktop-${version}-win32-x64.msi`,
+    });
+    publish("1.2.4", win32("1.2.4"));
+    await expect(updates().check()).rejects.toThrow(`${base}/desktop/latest.json is not a release of Surogate Desktop for this computer`);
+    const msi = randomBytes(300_000);
+    const manifest = Buffer.from(`${JSON.stringify({ ...win32("1.2.4"), sha256: sha256(msi), size: msi.length, stateSchema: 1 })}\n`);
+    const signed = sign(null, manifest, keys.privateKey);
+    expect(() => signedRelease("URL", manifest, signed, [keys.publicKey], "stable", "linux-x64")).toThrow("URL is not a release of Surogate Desktop for this computer");
+    expect(() => signedRelease("URL", manifest, signed, [keys.publicKey], "stable", "darwin-arm64")).toThrow("URL is not a release of Surogate Desktop for this computer");
+    expect(signedRelease("URL", manifest, signed, [keys.publicKey], "stable", "win32-x64").version).toBe("1.2.4");
+    // And Windows's app refuses Linux's and macOS's, each signed by a listed key.
+    publish("1.2.4");
+    const others = [served.get("/desktop/latest.json")!, Buffer.from(`${JSON.stringify({
+      ...win32("1.2.4"), platform: "darwin", arch: "arm64", url: "releases/1.2.4/darwin-arm64/surogate-desktop-1.2.4-darwin-arm64.tar.gz", sha256: sha256(msi), size: msi.length, stateSchema: 1,
+    })}\n`)];
+    for (const other of others) expect(() => signedRelease("URL", other, sign(null, other, keys.privateKey), [keys.publicKey], "stable", "win32-x64")).toThrow("URL is not a release of Surogate Desktop for this computer");
+    // Its own latest.json and its release's own folder, as Windows's app reads them.
+    served.set("/desktop/win32-x64/latest.json", manifest);
+    served.set("/desktop/releases/1.2.4/win32-x64/manifest.json.sig", signed);
+    served.set("/desktop/releases/1.2.4/win32-x64/surogate-desktop-1.2.4-win32-x64.msi", msi);
+    heard = [];
+    const windows = updates({ target: "win32-x64" });
+    await windows.check();
+    expect(windows.state).toMatchObject({ state: "available", version: "1.2.4" });
+    expect(heard.map(({ url }) => url)).toEqual([
+      "/desktop/win32-x64/latest.json", "/desktop/releases/1.2.4/win32-x64/manifest.json.sig", "/desktop/releases/1.2.4/win32-x64/surogate-desktop-1.2.4-win32-x64.msi",
+    ]);
+  });
+
   it("stops asking its base when the app quits", async () => {
     publish("1.2.4");
     // A base that takes the request, and never answers it.

@@ -43,8 +43,10 @@ export interface FdPaths {
 }
 
 // On a system the file host is not built for yet, every call is refused, in notBuilt's words (platform.ts): files/ is on
-// the agent's disk, which holds no platform.js. The object itself is shown as any other is.
-const NOT_BUILT = `The file host is not built for ${process.platform === "darwin" ? "macOS" : process.platform} yet`;
+// the agent's disk, which holds no platform.js, so it keeps its own copy of the OSes' names. The object itself is shown
+// as any other is.
+export const OS_NAMES: Readonly<Partial<Record<NodeJS.Platform, string>>> = { darwin: "macOS", win32: "Windows" };
+const NOT_BUILT = `The file host is not built for ${OS_NAMES[process.platform] ?? process.platform} yet`;
 const refused = (): never => {
   throw new Error(NOT_BUILT);
 };

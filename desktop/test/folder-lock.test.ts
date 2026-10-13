@@ -91,7 +91,7 @@ describe("the folder lock, one try at a time", () => {
 
   it("is refused, in words, on a system it is not built for yet", async () => {
     const { takeLock: elsewhere } = await importedOn("win32", () => import("../src/hosts/folder-lock.js"));
-    await expect(elsewhere(UID, D, 23)).rejects.toThrow(new Error("The folder lock is not built for win32 yet"));
+    await expect(elsewhere(UID, D, 23)).rejects.toThrow(new Error("The folder lock is not built for Windows yet"));
   });
 });
 

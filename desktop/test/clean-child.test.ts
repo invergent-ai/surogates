@@ -85,7 +85,7 @@ describe("a child the app starts", () => {
 
   it("is refused, in words, on a system the app cannot start one cleanly on yet", async () => {
     const { cleanly: elsewhere } = await importedOn("win32", () => import("../src/clean-child.js"));
-    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for win32 yet"));
+    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for Windows yet"));
     expect(() => elsewhere("env", [])).toThrow("env is not named by its whole path");
   });
 });

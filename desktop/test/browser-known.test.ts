@@ -39,5 +39,5 @@ it("knows none on a system the app drives no browser on yet, and refuses each on
   const { KNOWN_BROWSERS } = await importedOn("win32", () => import("../src/browser/known.js"));
   const disk = { realpath: (path: string) => path, executable: () => true, head: () => "" };
   expect(KNOWN_BROWSERS.candidates("C:\\Users\\ana")).toEqual([]);
-  expect(KNOWN_BROWSERS.refused("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", disk)).toBe("driving a browser is not built for win32 yet");
+  expect(KNOWN_BROWSERS.refused("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", disk)).toBe("driving a browser is not built for Windows yet");
 });

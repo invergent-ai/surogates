@@ -1,18 +1,18 @@
 // The platform and architecture a release of the app is built for, its target, and the names its
 // files have on the release bucket, under <base>/desktop/ (release/publish.sh, target_files, names
-// them the same). Linux's are the names every release before macOS's had; macOS's are in folders of
-// their own beside them, so that neither's latest.json names the other's release.
+// them the same). Linux's are the names every release before macOS's had; macOS's and Windows's are
+// in folders of their own beside them, so that no target's latest.json names another's release.
 // And the one lookup by which each part of the app picks its side for the OS it runs on.
 // Electron-free.
 
-export type Target = "linux-x64" | "darwin-arm64";
+export type Target = "linux-x64" | "darwin-arm64" | "win32-x64";
 
 export interface TargetFiles {
-  platform: "linux" | "darwin";
+  platform: "linux" | "darwin" | "win32";
   arch: "x64" | "arm64";
-  /** The release's tarball, by its name alone. */
-  tarball(version: string): string;
-  /** The folder its tarball, its manifest and the manifest's signature are sent to, and kept in. */
+  /** The release's payload, by its name alone: a tarball, or Windows's MSI. */
+  archive(version: string): string;
+  /** The folder its payload, its manifest and the manifest's signature are sent to, and kept in. */
   releaseDir(version: string): string;
   /** The manifest of the newest release, which every app and install reads first. */
   latest: string;
@@ -22,16 +22,23 @@ export const TARGETS: Readonly<Record<Target, TargetFiles>> = {
   "linux-x64": {
     platform: "linux",
     arch: "x64",
-    tarball: (version) => `surogate-desktop-${version}-linux-x64.tar.gz`,
+    archive: (version) => `surogate-desktop-${version}-linux-x64.tar.gz`,
     releaseDir: (version) => `releases/${version}`,
     latest: "latest.json",
   },
   "darwin-arm64": {
     platform: "darwin",
     arch: "arm64",
-    tarball: (version) => `surogate-desktop-${version}-darwin-arm64.tar.gz`,
+    archive: (version) => `surogate-desktop-${version}-darwin-arm64.tar.gz`,
     releaseDir: (version) => `releases/${version}/darwin-arm64`,
     latest: "darwin-arm64/latest.json",
+  },
+  "win32-x64": {
+    platform: "win32",
+    arch: "x64",
+    archive: (version) => `surogate-desktop-${version}-win32-x64.msi`,
+    releaseDir: (version) => `releases/${version}/win32-x64`,
+    latest: "win32-x64/latest.json",
   },
 };
 
@@ -43,10 +50,13 @@ export function forThisOs<T>(rows: Partial<Record<NodeJS.Platform, T>>, platform
   return rows[platform] ?? null;
 }
 
-// The OS this app runs on, by the name a person knows it by: read once, as each part picks its side.
-const OS = forThisOs({ darwin: "macOS" }) ?? process.platform;
+/** Each OS by the name a person knows it by, where that is not the name Node gives it (files/fd-paths.ts keeps a copy). */
+export const OS_NAMES: Readonly<Partial<Record<NodeJS.Platform, string>>> = { darwin: "macOS", win32: "Windows" };
 
-/** What a part of the app that has only Linux's side so far says on another OS: that *what* is not built for that OS yet. */
+// The OS this app runs on, by the name a person knows it by: read once, as each part picks its side.
+const OS = forThisOs(OS_NAMES) ?? process.platform;
+
+/** What a part of the app that has no row for this OS yet says here: that *what* is not built for this OS yet. */
 export const notBuiltWords = (what: string): string => `${what} is not built for ${OS} yet`;
 
 /** What such a part does there: it refuses, in those words. */
