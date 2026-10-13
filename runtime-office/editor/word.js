@@ -344,6 +344,24 @@
       remove(what);
       return { ids: [String(copy.GetInternalId())] };
     },
+    comment: function (op, agent) {
+      var where = resolveTarget(op.anchor);
+      var comment = where.range.AddComment(op.body, agent.name, agent.id);
+      if (!comment) throw new Error("the comment could not be added");
+      return { thread: String(comment.GetId()) };
+    },
+    reply: function (op, agent) {
+      var comment = doc.GetCommentById(String(op.thread));
+      if (!comment) throw new Refusal("Comment thread " + op.thread + " is gone.");
+      comment.AddReply(op.body, agent.name, agent.id);
+      return {};
+    },
+    resolve: function (op) {
+      var comment = doc.GetCommentById(String(op.thread));
+      if (!comment) throw new Refusal("Comment thread " + op.thread + " is gone.");
+      comment.SetSolved(true);
+      return {};
+    },
   };
 
   function edit(ops, agent) {
