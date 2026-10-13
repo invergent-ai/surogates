@@ -753,14 +753,15 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
          "occurrence_id": str(invitation.occurrence_id)}
         if invitation is not None else {}
     )
+    # The key groups this escalation's alerts and its event, so an unopened
+    # red one is reminded once and read as one, and names the check-in
+    # whose history records it.
+    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{uuid.uuid4().hex}"
     inboxed = target_id is not None and await _inbox(
         sf, ctx, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
-        reason=reason, payload=payload,
+        reason=reason, payload={**payload, "escalation": escalation},
     )
-    # The key groups this escalation's alerts so an unopened red one is
-    # reminded once, and names the check-in whose history records it.
-    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{uuid.uuid4().hex}"
     queued, why_not = await _tell_team(
         sf, ctx, settings, kind="alert",
         text=f"🔴 {reason}" if severity == "red" else reason,

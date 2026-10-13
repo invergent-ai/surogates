@@ -407,11 +407,19 @@ async def _invitations(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list]:
     return out
 
 
+def _bare_reason(text: str) -> str:
+    """An alert's reason without its footer and its severity mark."""
+    return text.split("\n\n— ")[0].strip().removeprefix("🔴").removeprefix("🟡").strip()
+
+
 async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]]:
     """Each person's alerts and escalations of the last 72 hours, once each.
 
-    An alert is queued once per team phone, and an escalation is also an
-    event on the person's session, so the same reason is read several times.
+    An escalation is queued once per team phone, keyed
+    ``<escalation>:<recipient>``, and recorded as an event carrying the same
+    key, so the key, not the wording, says which rows are one escalation;
+    its reminder is a flag on it.  Text matches only what has no key.
+    Returns ``(at, reason, reminded)`` per person, oldest first.
     """
     since = now - ALERT_WINDOW
     async with sf() as db:
@@ -420,6 +428,7 @@ async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]
                 sa.select(
                     OutreachMessageRow.subject_user_id,
                     OutreachMessageRow.created_at, OutreachMessageRow.text,
+                    OutreachMessageRow.dedupe_key,
                 )
                 .where(OutreachMessageRow.org_id == org_id)
                 .where(OutreachMessageRow.agent_id == agent_id)
@@ -440,17 +449,31 @@ async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]
                 .where(Event.created_at >= since.replace(tzinfo=None))
             )
         ).all()
-    out: dict[uuid.UUID, dict[str, datetime]] = {}
-    for user_id, at, text in outreach:
-        reason = (text or "").split("\n\n— ")[0].strip()
-        out.setdefault(user_id, {}).setdefault(reason, at)
+    found: dict[uuid.UUID, dict[str, list]] = {}
+    reminded: set[tuple[uuid.UUID, str]] = set()
+    for user_id, at, text, dedupe_key in outreach:
+        key = dedupe_key.rsplit(":", 1)[0] if dedupe_key else None
+        if key and key.startswith("reminder:"):
+            reminded.add((user_id, "escalation:" + key.removeprefix("reminder:")))
+            continue
+        reason = _bare_reason(text or "")
+        found.setdefault(user_id, {}).setdefault(key or f"text:{reason}", [at, reason])
     for user_id, at, data in escalations:
-        reason = str((data or {}).get("reason") or "").strip()
-        out.setdefault(user_id, {}).setdefault(reason, at)
-    return {
-        uid: sorted(((at, r) for r, at in reasons.items() if r), key=lambda x: as_utc(x[0]))
-        for uid, reasons in out.items()
-    }
+        reason = _bare_reason(str((data or {}).get("reason") or ""))
+        key = (data or {}).get("escalation") or f"text:{reason}"
+        found.setdefault(user_id, {}).setdefault(key, [at, reason])
+    out: dict[uuid.UUID, list[tuple]] = {}
+    for user_id, items in found.items():
+        keyed = {reason for key, (_, reason) in items.items() if not key.startswith("text:")}
+        out[user_id] = sorted(
+            (
+                (at, reason, (user_id, key) in reminded)
+                for key, (at, reason) in items.items()
+                if reason and not (key.startswith("text:") and reason in keyed)
+            ),
+            key=lambda x: as_utc(x[0]),
+        )
+    return out
 
 
 async def _undelivered(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[str]]:
@@ -688,8 +711,11 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             f"  last wrote {_ago(wrote, now)}; last check-in {_last_checkin(invs)}; "
             f"unanswered check-ins in a row: {_unanswered_streak(invs)}"
         )
-        for at, reason in alerts.get(person.user_id, []):
-            lines.append(f"  alert {as_utc(at):%m-%d %H:%M}: {reason[:300]}")
+        for at, reason, was_reminded in alerts.get(person.user_id, []):
+            lines.append(
+                f"  alert {as_utc(at):%m-%d %H:%M}: {reason[:300]}"
+                + (" (reminded)" if was_reminded else "")
+            )
         if fragment and len(people) == 1:
             convo = await _conversation(sf, ctx.org_id, ctx.agent_id, person.user_id)
             lines.append("  latest conversation:" if convo else "  no conversation yet")

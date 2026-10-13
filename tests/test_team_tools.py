@@ -203,6 +203,37 @@ async def test_overview_lists_this_agents_people_and_nobody_elses(sf, practice):
 
 
 @pytest.mark.asyncio
+async def test_overview_reads_each_escalation_once_by_its_key_and_flags_its_reminder(sf, practice):
+    ion, ion_session = practice.ion
+    first, second = "escalation:-:aaa", "escalation:-:bbb"
+    async with sf() as db:
+        for key in (first, second):
+            db.add(Event(
+                session_id=ion_session, org_id=ORG, type="followup.escalation",
+                data={"reason": "Durere în piept", "escalation": key},
+            ))
+        await db.commit()
+    for recipient in (practice.doctor, uuid.uuid4()):
+        for prefix, text in (
+            (first, "🔴 Durere în piept\n\n— Ion Popescu"),
+            (second, "Durere în piept\n\n— Ion Popescu"),
+            ("reminder:-:aaa", "🔴 Reminder, not yet opened after 30 minutes:\n\n🔴 Durere în piept"),
+        ):
+            await store.queue_outreach(
+                sf, org_id=ORG, agent_id=AGENT, user_id=recipient, platform="whatsapp",
+                channel_identifier="pn1", kind="alert", text=text,
+                template_name=None, template_language=None, subject_user_id=ion,
+                dedupe_key=f"{prefix}:{recipient}",
+            )
+
+    out = await team.handle_team_overview({}, **_kw(sf, practice.doctor_session))
+    alerts = [line for line in out.splitlines() if line.strip().startswith("alert ")]
+    assert len(alerts) == 2
+    assert sum(line.endswith("Durere în piept (reminded)") for line in alerts) == 1
+    assert "Reminder" not in out
+
+
+@pytest.mark.asyncio
 async def test_overview_focus_shows_one_person_with_their_conversation(sf, practice):
     _, ion_session = practice.ion
     async with sf() as db:
