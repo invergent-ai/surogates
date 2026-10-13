@@ -24,7 +24,7 @@ const PROBE = [
   ...NAMES.flatMap((name, n) => [
     `touch '${name}' 2>/dev/null && echo 'made ${name}' || echo 'refused ${name}'`,
     `echo x > 'w${n}' && mv 'w${n}' '${name}' 2>/dev/null && echo 'renamed ${name}' || echo 'kept ${name}'`,
-    `echo x >> 'old/${name}' 2>/dev/null && echo 'wrote ${name}' || echo 'left ${name}'`,
+    `{ echo x >> 'old/${name}'; } 2>/dev/null && echo 'wrote ${name}' || echo 'left ${name}'`,
   ]),
   "touch notes.txt 2>/dev/null && echo 'made notes.txt' || echo 'refused notes.txt'",
   "touch desktop.ini.txt 2>/dev/null && echo 'made desktop.ini.txt' || echo 'refused desktop.ini.txt'",
