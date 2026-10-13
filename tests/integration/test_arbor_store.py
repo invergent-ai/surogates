@@ -92,8 +92,13 @@ async def test_set_meta_enforces_closed_keys_and_machine_keys(research_run):
     store, run_id, _ = research_run
     await store.set_meta(run_id, {"eval_cmd": "python eval.py --split dev"})
     assert (await store.get_run(run_id)).meta["eval_cmd"] == "python eval.py --split dev"
-    with pytest.raises(MetaKeyError):
+    with pytest.raises(MetaKeyError) as unknown:
         await store.set_meta(run_id, {"not_a_real_key": 1})
+    # The refusal names what may be set, so a coordinator that guessed a
+    # key (PROD: "baseline_test", "required_outputs") fixes it in one retry
+    # instead of guessing again; machine-written keys are not offered.
+    assert "eval_cmd_test" in str(unknown.value)
+    assert "test_baseline_score" not in str(unknown.value)
     with pytest.raises(MetaKeyError):  # machine-score keys rejected from the LLM path
         await store.set_meta(run_id, {"test_trunk_score": 99.0})
     await store.set_meta(
