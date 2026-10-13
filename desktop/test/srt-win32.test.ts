@@ -28,6 +28,25 @@ describe("the file helper's sandbox on Windows", () => {
     expect([linux.wraps, darwin.wraps]).toEqual([true, true]);
   });
 
+  it("looks for the app's own rg.exe beside the node the host runs on, first, then on the app's PATH, by Windows's separator", async () => {
+    const { srtOs } = await windows();
+    const node = "C:\\Program Files\\Surogate\\resources\\app\\bin\\node.exe";
+    expect(srtOs.toolsPath("C:\\Windows\\System32;C:\\Tools", node)).toBe("C:\\Program Files\\Surogate\\resources\\app\\bin;C:\\Windows\\System32;C:\\Tools");
+    expect(srtOs.toolsPath("", node)).toBe("C:\\Program Files\\Surogate\\resources\\app\\bin");
+  });
+
+  it("runs its hosts on the app's own node.exe, in the app's bin folder, where the app looks for the tools too", async () => {
+    const [{ NODE: windowsNode }, { NODE: linuxNode }] = [await importedOn("win32", () => import("../src/hosts/tool-hosts.js")), await importedOn("linux", () => import("../src/hosts/tool-hosts.js"))];
+    expect(windowsNode).toBe(`${linuxNode.slice(0, -"node".length)}node.exe`);
+    expect(linuxNode).toMatch(/\/bin\/node$/);
+  });
+
+  it("keeps of the app's PATH each folder on a drive, by Windows's separator, and nothing in its stead where none is left", async () => {
+    const { pathOutside } = await importedOn("win32", () => import("../src/hosts/policy.js"));
+    expect(pathOutside("relative;\\\\server\\share;/usr/bin;;C:", [])).toBe("");
+    expect(pathOutside(undefined, [])).toBe("");
+  });
+
   it("refuses each of Windows's own folders, and what lies in them, in any case, and no other", async () => {
     const { srtOs } = await windows();
     const saved = Object.fromEntries(Object.keys(ENV).map((name) => [name, process.env[name]]));

@@ -39,7 +39,7 @@ export const WIN32_SRT: SrtOs = {
   toolsMissing: (lacking) => `Surogate's tools are missing. Install Surogate again. It lacks ${lacking.join(", ")}`,
   fileToolsMissing: (_bwrap, path) => (fileOs.rg(path, "", findOnPath) === null ? [...TOOLS] : []),
   // The app's own rg.exe, beside the node the host runs on, before anything of the app's PATH.
-  toolsPath: (outside) => [dirname(process.execPath), ...(outside ? [outside] : [])].join(";"),
+  toolsPath: (outside, node) => [dirname(node), ...(outside ? [outside] : [])].join(";"),
   line: (line) => line,
   tempFolder: (dataDir, key) => join(dataDir, "hosts", key),
   // No sockets of srt's.

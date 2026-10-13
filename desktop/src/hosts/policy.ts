@@ -4,11 +4,13 @@
 // thread's copy it lands from, and writes the folder its replaced files are kept in (Section 13).
 // What of it is each OS's own is in srt-os.ts.
 
-import { statSync } from "node:fs";
+import { realpathSync, type Stats, statSync } from "node:fs";
 
 import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
 import { dirname } from "../host-path.js";
+import { hostStat } from "../host-stat.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { srtOs } from "./srt-os.js";
 
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
@@ -37,11 +39,12 @@ export function fileToolsMissing(bwrap: string | undefined, path: string): strin
  */
 export function pathOutside(path: string | undefined, held: Array<{ dev: number; ino: number }>): string {
   const ids = held.map(({ dev, ino }) => `${dev}:${ino}`);
+  const { delimiter, absolute, real, stat, none } = PATHS ?? notBuilt("A file host's PATH");
   const within = (dir: string): boolean => {
     for (let at = dir; ; at = dirname(at)) {
       let stats;
       try {
-        stats = statSync(at, { throwIfNoEntry: false });
+        stats = stat(at);
       } catch {
         return true; // a folder that cannot be judged (ENOTDIR, EACCES, ELOOP): its entry is dropped
       }
@@ -50,12 +53,53 @@ export function pathOutside(path: string | undefined, held: Array<{ dev: number;
       if (at === dirname(at)) return false;
     }
   };
-  return (path ?? "").split(":")
-    .filter((entry) => entry.startsWith("/"))
-    .map((entry) => realpath(entry).path)
-    .filter((entry) => !within(entry))
-    .join(":") || "/usr/bin:/bin";
+  return (path ?? "").split(delimiter)
+    .filter(absolute)
+    .map(real)
+    .filter((entry): entry is string => entry !== null && !within(entry))
+    .join(delimiter) || none;
 }
+
+// A PATH as each OS reads it: its separator, the entries it keeps, each as the path it leads to now, a folder's stats
+// with its identity, and what stands in where none is left. Linux and macOS keep each entry from /, resolved as the
+// file host resolves a path, and the system's own where none is left. Windows keeps each on a drive (X:\…), as
+// Windows resolves it (an entry that leads nowhere has no tools to give), and nothing where none is left: the app's
+// own tools come first anyway (srt-win32.ts, toolsPath).
+interface PathRows {
+  delimiter: string;
+  absolute(entry: string): boolean;
+  real(entry: string): string | null;
+  stat(path: string): Stats | undefined;
+  none: string;
+}
+const POSIX_PATHS: PathRows = {
+  delimiter: ":", absolute: (entry) => entry.startsWith("/"), real: (entry) => realpath(entry).path,
+  stat: (path) => statSync(path, { throwIfNoEntry: false }), none: "/usr/bin:/bin",
+};
+const PATHS = forThisOs<PathRows>({
+  linux: POSIX_PATHS,
+  darwin: POSIX_PATHS,
+  win32: {
+    delimiter: ";",
+    absolute: (entry) => /^[A-Za-z]:\\/.test(entry),
+    real: (entry) => {
+      try {
+        return realpathSync.native(entry);
+      } catch {
+        return null;
+      }
+    },
+    stat: (path) => {
+      try {
+        return hostStat(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    },
+    none: "",
+  },
+});
 
 /**
  * The PATH a file host on the app's node *node* looks for the file helper's tools on, and gives srt and its helper:

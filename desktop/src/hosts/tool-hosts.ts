@@ -42,10 +42,10 @@ import {
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 const HOST = join(PACKAGE, "dist", "hosts", "host.js");
-// The app's own plain node, beside its files (scripts/node.sh puts it there). The file hosts run
-// on it, and their helpers in srt, so no process runs Electron as Node (spec, Section 11), and
-// none runs a node of the user's.
-export const NODE = join(PACKAGE, "bin", "node");
+// The app's own plain node, beside its files (scripts/node.sh puts it there; a development build on Windows, its
+// build:win32). The file hosts run on it, and their helpers in srt, so no process runs Electron as Node (spec,
+// Section 11), and none runs a node of the user's.
+export const NODE = join(PACKAGE, "bin", forThisOs({ linux: "node", darwin: "node", win32: "node.exe" }) ?? "node");
 // Read-only folders a sandbox may read, and no chat's folder may hold: the running program's
 // (Electron's, in the app) and the app's files, its node among them.
 export const APP_DIRS = [dirname(process.execPath), PACKAGE];

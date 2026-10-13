@@ -35,16 +35,18 @@ describe("the Windows native programs", () => {
   it("are built, with every other native part of the Windows app, by one script", () => {
     const { scripts } = JSON.parse(read(DESKTOP, "package.json")) as { scripts: Record<string, string> };
     const steps = scripts["build:win32"]!.split(" && ");
-    // The app's code first, which ntat is built beside (dist/native); then the app's rg, ntat, and last the workspace,
+    // The app's code first, which ntat is built beside (dist/native); then the app's rg, the node its hosts run on, the
+    // one first on the PATH, as a development build's on a Mac (scripts/mac-build.sh); ntat; and last the workspace,
     // from its own folder, whose rust-toolchain.toml picks the toolchain.
-    expect(steps.slice(-4)).toEqual([
+    expect(steps.slice(-5)).toEqual([
       "scripts/rg.sh",
+      'cp "$(command -v node)" bin/node.exe',
       "powershell -NoProfile -ExecutionPolicy Bypass -File native/ntat/build.ps1",
       "cd native/windows",
       "cargo build --release --locked --workspace",
     ]);
     expect(steps.indexOf("tsc -p tsconfig.build.json")).toBeGreaterThan(-1);
-    expect(steps.indexOf("tsc -p tsconfig.build.json")).toBeLessThan(steps.length - 4);
+    expect(steps.indexOf("tsc -p tsconfig.build.json")).toBeLessThan(steps.length - 5);
     // No other script builds a part of native/windows.
     for (const [name, script] of Object.entries(scripts)) if (name !== "build:win32") expect(script, name).not.toMatch(/native\/windows|ntat|cargo/);
   });

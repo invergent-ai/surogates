@@ -18,8 +18,8 @@
 // that leads inside it is refused too, where Linux follows it.
 
 import { createHash } from "node:crypto";
-import { type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, readSync, type Stats, writeSync } from "node:fs";
-import { posix } from "node:path";
+import { type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, openSync, readSync, type Stats, writeSync } from "node:fs";
+import { posix, win32 } from "node:path";
 import { getSystemErrorMap, getSystemErrorMessage } from "node:util";
 
 import { osError, sandboxError } from "./answers.js";
@@ -504,6 +504,29 @@ function searchFiles(key: string, filter: Filter): FileSearch {
       for (const level of levels.splice(0)) closeLevel(level);
     },
   };
+}
+
+/**
+ * The stats of what is at *path*, this computer's own path (C:\\...), its identity read through ntat as the walk reads
+ * one: through every link on its way and at its end, as Node's stat follows them (libuv opens a path with
+ * FILE_FLAG_BACKUP_SEMANTICS, a folder's too); or, with *links*, the link at its end itself, opened relative to its
+ * folder as lstat sees one. For what the app and its hosts look at outside the walk: a chat's folder as it is bound and
+ * checked, the app's data, a PATH's folders. Neither placeholder mode nor anything else of the process is changed.
+ */
+export function statsAt(path: string, links: boolean): Stats {
+  const name = links ? win32.basename(path) : "";
+  const fd = name === "" ? openSync(path, constants.O_RDONLY) : openSync(win32.dirname(path), constants.O_RDONLY);
+  try {
+    if (name === "") return statsOf(ntat().query(fd), false);
+    const at = ntat().openAt(fd, name, 0, k().FILE_OPEN, 0, SHARE_ALL(), 0, true);
+    try {
+      return statsOf(ntat().query(at), false);
+    } finally {
+      closeSync(at);
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export const win32FdPaths: FdPaths = {
