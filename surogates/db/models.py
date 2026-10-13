@@ -1355,6 +1355,11 @@ class OutreachMessageRow(Base):
     reminded_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
     )
+    #: When WhatsApp said the recipient read this message's text.  A
+    #: template read does not count: the text behind it is still unseen.
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
     #: When this message's outcome was reported to whoever asked for it,
     #: or its failure to the team.  Reported once, never re-read.
     reported_at: Mapped[Optional[datetime]] = mapped_column(

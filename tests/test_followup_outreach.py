@@ -569,9 +569,83 @@ async def test_an_opened_or_yellow_alert_is_not_reminded(sf, doctor_session):
         created_by="agent", severity="yellow", dedupe_prefix=f"escalation:-:{uuid.uuid4().hex}",
     )
     await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    [red] = [r for r in await _alerts(sf, "agent") if r.severity == "red"]
+    assert red.state == "sent"
+    await _read(sf, red)
     await _at(sf, 40)
     await _send(sf, _Store(), _Delivery())
     assert await _alerts(sf, "reminder") == []
+
+
+async def _read(sf, row, wamid="wamid.text"):
+    """WhatsApp reports the text of *row* read by its recipient."""
+    async with sf() as db:
+        saved = await db.get(OutreachMessageRow, row.id)
+        saved.provider_message_id = wamid
+        await db.commit()
+    assert await outreach.apply_outreach_status(
+        sf, provider_message_id=wamid, status="read", reason=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_red_alert_sent_as_text_but_unread_is_reminded(sf, doctor_session):
+    await _wrote(sf, NOW - timedelta(hours=1))
+    await _red_alert(sf, [uuid.uuid4()])
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    assert [r.state for r in await _alerts(sf, "agent")] == ["sent"]
+    await _at(sf, 40)
+    await _send(sf, _Store(), _Delivery())
+    assert len(await _alerts(sf, "reminder")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_template_read_alone_is_not_a_read_alert(sf, doctor_session):
+    await _red_alert(sf, [uuid.uuid4()])
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    [held] = await _alerts(sf, "agent")
+    assert held.state == "awaiting_reply"
+    await _read(sf, held, "wamid.template")
+    assert (await _row(sf, held.id)).read_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_held_recipient_gets_the_reminder_instead_of_the_alert_twice(sf, doctor_session):
+    member = uuid.uuid4()
+    await _red_alert(sf, [member])
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    await _at(sf, 40)
+    await _send(sf, _Store(), _Delivery())
+    [original] = await _alerts(sf, "agent")
+    assert original.state == "replaced"
+
+    session_store = _Store()
+    await outreach.deliver_pending(
+        sf, session_store, org_id=ORG, agent_id=AGENT, user_id=member,
+        platform="whatsapp", channel_identifier=SENDER, session_id=uuid.uuid4(),
+        now=NOW + timedelta(minutes=1),
+    )
+    [(_, _, data)] = session_store.events
+    assert data["message"]["content"].startswith("🔴 Reminder")
+
+
+@pytest.mark.asyncio
+async def test_the_outbox_result_gives_an_outreach_text_its_provider_id(sf):
+    from surogates.db.models import DeliveryOutbox, Event
+
+    row = await _queue(sf, uuid.uuid4())
+    session_id = uuid.uuid4()
+    async with sf() as db:
+        db.add(Event(id=902, session_id=session_id, type=EventType.LLM_RESPONSE.value, data={
+            "synthetic": "outreach", "outreach_id": str(row.id),
+        }))
+        db.add(DeliveryOutbox(
+            id=78, session_id=session_id, event_id=902, channel="whatsapp",
+            destination={}, payload={"content": "x"}, status="pending",
+        ))
+        await db.commit()
+    assert await outreach.record_outreach_text(sf, 78, provider_message_id="wamid.x")
+    assert (await _row(sf, row.id)).provider_message_id == "wamid.x"
 
 
 @pytest.mark.asyncio

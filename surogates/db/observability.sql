@@ -1080,3 +1080,7 @@ CREATE INDEX IF NOT EXISTS idx_outreach_messages_unreported
     ON outreach_messages (created_at) WHERE reported_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_program_invitations_unreported
     ON program_invitations (created_at) WHERE reported_at IS NULL;
+
+-- ── whether a team member read an alert ──────────────────────────────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS read_at timestamptz;

@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 #: ``failed`` and must not resurrect a send that was already known lost.
 _ORDER = {"queued": 0, "accepted": 1, "delivered": 2, "failed": 3, "undelivered": 3}
 
-#: Meta status values worth recording.  ``sent`` and ``read`` add nothing the
-#: invitation does not already know.
+#: Meta status values worth recording on an invitation.  ``sent`` and
+#: ``read`` add nothing it does not already know; ``read`` still reaches
+#: outreach, where it says whether a team member opened an alert.
 _DELIVERY_STATES = frozenset({"delivered", "failed", "undelivered"})
 
 #: Set once at channels-process startup.  The webhook parser is synchronous
@@ -180,7 +181,7 @@ def schedule_status_apply(
     answered non-200 and Meta retries it in a loop.  A lost status costs one
     stale ``delivery_state``; a retry loop costs the channel.
     """
-    if _session_factory is None or status not in _DELIVERY_STATES:
+    if _session_factory is None or status not in (*_DELIVERY_STATES, "read"):
         return
     try:
         loop = asyncio.get_running_loop()

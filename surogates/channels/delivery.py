@@ -326,7 +326,7 @@ class DeliveryService:
         outreach row.  Best-effort: a bookkeeping failure must not fail the
         delivery that already happened.
         """
-        from surogates.followup.outreach import record_outreach_delivery
+        from surogates.followup.outreach import record_outreach_delivery, record_outreach_text
         from surogates.programs.delivery import record_outbox_result
 
         try:
@@ -339,6 +339,10 @@ class DeliveryService:
                 await record_outreach_delivery(
                     self._sf, outbox_id,
                     provider_message_id=provider_message_id, error=error,
+                )
+            elif provider_message_id and not error:
+                await record_outreach_text(
+                    self._sf, outbox_id, provider_message_id=provider_message_id,
                 )
         except Exception:  # noqa: BLE001
             logger.warning(

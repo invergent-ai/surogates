@@ -52,6 +52,7 @@ __all__ = [
     "apply_outreach_status",
     "deliver_pending",
     "record_outreach_delivery",
+    "record_outreach_text",
     "send_queued_outreach",
     "window_open",
 ]
@@ -488,12 +489,15 @@ def red_alert_reminder_minutes(settings: Any) -> int:
 
 
 async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> int:
-    """Send a red alert again, once, when a team member has not opened it.
+    """Send a red alert again, once, when no team member has read it.
 
-    "Not opened" is a held alert: its template went out and its recipient
-    has not answered.  The reminder goes to the whole team, so a colleague
-    can act when the first recipient is away from their phone.  Keyed on
-    the escalation, it is one reminder whichever pass gets there.
+    Read is WhatsApp's own read receipt on the alert's text, whether it went
+    straight into an open window or followed a template; an answered
+    template (the text then delivered) counts too.  A template read alone
+    does not: the alert behind it is still unseen.  The reminder goes to the
+    whole team, so a colleague can act when the first recipient is away
+    from their phone.  Keyed on the escalation, it is one reminder whichever
+    pass gets there.
     """
     async with session_factory() as db:
         rows = (
@@ -507,20 +511,24 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
                 .where(OutreachMessageRow.severity == "red")
                 .where(OutreachMessageRow.reminded_at.is_(None))
                 .where(OutreachMessageRow.dedupe_key.like("escalation:%"))
-                .where(OutreachMessageRow.state.in_(_HELD))
                 .where(OutreachMessageRow.created_at <= now - BATCH_WINDOW)
                 .where(OutreachMessageRow.created_at >= now - REMINDER_LOOKBACK)
+                .order_by(OutreachMessageRow.created_at)
                 .limit(BATCH)
             )
         ).all()
-    due: dict[str, tuple[Any, Any]] = {}
+    groups: dict[str, list[tuple[Any, Any]]] = {}
     for row, settings in rows:
-        wait = timedelta(minutes=red_alert_reminder_minutes(settings))
-        if as_utc(row.created_at) <= as_utc(now) - wait:
-            due.setdefault(row.dedupe_key.rsplit(":", 1)[0], (row, settings))
+        groups.setdefault(row.dedupe_key.rsplit(":", 1)[0], []).append((row, settings))
 
     reminded = 0
-    for escalation, (row, settings) in due.items():
+    for escalation, members in groups.items():
+        row, settings = members[0]
+        wait = timedelta(minutes=red_alert_reminder_minutes(settings))
+        if as_utc(row.created_at) > as_utc(now) - wait:
+            continue
+        if any(r.read_at is not None or r.state == "delivered" for r, _ in members):
+            continue
         try:
             reminded += await _remind(session_factory, escalation, row, settings, now=now)
         except Exception:  # noqa: BLE001 — one escalation, not the pass
@@ -550,6 +558,17 @@ async def _remind(
         fallback_sender=row.channel_identifier,
     )
     async with session_factory() as db:
+        if queued:
+            # A recipient still holding the alert behind its template gets
+            # the reminder, which quotes it, instead: answering must not
+            # deliver the same alert twice.
+            await db.execute(
+                sa.update(OutreachMessageRow)
+                .where(OutreachMessageRow.org_id == row.org_id)
+                .where(OutreachMessageRow.dedupe_key.like(f"{escalation}:%"))
+                .where(OutreachMessageRow.state.in_(_HELD))
+                .values(state="replaced", reason="Sent again as an unread red alert reminder")
+            )
         claimed = await db.execute(
             sa.update(OutreachMessageRow)
             .where(OutreachMessageRow.org_id == row.org_id)
@@ -940,6 +959,30 @@ async def _opener_of_outbox(db: Any, outbox_id: int) -> Any:
     return await db.get(OutreachMessageRow, uuid.UUID(outreach_id))
 
 
+async def record_outreach_text(
+    session_factory: Any, outbox_id: int, *, provider_message_id: str,
+) -> bool:
+    """The provider's id for an outreach text the outbox sent, so a later
+    ``read`` status can find it.  True when the row was an outreach text."""
+    async with session_factory() as db:
+        marker = (
+            await db.execute(
+                sa.select(Event.data["synthetic"].astext, Event.data["outreach_id"].astext)
+                .join(DeliveryOutbox, DeliveryOutbox.event_id == Event.id)
+                .where(DeliveryOutbox.id == outbox_id)
+            )
+        ).first()
+        if marker is None or marker[0] != "outreach" or not marker[1]:
+            return False
+        await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.id == uuid.UUID(marker[1]))
+            .values(provider_message_id=provider_message_id)
+        )
+        await db.commit()
+    return True
+
+
 async def apply_outreach_status(
     session_factory: Any,
     *,
@@ -947,7 +990,8 @@ async def apply_outreach_status(
     status: str,
     reason: str | None,
 ) -> bool:
-    """A provider status for a reopening template.  True when it was one."""
+    """A provider status for a reopening template or an outreach text.
+    True when it was one."""
     async with session_factory() as db:
         opener = (
             await db.execute(
@@ -957,7 +1001,11 @@ async def apply_outreach_status(
         ).scalar_one_or_none()
         if opener is None:
             return False
-        if status in ("failed", "undelivered"):
+        if status == "read":
+            if opener.state in ("sent", "delivered") and opener.read_at is None:
+                opener.read_at = datetime.now(timezone.utc)
+                await db.commit()
+        elif status in ("failed", "undelivered"):
             await _fail_reopened(
                 db, opener,
                 f"The reopening template was not delivered: {reason or status}",
