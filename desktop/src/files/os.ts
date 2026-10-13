@@ -18,9 +18,11 @@ export interface FileOs {
   rg(path: string | undefined, folder: string, find: Find): string | null;
   /** What rg is told before the path it searches, so that it names what it finds as the file kinds name paths. */
   readonly rgArgs: readonly string[];
+  /** A path rg's JSON names, as the file kinds name it, where rgArgs do not reach it; null where they do. */
+  readonly rgPrinted: ((path: string) => string) | null;
 }
 
-const POSIX: FileOs = { explorer: () => false, rg: (path, folder, find) => find("rg", path, folder), rgArgs: [] };
+const POSIX: FileOs = { explorer: () => false, rg: (path, folder, find) => find("rg", path, folder), rgArgs: [], rgPrinted: null };
 
 // Windows's PATH: absolute entries apart by ';', each looked in for rg.exe, as the app's own rg is beside its node
 // (hosts' toolsPath). A relative entry would be the helper's working folder, which is the user's folder: none is read.
@@ -41,8 +43,11 @@ const ROWS: Partial<Record<NodeJS.Platform, FileOs>> = {
   linux: POSIX,
   darwin: POSIX,
   // rg prints Windows's paths with '\' unless told: the file kinds turn this computer's path into the guest's by its
-  // start alone (edge.ts), so it prints '/'.
-  win32: { explorer: explorerActsOn, rg: (path) => windowsRg(path), rgArgs: ["--path-separator", "/"] },
+  // start alone (edge.ts), so it prints '/'. Its JSON keeps '\' below the path it was given (measured with 15.2.0),
+  // and no name on Windows holds one (names-win32.ts): each is a '/'.
+  win32: {
+    explorer: explorerActsOn, rg: (path) => windowsRg(path), rgArgs: ["--path-separator", "/"], rgPrinted: (path) => path.replaceAll("\\", "/"),
+  },
 };
 // On an OS the file host is not built for yet, in notBuilt's words (os-names.ts).
 const NOT_BUILT = notBuiltWords("The file host");
@@ -50,4 +55,4 @@ const refused = (): never => {
   throw new Error(NOT_BUILT);
 };
 
-export const fileOs: FileOs = ROWS[process.platform] ?? { explorer: refused, rg: refused, rgArgs: [] };
+export const fileOs: FileOs = ROWS[process.platform] ?? { explorer: refused, rg: refused, rgArgs: [], rgPrinted: null };

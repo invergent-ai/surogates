@@ -32,7 +32,9 @@ import { type FileId, ntat, type NtatConstants, type NtatEntry, type NtatError, 
 const k = (): NtatConstants => ntat().constants;
 const SHARE_ALL = (): number => k().FILE_SHARE_READ | k().FILE_SHARE_WRITE | k().FILE_SHARE_DELETE;
 // What a pin shares: no one may ask for DELETE, so nothing it holds can be renamed or removed (NtCreateFile's remarks on
-// ShareAccess: an open without FILE_SHARE_DELETE fails each later one that asks for DELETE).
+// ShareAccess: an open without FILE_SHARE_DELETE fails each later one that asks for DELETE). A pin asks for some of the
+// file's data, a folder's traversal or a file's read: an open that asks for its attributes alone has its sharing neither
+// checked nor kept (IoCheckShareAccess; measured on the runner, where such a pin let its file be renamed).
 const SHARE_PINNED = (): number => k().FILE_SHARE_READ | k().FILE_SHARE_WRITE;
 const PIECE = 1024 * 1024;
 // Between 1601 and 1970, in Windows's 100 ns.
@@ -353,9 +355,11 @@ function pinned(path: string): Outside {
   try {
     let dir = ntat().reopen(root.fd, k().FILE_TRAVERSE, SHARE_PINNED());
     held.push(dir);
-    for (const name of parts) {
+    for (const [i, name] of parts.entries()) {
+      // What rg reads, the searched folder's entries or the searched file, it must be able to read; above it, to pass.
+      const access = i === parts.length - 1 ? k().FILE_READ_DATA : k().FILE_TRAVERSE;
       try {
-        dir = ntat().openAt(dir, name, k().FILE_TRAVERSE, k().FILE_OPEN, 0, SHARE_PINNED(), 0, false);
+        dir = ntat().openAt(dir, name, access, k().FILE_OPEN, 0, SHARE_PINNED(), 0, false);
       } catch (error) {
         throw told(error, name);
       }
@@ -365,9 +369,20 @@ function pinned(path: string): Outside {
     if (ntat().query(dir).directory) {
       const entries = listing(dir);
       try {
-        const first = entries.readSync();
-        empty = first === null;
-        if (first !== null) held.push(ntat().openAt(dir, first.name.toString("utf8"), 0, k().FILE_OPEN, 0, SHARE_PINNED(), 0, true));
+        // The first entry that can be held; one that cannot be (another's, or gone) leaves the next.
+        empty = true;
+        let pin: number | null = null;
+        for (let entry = entries.readSync(); entry !== null && pin === null; entry = entries.readSync()) {
+          empty = false;
+          const access = entry.isFile() ? k().FILE_READ_DATA : k().FILE_TRAVERSE;
+          try {
+            pin = ntat().openAt(dir, entry.name.toString("utf8"), access, k().FILE_OPEN, 0, SHARE_PINNED(), 0, true);
+          } catch {
+            // The next.
+          }
+        }
+        if (!empty && pin === null) throw nodeError("EACCES", "open", path);
+        if (pin !== null) held.push(pin);
       } finally {
         entries.closeSync();
       }

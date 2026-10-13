@@ -687,7 +687,8 @@ async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Conte
   // A user's rg config could change the results or add --pre, which runs a program.
   const { RIPGREP_CONFIG_PATH: _config, ...clean } = env;
   // rg names what it finds from the path it is given: on a copy, by the copy's path, and on Windows by this computer's.
-  const edge = edgeOf(outside.path.slice(0, outside.path.length - (key.length - folder.length)), at ?? folder);
+  const named = edgeOf(outside.path.slice(0, outside.path.length - (key.length - folder.length)), at ?? folder);
+  const edge = named && fileOs.rgPrinted ? { ...named, printed: fileOs.rgPrinted } : named;
   return searchWith(rg, argv, clean, signal, edge && { mode, edge }).finally(outside.release);
 }
 

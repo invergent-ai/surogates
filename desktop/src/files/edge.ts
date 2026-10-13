@@ -61,7 +61,7 @@ function event(line: string, edge: Edge): string {
   if (typeof path !== "object" || path === null) return line;
   const [form, written] = typeof path.text === "string" ? (["text", path.text] as const) : typeof path.bytes === "string" ? (["bytes", path.bytes] as const) : [];
   if (form === undefined) return line;
-  const named = form === "text" ? shown(written, edge) : namedBytes(written, edge);
+  const named = form === "text" ? shown(edge.printed ? edge.printed(written) : written, edge) : namedBytes(written, edge);
   // An event whose file is named as it was is answered as rg wrote it.
   if (named === written) return line;
   path[form] = named;

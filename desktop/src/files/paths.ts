@@ -17,6 +17,8 @@ import { fdPaths } from "./fd-paths.js";
 export interface Edge {
   at: string;
   folder: string;
+  /** A path as rg prints it, in the file kinds' form (os.ts): on Windows, rg's JSON names a file below its path with '\'. */
+  printed?: (path: string) => string;
 }
 
 // The edge of a helper whose folder is named by another path, *at*; none for a folder named by its own.
