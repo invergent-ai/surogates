@@ -98,3 +98,81 @@ jobs:
           $said
           "### HcsGetServiceProperties, exit $code`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
           exit $code
+
+  # The shell and the browser on Windows: surogate-helper.exe's own lints and tests, those that fill the runner's
+  # certificate stores among them; the app end to end with no VM; and the browser host on the runner's own Chrome and
+  # Edge, headed.
+  shell:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
+      # The runner's own browsers, which the browser host's tests drive: each must be there, and its version is recorded.
+      - name: Find the runner's Chrome and Edge
+        run: |
+          $found = foreach ($browser in "C:\Program Files\Google\Chrome\Application\chrome.exe", "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe") {
+            if (-not (Test-Path $browser)) { throw "No browser at $browser" }
+            "$browser $((Get-Item $browser).VersionInfo.ProductVersion)"
+          }
+          $found
+          "### The runner's browsers`n``````n$($found -join "`n")`n``````" >> $env:GITHUB_STEP_SUMMARY
+
+      # Its own toolchain, as its rust-toolchain.toml pins it, and its crates as its Cargo.lock locks them.
+      - name: Lint surogate-helper.exe
+        working-directory: desktop/native/windows/helper
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run surogate-helper.exe's own tests, those that add roots to the runner's stores among them
+        if: ${{ !cancelled() }}
+        working-directory: desktop/native/windows/helper
+        run: cargo test --locked -- --include-ignored
+
+      - name: Build the app for Windows, surogate-helper.exe with it
+        if: ${{ !cancelled() }}
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
+
+      - name: Run the app end to end on Windows
+        if: ${{ !cancelled() }}
+        run: npx vitest run -c vitest.e2e.config.ts test/e2e/windows.e2e.ts
+
+      - name: Run the browser host on the runner's Chrome
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_WIN: "1"
+          SUROGATE_TEST_BROWSER: C:\Program Files\Google\Chrome\Application\chrome.exe
+        run: npx vitest run --project windows test/browser-host-win32.test.ts
+
+      - name: Run the browser host on the runner's Edge
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_WIN: "1"
+          SUROGATE_TEST_BROWSER: C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+        run: npx vitest run --project windows test/browser-host-win32.test.ts
