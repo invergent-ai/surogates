@@ -220,3 +220,23 @@ export async function getWorkspaceFile(
   }
   return (await response.json()) as FileContentResponse;
 }
+
+export interface WorkspaceEditorResponse {
+  document_server_url: string;
+  config: Record<string, unknown>;
+}
+
+export async function getWorkspaceEditor(
+  sessionId: string,
+  path: string,
+  theme: "light" | "dark",
+  view: boolean,
+): Promise<WorkspaceEditorResponse> {
+  const params = new URLSearchParams({ path, theme });
+  if (view) params.set("view", "true");
+  const response = await authFetch(`/api/v1/sessions/${sessionId}/workspace/editor?${params}`);
+  if (!response.ok) {
+    throw new Error(await refusal(sessionId, response, "Failed to open the document"));
+  }
+  return (await response.json()) as WorkspaceEditorResponse;
+}
