@@ -297,17 +297,14 @@ describe.runIf(process.platform === "win32" && process.env.CI === "true")("a dev
     rmSync(home, { recursive: true, force: true, maxRetries: 10 });
   });
 
-  it("has a Start menu shortcut with its own AppUserModelID, and a scheme whose link Windows opens in the running app; its removal quits it, and takes out its login item, its scheme and the shortcut", async () => {
-    // The running app, signed in, its data in the test's own folder; the script's runs are given that folder too.
+  it("registers the scheme for its user, whose link Windows opens in the running app, the chat it names shown", async () => {
+    // The running app, signed in, its data in the test's own folder; the script's runs are given that folder too, so
+    // the app it starts hands its launch to this one.
     const { shell, client } = await signedIn();
     const env = { ...process.env, ...shellEnv(home) };
     const made = powershell(`& '${SCRIPT}'`, env);
     expect(made.status, made.stderr).toBe(0);
-    const shortcut = shortcutPath();
-    expect(existsSync(shortcut)).toBe(true);
-    const named = powershell(`(New-Object -ComObject Shell.Application).NameSpace('${dirname(shortcut)}').ParseName('Surogate Dev.lnk').ExtendedProperty('System.AppUserModel.ID')`);
-    expect(named.stdout.trim()).toBe(DEVELOPMENT_ID);
-    // The scheme, for this user: this checkout's Electron on its main, the link after the end of its switches.
+    // This checkout's Electron on its main, the link after the end of its switches.
     expect(registry(LINKS, null)).toBe(`"${ELECTRON}" "${MAIN}" -- "%1"`);
     // A link Windows opens by it, as a browser or the Run box hands one to the shell, reaches the running app.
     await closeWindow(shell);
@@ -315,13 +312,23 @@ describe.runIf(process.platform === "win32" && process.env.CI === "true")("a dev
     expect(opened.status, opened.stderr).toBe(0);
     await expect.poll(async () => (await mainWindow(shell))?.visible, { timeout: 30_000 }).toBe(true);
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
-    // Its login item on, as Settings sets it.
+  }, 180_000);
+
+  it("has a Start menu shortcut with its own AppUserModelID; its removal quits the app it started, and takes out its login item, its scheme and the shortcut", async () => {
+    // Its data in the test's own folder, as the app's data home is a test's.
+    const env = { ...process.env, ...shellEnv(home) };
+    const made = powershell(`& '${SCRIPT}'`, env);
+    expect(made.status, made.stderr).toBe(0);
+    const shortcut = shortcutPath();
+    expect(existsSync(shortcut)).toBe(true);
+    const named = powershell(`(New-Object -ComObject Shell.Application).NameSpace('${dirname(shortcut)}').ParseName('Surogate Dev.lnk').ExtendedProperty('System.AppUserModel.ID')`);
+    expect(named.stdout.trim()).toBe(DEVELOPMENT_ID);
+    expect(registry(LINKS, null)).toBe(`"${ELECTRON}" "${MAIN}" -- "%1"`);
+    // Started; and its login item on, as Settings sets it.
+    await expect.poll(running, { timeout: 30_000 }).not.toBe("0");
     spawnSync(REG, ["add", RUN, "/v", DEVELOPMENT_ID, "/t", "REG_SZ", "/d", `"${ELECTRON}" "${MAIN}" --login`, "/f"]);
-    const closed = shell.waitForEvent("close");
     const removed = powershell(`& '${SCRIPT}' -Remove`, env);
     expect(removed.status, removed.stderr).toBe(0);
-    await closed;
-    app = undefined;
     expect(running()).toBe("0");
     expect(registry(RUN, DEVELOPMENT_ID)).toBeNull();
     expect(registry(LINKS, null)).toBeNull();
