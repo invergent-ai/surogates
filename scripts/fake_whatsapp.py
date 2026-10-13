@@ -11,7 +11,10 @@ http://127.0.0.1:58123/phone to write as a patient or a doctor.
 
 Inbound messages are signed with ``--app-secret`` and posted to the
 callback that ops registered (``override_callback_uri``), exactly like Meta.
-Templates are approved on creation.  State lives in memory.
+Templates are approved on creation.  Flows (``/{waba}/flows``, ``/{flow}/assets``,
+``/{flow}/publish``) are kept with their Flow JSON, and a flow message or a
+template's FLOW button opens on the phone as a form whose submission comes
+back as an ``nfm_reply``, like Meta's.  State lives in memory.
 
     .venv/bin/python scripts/fake_whatsapp.py --app-secret 0123456789abcdef0123456789abcdef
 """
@@ -44,6 +47,7 @@ state: dict = {
     "verify_token": "",
     "verified_name": "Dr. Pretorian · Urmărire TAVI",
     "templates": {},
+    "flows": {},
     "messages": [],
 }
 
@@ -145,6 +149,184 @@ async def create_template(version: str, waba_id: str, request: Request):
     return {"id": template["id"], "status": "APPROVED", "category": template["category"]}
 
 
+# ---------------------------------------------------------------------------
+# Flows
+# ---------------------------------------------------------------------------
+
+_FLOW_ROW = ("id", "name", "status", "categories", "validation_errors")
+
+
+async def _body(request: Request) -> dict:
+    try:
+        return dict(await request.json())
+    except Exception:
+        return dict(await request.form())
+
+
+def _validation_errors(flow_json) -> list[dict]:
+    if not isinstance(flow_json, dict) or not flow_json.get("screens"):
+        return [{"error": "INVALID_PROPERTY", "error_type": "JSON_SCHEMA_ERROR",
+                 "message": "The flow JSON needs a version and at least one screen.",
+                 "line_start": 1, "line_end": 1, "column_start": 1, "column_end": 1}]
+    return []
+
+
+def _store_flow_json(flow: dict, raw) -> None:
+    try:
+        flow_json = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    except ValueError:
+        flow_json = None
+    flow["flow_json"] = flow_json if isinstance(flow_json, dict) else None
+    flow["validation_errors"] = _validation_errors(flow_json)
+
+
+@app.post("/{version}/{waba_id}/flows")
+async def create_flow(version: str, waba_id: str, request: Request):
+    b = await _body(request)
+    categories = b.get("categories") or ["OTHER"]
+    if isinstance(categories, str):
+        categories = json.loads(categories)
+    flow = {"id": str(next(_ids)), "name": b.get("name") or "flow", "status": "DRAFT",
+            "categories": categories, "validation_errors": [], "flow_json": None, "waba_id": waba_id}
+    if b.get("flow_json"):
+        _store_flow_json(flow, b["flow_json"])
+    if str(b.get("publish")).lower() == "true" and flow["flow_json"] and not flow["validation_errors"]:
+        flow["status"] = "PUBLISHED"
+    state["flows"][flow["id"]] = flow
+    _persist()
+    return {"id": flow["id"], "success": True, "validation_errors": flow["validation_errors"]}
+
+
+@app.get("/{version}/{waba_id}/flows")
+async def list_flows(version: str, waba_id: str):
+    rows = [{k: f[k] for k in _FLOW_ROW} for f in state["flows"].values() if f.get("waba_id") == waba_id]
+    return {"data": rows, "paging": {"cursors": {"before": "", "after": ""}}}
+
+
+@app.post("/{version}/{flow_id}/assets")
+async def upload_flow_json(version: str, flow_id: str, request: Request):
+    flow = state["flows"].get(flow_id)
+    if flow is None:
+        return _error(100, f"Unsupported post request. Object with ID '{flow_id}' does not exist")
+    if flow["status"] != "DRAFT":
+        return _error(139001, "Flow can't be updated: only a draft flow can be changed")
+    form = await request.form()
+    upload = form.get("file")
+    _store_flow_json(flow, await upload.read() if hasattr(upload, "read") else upload)
+    _persist()
+    return {"success": True, "validation_errors": flow["validation_errors"]}
+
+
+@app.get("/{version}/{flow_id}/assets")
+async def flow_assets(version: str, flow_id: str, request: Request):
+    flow = state["flows"].get(flow_id)
+    if flow is None or flow["flow_json"] is None:
+        return {"data": [], "paging": {}}
+    return {"data": [{"name": "flow.json", "asset_type": "FLOW_JSON",
+                      "download_url": f"{request.base_url}flow-json/{flow_id}"}], "paging": {}}
+
+
+@app.get("/flow-json/{flow_id}")
+async def flow_json_download(flow_id: str):
+    return state["flows"][flow_id]["flow_json"]
+
+
+@app.post("/{version}/{flow_id}/publish")
+async def publish_flow(version: str, flow_id: str):
+    flow = state["flows"].get(flow_id)
+    if flow is None:
+        return _error(100, f"Object with ID '{flow_id}' does not exist")
+    if flow["flow_json"] is None or flow["validation_errors"]:
+        return _error(139002, "Publishing failed: the flow JSON is missing or has validation errors")
+    flow["status"] = "PUBLISHED"
+    _persist()
+    return {"success": True}
+
+
+@app.post("/{version}/{flow_id}/deprecate")
+async def deprecate_flow(version: str, flow_id: str):
+    flow = state["flows"].get(flow_id)
+    if flow is None or flow["status"] != "PUBLISHED":
+        return _error(139003, "Only a published flow can be deprecated")
+    flow["status"] = "DEPRECATED"
+    _persist()
+    return {"success": True}
+
+
+def _flow_fields(flow: dict, request: Request) -> dict:
+    wanted = (request.query_params.get("fields") or "id,name").split(",")
+    out = {"id": flow["id"]}
+    for field in wanted:
+        if field in _FLOW_ROW:
+            out[field] = flow[field]
+        elif field == "json_version":
+            out[field] = (flow["flow_json"] or {}).get("version")
+        elif field == "preview":
+            out[field] = {"preview_url": f"{request.base_url}phone", "expires_at": "2099-01-01T00:00:00+0000"}
+    return out
+
+
+def _resolve(expr, values: dict, data: dict):
+    """A Flow JSON dynamic value: ``${form.x}``, ``${screen.S.form.x}`` or ``${data.x}``."""
+    if not (isinstance(expr, str) and expr.startswith("${") and expr.endswith("}")):
+        return expr
+    path = expr[2:-1].split(".")
+    if path[0] == "form" or (path[0] == "screen" and len(path) > 3 and path[2] == "form"):
+        return values.get(path[-1])
+    if path[0] == "data":
+        # Earlier screens' answers reach a later screen as its data.
+        return values.get(path[-1], data.get(path[-1]))
+    return None
+
+
+def _walk(node):
+    if isinstance(node, dict):
+        yield node
+        for child in node.get("children") or []:
+            yield from _walk(child)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk(item)
+
+
+def flow_response(flow_json: dict, values: dict, data: dict, token: str) -> dict:
+    """What Meta returns as ``response_json``: the terminal ``complete`` payload plus the token."""
+    payload = None
+    for screen in flow_json.get("screens") or []:
+        for node in _walk((screen.get("layout") or {}).get("children") or []):
+            action = node.get("on-click-action") or {}
+            if action.get("name") == "complete":
+                payload = {k: _resolve(v, values, data) for k, v in (action.get("payload") or {}).items()}
+    if payload is None:
+        payload = dict(values)
+    return {**{k: v for k, v in payload.items() if v is not None}, "flow_token": token}
+
+
+@app.get("/phone/api/flow/{flow_id}")
+async def phone_flow(flow_id: str):
+    return state["flows"][flow_id]["flow_json"]
+
+
+@app.post("/phone/api/flow_submit")
+async def flow_submit(request: Request):
+    """The person filled the form in: post the ``nfm_reply`` webhook Meta sends."""
+    b = await request.json()
+    flow_json = state["flows"][b["flow_id"]]["flow_json"]
+    response = flow_response(flow_json, b.get("values") or {}, b.get("data") or {}, b.get("flow_token") or "unused")
+    wa_id, name = b["wa_id"], b.get("name") or b["wa_id"]
+    message = {
+        "from": wa_id, "id": _wamid(), "timestamp": str(int(time.time())), "type": "interactive",
+        "interactive": {"type": "nfm_reply", "nfm_reply": {
+            "name": "flow", "body": "Sent", "response_json": json.dumps(response, ensure_ascii=False),
+        }},
+    }
+    if b.get("context_id"):
+        message["context"] = {"from": DISPLAY_PHONE.replace(" ", "").lstrip("+"), "id": b["context_id"]}
+    _log("in", wa_id, "interactive", message)
+    await _post_webhook({"contacts": [{"profile": {"name": name}, "wa_id": wa_id}], "messages": [message]})
+    return {"ok": True, "response_json": response}
+
+
 MEDIA: dict[str, tuple[bytes, str]] = {}
 
 
@@ -157,6 +339,8 @@ async def media_bytes(media_id: str):
 
 @app.get("/{version}/{media_id}")
 async def media_url(version: str, media_id: str, request: Request):
+    if media_id in state["flows"]:
+        return _flow_fields(state["flows"][media_id], request)
     data, mime = MEDIA[media_id]
     return {"url": f"{request.base_url}media-bytes/{media_id}", "mime_type": mime,
             "file_size": len(data), "id": media_id, "messaging_product": "whatsapp"}
@@ -183,6 +367,10 @@ async def send(version: str, pnid: str, request: Request):
             return _error(132001, f"Template name does not exist in the translation ({key})")
     elif not _window_open(wa_id):
         return _error(131047, "Re-engagement message: more than 24 hours have passed since the recipient last replied")
+    elif kind == "interactive" and (body.get("interactive") or {}).get("type") == "flow":
+        flow_id = (((body["interactive"].get("action") or {}).get("parameters")) or {}).get("flow_id")
+        if (state["flows"].get(str(flow_id)) or {}).get("status") != "PUBLISHED":
+            return _error(100, f"Invalid parameter: flow {flow_id} is not a published flow")
     entry = _log("out", wa_id, kind, body)
     asyncio.create_task(_statuses(entry))
     return {"messaging_product": "whatsapp", "contacts": [{"input": wa_id, "wa_id": wa_id}],
@@ -313,7 +501,7 @@ async def phone():
     return PHONE_HTML
 
 
-PHONE_HTML = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
+PHONE_HTML = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
 <title>Fake WhatsApp</title>
 <style>
 body{margin:0;font:15px system-ui;background:#0b141a;color:#e9edef;display:flex;gap:16px;padding:16px;flex-wrap:wrap}
@@ -326,25 +514,69 @@ body{margin:0;font:15px system-ui;background:#0b141a;color:#e9edef;display:flex;
 .btn{display:block;width:100%;margin-top:4px;background:#2a3942;color:#53bdeb;border:0;border-radius:6px;padding:7px;cursor:pointer;font:inherit}
 .meta{color:#8696a0;font-size:11px;text-align:right}
 form{display:flex;gap:6px;padding:8px;background:#202c33}input{flex:1;border:0;border-radius:8px;padding:9px;background:#2a3942;color:#e9edef}
+#sheet{position:fixed;inset:0;background:#000a;display:none;align-items:flex-end;justify-content:center}
+#sheet .fl{width:380px;max-height:85vh;overflow:auto;background:#111b21;border-radius:14px 14px 0 0;padding:14px}
+#sheet form{display:block;background:none;padding:0}#sheet label{display:block;margin:10px 0 4px;color:#8696a0}
+#sheet input,#sheet select,#sheet textarea{width:100%;box-sizing:border-box;border:0;border-radius:8px;padding:9px;background:#2a3942;color:#e9edef;font:inherit}
+#sheet input[type=radio],#sheet input[type=checkbox]{width:auto;margin-right:6px}#sheet .opt{display:block;color:#e9edef;margin:4px 0}
+#sheet h3{margin:12px 0 6px}#sheet p{margin:6px 0;color:#d1d7db}
 </style>
-<div id=root></div>
+<div id=root></div><div id=sheet></div>
 <script>
 const phones=[{wa:'40712000001',name:'Ion Pacient',label:'Pacient'},{wa:'40712000002',name:'Dr. Radu Pretorian',label:'Medic'}];
-const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function send(p,extra){await fetch('/phone/api/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({wa_id:p.wa,name:p.name,...extra})});draw()}
 function bubble(p,m){
   const b=m.body;let h='';
-  if(m.dir==='in'){const t=b.text?.body??b.interactive?.button_reply?.title??b.interactive?.list_reply?.title??b.button?.text;return `<div class="m in">${esc(t)}</div>`}
+  if(m.dir==='in'){const nfm=b.interactive?.nfm_reply;const t=nfm?'📋 '+Object.entries(JSON.parse(nfm.response_json)).filter(([k])=>k!=='flow_token').map(([k,v])=>k+': '+v).join('\n'):b.text?.body??b.interactive?.button_reply?.title??b.interactive?.list_reply?.title??b.button?.text;return `<div class="m in">${esc(t)}</div>`}
   if(m.kind==='text')h=esc(b.text?.body);
   else if(m.kind==='template'){const c=m.template?.components||[];const g=t=>c.find(x=>x.type===t);
     h=(g('HEADER')?`<div class=hdr>${esc(g('HEADER').text)}</div>`:'')+esc(g('BODY')?.text||'[template '+b.template?.name+']')+(g('FOOTER')?`<div class=ftr>${esc(g('FOOTER').text)}</div>`:'');
-    for(const x of g('BUTTONS')?.buttons||[])h+=`<button class=btn data-k=tb data-v="${esc(x.text)}">${esc(x.text)}</button>`}
+    for(const x of g('BUTTONS')?.buttons||[]){
+      if(x.type==='FLOW'){const tok=(b.template?.components||[]).find(c=>c.sub_type==='flow')?.parameters?.[0]?.action?.flow_token||'unused';
+        h+=flowBtn(x.text,x.flow_id,tok,x.navigate_screen,{},m.id)}
+      else h+=`<button class=btn data-k=tb data-v="${esc(x.text)}">${esc(x.text)}</button>`}}
   else if(m.kind==='interactive'){const i=b.interactive;h=(i.header?.text?`<div class=hdr>${esc(i.header.text)}</div>`:'')+esc(i.body?.text)+(i.footer?`<div class=ftr>${esc(i.footer.text)}</div>`:'');
     if(i.type==='button')for(const x of i.action.buttons)h+=`<button class=btn data-k=br data-id="${esc(x.reply.id)}" data-v="${esc(x.reply.title)}">${esc(x.reply.title)}</button>`;
     if(i.type==='list')for(const s of i.action.sections)for(const r of s.rows)h+=`<button class=btn data-k=lr data-id="${esc(r.id)}" data-v="${esc(r.title)}">${esc(r.title)}${r.description?' · '+esc(r.description):''}</button>`;
-    if(i.type==='flow')h+=`<button class=btn disabled>${esc(i.action?.parameters?.flow_cta)} (flow)</button>`}
+    if(i.type==='flow'){const f=i.action.parameters;h+=flowBtn(f.flow_cta,f.flow_id,f.flow_token,f.flow_action_payload?.screen,f.flow_action_payload?.data||{},m.id)}}
   else h=esc('['+m.kind+'] '+JSON.stringify(b).slice(0,200));
   return `<div class="m out">${h}<div class=meta>${m.status}</div></div>`}
+const flowBtn=(text,flow,token,screen,data,ctx)=>`<button class=btn data-k=flow data-flow="${esc(flow)}" data-token="${esc(token)}" data-screen="${esc(screen||'')}" data-data="${esc(JSON.stringify(data))}" data-ctx="${esc(ctx)}">📋 ${esc(text)}</button>`;
+const val=(x,data)=>{const r=typeof x==='string'&&/^\$\{data\.(\w+)\}$/.exec(x);return r?data[r[1]]:x};
+function walk(n,out){if(Array.isArray(n))n.forEach(c=>walk(c,out));else if(n&&typeof n==='object'){out.push(n);walk(n.children||[],out)}return out}
+function field(c,data,init){
+  const v=val(c['init-value']??init[c.name],data)??'',lb=`<label>${esc(c.label)}${c.required?' *':''}</label>`,nm=`name="${esc(c.name)}"`,rq=c.required?' required':'';
+  const opts=val(c['data-source'],data)||[];
+  switch(c.type){
+    case 'TextHeading':case 'TextSubheading':return `<h3>${esc(c.text)}</h3>`;
+    case 'TextBody':case 'TextCaption':return `<p>${esc(c.text)}</p>`;
+    case 'TextInput':{const t={number:'number',email:'email',phone:'tel',password:'password'}[c['input-type']]||'text';return lb+`<input type=${t} ${nm} value="${esc(v)}"${rq}>`}
+    case 'TextArea':return lb+`<textarea ${nm} rows=3${rq}>${esc(v)}</textarea>`;
+    case 'DatePicker':return lb+`<input type=date ${nm} value="${esc(v)}"${rq}>`;
+    case 'Dropdown':return lb+`<select ${nm}${rq}><option value=""></option>${opts.map(o=>`<option value="${esc(o.id)}"${o.id===v?' selected':''}>${esc(o.title)}</option>`).join('')}</select>`;
+    case 'RadioButtonsGroup':return lb+opts.map(o=>`<span class=opt><input type=radio ${nm} value="${esc(o.id)}"${o.id===v?' checked':''}${rq}>${esc(o.title)}</span>`).join('');
+    case 'CheckboxGroup':return lb+opts.map(o=>`<span class=opt><input type=checkbox data-multi ${nm} value="${esc(o.id)}"${(v||[]).includes?.(o.id)?' checked':''}>${esc(o.title)}</span>`).join('');
+    case 'OptIn':return `<span class=opt><input type=checkbox data-optin ${nm}${v===true?' checked':''}${rq}>${esc(c.label)}</span>`;
+    case 'Footer':return `<button class=btn type=submit>${esc(c.label)}</button>`;
+    default:return ''}}
+async function openFlow(p,d){
+  const fj=await (await fetch('/phone/api/flow/'+d.flow)).json(),data=JSON.parse(d.data||'{}');
+  const screens=[...fj.screens].sort((a,b)=>(b.id===d.screen)-(a.id===d.screen));
+  let html='',footer='';
+  for(const s of screens){html+=`<h3>${esc(s.title||s.id)}</h3>`;for(const c of walk(s.layout?.children||[],[])){
+    const init=c.type==='Form'?c['init-values']||{}:{};if(c.type==='Form'){walk(c.children,[]).forEach(x=>x.__init=init);continue}
+    const f=field(c,data,c.__init||{});if(c.type==='Footer')footer=f;else html+=f}}
+  sheet.innerHTML=`<div class=fl><form>${html}${footer||'<button class=btn type=submit>Trimite</button>'}<button class=btn type=button id=cl>Închide</button></form></div>`;
+  sheet.style.display='flex';sheet.querySelector('#cl').onclick=()=>sheet.style.display='none';
+  sheet.querySelector('form').onsubmit=async e=>{e.preventDefault();const values={};
+    for(const el of e.target.elements){if(!el.name)continue;
+      if(el.dataset.multi!==undefined){(values[el.name]??=[]);if(el.checked)values[el.name].push(el.value)}
+      else if(el.dataset.optin!==undefined)values[el.name]=el.checked;
+      else if(el.type==='radio'){if(el.checked)values[el.name]=el.value}
+      else if(el.value!=='')values[el.name]=el.value}
+    await fetch('/phone/api/flow_submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({wa_id:p.wa,name:p.name,flow_id:d.flow,flow_token:d.token,data,values,context_id:d.ctx})});
+    sheet.style.display='none';draw()}}
 async function draw(){
   let out='';
   for(const p of phones){const r=await (await fetch('/phone/api/thread?wa_id='+p.wa)).json();
@@ -359,7 +591,8 @@ async function draw(){
     el.querySelectorAll('.btn').forEach(b=>b.onclick=()=>{const k=b.dataset.k;
       if(k==='tb')send(p,{template_button:b.dataset.v});
       if(k==='br')send(p,{button_reply:{id:b.dataset.id,title:b.dataset.v}});
-      if(k==='lr')send(p,{list_reply:{id:b.dataset.id,title:b.dataset.v}})})})}
+      if(k==='lr')send(p,{list_reply:{id:b.dataset.id,title:b.dataset.v}});
+      if(k==='flow')openFlow(p,b.dataset)})})}
 draw();setInterval(()=>{if(!document.activeElement||document.activeElement.tagName!=='INPUT'||!document.activeElement.value)draw()},1500);
 </script>"""
 
