@@ -212,7 +212,7 @@ COMMANDS = {
     "/goal <text>": Command("/goal Ship the Q3 report", "_handle_goal_command", ("Outcome defined (",), made="a_goal"),
     "/mission <text>": Command(MISSION, "_handle_mission_command", ("Mission ",), made="a_mission"),
     "/mission pause": Command("/mission pause", "_handle_mission_command", ("Mission paused.",), made="a_pause", of_a_coordinator=True),
-    "/compress": Command("/compress", "_handle_compress_command", ("Context compressed", "Context is too small"), made="a_compaction"),
+    "/compress": Command("/compress", "_handle_compress_command", ("Context compressed", "Nothing to compress"), made="a_compaction"),
     "/clear": Command("/clear", "_handle_clear_command", ("Conversation cleared.",), made="a_clearing"),
     "/loop <prompt>": Command("/loop 1d Check the cash report", "_handle_loop_command", ("Loop scheduled: ",), made="a_routine"),
     "/loop list": Command("/loop list", "_handle_loop_command", ("No active loops.",)),
@@ -443,8 +443,8 @@ class Placement:
     async def a_compaction(self) -> list[str]:
         [answer] = [event.data["message"]["content"] for event in self.answers_to(self.message_of(self.command.typed).id)][:1] or [""]
         made = (len(self.compactions()), len(self.compressed))
-        if answer.startswith("Context is too small") or self.dies == NOT_WRITTEN and not self.compressed:
-            return [] if made == (0, 0) else [f"/compress says too small, and compressed {made}"]
+        if answer.startswith("Nothing to compress") or self.dies == NOT_WRITTEN and not self.compressed:
+            return [] if made == (0, 0) else [f"/compress says nothing to compress, and compressed {made}"]
         faults = [] if made == (1, 1) else [f"/compress wrote {made[0]} compactions from {made[1]} runs of the compressor"]
         for conversation in self.compressed:
             faults += [f"/compress was given a conversation in which {fault}" for fault in not_taken_by_a_provider(conversation)]
