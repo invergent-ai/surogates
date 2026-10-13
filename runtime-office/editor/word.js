@@ -165,7 +165,209 @@
     return { matches: matches, total: found.length };
   }
 
+  function Refusal(reason, el) {
+    this.reason = reason;
+    this.block = el ? describe(el, 80) : null;
+  }
+
+  function resolveTarget(target) {
+    if (target.end) return { end: true };
+    if (target.block !== undefined) {
+      var el = Api.GetByInternalId(String(target.block));
+      if (!el || !attached(el)) throw new Refusal("Block " + target.block + " is gone: someone deleted it. Read the outline again.");
+      if (hash(textOf(el)) !== target.hash) {
+        throw new Refusal("Block " + target.block + " changed since you read it. This is it now; work from it.", el);
+      }
+      return { el: el };
+    }
+    if (target.pending !== undefined) {
+      var sdt = doc.GetContentControlsByTag("pending:" + target.pending)[0];
+      if (!sdt) throw new Refusal("The pending block " + target.pending + " is gone: the user deleted it. Leave that section out.");
+      return { el: sdt, pending: true };
+    }
+    var found = find(target.find, true);
+    if (found.length < target.nth) {
+      throw new Refusal(found.length
+        ? "Only " + found.length + " match(es) of \"" + target.find + "\"."
+        : "\"" + target.find + "\" is not in the document now: someone changed it. Read it again.");
+    }
+    var range = found[target.nth - 1];
+    return { el: blockAt(spans(), range), range: range };
+  }
+
+  function position(where, side) {
+    if (where.end) return doc.GetElementsCount();
+    var pos = where.el.GetPosInParent();
+    return side === "before" ? pos : pos + 1;
+  }
+
+  function addRuns(paragraph, runs, size) {
+    for (var i = 0; i < runs.length; i++) {
+      var run = runs[i];
+      if (run.href) {
+        try {
+          paragraph.AddElement(Api.CreateHyperlink(run.href, run.text, ""));
+          continue;
+        } catch (e) {
+          // The text stays, without its link.
+        }
+      }
+      var lines = String(run.text).split("\n");
+      for (var k = 0; k < lines.length; k++) {
+        if (k > 0) paragraph.AddLineBreak();
+        if (!lines[k]) continue;
+        var added = paragraph.AddText(lines[k]);
+        if (run.b || size) added.SetBold(true);
+        if (run.i) added.SetItalic(true);
+        if (run.s) added.SetStrikeout(true);
+        if (run.code) added.SetFontFamily("Courier New");
+        if (size) added.SetFontSize(size);
+      }
+    }
+  }
+
+  function paragraphOf(runs, styleName, level) {
+    var paragraph = Api.CreateParagraph(), style = styleName ? doc.GetStyle(styleName) : null;
+    if (style) paragraph.SetStyle(style);
+    // A document without heading styles gets bold, larger text instead (sizes in half-points).
+    addRuns(paragraph, runs, styleName && !style && level ? [0, 32, 28, 24][level] : 0);
+    return paragraph;
+  }
+
+  function bold(runs) {
+    return runs.map(function (run) {
+      var copy = {};
+      for (var key in run) copy[key] = run[key];
+      copy.b = true;
+      return copy;
+    });
+  }
+
+  function tableOf(rows) {
+    var columns = 1;
+    for (var r = 0; r < rows.length; r++) columns = Math.max(columns, rows[r].length);
+    var table = Api.CreateTable(columns, rows.length), grid = doc.GetStyle("Table Grid");
+    if (grid) table.SetStyle(grid);
+    for (var row = 0; row < rows.length; row++) {
+      for (var c = 0; c < rows[row].length; c++) {
+        addRuns(table.GetCell(row, c).GetContent().GetElement(0), row === 0 ? bold(rows[row][c]) : rows[row][c], 0);
+      }
+    }
+    return table;
+  }
+
+  function pendingOf(key, intent) {
+    var sdt = Api.CreateBlockLvlSdt();
+    sdt.SetTag("pending:" + key);
+    sdt.SetAlias("The agent is writing this");
+    sdt.SetPlaceholderText(intent);
+    // The user cannot type into it, but one Delete removes it.
+    sdt.SetLock("contentLocked");
+    sdt.SetBackgroundColor(230, 240, 255);
+    sdt.SetBorderColor(80, 120, 200);
+    return sdt;
+  }
+
+  function build(blocks) {
+    var out = [], lists = {};
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      if (b.t === "h") out.push(paragraphOf(b.runs, "Heading " + b.level, b.level));
+      else if (b.t === "p") out.push(paragraphOf(b.runs));
+      else if (b.t === "li") {
+        var numbering = lists[b.list] || (lists[b.list] = doc.CreateNumbering(b.ordered ? "numbered" : "bullet"));
+        var item = paragraphOf(b.runs);
+        item.SetNumbering(numbering.GetLevel(Math.min(b.level, 8)));
+        out.push(item);
+      } else if (b.t === "code") {
+        for (var l = 0; l < b.lines.length; l++) out.push(paragraphOf([{ text: b.lines[l], code: true }]));
+      } else if (b.t === "table") out.push(tableOf(b.rows));
+      else if (b.t === "pending") out.push(pendingOf(b.key, b.intent));
+      else throw new Error("unknown block " + b.t);
+    }
+    return out;
+  }
+
+  function insertAt(pos, elements) {
+    var ids = [];
+    for (var i = 0; i < elements.length; i++) {
+      doc.AddElement(pos + i, elements[i]);
+      MUTATED = true;
+      ids.push(String(elements[i].GetInternalId()));
+    }
+    return ids;
+  }
+
+  function fill(sdt, elements) {
+    // Marked first: a failure after the block is emptied is undone too.
+    MUTATED = true;
+    sdt.SetLock("unlocked");
+    sdt.RemoveAllElements();
+    for (var i = 0; i < elements.length; i++) sdt.AddElement(elements[i], i);
+    var ids = elements.map(function (el) { return String(el.GetInternalId()); });
+    sdt.Delete(true);
+    return ids;
+  }
+
+  function remove(where) {
+    if (where.range) where.range.Delete();
+    else if (where.pending) where.el.Delete(false);
+    else where.el.Delete();
+    MUTATED = true;
+  }
+
+  var EDITS = {
+    insert: function (op) {
+      return { ids: insertAt(position(resolveTarget(op.target), op.side), build(op.blocks)) };
+    },
+    replace: function (op) {
+      var where = resolveTarget(op.target), elements = build(op.blocks);
+      if (where.pending) return { ids: fill(where.el, elements) };
+      var ids = insertAt(where.el.GetPosInParent(), elements);
+      remove(where);
+      return { ids: ids };
+    },
+    reword: function (op) {
+      var where = resolveTarget(op.target), start = where.range.GetStartPos(), length = where.range.GetText().length;
+      // The new words go in after the old, inside its last run, so they keep its formatting; then the old go.
+      MUTATED = true;
+      where.range.AddText(op.text, "after");
+      var old = doc.GetRange(start, start + length);
+      if (old.GetText() !== op.target.find) throw new Error("the words moved while they were being changed");
+      old.Delete();
+      return {};
+    },
+    delete: function (op) {
+      remove(resolveTarget(op.target));
+      return {};
+    },
+    move: function (op) {
+      var what = resolveTarget(op.target), to = resolveTarget(op.to);
+      if (to.el && String(to.el.GetInternalId()) === String(what.el.GetInternalId())) throw new Refusal("A block cannot move next to itself.");
+      var copy = what.el.Copy();
+      insertAt(position(to, op.side), [copy]);
+      remove(what);
+      return { ids: [String(copy.GetInternalId())] };
+    },
+  };
+
+  function edit(ops, agent) {
+    var results = [];
+    for (var i = 0; i < ops.length; i++) {
+      try {
+        var result = EDITS[ops[i].op](ops[i], agent);
+        result.op = i;
+        results.push(result);
+      } catch (e) {
+        if (e instanceof Refusal) return { refused: { op: i, reason: e.reason, block: e.block }, mutated: MUTATED };
+        throw e;
+      }
+    }
+    return { results: results, mutated: MUTATED };
+  }
+
   try {
+    if (scope.action === "edit") return edit(scope.ops, scope.agent);
     if (scope.action === "outline") return outline(scope.start || 0, scope.limit || 200);
     if (scope.action === "view") return view(scope.target);
     if (scope.action === "search") return search(scope.query);
