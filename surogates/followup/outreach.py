@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 
-from surogates.channels.identity import readable_phone
+from surogates.channels.identity import mask_readable_phones, readable_phone
 from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
@@ -159,16 +159,19 @@ async def _write_text(
 ) -> None:
     # An assistant reply as far as the transcript and the outbox are
     # concerned, so it is delivered exactly as the agent's own replies are,
-    # and the agent sees what was said when the person answers.
+    # and the agent sees what was said when the person answers.  The log,
+    # which the model reads, keeps phone numbers masked; only the outbox
+    # carries them whole, for the team member who has to call.
+    text = text or row.text
+    data = {
+        "message": {"role": "assistant", "content": mask_readable_phones(text)},
+        "synthetic": "outreach",
+        "outreach_id": str(row.id),
+        "outreach_kind": row.kind,
+    }
     await session_store.emit_event(
-        session_id,
-        EventType.LLM_RESPONSE,
-        {
-            "message": {"role": "assistant", "content": text or row.text},
-            "synthetic": "outreach",
-            "outreach_id": str(row.id),
-            "outreach_kind": row.kind,
-        },
+        session_id, EventType.LLM_RESPONSE, data,
+        delivery_data={**data, "message": {"role": "assistant", "content": text}},
     )
 
 

@@ -265,7 +265,7 @@ async def test_an_ambiguous_patient_returns_candidates_and_sends_nothing(sf, pra
     )
     assert "more than one person" in out
     assert "Ion Popescu" in out and "Ioana Popa" in out
-    assert "+40 700 000 001" in out  # whole, to call or message
+    assert "+40…001" in out  # whole, to call or message
     assert await _outreach(sf) == []
 
 
@@ -286,7 +286,7 @@ async def test_unconfirmed_is_a_preview_and_sends_nothing(sf, practice):
         {"patient": "Ioana", "text": "Veniți mâine la 10."},
         **_kw(sf, practice.doctor_session),
     )
-    assert out.startswith("Will send to Ioana Popa (+40 700 000 002): «Veniți mâine la 10.»")
+    assert out.startswith("Will send to Ioana Popa (+40…002): «Veniți mâine la 10.»")
     assert _redis.ttl[next(iter(_redis.data))] == team.CONFIRM_TTL_SECONDS
     assert f'confirmation="{_code(out)}"' in out
     assert await _outreach(sf) == []
@@ -373,7 +373,7 @@ async def test_closed_window_without_a_template_is_refused(sf, practice):
         **_kw(sf, practice.doctor_session),
     )
     assert "24 hours" in out
-    assert "+40 700 000 002" in out
+    assert "+40…002" in out
     assert await _outreach(sf) == []
 
 
@@ -404,7 +404,7 @@ async def test_a_paused_patient_is_messaged_only_when_the_doctor_insists(sf, pra
         {"patient": "Ioana", "text": "x"}, **kw,
     )
     assert "not active (post-op paused (internată))" in out
-    assert "even_if_paused" in out and "+40 700 000 002" in out
+    assert "even_if_paused" in out and "+40…002" in out
     assert await _outreach(sf) == []
 
     out = await _confirmed(
@@ -423,7 +423,7 @@ async def test_no_permission_is_refused(sf, practice):
         **_kw(sf, practice.doctor_session),
     )
     assert "permission" in out
-    assert "Call them instead: +40 700 000 006" in out
+    assert "Call them instead (+40…006)" in out
     assert await _outreach(sf) == []
 
 
@@ -546,7 +546,7 @@ async def test_enrol_preview_writes_nothing(sf, practice, bindings):
     out = await team.handle_team_enroll_person(
         _enrol(answered_by="Ana, fiica"), **_kw(sf, practice.doctor_session),
     )
-    assert out.startswith("Will enrol Elena Dumitru (+40 711 222 333) in post-op from ")
+    assert out.startswith("Will enrol Elena Dumitru (+40…333) in post-op from ")
     assert "answered by Ana, fiica" in out and "welcome message" in out
     assert "Nothing has been changed" in out
     async with sf() as db:
@@ -566,7 +566,7 @@ async def test_confirmed_enrol_creates_the_phone_only_person_and_welcomes_them(s
         team.handle_team_enroll_person,
         _enrol(start_date_approximate=True), _kw(sf, practice.doctor_session),
     )
-    assert "Enrolled Elena Dumitru (+40 711 222 333) in post-op" in out
+    assert "Enrolled Elena Dumitru (+40…333) in post-op" in out
     assert "Welcome message queued" in out
     async with sf() as db:
         identity = (await db.execute(
@@ -723,7 +723,7 @@ async def test_overview_lists_messages_that_did_not_arrive_as_open_items(sf, pra
     out = await team.handle_team_overview({}, **_kw(sf, practice.doctor_session))
     assert (
         "Open items, messages that did not arrive (last 72h): Ioana Popa: no "
-        "permission to message them, call +40 700 000 002"
+        "permission to message them, call them (+40…002)"
     ) in out
 
 
@@ -733,3 +733,25 @@ def test_team_tools_ask_for_a_person_and_never_speak_of_patients_or_doctors():
                    team.TEAM_UPDATE_PERSON_SCHEMA, team.TEAM_ENROLL_PERSON_SCHEMA):
         text = str(schema.description) + str(schema.parameters)
         assert not re.search(r"patient|doctor|care team|practice", text, re.I), schema.name
+
+
+
+@pytest.mark.asyncio
+async def test_the_model_never_reads_a_whole_number_and_the_platform_sends_it(sf, practice):
+    import re
+
+    from surogates.channels.identity import mask_readable_phones
+
+    whole = re.compile(r"\+\d{1,3}(?: \d{3}){2,}|\+\d{7,}")
+    out = await team.handle_team_overview(
+        {"include_phone": True}, **_kw(sf, practice.doctor_session),
+    )
+    assert not whole.search(out)
+    assert "sent to the team member in a separate message" in out
+    async with sf() as db:
+        [notice] = (await db.execute(
+            sa.select(OutreachMessageRow).where(OutreachMessageRow.created_by == "team-overview")
+        )).scalars().all()
+    assert notice.user_id == practice.doctor
+    assert "+40 700 000 001" in notice.text and "+40 700 000 002" in notice.text
+    assert mask_readable_phones("Ion · +40 700 000 001") == "Ion · +40…001"

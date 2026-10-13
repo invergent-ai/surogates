@@ -49,7 +49,7 @@ class _FakeSessionStore:
         self._next_session_id: UUID = uuid4()
 
     async def emit_event(
-        self, session_id: UUID, event_type: EventType, data: dict,
+        self, session_id: UUID, event_type: EventType, data: dict, **_: Any,
     ) -> None:
         self.events.append((session_id, event_type, data))
 

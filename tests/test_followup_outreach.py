@@ -24,10 +24,11 @@ class _Store:
         self.events: list[tuple] = []
         self.fail_on_emit = fail_on_emit
 
-    async def emit_event(self, session_id, event_type, data, **_):
+    async def emit_event(self, session_id, event_type, data, delivery_data=None, **_):
         if self.fail_on_emit:
             raise RuntimeError("database went away")
         self.events.append((session_id, event_type, data))
+        self.delivered = delivery_data
         return len(self.events)
 
     async def emit_synthetic_user_message(self, session_id, *, content, synthetic, metadata):
@@ -867,3 +868,15 @@ async def test_an_answer_after_expiry_is_told_kindly_and_the_requester_hears(sf,
     late = [n for n in await _notices(sf) if n.text.startswith("↩️")]
     assert [n.user_id for n in late] == [member]
     assert late[0].text.startswith("↩️ Ion Pop answered after your message expired")
+
+
+
+@pytest.mark.asyncio
+async def test_the_log_keeps_a_number_masked_and_only_the_delivery_has_it_whole(sf, doctor_session):
+    await _wrote(sf, NOW - timedelta(hours=2))
+    await _queue(sf, uuid.uuid4(), text="Faint\n\n— Ion Pop · +40 711 111 111")
+    session_store = _Store()
+    await _send(sf, session_store, _Delivery())
+    [(_, _, data)] = session_store.events
+    assert data["message"]["content"] == "Faint\n\n— Ion Pop · +40…111"
+    assert session_store.delivered["message"]["content"].endswith("+40 711 111 111")

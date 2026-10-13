@@ -92,6 +92,8 @@ class _EventWrite:
     id: int = 0
     stamped: Any = None
     inbox_publish: tuple[int, str, UUID] | None = None
+    #: What the channel delivers when it must differ from what the log keeps.
+    delivery_data: dict | None = None
 
 
 class BrowserControlBusy(Exception):
@@ -1382,6 +1384,7 @@ class SessionStore:
         *,
         lease_token: UUID | None = None,
         status: str | None = None,
+        delivery_data: dict | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
@@ -1391,6 +1394,10 @@ class SessionStore:
         an event that says a session is paused and the status that makes it
         so are both there or neither.  ``archived`` is final, as for
         :meth:`update_session_status`.
+
+        With *delivery_data*, a channel delivers that instead of *data*: a
+        platform text whose full phone number the team needs, while the
+        event, which the model reads, keeps it masked.
 
         With *lease_token*, the event is committed only while that token is
         the session's lease: a worker that lost the session must not answer
@@ -1406,6 +1413,8 @@ class SessionStore:
         cleanly in ORM ``update().values()``.
         """
         event = await self._ready_event(session_id, event_type, data)
+        if delivery_data is not None:
+            event.delivery_data = redact_sensitive_data(delivery_data)
         async with self._sf() as db:
             if lease_token is not None:
                 held = (await db.execute(
@@ -1584,7 +1593,7 @@ class SessionStore:
                 session_id,
                 event.id,
                 event_type,
-                event.data,
+                event.delivery_data or event.data,
             )
 
     async def _enqueue_channel_delivery(

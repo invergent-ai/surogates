@@ -21,7 +21,9 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
-from surogates.channels.identity import channel_user_email, normalize_wa_id, readable_phone
+from surogates.channels.identity import (
+    channel_user_email, mask_readable_phones, masked_phone, normalize_wa_id, readable_phone,
+)
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import (
@@ -69,6 +71,12 @@ WELCOME_TEXT = (
     "Thank you. To start your follow-up, could you tell me the date of your procedure?"
 )
 
+#: Phone numbers never reach the model whole; the platform sends them.
+PHONE_HINT = (
+    "numbers are shown masked here; team_overview with include_phone sends "
+    "the team member the whole number in a separate message."
+)
+
 TEAM_OVERVIEW_SCHEMA = ToolSchema(
     name="team_overview",
     description=(
@@ -95,6 +103,16 @@ TEAM_OVERVIEW_SCHEMA = ToolSchema(
                     "A name or phone fragment to show only that person, with "
                     "their latest conversation lines and what the agent "
                     "remembers about them."
+                ),
+            },
+            "include_phone": {
+                "type": "boolean",
+                "description": (
+                    "true when the team member asks for a phone number. "
+                    "Numbers in this digest are masked; with this, the "
+                    "platform sends the team member the whole numbers of the "
+                    "people shown in a separate message. Never write a number "
+                    "out yourself."
                 ),
             },
         },
@@ -375,7 +393,7 @@ async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Perso
     if len(matches) > 1:
         return (
             f"'{fragment}' matches more than one person. Ask the team member which "
-            "one:\n" + "\n".join(f"- {p.label} ({readable_phone(p.phone) if p.phone else 'no number'})" for p in matches)
+            "one:\n" + "\n".join(f"- {p.label} ({masked_phone(p.phone)})" for p in matches)
         )
     return matches[0]
 
@@ -687,7 +705,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
 
         head = person.label
         if person.phone:
-            head += f" · {readable_phone(person.phone)}"
+            head += f" · {masked_phone(person.phone)}"
         lines = [f"• {head}"]
         for row in person.rows:
             zone = zones.get(row.protocol, "UTC")
@@ -735,7 +753,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         f"Paused or ended (last {since_hours}h): " + ("; ".join(changed) or "none"),
         "Silent 3 days or more: " + ("; ".join(silent) or "none"),
         "Open items, messages that did not arrive (last 72h): " + ("; ".join(
-            f"{p.label}: {plain_reason(reason)}, call {readable_phone(p.phone) if p.phone else 'no number'}"
+            f"{p.label}: {plain_reason(reason)}, call them ({masked_phone(p.phone)})"
             for p in people for reason in undelivered.get(p.user_id, [])
         ) or "none"),
     ]
@@ -751,7 +769,31 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             f"\n\n… {len(blocks) - shown} more not shown; ask about one person "
             "with the person argument."
         )
-    return out
+    if arguments.get("include_phone") is True:
+        out += "\n\n" + await _send_phones(sf, ctx, settings, people[:shown])
+    return mask_readable_phones(out)
+
+
+async def _send_phones(sf: Any, ctx: Any, settings: Any, people: list) -> str:
+    """Send the asking team member the whole numbers, outside the model.
+
+    Platform text to their phone: the event the model reads keeps them
+    masked, the outbox row carries them whole.
+    """
+    lines = [f"{p.label}: {readable_phone(p.phone)}" for p in people if p.phone]
+    if not lines:
+        return "Phone numbers: nobody shown has a number on record."
+    queued, why_not = await followup_store.notify_team(
+        sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="notice",
+        text="📞 " + "\n📞 ".join(lines), created_by="team-overview",
+        only_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
+    )
+    if not queued:
+        return f"Phone numbers: could not be sent ({why_not})."
+    return (
+        "Phone numbers: sent to the team member in a separate message within "
+        "a minute. Tell them so; do not repeat or guess any number."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -839,8 +881,8 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         ).scalars().first()
     if identity is None:
         return f"Nothing sent: {person.label} has no WhatsApp number."
-    phone = readable_phone(identity.platform_user_id)
-    call = f"Call them instead: {phone}."
+    phone = masked_phone(identity.platform_user_id)
+    call = f"Call them instead ({phone}); {PHONE_HINT}"
     active = any(r.status == "active" for r in person.rows)
     if not active and arguments.get("even_if_paused") is not True:
         status = "; ".join(
@@ -1086,7 +1128,7 @@ async def _person_account(
             ))
         elif bound != wa_id:
             # Never move a person's number, as the Users page refuses to.
-            return f"that person's account already has the number {readable_phone(bound)}."
+            return f"that person's account already has the number {masked_phone(bound)}."
         # Someone who wrote first has a runtime shadow account, which the
         # linked identity policy refuses; the team member vouching makes them known.
         if user.auth_provider == "whatsapp":
@@ -1142,7 +1184,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     holder = await _number_holder(sf, ctx.org_id, wa_id)
     if holder is not None and followup_store.is_team_member(settings, holder.id):
         return (
-            f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the team, "
+            f"Not enrolled: {masked_phone(wa_id)} belongs to a member of the team, "
             "who receives the alerts and is not followed. Check the number."
         )
     sender = _sender(ctx, settings)
@@ -1153,7 +1195,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     )
     refused = await _unconfirmed(
         kwargs, "team_enroll_person", arguments,
-        f"Will enrol {name} ({readable_phone(wa_id)}) in {protocol} {when}"
+        f"Will enrol {name} ({masked_phone(wa_id)}) in {protocol} {when}"
         + (f", answered by {answered_by}" if answered_by else "")
         + (f"; the number is already known as {holder.display_name}" if holder else "")
         + "; record their permission to be messaged on your say-so"
@@ -1179,8 +1221,8 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             answered_by=answered_by, start_date_approximate=approximate,
         )
     except followup_store.TeamMember:
-        return f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the team."
-    result = f"Enrolled {name} ({readable_phone(wa_id)}) in {protocol}"
+        return f"Not enrolled: {masked_phone(wa_id)} belongs to a member of the team."
+    result = f"Enrolled {name} ({masked_phone(wa_id)}) in {protocol}"
     if row.start_date:
         result += f" from {_start_text(row)}"
     result += ". Permission to message them recorded on your say-so."

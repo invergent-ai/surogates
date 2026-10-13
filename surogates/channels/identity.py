@@ -64,12 +64,33 @@ def readable_phone(wa_id: str) -> str:
 
     "+40 712 000 403": WhatsApp links it as a number to call or message, and
     the spaces keep event redaction, which masks a run of seven or more
-    digits after a "+", off a number the practice needs whole.
+    digits after a "+", off a number the team needs whole.  Only for text
+    the platform delivers to a team member; the model and the event log
+    get :func:`masked_phone`, see :func:`mask_readable_phones`.
     """
     digits = "".join(c for c in str(wa_id or "") if c.isdigit())
     head = len(digits) % 3 or 3
     groups = [digits[:head]] + [digits[i:i + 3] for i in range(head, len(digits), 3)]
     return "+" + " ".join(groups)
+
+
+_READABLE_PHONE_RE = re.compile(r"\+\d{1,3}(?: \d{2,4}){2,}")
+
+
+def masked_phone(wa_id: str) -> str:
+    """Enough of a number to tell two people apart, never enough to dial:
+    what the model and the event log may hold."""
+    digits = "".join(c for c in str(wa_id or "") if c.isdigit())
+    return f"+{digits[:2]}…{digits[-3:]}" if len(digits) > 5 else "no number"
+
+
+def mask_readable_phones(text: str) -> str:
+    """*text* with every :func:`readable_phone` number masked."""
+    def mask(match: re.Match) -> str:
+        number = match.group()
+        return masked_phone(number) if sum(c.isdigit() for c in number) >= 7 else number
+
+    return _READABLE_PHONE_RE.sub(mask, text)
 
 
 def normalize_wa_id(raw: str) -> str:
