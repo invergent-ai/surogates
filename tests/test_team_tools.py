@@ -576,12 +576,12 @@ async def test_confirmed_enrol_creates_the_phone_only_person_and_welcomes_them(s
     assert user.email == f"whatsapp-40711222333@{ORG}.channels.surogate.local"
     assert (user.display_name, user.auth_provider) == ("Elena Dumitru", "external")
     permission = identity.platform_meta["contact_permission"]
-    assert (permission["status"], permission["method"]) == ("granted", "care_team")
+    assert (permission["status"], permission["method"]) == ("granted", "team")
     assert permission["recorded_by"] == f"team:{practice.doctor}"
     [binding] = bindings
     assert binding["user_id"] == user.id and binding["agent_id"] == AGENT
     row = await _enrollment(sf, user.id)
-    assert (row.enrolled_by, row.status, row.patient_name) == ("care_team", "active", "Elena Dumitru")
+    assert (row.enrolled_by, row.status, row.patient_name) == ("team", "active", "Elena Dumitru")
     assert row.start_date == date.today() - timedelta(days=2) and row.start_date_approximate
     [welcome] = await _outreach(sf)  # the doctor is the only care-team member
     assert (welcome.user_id, welcome.kind, welcome.text) == (user.id, "welcome", "Bun venit!")
@@ -607,7 +607,7 @@ async def test_enrol_attaches_someone_who_already_wrote(sf, practice, bindings):
     async with sf() as db:
         assert (await db.get(User, shadow)).auth_provider == "external"
         assert len((await db.execute(sa.select(User))).all()) == 4  # nobody new
-    assert (await _enrollment(sf, shadow)).enrolled_by == "care_team"
+    assert (await _enrollment(sf, shadow)).enrolled_by == "team"
 
 
 @pytest.mark.asyncio

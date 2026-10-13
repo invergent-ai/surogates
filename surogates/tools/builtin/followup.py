@@ -579,7 +579,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
 
     result = f"Updated {protocol}: status {row.status}"
     if row.patient_name:
-        result += f", name {row.patient_name}"
+        result += f", person_name {row.patient_name}"
     if row.answered_by:
         result += f", answered by {row.answered_by}"
     if row.start_date:
@@ -633,8 +633,8 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         index = day_index(row.start_date, today)
         detail = [f"{row.protocol}: {row.status}"]
         detail.append(
-            f"name {row.patient_name}" if row.patient_name
-            else "name not recorded"
+            f"person_name {row.patient_name}" if row.patient_name
+            else "person_name not recorded"
         )
         if row.answered_by:
             detail.append(f"answered by {row.answered_by}")

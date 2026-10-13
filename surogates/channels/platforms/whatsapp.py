@@ -462,8 +462,8 @@ def _merge_batch(messages: list[InboundMessage], *, pnid: str | None) -> Inbound
     """One message for a webhook that batched several from one person.
 
     The dispatcher runs one pipeline pass per webhook, and Meta batches a
-    burst ("Bună ziua" / "am făcut TAVI" / "de azi am febră 38").  Keeping
-    only the first dropped the fever.  Same-sender messages are joined in
+    burst ("Bună ziua" / "am o comandă" / "nu a ajuns azi").  Keeping only
+    the first dropped the complaint.  Same-sender messages are joined in
     order, with every attachment; ``ts`` stays the first wamid so a retried
     batch still deduplicates, while ``source.wamid`` is the last one, the
     message a read receipt and the typing indicator should point at.
@@ -620,7 +620,7 @@ _ROW_TITLE_CHARS = 24
 _ROW_DESCRIPTION_CHARS = 72
 
 #: The list message's button text when the agent gives none.  A glyph, not a
-#: word: patients read the prompt in their own language and an English
+#: word: people read the prompt in their own language and an English
 #: "Choose" would be the only foreign text on the screen.
 _DEFAULT_LIST_BUTTON = "☰"
 

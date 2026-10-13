@@ -1150,10 +1150,11 @@ class FollowupEnrollmentRow(Base):
         Boolean, nullable=False, server_default="false", default=False,
     )
     phase: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    #: The patient's own name.  The user's display name is their WhatsApp
-    #: profile, which is a relative's when the relative enrolled them.
+    #: The person's own name (``person_name`` in the tools).  The user's
+    #: display name is their WhatsApp profile, which is a relative's when
+    #: the relative enrolled them.
     patient_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    #: Who answers the check-ins when not the patient, e.g. "Ana, daughter".
+    #: Who answers the check-ins when not the person, e.g. "Ana, daughter".
     answered_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="active",
@@ -1162,7 +1163,8 @@ class FollowupEnrollmentRow(Base):
     status_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: ``agent`` when the agent enrolled the person in conversation,
     #: ``operator`` when someone did it from Studio, ``purchase`` when a
-    #: paid package did, ``care_team`` when a team member did it from WhatsApp.
+    #: paid package did, ``team`` (formerly ``care_team``) when a team member
+    #: did it from WhatsApp.
     enrolled_by: Mapped[str] = mapped_column(Text, nullable=False)
     #: Who paid, when a purchase enrolled them: often a relative, so not
     #: necessarily ``user_id``.
@@ -1196,13 +1198,13 @@ class FollowupSettingsRow(Base):
     #: the agent's WhatsApp phone_number_id.  Stored, not inferred: an
     #: escalation raised in a web conversation has no sender of its own.
     channel_identifier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    #: End users on this agent who are told on their phone, e.g. the doctor.
+    #: End users on this agent who are told on their phone: the team.
     alert_recipient_user_ids: Mapped[list[str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=list,
     )
     #: The approved template that reopens a recipient's conversation when the
     #: provider's customer-service window has closed.  One for alerts to the
-    #: care team, one for messages an operator sends a person.
+    #: team, one for messages an operator sends a person.
     alert_template_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     alert_template_language: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
@@ -1213,7 +1215,7 @@ class FollowupSettingsRow(Base):
     message_template_language: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
     )
-    #: The approved template that opens a newly paid patient's
+    #: The approved template that opens a newly paid person's
     #: conversation.  The text that follows once they answer it is
     #: ``texts["welcome_text"]``.
     welcome_template_name: Mapped[Optional[str]] = mapped_column(
@@ -1227,8 +1229,8 @@ class FollowupSettingsRow(Base):
     offer_protocols: Mapped[dict[str, str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )
-    #: Wording in the practice's language for what the platform itself
-    #: writes: the checkout field labels and the notices the care team gets.
+    #: Wording in the business's language for what the platform itself
+    #: writes: the checkout field labels and the notices the team gets.
     #: Keys: ``checkout_phone``, ``checkout_name``, ``checkout_consent``,
     #: ``purchase_notice``, ``invalid_number_notice``, ``welcome_text``.
     #: Missing keys use the platform's defaults.
@@ -1236,7 +1238,7 @@ class FollowupSettingsRow(Base):
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )
     #: How long a team member's message held behind a template waits for the
-    #: patient's answer before the doctor is told it did not arrive.  NULL
+    #: person's answer before the team member is told it did not arrive.  NULL
     #: is the platform default; other held texts always wait 72 hours.
     operator_unanswered_hours: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True,
@@ -1277,7 +1279,7 @@ class ChannelContactRow(Base):
 class OutreachMessageRow(Base):
     """A message the platform must get to one person, unprompted.
 
-    An alert to the care team, an operator's message to a patient, a notice
+    An alert to the team, an operator's message to a person, a notice
     that someone enrolled.  Inside the provider's window it goes out as text;
     outside it the approved template goes first and the text waits for the
     reply.

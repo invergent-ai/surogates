@@ -86,7 +86,7 @@ TEAM_OVERVIEW_SCHEMA = ToolSchema(
         "check-ins in a row and the next scheduled message, with a header of "
         "recent enrolments, pauses and people silent for 3 days or more. "
         "Summarise it for the team member using only what it says; never rank or "
-        "interpret clinical values."
+        "interpret values."
     ),
     parameters={
         "type": "object",
@@ -1047,7 +1047,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
         return f"Nothing changed: {person.label} is no longer enrolled in {row.protocol}."
     result = f"Updated {person.label}'s {row.protocol}: status {updated.status}"
     if updated.patient_name:
-        result += f", name {updated.patient_name}"
+        result += f", person_name {updated.patient_name}"
     if updated.answered_by:
         result += f", answered by {updated.answered_by}"
     if updated.start_date:
@@ -1211,12 +1211,12 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         return f"Not enrolled: {user_id}"
     await followup_store.grant_contact_permission(
         sf, org_id=ctx.org_id, platform="whatsapp", platform_user_id=wa_id,
-        recorded_by=f"team:{ctx.user_id}", method="care_team",
+        recorded_by=f"team:{ctx.user_id}", method="team",
     )
     try:
         row = await followup_store.upsert_enrollment(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
-            protocol=protocol, start_date=start, phase=None, enrolled_by="care_team",
+            protocol=protocol, start_date=start, phase=None, enrolled_by="team",
             source_ref=f"team:{ctx.user_id}", patient_name=name,
             answered_by=answered_by, start_date_approximate=approximate,
         )

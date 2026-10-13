@@ -165,7 +165,7 @@ _TITLE_MAX = 60
 def titled_entry_index(content: str, entries: list[str]) -> int | None:
     """Index of the existing entry with the same short first line as *content*.
 
-    A titled entry (short first line, e.g. a patient record headed "FIȘA") is
+    A titled entry (short first line, e.g. a customer record headed "FIȘA") is
     kept as one record that adding again replaces.  Models fill ``content``
     reliably on ``add`` but often omit it on ``replace``, which left records
     stale and looped the turn.

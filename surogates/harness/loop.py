@@ -4806,7 +4806,7 @@ class AgentHarness(
             return None
         # The context is the reply being converted, word for word: channels
         # deliver it as the agent talking to the person, and the judge's own
-        # summary of it reached a patient as "Asistentul" in place of the reply.
+        # summary of it reached a person as "Asistentul" in place of the reply.
         context = (content or "").strip()
 
         tool_call_id = f"{ASK_USER_QUESTION_RESCUE_PREFIX}{uuid4().hex[:24]}"
@@ -5600,7 +5600,7 @@ class AgentHarness(
 
         Also ends a messaging-channel turn a guard stopped (*reason*): the
         person on WhatsApp sees only what is delivered, and a turn halted
-        between tool calls left a patient who had just tapped a button with
+        between tool calls left a person who had just tapped a button with
         no reply at all.
 
         *request* is what the user asked for.  Nothing reads it today: a

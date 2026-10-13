@@ -84,7 +84,7 @@ def match_choice_label(text: str, choices: list[dict]) -> str | None:
 
 
 def _fold(text: str) -> str:
-    """Patients often type without diacritics: "Nu stiu" for "Nu știu"."""
+    """People often type without diacritics: "Nu stiu" for "Nu știu"."""
     decomposed = unicodedata.normalize("NFKD", (text or "").strip())
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
