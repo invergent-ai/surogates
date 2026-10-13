@@ -69,7 +69,7 @@ ADAPTER_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 
 #: Channels whose platform can render an ``ask_user_question`` prompt
 #: (Slack: Answer button + modal; Telegram: inline keyboard; WhatsApp:
-#: numbered plain text).  A channel OUTSIDE this set gets no
+#: reply buttons or a list, else bulleted text).  A channel OUTSIDE this set gets no
 #: ``input_prompt`` outbox row at all — ``_build_channel_payload`` returns
 #: an empty payload and ``store`` drops it — so the user sees nothing and
 #: the session parks waiting for an answer that can never arrive.  Adding a

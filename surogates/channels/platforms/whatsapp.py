@@ -445,9 +445,10 @@ def _build_message(
 def _render_input_prompt(payload: dict) -> str:
     """Render an ``ask_user_question`` prompt as plain text.
 
-    WhatsApp has no native buttons in this integration, so the choices are
-    listed in the message body and a plain typed reply resolves the pending
-    record through the shared ``resolve_text_answer`` path.
+    The fallback for prompts :func:`_interactive_prompt` cannot carry
+    (several questions, open-ended ones, labels over Meta's limits): the
+    choices are listed in the message body and a plain typed reply resolves
+    the pending record through the shared ``resolve_text_answer`` path.
 
     The question shape is the one normalised by
     ``tools.builtin.ask_user_question._validate_questions`` and emitted
@@ -477,6 +478,85 @@ def _render_input_prompt(payload: dict) -> str:
                 lines.append(f"  • {label}")
 
     return "\n".join(line for line in lines if line)
+
+
+#: Cloud API limits for interactive messages.  A prompt that exceeds any of
+#: them goes out as text instead: a truncated label would no longer match the
+#: choice it stands for when the tap comes back.
+_INTERACTIVE_BODY_CHARS = 1024
+_MAX_REPLY_BUTTONS = 3
+_BUTTON_TITLE_CHARS = 20
+_MAX_LIST_ROWS = 10
+_ROW_TITLE_CHARS = 24
+_ROW_DESCRIPTION_CHARS = 72
+
+#: The list message's button text when the agent gives none.  A glyph, not a
+#: word: patients read the prompt in their own language and an English
+#: "Choose" would be the only foreign text on the screen.
+_DEFAULT_LIST_BUTTON = "☰"
+
+
+def _interactive_prompt(payload: dict) -> dict | None:
+    """The ``interactive`` object for a single choice question, or ``None``.
+
+    Up to three short labels without descriptions become reply buttons;
+    otherwise up to ten rows become a list.  Either way the tap comes back
+    carrying the label as its title, which ``resolve_text_answer`` matches.
+    """
+    questions = [q for q in payload.get("questions") or [] if isinstance(q, dict)]
+    if len(questions) != 1:
+        return None
+    question = questions[0]
+    choices = [c for c in question.get("choices") or [] if isinstance(c, dict) and c.get("label")]
+    if not choices or len(choices) > _MAX_LIST_ROWS:
+        return None
+
+    body = "\n".join(
+        part for part in (
+            (payload.get("context") or "").strip(),
+            (question.get("prompt") or "").strip(),
+        ) if part
+    )
+    if not body or len(body) > _INTERACTIVE_BODY_CHARS:
+        return None
+
+    if (
+        len(choices) <= _MAX_REPLY_BUTTONS
+        and not any(c.get("description") for c in choices)
+        and all(len(c["label"]) <= _BUTTON_TITLE_CHARS for c in choices)
+    ):
+        return {
+            "type": "button",
+            "body": {"text": body},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": f"choice:{i}", "title": c["label"]}}
+                    for i, c in enumerate(choices)
+                ],
+            },
+        }
+
+    if any(
+        len(c["label"]) > _ROW_TITLE_CHARS
+        or len(c.get("description") or "") > _ROW_DESCRIPTION_CHARS
+        for c in choices
+    ):
+        return None
+    rows = []
+    for i, c in enumerate(choices):
+        row = {"id": f"choice:{i}", "title": c["label"]}
+        if c.get("description"):
+            row["description"] = c["description"]
+        rows.append(row)
+    button = (question.get("button_label") or "").strip()[:_BUTTON_TITLE_CHARS]
+    return {
+        "type": "list",
+        "body": {"text": body},
+        "action": {
+            "button": button or _DEFAULT_LIST_BUTTON,
+            "sections": [{"rows": rows}],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +747,24 @@ class WhatsAppPlatform:
             return SendResult(success=True, message_id=wamid)
 
         if item.payload.get("input_prompt"):
+            interactive = _interactive_prompt(item.payload)
+            if interactive is not None:
+                wamid, error = await send_message(
+                    self._http,
+                    token=token,
+                    phone_number_id=phone_number_id,
+                    payload={
+                        "messaging_product": "whatsapp",
+                        "recipient_type": "individual",
+                        "to": wa_id,
+                        "type": "interactive",
+                        "interactive": interactive,
+                    },
+                    api_version=api_version,
+                )
+                if wamid is None:
+                    return SendResult(success=False, error=error or "send failed")
+                return SendResult(success=True, message_id=wamid)
             text = _render_input_prompt(item.payload)
         else:
             text = render_whatsapp(item.payload.get("content", "") or "")

@@ -48,6 +48,8 @@ MAX_CHOICES_PER_QUESTION = 4
 MAX_PROMPT_LENGTH = 1000
 MAX_LABEL_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
+#: WhatsApp's cap on a list message's button text.
+MAX_BUTTON_LABEL_LENGTH = 20
 
 # Polling / lease renewal --------------------------------------------------
 _POLL_INTERVAL_SECONDS = 1.0
@@ -145,6 +147,15 @@ ASK_USER_QUESTION_SCHEMA = {
                             "open-ended question."
                         ),
                     },
+                    "button_label": {
+                        "type": "string",
+                        "maxLength": MAX_BUTTON_LABEL_LENGTH,
+                        "description": (
+                            "Optional, in the user's language: the text of "
+                            "the button that opens the choice list on "
+                            "messaging apps that need one (WhatsApp)."
+                        ),
+                    },
                     "allow_other": {
                         "type": "boolean",
                         "description": (
@@ -236,6 +247,9 @@ def _validate_questions(raw: Any) -> list[dict[str, Any]]:
         }
         if choices:
             item["choices"] = choices
+        button_label = q.get("button_label")
+        if isinstance(button_label, str) and button_label.strip():
+            item["button_label"] = button_label.strip()[:MAX_BUTTON_LABEL_LENGTH]
         normalised.append(item)
 
     return normalised

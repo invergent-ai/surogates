@@ -223,16 +223,15 @@ def _questions(raw: list[dict]) -> list[dict]:
 class TestWhatsAppInputPrompt:
 
     @pytest.mark.asyncio
-    async def test_renders_the_question_and_its_choices(self):
+    async def test_short_choices_go_out_as_reply_buttons(self):
         p = WhatsAppPlatform()
         item = _item(
             "",
             input_prompt=True,
             tool_call_id="tc1",
-            context="Need a decision.",
             questions=_questions([{
-                "prompt": "Which environment?",
-                "choices": [{"label": "staging"}, {"label": "production"}],
+                "prompt": "Cum vă simțiți azi?",
+                "choices": [{"label": "Bine"}, {"label": "Obosit"}, {"label": "Rău"}],
             }]),
         )
         with respx.mock(assert_all_called=True) as router:
@@ -242,12 +241,82 @@ class TestWhatsAppInputPrompt:
                 )
             )
             result = await p.send(item, creds=_creds())
-        sent = _json.loads(route.calls[0].request.content)["text"]["body"]
-        assert "Which environment?" in sent
-        assert "Need a decision." in sent
-        assert "staging" in sent
-        assert "production" in sent
-        assert result.success is True
+        sent = _json.loads(route.calls[0].request.content)
+        assert sent["type"] == "interactive"
+        assert sent["interactive"] == {
+            "type": "button",
+            "body": {"text": "Cum vă simțiți azi?"},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": "choice:0", "title": "Bine"}},
+                {"type": "reply", "reply": {"id": "choice:1", "title": "Obosit"}},
+                {"type": "reply", "reply": {"id": "choice:2", "title": "Rău"}},
+            ]},
+        }
+        assert result.success is True and result.message_id == "wamid.Q1"
+
+    @pytest.mark.asyncio
+    async def test_four_choices_go_out_as_a_list(self):
+        p = WhatsAppPlatform()
+        item = _item(
+            "",
+            input_prompt=True,
+            tool_call_id="tc1",
+            questions=_questions([{
+                "prompt": "Ce simptom aveți?",
+                "button_label": "Alegeți",
+                "choices": [
+                    {"label": "Durere în piept", "description": "La efort sau în repaus"},
+                    {"label": "Dispnee"},
+                    {"label": "Palpitații"},
+                    {"label": "Niciunul"},
+                ],
+            }]),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(200, json={"messages": [{"id": "wamid.L"}]}),
+            )
+            await p.send(item, creds=_creds())
+        interactive = _json.loads(route.calls[0].request.content)["interactive"]
+        assert interactive["type"] == "list"
+        assert interactive["action"]["button"] == "Alegeți"
+        [section] = interactive["action"]["sections"]
+        assert section["rows"][0] == {
+            "id": "choice:0", "title": "Durere în piept",
+            "description": "La efort sau în repaus",
+        }
+        assert [r["title"] for r in section["rows"]] == [
+            "Durere în piept", "Dispnee", "Palpitații", "Niciunul",
+        ]
+
+    def test_list_button_defaults_to_a_glyph_not_english(self):
+        from surogates.channels.platforms.whatsapp import _interactive_prompt
+
+        interactive = _interactive_prompt({"questions": [{
+            "prompt": "?",
+            "choices": [{"label": str(n)} for n in range(4)],
+        }]})
+        assert interactive["action"]["button"] == "☰"
+
+    @pytest.mark.parametrize("payload", [
+        # several questions
+        {"questions": [
+            {"prompt": "a", "choices": [{"label": "x"}]},
+            {"prompt": "b", "choices": [{"label": "y"}]},
+        ]},
+        # open-ended
+        {"questions": [{"prompt": "Când a avut loc procedura?"}]},
+        # a label too long for a list row
+        {"questions": [{"prompt": "a", "choices": [{"label": "x" * 25}]}]},
+        # a description too long for a list row
+        {"questions": [{"prompt": "a", "choices": [{"label": "x", "description": "d" * 73}]}]},
+        # a body over the interactive cap
+        {"questions": [{"prompt": "p" * 1025, "choices": [{"label": "x"}]}]},
+    ])
+    def test_prompts_beyond_meta_limits_stay_text(self, payload):
+        from surogates.channels.platforms.whatsapp import _interactive_prompt
+
+        assert _interactive_prompt(payload) is None
 
     @pytest.mark.asyncio
     async def test_choices_are_answerable_by_label(self):
@@ -258,12 +327,12 @@ class TestWhatsAppInputPrompt:
         )
 
         p = WhatsAppPlatform()
-        questions = _questions([{
-            "prompt": "Which environment?",
-            "choices": [{"label": "staging"}, {"label": "production"}],
-        }])
-        item = _item("", input_prompt=True, tool_call_id="tc1", context="",
-                     questions=questions)
+        questions = _questions([
+            {"prompt": "Which environment?",
+             "choices": [{"label": "staging"}, {"label": "production"}]},
+            {"prompt": "Which region?"},
+        ])
+        item = _item("", input_prompt=True, tool_call_id="tc1", questions=questions)
         with respx.mock(assert_all_called=True) as router:
             route = router.post(MESSAGES_URL).mock(
                 return_value=httpx.Response(
@@ -276,7 +345,7 @@ class TestWhatsAppInputPrompt:
         # Every label the user can read back is one the resolver accepts.
         for label in ("staging", "production"):
             assert label in sent
-            [answer] = resolve_text_answer(questions, label)
+            [answer] = resolve_text_answer(questions[:1], label)
             assert answer.get("is_other") is not True
 
     @pytest.mark.asyncio
