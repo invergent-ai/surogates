@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.history import (
@@ -3870,6 +3870,18 @@ class AgentHarness(
                             "Session %s: aborting after %d consecutive invalid tool calls",
                             session.id, consecutive_invalid_tool_calls,
                         )
+                        if session.channel in ADAPTER_CHANNELS:
+                            messages.append(assistant_message)
+                            messages.extend(
+                                {"role": "tool", "tool_call_id": tc.get("id", ""), "content": error_msg}
+                                for tc, error_msg in invalid_calls
+                            )
+                            await self._request_final_summary(
+                                session, messages, system_prompt, lease,
+                                request=request, cost_tracker=cost_tracker, turn_id=turn_id,
+                                iteration_index=turn_iteration_index, reason="invalid_tool_calls",
+                            )
+                            return
                         await self._complete_session(
                             session, messages, lease, reason="invalid_tool_calls",
                             through_event_id=event_id,
@@ -4027,6 +4039,13 @@ class AgentHarness(
                     "ending turn",
                     session.id, halt.code, halt.count,
                 )
+                if session.channel in ADAPTER_CHANNELS:
+                    await self._request_final_summary(
+                        session, messages, system_prompt, lease,
+                        request=request, cost_tracker=cost_tracker, turn_id=turn_id,
+                        iteration_index=turn_iteration_index, reason="tool_loop_halt",
+                    )
+                    return
                 await self._complete_session(
                     session, messages, lease,
                     reason="tool_loop_halt",
@@ -5547,8 +5566,14 @@ class AgentHarness(
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
         iteration_index: int | None = None,
+        reason: str = "budget_exhausted",
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
+
+        Also ends a messaging-channel turn a guard stopped (*reason*): the
+        person on WhatsApp sees only what is delivered, and a turn halted
+        between tool calls left a patient who had just tapped a button with
+        no reply at all.
 
         *request* is what the user asked for.  Nothing reads it today: a
         ``budget_exhausted`` end writes no turn summary (``wants_turn_summary``),
@@ -5564,11 +5589,18 @@ class AgentHarness(
             session.id,
         )
 
-        summary_request = (
-            "You've reached the maximum number of tool-calling iterations allowed. "
-            "Please provide a final response summarizing what you've found and accomplished so far, "
-            "without calling any more tools."
-        )
+        if session.channel in ADAPTER_CHANNELS:
+            summary_request = (
+                "Your tool calls cannot run any more this turn. Without calling any tools, "
+                "reply now to the person you are talking with, in their language: answer "
+                "what they last said as far as you can, or tell them briefly what happens next."
+            )
+        else:
+            summary_request = (
+                "You've reached the maximum number of tool-calling iterations allowed. "
+                "Please provide a final response summarizing what you've found and accomplished so far, "
+                "without calling any more tools."
+            )
         messages.append({"role": "user", "content": summary_request})
 
         model_id = self._current_model or session.model or self._default_model
@@ -5629,7 +5661,7 @@ class AgentHarness(
                 assistant_message, usage_data,
                 model_id=model_id, cost_tracker=cost_tracker,
             )
-            final_payload["finish_reason"] = "budget_exhausted"
+            final_payload["finish_reason"] = reason
             if turn_id is not None:
                 final_payload["turn_id"] = turn_id
                 final_payload["iteration_index"] = (
@@ -5653,7 +5685,7 @@ class AgentHarness(
             )
 
         await self._complete_session(
-            session, messages, lease, reason="budget_exhausted",
+            session, messages, lease, reason=reason,
             cost_tracker=cost_tracker,
             turn_id=turn_id,
             user_message=request,
