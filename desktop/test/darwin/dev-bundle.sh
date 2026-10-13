@@ -24,6 +24,7 @@ if [ "${1:-}" = "--remove" ]; then
 fi
 
 [ -f dist/shell/main.js ] || { echo "Build it first: npm run build:darwin" >&2; exit 1; }
+[ -f dictionaries/en-US-10-1.bdic ] || { echo "Build it first: npm run build:darwin, which fetches the spelling dictionary" >&2; exit 1; }
 electron="node_modules/electron/dist/Electron.app"
 [ -d "$electron" ] || { echo "Install Electron first: npm ci && npm run electron:install" >&2; exit 1; }
 

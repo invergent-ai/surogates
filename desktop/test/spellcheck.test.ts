@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -65,6 +65,41 @@ describe("the app's dictionary", () => {
     expect(heard.split("\r\n")[0]).toBe("CONNECT redirector.gvt1.com:443 HTTP/1.1");
     expect(heard).not.toContain("X-From-Curlrc");
     expect([code === 0, existsSync(join(own, "dictionaries"))]).toEqual([false, false]);
+  });
+
+  it("is fetched and checked by the Mac's build as by Linux's, before the app's code is built", () => {
+    const { scripts } = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8")) as { scripts: Record<string, string> };
+    for (const build of ["build", "build:darwin"]) expect(scripts[build]!.split(" && "), build).toContain("scripts/dictionary.sh");
+    expect(scripts["build:darwin"]!.split(" && ")[0]).toBe("scripts/dictionary.sh");
+  });
+
+  it("is kept as it is, with no fetch, where the computer has no sha256sum, as a Mac has none: shasum checks it there", async () => {
+    // The script in a package of its own, with the pinned dictionary in place, on a PATH of every program of this
+    // computer's but sha256sum. Its connections go to a proxy of the test's, which refuses them.
+    const own = mkdtempSync(join(dir, "dictionary-mac-"));
+    mkdirSync(join(own, "scripts"));
+    copyFileSync(join(PACKAGE, "scripts", "dictionary.sh"), join(own, "scripts", "dictionary.sh"));
+    mkdirSync(join(own, "dictionaries"));
+    copyFileSync(join(SHIPPED, DICTIONARY), join(own, "dictionaries", DICTIONARY));
+    const bin = join(own, "bin");
+    mkdirSync(bin);
+    for (const name of readdirSync("/usr/bin")) if (name !== "sha256sum") symlinkSync(join("/usr/bin", name), join(bin, name));
+    let heard = 0;
+    const proxy = createServer((socket) => {
+      heard += 1;
+      socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const { port } = proxy.address() as AddressInfo;
+    const before = statSync(join(own, "dictionaries", DICTIONARY));
+    const code = await new Promise<number | null>((resolve) => {
+      spawn(join(bin, "bash"), [join(own, "scripts", "dictionary.sh")], {
+        env: { PATH: bin, HOME: own, https_proxy: `http://127.0.0.1:${port}` }, stdio: "ignore",
+      }).on("exit", resolve);
+    });
+    proxy.close();
+    const after = statSync(join(own, "dictionaries", DICTIONARY));
+    expect([code, heard, after.ino, after.mtimeMs]).toEqual([0, 0, before.ino, before.mtimeMs]);
   });
 
   it("is put where Chromium looks for it, whole, and left as it is while it is the same bytes", () => {
