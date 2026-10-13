@@ -509,3 +509,26 @@ async def test_a_cancel_during_subscribe_closes_the_pubsub():
     with pytest.raises(asyncio.CancelledError):
         await wait
     assert pubsub.closed
+
+
+@pytest.mark.asyncio
+async def test_a_rescued_reply_reaches_the_person_word_for_word():
+    """The judge's own context ("Asistentul") reached a patient in place of the reply it rescued."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from surogates.harness.loop import AgentHarness
+
+    reply = "Am notat: TAVI acum 5 zile. Sunteți de acord să vă înscriu în urmărire?"
+    harness = SimpleNamespace(
+        _judge_final_response_user_action=AsyncMock(return_value={
+            "action_kind": "ask_user_question", "question": "Sunteți de acord?", "context": "Asistentul",
+        }),
+        _can_ask_user_question=lambda: True,
+    )
+    session = SimpleNamespace(channel="whatsapp", user_id=uuid4(), service_account_id=None, parent_id=None, id=uuid4())
+    message = {"role": "assistant", "content": reply}
+    out = await AgentHarness._maybe_route_final_response_to_inbox(
+        harness, session=session, messages=[], assistant_message=message, model="m", tool_filter=None)
+    assert out == "ask_user_question"
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"])["context"] == reply

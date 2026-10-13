@@ -4757,7 +4757,10 @@ class AgentHarness(
         question = str(decision.get("question") or "").strip()
         if not question:
             return None
-        context = str(decision.get("context") or content).strip()
+        # The context is the reply being converted, word for word: channels
+        # deliver it as the agent talking to the person, and the judge's own
+        # summary of it reached a patient as "Asistentul" in place of the reply.
+        context = (content or "").strip()
 
         tool_call_id = f"{ASK_USER_QUESTION_RESCUE_PREFIX}{uuid4().hex[:24]}"
         assistant_message["content"] = None
