@@ -126,3 +126,25 @@ def test_data_expressions_read_earlier_screens_answers(fake):
     assert fake.flow_response(two_screens, {"name": "Ion", "date": "2026-10-13"}, {}, "t") == {
         "name": "Ion", "date": "2026-10-13", "source": "fake", "flow_token": "t",
     }
+
+
+def test_the_phone_sees_ticks_typing_and_quoted_button_replies(fake):
+    client = TestClient(fake.app)
+    client.post("/phone/api/send", json={"wa_id": "40712000001", "text": "Bună"})
+    client.post("/phone/api/send", json={
+        "wa_id": "40712000001", "template_button": "Trimite", "template_payload": "send_report",
+        "context_id": "wamid.TPL",
+    })
+    first, tapped = fake.state["messages"]
+    assert tapped["body"]["button"] == {"text": "Trimite", "payload": "send_report"}
+    assert tapped["body"]["context"]["id"] == "wamid.TPL"
+
+    client.post("/v23.0/100000000000001/messages", json={
+        "messaging_product": "whatsapp", "status": "read", "message_id": tapped["id"],
+        "typing_indicator": {"type": "text"},
+    })
+    thread = client.get("/phone/api/thread", params={"wa_id": "40712000001"}).json()
+    assert [m["status"] for m in thread["messages"]] == ["read", "read"]
+    assert thread["typing"] is True
+    assert client.get("/phone/api/thread", params={"wa_id": "40712000002"}).json()["typing"] is False
+    assert client.get("/phone/api/contacts").json() == {"contacts": ["40712000001"]}
