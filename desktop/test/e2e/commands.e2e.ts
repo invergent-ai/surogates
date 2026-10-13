@@ -706,12 +706,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     mkdirSync(folder);
     const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
     const page = await shellPage(app!);
-    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${served.host} answered 404 for rootfs.img.zst`);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${served.host} answered 404 for initrd.zst`);
     expect(await page.textContent("#sandbox-retry")).toBe("Retry");
     expect(await page.isHidden("#sandbox-log")).toBe(true);
     await bind(client, folder);
     expect(await operation("run", { command: "echo retried", workdir: null, timeout: 30 })).toEqual({
-      error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${served.host} answered 404 for rootfs.img.zst` },
+      error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${served.host} answered 404 for initrd.zst` },
     });
     state.missing = false;
     await page.click("#sandbox-retry");
