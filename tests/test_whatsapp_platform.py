@@ -983,6 +983,13 @@ class TestQuestionNotRepeated:
         ("Mulțumesc. A? B?", [{"prompt": "A?"}, {"prompt": "B?"}], "whatsapp"),
         # The web chat shows no separate prompt text.
         ("Mulțumesc. Sunteți de acord?", [{"prompt": "Sunteți de acord?"}], "web"),
+        # A call the tool refuses asks nothing, so nothing repeats the text.
+        ("Mulțumesc. Sunteți de acord?",
+         [{"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}, {"no_label": "Nu"}]}],
+         "whatsapp"),
+        ("Mulțumesc. Sunteți de acord?",
+         [{"prompt": "Sunteți de acord?", "choices": [{"label": str(n)} for n in range(11)]}],
+         "whatsapp"),
     ])
     def test_anything_else_is_kept(self, content, questions, channel):
         assert self._payload(content, *questions, channel=channel)["content"] == content

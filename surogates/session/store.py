@@ -232,8 +232,14 @@ def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
     The channel prompt follows right after, so a reply ending in "Cum vă
     numiți?" beside a call asking "Cum vă numiți?" showed the person the
     same question twice.  Exact match only (whitespace aside), and only for
-    a single question: anything else is not provably a repeat.
+    a single question: anything else is not provably a repeat.  A call the
+    tool will refuse asks nothing, so its text is delivered intact.
     """
+    from surogates.tools.builtin.ask_user_question import (
+        MAX_CHANNEL_CHOICES_PER_QUESTION,
+        _validate_questions,
+    )
+
     asks = [
         call for call in tool_calls or []
         if isinstance(call, dict) and (call.get("function") or {}).get("name") == "ask_user_question"
@@ -241,7 +247,10 @@ def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
     if len(asks) != 1:
         return content
     try:
-        questions = json.loads(asks[0]["function"].get("arguments") or "{}").get("questions")
+        questions = _validate_questions(
+            json.loads(asks[0]["function"].get("arguments") or "{}").get("questions"),
+            max_choices=MAX_CHANNEL_CHOICES_PER_QUESTION,
+        )
     except (TypeError, ValueError, AttributeError):
         return content
     return _strip_trailing_question(content, questions)
