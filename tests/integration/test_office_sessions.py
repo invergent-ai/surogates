@@ -66,11 +66,35 @@ async def test_reopening_a_closing_row_raises(session_factory):
 
 async def test_newer_save_replaces_a_pending_one_and_keeps_close(session_factory):
     document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
-    assert await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k1", close=True) is None
-    replaced = await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False)
+    older, newer = datetime(2026, 10, 13, 9, 0, tzinfo=timezone.utc), datetime(2026, 10, 13, 9, 5, tzinfo=timezone.utc)
+    assert await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k1", close=True, lastsave=older) is None
+    replaced = await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False, lastsave=newer)
     assert replaced == "k1"
     pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
-    assert pending == {"bucket": "b", "key": "k2", "close": True, "attempts": 0}
+    assert pending == {"bucket": "b", "key": "k2", "lastsave": newer.isoformat(), "close": True, "attempts": 0}
+
+
+async def test_older_save_arriving_late_keeps_the_newer_pending_one(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    older, newer = datetime(2026, 10, 13, 9, 0, tzinfo=timezone.utc), datetime(2026, 10, 13, 9, 5, tzinfo=timezone.utc)
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="new", close=False, lastsave=newer)
+    discarded = await office_sessions.set_pending(session_factory, document.id, bucket="b", key="old", close=True, lastsave=older)
+    assert discarded == "old"
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending == {"bucket": "b", "key": "new", "lastsave": newer.isoformat(), "close": True, "attempts": 0}
+
+
+async def test_a_save_counts_as_connected(session_factory):
+    """A lost status-1 callback must not let the reaper close a row that receives saves."""
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k", close=False)
+    async with office_sessions.claim_pending(session_factory) as row:
+        office_sessions.mark_landed(row, "etag-2")
+    closed = await office_sessions.close_never_opened(
+        session_factory, older_than=timedelta(minutes=10), now=datetime.now(timezone.utc) + timedelta(minutes=11),
+    )
+    assert closed == 0
+    assert await office_sessions.get_open(session_factory, document.id) is not None
 
 
 async def test_close_returns_the_dropped_pending_key(session_factory):

@@ -352,3 +352,55 @@ async def test_closed_document_refuses_callbacks(client, app, session_factory):
     body = {"key": config["document"]["key"], "status": 1, "users": []}
     response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
     assert response.status_code == 404
+
+
+async def test_a_closing_document_is_not_served(client, app, session_factory):
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    file_token, _ = _tokens(config)
+    await office_sessions.set_pending(session_factory, row_id, bucket="b", key="k", close=True)
+    response = await client.get(f"/v1/office/files/{file_token}")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "The document is still being saved; try again in a moment."
+
+
+async def test_an_older_save_arriving_late_is_discarded(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+    contents = iter([b"newer", b"older"])
+
+    async def fake_download(url: str) -> bytes:
+        return next(contents)
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    url = "https://office.example/cache/files/x/output.docx"
+    for lastsave in ("2026-10-13T09:05:00.000Z", "2026-10-13T09:00:00.000Z"):
+        body = {"key": config["document"]["key"], "status": 6, "url": url, "lastsave": lastsave}
+        response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+        assert response.json() == {"error": 0}
+    pending = (await office_sessions.get_open(session_factory, row_id)).pending_save
+    assert await app.state.storage.read(pending["bucket"], pending["key"]) == b"newer"
+    keys = [e["key"] for e in await app.state.storage.list_entries(pending["bucket"], prefix=f"_office/pending/{config['document']['key']}/")]
+    assert keys == [pending["key"]]
+
+
+async def test_a_save_is_kept_when_the_replaced_one_cannot_be_deleted(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+    contents = iter([b"first", b"second"])
+
+    async def fake_download(url: str) -> bytes:
+        return next(contents)
+
+    async def failing_delete(bucket: str, key: str, **_: object) -> None:
+        raise OSError("storage is down")
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    monkeypatch.setattr(app.state.storage, "delete", failing_delete)
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    for _ in range(2):
+        body = {"key": config["document"]["key"], "status": 6, "url": "https://office.example/cache/files/x/output.docx"}
+        response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+        assert response.json() == {"error": 0}
+    pending = (await office_sessions.get_open(session_factory, row_id)).pending_save
+    assert await app.state.storage.read(pending["bucket"], pending["key"]) == b"second"

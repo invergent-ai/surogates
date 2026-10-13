@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -136,11 +137,13 @@ async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, st
     raise HTTPException(status_code=403, detail="Only a person can open the editor.")
 
 
-
 @router.get("/office/files/{token}")
 async def get_office_file(token: str, request: Request) -> Response:
     """The document the document server opens: read through the workspace layer."""
     document = await _document_for(request, token, "file")
+    # Its key's session has ended: a fresh open would start from bytes about to be replaced.
+    if (document.pending_save or {}).get("close"):
+        raise HTTPException(status_code=409, detail="The document is still being saved; try again in a moment.")
     session = await _live_session(request, document)
     async with workspace_files(request, session) as files:
         if not isinstance(files, StorageWorkspaceIO):
@@ -196,6 +199,7 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     """Keep the edited file at once (the document server retries a callback only
     three times, seconds apart); a worker job lands it."""
     office = request.app.state.settings.office
+    received = datetime.now(timezone.utc)
     url = payload.get("url")
     if not url:
         raise HTTPException(status_code=400, detail="The save names no file.")
@@ -209,11 +213,24 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     key = f"{PENDING_PREFIX}{document.doc_key}/{uuid4().hex}"
     storage = request.app.state.storage
     await storage.write(bucket, key, data)
-    replaced = await office_sessions.set_pending(
+    discarded = await office_sessions.set_pending(
         request.app.state.session_factory, document.id, bucket=bucket, key=key, close=close,
+        lastsave=_saved_at(payload, received),
     )
-    if replaced:
-        await storage.delete(bucket, replaced)
+    if discarded:
+        try:
+            await storage.delete(bucket, discarded)
+        except Exception:  # the save is recorded; the stray object only costs storage
+            logger.warning("could not delete the discarded save %s/%s", bucket, discarded, exc_info=True)
+
+
+def _saved_at(payload: dict[str, Any], received: datetime) -> datetime:
+    """When the document server made the save (its ``lastsave``), or *received* when it does not say."""
+    try:
+        when = datetime.fromisoformat(str(payload["lastsave"]))
+    except (KeyError, ValueError):
+        return received
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 async def _download(url: str) -> bytes:

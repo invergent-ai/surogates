@@ -109,17 +109,34 @@ async def record_editors(session_factory: Any, row_id: UUID, users: list[str]) -
             row.connected_at = datetime.now(timezone.utc)
 
 
-async def set_pending(session_factory: Any, row_id: UUID, *, bucket: str, key: str, close: bool) -> str | None:
-    """Record a save waiting to land; returns the key of the pending save it replaced."""
+async def set_pending(
+    session_factory: Any, row_id: UUID, *, bucket: str, key: str, close: bool, lastsave: datetime | None = None,
+) -> str | None:
+    """Record a save waiting to land, made at *lastsave* (now when None); returns the key
+    of the save that lost, to delete.
+
+    Callbacks can arrive out of order (a slow download, autoAssembly racing a Save), so a
+    pending save made later than *lastsave* stays and the incoming *key* is the one that
+    lost; either way a ``close`` from either save survives.
+    """
+    lastsave = lastsave or datetime.now(timezone.utc)
     async with session_factory() as db, db.begin():
         row = await db.get(OfficeSession, row_id, with_for_update=True)
         if row is None:
             return None
+        # A save means an editor connected, though its status-1 callback may have been lost.
+        if row.connected_at is None:
+            row.connected_at = datetime.now(timezone.utc)
         previous = dict(row.pending_save or {})
+        close = close or bool(previous.get("close"))
+        if previous and datetime.fromisoformat(previous["lastsave"]) > lastsave:
+            row.pending_save = {**previous, "close": close}
+            return key
         row.pending_save = {
             "bucket": bucket,
             "key": key,
-            "close": close or bool(previous.get("close")),
+            "lastsave": lastsave.isoformat(),
+            "close": close,
             "attempts": 0,
         }
         replaced = previous.get("key")
