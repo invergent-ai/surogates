@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlsplit
 
+from surogates.harness.expert_routing import model_supports_thinking_toggle
+
 
 def reasoning_disabled_extra_body(model: str, base_url: str = "") -> dict[str, Any] | None:
     url = urlsplit(base_url)
@@ -22,6 +24,11 @@ def reasoning_disabled_extra_body(model: str, base_url: str = "") -> dict[str, A
             "reasoning": {"enabled": False},
             "chat_template_kwargs": {"enable_thinking": False},
         }
+    if model.lower() != "surogate-pro" and model_supports_thinking_toggle(model):
+        # A chat-template model reached by name (surogate3.7 through the
+        # /_model route, Qwen3, GLM). The pro sentinel is Claude behind the
+        # proxy, which has no template to switch.
+        return {"chat_template_kwargs": {"enable_thinking": False}}
     return None
 
 
