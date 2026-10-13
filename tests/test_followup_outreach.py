@@ -596,3 +596,63 @@ async def test_the_reminder_wait_is_the_agents_setting_and_marks_the_check_in(sf
     assert len(await _alerts(sf, "reminder")) == 1
     async with sf() as db:
         assert (await db.get(ProgramInvitationRow, invitation_id)).escalation_state == "reminded"
+
+
+# --- failures reaching a person ---------------------------------------------
+
+
+async def _failed_opener(sf, user_id, *, error, at=NOW, state="failed"):
+    from surogates.db.models import ProgramInvitationRow
+
+    async with sf() as db:
+        db.add(ProgramInvitationRow(
+            org_id=ORG, agent_id=AGENT, program_id=uuid.uuid4(),
+            occurrence_id=uuid.uuid4(), user_id=user_id, platform="whatsapp",
+            platform_user_id="40711111111", delivery_state=state,
+            delivery_error=error if state != "canceled" else None,
+            reason=error if state == "canceled" else None, created_at=at,
+        ))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_program_opener_tells_the_team_once_per_person_per_day(sf, doctor_session):
+    member, row = await _team_message(sf)
+    person = row.user_id
+    await _failed_opener(sf, person, error="graph error 132015 (template paused)")
+    await _failed_opener(sf, person, error="graph error 131047 (window closed)")
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=1))
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=2))
+
+    [notice] = await _notices(sf)
+    assert notice.user_id == member
+    assert notice.subject_user_id == person
+    assert notice.text == (
+        "⚠️ A message to Ion Pop did not arrive: Meta has paused the WhatsApp "
+        "template. Call them? +40 711 111 111"
+    )
+
+    await _failed_opener(sf, person, error="Permission withdrawn before the opener was sent",
+                         at=NOW + timedelta(days=1), state="canceled")
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(days=1, minutes=1))
+    texts = [n.text for n in await _notices(sf) if n.text.startswith("⚠️ A message")]
+    assert len(texts) == 2
+    assert "no permission to message them" in texts[0] + texts[1]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_welcome_is_surfaced_but_a_team_message_is_reported_to_its_sender(sf, doctor_session):
+    member, row = await _team_message(sf)
+    welcome = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=row.user_id, platform="whatsapp",
+        channel_identifier=SENDER, kind="welcome", text="Welcome",
+        template_name=None, template_language=None, created_by="purchase",
+    )
+    await _send(sf, _Store(), _Delivery())
+    assert (await _row(sf, welcome.id)).state == "failed"
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=25))
+
+    notices = sorted(n.text for n in await _notices(sf))
+    assert len(notices) == 2
+    assert notices[0].startswith("⚠️ A message to Ion Pop did not arrive: their 24h window")
+    assert notices[1].startswith("⚠️ Ion Pop did not receive your message: no answer")

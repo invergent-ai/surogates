@@ -85,6 +85,7 @@ DEFAULT_TEXTS = {
     "delivered_notice": "✅ {name} received your message ({time}).",
     "undelivered_notice": "⚠️ {name} did not receive your message: {why}. Call them? {phone}",
     "red_alert_reminder": "🔴 Reminder, not yet opened after {minutes} minutes:\n\n{text}",
+    "person_failure_notice": "⚠️ A message to {name} did not arrive: {why}. Call them? {phone}",
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
@@ -317,6 +318,10 @@ def plain_reason(reason: str | None) -> str:
         return f"no answer to the opening template ({text.rsplit('within ', 1)[-1]})"
     if "131047" in lowered:
         return "their 24h WhatsApp window had closed"
+    if "132015" in lowered or "paused" in lowered:
+        return "Meta has paused the WhatsApp template"
+    if "132016" in lowered or "disabled" in lowered or "rejected" in lowered:
+        return "Meta has disabled or rejected the WhatsApp template"
     if "permission" in lowered:
         return "no permission to message them"
     if "no whatsapp identity" in lowered:
@@ -471,6 +476,101 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
     return reminded
 
 
+async def _surface_person_failures(session_factory: Any, *, now: datetime) -> int:
+    """Tell the team when the agent or a Program could not reach a person.
+
+    A check-in opener or a welcome that failed would otherwise only show in
+    a run history nobody reads.  One notice per person per day of failure,
+    whatever number of messages failed that day.  A team member's own
+    message is reported to them by :func:`_report_outcomes` instead.
+    """
+    since = now - OUTCOME_LOOKBACK
+    async with session_factory() as db:
+        invitations = (
+            await db.execute(
+                sa.select(
+                    ProgramInvitationRow.org_id, ProgramInvitationRow.agent_id,
+                    ProgramInvitationRow.user_id, ProgramInvitationRow.created_at,
+                    sa.func.coalesce(ProgramInvitationRow.delivery_error, ProgramInvitationRow.reason),
+                )
+                .where(sa.or_(
+                    ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")),
+                    sa.and_(
+                        ProgramInvitationRow.delivery_state == "canceled",
+                        ProgramInvitationRow.reason.ilike("%permission%"),
+                    ),
+                ))
+                .where(ProgramInvitationRow.created_at >= since)
+                .limit(BATCH)
+            )
+        ).all()
+        messages = (
+            await db.execute(
+                sa.select(
+                    OutreachMessageRow.org_id, OutreachMessageRow.agent_id,
+                    OutreachMessageRow.user_id, OutreachMessageRow.created_at,
+                    OutreachMessageRow.reason,
+                )
+                .where(OutreachMessageRow.kind.in_(("welcome", "operator")))
+                .where(OutreachMessageRow.state == "failed")
+                .where(OutreachMessageRow.created_at >= since)
+                .where(sa.or_(
+                    OutreachMessageRow.created_by.is_(None),
+                    sa.not_(sa.or_(
+                        OutreachMessageRow.created_by.like("team:%"),
+                        OutreachMessageRow.created_by.like("care-team:%"),
+                    )),
+                ))
+                .limit(BATCH)
+            )
+        ).all()
+    failures: dict[str, tuple] = {}
+    for org_id, agent_id, user_id, at, reason in sorted(
+        [*invitations, *messages], key=lambda r: as_utc(r[3]),
+    ):
+        key = f"failure:{agent_id}:{user_id}:{as_utc(at):%Y-%m-%d}"
+        failures.setdefault(key, (org_id, agent_id, user_id, reason))
+    if not failures:
+        return 0
+    async with session_factory() as db:
+        told = {
+            key.rsplit(":", 1)[0] for key in (
+                await db.execute(
+                    sa.select(OutreachMessageRow.dedupe_key)
+                    .where(OutreachMessageRow.dedupe_key.like("failure:%"))
+                    .where(OutreachMessageRow.created_at >= since)
+                )
+            ).scalars()
+        }
+    surfaced = 0
+    for key, (org_id, agent_id, user_id, reason) in failures.items():
+        if key in told:
+            continue
+        try:
+            settings = await followup_store.get_settings(
+                session_factory, org_id=org_id, agent_id=agent_id,
+            )
+            if followup_store.is_care_team(settings, user_id):
+                continue
+            name, phone, _zone = await describe_person(
+                session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+            )
+            queued, _ = await followup_store.notify_care_team(
+                session_factory, settings, org_id=org_id, agent_id=agent_id,
+                kind="notice", created_by="outreach", subject_user_id=user_id,
+                text=followup_store.render_text(
+                    ((settings.texts or {}) if settings else {}).get("person_failure_notice"),
+                    DEFAULT_TEXTS["person_failure_notice"],
+                    name=name, why=plain_reason(reason), phone=phone,
+                ),
+                dedupe_prefix=key,
+            )
+            surfaced += queued
+        except Exception:  # noqa: BLE001 — one person, not the pass
+            logger.exception("[outreach] could not surface a failure for %s", user_id)
+    return surfaced
+
+
 async def send_queued_outreach(
     session_factory: Any,
     *,
@@ -491,6 +591,7 @@ async def send_queued_outreach(
     await _expire_unanswered(session_factory, now=now)
     await _report_outcomes(session_factory, now=now)
     await _remind_unseen_red_alerts(session_factory, now=now)
+    await _surface_person_failures(session_factory, now=now)
 
     answered = sa.exists().where(
         ChannelContactRow.org_id == OutreachMessageRow.org_id,
