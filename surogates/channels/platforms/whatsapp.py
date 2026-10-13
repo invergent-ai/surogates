@@ -622,6 +622,20 @@ _ROW_DESCRIPTION_CHARS = 72
 _DEFAULT_LIST_BUTTON = "☰"
 
 
+def _template_object(template: dict) -> dict:
+    """The Cloud API ``template`` object, with a FLOW button's token when one is set."""
+    out: dict[str, Any] = {"name": template["name"], "language": {"code": template["language"]}}
+    button = template.get("flow_button")
+    if isinstance(button, dict) and button.get("flow_token"):
+        out["components"] = [{
+            "type": "button",
+            "sub_type": "flow",
+            "index": str(button.get("index") or "0"),
+            "parameters": [{"type": "action", "action": {"flow_token": button["flow_token"]}}],
+        }]
+    return out
+
+
 def _interactive_prompt(payload: dict) -> dict | None:
     """The ``interactive`` object for a single choice question, or ``None``.
 
@@ -863,10 +877,7 @@ class WhatsAppPlatform:
                     "recipient_type": "individual",
                     "to": wa_id,
                     "type": "template",
-                    "template": {
-                        "name": template["name"],
-                        "language": {"code": template["language"]},
-                    },
+                    "template": _template_object(template),
                 },
                 api_version=api_version,
             )

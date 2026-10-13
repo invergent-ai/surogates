@@ -27,6 +27,7 @@ from uuid import UUID
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.memory_boundary import boundary_token
 from surogates.channels.source import SessionSource, build_session_key
+from surogates.channels.whatsapp_flows import new_flow_token
 from surogates.session.events import CHECKIN_OPENER_MARKER
 
 logger = logging.getLogger(__name__)
@@ -214,16 +215,27 @@ def make_opener_enqueue(
         session_id = await _session(
             invitation, platform, session_key, channel_id=wa_id, sender=sender,
         )
+        template = {"name": template_name, "language": template_language}
+        metadata = _metadata(invitation, template_name=template_name)
+        # A FLOW button on the template opens the form in one tap; its token
+        # rides on the opener event so the reply is recognised like any
+        # form this conversation sent.
+        button = config.get("template_flow_button")
+        if isinstance(button, dict):
+            metadata["flow_token"] = new_flow_token(str(button.get("form") or "form"))
+            template["flow_button"] = {
+                "index": str(button.get("index") or 0), "flow_token": metadata["flow_token"],
+            }
         event_id = await session_store.emit_synthetic_user_message(
             session_id, content=_opener_text(config), synthetic=CHECKIN_OPENER_MARKER,
-            metadata=_metadata(invitation, template_name=template_name),
+            metadata=metadata,
         )
         # Same three keys the reply path writes; the dispatcher reads
         # ``channel_identifier`` first and fails the row without it.
         return await delivery_service.enqueue(
             session_id, event_id, platform,
             {"wa_id": wa_id, "phone_number_id": sender, "channel_identifier": sender},
-            {"template": {"name": template_name, "language": template_language}},
+            {"template": template},
         )
 
     return _enqueue
