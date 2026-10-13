@@ -1,8 +1,8 @@
 //! This user's processes, each with its program and its arguments, as Linux reads them from /proc: what the browser
 //! host asks to find the processes on a browser's profile. Each process of a snapshot (CreateToolhelp32Snapshot,
 //! TH32CS_SNAPPROCESS) is opened for limited information alone, and kept where its token's user is this process's
-//! (OpenProcessToken, GetTokenInformation with TokenUser, EqualSid): another user's is passed over, as /proc does not
-//! give its command line. Its program by QueryFullProcessImageNameW, its command line by NtQueryInformationProcess's
+//! (OpenProcessToken, GetTokenInformation with TokenUser, the SID's bytes as GetLengthSid measures them): another
+//! user's is passed over, as /proc does not give its command line. Its program by QueryFullProcessImageNameW, its command line by NtQueryInformationProcess's
 //! ProcessCommandLineInformation, which needs PROCESS_QUERY_LIMITED_INFORMATION alone (Microsoft,
 //! NtQueryInformationProcess, ProcessCommandLineInformation), split as the C runtime reads it (CommandLineToArgvW).
 
@@ -12,7 +12,7 @@ use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessComm
 use windows_sys::Win32::Foundation::{
     CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
 };
-use windows_sys::Win32::Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+use windows_sys::Win32::Security::{GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
@@ -61,10 +61,9 @@ fn described(pid: u32, own: &[u8]) -> Option<Process> {
         return None;
     }
     let found = (|| {
-        let user = user_of(process)?;
-        // SAFETY: both are TOKEN_USER buffers, whose SID each points into itself.
-        let same = unsafe { EqualSid((*user.as_ptr().cast::<TOKEN_USER>()).User.Sid, (*own.as_ptr().cast::<TOKEN_USER>()).User.Sid) } != 0;
-        if !same {
+        // Two SIDs are one where their bytes are (Microsoft, EqualSid: the revision, the identifier authority and
+        // each subauthority).
+        if user_of(process)? != own {
             return None;
         }
         let command = command_line(process)?;
@@ -75,7 +74,8 @@ fn described(pid: u32, own: &[u8]) -> Option<Process> {
     found
 }
 
-// The TOKEN_USER of *process*'s token, as GetTokenInformation fills one, in a buffer aligned for it.
+// The bytes of the SID of *process*'s token's user: copied out of the TOKEN_USER that GetTokenInformation fills,
+// whose SID points into that buffer, before the buffer goes.
 fn user_of(process: HANDLE) -> Option<Vec<u8>> {
     let mut token: HANDLE = null_mut();
     // SAFETY: a token handle for querying, closed below.
@@ -90,7 +90,17 @@ fn user_of(process: HANDLE) -> Option<Vec<u8>> {
     let read = unsafe { GetTokenInformation(token, TokenUser, buffer.as_mut_ptr().cast(), size, &mut size) } != 0;
     // SAFETY: opened above.
     unsafe { CloseHandle(token) };
-    read.then(|| buffer.iter().flat_map(|word| word.to_ne_bytes()).collect())
+    if !read {
+        return None;
+    }
+    // SAFETY: the buffer holds the TOKEN_USER the call filled, and the SID it points to, while it is read here.
+    unsafe {
+        let sid = (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        if sid.is_null() || IsValidSid(sid) == 0 {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(sid.cast::<u8>(), GetLengthSid(sid) as usize).to_vec())
+    }
 }
 
 // The path of *process*'s program.
