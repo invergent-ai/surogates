@@ -519,36 +519,50 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
   end
 
-  def test_the_windows_suites_run_by_hand_on_windows_on_the_ref_they_are_given_and_hold_nothing_to_leak
+  def test_the_windows_suites_run_by_hand_or_for_the_release_on_windows_on_the_ref_they_are_given_and_hold_nothing_to_leak
     windows = YAML.load_file(WINDOWS)
     on = triggers(windows)
-    # Each suite runs once a branch, on its final head: started by hand, never by a push or a pull
-    # request, whose code it would run.
-    assert_equal %w[workflow_dispatch], on.keys
-    inputs = on.fetch("workflow_dispatch").fetch("inputs")
-    assert_equal %w[ref], inputs.keys
-    assert_equal [true, "string"], inputs.fetch("ref").values_at("required", "type")
+    # Each suite runs once a branch, on its final head, started by hand; or for the release, which calls it on its
+    # tag. Never by a push or a pull request, whose code it would run.
+    assert_equal %w[workflow_dispatch workflow_call], on.keys
+    on.each do |trigger, given|
+      # The ref it is given, and nothing else: no secret is ever handed to it, and it hands nothing back.
+      assert_equal %w[inputs], given.keys, trigger
+      inputs = given.fetch("inputs")
+      assert_equal %w[ref], inputs.keys, trigger
+      assert_equal [true, "string"], inputs.fetch("ref").values_at("required", "type"), trigger
+    end
     # Its token reads the repository and nothing else, and nothing of the workflow's own is every job's.
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit], jobs.keys
+    assert_equal %w[unit vm-probe], jobs.keys
     jobs.each do |name, job|
       assert_equal "windows-2025", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
-      # A run on a branch's head runs that branch's code: no job is given a secret, in any form,
-      # an Environment's or a permission of its own, a signing token's among them.
+      # A run on a branch's head runs that branch's code: no job is given a secret, in any form, an Environment's or
+      # a permission of its own, a token to sign with among them.
       refute_match(/secrets/i, job.to_s, "#{name} names a secret")
       refute_match(/id-token/, job.to_s, "#{name} asks for a token to sign with")
       refute job.key?("environment"), "#{name} runs in an Environment"
       refute job.key?("permissions"), "#{name} asks for permissions of its own"
+      steps = job.fetch("steps")
+      # The ref it is given, checked out with no token kept for that ref's code to use, as its files are written.
+      checkouts = steps.select { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+      assert_equal [{ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }], checkouts.map { |step| step.fetch("with") }, name
+      assert_operator steps.index { |step| step["run"].to_s.include?("git config --global core.autocrlf false") }, :<, steps.index(checkouts.first), name
     end
     refute_match(/id-token/, windows.to_s)
-    steps = jobs.fetch("unit").fetch("steps")
-    # The ref it is given, checked out with no token kept for that ref's code to use.
-    assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, steps.first.fetch("with"))
-    # The desktop's types, checked on Windows.
-    assert_equal "npm run typecheck", steps.last.fetch("run").strip
+    # The files of the desktop's vitest project for Windows, which each part built for Windows joins; they gate.
+    unit = jobs.fetch("unit")
+    refute unit.key?("continue-on-error")
+    assert_equal "npx vitest run --project windows", unit.fetch("steps").last.fetch("run").strip
+    # What the runner offers the VM, recorded and never gating: its Rust probe built as its lock file has it.
+    probe = jobs.fetch("vm-probe")
+    assert_equal true, probe.fetch("continue-on-error")
+    runs = probe.fetch("steps").map { |step| step["run"].to_s }
+    assert(runs.any? { |run| run.include?("Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform") })
+    assert(runs.any? { |run| run.include?("cargo build --release --locked") })
   end
 
   def test_the_arm64_guest_is_built_and_tested_by_hand_on_an_arm64_runner_and_holds_nothing_to_leak
@@ -696,7 +710,8 @@ class ReleaseWorkflowTest < Minitest::Test
         "shell" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed 999968b5792d1f09 82ea49c2e002c4eb bb26d389f9d8b55f 2734cf3c0643d000 512eb34e3e8c1e1d bea3be8dc0d7d250]],
       },
       "desktop-windows.yml" => {
-        "unit" => ["943604becd7dec07", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 db6273944f5b635b]],
+        "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
+        "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],

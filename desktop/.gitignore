@@ -6,3 +6,4 @@ native/*/build/
 native/out/
 native/macos/.build/
 test/vm/darwin/measure/out/
+test/vm/win32/hcs-probe/target/

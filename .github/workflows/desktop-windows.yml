@@ -1,7 +1,7 @@
 # The desktop's suites on Windows: GitHub's windows-2025 runners, x64. Started by hand, once, on a
-# branch's final head: every suite runs once a branch. A run tests whatever code the ref names, so no
-# job here is given anything to leak: no secret, no Environment, and a token that reads the repository
-# alone.
+# branch's final head, or called by the release on the tag it releases: every suite runs once a
+# branch. A run tests whatever code the ref names, so no job here is given anything to leak: no
+# secret, no Environment, no token to sign with, and a token that reads the repository alone.
 name: Desktop on Windows
 
 on:
@@ -11,13 +11,19 @@ on:
         description: The branch, tag or commit whose desktop to test
         required: true
         type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: The tag or commit whose desktop to test
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  # The desktop's types, checked on Windows: the first of its suites there, which each part of the app
-  # built for Windows adds to.
+  # The files of desktop/vitest.config.ts's windows project: those that pass on Windows, which each
+  # part of the app built for Windows joins.
   unit:
     runs-on: windows-2025
     timeout-minutes: 30
@@ -25,6 +31,12 @@ jobs:
       run:
         working-directory: desktop
     steps:
+      # The repository's files as they are written: git for Windows would check each text file out
+      # with CRLF line ends, which no test reads as the app's own.
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.ref }}
@@ -41,5 +53,48 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
+      # npm ci leaves no Electron binary. The script is a POSIX shell's, which npm runs in cmd on
+      # Windows unless told otherwise: Git for Windows' bash, by its whole path, as no other bash on
+      # the runner's PATH is.
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
       - name: Check the desktop's types
         run: npm run typecheck
+
+      - name: Run the suites that pass on Windows
+        run: npx vitest run --project windows
+
+  # What a Windows runner offers the VM, recorded and never gating: GitHub calls nested
+  # virtualization on its runners experimental. Whether Virtual Machine Platform is on, and what the
+  # Host Compute Service says of itself (desktop/test/vm/win32/hcs-probe).
+  vm-probe:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Keep the repository's line ends
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Ask whether Virtual Machine Platform is on
+        run: |
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform | Format-List FeatureName, State, RestartNeeded | Out-String
+          $feature
+          "### Virtual Machine Platform`n``````n$feature``````" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Ask the Host Compute Service what it supports
+        working-directory: desktop/test/vm/win32/hcs-probe
+        run: |
+          cargo build --release --locked
+          $said = & .\target\release\hcs-probe.exe | Out-String
+          $code = $LASTEXITCODE
+          $said
+          "### HcsGetServiceProperties, exit $code`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
+          exit $code

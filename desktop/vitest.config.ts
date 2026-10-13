@@ -22,6 +22,15 @@ export const MACOS = [
   "test/browser-known-darwin.test.ts", "test/browser-processes-darwin.test.ts", "test/browser-host-darwin.test.ts",
 ];
 
+// The files that pass on Windows, which the Windows workflow runs (.github/workflows/desktop-windows.yml): each part of
+// the app built for Windows adds its own. A project on Windows alone: on Linux each is the unit project's.
+export const WINDOWS = [
+  "test/platform.test.ts", "test/backoff.test.ts", "test/egress.test.ts", "test/guest-control.test.ts", "test/output.test.ts", "test/protocol.test.ts",
+  "test/vm-manifest.test.ts",
+  // The seams each part of the app picks its OS by, which name Windows's rows.
+  "test/platform-seams.test.ts", "test/session-paths.test.ts", "test/native-helper.test.ts", "test/windows-project.test.ts",
+];
+
 // Every git the tests run themselves reads none of the user's or the system's config, so it
 // never signs with the user's key or reaches their gpg-agent, and commits as the tests.
 const GIT = {
@@ -43,6 +52,7 @@ export default defineConfig({
       { extends: true, test: { name: "unit", include: ["test/**/*.test.ts"], exclude: [...configDefaults.exclude, ...MOUNTING] } },
       { extends: true, test: { name: "mounting", include: MOUNTING, sequence: { groupOrder: 1 } } },
       ...(process.platform === "darwin" ? [{ extends: true as const, test: { name: "macos", include: MACOS } }] : []),
+      ...(process.platform === "win32" ? [{ extends: true as const, test: { name: "windows", include: WINDOWS } }] : []),
     ],
   },
 });
