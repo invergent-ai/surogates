@@ -347,22 +347,40 @@
     comment: function (op, agent) {
       var where = resolveTarget(op.anchor);
       var comment = where.range.AddComment(op.body, agent.name, agent.id);
-      if (!comment) throw new Error("the comment could not be added");
+      if (!comment) throw new Refusal("The quoted words are inside a locked part of the document; anchor the comment elsewhere.");
       return { thread: String(comment.GetId()) };
     },
     reply: function (op, agent) {
-      var comment = doc.GetCommentById(String(op.thread));
-      if (!comment) throw new Refusal("Comment thread " + op.thread + " is gone.");
-      comment.AddReply(op.body, agent.name, agent.id);
+      changeThread(op.thread, function (data) { data.Add_Reply(replyOf(op.body, agent)); });
       return {};
     },
     resolve: function (op) {
-      var comment = doc.GetCommentById(String(op.thread));
-      if (!comment) throw new Refusal("Comment thread " + op.thread + " is gone.");
-      comment.SetSolved(true);
+      changeThread(op.thread, function (data) { data.SetSolved(true); });
       return {};
     },
   };
+
+  // The Builder's AddReply and SetSolved change a comment's data in place, so cancelling the edit cannot take them
+  // back: a copy is changed and set instead, and the history keeps the old data. (Internal, unversioned names.)
+  function changeThread(thread, change) {
+    var found = doc.GetCommentById(String(thread));
+    if (!found) throw new Refusal("Comment thread " + thread + " is gone.");
+    var data = found.Comment.GetData().Copy();
+    change(data);
+    doc.Document.EditComment(found.Comment.GetId(), data);
+  }
+
+  // As the Builder's AddReply makes it.
+  function replyOf(text, agent) {
+    var reply = new AscCommon.CCommentData(), now = new Date();
+    reply.SetText(text);
+    reply.SetUserName(agent.name);
+    reply.m_sUserId = agent.id;
+    reply.m_sProviderId = "Teamlab";
+    reply.m_sTime = String(now.getTime() - now.getTimezoneOffset() * 60000);
+    reply.m_sOOTime = String(now.getTime());
+    return reply;
+  }
 
   function edit(ops, agent) {
     var results = [];
