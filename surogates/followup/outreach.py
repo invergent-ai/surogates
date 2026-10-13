@@ -71,9 +71,16 @@ UNANSWERED_AFTER = timedelta(hours=72)
 #: The same for a team member's message to a person, unless the agent's
 #: settings say otherwise: whoever asked should hear about it the same day.
 OPERATOR_UNANSWERED_HOURS = 24
-#: How far back the outcome pass looks.  Longer than any wait above, so
-#: every held text has settled inside it.
-OUTCOME_LOOKBACK = timedelta(days=4)
+#: How far back the outcome pass looks.  A day longer than the longest wait
+#: above or an agent may set, so every held text has settled inside it.
+OUTCOME_LOOKBACK = max(
+    UNANSWERED_AFTER,
+    timedelta(hours=followup_store.SETTINGS_RANGES["operator_unanswered_hours"][1]),
+) + timedelta(days=1)
+#: How far back the reminder pass looks: past the longest reminder wait.
+REMINDER_LOOKBACK = timedelta(
+    minutes=followup_store.SETTINGS_RANGES["red_alert_reminder_minutes"][1],
+) + timedelta(hours=12)
 #: The team's notices about a message's outcome, overridable per agent in
 #: ``followup_settings.texts`` like every other platform wording.
 #: Minutes a red alert may wait unopened before the team is reminded,
@@ -437,7 +444,7 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
                 .where(OutreachMessageRow.dedupe_key.like("escalation:%"))
                 .where(OutreachMessageRow.state.in_(_HELD))
                 .where(OutreachMessageRow.created_at <= now - BATCH_WINDOW)
-                .where(OutreachMessageRow.created_at >= now - timedelta(days=1))
+                .where(OutreachMessageRow.created_at >= now - REMINDER_LOOKBACK)
                 .limit(BATCH)
             )
         ).all()

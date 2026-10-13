@@ -255,3 +255,30 @@ async def test_settings_change_only_the_fields_given(sf):
     assert saved.alert_template_name == "alerta"
     with pytest.raises(ValueError):
         await store.update_settings(sf, org_id=ORG, agent_id=AGENT, colour="red")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field, bad, good", [
+    ("operator_unanswered_hours", [0, 73, "x", 1.5, True], [1, 72, "24", None]),
+    ("red_alert_reminder_minutes", [4, 721, "soon"], [5, 720, None]),
+])
+async def test_outreach_timing_settings_are_bounded(sf, field, bad, good):
+    from surogates.followup import store as followup_store
+
+    for value in bad:
+        with pytest.raises(ValueError, match=f"{field} must be a whole number"):
+            await followup_store.update_settings(sf, org_id=ORG, agent_id="a1", **{field: value})
+    for value in good:
+        row = await followup_store.update_settings(sf, org_id=ORG, agent_id="a1", **{field: value})
+        assert getattr(row, field) == (int(value) if value is not None else None)
+
+
+def test_the_passes_look_back_past_the_longest_setting():
+    from datetime import timedelta
+
+    from surogates.followup import outreach
+    from surogates.followup.store import SETTINGS_RANGES
+
+    assert outreach.OUTCOME_LOOKBACK > timedelta(hours=SETTINGS_RANGES["operator_unanswered_hours"][1])
+    assert outreach.OUTCOME_LOOKBACK > outreach.UNANSWERED_AFTER
+    assert outreach.REMINDER_LOOKBACK > timedelta(minutes=SETTINGS_RANGES["red_alert_reminder_minutes"][1])

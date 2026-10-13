@@ -77,6 +77,12 @@ SETTINGS_FIELDS = frozenset({
     "operator_unanswered_hours", "red_alert_reminder_minutes",
 })
 ALERT_SEVERITIES = ("red", "yellow")
+#: Allowed ranges, inclusive, for the settings that time outreach.  The
+#: passes that act on them look back far enough to cover the maximum.
+SETTINGS_RANGES = {
+    "operator_unanswered_hours": (1, 72),
+    "red_alert_reminder_minutes": (5, 720),
+}
 
 
 class TeamMember(ValueError):
@@ -425,6 +431,18 @@ async def get_settings(
 
 
 def _normalised(field: str, value: Any) -> Any:
+    if field in SETTINGS_RANGES:
+        if value is None or value == "":
+            return None
+        low, high = SETTINGS_RANGES[field]
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = None
+        if isinstance(value, bool) or number is None or str(number) != str(value).strip() \
+                or not low <= number <= high:
+            raise ValueError(f"{field} must be a whole number from {low} to {high}")
+        return number
     if field == "alert_recipient_user_ids":
         return list(dict.fromkeys(str(u) for u in (value or [])))
     if field in ("offer_protocols", "texts"):
@@ -444,6 +462,7 @@ async def update_settings(
     unknown = set(fields) - SETTINGS_FIELDS
     if unknown:
         raise ValueError(f"unknown settings fields: {', '.join(sorted(unknown))}")
+    fields = {field: _normalised(field, value) for field, value in fields.items()}
     async with session_factory() as db:
         row = await db.get(FollowupSettingsRow, (org_id, agent_id))
         if row is None:
@@ -453,7 +472,7 @@ async def update_settings(
             )
             db.add(row)
         for field, value in fields.items():
-            setattr(row, field, _normalised(field, value))
+            setattr(row, field, value)
         row.updated_at = _utcnow()
         await db.commit()
         await db.refresh(row)
