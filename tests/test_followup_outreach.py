@@ -578,11 +578,11 @@ async def test_an_opened_or_yellow_alert_is_not_reminded(sf, doctor_session):
     assert await _alerts(sf, "reminder") == []
 
 
-async def _read(sf, row, wamid="wamid.text"):
-    """WhatsApp reports the text of *row* read by its recipient."""
+async def _read(sf, row, wamid="wamid.text", column="text_message_id"):
+    """WhatsApp reports the text of *row* (or its template) read."""
     async with sf() as db:
         saved = await db.get(OutreachMessageRow, row.id)
-        saved.provider_message_id = wamid
+        setattr(saved, column, wamid)
         await db.commit()
     assert await outreach.apply_outreach_status(
         sf, provider_message_id=wamid, status="read", reason=None,
@@ -606,7 +606,7 @@ async def test_a_template_read_alone_is_not_a_read_alert(sf, doctor_session):
     await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
     [held] = await _alerts(sf, "agent")
     assert held.state == "awaiting_reply"
-    await _read(sf, held, "wamid.template")
+    await _read(sf, held, "wamid.template", "provider_message_id")
     assert (await _row(sf, held.id)).read_at is None
 
 
@@ -646,7 +646,34 @@ async def test_the_outbox_result_gives_an_outreach_text_its_provider_id(sf):
         ))
         await db.commit()
     assert await outreach.record_outreach_text(sf, 78, provider_message_id="wamid.x")
-    assert (await _row(sf, row.id)).provider_message_id == "wamid.x"
+    assert (await _row(sf, row.id)).text_message_id == "wamid.x"
+
+
+@pytest.mark.asyncio
+async def test_the_text_id_does_not_replace_the_templates(sf):
+    from surogates.db.models import DeliveryOutbox, Event
+
+    row = await _queue(sf, uuid.uuid4())
+    session_id = uuid.uuid4()
+    async with sf() as db:
+        saved = await db.get(OutreachMessageRow, row.id)
+        saved.state, saved.provider_message_id = "awaiting_reply", "wamid.template"
+        db.add(Event(id=903, session_id=session_id, type=EventType.LLM_RESPONSE.value, data={
+            "synthetic": "outreach", "outreach_id": str(row.id),
+        }))
+        db.add(DeliveryOutbox(
+            id=79, session_id=session_id, event_id=903, channel="whatsapp",
+            destination={}, payload={"content": "x"}, status="pending",
+        ))
+        await db.commit()
+    assert await outreach.record_outreach_text(sf, 79, provider_message_id="wamid.text")
+
+    assert await outreach.apply_outreach_status(
+        sf, provider_message_id="wamid.template", status="failed", reason="131026",
+    )
+    saved = await _row(sf, row.id)
+    assert (saved.provider_message_id, saved.text_message_id) == ("wamid.template", "wamid.text")
+    assert saved.state == "failed"
 
 
 @pytest.mark.asyncio

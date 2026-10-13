@@ -1344,6 +1344,11 @@ class OutreachMessageRow(Base):
     provider_message_id: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, index=True,
     )
+    #: The provider's id for the text itself, kept apart from the
+    #: template's so a late status for either still finds the row.
+    text_message_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, index=True,
+    )
     #: On a text held behind another row's template: that row.  A failed
     #: template fails exactly the texts riding on it.
     rides_on: Mapped[Optional[uuid.UUID]] = mapped_column(

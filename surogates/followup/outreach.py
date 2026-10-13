@@ -988,7 +988,7 @@ async def record_outreach_text(
         await db.execute(
             sa.update(OutreachMessageRow)
             .where(OutreachMessageRow.id == uuid.UUID(marker[1]))
-            .values(provider_message_id=provider_message_id)
+            .values(text_message_id=provider_message_id)
         )
         await db.commit()
     return True
@@ -1007,16 +1007,24 @@ async def apply_outreach_status(
         opener = (
             await db.execute(
                 sa.select(OutreachMessageRow)
-                .where(OutreachMessageRow.provider_message_id == provider_message_id)
+                .where(sa.or_(
+                    OutreachMessageRow.provider_message_id == provider_message_id,
+                    OutreachMessageRow.text_message_id == provider_message_id,
+                ))
             )
-        ).scalar_one_or_none()
+        ).scalars().first()
         if opener is None:
             return False
         if status == "read":
-            if opener.state in ("sent", "delivered") and opener.read_at is None:
+            # Only the text's own receipt: a template read leaves it unseen.
+            if (
+                opener.text_message_id == provider_message_id
+                and opener.state in ("sent", "delivered")
+                and opener.read_at is None
+            ):
                 opener.read_at = datetime.now(timezone.utc)
                 await db.commit()
-        elif status in ("failed", "undelivered"):
+        elif status in ("failed", "undelivered") and opener.provider_message_id == provider_message_id:
             await _fail_reopened(
                 db, opener,
                 f"The reopening template was not delivered: {reason or status}",

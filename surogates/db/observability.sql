@@ -1084,3 +1084,9 @@ CREATE INDEX IF NOT EXISTS idx_program_invitations_unreported
 -- ── whether a team member read an alert ──────────────────────────────
 ALTER TABLE outreach_messages
     ADD COLUMN IF NOT EXISTS read_at timestamptz;
+
+-- ── a text's provider id, kept apart from its template's ─────────────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS text_message_id text;
+CREATE INDEX IF NOT EXISTS ix_outreach_messages_text_message_id
+    ON outreach_messages (text_message_id);
