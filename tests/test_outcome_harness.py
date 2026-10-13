@@ -713,3 +713,85 @@ async def test_outcome_continuation_does_not_complete_session(
 
     assert continued is True
     harness._complete_session.assert_not_called()
+
+
+class _RepoSandbox:
+    """A sandbox pool whose terminal answers the /auto-research repo check."""
+
+    def __init__(self, output: str) -> None:
+        self.output = output
+        self.commands: list[str] = []
+
+    async def ensure(self, owner: str, spec: Any) -> None:
+        return None
+
+    async def execute(self, owner: str, tool: str, arguments: str) -> str:
+        import json
+
+        self.commands.append(json.loads(arguments)["command"])
+        return json.dumps({"output": self.output, "exit_code": 0, "error": None})
+
+
+def _auto_research_create(repo: str) -> str:
+    return (
+        f"/auto-research repo={repo} baseline=0.0 baseline_test=0.0 Make solver.f right.\n\n"
+        "Rubric: Satisfied when the held-out score beats 0.0."
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_research_refuses_a_repo_the_workspace_does_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PROD 0cd8c666: repo=/workspace/bench was accepted while the session's
+    repo was /workspace/rule; the run started and could only fail at its first
+    experiment.  The refusal names the repos that are there."""
+    created: list[Any] = []
+
+    async def fake_create(**kwargs: Any) -> Any:
+        created.append(kwargs)
+
+    async def spec(*_a: Any, **_kw: Any) -> object:
+        return object()
+
+    monkeypatch.setattr("surogates.missions.commands.handle_research_mission_create", fake_create)
+    monkeypatch.setattr("surogates.harness.tool_exec._build_session_sandbox_spec", spec)
+    store = FakeStore()
+    pool = _RepoSandbox("missing\n/workspace/rule\n")
+    harness = _make_harness(store, session_factory=MagicMock(), redis_client=FakeRedis(), sandbox_pool=pool)
+    session = _session()
+
+    await harness._handle_auto_research_command(session, _auto_research_create("/workspace/bench"), _lease(session.id))
+
+    assert created == []
+    answer = [e for e in store.events if e[1] == EventType.LLM_RESPONSE][-1][2]["message"]["content"]
+    assert "/workspace/bench" in answer and "/workspace/rule" in answer
+    assert "'/workspace/bench'" in pool.commands[0] or "/workspace/bench" in pool.commands[0]
+
+
+@pytest.mark.asyncio
+async def test_auto_research_starts_on_a_repo_the_workspace_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surogates.missions.commands import MissionHandlerResult
+
+    created: list[Any] = []
+
+    async def fake_create(**kwargs: Any) -> MissionHandlerResult:
+        created.append(kwargs)
+        return MissionHandlerResult(ok=True, message="Research mission started.")
+
+    async def spec(*_a: Any, **_kw: Any) -> object:
+        return object()
+
+    monkeypatch.setattr("surogates.missions.commands.handle_research_mission_create", fake_create)
+    monkeypatch.setattr("surogates.harness.tool_exec._build_session_sandbox_spec", spec)
+    store = FakeStore()
+    harness = _make_harness(
+        store, session_factory=MagicMock(), redis_client=FakeRedis(), sandbox_pool=_RepoSandbox("ok\n"),
+    )
+    session = _session()
+
+    await harness._handle_auto_research_command(session, _auto_research_create("/workspace/rule"), _lease(session.id))
+
+    assert len(created) == 1 and created[0]["cmd"].repo == "/workspace/rule"

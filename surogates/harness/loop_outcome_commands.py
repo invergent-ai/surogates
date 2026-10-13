@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -428,6 +429,54 @@ class OutcomeCommandMixin:
             },
         )
 
+    async def _research_repo_problem(self, session: Session, repo: str | None) -> str | None:
+        """Why ``repo=`` cannot be researched in this session's workspace, or None.
+
+        Checked before the run exists: a run on a missing or empty repo was
+        accepted and could only fail at its first experiment's bundle.  The
+        refusal names the git repos the workspace does have.  Without a
+        sandbox pool (tests, a worker without sandboxes) there is nothing
+        to look with.
+        """
+        if self._sandbox_pool is None or not repo:
+            return None
+        from surogates.harness.tool_exec import _build_session_sandbox_spec
+        from surogates.sandbox.pool import sandbox_session_key
+        from surogates.tools.builtin.arbor import _terminal_stdout
+
+        quoted = shlex.quote(repo)
+        script = (
+            f"if git -C {quoted} rev-parse --verify -q HEAD >/dev/null 2>&1; then echo ok; "
+            'else echo missing; for d in /workspace/*/.git; do [ -d "$d" ] && dirname "$d"; done; fi'
+        )
+        owner = sandbox_session_key(session)
+        try:
+            spec = await _build_session_sandbox_spec(
+                session, self._tenant, owner, credential_vault=self._credential_vault,
+            )
+            await self._sandbox_pool.ensure(owner, spec)
+            raw = await self._sandbox_pool.execute(
+                owner, "terminal", json.dumps({"command": script, "timeout": 30}),
+            )
+        except Exception:
+            logger.warning("Session %s: could not check /auto-research repo %s", session.id, repo, exc_info=True)
+            return (
+                f"/auto-research could not check {repo}: this session's sandbox is "
+                "unavailable. Try again in a moment."
+            )
+        lines = _terminal_stdout(raw).split()
+        if lines[:1] == ["ok"]:
+            return None
+        found = [line for line in lines[1:] if line.startswith("/workspace/")]
+        where = (
+            f"Git repos in this workspace: {', '.join(found)}."
+            if found else "There is no git repo under /workspace yet."
+        )
+        return (
+            f"/auto-research: {repo} is not a git repo with a commit in this "
+            f"session's workspace. {where} Create and commit it first, or fix repo=."
+        )
+
     async def _handle_auto_research_command(
         self,
         session: Session,
@@ -488,6 +537,8 @@ class OutcomeCommandMixin:
                             "session — anonymous channel sessions cannot own "
                             "research missions."
                         )
+                    elif (repo_problem := await self._research_repo_problem(session, command.repo)) is not None:
+                        message = repo_problem
                     else:
                         result = await handle_research_mission_create(
                             cmd=command,
