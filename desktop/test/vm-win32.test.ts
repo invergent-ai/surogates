@@ -7,12 +7,13 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { PLAN9_PORT } from "../src/guest/protocol.js";
+import { socketsIn } from "../src/vm/sockets.js";
 import { backendFor } from "../src/vm/backends.js";
 import { Guest, type VmBackend, type VmOptions } from "../src/vm/manager.js";
 import type { Start } from "../src/vm/vm-helper.js";
@@ -31,11 +32,13 @@ const booted: VmBackend[] = [];
 // The stand-in started with Node's own spawn, told *knobs* (fake-vm.mjs) through its environment: win32Boot's own
 // program argument is ignored, as the stand-in is Node, not surogate-vm.exe.
 const starting = (knobs: Record<string, string>): Start => (_program, args, options) => spawn(process.execPath, [FAKE, ...args], { ...options, env: { ...options.env, ...knobs } });
+// Named pipes on Windows, Unix sockets on Linux, so the backend's driver runs on both; the fake listens on the same.
+const testAddresses = (run: string) => (process.platform === "win32" ? addressesWin32(run) : socketsIn(run));
 
 const boot = async (knobs: Record<string, string> = {}, extra: Partial<VmOptions> = {}) => {
   const run = extra.run ?? options.run;
   mkdirSync(run, { recursive: true });
-  const vm = await win32Boot(starting(knobs))({ ...options, ...extra }, undefined, performance.now() + 10_000);
+  const vm = await win32Boot(starting(knobs), testAddresses)({ ...options, ...extra }, undefined, performance.now() + 10_000);
   booted.push(vm);
   return vm;
 };
@@ -68,12 +71,12 @@ describe("the Windows VM backend", () => {
       .toBe(runtimeFolderWin32({ LOCALAPPDATA: "C:\\Users\\ana\\AppData\\Local" }, "C:\\Users\\ana\\AppData\\Local\\Surogate"));
   });
 
-  it("names its ports as pipes on Windows, and the guest's command line names Hyper-V's devices and Windows's refused names", () => {
-    if (process.platform === "win32") {
-      expect(addressesWin32("C:\\Users\\ana\\AppData\\Local\\Surogate\\run\\vm-0b6c1d3e")).toEqual({
-        control: "\\\\.\\pipe\\surogate-0b6c1d3e-control", net: "\\\\.\\pipe\\surogate-0b6c1d3e-net", inbound: "\\\\.\\pipe\\surogate-0b6c1d3e-inbound", door: "\\\\.\\pipe\\surogate-0b6c1d3e-door",
-      });
-    }
+  it("names its ports as pipes only this user may open, and the guest's command line names Hyper-V's devices and Windows's refused names", () => {
+    // The runtime folder's own 8 hex names this boot's pipes apart; basename splits the OS's separator (host-path).
+    const run = `${sep}run${sep}vm-0b6c1d3e`;
+    expect(addressesWin32(run)).toEqual({
+      control: "\\\\.\\pipe\\surogate-0b6c1d3e-control", net: "\\\\.\\pipe\\surogate-0b6c1d3e-net", inbound: "\\\\.\\pipe\\surogate-0b6c1d3e-inbound", door: "\\\\.\\pipe\\surogate-0b6c1d3e-door",
+    });
     expect(commandLine()).toBe("console=ttyS0 panic=-1 quiet surogate.disks=scsi surogate.transport=vsock surogate.names=windows lsm=landlock,lockdown,yama,integrity,apparmor,bpf");
   });
 
@@ -156,7 +159,7 @@ describe("the VM manager's guest on the Windows backend", () => {
   it("sets a root up on its folder and runs its operations", async () => {
     mkdirSync(options.run, { recursive: true });
     let captured: VmBackend | undefined;
-    const guest = await Guest.boot(async (...args) => (captured = await win32Boot(starting({}))(...args)), { ...options });
+    const guest = await Guest.boot(async (...args) => (captured = await win32Boot(starting({}), testAddresses)(...args)), { ...options });
     if (captured) booted.push(captured);
     expect(await guest.ready(ROOT, folder())).toBeNull();
     expect(await guest.op(ROOT, "run", { command: "echo hi", workdir: null, timeout: 10 }, new AbortController().signal))

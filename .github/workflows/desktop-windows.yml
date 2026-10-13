@@ -124,6 +124,42 @@ jobs:
       - name: Test the native programs
         run: cargo test --locked --workspace
 
+  # The TypeScript VM backend against a stand-in for surogate-vm.exe (test/vm/win32/fake-vm.mjs). It builds the
+  # desktop's code first, which the stand-in imports; no secret. It gates: this is win32.ts's driver of the VM.
+  vm-backend:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Build the desktop
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build
+
+      - name: Run the VM backend against the stand-in
+        run: npx vitest run test/vm-win32.test.ts
+
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
   # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
   # fetches milestone B's guest image if a run of it is named, and runs the boot and requirements measurements. If the

@@ -29,8 +29,6 @@ export const WINDOWS = [
   "test/vm-manifest.test.ts",
   // The seams each part of the app picks its OS by, which name Windows's rows.
   "test/platform-seams.test.ts", "test/session-paths.test.ts", "test/native-helper.test.ts", "test/windows-project.test.ts",
-  // The VM backend against the stand-in for surogate-vm.exe (test/vm/win32/fake-vm.mjs).
-  "test/vm-win32.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

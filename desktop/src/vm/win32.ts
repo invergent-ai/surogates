@@ -46,15 +46,12 @@ const mark = (run: string): string => {
 
 /**
  * Where the VM manager reaches the guest's three ports, and where the browser's door is, for the runtime folder *run*:
- * named pipes only this user may open on Windows, which reach() and Node's net take by name; the same names as Unix
- * sockets in *run* elsewhere, so the backend's driver is exercised against the fake on Linux (test/vm/win32).
+ * named pipes only this user may open, which reach() and Node's net take by name. The backend's tests drive it against
+ * the fake over Unix sockets on Linux by giving win32Boot their own address maker (test/vm/win32).
  */
 export function addressesWin32(run: string): Addresses {
-  if (process.platform === "win32") {
-    const pipe = (port: string) => `\\\\.\\pipe\\surogate-${mark(run)}-${port}`;
-    return { control: pipe("control"), net: pipe("net"), inbound: pipe("inbound"), door: pipe("door") };
-  }
-  return { control: join(run, "control.sock"), net: join(run, "net.sock"), inbound: join(run, "inbound.sock"), door: join(run, "browser.sock") };
+  const pipe = (port: string) => `\\\\.\\pipe\\surogate-${mark(run)}-${port}`;
+  return { control: pipe("control"), net: pipe("net"), inbound: pipe("inbound"), door: pipe("door") };
 }
 
 /** The VM's runtime folder for *dataDir*: %LOCALAPPDATA%\Surogate\run\vm-<8 hex>, this user's own, one per data folder. */
@@ -66,21 +63,16 @@ export function runtimeFolderWin32(env: NodeJS.ProcessEnv, dataDir: string): str
 /** The guest kernel's command line on Windows: Hyper-V's SCSI disks and vsock ports, and the names its rule refuses. */
 export const commandLine = (): string => kernelLine({ disks: "scsi", transport: "vsock", names: "windows" });
 
-const ports = (run: string): string[] => {
-  const { control, net, inbound } = addressesWin32(run);
-  return [control, net, inbound];
-};
-
 /**
  * A boot on Windows, as *start* starts surogate-vm.exe: spawnClean in the app. surogate-vm.exe makes the three pipes
  * and says "listening"; the manager connects to them; it sends boot, and surogate-vm.exe asks the service for the VM,
  * binds the ports and answers "started".
  */
-export function win32Boot(start: Start): BootVm {
+export function win32Boot(start: Start, addresses: (run: string) => Addresses = addressesWin32): BootVm {
   return async (options, signal, deadline) => {
     if (signal?.aborted) throw new Error("The boot was stopped");
     const program = options.program ?? VM_PROGRAM;
-    const { control, net, inbound } = addressesWin32(options.run);
+    const { control, net, inbound } = addresses(options.run);
     const data = options.data ?? dirname(dirname(options.sessions));
     const helper = new Helper(start, program, ["run", options.run, "--data", data, "--control", control, "--net", net, "--inbound", inbound], ENV);
     const halt = () => helper.child.kill("SIGKILL");
@@ -90,7 +82,7 @@ export function win32Boot(start: Start): BootVm {
       const listening = await helper.first((said) => said.type === "listening" || said.type === "failed", deadline);
       if (listening === "late") throw new Error("surogate-vm did not open its pipes");
       if (listening === "exited" || listening.type !== "listening") throw new Error(helper.words() || "surogate-vm exited");
-      for (const path of ports(options.run)) {
+      for (const path of [control, net, inbound]) {
         const socket = await reach(path, helper.child, deadline);
         if (!socket) throw new Error(ended(helper.child) ? "surogate-vm exited" : "surogate-vm did not take a connection to its pipes");
         connected.push(socket);

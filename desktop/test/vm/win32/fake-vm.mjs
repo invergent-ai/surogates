@@ -18,8 +18,11 @@ import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 
 const { Control } = await import(new URL("../../../dist/guest/control.js", import.meta.url).href);
-// The backend names the three ports (dist/vm/win32.js, addressesWin32), the same on this OS as the backend uses them.
+// The backend names the three ports as pipes (dist/vm/win32.js, addressesWin32); on Linux the test drives it over Unix
+// sockets instead (dist/vm/sockets.js, socketsIn), and the fake listens on whichever this OS uses.
 const { addressesWin32 } = await import(new URL("../../../dist/vm/win32.js", import.meta.url).href);
+const { socketsIn } = await import(new URL("../../../dist/vm/sockets.js", import.meta.url).href);
+const addressesOf = (run) => (process.platform === "win32" ? addressesWin32(run) : socketsIn(run));
 
 const env = process.env;
 const say = (line) => process.stdout.write(`${JSON.stringify(line)}\n`);
@@ -36,7 +39,7 @@ if (command !== "run" || !run) {
   process.exit(2);
 }
 
-const { control: controlName, net: netName, inbound: inboundName } = addressesWin32(run);
+const { control: controlName, net: netName, inbound: inboundName } = addressesOf(run);
 const names = [controlName, netName, inboundName];
 const connected = await new Promise((resolve) => {
   const sockets = [];

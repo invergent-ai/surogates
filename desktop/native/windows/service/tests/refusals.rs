@@ -28,12 +28,16 @@ fn name() -> String {
     format!(r"\\.\pipe\surogate-vm-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst))
 }
 
-// A scratch folder of the test's own, under the runner's temp folder.
+// A scratch folder of the test's own, under the runner's temp folder, by its canonical long path (the temp folder may
+// carry a short name, which the service's walk refuses as another name): canonicalize, and drop the \\?\ prefix so
+// it is a drive-absolute path again.
 fn scratch(leaf: &str) -> String {
     let base = std::env::temp_dir().join(format!("surogate-refusals-{}-{leaf}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
-    base.to_string_lossy().into_owned()
+    let real = std::fs::canonicalize(&base).unwrap();
+    let text = real.to_string_lossy().into_owned();
+    text.strip_prefix(r"\?").map(str::to_owned).unwrap_or(text)
 }
 
 // The service serving a client that connects to a pipe of *sddl*, on a thread; the client's end.
