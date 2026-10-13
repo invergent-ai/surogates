@@ -1,15 +1,17 @@
 //! The company's root certificates, as an administrator or a policy gave them, and only those Windows itself would
 //! trust for TLS.
 //!
-//! The Root stores read are physical stores, each opened by its name (Microsoft, CertOpenStore,
-//! CERT_STORE_PROV_PHYSICAL: "a system store name and a name of a physical, separated by a backslash"; "Physical Store
-//! Names"; "System Store Locations"):
+//! The Root stores read are each one registry key's (Microsoft, "System Store Locations"; CertOpenStore):
 //! - LocalMachine's Root\.Default, the computer's own (HKLM\SOFTWARE\Microsoft\SystemCertificates\Root), which an
 //!   administrator writes;
 //! - LocalMachine's Root\.GroupPolicy, what Group Policy gives the computer (HKLM\SOFTWARE\Policies\…);
 //! - LocalMachine's Root\.Enterprise, the enterprise's (HKLM\SOFTWARE\Microsoft\EnterpriseCertificates\Root);
-//! - the user's Root\.GroupPolicy, what Group Policy gives the user (HKCU\Software\Policies\…), whose key "a standard
-//!   user cannot change" (Microsoft, "Implementing Registry-Based Group Policy for Applications").
+//!   each of these three a physical store of LocalMachine's Root, opened by its name (CERT_STORE_PROV_PHYSICAL: "a
+//!   system store name and a name of a physical, separated by a backslash"; "Physical Store Names");
+//! - the user's Group Policy Root, what Group Policy gives the user (HKCU\Software\Policies\…), whose key "a standard
+//!   user cannot change" (Microsoft, "Implementing Registry-Based Group Policy for Applications"): the Root store at
+//!   CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY, that key alone. On the Windows runner the user's Root\.GroupPolicy,
+//!   opened by its name, held none of the roots put there.
 //!
 //! Never LocalMachine's Root\.AuthRoot, Microsoft's root program, which Windows fills whenever any user's program
 //! builds a chain to one of its roots (Microsoft, "Automatic updating of trusted root authorities"), each root with
@@ -37,12 +39,19 @@ use windows_sys::Win32::Security::Cryptography::{
 use super::wide;
 use crate::answers::{for_server_auth, Usages};
 
-/// The Root stores read: each one's location, its physical store's name, and the name its words give it.
-pub const ROOTS: [(u32, &str, &str); 4] = [
-    (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Default", "the computer's Root store"),
-    (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.GroupPolicy", "Group Policy's Root store for the computer"),
-    (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Enterprise", "the enterprise's Root store"),
-    (CERT_SYSTEM_STORE_CURRENT_USER_ID, "Root\\.GroupPolicy", "Group Policy's Root store for this user"),
+/// How a store is opened: by its physical store's name, or as the system store at its location.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Opened {
+    Physical,
+    System,
+}
+
+/// The Root stores read: how each is opened, its location, its name, and the name its words give it.
+pub const ROOTS: [(Opened, u32, &str, &str); 4] = [
+    (Opened::Physical, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Default", "the computer's Root store"),
+    (Opened::Physical, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.GroupPolicy", "Group Policy's Root store for the computer"),
+    (Opened::Physical, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Enterprise", "the enterprise's Root store"),
+    (Opened::System, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, "Root", "Group Policy's Root store for this user"),
 ];
 
 /// The Disallowed stores read, each a system store opened whole at its location, with the name its words give it.
@@ -64,8 +73,9 @@ pub fn roots() -> Result<Vec<Vec<u8>>, String> {
         })?;
     }
     let mut found: Vec<Vec<u8>> = Vec::new();
-    for (location, store, named) in ROOTS {
-        each(CERT_STORE_PROV_PHYSICAL_W, location, store, named, |certificate, der| {
+    for (opened, location, store, named) in ROOTS {
+        let provider = if opened == Opened::Physical { CERT_STORE_PROV_PHYSICAL_W } else { CERT_STORE_PROV_SYSTEM_W };
+        each(provider, location, store, named, |certificate, der| {
             if disallowed.iter().any(|distrusted| distrusted == der) || found.iter().any(|known| known == der) {
                 return;
             }
@@ -153,18 +163,18 @@ unsafe fn usages(certificate: *const CERT_CONTEXT) -> Option<Usages> {
 
 #[cfg(test)]
 mod tests {
-    use windows_sys::Win32::Security::Cryptography::{CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID};
+    use windows_sys::Win32::Security::Cryptography::{CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID};
 
-    use super::ROOTS;
+    use super::{Opened, ROOTS};
 
     #[test]
     fn reads_the_root_stores_an_administrator_or_a_policy_writes_and_never_microsoft_s_program_or_the_user_s_own() {
-        let stores: Vec<(u32, &str)> = ROOTS.iter().map(|(location, store, _)| (*location, *store)).collect();
+        let stores: Vec<(Opened, u32, &str)> = ROOTS.iter().map(|(opened, location, store, _)| (*opened, *location, *store)).collect();
         assert_eq!(stores, vec![
-            (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Default"),
-            (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.GroupPolicy"),
-            (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Enterprise"),
-            (CERT_SYSTEM_STORE_CURRENT_USER_ID, "Root\\.GroupPolicy"),
+            (Opened::Physical, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Default"),
+            (Opened::Physical, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.GroupPolicy"),
+            (Opened::Physical, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, "Root\\.Enterprise"),
+            (Opened::System, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, "Root"),
         ]);
     }
 }

@@ -258,9 +258,10 @@ fn lists_the_roots_an_administrator_or_a_policy_gave_that_windows_trusts_for_tls
     planted.add(None, own, Given::AsItIs).expect("the user's own root is planted");
     assert!(Store::user_registry().holds(own), "the user's own root is in its store's registry key");
     // What Microsoft's program and the smart cards' stores hold, besides what the stores read hold too.
-    let read: Vec<Vec<u8>> = [(LOCAL_MACHINE, "Root\\.Default"), (LOCAL_MACHINE, "Root\\.GroupPolicy"), (LOCAL_MACHINE, "Root\\.Enterprise"), (CURRENT_USER, "Root\\.GroupPolicy")]
+    let read: Vec<Vec<u8>> = [(LOCAL_MACHINE, "Root\\.Default"), (LOCAL_MACHINE, "Root\\.GroupPolicy"), (LOCAL_MACHINE, "Root\\.Enterprise")]
         .iter()
         .filter_map(|(location, name)| Store::physical(*location, name))
+        .chain(std::iter::once(Store::system(USER_POLICY, "Root")))
         .flat_map(|store| store.all())
         .collect();
     let unread = |name: &str| -> Vec<Vec<u8>> {
