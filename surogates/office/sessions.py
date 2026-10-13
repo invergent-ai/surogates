@@ -41,32 +41,45 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
     )
 
 
+class DocumentClosing(Exception):
+    """The file's open row only waits for its last save to land; open the file again once it has."""
+
+
 async def open_or_reuse(session_factory: Any, *, location: str, path: str, session_id: UUID) -> OpenDocument:
-    """The open row for *location*, created when there is none; *session_id* joins its chats."""
+    """The open row for *location*, created when there is none; *session_id* joins its chats.
+
+    Raises :class:`DocumentClosing` for a row whose pending save closes it: the document
+    server ended that key's session, so edits made under the key would be lost.
+    """
     async with session_factory() as db, db.begin():
-        await db.execute(
-            pg_insert(OfficeSession)
-            .values(
-                id=uuid4(), path=path, location=location, session_ids=[str(session_id)],
-                doc_key=uuid4().hex, status=OPEN,
-            )
-            .on_conflict_do_nothing(index_elements=["location"], index_where=text("status = 'open'"))
-        )
-        row = await db.scalar(
-            select(OfficeSession)
-            .where(OfficeSession.location == location, OfficeSession.status == OPEN)
-            .with_for_update()
-        )
-        if row is None:  # closed between the insert and the select: open a fresh one
-            row = OfficeSession(
-                id=uuid4(), path=path, location=location, session_ids=[str(session_id)],
-                doc_key=uuid4().hex, status=OPEN,
-            )
-            db.add(row)
-        elif str(session_id) not in row.session_ids:
+        row = await _insert_and_lock(db, location=location, path=path, session_id=session_id)
+        if row is None:  # closed between the insert and the select: insert again
+            row = await _insert_and_lock(db, location=location, path=path, session_id=session_id)
+        if row is None or (row.pending_save or {}).get("close"):
+            raise DocumentClosing(location)
+        if str(session_id) not in row.session_ids:
             row.session_ids = [*row.session_ids, str(session_id)]
+        # Every open moves the clock close_never_opened measures from.
+        row.updated_at = datetime.now(timezone.utc)
         await db.flush()
         return _snapshot(row)
+
+
+async def _insert_and_lock(db: Any, *, location: str, path: str, session_id: UUID) -> OfficeSession | None:
+    """Insert an open row for *location* unless one is open, then lock the open row (None if it closed meanwhile)."""
+    await db.execute(
+        pg_insert(OfficeSession)
+        .values(
+            id=uuid4(), path=path, location=location, session_ids=[str(session_id)],
+            doc_key=uuid4().hex, status=OPEN,
+        )
+        .on_conflict_do_nothing(index_elements=["location"], index_where=text("status = 'open'"))
+    )
+    return await db.scalar(
+        select(OfficeSession)
+        .where(OfficeSession.location == location, OfficeSession.status == OPEN)
+        .with_for_update()
+    )
 
 
 async def get_open(session_factory: Any, row_id: UUID) -> OpenDocument | None:
@@ -125,33 +138,34 @@ async def close_when_saved(session_factory: Any, row_id: UUID) -> None:
             row.pending_save = {**row.pending_save, "close": True}
 
 
-async def close(session_factory: Any, row_id: UUID) -> None:
+async def close(session_factory: Any, row_id: UUID) -> str | None:
+    """Close the row now, dropping any pending save; returns the dropped save's key."""
     async with session_factory() as db, db.begin():
         row = await db.get(OfficeSession, row_id, with_for_update=True)
-        if row is not None and row.status == OPEN:
-            row.pending_save = None
-            _close(row)
+        if row is None or row.status != OPEN:
+            return None
+        dropped = (row.pending_save or {}).get("key")
+        row.pending_save = None
+        _close(row)
+        return str(dropped) if dropped else None
 
 
 @asynccontextmanager
-async def claim_pending(session_factory: Any, *, limit: int = 20) -> AsyncIterator[list[OfficeSession]]:
-    """Rows with a save to land, locked so no other worker lands them meanwhile.
+async def claim_pending(session_factory: Any) -> AsyncIterator[OfficeSession | None]:
+    """The oldest row with a save to land (None when there is none), locked so no other worker lands it.
 
-    The caller changes the rows (``mark_*``); the changes commit when the block ends.
+    One row per transaction, so a failed landing never undoes another and a callback
+    waits on one row at most. The caller changes the row (``mark_*``), the change
+    commits when the block ends, and the caller claims again for the next row.
     """
     async with session_factory() as db, db.begin():
-        rows = list(
-            (
-                await db.scalars(
-                    select(OfficeSession)
-                    .where(OfficeSession.pending_save.is_not(None))
-                    .order_by(OfficeSession.updated_at)
-                    .limit(limit)
-                    .with_for_update(skip_locked=True)
-                )
-            ).all()
+        yield await db.scalar(
+            select(OfficeSession)
+            .where(OfficeSession.pending_save.is_not(None))
+            .order_by(OfficeSession.updated_at)
+            .limit(1)
+            .with_for_update(skip_locked=True)
         )
-        yield rows
 
 
 def mark_landed(row: OfficeSession, version: str | None) -> None:
@@ -175,7 +189,7 @@ def mark_attempt(row: OfficeSession) -> int:
 
 
 async def close_never_opened(session_factory: Any, *, older_than: timedelta, now: datetime | None = None) -> int:
-    """Close rows whose editor never connected (a config fetched, never opened)."""
+    """Close rows whose editor never connected (a config fetched, never opened), untouched for *older_than*."""
     cutoff = (now or datetime.now(timezone.utc)) - older_than
     async with session_factory() as db, db.begin():
         result = await db.execute(
@@ -184,7 +198,7 @@ async def close_never_opened(session_factory: Any, *, older_than: timedelta, now
                 OfficeSession.status == OPEN,
                 OfficeSession.connected_at.is_(None),
                 OfficeSession.pending_save.is_(None),
-                OfficeSession.created_at < cutoff,
+                OfficeSession.updated_at < cutoff,
             )
             .values(status=CLOSED, closed_at=datetime.now(timezone.utc))
         )
