@@ -1150,7 +1150,7 @@ class FollowupEnrollmentRow(Base):
     status_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: ``agent`` when the agent enrolled the person in conversation,
     #: ``operator`` when someone did it from Studio, ``purchase`` when a
-    #: paid package did.
+    #: paid package did, ``care_team`` when a doctor did it from WhatsApp.
     enrolled_by: Mapped[str] = mapped_column(Text, nullable=False)
     #: Who paid, when a purchase enrolled them: often a relative, so not
     #: necessarily ``user_id``.

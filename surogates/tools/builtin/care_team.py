@@ -17,7 +17,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
+from surogates.channels.identity import channel_user_email, normalize_wa_id
+from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import (
     ChannelIdentity,
     Event,
@@ -35,6 +38,7 @@ from surogates.tools.registry import ToolSchema
 
 CARE_TEAM_TOOL_NAMES: frozenset[str] = frozenset({
     "care_team_overview", "care_team_message_patient", "care_team_update_patient",
+    "care_team_enroll_patient",
 })
 
 NOT_CARE_TEAM = (
@@ -51,6 +55,10 @@ MAX_PEOPLE = 60
 MAX_CHARS = 12_000
 CONVERSATION_LINES = 10
 MAX_MESSAGE = 4000
+#: ops' default ``texts.welcome_text``, used when the practice set none.
+WELCOME_TEXT = (
+    "Thank you. To start your follow-up, could you tell me the date of your procedure?"
+)
 
 CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
     name="care_team_overview",
@@ -175,6 +183,64 @@ CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
             },
         },
         "required": ["patient"],
+    },
+)
+
+CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
+    name="care_team_enroll_patient",
+    description=(
+        "Care team only. Enrol a new patient by their WhatsApp number on the "
+        "doctor's word: it records their permission to be messaged as the "
+        "doctor's say-so and sends them the practice's welcome message. First "
+        "call without confirmed: it shows who would be enrolled and how, and "
+        "changes nothing. Show that to the doctor and call again with "
+        "confirmed=true only after they answer yes."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "phone": {
+                "type": "string",
+                "description": "The patient's WhatsApp number with country code, e.g. +40 746 148 303.",
+            },
+            "patient_name": {"type": "string", "description": "The patient's full name."},
+            "protocol": {
+                "type": "string",
+                "description": "The protocol slug. Omit when the practice offers only one.",
+            },
+            "start_date": {
+                "type": "string",
+                "description": "Day 0 as YYYY-MM-DD. Give this, days_ago or date_unknown.",
+            },
+            "days_ago": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Day 0 as days before today, when the doctor says it that "
+                    "way. Do not work out the date yourself."
+                ),
+            },
+            "start_date_approximate": {
+                "type": "boolean",
+                "description": "True when the doctor gave the start only roughly.",
+            },
+            "date_unknown": {
+                "type": "boolean",
+                "description": "True only when the doctor does not know day 0.",
+            },
+            "answered_by": {
+                "type": "string",
+                "description": (
+                    "Who answers the check-ins when not the patient, with their "
+                    "relation, e.g. \"Ana, daughter\"."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": "True only after the doctor confirmed this exact preview.",
+            },
+        },
+        "required": ["phone", "patient_name"],
     },
 )
 
@@ -730,6 +796,193 @@ async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str
     return result
 
 
+# ---------------------------------------------------------------------------
+# care_team_enroll_patient
+# ---------------------------------------------------------------------------
+
+
+async def _number_holder(sf: Any, org_id: uuid.UUID, wa_id: str) -> User | None:
+    """The account this number already belongs to, the way ops resolves it:
+    the identity holding the number, else the phone-only account's e-mail."""
+    async with sf() as db:
+        held = (
+            await db.execute(
+                sa.select(ChannelIdentity.user_id)
+                .where(ChannelIdentity.org_id == org_id)
+                .where(ChannelIdentity.platform == "whatsapp")
+                .where(ChannelIdentity.platform_user_id == wa_id)
+            )
+        ).scalar_one_or_none()
+        if held is not None:
+            return await db.get(User, held)
+        return (
+            await db.execute(
+                sa.select(User)
+                .where(User.org_id == org_id)
+                .where(sa.func.lower(User.email) == channel_user_email("whatsapp", wa_id, org_id))
+                .order_by(User.created_at)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+
+async def _patient_account(
+    sf: Any, ctx: Any, wa_id: str, name: str, holder: User | None,
+) -> uuid.UUID | str:
+    """The account behind *wa_id*, created phone-only when there is none, in
+    the shape ops' Users page creates: synthetic e-mail, external auth, the
+    number bound, a runtime shadow promoted, and bound to this agent."""
+    async with sf() as db:
+        user = await db.get(User, holder.id) if holder is not None else None
+        if user is None:
+            user = User(
+                org_id=ctx.org_id, display_name=name, auth_provider="external",
+                email=channel_user_email("whatsapp", wa_id, ctx.org_id),
+            )
+            db.add(user)
+            await db.flush()
+        bound = (
+            await db.execute(
+                sa.select(ChannelIdentity.platform_user_id)
+                .where(ChannelIdentity.org_id == ctx.org_id)
+                .where(ChannelIdentity.platform == "whatsapp")
+                .where(ChannelIdentity.user_id == user.id)
+            )
+        ).scalar_one_or_none()
+        if bound is None:
+            db.add(ChannelIdentity(
+                org_id=ctx.org_id, user_id=user.id, platform="whatsapp",
+                platform_user_id=wa_id, platform_meta={},
+            ))
+        elif bound != wa_id:
+            # Never move a person's number, as the Users page refuses to.
+            return f"that person's account already has the number +{bound}."
+        # Someone who wrote first has a runtime shadow account, which the
+        # linked identity policy refuses; the doctor vouching makes them known.
+        if user.auth_provider == "whatsapp":
+            user.auth_provider = "external"
+        await ensure_agent_user(
+            db, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user.id,
+            source=SOURCE_MANUAL, reactivate=True,
+        )
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            return "the number was registered for someone else at the same moment; try again."
+        return user.id
+
+
+async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str:
+    sf = kwargs["session_factory"]
+    ctx, settings = await _context(kwargs)
+    if ctx is None or not followup_store.is_care_team(settings, ctx.user_id):
+        return NOT_CARE_TEAM
+    try:
+        wa_id = normalize_wa_id(str(arguments.get("phone") or ""))
+    except ValueError as exc:
+        return f"Not enrolled: {exc}"
+    name = str(arguments.get("patient_name") or "").strip()
+    if not name:
+        return "Not enrolled: ask the doctor for the patient's full name."
+    zones = await followup_store.protocol_timezones(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    )
+    protocol = str(arguments.get("protocol") or "").strip()
+    if not protocol and len(zones) == 1:
+        [protocol] = zones
+    if protocol not in zones:
+        return (
+            "Not enrolled: " + (
+                f"'{protocol}' is not offered here. " if protocol else "say which protocol. "
+            ) + "Offered: " + (", ".join(sorted(zones)) or "none (no active Program)") + "."
+        )
+    try:
+        start = _start_date(arguments, zones[protocol])
+    except ValueError as exc:
+        return f"Not enrolled: {exc}."
+    if start is None and arguments.get("date_unknown") is not True:
+        return (
+            "Not enrolled: ask the doctor for day 0 and pass days_ago or "
+            "start_date, or date_unknown: true if they do not know it."
+        )
+    approximate = arguments.get("start_date_approximate") is True if start else None
+    answered_by = str(arguments.get("answered_by") or "").strip() or None
+
+    holder = await _number_holder(sf, ctx.org_id, wa_id)
+    if holder is not None and followup_store.is_care_team(settings, holder.id):
+        return (
+            f"Not enrolled: +{wa_id} belongs to a member of the care team, "
+            "who receives the alerts and is not a patient. Check the number."
+        )
+    sender = _sender(ctx, settings)
+
+    if arguments.get("confirmed") is not True:
+        when = (
+            f"from {start}" + (" (approximate)" if approximate else "")
+            if start else "with no start date, so no Program reaches them until one is set"
+        )
+        return (
+            f"Will enrol {name} (+{wa_id}) in {protocol} {when}"
+            + (f", answered by {answered_by}" if answered_by else "")
+            + (f"; the number is already known as {holder.display_name}" if holder else "")
+            + "; record their permission to be messaged on your say-so"
+            + ("; and send them the practice's welcome message" if sender else "")
+            + ". Ask the doctor to confirm with a yes before calling again with "
+            "confirmed=true. Nothing has been changed."
+        )
+
+    user_id = await _patient_account(sf, ctx, wa_id, name, holder)
+    if isinstance(user_id, str):
+        return f"Not enrolled: {user_id}"
+    await followup_store.grant_contact_permission(
+        sf, org_id=ctx.org_id, platform="whatsapp", platform_user_id=wa_id,
+        recorded_by=f"care-team:{ctx.user_id}", method="care_team",
+    )
+    try:
+        row = await followup_store.upsert_enrollment(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
+            protocol=protocol, start_date=start, phase=None, enrolled_by="care_team",
+            source_ref=f"care-team:{ctx.user_id}", patient_name=name,
+            answered_by=answered_by, start_date_approximate=approximate,
+        )
+    except followup_store.CareTeamMember:
+        return f"Not enrolled: +{wa_id} belongs to a member of the care team."
+    result = f"Enrolled {name} (+{wa_id}) in {protocol}"
+    if row.start_date:
+        result += f" from {_start_text(row)}"
+    result += ". Permission to message them recorded on your say-so."
+    if sender:
+        welcome = await followup_store.queue_outreach(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
+            platform="whatsapp", channel_identifier=sender, kind="welcome",
+            text=(
+                ((settings.texts or {}).get("welcome_text") or "").strip()
+                or WELCOME_TEXT
+            ),
+            template_name=settings.welcome_template_name,
+            template_language=settings.welcome_template_language,
+            subject_user_id=user_id, created_by=f"care-team:{ctx.user_id}",
+            dedupe_key=(
+                f"welcome:care-team:{ctx.agent_id}:{user_id}:{protocol}:"
+                f"{datetime.now(timezone.utc):%Y-%m-%d}"
+            ),
+        )
+        result += f" Welcome message queued (state {welcome.state})."
+    else:
+        result += " No welcome sent: WhatsApp is not switched on for this practice."
+    queued, why_not = await followup_store.notify_care_team(
+        sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="enrolment",
+        text=(
+            f"{name} enrolled in {protocol} by {_doctor(ctx)}."
+            f"\n\n— {followup_store.patient_label(name, row)} · +{wa_id}"
+        ),
+        created_by=f"care-team:{ctx.user_id}", subject_user_id=user_id,
+        exclude_user_id=ctx.user_id, fallback_sender=sender,
+    )
+    return result + " " + _told(queued, why_not)
+
+
 def register(registry: Any) -> None:
     for name, schema, handler in (
         ("care_team_overview", CARE_TEAM_OVERVIEW_SCHEMA, handle_care_team_overview),
@@ -737,5 +990,7 @@ def register(registry: Any) -> None:
          handle_care_team_message_patient),
         ("care_team_update_patient", CARE_TEAM_UPDATE_PATIENT_SCHEMA,
          handle_care_team_update_patient),
+        ("care_team_enroll_patient", CARE_TEAM_ENROLL_PATIENT_SCHEMA,
+         handle_care_team_enroll_patient),
     ):
         registry.register(name=name, schema=schema, handler=handler, toolset="care_team")

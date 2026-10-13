@@ -353,3 +353,120 @@ async def test_confirmed_update_writes_and_tells_the_rest_of_the_care_team(sf, p
     assert alert.kind == "alert" and alert.subject_user_id == ioana
     assert alert.text.startswith("post-op paused by Dr. Ionescu: internată")
     assert alert.created_by == f"care-team:{practice.doctor}"
+
+
+# --- enrol --------------------------------------------------------------------
+
+
+@pytest.fixture
+def bindings(monkeypatch):
+    """agent_users is written with a Postgres upsert; record the call instead."""
+    calls = []
+
+    async def ensure(db, **kw):
+        calls.append(kw)
+
+    monkeypatch.setattr(care_team, "ensure_agent_user", ensure)
+    return calls
+
+
+def _enrol(**extra):
+    return {"phone": "+40 711 222 333", "patient_name": "Elena Dumitru", "days_ago": 2, **extra}
+
+
+@pytest.mark.asyncio
+async def test_enrol_is_refused_outside_the_care_team(sf, practice, bindings):
+    out = await care_team.handle_care_team_enroll_patient(
+        _enrol(confirmed=True), **_kw(sf, practice.ion[1]),
+    )
+    assert out == care_team.NOT_CARE_TEAM
+    assert bindings == []
+
+
+@pytest.mark.asyncio
+async def test_enrol_preview_writes_nothing(sf, practice, bindings):
+    out = await care_team.handle_care_team_enroll_patient(
+        _enrol(answered_by="Ana, fiica"), **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Will enrol Elena Dumitru (+40711222333) in post-op from ")
+    assert "answered by Ana, fiica" in out and "welcome message" in out
+    assert "Nothing has been changed" in out
+    async with sf() as db:
+        assert (await db.execute(
+            sa.select(ChannelIdentity).where(ChannelIdentity.platform_user_id == "40711222333")
+        )).first() is None
+    assert bindings == [] and await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_enrol_creates_the_phone_only_person_and_welcomes_them(sf, practice, bindings):
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, welcome_template_name="welcome",
+        welcome_template_language="ro", texts={"welcome_text": "Bun venit!"},
+    )
+    out = await care_team.handle_care_team_enroll_patient(
+        _enrol(start_date_approximate=True, confirmed=True), **_kw(sf, practice.doctor_session),
+    )
+    assert "Enrolled Elena Dumitru (+40711222333) in post-op" in out
+    assert "Welcome message queued" in out
+    async with sf() as db:
+        identity = (await db.execute(
+            sa.select(ChannelIdentity).where(ChannelIdentity.platform_user_id == "40711222333")
+        )).scalar_one()
+        user = await db.get(User, identity.user_id)
+    assert user.email == f"whatsapp-40711222333@{ORG}.channels.surogate.local"
+    assert (user.display_name, user.auth_provider) == ("Elena Dumitru", "external")
+    permission = identity.platform_meta["contact_permission"]
+    assert (permission["status"], permission["method"]) == ("granted", "care_team")
+    assert permission["recorded_by"] == f"care-team:{practice.doctor}"
+    [binding] = bindings
+    assert binding["user_id"] == user.id and binding["agent_id"] == AGENT
+    row = await _enrollment(sf, user.id)
+    assert (row.enrolled_by, row.status, row.patient_name) == ("care_team", "active", "Elena Dumitru")
+    assert row.start_date == date.today() - timedelta(days=2) and row.start_date_approximate
+    [welcome] = await _outreach(sf)  # the doctor is the only care-team member
+    assert (welcome.user_id, welcome.kind, welcome.text) == (user.id, "welcome", "Bun venit!")
+    assert (welcome.template_name, welcome.template_language) == ("welcome", "ro")
+    assert welcome.channel_identifier == "pn1"
+
+    again = await care_team.handle_care_team_enroll_patient(
+        _enrol(confirmed=True), **_kw(sf, practice.doctor_session),
+    )
+    assert "Enrolled" in again
+    assert len(await _outreach(sf)) == 1  # the same day's welcome is not sent twice
+
+
+@pytest.mark.asyncio
+async def test_enrol_attaches_someone_who_already_wrote(sf, practice, bindings):
+    shadow, _ = await _person(sf, "WA profile", "40711222333", enrol=False, permission=False)
+    async with sf() as db:
+        (await db.get(User, shadow)).auth_provider = "whatsapp"
+        await db.commit()
+    await care_team.handle_care_team_enroll_patient(
+        _enrol(confirmed=True), **_kw(sf, practice.doctor_session),
+    )
+    async with sf() as db:
+        assert (await db.get(User, shadow)).auth_provider == "external"
+        assert len((await db.execute(sa.select(User))).all()) == 4  # nobody new
+    assert (await _enrollment(sf, shadow)).enrolled_by == "care_team"
+
+
+@pytest.mark.asyncio
+async def test_a_care_team_number_is_refused(sf, practice, bindings):
+    out = await care_team.handle_care_team_enroll_patient(
+        _enrol(phone="+40 700 000 099", confirmed=True), **_kw(sf, practice.doctor_session),
+    )
+    assert "care team" in out and out.startswith("Not enrolled")
+    assert await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=practice.doctor) == []
+    assert bindings == [] and await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_enrol_needs_a_date_or_date_unknown_and_a_valid_number(sf, practice, bindings):
+    kw = _kw(sf, practice.doctor_session)
+    no_date = await care_team.handle_care_team_enroll_patient(
+        {"phone": "+40711222333", "patient_name": "X", "confirmed": True}, **kw,
+    )
+    bad = await care_team.handle_care_team_enroll_patient(_enrol(phone="0711222333", confirmed=True), **kw)
+    assert "days_ago" in no_date and "country code" in bad
+    assert bindings == []

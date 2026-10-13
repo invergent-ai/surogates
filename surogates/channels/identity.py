@@ -10,6 +10,7 @@ Used by Slack, Teams, Telegram, and Webhook adapters.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -56,6 +57,49 @@ def channel_user_email(platform: str, platform_user_id: str, org_id: UUID | str)
     """
     local_part = platform_user_id.lstrip("@")
     return f"{platform}-{local_part}@{org_id}.channels.surogate.local"
+
+
+def normalize_wa_id(raw: str) -> str:
+    """The bare-digit WhatsApp ``wa_id`` for a number as people type it.
+
+    Identical to ops' ``surogate_ops.utils.phone.normalize_wa_id``: both
+    sides must store the same id for one number, or an inbound message
+    misses the account and falls through to the pairing prompt.
+
+    Raises:
+        ValueError: when *raw* cannot be a WhatsApp id.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Phone number is required.")
+    text = raw.strip()
+    # The international prefix goes before punctuation, so a leading "00"
+    # is not kept as two digits of the number.
+    if text.startswith("+"):
+        text = text[1:]
+    elif text.startswith("00"):
+        text = text[2:]
+    if not re.fullmatch(r"[0-9\s\-()./]+", text):
+        raise ValueError("Phone number must contain only digits and phone punctuation.")
+    # "(0)" marks a trunk prefix dropped when dialling from abroad; a zero
+    # hidden inside a bracketed area code is ambiguous, so it is refused.
+    for group in re.findall(r"\(([^)]*)\)", text):
+        inner = group.strip()
+        if inner != "0" and inner.startswith("0"):
+            raise ValueError(
+                "Write the number without the national trunk prefix — for "
+                "example +44 20 7946 0958, not +44 (020) 7946 0958."
+            )
+    digits = re.sub(r"[^0-9]", "", re.sub(r"\(\s*0\s*\)", "", text))
+    if not digits:
+        raise ValueError("Phone number must contain digits.")
+    if digits.startswith("0"):
+        raise ValueError(
+            "Phone number needs a country code — write it in international "
+            "form, for example +40 746 148 303."
+        )
+    if not 8 <= len(digits) <= 15:
+        raise ValueError("Phone number should be 8–15 digits including the country code.")
+    return digits
 
 
 async def resolve_identity(

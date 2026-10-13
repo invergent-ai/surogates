@@ -56,7 +56,7 @@ __all__ = [
 ]
 
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
-ENROLLMENT_SOURCES = ("agent", "operator", "purchase")
+ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "care_team")
 OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome")
 #: Where outreach can reach a person.  WhatsApp only: it is the one channel
 #: whose rules (a template outside the 24-hour window) outreach implements.
