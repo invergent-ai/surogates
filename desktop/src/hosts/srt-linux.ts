@@ -52,7 +52,7 @@ export const LINUX_SRT: SrtOs = {
   // on *path*; socat, which srt runs; and ripgrep, which the helper searches with.
   fileToolsMissing: (bwrap, path) => [["bubblewrap", bwrap ?? "bwrap"], ["socat", "socat"], ["ripgrep", "rg"]]
     .filter(([, program]) => findOnPath(program!, path, "/") === null).map(([name]) => name!),
-  toolsPath: (outside) => outside,
+  toolsPath: (outside, _node) => outside,
   line: hideSrtTmp,
   // In the app's data, by the folder's key.
   tempFolder: (dataDir, key) => join(dataDir, "srt", key),

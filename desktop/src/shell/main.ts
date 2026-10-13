@@ -26,7 +26,8 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
-import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
+import { fileToolsMissing, hostToolsPath, toolsMissing } from "../hosts/policy.js";
+import { NODE } from "../hosts/tool-hosts.js";
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
@@ -438,15 +439,16 @@ const toolsPath = (): Promise<string> => folderLooks.path(process.env.PATH);
 
 // The file helper's tools, looked for again beside what the VM was last found to lack: with each
 // look, once the device's folders are known, and at each change of them. They are looked for where
-// the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
+// the folders' file hosts look, by the hosts' own rule (hostToolsPath): on the app's PATH without its
 // relative entries, and without any entry in a folder a chat is bound to, where a command may have
-// written a program. So the line and a file tool's answer name the same tools. *said*: tell the
-// pages even when nothing changed, as Check again asks.
+// written a program, after the app's own tools beside the node the hosts run on, where this OS puts
+// them first. So the line and a file tool's answer name the same tools. *said*: tell the pages even
+// when nothing changed, as Check again asks.
 let toolsOwedSaid = false;
 function lookForFileTools(said = false, folders = boundFolders(), path = toolsPath()): void {
   toolsOwedSaid ||= said;
   const look: Promise<string[]> = Promise.all([vmLacking, folders, path]).then(([vm, held, on]) => {
-    const found = [...fileToolsMissing(BWRAP, pathOutside(on, held)), ...vm];
+    const found = [...fileToolsMissing(BWRAP, hostToolsPath(on, held, NODE)), ...vm];
     // A look that a later one has overtaken says nothing: the later one's folders are the newer,
     // and it tells the pages what this one owed them.
     if (lackingFound !== look) return lackingFound;

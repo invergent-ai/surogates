@@ -1,8 +1,8 @@
 // The app on a Mac, through the real app, as a development build runs there: its data in the user's
 // Library, the app's menu in the menu bar, the window's own buttons inset over its corner, a template
 // image in the menu bar, Option+Space for quick entry, links from Launch Services' open-url, the Dock's
-// click, sign-in tokens sealed, the Mac's own name, and a notification's click. With no VM: none boots on
-// the macOS runner. On a Mac alone.
+// click, sign-in tokens sealed, the file helper's tools on the PATH an app started from the Dock has, the
+// Mac's own name, and a notification's click. With no VM: none boots on the macOS runner. On a Mac alone.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -158,6 +158,16 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
       expect(kept, file).not.toContain('"plain"');
     }
     expect(await page.isHidden("#notice")).toBe(true);
+  });
+
+  it("finds the file helper's tools, its own rg beside its node, on the bare PATH Finder and the Dock give an app", async () => {
+    // As scripts/rg.sh fetches it, or this test means nothing.
+    expect(existsSync(join(import.meta.dirname, "..", "..", "bin", "rg")), "the app's rg, by scripts/rg.sh").toBe(true);
+    app = await launch(home, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
+    const page = await shellPage(app);
+    // The line says what the sandbox lacks once its looks are done: this runner's VM, which none boots on, and no tool.
+    await expect.poll(() => page.textContent("#sandbox-text"), { timeout: 15_000 }).toMatch(/This Mac cannot run Surogate's sandbox|tools are missing/);
+    expect(await page.textContent("#sandbox-text")).not.toContain("tools are missing");
   });
 
   it("names this Mac in Settings by the name System Settings gives it", async () => {

@@ -71,7 +71,7 @@ export const DARWIN_SRT: SrtOs = {
   // The app's own rg, beside the node the host runs on (bin/ in a development build, the bundle's own folder in the
   // app), before anything of the app's PATH: a Mac's PATH has no rg, and one a person installed reads libraries
   // the sandbox does not.
-  toolsPath: (outside) => `${dirname(process.execPath)}:${outside}`,
+  toolsPath: (outside, node) => `${dirname(node)}:${outside}`,
   // As srt gives it: its profile lets the helper's node map fsat as code, as every file it may read (measured on
   // macOS 15: Seatbelt's file-map-executable is not refused there).
   line: (line) => line,

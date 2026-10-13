@@ -55,6 +55,16 @@ export function pathOutside(path: string | undefined, held: Array<{ dev: number;
     .join(":") || "/usr/bin:/bin";
 }
 
+/**
+ * The PATH a file host on the app's node *node* looks for the file helper's tools on, and gives srt and its helper:
+ * the app's *path* as pathOutside keeps it, holding *held*, with what this OS puts before it (srt-os.ts, toolsPath).
+ * The app looks for the helper's tools on it too, by the node its hosts run on, so the sandbox's line and a file
+ * tool name the same tools.
+ */
+export function hostToolsPath(path: string | undefined, held: Array<{ dev: number; ino: number }>, node: string): string {
+  return srtOs.toolsPath(pathOutside(path, held), node);
+}
+
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
 
