@@ -73,6 +73,19 @@ DISMISSED_BY_A_COMMAND = (
     "Ask it again if you still need the answer."
 )
 
+#: Why a question went unanswered when its person sent something else on a
+#: channel (a photo, another question).  The message itself reaches the model
+#: next, so the turn goes on with it.
+WROTE_SOMETHING_ELSE = "person_wrote_something_else"
+WROTE_SOMETHING_ELSE_DETAIL = (
+    "The person sent something else instead of answering; their message follows. "
+    "Deal with it first, then ask again if you still need the answer."
+)
+
+#: Set on a channel ``user.message`` to the ``tool_call_id`` of the question it
+#: did not answer.
+DISMISSES_QUESTION = "dismisses_question"
+
 
 ASK_USER_QUESTION_DESCRIPTION = (
     "Ask the user one or more questions and wait for their answers before "
@@ -381,10 +394,12 @@ async def _wait_for_response(
                 types=[EventType.ASK_USER_QUESTION_RESPONSE, EventType.USER_MESSAGE],
             )
             commanded = False
+            wrote_else = False
             for event in events:
                 data = event.data or {}
                 if event.type == EventType.USER_MESSAGE.value:
                     commanded = commanded or (event.id > said and _typed_a_command(event))
+                    wrote_else = wrote_else or data.get(DISMISSES_QUESTION) == tool_call_id
                 elif data.get("tool_call_id") == tool_call_id:
                     responses = data.get("responses")
                     if isinstance(responses, list):
@@ -392,6 +407,8 @@ async def _wait_for_response(
                     return {"cancelled": True, "reason": "malformed_response"}
             if commanded:
                 return {"cancelled": True, "reason": DISMISSED}
+            if wrote_else:
+                return {"cancelled": True, "reason": WROTE_SOMETHING_ELSE}
             cursor = said = max([cursor, said, *(event.id for event in events)])
 
             # 2. Has the session been stopped?  Status is the authoritative
@@ -502,6 +519,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
                 "cancelled": True,
                 "reason": reason,
                 **({"detail": DISMISSED_BY_A_COMMAND} if reason == DISMISSED else {}),
+                **({"detail": WROTE_SOMETHING_ELSE_DETAIL} if reason == WROTE_SOMETHING_ELSE else {}),
                 "questions_asked": questions,
             },
             ensure_ascii=False,

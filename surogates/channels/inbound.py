@@ -734,16 +734,18 @@ class ChannelInboundPipeline:
             runtime_payload=runtime_payload,
         )
 
-        # While a question is pending, the platforms diverge on what a plain
-        # reply means — see _intercept_pending_input.
+        # While a question is pending, a message is its answer or dismisses it
+        # — see _intercept_pending_input.
         if deps.pending_input is not None and routing.platform in (
             "slack", "telegram", "whatsapp",
         ):
-            intercepted = await self._intercept_pending_input(
+            intercepted, _unanswered = await self._intercept_pending_input(
                 msg, routing=routing, deps=deps, session_id=session_id,
             )
             if intercepted is not None:
                 return intercepted
+        else:
+            _unanswered = None
 
         # Seed channel history on the first message of a Slack channel session
         # (lazy fallback for channels where the join event was missed). Best
@@ -810,6 +812,9 @@ class ChannelInboundPipeline:
                 msg, platform=routing.platform, chat_type=chat_type,
             ),
         }
+        if _unanswered:
+            from surogates.tools.builtin.ask_user_question import DISMISSES_QUESTION
+            event_data[DISMISSES_QUESTION] = _unanswered
         if _images:
             event_data["images"] = _images
         if _attachments:
@@ -1000,61 +1005,61 @@ class ChannelInboundPipeline:
         routing: Any,
         deps: PipelineDeps,
         session_id: Any,
-    ) -> InboundOutcome | None:
+    ) -> tuple[InboundOutcome | None, str | None]:
         """Handle a message that arrives while ``ask_user_question`` waits.
 
-        The platforms diverge on what a plain reply means:
+        Only an answer is taken as one: text that names a choice (a tapped
+        button or list row comes back as its label), or any text when the
+        question offers no choices.  Anything else -- a photo of a discharge
+        letter, "can I stop the aspirin?" under a consent question, a Flow
+        form -- was being recorded as an "other" answer, its media dropped
+        and its question never seen by the agent.  It now goes on as the
+        person's message, with its media, and dismisses the question.
 
-        - Slack has a modal surface, so a plain in-thread reply is NOT the
-          answer — nudge toward the Answer button and suppress the turn so
-          it doesn't pile into a blocked worker.
-        - Telegram has no modal; a plain reply IS the answer — resolve the
-          durable pending record with it and ack.
+        A built-in command is never the answer either: it goes on as a
+        message, whose command dismisses the question.
 
-        A built-in command is never the answer, on any of them: it goes on
-        as a message, whose command dismisses the question, and its wake
-        runs it.
-
-        Returns the outcome when the message was consumed, or ``None`` to
-        continue normal processing (no question pending, a command, or a
-        Telegram resolution lost the race against a button tap — the text is
-        then a real user message, not an answer, and must not vanish).
+        Returns ``(outcome, None)`` when the message was consumed as the
+        answer, ``(None, tool_call_id)`` when it goes on and dismisses that
+        question, and ``(None, None)`` otherwise (nothing pending, a command,
+        or an answer that lost the race against a button tap -- the text is
+        then a real user message and must not vanish).
         """
         from surogates.harness.slash_skill import names_builtin_command
 
         if names_builtin_command(msg.text):
-            return None
+            return None, None
         try:
             pending = await deps.pending_input(session_id)
         except Exception:
             logger.warning(
                 "[channels] pending input lookup failed - continuing", exc_info=True,
             )
-            return None
+            return None, None
         if not pending:
-            return None
-
-        async def _nudge(text: str) -> None:
-            if deps.input_nudge is None:
-                return
-            try:
-                await deps.input_nudge(session_id, msg, text)
-            except Exception:
-                logger.warning("[channels] pending input nudge failed", exc_info=True)
-
-        if routing.platform == "slack":
-            await _nudge(
-                "I'm waiting on your answer - tap *Answer* above, or use the web inbox."
-            )
-            return InboundOutcome.DROPPED
-
-        if not msg.text.strip():
-            return None
+            return None, None
 
         from surogates.channels.platforms.telegram_interactive import (
             resolve_text_answer,
         )
-        from surogates.session.interactive_input import resolve_input_response
+        from surogates.session.interactive_input import (
+            match_choice_label,
+            resolve_input_response,
+        )
+
+        questions = pending.get("questions") or []
+        text = (msg.text or "").strip()
+        answers = (
+            bool(text)
+            and not getattr(msg, "files", None)
+            and not (msg.source or {}).get("flow_reply")
+            and all(
+                not q.get("choices") or match_choice_label(text, q["choices"])
+                for q in questions
+            )
+        )
+        if not answers:
+            return None, pending.get("tool_call_id") or None
 
         resolved = False
         try:
@@ -1062,9 +1067,7 @@ class ChannelInboundPipeline:
                 deps.session_store,
                 session_id=session_id,
                 tool_call_id=pending.get("tool_call_id", ""),
-                responses=resolve_text_answer(
-                    pending.get("questions") or [], msg.text,
-                ),
+                responses=resolve_text_answer(questions, text),
             )
         except Exception:
             logger.warning("[channels] pending input resolution failed", exc_info=True)
@@ -1072,8 +1075,8 @@ class ChannelInboundPipeline:
             # No acknowledgement of our own: the agent's next message is the
             # reply, in the language it speaks with this person.
             await _keep_typing(deps, session_id, msg)
-            return InboundOutcome.DROPPED
-        return None
+            return InboundOutcome.DROPPED, None
+        return None, None
 
     @staticmethod
     async def _maybe_send_disclosure(

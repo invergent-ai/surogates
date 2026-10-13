@@ -477,6 +477,8 @@ def _build_message(
     wamid = raw_message.get("id") or ""
 
     files: list[InboundFileRef] = []
+    # A Flow's form fields are never a pending question's answer.
+    flow_reply = (raw_message.get("interactive") or {}).get("type") == "nfm_reply"
     if msg_type == "text":
         text = ((raw_message.get("text") or {}).get("body")) or ""
     elif msg_type in _TAP_TYPES:
@@ -495,6 +497,8 @@ def _build_message(
         "phone_number_id": identifier,
         "wamid": wamid,
     }
+    if flow_reply:
+        source["flow_reply"] = True
     if msg_type == "audio":
         source["voice"] = bool((raw_message.get("audio") or {}).get("voice"))
 

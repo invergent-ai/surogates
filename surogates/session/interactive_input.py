@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import unicodedata
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select, update
@@ -63,20 +64,26 @@ async def pending_input_for_session(
 
 
 def match_choice_label(text: str, choices: list[dict]) -> str | None:
-    """The choice *text* selects, matched case- and padding-insensitively.
+    """The choice *text* selects, matched case-, diacritics- and padding-insensitively.
 
     The one definition of "is this answer on the menu", shared by the
     free-text channel resolver and the server-side ``is_other`` check so
     the two cannot drift.
     """
-    target = (text or "").strip().lower()
+    target = _fold(text)
     if not target:
         return None
     for choice in choices:
         label = (choice.get("label") or "").strip()
-        if label and label.lower() == target:
+        if label and _fold(label) == target:
             return label
     return None
+
+
+def _fold(text: str) -> str:
+    """Patients often type without diacritics: "Nu stiu" for "Nu știu"."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").strip())
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 async def asked_questions(

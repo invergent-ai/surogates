@@ -298,6 +298,24 @@ async def test_only_a_command_its_user_typed_dismisses_the_question(looks_often,
     assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
 
 
+@pytest.mark.asyncio
+async def test_a_channel_message_that_is_not_the_answer_dismisses_it(looks_often):
+    result = await _asked_while(
+        FakeSessionStore(), {"content": "Pot să opresc aspirina?", "dismisses_question": "tc"},
+    )
+    assert result == {
+        "cancelled": True, "reason": ask_module.WROTE_SOMETHING_ELSE,
+        "detail": ask_module.WROTE_SOMETHING_ELSE_DETAIL,
+        "questions_asked": [{"prompt": "Which quarter?", "allow_other": True}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_dismissed_another_question_does_not_dismiss_this_one(looks_often):
+    result = await _asked_while(FakeSessionStore(), {"content": "x", "dismisses_question": "older"})
+    assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
+
+
 class LandsAfterARead(FakeSessionStore):
     """A store in which *then*, each an event's type and data, is written right after the wait's first look at the log."""
 
