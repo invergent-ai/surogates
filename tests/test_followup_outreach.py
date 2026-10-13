@@ -486,7 +486,7 @@ async def test_an_unanswered_message_expires_after_a_day_and_the_requester_is_to
     assert notice.user_id == member
     assert notice.text == (
         "⚠️ Ion Pop did not receive your message: no answer to the opening "
-        "template (24 hours). Call them? +40 711 111 111"
+        "template. Call them? +40 711 111 111"
     )
 
 
@@ -707,7 +707,7 @@ async def test_a_failed_program_opener_tells_the_team_once_per_person_per_day(sf
     assert notice.user_id == member
     assert notice.subject_user_id == person
     assert notice.text == (
-        "⚠️ A message to Ion Pop did not arrive: Meta has paused the WhatsApp "
+        "⚠️ A message to Ion Pop did not arrive: WhatsApp refused the "
         "template. Call them? +40 711 111 111"
     )
 
@@ -880,3 +880,23 @@ async def test_the_log_keeps_a_number_masked_and_only_the_delivery_has_it_whole(
     [(_, _, data)] = session_store.events
     assert data["message"]["content"] == "Faint\n\n— Ion Pop · +40…111"
     assert session_store.delivered["message"]["content"].endswith("+40 711 111 111")
+
+
+
+def test_every_reason_reads_in_the_agents_own_words():
+    texts = {
+        "why_window_closed": "fereastra de 24h s-a închis",
+        "why_no_permission": "nu avem permisiunea",
+        "why_template_failed": "WhatsApp a refuzat șablonul",
+        "why_expired": "nu a răspuns la șablon",
+        "why_no_template": "nu e ales niciun șablon",
+    }
+    for raw, key in (
+        ("graph error 131047", "why_window_closed"),
+        ("No permission to message the recipient", "why_no_permission"),
+        ("The reopening template was not sent: 132015 paused", "why_template_failed"),
+        ("The recipient did not answer the template within 24 hours", "why_expired"),
+        ("window is closed and no approved template is configured", "why_no_template"),
+    ):
+        assert outreach.plain_reason(raw, texts) == texts[key]
+        assert outreach.plain_reason(raw) == outreach.DEFAULT_TEXTS[key]

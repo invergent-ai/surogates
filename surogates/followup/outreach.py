@@ -102,6 +102,12 @@ DEFAULT_TEXTS = {
         "A message from the team was waiting for your reply but expired "
         "before you answered. They know you have written back."
     ),
+    # The {why} of the notices above.
+    "why_window_closed": "their 24h WhatsApp window had closed",
+    "why_no_permission": "no permission to message them",
+    "why_template_failed": "WhatsApp refused the template",
+    "why_expired": "no answer to the opening template",
+    "why_no_template": "their 24h window is closed and no approved template is chosen",
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
@@ -388,27 +394,29 @@ async def describe_person(
     return name or "?", readable_phone(wa_id) if wa_id else "?", zone
 
 
-def plain_reason(reason: str | None) -> str:
-    """Why a message did not arrive, in words a team member can act on."""
+def plain_reason(reason: str | None, texts: dict | None = None) -> str:
+    """Why a message did not arrive, in words a team member can act on.
+
+    Each kind of reason is a ``why_*`` wording the agent's ``texts`` can
+    override, so the team reads it in their own language.
+    """
     text = (reason or "").strip()
     lowered = text.lower()
     if "did not answer the template" in lowered:
-        return f"no answer to the opening template ({text.rsplit('within ', 1)[-1]})"
-    if "131047" in lowered:
-        return "their 24h WhatsApp window had closed"
-    if "132015" in lowered or "paused" in lowered:
-        return "Meta has paused the WhatsApp template"
-    if "132016" in lowered or "disabled" in lowered or "rejected" in lowered:
-        return "Meta has disabled or rejected the WhatsApp template"
-    if "permission" in lowered:
-        return "no permission to message them"
-    if "no whatsapp identity" in lowered:
+        key = "why_expired"
+    elif "131047" in lowered:
+        key = "why_window_closed"
+    elif any(k in lowered for k in ("132015", "132016", "paused", "disabled", "rejected", "template was not")):
+        key = "why_template_failed"
+    elif "permission" in lowered:
+        key = "why_no_permission"
+    elif "no approved" in lowered:
+        key = "why_no_template"
+    elif "no whatsapp identity" in lowered:
         return "no WhatsApp number on record"
-    if "no approved template" in lowered or "no approved" in lowered:
-        return "their 24h window is closed and no approved template is chosen"
-    if "template was not" in lowered:
-        return f"WhatsApp refused the template ({text.split(': ', 1)[-1][:160]})"
-    return text[:200] or "unknown reason"
+    else:
+        return text[:200] or "unknown reason"
+    return followup_store.render_text((texts or {}).get(key), DEFAULT_TEXTS[key])
 
 
 async def _mark_reported(session_factory: Any, model: Any, ids: list, now: datetime) -> None:
@@ -471,7 +479,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
             else:
                 text = followup_store.render_text(
                     texts.get("undelivered_notice"), DEFAULT_TEXTS["undelivered_notice"],
-                    name=name, why=plain_reason(row.reason), phone=phone,
+                    name=name, why=plain_reason(row.reason, texts), phone=phone,
                 )
             queued, _ = await followup_store.notify_team(
                 session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
@@ -676,7 +684,7 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                     text=followup_store.render_text(
                         (settings.texts or {}).get("person_failure_notice"),
                         DEFAULT_TEXTS["person_failure_notice"],
-                        name=name, why=plain_reason(failure["first"][1]), phone=phone,
+                        name=name, why=plain_reason(failure["first"][1], settings.texts), phone=phone,
                     ),
                     dedupe_prefix=key,
                 )

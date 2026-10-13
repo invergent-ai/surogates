@@ -753,7 +753,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         f"Paused or ended (last {since_hours}h): " + ("; ".join(changed) or "none"),
         "Silent 3 days or more: " + ("; ".join(silent) or "none"),
         "Open items, messages that did not arrive (last 72h): " + ("; ".join(
-            f"{p.label}: {plain_reason(reason)}, call them ({masked_phone(p.phone)})"
+            f"{p.label}: {plain_reason(reason, settings.texts if settings else None)}, call them ({masked_phone(p.phone)})"
             for p in people for reason in undelivered.get(p.user_id, [])
         ) or "none"),
     ]
