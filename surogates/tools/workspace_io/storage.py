@@ -9,6 +9,7 @@ cloud session sees.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import tempfile
@@ -23,6 +24,13 @@ from surogates.tools.workspace_io.base import FileStat, RevisionConflict, Walk, 
 
 def _missing(key: str) -> FileNotFoundError:
     return FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), key)
+
+
+def _spill(data: bytes) -> Path:
+    """*data* in a temporary file, for an upload that takes a path."""
+    with tempfile.NamedTemporaryFile(delete=False) as handle:
+        handle.write(data)
+        return Path(handle.name)
 
 
 class StorageWorkspaceIO:
@@ -90,9 +98,7 @@ class StorageWorkspaceIO:
         Used by saves from the document editor; every other write keeps
         :meth:`write`'s unconditional behaviour.
         """
-        with tempfile.NamedTemporaryFile(delete=False) as handle:
-            handle.write(data)
-            source = Path(handle.name)
+        source = await asyncio.to_thread(_spill, data)
         try:
             await self._storage.upload(
                 self._bucket, self._prefix + key, source, if_tag=expected, if_absent=expected is None,
@@ -100,7 +106,7 @@ class StorageWorkspaceIO:
         except Changed as exc:
             raise RevisionConflict(f"{key} changed since it was opened") from exc
         finally:
-            source.unlink(missing_ok=True)
+            await asyncio.to_thread(source.unlink, missing_ok=True)
 
     async def delete(self, key: str) -> None:
         if not await self._storage.exists(self._bucket, self._prefix + key):
