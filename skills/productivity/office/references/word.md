@@ -1,0 +1,69 @@
+# office_edit for Word documents: formats and examples
+
+## Read
+
+```json
+{"path": "reports/Q3.docx"}
+{"path": "reports/Q3.docx", "view": "outline", "start": 200}
+{"path": "reports/Q3.docx", "view": "block", "target": "853"}
+{"path": "reports/Q3.docx", "view": "search", "query": "revenue"}
+```
+
+The outline lists blocks as `{"id", "hash", "kind", "text"}`, where `text` is the first words only; a long document
+comes in pages, continue with `start` = its `next`. Kinds are `heading1`–`heading3`, `paragraph`, `bullet`,
+`numbered`, `table`, `image`, `pending` (with `key` and `intent`). Comment threads come with their `id`, a string.
+
+The `block` view gives one block's exact text, tabs and spaces kept (a table's cells): copy the words for a
+`{"find": …}` target from it. `find` matches case and spacing exactly.
+
+## Plant a new document's outline
+
+```json
+{"path": "reports/Q3.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {
+  "markdown": "# Q3 report\n\n## Summary\n<?block summary?>\n\n## Results\n<?block results?>\n\n## Risks\n<?block risks?>",
+  "blocks": {
+    "summary": {"type": "pending", "intent": "Three sentences: what happened this quarter and what it means"},
+    "results": {"type": "pending", "intent": "Revenue and costs by region, with a chart"},
+    "risks": {"type": "pending", "intent": "What could slip next quarter, and what we do about it"}
+  }}}]}
+```
+
+## Fill one section
+
+```json
+{"path": "reports/Q3.docx", "ops": [{"op": "replace", "target": {"pending": "results"}, "content": {
+  "markdown": "Revenue grew **12%** in the north and 8% in the east.\n\n<?block chart?>\n\n| Region | Revenue | Growth |\n|---|---|---|\n| North | 4.2M | 12% |\n| East | 3.1M | 8% |",
+  "blocks": {"chart": {"type": "chart", "chart": "bar", "title": "Revenue by region",
+                        "rows": [["", "Q2", "Q3"], ["North", 3.75, 4.2], ["East", 2.87, 3.1]]}}}}]}
+```
+
+A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "width": 480}` (PNG or JPEG, at most 5 MB).
+
+## Change what is there
+
+```json
+{"op": "replace", "target": {"find": "revenue target", "nth": 1}, "content": {"text": "sales goal"}}
+{"op": "insert", "target": {"block": "853", "hash": "a1b2c3d4"}, "side": "after", "content": {"markdown": "- One more point"}}
+{"op": "replace", "target": {"block": "861", "hash": "0f9e8d7c"}, "content": {"markdown": "A rewritten paragraph."}}
+{"op": "delete", "target": {"block": "870", "hash": "11aa22bb"}}
+{"op": "move", "target": {"block": "880", "hash": "33cc44dd"}, "to": {"block": "853", "hash": "a1b2c3d4"}, "side": "before"}
+```
+
+A moved block loses the comments anchored in it.
+
+## Comments
+
+```json
+{"op": "comment", "anchor": {"find": "grew 12%"}, "body": "Source: the regional sales export, 3 Oct."}
+{"op": "reply", "thread": "1184659669", "body": "Updated the figure."}
+{"op": "resolve", "thread": "1184659669"}
+```
+
+`thread` is a comment's `id` from the outline, or the `thread` a `comment` op returned.
+
+## Refusals
+
+`{"applied": false, "refused": {"op": 1, "reason": "…", "block": {…}}}` means nothing of the call applied, and no
+co-editor saw any of it. `op` is the refused op's place in `ops`, counting from 0. `block` is how the targeted block
+reads now, or null when the `reason` is something else (a block someone deleted is "gone", quoted words are no longer
+there). Read again, then edit from what is there.
