@@ -75,6 +75,7 @@ literal `#NAME?` baked into the file you deliver.
 - **`data_only=True` on a file openpyxl just wrote returns `None` everywhere** — run `recalc.py` first. (A formula whose result is `""` also reads back as `None`.)
 - **Merged cells: write the top-left anchor only.** Every other cell in the range is a `MergedCell` whose `.value` is read-only.
 - **`.xlsm` loses its macros unless you pass `keep_vba=True`** to `load_workbook`.
+- **Write dates as `datetime.date` / `datetime`, never strings.** `"2026-01-01"` is stored as text: its number format never applies, and date formulas (`EDATE`, `YEAR`) work on it only where the spreadsheet converts text to a date — Excel does that by locale, so the same file can break on another machine.
 - **A sheet name containing a space must be quoted** in a cross-sheet reference: `='Assumptions Inputs'!$B$5`. Unquoted, it evaluates to `#VALUE!`.
 
 ## Financial models
