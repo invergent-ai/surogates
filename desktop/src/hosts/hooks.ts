@@ -9,7 +9,8 @@
 // It also comments out each exec step that appeared in a paused rebase's or
 // cherry-pick's todo while the chat's commands could write there, which the host's
 // git rebase --continue would run outside the sandbox: the guest's rule lets commands
-// write git's transient state (stripTodo).
+// write git's transient state (stripTodo). On Windows the look goes through the file
+// host's walk, and a hook that is not the user's own is refused outright (hooks-win32.ts).
 
 import { randomUUID } from "node:crypto";
 import { close, fstat, open as openFile, readFile, type Stats, writeFile } from "node:fs";
@@ -21,10 +22,14 @@ import { identityOf, sameFile } from "../files/identity.js";
 import { inside, realpath as followed } from "../files/paths.js";
 import { dependencyFolder, folded, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { basename, dirname, join, relative } from "../session-path.js";
+import { refuseWalked, scanWalked } from "./hooks-win32.js";
 
 const SCAN_TIMEOUT_MS = 30_000;
 export const HOOKS_NOTICE = "The computer stopped these git hooks from running, because git would run them outside the sandbox (where it closed a hooks folder, that repository's other hooks are off until you make it searchable again): ";
+// Windows's: each hook is moved off its name (hooks-win32.ts).
+export const HOOKS_REFUSED_NOTICE = "The computer moved these git hooks off their names, because git would run them outside the sandbox; each is beside its name, ending (refused by Surogate): ";
 const STEPS_NOTICE = "The computer removed a step that appeared in a paused git rebase or cherry-pick while this chat's commands could write there, because git would run it outside the sandbox; each such exec line is now a comment in: ";
 const REMOVED = "# Surogate removed a step that appeared while the chat's commands could write: ";
 export const MAX_LISTED = 20;
@@ -100,7 +105,7 @@ async function describe(path: string): Promise<string | null> {
 
 // Where the guest's rule refuses to move a folder to or from, since what it holds would arrive
 // unjudged: a KEY_FOLDERS leaf (.claude, .git), or a place at or under .git/modules or .git/worktrees.
-function keyPlace(folder: string, path: string): boolean {
+export function keyPlace(folder: string, path: string): boolean {
   const parts = folded(path.slice(folder.length + 1)).split("/");
   return KEY_FOLDERS.has(parts.at(-1) ?? "") || parts.some((part, i) => part === ".git" && (parts[i + 1] === "modules" || parts[i + 1] === "worktrees"));
 }
@@ -236,6 +241,43 @@ export async function neutralize(
   return { changed, stuck };
 }
 
+// How each OS's guard looks at a folder and stops a hook (hooks-win32.ts): by fs.promises' calls by path on Linux and
+// macOS, inside no sandbox, and by making a hook non-executable; on Windows through the walk, refusing the hook outright.
+// A todo by its path, and the folder a todo is stripped through, each opened its OS's way.
+interface Looks {
+  scan(folder: string): Promise<HookScan>;
+  stop(folder: string, scan: HookScan, baseline: ReadonlyMap<string, string>, writable: readonly string[]): Promise<{ changed: string[]; stuck: string[] }>;
+  notice: string;
+  openTodo(path: string, flags: number): Promise<number>;
+  // A todo's stats by its descriptor, its identity as the OS's walk reads one (files/identity.ts).
+  fstat(fd: number): Promise<Stats>;
+  holdDir(path: string): Promise<{ fd: number; close(): Promise<void> }>;
+}
+const POSIX_LOOKS: Looks = {
+  scan: (folder) => scanHooks(folder),
+  stop: neutralize,
+  notice: HOOKS_NOTICE,
+  openTodo: (path, flags) => onThreads.open(path, flags),
+  fstat: (fd) => onThreads.fstat(fd),
+  holdDir: (path) => open(path, constants.O_RDONLY | constants.O_DIRECTORY),
+};
+const LOOKS = forThisOs<Looks>({
+  linux: POSIX_LOOKS,
+  darwin: POSIX_LOOKS,
+  win32: {
+    scan: scanWalked,
+    stop: refuseWalked,
+    notice: HOOKS_REFUSED_NOTICE,
+    openTodo: (path, flags) => new Promise((resolve) => resolve(fdPaths.open(path, flags))),
+    fstat: (fd) => new Promise((resolve) => resolve(fdPaths.fstat(fd))),
+    holdDir: (path) => new Promise((resolve) => {
+      const fd = fdPaths.hold(path);
+      resolve({ fd, close: () => onThreads.close(fd) });
+    }),
+  },
+});
+const looks = (): Looks => LOOKS ?? notBuilt("The hook guard");
+
 // What git reads at *path*, through links: null when there is none; undefined when git could read
 // something this does not: a FIFO or a device it would wait on or read without end, or a file too large.
 // A todo by its path is opened on libuv's threads; one in a folder held open, through FdPaths.
@@ -243,13 +285,13 @@ async function readTodo(path: Where): Promise<{ text: string; stats: Stats } | n
   const flags = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY;
   let file: number;
   try {
-    file = typeof path === "string" ? await onThreads.open(path, flags) : fdPaths.open(path, flags);
+    file = typeof path === "string" ? await looks().openTodo(path, flags) : fdPaths.open(path, flags);
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     return code === "ENOENT" || code === "ENOTDIR" ? null : undefined;
   }
   try {
-    const stats = await onThreads.fstat(file);
+    const stats = await looks().fstat(file);
     // Byte for byte: a line this leaves is written back as it was.
     return stats.isFile() && stats.size <= MAX_TODO ? { text: await onThreads.readFile(file, "latin1"), stats } : undefined;
   } catch {
@@ -271,7 +313,7 @@ async function todoSteps(path: string): Promise<Set<string>> {
 // todo linked to a file becomes a file, and the file is left. "stuck": there are steps to comment
 // out and this could not, or git could read a todo there that this cannot.
 async function stripTodo(path: string, keep: ReadonlySet<string>, folders: readonly string[]): Promise<"none" | "stripped" | "stuck"> {
-  const dir = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY).catch(() => null);
+  const dir = await looks().holdDir(dirname(path)).catch(() => null);
   if (!dir) return "none";
   const todo: Where = { dir: dir.fd, name: basename(path) };
   const temp: Where = { dir: dir.fd, name: `.${basename(path)}.${randomUUID()}` };
@@ -383,7 +425,7 @@ export class HookGuard {
     this.unreported.clear();
     this.unstripped.clear();
     const notices = [
-      told.length > 0 ? `${HOOKS_NOTICE}${listed(this.folder, told)}` : null,
+      told.length > 0 ? `${looks().notice}${listed(this.folder, told)}` : null,
       removed.length > 0 ? `${STEPS_NOTICE}${listed(this.folder, removed)}` : null,
     ].filter(Boolean);
     if (notices.length === 0) return outcome;
@@ -429,7 +471,7 @@ export class HookGuard {
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), this.timeoutMs);
     });
-    const scan = await Promise.race([scanHooks(this.folder), late]);
+    const scan = await Promise.race([looks().scan(this.folder), late]);
     clearTimeout(timer);
     const unseen = !scan
       ? `Blocked: the computer could not look through this folder for git hooks within ${this.timeoutMs / 1000} seconds, so commands cannot run here.`
@@ -451,7 +493,7 @@ export class HookGuard {
         };
       }
     }
-    const { changed, stuck } = await neutralize(this.folder, scan, this.baseline, this.writable);
+    const { changed, stuck } = await looks().stop(this.folder, scan, this.baseline, this.writable);
     this.todos = scan.todos;
     const { stripped, stuck: unstrippable, held } = await this.todosLook(scan.todos);
     const unstopped = stuck.length > 0
