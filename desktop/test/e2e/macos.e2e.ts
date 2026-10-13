@@ -12,9 +12,14 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { clickNotice, dataHome, dataRoot, launch, notices, quit, secondLaunch, shellPage, stubNative, stubNotifications } from "./launch.js";
+import { clickNotice, dataHome, dataRoot, ELECTRON, launch, notices, quit, secondLaunch, shellPage, stubNative, stubNotifications } from "./launch.js";
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
+// The bundle this package's Electron runs from, as Launch Services knows the app the tests launch, and the main
+// processes running its program.
+const BUNDLE = ELECTRON.replace(/\/Contents\/MacOS\/[^/]+$/, "");
+const electrons = () => execFileSync("/bin/ps", ["-axo", "pid=,command="], { encoding: "utf8" }).split("\n")
+  .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line)).filter((found) => found?.[2]?.startsWith(ELECTRON)).map((found) => Number(found![1]));
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 const link = (url: string) => `surogate://open?url=${encodeURIComponent(url)}`;
 
@@ -139,15 +144,39 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
     await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
   });
 
-  it("shows its window at a second launch and at a click on its Dock icon", async () => {
+  it("shows its window at a second launch", async () => {
     app = await launch(home);
     await shellPage(app);
     await hide(app);
     expect(await secondLaunch(home)).toBe(0);
     await expect.poll(() => visible(app!)).toBe(true);
-    await hide(app);
-    await app.evaluate(({ app: running }) => running.emit("activate"));
-    await expect.poll(() => visible(app!)).toBe(true);
+  });
+
+  it("shows its window, hidden by Cmd+W and never destroyed, at the reopen a click on its Dock icon sends", async () => {
+    app = await launch(home);
+    await shellPage(app);
+    // Cmd+W, File's Close window: the window's own close, as its close button's.
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith("/shell.html"))!.close());
+    await expect.poll(() => visible(app!)).toBe(false);
+    await app.evaluate(({ app: running }) => {
+      const came = { activate: 0, secondInstance: 0 };
+      running.on("activate", () => { came.activate += 1; });
+      running.on("second-instance", () => { came.secondInstance += 1; });
+      Object.assign(globalThis, { came });
+    });
+    // Launch Services hands an app it runs a reopen (kAEReopenApplication), as the Dock does at a click on its icon:
+    // Electron's activate (NSApplicationDelegate, applicationShouldHandleReopen:hasVisibleWindows:).
+    const before = electrons();
+    execFileSync("/usr/bin/open", ["-a", BUNDLE]);
+    try {
+      await expect.poll(() => visible(app!)).toBe(true);
+    } finally {
+      // Unsure: that Launch Services takes the app a test started for its bundle's, and reopens it rather than start another.
+      const started = electrons().filter((pid) => !before.includes(pid));
+      for (const pid of started) process.kill(pid, "SIGKILL");
+      expect(started, "Launch Services started another Electron in place of a reopen").toEqual([]);
+    }
+    expect(await app.evaluate(() => (globalThis as unknown as { came: object }).came)).toEqual({ activate: 1, secondInstance: 0 });
   });
 
   it("keeps its sign-in and its device token sealed, and says nothing of encryption", async () => {
