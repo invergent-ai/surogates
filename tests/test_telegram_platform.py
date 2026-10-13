@@ -369,3 +369,19 @@ class TestTelegramSendPrivate:
             {"bot_token": "T"}, sender_id="555", chat_id="-100", is_dm=False, text="x",
         )
         assert ok is False
+
+
+@pytest.mark.parametrize("questions", [
+    [{"prompt": "Deploy?", "choices": [{"label": "Yes"}, {"label": "No"}], "allow_other": True}],
+    [{"prompt": "Which tag?"}],
+    [{"prompt": "Which tag?"}, {"prompt": "Deploy?", "choices": [{"label": "Yes"}]}],
+])
+def test_a_prompt_promises_no_free_text_answer(questions):
+    """"Reply to this message to answer in your own words" promised an answer
+    that a reply off the menu no longer gives: it reaches the agent as a message."""
+    from surogates.channels.platforms.telegram_interactive import build_input_prompt
+
+    _html, plain, _markup = build_input_prompt(
+        session_id="s1", questions=questions, tool_call_id="tc1",
+    )
+    assert "own words" not in plain and "Reply to this message" not in plain

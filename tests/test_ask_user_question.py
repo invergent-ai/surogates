@@ -308,6 +308,8 @@ async def test_a_channel_message_that_is_not_the_answer_dismisses_it(looks_often
         "detail": ask_module.WROTE_SOMETHING_ELSE_DETAIL,
         "questions_asked": [{"prompt": "Which quarter?", "allow_other": True}],
     }
+    # A reply to several questions comes this way too: it may be the answer.
+    assert "may answer the question" in result["detail"]
 
 
 @pytest.mark.asyncio

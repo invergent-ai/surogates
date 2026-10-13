@@ -33,8 +33,6 @@ __all__ = [
 
 CALLBACK_PREFIX = "si"
 
-_FREE_TEXT_HINT = "Reply to this message to answer in your own words."
-
 
 def tool_call_digest(tool_call_id: str) -> str:
     """Short stable digest binding a button to one ``ask_user_question``."""
@@ -57,9 +55,10 @@ def build_input_prompt(
     ``reply_markup`` is an ``inline_keyboard`` dict when the prompt is a
     single choice-question, else ``None``.
 
-    No header of our own: the people on the other end may be end users
-    writing in their own language, and the question already says what is
-    being asked.
+    No header or hint of our own: the people on the other end may be end
+    users writing in their own language, the question already says what is
+    being asked, and a typed reply that is not a choice reaches the agent
+    as the person's message rather than as an answer.
     """
     lines_html: list[str] = []
     lines_plain: list[str] = []
@@ -99,12 +98,6 @@ def build_input_prompt(
                 for ci, choice in enumerate(choices)
             ]
         }
-        if single.get("allow_other", True):
-            lines_html.append(_esc(_FREE_TEXT_HINT))
-            lines_plain.append(_FREE_TEXT_HINT)
-    else:
-        lines_html.append(_esc(_FREE_TEXT_HINT))
-        lines_plain.append(_FREE_TEXT_HINT)
 
     return "\n".join(lines_html), "\n".join(lines_plain), reply_markup
 

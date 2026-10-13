@@ -203,3 +203,19 @@ async def test_only_the_person_asked_answers_or_dismisses_the_question(monkeypat
     resolve.assert_not_awaited()
     assert [d["content"] for d in said] == [text]
     assert "dismisses_question" not in said[0]
+
+
+@pytest.mark.parametrize("platform", ["whatsapp", "telegram", "slack"])
+@pytest.mark.parametrize("text", ["acum 5 zile", "Da, sunt de acord"])
+async def test_a_reply_to_several_questions_reaches_the_agent_as_the_persons_message(
+    monkeypatch, platform, text,
+):
+    """One reply cannot be split between several questions: it went to each of
+    them as the same answer.  It is the person's message, and the agent reads it."""
+    several = {**_OPEN, "questions": [*_OPEN["questions"], *_CONSENT["questions"]]}
+    result, resolve, said = await _handle_while_pending(
+        monkeypatch, several, _make_msg(is_dm=True, text=text, ts="715.0"), platform,
+    )
+    assert result == InboundOutcome.PROCESSED
+    resolve.assert_not_awaited()
+    assert [(d["content"], d["dismisses_question"]) for d in said] == [(text, "tc1")]

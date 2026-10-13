@@ -574,8 +574,10 @@ def _render_input_prompt(payload: dict) -> str:
 
     The fallback for prompts :func:`_interactive_prompt` cannot carry
     (several questions, open-ended ones, labels over Meta's limits): the
-    choices are listed in the message body and a plain typed reply resolves
-    the pending record through the shared ``resolve_text_answer`` path.
+    choices are listed in the message body.  A typed reply naming a choice,
+    or any reply to a single open question, answers it; anything else,
+    including any reply to several questions, reaches the agent as the
+    person's message and dismisses the question.
 
     The question shape is the one normalised by
     ``tools.builtin.ask_user_question._validate_questions`` and emitted
@@ -587,7 +589,7 @@ def _render_input_prompt(payload: dict) -> str:
     would invite a "1" that the resolver records as a free-form answer.
 
     No header or footer of our own: the people on the other end are
-    end users writing in their own language, and any typed reply answers.
+    end users writing in their own language.
     """
     lines: list[str] = []
     context = (payload.get("context") or "").strip()

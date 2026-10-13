@@ -1049,7 +1049,9 @@ class ChannelInboundPipeline:
 
         Only an answer is taken as one: text that names a choice (a tapped
         button or list row comes back as its label), or any text when the
-        question offers no choices.  Anything else -- a photo of a discharge
+        single question offers no choices.  A reply to several questions at
+        once cannot be split between them, so it goes on as the person's
+        message like anything else.  Anything else -- a photo of a discharge
         letter, "can I stop the aspirin?" under a consent question, a Flow
         form -- was being recorded as an "other" answer, its media dropped
         and its question never seen by the agent.  It now goes on as the
@@ -1095,6 +1097,7 @@ class ChannelInboundPipeline:
         text = (msg.text or "").strip()
         answers = (
             bool(text)
+            and len(questions) == 1
             and not getattr(msg, "files", None)
             and not (msg.source or {}).get("flow_reply")
             and all(

@@ -82,8 +82,9 @@ DISMISSED_BY_A_COMMAND = (
 #: next, so the turn goes on with it.
 WROTE_SOMETHING_ELSE = "person_wrote_something_else"
 WROTE_SOMETHING_ELSE_DETAIL = (
-    "The person sent something else instead of answering; their message follows. "
-    "Deal with it first, then ask again if you still need the answer."
+    "The person wrote a message instead of picking an answer; it follows, and it "
+    "may answer the question in their own words. Read it first, then ask again "
+    "only for what is still missing."
 )
 
 #: Set on a channel ``user.message`` to the ``tool_call_id`` of the question it
