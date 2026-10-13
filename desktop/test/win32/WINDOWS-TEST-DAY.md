@@ -28,7 +28,7 @@ The guest image the Windows app boots is the x64 one Linux boots, with Hyper-V's
      mkdir 'GIT~1'; touch '.git./x' '.git /x' '.git::$INDEX_ALLOCATION'; touch 'x.lnk::$DATA' 'desktop.ini.' 'desktop.ini '; touch 'sub\desktop.ini'
      ```
      Pass: every one refused, and `ls -laR .git GIT~1 sub 2>/dev/null` shows no file made under any of these names, and `.git/hooks` holds no `x`.
-   - **What is HCS's server's, not the guest's (Mw5), recorded, not a guest finding:** a device name (`touch CON NUL`) and a symlink to a UNC path (`ln -s '//server/share/x' unc`). The guest's rule does not judge these; the file tools refuse the device names on Windows, and Mw5 records what the server makes of each. Send back what the server did with them.
+   - **What is HCS's server's, not the guest's, recorded, not a guest finding:** a device name (`touch CON NUL`) and a symlink to a UNC path (`ln -s '//server/share/x' unc`). The guest's rule does not judge these; the file tools refuse the device names on Windows, and this step records what the server makes of each. Send back what the server did with them.
 
    **A file made in the folder under a protected name, an Explorer name or one of the aliases above, or a vsock socket made, is a security finding: stop and report it.**
 5. **The memory given back.** Leave the guest idle for ten minutes after a command that took 1 GiB (`python3 -c 'b = bytearray(1 << 30)'`). Pass: `vmmem`'s memory in Task Manager falls back within a minute of the command's end. Send back the two numbers.
