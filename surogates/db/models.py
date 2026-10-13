@@ -877,8 +877,10 @@ class OfficeSession(Base):
     editors: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     # Who opened the document, by editor user id: people's names and the agent's, for the agent's "open by".
     user_names: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
-    # A save waiting to land: {"bucket", "key", "close", "attempts"}.  None is SQL NULL,
-    # not a JSON null, so a landed or closed row drops out of ``pending_save IS NOT NULL``.
+    # How many of the document server's history entries (history.changes) are already landed.
+    changes_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # A save waiting to land: {"bucket", "key", "lastsave", "close", "attempts", "marks", "authors", "changes"}.
+    # None is SQL NULL, not a JSON null, so a landed or closed row drops out of ``pending_save IS NOT NULL``.
     pending_save: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

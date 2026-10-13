@@ -402,3 +402,36 @@ async def test_a_save_is_kept_when_the_replaced_one_cannot_be_deleted(client, ap
         assert response.json() == {"error": 0}
     pending = (await office_sessions.get_open(session_factory, row_id)).pending_save
     assert await app.state.storage.read(pending["bucket"], pending["key"]) == b"second"
+
+
+async def test_a_save_keeps_its_mark_and_who_edited_since_the_last_landed_save(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+
+    async def fake_download(url: str) -> bytes:
+        return b"PK-edited"
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    user, agent = {"id": "user:1", "name": "F"}, {"id": "agent:w:s", "name": "Writer"}
+
+    async def save(userdata: str, users: list[dict], lastsave: str) -> dict:
+        # As the document server does: every change since the document opened, not only this save's.
+        body = {"key": config["document"]["key"], "status": 6, "url": "https://office.example/cache/x/output.docx",
+                "userdata": userdata, "history": {"changes": [{"user": u} for u in users]}, "lastsave": lastsave}
+        await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+        return (await office_sessions.get_open(session_factory, row_id)).pending_save
+
+    first = await save('{"turn": "m1"}', [user], "2026-10-13T10:00:00Z")
+    assert (first["marks"], first["authors"], first["changes"]) == (['{"turn": "m1"}'], ["user:1"], 1)
+    # Not landed yet: the newer save holds both, its marks and authors joined.
+    second = await save('{"turn": "m2"}', [user, agent], "2026-10-13T10:01:00Z")
+    assert (second["marks"], second["authors"], second["changes"]) == (
+        ['{"turn": "m1"}', '{"turn": "m2"}'], ["user:1", "agent:w:s"], 2,
+    )
+    async with office_sessions.claim_pending(session_factory) as row:
+        office_sessions.mark_landed(row, "v2")
+    assert (await office_sessions.get_open(session_factory, row_id)).changes_seen == 2
+    # Landed: the next save's authors start at the last change already landed.
+    third = await save('{"turn": "m3"}', [user, agent, agent], "2026-10-13T10:02:00Z")
+    assert third["authors"] == ["agent:w:s"]

@@ -33,6 +33,7 @@ class OpenDocument:
     editors: tuple[str, ...]
     pending_save: dict[str, Any] | None
     user_names: dict[str, str]
+    changes_seen: int
     connected_at: datetime | None
 
 
@@ -46,6 +47,7 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
         editors=tuple(str(value) for value in row.editors),
         pending_save=dict(row.pending_save) if row.pending_save is not None else None,
         user_names={str(key): str(value) for key, value in (row.user_names or {}).items()},
+        changes_seen=row.changes_seen or 0,
         connected_at=row.connected_at,
     )
 
@@ -158,6 +160,7 @@ async def record_editors(session_factory: Any, row_id: UUID, users: list[str]) -
 
 async def set_pending(
     session_factory: Any, row_id: UUID, *, bucket: str, key: str, close: bool, lastsave: datetime | None = None,
+    marks: list[str] | None = None, authors: list[str] | None = None, changes: int | None = None,
 ) -> str | None:
     """Record a save waiting to land, made at *lastsave* (now when None); returns the key
     of the save that lost, to delete.
@@ -176,8 +179,12 @@ async def set_pending(
             row.connected_at = datetime.now(timezone.utc)
         previous = dict(row.pending_save or {})
         close = close or bool(previous.get("close"))
+        # The newer save holds both saves' edits: everyone who made either, and every forced save either answers.
+        marks = _union(previous.get("marks"), marks)
+        authors = _union(previous.get("authors"), authors)
+        changes = max(int(previous.get("changes") or 0), int(changes or 0))
         if previous and datetime.fromisoformat(previous["lastsave"]) > lastsave:
-            row.pending_save = {**previous, "close": close}
+            row.pending_save = {**previous, "close": close, "marks": marks, "authors": authors, "changes": changes}
             return key
         row.pending_save = {
             "bucket": bucket,
@@ -185,9 +192,20 @@ async def set_pending(
             "lastsave": lastsave.isoformat(),
             "close": close,
             "attempts": 0,
+            "marks": marks,
+            "authors": authors,
+            "changes": changes,
         }
         replaced = previous.get("key")
         return str(replaced) if replaced and replaced != key else None
+
+
+def _union(first: Any, second: Any) -> list[str]:
+    out: list[str] = []
+    for value in [*(first or []), *(second or [])]:
+        if str(value) not in out:
+            out.append(str(value))
+    return out
 
 
 async def close_when_saved(session_factory: Any, row_id: UUID) -> None:
@@ -233,10 +251,12 @@ async def claim_pending(session_factory: Any) -> AsyncIterator[OfficeSession | N
 
 
 def mark_landed(row: OfficeSession, version: str | None) -> None:
-    close_after = bool((row.pending_save or {}).get("close"))
+    pending = row.pending_save or {}
     row.base_version = version
+    # The changes this save covered are history now: the next save's authors start after them.
+    row.changes_seen = max(row.changes_seen or 0, int(pending.get("changes") or 0))
     row.pending_save = None
-    if close_after:
+    if pending.get("close"):
         _close(row)
 
 

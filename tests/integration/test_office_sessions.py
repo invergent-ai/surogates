@@ -71,7 +71,10 @@ async def test_newer_save_replaces_a_pending_one_and_keeps_close(session_factory
     replaced = await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False, lastsave=newer)
     assert replaced == "k1"
     pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
-    assert pending == {"bucket": "b", "key": "k2", "lastsave": newer.isoformat(), "close": True, "attempts": 0}
+    assert pending == {
+        "bucket": "b", "key": "k2", "lastsave": newer.isoformat(), "close": True, "attempts": 0,
+        "marks": [], "authors": [], "changes": 0,
+    }
 
 
 async def test_older_save_arriving_late_keeps_the_newer_pending_one(session_factory):
@@ -81,7 +84,10 @@ async def test_older_save_arriving_late_keeps_the_newer_pending_one(session_fact
     discarded = await office_sessions.set_pending(session_factory, document.id, bucket="b", key="old", close=True, lastsave=older)
     assert discarded == "old"
     pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
-    assert pending == {"bucket": "b", "key": "new", "lastsave": newer.isoformat(), "close": True, "attempts": 0}
+    assert pending == {
+        "bucket": "b", "key": "new", "lastsave": newer.isoformat(), "close": True, "attempts": 0,
+        "marks": [], "authors": [], "changes": 0,
+    }
 
 
 async def test_a_save_counts_as_connected(session_factory):

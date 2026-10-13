@@ -10,6 +10,7 @@ from uuid import UUID
 
 from surogates.artifacts.store import FolderArtifacts
 from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
+from surogates.config import load_settings
 from surogates.devices.binding import device_of
 from surogates.devices.history import opens_its_copy, passes_later
 from surogates.devices.operations import LeaseLost
@@ -54,7 +55,7 @@ from surogates.harness.landing import (
 )
 from surogates.harness.local_landing import keep_local_turn, land_local_turn, prune_local_history, set_aside_of, waiting_on_you_here
 from surogates.harness.loop_context_replay import _listed
-from surogates.runtime.turn_slots import detach_turn
+from surogates.runtime.turn_slots import detach_turn, turn_waiting
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.workstreams.history import waits_to_land
 from surogates.workstreams import is_project_master, is_project_thread
@@ -1218,6 +1219,9 @@ class ArtifactCompletionMixin:
         if self._turn_saga is not None:
             await self._finalize_sagas(self._turn_saga, session)
 
+        # The documents the turn edited in the editor save with it: one save a turn, before the summary reads them.
+        await self._save_office_documents(session)
+
         # Detach the sandbox now, delete the pod after.
         #
         # Deleting a pod is a round trip to the cluster, and it used to sit
@@ -1519,6 +1523,24 @@ class ArtifactCompletionMixin:
 
             spec = await _build_session_sandbox_spec(session, self._tenant, owner, credential_vault=self._credential_vault)
             await self._sandbox_pool.ensure(owner, spec)
+
+    async def _save_office_documents(self, session: Session) -> None:
+        """Save the documents this turn edited through the editor; nothing for a turn that edited none."""
+        office = load_settings().office
+        if not office.agent_editing or self._storage is None or device_of(session.config) is not None:
+            return
+        # Local: the office package reaches back into the session and sandbox modules this one is imported by.
+        from surogates.office.turn_end import save_turn
+
+        try:
+            # Waiting on the document server holds none of the worker's turn slots.
+            async with turn_waiting():
+                await save_turn(
+                    store=self._store, session=session, after=self._turn_after_event_id, office=office,
+                    storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+                )
+        except Exception:
+            logger.exception("Could not save the documents %s edited this turn", session.id)
 
     async def _pick_up_routine(self, session: Session, *, yours: bool = False) -> None:
         """A master's routine run records its changes to the real files as its own, at its turn's end.

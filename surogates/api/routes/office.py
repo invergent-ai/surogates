@@ -201,9 +201,15 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     key = f"{PENDING_PREFIX}{document.doc_key}/{uuid4().hex}"
     storage = request.app.state.storage
     await storage.write(bucket, key, data)
+    changes = _changes(payload)
     discarded = await office_sessions.set_pending(
         request.app.state.session_factory, document.id, bucket=bucket, key=key, close=close,
         lastsave=_saved_at(payload, received),
+        marks=[str(payload["userdata"])] if payload.get("userdata") else [],
+        # Every change since the document opened is listed; this save's own start at the last one already
+        # landed (kept: its author may have gone on editing).
+        authors=_authors(changes[max(document.changes_seen - 1, 0):]),
+        changes=len(changes),
     )
     if discarded:
         try:
@@ -219,6 +225,24 @@ def _saved_at(payload: dict[str, Any], received: datetime) -> datetime:
     except (KeyError, ValueError):
         return received
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _changes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The document server's ``history.changes``: every change since the document opened, first first."""
+    history = payload.get("history")
+    changes = history.get("changes") if isinstance(history, dict) else None
+    return [change for change in changes if isinstance(change, dict)] if isinstance(changes, list) else []
+
+
+def _authors(changes: list[dict[str, Any]]) -> list[str]:
+    """The editor user ids that made *changes*, each once, first first."""
+    authors: list[str] = []
+    for change in changes:
+        user = change.get("user")
+        user_id = str(user.get("id") or "") if isinstance(user, dict) else ""
+        if user_id and user_id not in authors:
+            authors.append(user_id)
+    return authors
 
 
 async def _download(url: str) -> bytes:
