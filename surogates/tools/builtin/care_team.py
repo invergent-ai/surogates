@@ -265,7 +265,8 @@ async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]
                 .where(SessionRow.agent_id == agent_id)
                 .where(SessionRow.user_id.in_(ids))
                 .where(Event.type.in_(("followup.escalation", "checkin.escalation")))
-                .where(Event.created_at >= since)
+                # events.created_at is naive UTC; asyncpg refuses an aware bound.
+                .where(Event.created_at >= since.replace(tzinfo=None))
             )
         ).all()
     out: dict[uuid.UUID, dict[str, datetime]] = {}
