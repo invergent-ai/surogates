@@ -762,23 +762,7 @@ class ChannelDeliveryDispatcher:
             refs=platform.descriptor.vault_refs(identifier),
         )
 
-        intermediate = bool(item.payload.get("intermediate"))
         supports_edit = getattr(platform, "supports_edit", False)
-
-        # Intermediate narration: fold into the single progress message on
-        # edit-capable platforms; suppress elsewhere so only the final answer
-        # reaches the channel.
-        if intermediate and not supports_edit:
-            await self._delivery.mark_delivered(item.id, provider_message_id=None)
-            return
-        if intermediate and self._redis is not None:
-            fresh = await self._redis.set(
-                f"channel-progress-edit:{platform.kind}:{item.session_id}",
-                "1", ex=1, nx=True,
-            )
-            if not fresh:  # a sub-second-old edit already in flight — coalesce
-                await self._delivery.mark_delivered(item.id, provider_message_id=None)
-                return
 
         # Coding-run heartbeat: fold every update for a run into a single "main
         # coding message" edited in place (latest activity only), independent of
@@ -898,7 +882,6 @@ class ChannelDeliveryDispatcher:
                 from surogates.channels.channel_progress import (
                     clear_placeholder,
                     set_code_run_ts,
-                    set_placeholder,
                 )
                 if code_run_id and supports_edit:
                     # Record (or refresh) this run's main-message ts so the next
@@ -915,21 +898,6 @@ class ChannelDeliveryDispatcher:
                         except Exception:
                             logger.warning(
                                 "[delivery] set_code_run_ts failed for outbox %d — ignoring",
-                                item.id,
-                            )
-                elif intermediate:
-                    ts = result.message_id or update_ts
-                    if ts:
-                        try:
-                            await set_placeholder(
-                                self._redis, platform.kind, item.session_id,
-                                channel=item.destination.get("channel_id", ""),
-                                ts=ts,
-                                thread_ts=item.destination.get("thread_ts"),
-                            )
-                        except Exception:
-                            logger.warning(
-                                "[delivery] set_placeholder failed for outbox %d — ignoring",
                                 item.id,
                             )
                 elif update_ts is not None:

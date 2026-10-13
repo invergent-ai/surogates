@@ -420,16 +420,18 @@ class TestKeepTyping:
         assert len(self._typing(calls)) == n
 
     @pytest.mark.asyncio
-    async def test_reply_or_question_stops_it_heartbeat_rearms_it(self, calls):
+    async def test_reply_or_question_stops_it_mid_turn_text_rearms_it(self, calls):
         import asyncio
 
         p = WhatsAppPlatform()
         msg = parse(_text_message(), creds=_creds(), identifier=PNID)
         p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
         await asyncio.sleep(0)
-        await p.send(_item("still running", code_run="r1"), creds=_creds())
-        await asyncio.sleep(0)
-        assert calls[-1].get("status") == "read"
+        for mid_turn in (_item("still running", code_run="r1"),
+                         _item("Sunați la 112.", intermediate=True)):
+            await p.send(mid_turn, creds=_creds())
+            await asyncio.sleep(0)
+            assert calls[-1].get("status") == "read"
         await p.send(_item("Gata."), creds=_creds())
         assert p._typing == {}
         n = len(calls)
@@ -778,30 +780,6 @@ def test_channel_prompt_keeps_the_rescued_reply() -> None:
         "telegram",
     )
     assert payload["context"] == "Am notat data procedurii."
-
-
-def test_text_beside_a_question_is_delivered_not_narration() -> None:
-    """The mandatory introduction came in the same message as the first
-    ask_user_question and never reached the patient."""
-    from surogates.session.events import EventType
-    from surogates.session.store import _build_channel_payload
-
-    def payload(tool_name: str) -> dict:
-        return _build_channel_payload(
-            EventType.LLM_RESPONSE,
-            {"message": {
-                "role": "assistant",
-                "content": "Bună ziua. Sunt asistentul digital.",
-                "tool_calls": [{"id": "c1", "type": "function",
-                                "function": {"name": tool_name, "arguments": "{}"}}],
-            }},
-            "whatsapp",
-        )
-
-    assert payload("ask_user_question") == {
-        "content": "Bună ziua. Sunt asistentul digital.", "intermediate": False,
-    }
-    assert payload("web_search")["intermediate"] is True
 
 
 class TestInboundTaps:

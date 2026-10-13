@@ -880,9 +880,9 @@ class WhatsAppPlatform:
 
         if last_id is None:
             return SendResult(success=False, error="send failed")
-        # A question or an answer ends the turn's visible work; a coding run's
-        # heartbeat is the turn still going.
-        if item.payload.get("code_run"):
+        # Text beside a tool call or a coding run's heartbeat is the turn still
+        # going; an answer or a question ends what the person waits for.
+        if item.payload.get("intermediate") or item.payload.get("code_run"):
             self._rearm_typing(phone_number_id, wa_id)
         else:
             self._stop_typing(phone_number_id, wa_id)
@@ -971,9 +971,7 @@ class WhatsAppPlatform:
     ) -> None:
         """Mark *msg* read and keep the typing pip up while its turn runs.
 
-        This is the only progress signal WhatsApp offers: it cannot edit a
-        sent message, so the dispatcher swallows every intermediate
-        narration event.  Meta shows the pip for at most 25 s and drops it
+        This is the only progress signal WhatsApp offers.  Meta shows the pip for at most 25 s and drops it
         on any outbound message, so it is re-sent every 20 s, and right
         after a message that does not end the turn, until a question or an
         answer goes out, *turn_active* says the turn is over, or the cap.
