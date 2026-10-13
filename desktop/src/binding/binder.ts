@@ -8,10 +8,10 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmdirSync } from "node:fs";
-import { lstat } from "node:fs/promises";
 
 import { join } from "../host-path.js";
-import { guestPathOf, hostPathOf } from "../session-path.js";
+import { hostLooked } from "../host-stat.js";
+import { guestPathOf, hostPathOf, shownPath } from "../session-path.js";
 import { type NoCopyAt, noCopyAt } from "../hosts/start.js";
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
 import type { Binding, Bindings, Mode } from "../journal/bindings.js";
@@ -118,7 +118,8 @@ export interface BinderOptions {
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;
   preparedMs?: number;
-  // How Show folder looks at a folder, and how long it waits; node:fs's lstat and LOOK_MS unless a test says.
+  // How Show folder looks at a folder, by the session's path, and how long it waits; its lstat by this computer's own
+  // path (host-stat.ts) and LOOK_MS unless a test says.
   look?: (path: string) => Promise<FolderLook>;
   lookMs?: number;
   // Whether a folder for a new chat is there and answered a look off this thread in time (FolderLooks): its checks
@@ -272,7 +273,7 @@ export class Binder implements Executor {
     if (this.options.keepsCopies !== true) throw new Error(NO_COPY_HERE);
     const { binding, checked } = found;
     const alone = noCopyAt(binding.folder, this.options.guards);
-    if (alone !== null) throw new Error(noCopyOf(binding.folder, alone));
+    if (alone !== null) throw new Error(noCopyOf(shownPath(binding.folder), alone));
     return this.prepare(checked, binding.mode === "free" ? "free" : "ask", window, { thread: true });
   }
 
@@ -291,11 +292,12 @@ export class Binder implements Executor {
     const binding = this.options.bindings.get(master);
     if (!binding?.project) return "This project's folder is not set up on this computer";
     const { folder } = binding;
+    // Its words are its person's: each folder by the path they read it by (session-path.ts, shownPath).
     const checked: FolderCheck = (await this.answers(folder))
-      ? checkFolder(folder, this.options.guards)
-      : { ok: false, missing: true, message: `the folder ${folder} did not answer` };
+      ? checkFolder(folder, this.options.guards, shownPath)
+      : { ok: false, missing: true, message: `the folder ${shownPath(folder)} did not answer` };
     if (!checked.ok) return `This project's folder cannot be used: ${checked.message}`;
-    if (checked.path !== folder || !confirmedFolder(binding, checked)) return `The folder ${folder} was replaced after it was chosen for this project`;
+    if (checked.path !== folder || !confirmedFolder(binding, checked)) return `The folder ${shownPath(folder)} was replaced after it was chosen for this project`;
     return { binding, checked };
   }
 
@@ -320,12 +322,14 @@ export class Binder implements Executor {
   async folderToShow(sessionId: string): Promise<string> {
     const binding = this.options.bindings.get(sessionId);
     if (!binding) throw new Error("This chat has no folder on this computer");
-    if (looking.has(sessionId)) throw new Error(`Surogate is still looking for ${binding.folder}`);
+    // Its words are its person's: the folder by the path they read it by (session-path.ts, shownPath).
+    const shown = shownPath(binding.folder);
+    if (looking.has(sessionId)) throw new Error(`Surogate is still looking for ${shown}`);
     if (looking.size >= LOOKS_AT_ONCE) throw new Error("Surogate is still looking for another folder");
     looking.add(sessionId);
     // lstat: a link at its path is never the folder. The path was resolved when it was bound,
     // so only its last name can have become a link since.
-    const look = (this.options.look ?? lstat)(binding.folder).then((found) => found, () => null);
+    const look = (this.options.look ?? ((folder: string) => hostLooked(hostPathOf(folder))))(binding.folder).then((found) => found, () => null);
     void look.finally(() => looking.delete(sessionId));
     const ms = this.options.lookMs ?? LOOK_MS;
     let timer: NodeJS.Timeout | undefined;
@@ -335,10 +339,10 @@ export class Binder implements Executor {
         timer = setTimeout(() => resolve("late"), ms).unref();
       }),
     ]).finally(() => clearTimeout(timer));
-    if (found === "late") throw new Error(`The folder ${binding.folder} did not answer within ${ms / 1000} s`);
-    if (!found) throw new Error(`The folder ${binding.folder} is not there`);
+    if (found === "late") throw new Error(`The folder ${shown} did not answer within ${ms / 1000} s`);
+    if (!found) throw new Error(`The folder ${shown} is not there`);
     if (!found.isDirectory() || !confirmedFolder(binding, found)) {
-      throw new Error(`The folder ${binding.folder} was replaced after it was confirmed for this chat`);
+      throw new Error(`The folder ${shown} was replaced after it was confirmed for this chat`);
     }
     return binding.folder;
   }
@@ -391,9 +395,10 @@ export class Binder implements Executor {
     // A page that has gone gets no prompt: the signal is looked at before each one.
     let folder = offered ?? (signal.aborted ? null : await prompts.pickFolder(startIn, signal));
     while (folder !== null && !signal.aborted) {
+      // The sheet's words are its person's: the folder by the path they read it by (session-path.ts, shownPath).
       const checked: FolderCheck = (await this.answers(folder))
-        ? checkFolder(folder, guards)
-        : { ok: false, missing: true, message: `the folder ${folder} did not answer` };
+        ? checkFolder(folder, guards, shownPath)
+        : { ok: false, missing: true, message: `the folder ${shownPath(folder)} did not answer` };
       if (signal.aborted) return null;
       const links = checked.ok ? await scanLinks(checked.path) : null;
       if (signal.aborted) return null;

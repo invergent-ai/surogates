@@ -3,7 +3,7 @@
 // is it named by this computer's own path (host-path.ts). Electron-free. files/ is on the agent disk, which holds no
 // module of the app's but its own: its modules take node:path's posix by name.
 
-import { posix } from "node:path";
+import { posix, win32 } from "node:path";
 
 import { forThisOs, notBuilt } from "./platform.js";
 
@@ -42,3 +42,29 @@ export const guestPathOf: (hostPath: string) => string = forThisOs({ linux: same
 
 /** The path on this computer of a bound folder's guest path, guestPathOf's inverse: what the folder is opened and shared by. */
 export const hostPathOf: (guestPath: string) => string = forThisOs({ linux: same, darwin: same, win32: windowsHostPath }) ?? unbuilt;
+
+/**
+ * A session's path as the person reads it, wherever the app shows one: this computer's own (hostPathOf), C:\Users\… on
+ * Windows; or, where it names nothing on this computer, as it is. Bindings keep the session's path inside.
+ */
+export function shownPath(path: string): string {
+  try {
+    return hostPathOf(path);
+  } catch {
+    return path;
+  }
+}
+
+// The last name of a path as this computer writes one.
+const ownBasename = forThisOs({ linux: posix.basename, darwin: posix.basename, win32: win32.basename }) ?? posix.basename;
+
+/** A session's path's last name as the person reads it, or the whole of one that has none, as a drive's root. */
+export const shownName = (path: string): string => {
+  const shown = shownPath(path);
+  return ownBasename(shown) || shown;
+};
+
+/** A path within a folder, as the session names it (src/app.py), as the person reads it: by this computer's separator. */
+export const shownWithin: (relative: string) => string = forThisOs({
+  linux: same, darwin: same, win32: (relative: string) => relative.split("/").join("\\"),
+}) ?? same;

@@ -33,7 +33,7 @@ import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import { hostPathOf } from "../session-path.js";
+import { hostPathOf, shownPath } from "../session-path.js";
 import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
@@ -1278,7 +1278,7 @@ async function restore(agent: Agent): Promise<void> {
       type: "question",
       message: `Restore local access on ${credential.name}?`,
       detail: folders.length > 0
-        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${folder}`).join("\n")}\nWork that was cancelled stays cancelled.`
+        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${shownPath(folder)}`).join("\n")}\nWork that was cancelled stays cancelled.`
         : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
       buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
     });
@@ -2284,13 +2284,14 @@ function showProject(editing: Opened | null): void {
         letGo(chosen);
         chosen = picked;
         mayHaveMade = false;
-        return { folder: picked.folder };
+        // Shown by the path its person reads it by (session-path.ts): the binding keeps the session's.
+        return { folder: shownPath(picked.folder) };
       } catch (error) {
         return { refused: refused(error) };
       }
     });
     // The folder the dialog shows: the one confirmed for the new project now, or none, as after a refusal that let it go.
-    handle("project:chosen", () => chosen?.folder ?? null);
+    handle("project:chosen", () => (chosen ? shownPath(chosen.folder) : null));
     // A new project, made with the folder its user confirmed: the agent binds its coordinator there, and the
     // dialog closes once this computer has recorded it. For an agent that takes no folders of this computer, in the cloud.
     const make = async (fields: ProjectFields): Promise<Project | string> => {

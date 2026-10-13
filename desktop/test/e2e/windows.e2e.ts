@@ -295,6 +295,9 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
       await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
       const prepared = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
       const sheet = await prompt(shell);
+      // The sheet names the folder by its Windows path, as its person reads it; the binding keeps its path in the guest.
+      await expect.poll(() => sheet.innerText("body")).toContain(folder);
+      expect(await sheet.innerText("body")).not.toContain("/mnt/");
       // A sheet that refuses the folder offers no mode: its words say why.
       await sheet.check('input[value="free"]', { timeout: 15_000 }).catch(async (error: Error) => {
         throw new Error(`${error.message}; the sheet says: ${await sheet.innerText("body")}`);

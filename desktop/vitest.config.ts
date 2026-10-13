@@ -42,6 +42,8 @@ export const WINDOWS = [
   "test/folders-held-win32.test.ts",
   // The native programs' one workspace, and the one script that builds the Windows app.
   "test/windows-native.test.ts",
+  // Every folder and file the app shows its person, by its Windows path.
+  "test/shown-paths.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it
