@@ -5,7 +5,7 @@
 // awaits app.whenReady() deadlocks.
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -26,6 +26,7 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
+import { hostUser } from "../host-user.js";
 import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
 import { FolderLooks, LOOK_MS } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
@@ -325,10 +326,6 @@ const fromBase = (url: string, init: { headers: Record<string, string>; signal?:
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
-const vmUser = () => {
-  const { uid, gid, username } = userInfo();
-  return { uid, gid, name: username, home: env.HOME };
-};
 
 // The guest's image: a packaged app downloads it from where it was installed from (the install
 // script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
@@ -486,7 +483,7 @@ const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = appVm({
     vm: {
-      ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+      ...vmOptions(root, hostUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
       ca: companyCertificates,
     },
     ready: vmReady,
@@ -510,7 +507,7 @@ const vmFor = (): VmClient => {
 // image did not start, its check by its hashes, and the next boot's line is the next boot's.
 function sandboxAction(action: unknown): void {
   if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
-  if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
+  if (action === "log") return void shell.openPath(vmOptions(root, hostUser(), VM_ENV).console);
   if (action === "check") return lookForTools();
   // The manager forgets that boot too, so the line never says Ready while it still refuses.
   boot = null;
