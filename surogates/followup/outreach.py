@@ -28,7 +28,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
-from sqlalchemy.orm import aliased
 
 from surogates.channels.identity import readable_phone
 from surogates.db.models import (
@@ -333,26 +332,30 @@ def plain_reason(reason: str | None) -> str:
     return text[:200] or "unknown reason"
 
 
+async def _mark_reported(session_factory: Any, model: Any, ids: list, now: datetime) -> None:
+    if not ids:
+        return
+    async with session_factory() as db:
+        await db.execute(sa.update(model).where(model.id.in_(ids)).values(reported_at=now))
+        await db.commit()
+
+
 async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
     """Tell a team member what became of a message they asked for.
 
-    One notice per message, keyed on it: a failure of anything they asked
-    for (their message, the welcome of someone they enrolled, a notice to a
-    colleague), and the delivery of their own message after a held wait.  A
-    text written straight into an open window needs none: the tool already
-    told them it went out.
+    One notice per message: a failure of anything they asked for (their
+    message, the welcome of someone they enrolled, a notice to a colleague),
+    and the delivery of their own message after a held wait.  A text
+    written straight into an open window needs none: the tool already told
+    them it went out.  The row is marked reported only once its notice is
+    queued, and the notice is keyed on the row, so a pass that dies in
+    between is retried without telling anyone twice.
     """
-    notice = aliased(OutreachMessageRow)
-    told = sa.exists().where(
-        notice.org_id == OutreachMessageRow.org_id,
-        notice.dedupe_key.like(
-            "outcome:" + sa.cast(OutreachMessageRow.id, sa.Text) + ":%"
-        ),
-    )
     async with session_factory() as db:
         rows = (
             await db.execute(
                 sa.select(OutreachMessageRow)
+                .where(OutreachMessageRow.reported_at.is_(None))
                 .where(sa.or_(
                     OutreachMessageRow.state == "failed",
                     sa.and_(
@@ -365,7 +368,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                     OutreachMessageRow.created_by.like("team:%"),
                     OutreachMessageRow.created_by.like("care-team:%"),
                 ))
-                .where(~told)
+                .order_by(OutreachMessageRow.created_at.desc())
                 .limit(BATCH)
             )
         ).scalars().all()
@@ -373,6 +376,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
     for row in rows:
         requester = _requester(row.created_by)
         if requester is None:
+            await _mark_reported(session_factory, OutreachMessageRow, [row.id], now)
             continue
         try:
             settings = await followup_store.get_settings(
@@ -399,6 +403,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                 subject_user_id=row.user_id, dedupe_prefix=f"outcome:{row.id}",
                 only_user_id=requester, fallback_sender=row.channel_identifier,
             )
+            await _mark_reported(session_factory, OutreachMessageRow, [row.id], now)
             reported += queued
         except Exception:  # noqa: BLE001 — one notice, not the pass
             logger.exception("[outreach] could not report the outcome of %s", row.id)
@@ -488,18 +493,29 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
 
     A check-in opener or a welcome that failed would otherwise only show in
     a run history nobody reads.  One notice per person per day of failure,
-    whatever number of messages failed that day.  Whatever a team member
+    whatever number of messages failed that day; the newest failures first,
+    each marked reported once its notice is queued.  Whatever a team member
     asked for is reported to them by :func:`_report_outcomes` instead.
     """
+    async with session_factory() as db:
+        teams = {
+            (row.org_id, row.agent_id): row
+            for row in (await db.execute(sa.select(FollowupSettingsRow))).scalars()
+            if row.alert_recipient_user_ids
+        }
+    if not teams:
+        return 0
     since = now - OUTCOME_LOOKBACK
     async with session_factory() as db:
         invitations = (
             await db.execute(
                 sa.select(
+                    ProgramInvitationRow.id,
                     ProgramInvitationRow.org_id, ProgramInvitationRow.agent_id,
                     ProgramInvitationRow.user_id, ProgramInvitationRow.created_at,
                     sa.func.coalesce(ProgramInvitationRow.delivery_error, ProgramInvitationRow.reason),
                 )
+                .where(ProgramInvitationRow.reported_at.is_(None))
                 .where(sa.or_(
                     ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")),
                     sa.and_(
@@ -508,16 +524,20 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                     ),
                 ))
                 .where(ProgramInvitationRow.created_at >= since)
+                .where(sa.tuple_(ProgramInvitationRow.org_id, ProgramInvitationRow.agent_id).in_(list(teams)))
+                .order_by(ProgramInvitationRow.created_at.desc())
                 .limit(BATCH)
             )
         ).all()
         messages = (
             await db.execute(
                 sa.select(
+                    OutreachMessageRow.id,
                     OutreachMessageRow.org_id, OutreachMessageRow.agent_id,
                     OutreachMessageRow.user_id, OutreachMessageRow.created_at,
                     OutreachMessageRow.reason,
                 )
+                .where(OutreachMessageRow.reported_at.is_(None))
                 .where(OutreachMessageRow.state == "failed")
                 .where(OutreachMessageRow.created_at >= since)
                 .where(sa.or_(
@@ -527,51 +547,47 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                         OutreachMessageRow.created_by.like("care-team:%"),
                     )),
                 ))
+                .where(sa.tuple_(OutreachMessageRow.org_id, OutreachMessageRow.agent_id).in_(list(teams)))
+                .order_by(OutreachMessageRow.created_at.desc())
                 .limit(BATCH)
             )
         ).all()
-    failures: dict[str, tuple] = {}
-    for org_id, agent_id, user_id, at, reason in sorted(
-        [*invitations, *messages], key=lambda r: as_utc(r[3]),
-    ):
-        key = f"failure:{agent_id}:{user_id}:{as_utc(at):%Y-%m-%d}"
-        failures.setdefault(key, (org_id, agent_id, user_id, reason))
-    if not failures:
-        return 0
-    async with session_factory() as db:
-        told = {
-            key.rsplit(":", 1)[0] for key in (
-                await db.execute(
-                    sa.select(OutreachMessageRow.dedupe_key)
-                    .where(OutreachMessageRow.dedupe_key.like("failure:%"))
-                    .where(OutreachMessageRow.created_at >= since)
-                )
-            ).scalars()
-        }
+    failures: dict[str, dict[str, Any]] = {}
+    for model, found in ((ProgramInvitationRow, invitations), (OutreachMessageRow, messages)):
+        for row_id, org_id, agent_id, user_id, at, reason in found:
+            key = f"failure:{agent_id}:{user_id}:{as_utc(at):%Y-%m-%d}"
+            failure = failures.setdefault(key, {
+                "org_id": org_id, "agent_id": agent_id, "user_id": user_id,
+                "first": (as_utc(at), reason), "rows": [],
+            })
+            failure["first"] = min(failure["first"], (as_utc(at), reason), key=lambda f: f[0])
+            failure["rows"].append((model, row_id))
+
     surfaced = 0
-    for key, (org_id, agent_id, user_id, reason) in failures.items():
-        if key in told:
-            continue
+    for key, failure in failures.items():
+        org_id, agent_id, user_id = failure["org_id"], failure["agent_id"], failure["user_id"]
+        settings = teams[(org_id, agent_id)]
         try:
-            settings = await followup_store.get_settings(
-                session_factory, org_id=org_id, agent_id=agent_id,
-            )
-            if followup_store.is_team_member(settings, user_id):
-                continue
-            name, phone, _zone = await describe_person(
-                session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
-            )
-            queued, _ = await followup_store.notify_team(
-                session_factory, settings, org_id=org_id, agent_id=agent_id,
-                kind="notice", created_by="outreach", subject_user_id=user_id,
-                text=followup_store.render_text(
-                    ((settings.texts or {}) if settings else {}).get("person_failure_notice"),
-                    DEFAULT_TEXTS["person_failure_notice"],
-                    name=name, why=plain_reason(reason), phone=phone,
-                ),
-                dedupe_prefix=key,
-            )
-            surfaced += queued
+            if not followup_store.is_team_member(settings, user_id):
+                name, phone, _zone = await describe_person(
+                    session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+                )
+                queued, _ = await followup_store.notify_team(
+                    session_factory, settings, org_id=org_id, agent_id=agent_id,
+                    kind="notice", created_by="outreach", subject_user_id=user_id,
+                    text=followup_store.render_text(
+                        (settings.texts or {}).get("person_failure_notice"),
+                        DEFAULT_TEXTS["person_failure_notice"],
+                        name=name, why=plain_reason(failure["first"][1]), phone=phone,
+                    ),
+                    dedupe_prefix=key,
+                )
+                surfaced += queued
+            for model in (ProgramInvitationRow, OutreachMessageRow):
+                await _mark_reported(
+                    session_factory, model,
+                    [row_id for m, row_id in failure["rows"] if m is model], now,
+                )
         except Exception:  # noqa: BLE001 — one person, not the pass
             logger.exception("[outreach] could not surface a failure for %s", user_id)
     return surfaced

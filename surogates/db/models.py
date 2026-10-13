@@ -1042,6 +1042,10 @@ class ProgramInvitationRow(Base):
             "idx_program_invitations_program_user",
             "program_id", "user_id", "created_at",
         ),
+        Index(
+            "idx_program_invitations_unreported",
+            "created_at", postgresql_where=text("reported_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1084,6 +1088,10 @@ class ProgramInvitationRow(Base):
     #: check-in's escalation was sent again.  Its own column: the escalation
     #: stays ``raised``, which is what run counts read.
     reminder_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: When the team was told this check-in's opener did not arrive.
+    reported_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
     deadline_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
     )
@@ -1285,6 +1293,10 @@ class OutreachMessageRow(Base):
             "org_id", "agent_id", "user_id", "state",
         ),
         Index("idx_outreach_messages_state", "state"),
+        Index(
+            "idx_outreach_messages_unreported",
+            "created_at", postgresql_where=text("reported_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1341,6 +1353,11 @@ class OutreachMessageRow(Base):
     severity: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: When the one reminder for this alert's escalation went out.
     reminded_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: When this message's outcome was reported to whoever asked for it,
+    #: or its failure to the team.  Reported once, never re-read.
+    reported_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(

@@ -1070,3 +1070,13 @@ ALTER TABLE outreach_messages
 -- ── a red alert's reminder, kept off the escalation it reminds of ────
 ALTER TABLE program_invitations
     ADD COLUMN IF NOT EXISTS reminder_state text;
+
+-- ── a message's outcome is reported once ─────────────────────────────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS reported_at timestamptz;
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS reported_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_outreach_messages_unreported
+    ON outreach_messages (created_at) WHERE reported_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_unreported
+    ON program_invitations (created_at) WHERE reported_at IS NULL;

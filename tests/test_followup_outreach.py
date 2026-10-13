@@ -623,7 +623,8 @@ async def test_a_failed_program_opener_tells_the_team_once_per_person_per_day(sf
     member, row = await _team_message(sf)
     person = row.user_id
     await _failed_opener(sf, person, error="graph error 132015 (template paused)")
-    await _failed_opener(sf, person, error="graph error 131047 (window closed)")
+    await _failed_opener(sf, person, error="graph error 131047 (window closed)",
+                         at=NOW + timedelta(seconds=30))
     await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=1))
     await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=2))
 
@@ -676,3 +677,44 @@ async def test_a_failed_welcome_a_team_member_asked_for_is_reported_to_them(sf, 
     [notice] = await _notices(sf)
     assert notice.user_id == member
     assert notice.text.startswith("⚠️ Ion Pop did not receive your message: their 24h window")
+
+
+@pytest.mark.asyncio
+async def test_failures_are_reported_once_newest_first_and_only_where_a_team_listens(
+    sf, doctor_session, monkeypatch,
+):
+    from surogates.db.models import ProgramInvitationRow
+
+    member, row = await _team_message(sf)
+    older, newer = uuid.uuid4(), row.user_id
+    await _failed_opener(sf, older, error="graph error 132015", at=NOW - timedelta(hours=2))
+    await _failed_opener(sf, newer, error="graph error 132015", at=NOW - timedelta(hours=1))
+    async with sf() as db:
+        db.add(ProgramInvitationRow(
+            org_id=ORG, agent_id="no-team", program_id=uuid.uuid4(),
+            occurrence_id=uuid.uuid4(), user_id=uuid.uuid4(), platform="whatsapp",
+            platform_user_id="40799999999", delivery_state="failed",
+            delivery_error="graph error 132015", created_at=NOW,
+        ))
+        await db.commit()
+    monkeypatch.setattr(outreach, "BATCH", 1)
+
+    assert await outreach._surface_person_failures(sf, now=NOW) == 1
+    [notice] = await _notices(sf)
+    assert notice.subject_user_id == newer
+    assert await outreach._surface_person_failures(sf, now=NOW) == 1
+    assert {n.subject_user_id for n in await _notices(sf)} == {newer, older}
+    assert await outreach._surface_person_failures(sf, now=NOW) == 0
+
+    async with sf() as db:
+        rows = (await db.execute(sa.select(ProgramInvitationRow))).scalars().all()
+    assert {r.agent_id for r in rows if r.reported_at is None} == {"no-team"}
+
+
+@pytest.mark.asyncio
+async def test_an_outcome_is_marked_reported_and_never_read_again(sf, doctor_session):
+    member, row = await _team_message(sf)
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=25))
+    assert (await _row(sf, row.id)).reported_at is not None
+    assert await outreach._report_outcomes(sf, now=NOW + timedelta(hours=26)) == 0
+    assert len(await _notices(sf)) == 1
