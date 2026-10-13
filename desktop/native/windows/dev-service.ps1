@@ -13,11 +13,14 @@
 [CmdletBinding()]
 param(
     [switch]$Remove,
-    [string]$AgentDisk = (Join-Path $PSScriptRoot "..\..\dist\agent.vhd")
+    [string]$AgentDisk = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ServiceName = "SurogateVM"
+# The script's own folder, however it was invoked ($PSScriptRoot is not yet set while a param default is bound).
+$here = Split-Path -Parent $PSCommandPath
+if (-not $AgentDisk) { $AgentDisk = Join-Path $here "..\..\dist\agent.vhd" }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run this in an elevated PowerShell: it installs a Windows service."
@@ -40,7 +43,7 @@ if ($Remove) {
 }
 
 # Build the service and surogate-vm, pinned, release.
-$workspace = $PSScriptRoot
+$workspace = $here
 Write-Host "Building the Rust programs (cargo build --locked --release)..."
 cargo build --locked --release --manifest-path (Join-Path $workspace "Cargo.toml") -p service -p vm
 $exe = Join-Path $workspace "target\release\surogate-service.exe"
