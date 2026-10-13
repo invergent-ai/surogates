@@ -650,7 +650,10 @@ async def test_a_masters_prompt_runs_the_project(api):
     # The master does a simple thing itself, and gives anything more to a thread, which it starts in the cloud.
     said = " ".join(prompt.split())
     assert "Do no work yourself beyond a quick answer." not in said
-    assert "Do a simple thing yourself, here: a quick answer, creating a file, a small edit, one quick command." in said
+    assert (
+        "Do a simple thing yourself, here: a quick answer, creating a file whose whole content the user gave you, "
+        "writing a few lines, a small edit, one quick command."
+    ) in said
     assert "Never do complex work yourself." in said
     assert "Never do the work and then give it to a thread" in said
     assert "## Starting threads - Give it to a new thread with `start_thread`." in said
