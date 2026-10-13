@@ -67,6 +67,7 @@ class ToolRuntime:
             loop_control,
             media_gen,
             memory,
+            office,
             research,
             session_search,
             skill_manager,
@@ -97,6 +98,7 @@ class ToolRuntime:
             browser,
             file_ops,
             kb_tools,
+            office,  # office_read, office_edit (live Word editing through runtime-office)
             loop_control,
             delegate,
             expert,

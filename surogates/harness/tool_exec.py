@@ -581,6 +581,10 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "propose_threads",
 })
 
+#: Tools whose call must not start before the response that makes it is saved: a stream discarded and retried
+#: would make it twice, and an edit a user watches land twice is worse than one that waits a moment.
+AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
+
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.
@@ -648,6 +652,10 @@ MAX_TOOL_WORKERS: int = 8
 SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "ask_user_question",
     "list_files",
+    # They write nothing in a thread's copy: the document's changes go through
+    # its editors, so a sandbox checkpoint could never undo them.
+    "office_edit",
+    "office_read",
     "read_file",
     "file_read",
     "search_files",

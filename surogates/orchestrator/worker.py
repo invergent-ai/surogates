@@ -23,6 +23,7 @@ from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
+from surogates.harness.tool_schemas import has_file_pane
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
@@ -354,6 +355,10 @@ def _filter_effective_tools(
     )
     if not is_research_coordinator:
         result -= RESEARCH_SPINE_TOOLS
+
+    # The office tools edit a document that opens beside the chat: the same rule the schemas keep.
+    if not has_file_pane(session):
+        result -= {"office_read", "office_edit"}
 
     return result
 

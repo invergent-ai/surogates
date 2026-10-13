@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from surogates.channels.constants import ADAPTER_CHANNELS, VOICE_TOOLS
+from surogates.channels.constants import ADAPTER_CHANNELS, STUDIO_CHANNEL, VOICE_TOOLS
 from surogates.devices.binding import device_of
 from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
@@ -76,6 +76,18 @@ _CRON_TOOLS: frozenset[str] = frozenset({
 _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
     "whiteboard_draw",
 })
+_OFFICE_TOOLS: frozenset[str] = frozenset({
+    "office_read", "office_edit",
+})
+
+
+def has_file_pane(session: Any) -> bool:
+    """Whether the session's chat shows a document beside it: the web, Surogate Desktop, Surogate Studio's Work chat
+    and a project's threads; never a phone call, a channel, a website visitor, an API caller or a folder on a computer."""
+    from surogates.workstreams import is_project_thread
+
+    config = getattr(session, "config", None) or {}
+    return (getattr(session, "channel", None) in ("web", STUDIO_CHANNEL) or is_project_thread(config)) and device_of(config) is None
 
 
 def channel_tool_flags(channel: str | None) -> dict[str, bool]:
@@ -92,6 +104,7 @@ def drop_unusable_tools(
     makes_routines: bool,
     is_whiteboard: bool = False,
     is_voice: bool = False,
+    has_file_pane: bool = True,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -104,6 +117,8 @@ def drop_unusable_tools(
     The cron tools go to a session that *makes_routines* through its
     model: a chat with an owner, ``/loop`` on and ``ask_user_question``
     to confirm with.  A scheduled run may not make another.
+
+    The office tools go only where ``has_file_pane``.
 
     Never returns an empty list: a request with no tools at all is worse
     than an oversized one.
@@ -119,6 +134,8 @@ def drop_unusable_tools(
         drop |= _WHITEBOARD_TOOLS
     if not is_voice:
         drop |= VOICE_TOOLS
+    if not has_file_pane:
+        drop |= _OFFICE_TOOLS
     if not drop:
         return schemas
 
