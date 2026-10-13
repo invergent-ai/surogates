@@ -3,8 +3,8 @@
 // entitlement. It speaks surogate-vm's line protocol on its stdin and stdout, and connects to the
 // guest's control, net and inbound ports as Unix sockets surogate-vm makes in the runtime folder,
 // as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server,
-// which maps no owner: every root runs as the host user's uid, which the kernel's command line
-// names for the protected-names rule (vm/init, guest/root.ts). surogate-vm stops the VM when its
+// which maps no owner and shows each file as the asking uid's: every root runs on its own uid, as
+// on Linux, where its folder shows it that uid (guest/root.ts, checkOwner). surogate-vm stops the VM when its
 // stdin ends, so the VM ends with the manager however it ends; it writes its pid in the runtime
 // folder, and the next boot's sweep ends one that outlived its manager.
 
@@ -18,7 +18,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { cleanly, spawnClean } from "../clean-child.js";
-import type { HostUser, Share } from "../guest/protocol.js";
+import type { Share } from "../guest/protocol.js";
 import { MAX_SHARES } from "../guest/protocol.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
 import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
@@ -73,9 +73,6 @@ export function fitting(run: string): string | null {
   const bytes = Buffer.byteLength(longest);
   return bytes > SOCKET_MAX ? `this Mac's temp folder's path is too long for the sandbox's sockets: ${longest} is ${bytes} bytes, over ${SOCKET_MAX}` : null;
 }
-
-/** The guest kernel's command line on macOS: every OS's, with the uid every root runs as, which the protected-names rule judges. */
-export const commandLine = (user: HostUser): string => `${KERNEL_COMMAND_LINE} surogate.uid=${user.uid}`;
 
 // What surogate-vm says, one JSON object a line.
 type Said =
@@ -196,7 +193,7 @@ export function darwinBoot(start: Start): BootVm {
       }
       helper.send({
         type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
-        cpus: options.cpus ?? guestCpus(), memoryMiB: MEMORY_MIB, commandLine: commandLine(options.user), layout: options.layout ?? LAYOUT,
+        cpus: options.cpus ?? guestCpus(), memoryMiB: MEMORY_MIB, commandLine: KERNEL_COMMAND_LINE, layout: options.layout ?? LAYOUT,
       });
       const started = await helper.first((said) => said.type === "started" || said.type === "failed", deadline);
       if (started === "late") throw new Error("the VM did not start in time");
@@ -267,8 +264,6 @@ interface Shared {
 class DarwinVm implements VmBackend {
   readonly exited: Promise<string>;
   readonly emulated = null;
-  // Apple's share maps no owner: every root runs as the host user's uid, which the guest's rule judges.
-  readonly rootUid: number;
   // Each share in the guest, by its tag and name; each name, r<n>, is never given again in this VM.
   private readonly shares = new Map<string, Shared>();
   private made = 0;
@@ -282,7 +277,6 @@ class DarwinVm implements VmBackend {
     readonly net: Socket,
     readonly inbound: Socket,
   ) {
-    this.rootUid = options.user.uid;
     this.exited = helper.gone.then(() => helper.words());
   }
 
@@ -302,8 +296,8 @@ class DarwinVm implements VmBackend {
 
   /**
    * *folder* shared into the running guest, by *deadline*, as a directory of the one device for every folder
-   * (or one of eight, as surogate-vm lays them out). Apple's share maps no owner, so *uid* maps nothing: the
-   * guest sees the host user's uid, which every root runs as; 0 is the guest's root's, for a folder's place.
+   * (or one of eight, as surogate-vm lays them out). Apple's share maps no owner, so *uid* maps nothing: it
+   * shows each file as the asking uid's, the root's own; 0 is the guest's root's, for a folder's place.
    * *readonly*: the place's real folder, which
    * Apple's server keeps read-only (VZSharedDirectory's readOnly).
    */

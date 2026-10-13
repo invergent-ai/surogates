@@ -41,7 +41,7 @@ struct Laid {
     boot = Boot(
       kernel: "\(places.image)/vmlinuz", rootfs: "\(places.image)/rootfs.img", agentDisk: "\(places.bundle)/agent.img", sessions: "\(places.data)/vm/sessions.img",
       console: "\(places.data)/logs/vm-console.log", cpus: 2, memoryMiB: 2048,
-      commandLine: "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.uid=501", layout: layout
+      commandLine: "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet", layout: layout
     )
   }
 }

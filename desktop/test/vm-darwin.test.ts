@@ -9,9 +9,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { backendFor } from "../src/vm/backends.js";
-import { bootDarwin, commandLine, fitting, runtimeFolder } from "../src/vm/darwin.js";
+import { bootDarwin, fitting, runtimeFolder } from "../src/vm/darwin.js";
 import type { VmOptions } from "../src/vm/manager.js";
-import { KERNEL_COMMAND_LINE } from "../src/vm/qemu.js";
 
 const ANA = { uid: 501, gid: 20, name: "ana", home: "/Users/ana" };
 
@@ -56,8 +55,7 @@ describe("the macOS VM backend", () => {
     expect(runtimeFolder("/data", "/no/such/temp")).toMatch(/^\/no\/such\/temp\/surogate\/vm-[0-9a-f]{8}$/);
   });
 
-  it("tells the guest kernel the uid every root runs as, which the protected-names rule judges, on every OS's command line", () => {
-    expect(commandLine(ANA)).toBe(`${KERNEL_COMMAND_LINE} surogate.uid=501`);
+  it("fits the sockets of a Mac's own temp folder", () => {
     expect(fitting(runtimeFolder("/Users/ana/Library/Application Support/Surogate", "/var/folders/ab/cdefghij/T"))).toBeNull();
   });
 });

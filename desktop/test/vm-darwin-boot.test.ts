@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { bootDarwin, commandLine, requirementsDarwin, runtimeFolder } from "../src/vm/darwin.js";
+import { bootDarwin, requirementsDarwin, runtimeFolder } from "../src/vm/darwin.js";
 import { Guest, type VmBackend, type VmOptions } from "../src/vm/manager.js";
 import { KERNEL_COMMAND_LINE } from "../src/vm/qemu.js";
 import { built } from "./built.js";
@@ -75,16 +75,16 @@ afterEach(async () => {
 });
 
 describe("the macOS VM backend", () => {
-  it("boots once its three sockets are connected and it said started, its boot line naming the files, the machine and the uid the rule judges", async () => {
+  it("boots once its three sockets are connected and it said started, its boot line naming the files, the machine and every OS's kernel command line", async () => {
     const log = join(dir, "said.log");
     const vm = await boot({ FAKE_VM_LOG: log });
-    expect([vm.emulated, vm.rootUid]).toEqual([null, 501]);
+    // Each root has a uid of its own, as on Linux: the backend names none for every root.
+    expect([vm.emulated, "rootUid" in vm]).toEqual([null, false]);
     const [line] = readFileSync(log, "utf8").trim().split("\n").map((text) => JSON.parse(text) as Record<string, unknown>);
     expect(line).toEqual({
       type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
-      cpus: expect.any(Number), memoryMiB: 2048, commandLine: `${KERNEL_COMMAND_LINE} surogate.uid=501`, layout: "multiple",
+      cpus: expect.any(Number), memoryMiB: 2048, commandLine: KERNEL_COMMAND_LINE, layout: "multiple",
     });
-    expect(commandLine(ANA)).toBe(`${KERNEL_COMMAND_LINE} surogate.uid=501`);
     // The sessions disk made, sparse and the user's alone; the runtime folder theirs alone too.
     expect([statSync(options.sessions).size, statSync(options.sessions).mode & 0o777, statSync(options.run).mode & 0o777]).toEqual([32 * 1024 ** 3, 0o600, 0o700]);
   });
@@ -182,7 +182,7 @@ describe("the VM manager's guest on the macOS backend", () => {
     return { path, dev, ino };
   };
 
-  it("sets a root up on its folder and runs its operations, the root running as the uid the rule judges", async () => {
+  it("sets a root up on its folder and runs its operations, the root on a uid of its own from 10000 up, as on Linux", async () => {
     const guest = await Guest.boot(bootDarwin, { ...options, program: program() });
     expect(await guest.ready(ROOT, folder())).toBeNull();
     expect(await guest.op(ROOT, "run", { command: "echo hi", workdir: null, timeout: 10 }, new AbortController().signal))
@@ -191,8 +191,8 @@ describe("the VM manager's guest on the macOS backend", () => {
     expect(alive(pidOf())).toBe(false);
   });
 
-  it("shares no folder for a root whose uid is not the one every root runs as on macOS", async () => {
-    const guest = await Guest.boot(bootDarwin, { ...options, program: program({ FAKE_VM_UID: "10000" }) });
+  it("shares no folder for a root whose uid is below 10000, which the rule would not judge, as on Linux", async () => {
+    const guest = await Guest.boot(bootDarwin, { ...options, program: program({ FAKE_VM_UID: "501" }) });
     expect(await guest.ready(ROOT, folder())).toMatchObject({ error: { type: "unavailable", message: expect.stringContaining("the guest gave no uid a root can have") } });
     await guest.stop();
   });

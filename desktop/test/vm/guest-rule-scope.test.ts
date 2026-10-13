@@ -1,9 +1,10 @@
-// The protected-names rule (vm/rule.bpf.c) as the guest kernel runs it, for what it judges besides
-// Linux's sessions: the names a volume that compares names without case takes as protected ones,
-// folded (rule-match.h, sg_fold), which the drift test checks against protect.ts on the host; and
-// its scope's one load-time uid, which a macOS VM names on the kernel's command line for its
-// sessions, all of the share's owner (vm/init, guest/root.ts). Under QEMU and KVM, behind
-// SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
+// The protected-names rule (vm/rule.bpf.c) as the guest kernel runs it, for whom and what it judges: the
+// names a volume that compares names without case takes as protected ones, folded (rule-match.h,
+// sg_fold), which the drift test checks against protect.ts on the host; and its scope, the sessions'
+// uids from 10000 up and none below, on every OS. With it, the owner a root's folder shows when asked
+// as the root's own uid, as a root's setup on Apple's share asks it (guest/root.ts, shownTo and
+// checkOwner), here of Linux's shares, whose server maps the host user to each root's uid. Under QEMU
+// and KVM, behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,32 +12,47 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ControlLink } from "../../src/vm/control.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
-import { agentDiskWith, altered, ARCH, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, until, USER } from "./guest-support.js";
+import { agentDiskWith, altered, ARCH, folderOf, IMAGE, KVM, needsKvm, OTHER, ROOT, signal, until, USER } from "./guest-support.js";
 
 beforeAll(needsKvm);
 
 const SHARE = "/run/surogate/shares/r1";
-// As init reads the kernel's command line for the scope, with surogate.uid= named too: Linux's QEMU names none.
-const scoped = (uid: string) => ['scope_uid "$(cat /proc/cmdline)"', `scope_uid "$(cat /proc/cmdline) surogate.uid=${uid}"`] as [string, string];
-// The rule's scope alone, the agent left Linux's: its roots keep their own uids from 10000 up, which Linux's shares map.
-const RULE_ALONE: [string, string] = ['echo "$scope" > /run/surogate/scope', "echo > /run/surogate/scope"];
-// As the guest's root, once a root's share is mounted: a write to a protected file and to another, by the scope's uid,
-// by a uid besides it, and by root, through a mount of the share's that each can reach (the agent's is root's alone);
-// then a change to the frozen scope. On the console, which init's own lines go to.
+const KEY = "0123456789abcdef";
+// As the guest's root, once a root's share is mounted: a write to a protected file and to another, by a session's
+// uid, by the uid just below the sessions', and by root, through a mount of the share's that each can reach (the
+// agent's is root's alone); then whether the rule has a map that could add a uid to its scope. On the console, which
+// init's own lines go to.
 const PROBE = `(
   until mountpoint -q ${SHARE}; do sleep 0.1; done
   mkdir /run/probe && mount --bind ${SHARE} /run/probe
-  for uid in 1234 1235 0; do
+  for uid in 10000 9999 0; do
     for file in .git/hooks/pre-commit notes.txt; do
       if setpriv --reuid="$uid" --regid="$uid" --clear-groups sh -c "echo x >> /run/probe/$file" 2>/dev/null; then said=written; else said=refused; fi
       echo "scope: $uid $file $said"
     done
   done
-  if /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/scope key 0 0 0 0 value 0 0 0 0 2>/dev/null; then echo "scope: changed"; else echo "scope: frozen"; fi
+  echo "scope: maps named scope $(/usr/sbin/bpftool map show | grep -c ' name scope ' || true)"
   echo "scope: done"
+) &
+`;
+// As the guest's root, once two roots' shares and a place are mounted: the agent's own look at a folder's owner as a
+// uid, of the first root's share as its uid and as the second root's, of the second's as its own, and of the place's
+// history, which is the guest's root's, as the first root's uid; and the agent's verdict on each.
+const ASKS = [[SHARE, 10000], [SHARE, 10001], ["/run/surogate/shares/r2", 10001], [`/run/surogate/places/${KEY}/history`, 10000]];
+const OWNERS = `(
+  until mountpoint -q ${SHARE} && mountpoint -q /run/surogate/shares/r2 && mountpoint -q /run/surogate/places/${KEY}/history; do sleep 0.1; done
+  /usr/bin/node --input-type=module -e '
+    const { checkOwner, shownTo } = await import("/run/surogate/agent/guest/root.js");
+    for (const [path, uid] of ${JSON.stringify(ASKS)}) {
+      const shown = await shownTo(path, uid, 5000);
+      let verdict = "taken";
+      try { checkOwner(shown ?? -1, uid); } catch (error) { verdict = error.message; }
+      console.error(\`owner: \${uid} \${shown} \${verdict}\`);
+    }
+    console.error("owner: done");
+  '
 ) &
 `;
 
@@ -86,17 +102,16 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the protected-names rule
     }
   });
 
-  it("judges the one uid the kernel's command line names as surogate.uid= besides the sessions' own, no other, and keeps it frozen", async () => {
+  it("judges sessions from uid 10000 up, and no uid below them, the guest's root among them, with no map to add one", async () => {
     rmSync(options.console, { force: true });
-    const init = altered(scoped("1234"), RULE_ALONE, [/^exec /m, `${PROBE}exec `]);
-    const guest = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, init) });
+    const guest = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, altered([/^exec /m, `${PROBE}exec `])) });
     try {
       expect(await guest.ready(ROOT, folderOf(folder))).toBeNull();
       await until(() => readFileSync(options.console, "utf8").includes("scope: done"), 30_000);
       const said = readFileSync(options.console, "utf8").split("\n").filter((line) => line.startsWith("scope: ")).map((line) => line.slice(7).trim());
       expect(said).toEqual([
-        "1234 .git/hooks/pre-commit refused", "1234 notes.txt written", "1235 .git/hooks/pre-commit written", "1235 notes.txt written",
-        "0 .git/hooks/pre-commit written", "0 notes.txt written", "frozen", "done",
+        "10000 .git/hooks/pre-commit refused", "10000 notes.txt written", "9999 .git/hooks/pre-commit written", "9999 notes.txt written",
+        "0 .git/hooks/pre-commit written", "0 notes.txt written", "maps named scope 0", "done",
       ]);
       expect([readFileSync(join(folder, ".git", "hooks", "pre-commit"), "utf8"), readFileSync(join(folder, "notes.txt"), "utf8")]).toEqual(["x\nx\n", "x\nx\nx\n"]);
     } finally {
@@ -104,14 +119,28 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the protected-names rule
     }
   });
 
-  it("fails the boot, before its hello, on a scope no session may run as: root's", async () => {
+  it("takes a root's folder that shows its own uid when asked as it, and refuses one that shows another user's or root's", async () => {
     rmSync(options.console, { force: true });
-    const booted = { ...options, agentDisk: agentDiskWith(dir, altered(scoped("0"))) };
-    const deadline = performance.now() + 60_000;
-    const vm = await bootLinux(booted, undefined, deadline);
-    const outcome = await ControlLink.open(vm.control, booted.user, deadline, vm.exited).then(() => "it said hello", (error: Error) => error.message);
-    await vm.kill();
-    expect(outcome).toContain("The VM exited");
-    expect(readFileSync(options.console, "utf8")).toContain("surogate: surogate.uid=0 is not a uid a session may run as");
+    const other = join(dir, "other");
+    const history = join(dir, "history");
+    const real = join(dir, "real");
+    for (const made of [other, history, real]) mkdirSync(made, { recursive: true });
+    const guest = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, altered([/^exec /m, `${OWNERS}exec `])) });
+    try {
+      expect(await guest.ready(ROOT, folderOf(folder))).toBeNull();
+      expect(await guest.ready(OTHER, folderOf(other))).toBeNull();
+      expect(await guest.place({ key: KEY, history, real: folderOf(real) })).toBeNull();
+      await until(() => readFileSync(options.console, "utf8").includes("owner: done"), 30_000);
+      const said = readFileSync(options.console, "utf8").split("\n").filter((line) => line.startsWith("owner: ")).map((line) => line.slice(7).trim());
+      expect(said).toEqual([
+        "10000 10000 taken",
+        "10001 10000 This chat's folder shows as another user's in the sandbox, so no command runs in it",
+        "10001 10001 taken",
+        "10000 0 This chat's folder shows as root's in the sandbox, so no command runs in it",
+        "done",
+      ]);
+    } finally {
+      await guest.stop();
+    }
   });
 });

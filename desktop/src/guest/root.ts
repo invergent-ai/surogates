@@ -6,8 +6,8 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, chownSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
-import { chmod, chown, mkdir, readdir, readFile, rmdir, stat, writeFile } from "node:fs/promises";
+import { chmodSync, chownSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { chmod, chown, mkdir, open, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
@@ -135,38 +135,22 @@ export function rootEnvironment(layout: string, user: HostUser, companyCa: boole
   };
 }
 
-// Where vm/init leaves the protected-names rule's scope once the rule is attached: the one uid it
-// judges besides those from FIRST_UID up, or nothing for none.
-export const SCOPE = "/run/surogate/scope";
-
-/** The rule's scope as vm/init wrote it (*written*, SCOPE's text): its uid, or null for none. Throws on anything else. */
-export function scopeOf(written: string): number | null {
-  const text = written.trim();
-  if (text === "") return null;
-  const uid = Number(text);
-  if (!/^[1-9][0-9]{0,9}$/.test(text) || uid > 4_294_967_294) throw new Error(`the protected-names rule's scope is not a uid: ${text.slice(0, 32)}`);
-  return uid;
-}
-
 // The guest uid of *root*: given at its first ask, from FIRST_UID up, and kept
 // as the owner of its folder on the sessions disk, which holds its home and temp
-// folder. A uid is never given again while that folder exists. In a guest whose
-// rule judges the one uid *scope* besides those, as a macOS VM's does, every root
-// runs as that uid, which its folder's share shows (sessionUid): its folder there is that uid's.
-export function uidOf(root: string, sessions = SESSIONS, scope: number | null = null): number {
+// folder. A uid is never given again while that folder exists.
+export function uidOf(root: string, sessions = SESSIONS): number {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
   const folder = join(sessions, root);
   try {
     const { uid } = statSync(folder);
-    // Only this agent makes these folders, each owned from FIRST_UID up, or by the scope's uid where there is one:
-    // any other owner was never given here.
-    if (scope === null ? uid < FIRST_UID : uid !== scope) throw new Error(`the folder of ${root} on the sessions disk is not one this guest made`);
+    // Only this agent makes these folders, each owned from FIRST_UID up: any other owner was never given here.
+    if (uid < FIRST_UID) throw new Error(`the folder of ${root} on the sessions disk is not one this guest made`);
     return uid;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const taken = readdirSync(sessions).filter((name) => ROOT_ID.test(name)).map((name) => statSync(join(sessions, name)).uid);
-  const uid = scope ?? Math.max(FIRST_UID - 1, ...taken) + 1;
+  const uid = Math.max(FIRST_UID - 1, ...taken) + 1;
   // Made whole under another name, then renamed: the folder is never there with another owner.
   const making = join(sessions, `.${root}`);
   rmSync(making, { recursive: true, force: true });
@@ -235,18 +219,56 @@ async function mountShare(share: Share): Promise<string> {
 export const mountDevice = (): Promise<string> => mountVirtiofs(DEVICE);
 
 /**
- * The uid a root's runner runs as on Apple's share, which maps no owner: the share's folder shows the host
- * user's uid, *owner*, which every root runs as, and which the protected-names rule judges as its *scope*.
- * Throws for a folder that shows as root's, or as any uid the rule does not judge.
+ * Whether a root whose uid is *uid* runs on Apple's share, whose folder showed *shown* as its owner when asked as
+ * *uid* (shownTo). Apple's server maps no owner: it shows each file as the asking uid's, so a root runs on its own
+ * uid, as on Linux, only where its folder shows exactly that uid. Throws for anything else, root's above all.
  */
-export function sessionUid(owner: number, scope: number | null): number {
-  if (scope === null) throw new Error(UNJUDGED);
-  if (owner === 0) throw new Error("This chat's folder shows as root's in the sandbox, so no command runs in it");
-  if (owner !== scope) throw new Error("This chat's folder shows as a user's in the sandbox whose writes its protected-names rule does not judge, so no command runs in it");
-  return owner;
+export function checkOwner(shown: number, uid: number): void {
+  if (shown === 0) throw new Error("This chat's folder shows as root's in the sandbox, so no command runs in it");
+  if (shown !== uid) throw new Error("This chat's folder shows as another user's in the sandbox, so no command runs in it");
 }
-// Apple's share in a guest whose rule judges no uid that the share shows.
-export const UNJUDGED = "This computer's sandbox judges no user's writes that this chat's folder shows, so no command runs in it";
+
+const STAT = "/usr/bin/stat";
+
+/**
+ * The owner *path*'s folder shows to *uid*, asked of its server and not of the guest's cache (coreutils'
+ * --cached=never: statx's AT_STATX_FORCE_SYNC), by a stat run as *uid* alone on a descriptor this agent opened,
+ * since a root's uid cannot reach SHARES, root's alone. Null when it has not answered within *ms*, as a share that
+ * stalled does not.
+ */
+export async function shownTo(path: string, uid: number, ms: number): Promise<number | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+    timer.unref();
+  });
+  const asked = (async () => {
+    const folder = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      const child = spawn(STAT, ["--cached=never", "--dereference", "--format=%u", "/proc/self/fd/3"], {
+        uid, gid: uid, env: {}, stdio: ["ignore", "pipe", "pipe", folder.fd],
+      });
+      void late.then(() => child.kill("SIGKILL"));
+      let said = "";
+      let why = "";
+      child.stdout?.on("data", (chunk: Buffer) => (said += chunk.toString()));
+      child.stderr?.on("data", (chunk: Buffer) => (why += chunk.toString()));
+      const code = await new Promise<number | null>((resolve) => {
+        child.once("error", () => resolve(null));
+        child.once("close", resolve);
+      });
+      if (code === 0 && /^[0-9]{1,10}\n$/.test(said)) return Number(said);
+      throw new Error(`This chat's folder could not be looked at in the sandbox: ${why.trim().slice(0, 200) || `stat ended ${code}`}`);
+    } finally {
+      await folder.close();
+    }
+  })();
+  try {
+    return await Promise.race([asked, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function mountVirtiofs(tag: string): Promise<string> {
   const share = join(SHARES, tag);
@@ -343,25 +365,23 @@ export async function setClock(now: number): Promise<void> {
 // the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
 // everything in them with it. Killing unshare reaches them only while enter-root
 // builds them: the kernel drops the parent-death signal when the runner takes on
-// the root's user. Nothing is made, mounted or given until every input has passed. *scope*: the
-// one uid the protected-names rule judges besides those from FIRST_UID up, which every root runs
-// as on Apple's share (sessionUid), and none on Linux's.
-export async function enter(root: string, place: Place, share: Share, user: HostUser, scope: number | null = null): Promise<ChildProcess> {
+// the root's user. Nothing is made, mounted or given until every input has passed.
+export async function enter(root: string, place: Place, share: Share, user: HostUser): Promise<ChildProcess> {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
   checkShare(share);
-  if (share.kind === "vz" && scope === null) throw new Error(UNJUDGED);
   if (!NAME.test(user.name)) throw new Error(`not a user name: ${user.name}`);
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
-  const uid = uidOf(root, SESSIONS, scope);
+  const uid = uidOf(root);
   // Made, if at all, before the host's answer to hello let any root be set up (Control), and kept for the boot.
   const companyCa = existsSync(STORE);
   const mount = await mountShare(share);
-  // Its owner read once, at its setup, within the mount's bound: one whose share stalled answers none.
+  // Apple's share's owner, asked as the root's uid, once, at its setup, within the mount's bound: one whose share
+  // stalled answers none. Linux's server maps the host user to the root's uid itself (virtiofsd's --uid-map).
   if (share.kind === "vz") {
-    const owner = await Promise.race([stat(mount).then(({ uid: shown }) => shown), new Promise<null>((resolve) => setTimeout(() => resolve(null), MOUNT_MS).unref())]);
-    if (owner === null) throw new Error("This chat's folder did not answer in the sandbox");
-    sessionUid(owner, scope);
+    const shown = await shownTo(mount, uid, MOUNT_MS);
+    if (shown === null) throw new Error("This chat's folder did not answer in the sandbox");
+    checkOwner(shown, uid);
   }
   const cgroup = join(CGROUPS, root);
   // Made at the root's first setup in this guest, and kept until the guest stops: the root's

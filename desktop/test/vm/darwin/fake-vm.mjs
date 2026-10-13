@@ -9,7 +9,7 @@
 //   FAKE_VM_KILL=ignore   a kill line is not heeded
 //   FAKE_VM_STOP=error    once started, the VM stops by itself for an error
 //   FAKE_VM_SUPPORTED=0   check says this Mac cannot run it
-//   FAKE_VM_UID=<uid>     its agent gives each root that uid, not the kernel command line's surogate.uid=
+//   FAKE_VM_UID=<uid>     its agent gives each root that uid, not 10000, the first a root has
 //   FAKE_VM_POWEROFF=ignore its agent's power-off never ends the VM
 //   FAKE_VM_LOG=<file>    each line read is written there
 // Node, and no Apple framework: so it runs where the tests do, on Linux and on a Mac.
@@ -86,12 +86,12 @@ const stop = (reason, why) => {
   process.exit(0);
 };
 
-function boot(line) {
+function boot() {
   if (env.FAKE_VM_BOOT === "fail") {
     say({ type: "failed", why: "the fake was told to fail" });
     process.exit(1);
   }
-  const uid = Number(env.FAKE_VM_UID ?? /(?:^| )surogate\.uid=(\d+)(?: |$)/.exec(line.commandLine)?.[1]);
+  const uid = Number(env.FAKE_VM_UID ?? 10_000);
   const [control] = connected;
   const roots = {
     uid: () => uid,
@@ -121,7 +121,7 @@ createInterface({ input: process.stdin }).on("line", (text) => {
   if (line.type === "boot") {
     if (state !== "waiting") return say({ type: "refused", why: "a boot after the first" });
     pending = line;
-    return boot(pending);
+    return boot();
   }
   if (line.type === "share") {
     if (state !== "running") return say({ type: "refused", id: line.id, why: "the guest is not running" });
