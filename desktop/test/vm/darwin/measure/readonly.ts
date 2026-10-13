@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { expect, it } from "vitest";
 
-import { lab, PROBING_DISK, ready, record, ROOTS, scratch } from "./harness.js";
+import { folderOf, lab, PROBING_DISK, record, ROOTS, scratch } from "./harness.js";
 
 const KEY = "0123456789abcdef";
 const ATTEMPTS = [
@@ -37,7 +37,8 @@ it("keeps a place's folder read-only to the guest's root, however it remounts", 
     return;
   }
   // A root of its own, so the guest has a share the probe's watcher looks in: the history's, where the probe is left.
-  await ready(booted.guest, ROOTS[0]!, scratch("readonly-root"));
+  // Set up, or refused for the owner its folder shows: the agent mounts the share before it reads that.
+  await booted.guest.ready(ROOTS[0]!, folderOf(scratch("readonly-root")));
   const script = [
     `for at in /run/surogate/places/${KEY}/real /run/surogate/shares/surogate/r2; do`,
     '  echo "at $at"; echo "remount: $(mount -o remount,rw "$at" 2>&1 && echo allowed || echo refused)"',
