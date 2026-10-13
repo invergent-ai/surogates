@@ -6060,14 +6060,21 @@ class AgentHarness(
         message: str,
         *,
         user_content: str | None = None,
+        notice: bool = False,
     ) -> None:
         # The cursor is the turn's end's to move (``_end_command_turn``): it
         # must not pass what the user sent while this was being answered.
+        # A *notice* is a status line, not an answer: the chat shows it as
+        # a quiet marker.
         assistant_message = {"role": "assistant", "content": message}
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": assistant_message, **self._names_its_message()},
+            {
+                "message": assistant_message,
+                **self._names_its_message(),
+                **({"notice": True} if notice else {}),
+            },
             lease_token=lease.lease_token,
         )
 
@@ -6091,11 +6098,10 @@ class AgentHarness(
         if compacted is not None:
             await self._emit_loop_response(
                 session, lease,
-                f"Context compressed to {len(compacted.data.get('compacted_messages') or [])} messages. "
-                f"Strategy: {compacted.data.get('strategy', 'unknown')}.",
+                f"Context compressed to {len(compacted.data.get('compacted_messages') or [])} messages.",
+                notice=True,
             )
             return
-        original_count = len(messages)
 
         # Remove the /compress message itself — it's not real conversation.
         # Dispatch only reaches here once the latest user *event* text is
@@ -6109,24 +6115,7 @@ class AgentHarness(
             None,
         )
         messages = [m for m in messages if m is not last_user]
-
-        if len(messages) <= 5:
-            # Too few messages to compress.
-            await self._store.emit_event(
-                session.id,
-                EventType.LLM_RESPONSE,
-                {
-                    **self._names_its_message(),
-                    "message": {
-                        "role": "assistant",
-                        "content": "Context is too small to compress — only "
-                                   f"{len(messages)} messages.",
-                    },
-                },
-                lease_token=lease.lease_token,
-            )
-            # Lease released by the outer wake() finally block.
-            return
+        original_count = len(messages)
 
         try:
             compressed, summary_data = await self._compressor.compress(
@@ -6149,8 +6138,13 @@ class AgentHarness(
             # Lease released by the outer wake() finally block.
             return
 
-        compressed_count = len(compressed)
-        saved = original_count - compressed_count
+        # As in automatic compaction, a pass that changed nothing writes no
+        # compaction.
+        if summary_data.get("strategy") in NOOP_STRATEGIES:
+            await self._emit_loop_response(
+                session, lease, "Nothing to compress yet.", notice=True,
+            )
+            return
 
         # Emit the compacted messages as a CONTEXT_COMPACT event.
         await self._store.emit_event(
@@ -6164,26 +6158,10 @@ class AgentHarness(
             lease_token=lease.lease_token,
         )
         self._forget_compacted_reads(session)
-
-        # Emit an assistant message summarising the result.
-        await self._store.emit_event(
-            session.id,
-            EventType.LLM_RESPONSE,
-            {
-                **self._names_its_message(),
-                "message": {
-                    "role": "assistant",
-                    "content": (
-                        f"Context compressed: {original_count} → {compressed_count} messages "
-                        f"({saved} removed). "
-                        f"Strategy: {summary_data.get('strategy', 'unknown')}."
-                    ),
-                },
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "context_window": self._compressor.context_length,
-            },
-            lease_token=lease.lease_token,
+        await self._emit_loop_response(
+            session, lease,
+            f"Context compressed: {original_count} → {len(compressed)} messages.",
+            notice=True,
         )
         # Lease released by the outer wake() finally block.
 

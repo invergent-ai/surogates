@@ -8,6 +8,7 @@ export type AgentChatSystemKind =
   | "error"
   | "browser_marker"
   | "browser_marker_warning"
+  | "notice"
   | "worker"
   | "thread_proposal";
 
