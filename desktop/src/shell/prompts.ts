@@ -1,7 +1,7 @@
-// The desktop's own prompts (spec, Sections 4 and 8). The folder dialog is the system's,
-// as Claude Desktop picks a folder (dialog.showOpenDialog with openDirectory and
-// createDirectory); the folder sheet, the approval prompts, the Work-freely confirmation and the
-// hand back's are prompt windows of the app's own. Each takes its turn over the app's window, one at a time.
+// The desktop's own prompts (spec, Sections 4 and 8). The folder dialog is the system's
+// (dialog.showOpenDialog with openDirectory and createDirectory); the folder sheet, the
+// approval prompts, the Work-freely confirmation and the hand back's are prompt windows of
+// the app's own. Each takes its turn over the app's window, one at a time.
 
 import { type BrowserWindow, dialog } from "electron";
 
