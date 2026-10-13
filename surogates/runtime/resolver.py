@@ -37,6 +37,7 @@ def _opt_llm(blob: dict | None) -> LLMEndpoint | None:
         model=blob["model"],
         base_url=blob["base_url"],
         api_key_ref=blob["api_key_ref"],
+        context_window=blob.get("context_window") or None,
     )
 
 

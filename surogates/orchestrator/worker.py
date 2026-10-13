@@ -1681,8 +1681,7 @@ async def run_worker(settings: Settings) -> None:
         compressor = ContextCompressor(
             model_id,
             threshold_percent=settings.llm.compression_threshold,
-            base_url=settings.llm.base_url,
-            api_key=settings.llm.api_key,
+            context_window=llm_bundle.main.context_window,
             model_overrides=settings.llm.models,
             prune_browser_state=settings.llm.prune_browser_state,
             browser_state_keep_last=settings.llm.browser_state_keep_last,
