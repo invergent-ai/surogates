@@ -1,7 +1,8 @@
 //! surogate-helper <command>: one answer a run, on stdout, and its words on stderr where it has none. It runs as the
 //! user who starts it, never elevated, reads no environment and no file of the caller's but the program `verify` or `version` is
-//! given, and starts no program. The app's TypeScript reads each answer (src/shell/ca-source-win32.ts,
-//! src/browser/processes-win32.ts, src/browser/known-win32.ts).
+//! given, and starts no program but the one `spawn` is given. The app's TypeScript reads each answer (src/shell/ca-source-win32.ts,
+//! src/browser/processes-win32.ts, src/browser/known-win32.ts), and starts every program that is not its own through
+//! `spawn` (src/clean-child.ts).
 //!
 //!   trust             the company's root certificates, as PEM: those an administrator or a policy put in the
 //!                     computer's or Group Policy's Root stores that Windows would trust for TLS, none it distrusts
@@ -11,6 +12,10 @@
 //!   app-path <name>   where the App Paths key says the program <name> is: HKLM's, then HKCU's, a line each
 //!   look <path>       nothing: whether <path> is there, opened through its links, by the run's end alone (0 or 1)
 //!   version <path>    the program's product version, from its version resource, a line
+//!   spawn <keep> <program> <args>…
+//!                     the program, by its whole path, holding the helper's first <keep> + 1 descriptors and nothing
+//!                     else of its caller's, in the helper's place: its output is the program's, and the helper ends as
+//!                     it ends, taking it along if killed first (spawn.rs, windows/spawn.rs)
 //!
 //! A Windows-subsystem program: started by an app that has no console, as the installed app started from the Start
 //! menu has none, it gives Windows no reason to make one (Microsoft, "Creation of a Console": a console process gets a
@@ -20,10 +25,14 @@
 use std::ffi::OsString;
 use std::io::Write;
 
-const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path> | version <path>";
+const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path> | version <path> | spawn <keep> <program> <args>…";
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // A program in the helper's place says nothing of the helper's: its output is the program's own.
+    if args.first().and_then(|first| first.to_str()) == Some("spawn") {
+        spawn(&args[1..]);
+    }
     let (code, out, words) = match run(&args) {
         Answer::Said(text) => (0, text, None),
         Answer::Failed(words) => (1, String::new(), Some(words)),
@@ -82,4 +91,19 @@ fn run(args: &[OsString]) -> Answer {
 #[cfg(not(windows))]
 fn run(_args: &[OsString]) -> Answer {
     Answer::Failed("surogate-helper answers on Windows alone".to_string())
+}
+
+fn spawn(args: &[OsString]) -> ! {
+    let Some(spawn) = surogate_helper::spawn::parsed(args) else {
+        let _ = writeln!(std::io::stderr().lock(), "{USAGE}");
+        std::process::exit(2);
+    };
+    #[cfg(windows)]
+    surogate_helper::windows::spawn::run(&spawn);
+    #[cfg(not(windows))]
+    {
+        let _ = (spawn.keep, spawn.program, spawn.args);
+        let _ = writeln!(std::io::stderr().lock(), "surogate-helper starts a program on Windows alone");
+        std::process::exit(2);
+    }
 }

@@ -3,6 +3,7 @@
 pub mod app_path;
 pub mod look;
 pub mod procs;
+pub mod spawn;
 pub mod trust;
 pub mod verify;
 pub mod version;

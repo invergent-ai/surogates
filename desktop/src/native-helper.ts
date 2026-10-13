@@ -5,29 +5,12 @@
 // every other is started there. Either way with no environment of the app's. Electron-free.
 
 import { execFile, spawnSync } from "node:child_process";
-import { posix, win32 } from "node:path";
 
 import { cleanly } from "./clean-child.js";
+import { helperAt } from "./helper-path.js";
 import { forThisOs, notBuilt } from "./platform.js";
 
-// macOS's: in the app's bundle, beside the app's own executable, as its code lives in Contents/Resources/app; in a
-// development build, its build's own (native/helper/build.sh). Linux has no helper of its own: there a development
-// build's tests find macOS's where its build puts it.
-function inBundle(dir: string): string {
-  const bundle = /^(.+\.app)\/Contents\/Resources\/app\/dist$/.exec(dir)?.[1];
-  return bundle ? posix.join(bundle, "Contents", "MacOS", "surogate-helper") : posix.join(dir, "..", "native", "helper", ".build", "surogate-helper");
-}
-
-// Windows's: in the installed app's bin folder, as its code lives in resources\app; in a development build, the
-// release build of the programs' Cargo workspace (native/windows).
-function inInstall(dir: string): string {
-  const install = /^(.+)\\resources\\app\\dist$/.exec(dir)?.[1];
-  return install ? win32.join(install, "bin", "surogate-helper.exe") : win32.join(dir, "..", "native", "windows", "target", "release", "surogate-helper.exe");
-}
-
-/** The helper of the app whose code is in *dir*, its dist folder, by this OS. */
-export const helperAt: (dir: string) => string = forThisOs({ linux: inBundle, darwin: inBundle, win32: inInstall })
-  ?? (() => notBuilt("Surogate Desktop's helper"));
+export { helperAt };
 
 export const HELPER = helperAt(import.meta.dirname);
 

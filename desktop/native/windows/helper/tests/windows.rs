@@ -405,3 +405,113 @@ fn says_how_it_is_run_when_it_is_not() {
         assert!(done.stdout.is_empty());
     }
 }
+
+const SYSTEM32: &str = "C:\\Windows\\System32";
+
+// The helper's spawn of *program* with *args*, keeping the standard three, as the app's clean spawns run it.
+fn spawned(program: &str, args: &[&str]) -> Output {
+    let mut all = vec![OsStr::new("spawn"), OsStr::new("2"), OsStr::new(program)];
+    all.extend(args.iter().map(OsStr::new));
+    helper(&all)
+}
+
+#[test]
+fn starts_a_program_in_its_place_its_output_and_its_exit_code_the_program_s() {
+    let cmd = format!("{SYSTEM32}\\cmd.exe");
+    let echoed = spawned(&cmd, &["/d", "/c", "echo", "the program's own words"]);
+    assert_eq!((echoed.status.code(), String::from_utf8_lossy(&echoed.stdout).trim_end().to_string()), (Some(0), "the program's own words".to_string()));
+    assert_eq!(spawned(&cmd, &["/d", "/c", "exit", "7"]).status.code(), Some(7));
+    // Each argument reaches the program as it is.
+    let node = which_node();
+    let argv = spawned(&node, &["-e", "process.stdout.write(JSON.stringify(process.argv.slice(1)))", "a b", "", "c\"d", "e\\", "f\\\\\"g"]);
+    assert_eq!(String::from_utf8_lossy(&argv.stdout), r#"["a b","","c\"d","e\\","f\\\\\"g"]"#);
+}
+
+#[test]
+fn says_a_program_it_cannot_start_as_a_shell_says_it_and_ends_127() {
+    let missing = "C:\\no\\such\\program.exe";
+    let done = spawned(missing, &[]);
+    assert_eq!(done.status.code(), Some(127));
+    assert!(String::from_utf8_lossy(&done.stderr).starts_with(&format!("{missing}: ")), "{}", String::from_utf8_lossy(&done.stderr));
+    for args in [&["spawn"][..], &["spawn", "2"], &["spawn", "1", "C:\\x.exe"], &["spawn", "2", "x.exe"]] {
+        assert_eq!(helper(&args.iter().map(OsStr::new).collect::<Vec<_>>()).status.code(), Some(2), "{args:?}");
+    }
+}
+
+// The node on this computer's PATH, as the runner's setup puts one there.
+fn which_node() -> String {
+    let found = Command::new(format!("{SYSTEM32}\\where.exe")).arg("node").output().expect("where runs");
+    String::from_utf8_lossy(&found.stdout).lines().next().expect("a node on the PATH").trim().to_string()
+}
+
+mod held {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, CompareObjectHandles, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcess, WaitForSingleObject, PROCESS_DUP_HANDLE, PROCESS_SYNCHRONIZE};
+
+    use super::{HELPER, SYSTEM32};
+
+    // The process whose parent is *parent*, once there is one.
+    fn child_of(parent: u32) -> u32 {
+        let until = Instant::now() + Duration::from_secs(20);
+        loop {
+            // SAFETY: the snapshot is closed once read.
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+                let mut found = None;
+                let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+                while more {
+                    if entry.th32ParentProcessID == parent {
+                        found = Some(entry.th32ProcessID);
+                    }
+                    more = Process32NextW(snapshot, &mut entry) != 0;
+                }
+                CloseHandle(snapshot);
+                if let Some(pid) = found {
+                    return pid;
+                }
+            }
+            assert!(Instant::now() < until, "the helper started no program");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn gives_the_program_its_stdio_alone_of_what_its_caller_could_hand_it_and_ends_it_when_killed() {
+        // An event this test makes inheritable, which the helper is handed by this test's spawn of it, as libuv hands a
+        // child every inheritable handle its parent has.
+        let inheritable = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 1 };
+        // SAFETY: an unnamed event, closed at the test's end.
+        let event: HANDLE = unsafe { CreateEventW(&inheritable, 1, 0, std::ptr::null()) };
+        assert!(!event.is_null());
+        let mut helper = Command::new(HELPER)
+            .args(["spawn", "2", &format!("{SYSTEM32}\\PING.EXE"), "-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().expect("the helper starts");
+        let program = child_of(helper.id());
+        // SAFETY: the program's handle is closed at the test's end; a handle duplicated from it is compared, then closed.
+        unsafe {
+            let process = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_SYNCHRONIZE, 0, program);
+            assert!(!process.is_null(), "the program is there to look at");
+            // An inherited handle keeps its value: had the program inherited the event, the event is at it there too.
+            let mut there: HANDLE = std::ptr::null_mut();
+            let copied = DuplicateHandle(process, event, GetCurrentProcess(), &mut there, 0, 0, DUPLICATE_SAME_ACCESS) != 0;
+            let same = copied && CompareObjectHandles(there, event) != 0;
+            if copied {
+                CloseHandle(there);
+            }
+            assert!(!same, "the program holds the event its helper was handed");
+            // Killed, the helper takes the program along.
+            helper.kill().unwrap();
+            helper.wait().unwrap();
+            assert_eq!(WaitForSingleObject(process, 10_000), WAIT_OBJECT_0, "the program ended with its helper");
+            CloseHandle(process);
+            CloseHandle(event);
+        }
+    }
+}

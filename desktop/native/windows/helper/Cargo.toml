@@ -1,6 +1,6 @@
 # surogate-helper.exe: the app's own program for what only Windows's own libraries answer, as the user and never
 # elevated: the company's root certificates, this user's processes, a program's Authenticode signer, and where
-# Windows says a program is installed.
+# Windows says a program is installed; and the one way the app starts a program that is not its own.
 [package]
 name = "surogate-helper"
 version.workspace = true
@@ -27,6 +27,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Security_WinTrust",
   "Win32_Storage_FileSystem",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_System_WindowsProgramming",

@@ -31,6 +31,7 @@ import { basename, dirname, join } from "../host-path.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { forgettable } from "../vm/history.js";
 import type { Folder, ProcessesChange } from "../vm/manager.js";
 import { LOCK_WAIT_MS } from "./folder-record.js";
@@ -197,19 +198,24 @@ export interface ForkOptions {
   execPath?: string; // the node it runs on; its default is the app's own
 }
 
+// How a host that goes takes along what it started, by OS: on Linux and macOS its own process group, killed whole,
+// since srt's socat bridges are the host's children, outside the sandbox, and do not die with it; on Windows the job
+// surogate-helper.exe holds it in (clean-child.ts), which ends it and all it started when the helper is killed, and
+// when the app ends, the helper being the app's own child, not detached.
+const GROUPED = forThisOs({ linux: true, darwin: true, win32: false });
+
 export function forkHost(options: ForkOptions = {}): HostProcess {
   // Spawned with an IPC channel, never forked: once Electron's RunAsNode fuse is off, its
   // child_process.fork() throws in every process of the app's, whatever node it is given.
-  // Its own process group: srt's socat bridges are the host's children, outside
-  // the sandbox, and do not die with it, so a host that goes takes its group
-  // along. Its stdout goes to stderr: the app's stdout may carry other things.
+  // What it started goes with it (GROUPED). Its stdout goes to stderr: the app's stdout may carry other things.
   // Its environment is named, never the app's: a plain node acts on NODE_OPTIONS, NODE_PATH,
   // OPENSSL_CONF and the like, and srt on CLAUDE_CODE_TMPDIR, none of which the user's may set for it.
   // --disable-sigusr1: a plain node opens its inspector on SIGUSR1, which any process of the user's can
   // send, and has no fuse to refuse it as Electron has.
   // With its three standard descriptors and its channel, and nothing else the app has open.
+  const grouped = GROUPED ?? notBuilt("A file host");
   const child = spawnClean(options.execPath ?? NODE, ["--disable-sigusr1", options.script ?? HOST], {
-    detached: true,
+    detached: grouped,
     stdio: ["ignore", 2, 2, "ipc"],
     env: { PATH: process.env.PATH ?? "", HOME: homedir() },
   });
@@ -217,7 +223,9 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
   let exited = false;
   const killGroup = () => {
     try {
-      if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      if (child.pid === undefined) return;
+      if (grouped) process.kill(-child.pid, "SIGKILL");
+      else child.kill("SIGKILL");
     } catch {
       // The group has gone.
     }
