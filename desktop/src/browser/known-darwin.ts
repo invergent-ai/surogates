@@ -1,28 +1,46 @@
 // The browsers the app knows on macOS (spec, Section 5, "Choosing the browser"): each one's app in the
 // Applications folder, or in the user's own, where its installer or a drag from its disk image puts it.
 // Its program is the one its Info.plist names (Apple, Information Property List, CFBundleExecutable), in
-// its Contents/MacOS. The app drives one only where its code signature checks out (Apple, codesign(1),
-// --verify --strict), as Linux refuses a Snap, and only where the app stays: not on a mounted disk image,
-// which goes when it is ejected, nor in the temporary copy macOS runs a downloaded app from until it is
-// moved (App Translocation), which goes at the next restart.
+// its Contents/MacOS. The app drives one only where its code signature checks out against whose it must be
+// (Apple, codesign(1), --verify --strict and -R), as Linux refuses a Snap, and only where the app stays: not
+// on a mounted disk image, which goes when it is ejected, nor in the temporary copy macOS runs a downloaded app
+// from until it is moved (App Translocation), which goes at the next restart. Both Applications folders can be
+// the user's to write, so no chat's folder may hold a place the app looks for one at (binding/folder.ts).
 
 import { execFile, spawnSync } from "node:child_process";
-import { statSync } from "node:fs";
-import { join } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import { cleanly } from "../clean-child.js";
 import type { BrowserId, Disk } from "./choose.js";
 import type { KnownBrowser, KnownBrowsers } from "./known.js";
 
-// Each one's app, in the order Settings lists them. Verified: Chrome and Edge, with playwright-core 1.63.0,
-// on the macOS runner's own; the rest are detected, unverified.
-export const APPS: ReadonlyArray<{ id: BrowserId; name: string; app: string; verified: boolean }> = [
-  { id: "chrome", name: "Google Chrome", app: "Google Chrome.app", verified: true },
-  { id: "edge", name: "Microsoft Edge", app: "Microsoft Edge.app", verified: true },
-  { id: "brave", name: "Brave", app: "Brave Browser.app", verified: false },
-  { id: "vivaldi", name: "Vivaldi", app: "Vivaldi.app", verified: false },
+// Each one's app, in the order Settings lists them, and whose its signature must be: its vendor's bundle identifier,
+// as its Info.plist names it (CFBundleIdentifier), and its vendor's team, which Apple's Developer ID certificate that
+// signs its release names in its subject (OU), as codesign -dv shows it (TeamIdentifier): "Developer ID Application:
+// Google LLC (EQHXZ8M8AV)", "... Microsoft Corporation (UBF8T346G9)", "... Brave Software, Inc. (KL8N8XSYF4)", which
+// Brave's own page of its signing keys also gives (brave.com/signing-keys), and "... Vivaldi Technologies AS
+// (4XF3XNRN6Y)". Chromium has no vendor who signs it. Verified: Chrome and Edge, with playwright-core 1.63.0, on the
+// macOS runner's own, their signatures too; the rest are detected, unverified.
+export const APPS: ReadonlyArray<{ id: BrowserId; name: string; app: string; verified: boolean; signer?: { identifier: string; team: string } }> = [
+  { id: "chrome", name: "Google Chrome", app: "Google Chrome.app", verified: true, signer: { identifier: "com.google.Chrome", team: "EQHXZ8M8AV" } },
+  { id: "edge", name: "Microsoft Edge", app: "Microsoft Edge.app", verified: true, signer: { identifier: "com.microsoft.edgemac", team: "UBF8T346G9" } },
+  { id: "brave", name: "Brave", app: "Brave Browser.app", verified: false, signer: { identifier: "com.brave.Browser", team: "KL8N8XSYF4" } },
+  { id: "vivaldi", name: "Vivaldi", app: "Vivaldi.app", verified: false, signer: { identifier: "com.vivaldi.Vivaldi", team: "4XF3XNRN6Y" } },
   { id: "chromium", name: "Chromium", app: "Chromium.app", verified: false },
 ];
+// Where the app looks for each: the Applications folder, then the user's own.
+const FOLDERS = (home: string) => ["/Applications", join(home, "Applications")];
+
+// What an app's signature must be, in Apple's Code Signing Requirement Language (Code Signing Guide): an app by a
+// known browser's name, its vendor's identifier, under a certificate Apple issued to its vendor's team; any other,
+// as one picked in Custom… or Chromium, one whose certificate chain Apple issued (anchor apple generic), which a
+// signature made ad hoc, or by a certificate of no one's, does not have.
+export const ANY_DEVELOPER = "anchor apple generic";
+export function requirementOf(app: string): string {
+  const signer = APPS.find((known) => known.app === basename(app))?.signer;
+  return signer ? `identifier "${signer.identifier}" and ${ANY_DEVELOPER} and certificate leaf[subject.OU] = "${signer.team}"` : ANY_DEVELOPER;
+}
 
 export const NOT_AN_APP = "a program outside an app is not supported";
 export const ON_A_VOLUME = "an app on a disk image or another volume is not supported: drag it to Applications";
@@ -43,8 +61,8 @@ const VERIFY_MS = 120_000;
 export interface AppTools {
   /** The CFBundleExecutable that the Info.plist at *plist* names, as it names it. */
   executableIn(plist: string): string;
-  /** Why the code signature of the app at *app* does not check out, or null where it does. */
-  verify(app: string): Promise<string | null>;
+  /** Why the code signature of the app at *app* does not check out against *requirement* (requirementOf), or null where it does. */
+  verify(app: string, requirement: string): Promise<string | null>;
 }
 
 const said = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -56,8 +74,9 @@ export const SYSTEM: AppTools = {
     if (done.status !== 0) throw new Error(`${plist} names no program: ${(done.stderr || done.error?.message || "").trim()}`);
     return done.stdout.replace(/\n$/, "");
   },
-  verify: (app) => new Promise((resolve) => {
-    execFile(...cleanly(CODESIGN, ["--verify", "--strict", app]), { env: ENV, timeout: VERIFY_MS }, (error) => {
+  // -R's argument, after an equals sign, is a requirement's text (codesign(1), "Specifying Requirements").
+  verify: (app, requirement) => new Promise((resolve) => {
+    execFile(...cleanly(CODESIGN, ["--verify", "--strict", "-R", `=${requirement}`, app]), { env: ENV, timeout: VERIFY_MS }, (error) => {
       resolve(error === null ? null : error.killed ? UNCHECKED : NOT_SIGNED);
     });
   }),
@@ -110,7 +129,7 @@ export function darwinBrowsers(tools: AppTools = SYSTEM): KnownBrowsers {
     const kept = checks.get(app);
     if (kept?.stamp === now) return kept;
     const check: { stamp: string; done: Promise<void>; why: string | null | undefined } = { stamp: now, done: Promise.resolve(), why: undefined };
-    check.done = Promise.resolve().then(() => tools.verify(app)).then((why) => {
+    check.done = Promise.resolve().then(() => tools.verify(app, requirementOf(app))).then((why) => {
       check.why = why;
     }, (error: unknown) => {
       // No check could be run: said as it is.
@@ -122,8 +141,21 @@ export function darwinBrowsers(tools: AppTools = SYSTEM): KnownBrowsers {
 
   return {
     candidates: (home): readonly KnownBrowser[] => APPS.map(({ id, name, app, verified }) => ({
-      id, name, verified, paths: ["/Applications", join(home, "Applications")].flatMap((folder) => programOf(join(folder, app)) ?? []),
+      id, name, verified, paths: FOLDERS(home).flatMap((folder) => programOf(join(folder, app)) ?? []),
     })),
+    // Each place the app looks for a browser at, one there or not yet, and the app of the program picked.
+    guarded: (home, chosen) => {
+      const places = APPS.flatMap(({ app }) => FOLDERS(home).map((folder) => join(folder, app)));
+      if (chosen === null) return places;
+      let real = chosen;
+      try {
+        real = realpathSync(chosen);
+      } catch {
+        // Gone: guarded where it was kept.
+      }
+      const picked = appOf(real);
+      return picked === null ? places : [...places, picked];
+    },
     refused: (real: string, _disk: Disk) => {
       const app = appOf(real);
       if (app === null) return NOT_AN_APP;

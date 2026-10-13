@@ -41,4 +41,6 @@ export const LINUX: KnownBrowsers = {
   },
   // Every rule of Linux's is said at once.
   checked: async () => {},
+  // Its known browsers are the system's packages', which the user cannot write.
+  guarded: () => [],
 };

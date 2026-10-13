@@ -96,6 +96,14 @@ export function findBrowsers(disk: Disk = DISK): Found[] {
   return found;
 }
 
+/**
+ * The folders no chat's folder may be, hold or lie in (binding/folder.ts), for the user whose home is *home*: where this
+ * OS's app looks for a browser it knows, and the one picked in Custom… as the app's data folder *dataDir* keeps it.
+ */
+export function browserFolders(home: string, dataDir: string): string[] {
+  return KNOWN_BROWSERS.guarded(home, new BrowserSetting(join(dataDir, BROWSER_SETTING)).custom());
+}
+
 /** The known browsers installed here (findBrowsers), once every check of them this OS makes is done: as Settings lists them. */
 export async function checkedBrowsers(disk: Disk = DISK): Promise<Found[]> {
   await Promise.all(findBrowsers(disk).map((browser) => KNOWN_BROWSERS.checked(browser.executable)));
@@ -127,6 +135,9 @@ export function chosenBrowser(choice: BrowserChoice, found: Found[], disk: Disk 
 // never as this module is imported: on macOS, knowing a browser reads its app's Info.plist.
 const choiceIds = (): Set<string> => new Set<string>(["auto", ...knownBrowsers().map(({ id }) => id)]);
 
+// Settings → Browser's file, in the app's data folder.
+export const BROWSER_SETTING = "browser.json";
+
 /** Settings → Browser's choice, kept beside the app's other settings: Automatic until the user picks another. */
 export class BrowserSetting {
   constructor(private readonly path: string) {}
@@ -137,6 +148,12 @@ export class BrowserSetting {
       return { choice: "custom", executable: saved.executable, version: typeof saved.version === "string" ? saved.version : "" };
     }
     return typeof saved.choice === "string" && choiceIds().has(saved.choice) ? ({ choice: saved.choice } as BrowserChoice) : { choice: "auto" };
+  }
+
+  /** The program picked in Custom…, as kept, or null where the choice is another. Reads no browser's app. */
+  custom(): string | null {
+    const saved = readState<Record<string, unknown>>(this.path, {});
+    return saved.choice === "custom" && typeof saved.executable === "string" && saved.executable.startsWith("/") ? saved.executable : null;
   }
 
   set(choice: BrowserChoice): void {

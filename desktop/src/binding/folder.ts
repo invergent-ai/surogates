@@ -4,6 +4,7 @@
 import { realpathSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { browserFolders } from "../browser/choose.js";
 import { inside, realpath } from "../files/paths.js";
 import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
 import { bootId } from "./boot-id.js";
@@ -89,5 +90,10 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
       guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)) || links.some((link) => inside(link, candidate)),
   );
   if (held) return refused(`the folder ${path} holds this computer's home folder or the app's own data`);
+  // The app runs the browser it drives outside every sandbox: a folder that is, holds or lies in one, or a place the
+  // app looks for one at, would let a command put a program of its own there.
+  const browsers = browserFolders(guards.home, guards.dataDir).flatMap((dir) => spellings(dir));
+  const browser = browsers.find((dir) => [...new Set([resolve(folder), path])].some((candidate) => inside(dir, candidate) || inside(candidate, dir)));
+  if (browser) return refused(`the app runs a browser at ${browser} outside the sandbox, so the folder ${path} cannot be a chat's`);
   return { ok: true, path, dev: stats.dev, ino: stats.ino };
 }

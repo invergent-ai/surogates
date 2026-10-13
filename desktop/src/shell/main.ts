@@ -19,7 +19,7 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
+  BROWSER_SETTING, type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
   unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
@@ -109,7 +109,7 @@ const loginItem = loginItemFor(places, app);
 const loginCommand = (): string[] => (app.isPackaged ? [places.launcher ?? process.execPath] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
-const browserSetting = new BrowserSetting(join(root, "browser.json"));
+const browserSetting = new BrowserSetting(join(root, BROWSER_SETTING));
 let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
