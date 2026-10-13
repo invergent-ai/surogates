@@ -1023,3 +1023,25 @@ class TestNoEarlyStart:
         assert dispatched == []
         await executor.get_all_results()
         assert dispatched == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_a_question_waits_for_the_response_to_be_saved() -> None:
+    """Started mid-stream, the question's channel prompt overtook the text the
+    model wrote beside it: patients got the question before the introduction."""
+    started: list[str] = []
+
+    async def dispatch(name, args, **kwargs):
+        started.append(name)
+        return json.dumps({"ok": True})
+
+    tools = _make_registry("ask_user_question")
+    tools.dispatch = dispatch
+    executor = _make_executor(tools=tools)
+
+    executor.add_tool(_make_tool_call("ask_user_question", call_id="tc_q"))
+    await asyncio.sleep(0)
+    assert started == []
+
+    await executor.get_all_results()
+    assert started == ["ask_user_question"]

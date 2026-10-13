@@ -608,6 +608,12 @@ def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:
 # a git repository, and a thread's copy holds none to bundle.
 THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOLS)
 
+# Tools the streaming executor holds until the response is saved.  A question
+# started mid-stream wrote its channel prompt to the outbox before the text
+# the model wrote beside it, so patients got the question before the
+# introduction leading up to it.
+HELD_UNTIL_SAVED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS | frozenset({"ask_user_question"})
+
 
 def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
     """What a session under a project's thread is refused in the call of *tool_name*, as its refusal names it; None when it may run.
