@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds Surogate Desktop's VM guest for an arch from the guest stage of
-# images/sandbox/Dockerfile into <out>: rootfs.img.zst and vmlinuz.zst, the files
-# the release publishes; rootfs.img and vmlinuz unpacked beside them, sparse, for
-# the VM tests, unless --packed; and manifest.json, which the app's tarball carries:
+# images/sandbox/Dockerfile into <out>: initrd.zst, rootfs.img.zst and vmlinuz.zst, the
+# files the release publishes; initrd, rootfs.img and vmlinuz unpacked beside them, sparse,
+# for the VM tests, unless --packed; and manifest.json, which the app's tarball carries:
 # the image's key (images/guest/inputs.sh), its arch and, for each file, its size and
-# sha256 unpacked and as downloaded.
+# sha256 unpacked and as downloaded. The initrd is Hyper-V's: Linux and macOS boot without it.
 #
 # Usage:
 #   images/guest/build.sh [--arch amd64|arm64] [--packed] [out]   # amd64 unless it says arm64; out: images/guest/out
@@ -36,7 +36,7 @@ docker build --platform "linux/$ARCH" --target guest-disk --output "type=local,d
   --file "$REPO_ROOT/images/sandbox/Dockerfile" "$REPO_ROOT"
 
 entries=()
-for file in rootfs.img vmlinuz; do
+for file in initrd rootfs.img vmlinuz; do
   [ -n "$PACKED" ] || zstd -q -d -f --sparse "$OUT/$file.zst" -o "$OUT/$file"
   entries+=("$(printf '{"name":"%s","size":%s,"sha256":"%s","download":"%s.zst","downloadSize":%s,"downloadSha256":"%s"}' \
     "$file" "$(zstd -q -dc "$OUT/$file.zst" | wc -c)" "$(zstd -q -dc "$OUT/$file.zst" | sha256sum | cut -d' ' -f1)" \
@@ -45,6 +45,6 @@ done
 printf '{"key":"%s","arch":"%s","files":[%s]}\n' "$("$REPO_ROOT/images/guest/inputs.sh" "$ARCH")" "$ARCH" "$(IFS=,; echo "${entries[*]}")" > "$OUT/manifest.json"
 
 printf '%s\t%s\t%s\n' file bytes "on disk"
-for file in rootfs.img.zst rootfs.img vmlinuz.zst vmlinuz; do
+for file in initrd.zst initrd rootfs.img.zst rootfs.img vmlinuz.zst vmlinuz; do
   if [ -e "$OUT/$file" ]; then printf '%s\t%s\t%s\n' "$file" "$(stat -c %s "$OUT/$file")" "$(du -h "$OUT/$file" | cut -f1)"; fi
 done

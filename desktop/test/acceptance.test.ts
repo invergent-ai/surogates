@@ -260,7 +260,7 @@ describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance V
     // The guest's image where a release publishes it, <base>/desktop/vm/<key>/, as it is downloaded.
     const { key } = JSON.parse(readFileSync(join(GUEST, "manifest.json"), "utf8")) as { key: string };
     mkdirSync(join(www, "vm", key), { recursive: true });
-    for (const file of ["rootfs.img.zst", "vmlinuz.zst"]) symlinkSync(join(GUEST, file), join(www, "vm", key, file));
+    for (const file of ["initrd.zst", "rootfs.img.zst", "vmlinuz.zst"]) symlinkSync(join(GUEST, file), join(www, "vm", key, file));
     for (const probe of ["probe.mjs", "guest-probe.mjs"]) copyFileSync(join(DESKTOP, "test", "acceptance", probe), join(dir, "www", probe));
     // The guest probe's init, with the guest's root trying a place's folder before the agent starts.
     const init = readFileSync(join(DESKTOP, "vm", "init"), "utf8");

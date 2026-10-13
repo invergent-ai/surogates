@@ -13,6 +13,32 @@ sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_di
   fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2 \
   kernel.io_uring_disabled=2
 
+# The value of the word surogate.$2= on the kernel's command line, $1, which must name it once: printed,
+# or why not.
+named() {
+  found= value=
+  set -f
+  # shellcheck disable=SC2086 # split into words, never into files
+  for word in $1; do
+    case "$word" in
+      "surogate.$2="*)
+        [ -z "$found" ] || { set +f; echo "the kernel's command line names surogate.$2= twice"; return 1; }
+        found=1 value=${word#"surogate.$2="}
+        ;;
+    esac
+  done
+  set +f
+  [ -n "$found" ] || { echo "the kernel's command line names no surogate.$2="; return 1; }
+  echo "$value"
+}
+
+# How the agent's ports reach the host (guest/port.ts): virtio-serial's ports, or vsock's streams, Hyper-V's.
+transport=$(named "$(cat /proc/cmdline)" transport) || { echo "surogate: $transport, so the guest stops" >&2; exit 1; }
+case "$transport" in
+  virtio-serial | vsock) ;;
+  *) echo "surogate: surogate.transport=$transport is not a transport this guest knows, so the guest stops" >&2; exit 1 ;;
+esac
+
 # The guest-kernel rule on protected names (rule.bpf.c), loaded beside the rest of the
 # boot: bpftool takes about a second, and the sessions disk's check, the cgroups and the
 # agent's start go on meanwhile. Its outcome lands in /run/surogate/rule, and the agent
@@ -153,7 +179,15 @@ mkdir -p /run/surogate/sessions
 mount -t ext4 -o nodev,nosuid,discard "$sessions" /run/surogate/sessions
 mkdir -p -m 0711 /run/surogate/sessions/roots
 
-modprobe virtiofs
+# The folders' filesystem: virtio-fs where the ports are virtio's, and on vsock the 9P client with its
+# transport over a descriptor, which a Plan 9 share is mounted through (guest/root.ts). The machine's own
+# drivers on Hyper-V the initrd loaded (images/guest/initrd). Then overlay, for each root's layers.
+if [ "$transport" = vsock ]; then
+  modprobe 9p
+  modprobe 9pnet_fd
+else
+  modprobe virtiofs
+fi
 modprobe overlay
 # The kernel loads no more modules: a command opening a socket of a rare family
 # would otherwise pull that family's code into the kernel every root shares.

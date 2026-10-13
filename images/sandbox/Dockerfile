@@ -203,17 +203,44 @@ ADD --checksum=sha256:c61071b5f4e8d8dcf0df3e1458377c2860f51ce52e1fb3da7c329e9ca5
 ADD --checksum=sha256:95751940dd6469797292ba04221ffdd1f1f10f0a0769bda66975ddc0346ce77f \
     https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-38_7.0.0-38.38~24.04.4_arm64.deb /tmp/hwe-tools.deb
 
-# The kernel boots without an initrd: kernel-config.sh fails the build on one that does not
-# build in what that needs. Of the modules, only those vm/init loads: the kernel loads no others
-# (modules_disabled), and the rest, compressed already, would add 170 MB to the download.
+# On virtio the kernel boots without an initrd: kernel-config.sh fails the build on one that does not
+# build in what that needs, and what Hyper-V's initrd and vm/init load there.
 FROM kernel-${TARGETARCH} AS kernel
 ARG KERNEL
 ARG TARGETARCH
 COPY --chmod=0755 images/guest/kernel-config.sh /usr/local/bin/kernel-config.sh
 RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
     && dpkg-deb -x /tmp/tools.deb /tools && dpkg-deb -x /tmp/hwe-tools.deb /tools \
-    && kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL" \
-    && find /kernel/lib/modules/*/kernel -type f ! -name virtiofs.ko.zst ! -name overlay.ko.zst -delete
+    && kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL"
+
+# ── The kernel's modules that each part of the guest loads ──────────
+# By the pinned kernel's own modules.dep, which depmod makes, the package shipping none (modules.sh). The
+# image keeps only those vm/init loads, each with those it needs: the virtio-fs and 9P clients', and
+# overlay's. The kernel loads no others (modules_disabled), and the rest, compressed already, would add
+# 170 MB to the download. The initrd's, Hyper-V's drivers, are copied out for it.
+FROM ubuntu:24.04 AS modules
+ARG KERNEL
+RUN apt-get update && apt-get install -y --no-install-recommends kmod \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 images/guest/modules.sh /usr/local/bin/modules.sh
+COPY images/guest/initrd/modules /initrd/modules
+RUN --mount=type=bind,from=kernel,source=/kernel/lib/modules,target=/all \
+    mkdir -p /image/lib/modules && cp -a "/all/$KERNEL" /image/lib/modules/ \
+    && depmod -b /image "$KERNEL" \
+    && modules.sh copy "/image/lib/modules/$KERNEL" /initrd/lib $(sed 's/#.*//' /initrd/modules) \
+    && modules.sh keep "/image/lib/modules/$KERNEL" netfs 9pnet 9pnet_fd 9p virtiofs overlay
+
+# ── The initrd, for Hyper-V ─────────────────────────────────────────
+# Its init, Ubuntu's static busybox, and Hyper-V's drivers from the pinned kernel (images/guest/initrd),
+# in the cpio archive the kernel unpacks as its first root, uncompressed (initrd.sh). Linux and macOS
+# boot without it.
+FROM ubuntu:24.04 AS initrd
+RUN apt-get update && apt-get install -y --no-install-recommends busybox-static cpio zstd \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 images/guest/initrd.sh /usr/local/bin/initrd.sh
+COPY --chmod=0755 images/guest/initrd/init /src/init
+RUN --mount=type=bind,from=modules,source=/initrd,target=/modules \
+    mkdir /out && initrd.sh /src/init /bin/busybox /modules/lib /modules/modules /out/initrd
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
 # The BTF is the pinned kernel's own, /btf as bpftool reads it. amd64's vmlinuz is a bzImage
@@ -274,7 +301,7 @@ ARG KERNEL
 RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fsprogs kmod \
         libelf1 zlib1g libcap2 libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=kernel /kernel/lib/modules/ /usr/lib/modules/
+COPY --from=modules /image/lib/modules/ /usr/lib/modules/
 COPY --from=bpf /rule.bpf.o /usr/lib/surogate/rule.bpf.o
 COPY --from=bpf --chmod=0755 /usr/lib/linux-tools/${KERNEL}/bpftool /usr/sbin/bpftool
 COPY --chmod=0755 images/guest/surogate-init /usr/sbin/surogate-init
@@ -301,7 +328,7 @@ EOF
 # The guest's disks, made in the build so the tree keeps its owners and modes:
 # docker build --target guest-disk --output type=local,dest=<dir> (images/guest/build.sh).
 # The kernel as the VM boots it: amd64's vmlinuz as it is, and arm64's as the uncompressed
-# Image (kernel-image.sh), under the same name.
+# Image (kernel-image.sh), under the same name; and Hyper-V's initrd beside it.
 FROM python:3.12-slim AS guest-disk-build
 ARG KERNEL
 ARG TARGETARCH
@@ -311,7 +338,9 @@ COPY --chmod=0755 images/guest/kernel-image.sh /usr/local/bin/kernel-image.sh
 # Sized from the tree: 10% and 64 MiB over its blocks, an inode for every entry and a fifth more.
 RUN --mount=type=bind,from=guest,target=/tree \
     --mount=type=bind,from=kernel,source=/kernel/boot,target=/boot \
+    --mount=type=bind,from=initrd,source=/out,target=/initrd \
     mkdir /out \
+    && zstd -q -19 -o /out/initrd.zst /initrd/initrd \
     && case "$TARGETARCH" in \
         amd64) zstd -q -19 -o /out/vmlinuz.zst "/boot/vmlinuz-$KERNEL" ;; \
         arm64) kernel-image.sh "/boot/vmlinuz-$KERNEL" /out/vmlinuz && zstd -q -19 --rm -o /out/vmlinuz.zst /out/vmlinuz ;; \

@@ -20,9 +20,13 @@ cd "$REPO_ROOT"
 # the Dockerfile's COPY and ADD lines, and its RUNs' bind mounts, before the sandbox stage.
 FILES=(
   images/guest/build.sh
+  images/guest/initrd.sh
+  images/guest/initrd/init
+  images/guest/initrd/modules
   images/guest/kernel-btf.sh
   images/guest/kernel-config.sh
   images/guest/kernel-image.sh
+  images/guest/modules.sh
   images/guest/surogate-init
   images/sandbox/pip-wrapper
   desktop/vm/rule.bpf.c

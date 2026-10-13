@@ -112,9 +112,9 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     }
   });
 
-  // What build.sh leaves in *out*: the two downloads, zstd's, and the manifest that names *key* and *arch*.
+  // What build.sh leaves in *out*: the three downloads, zstd's, and the manifest that names *key* and *arch*.
   const built = (named = key, arch = "amd64") => {
-    const files = [["rootfs.img", 3 * 1024 * 1024], ["vmlinuz", 64 * 1024]] as const;
+    const files = [["initrd", 32 * 1024], ["rootfs.img", 3 * 1024 * 1024], ["vmlinuz", 64 * 1024]] as const;
     const entries = files.map(([name, bytes]) => {
       const data = randomBytes(bytes);
       writeFileSync(join(out, name), data);
@@ -124,7 +124,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
     });
     writeFileSync(join(out, "manifest.json"), `${JSON.stringify({ key: named, arch, files: entries })}\n`);
   };
-  const sentFiles = () => Object.fromEntries(["rootfs.img.zst", "vmlinuz.zst", "manifest.json"].map((file) => [file, readFileSync(join(out, file))]));
+  const sentFiles = () => Object.fromEntries(["initrd.zst", "rootfs.img.zst", "vmlinuz.zst", "manifest.json"].map((file) => [file, readFileSync(join(out, file))]));
 
   it("sends a new image's files and then its manifest, checks what the bucket then holds, and from then on takes the manifest from the release that published it", () => {
     expect(publish("fetch")).toMatchObject({ status: 0, stdout: "missing\n" });
@@ -228,7 +228,7 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the guest image's publis
       replace(`desktop/vm/${key}/manifest.json`, bytes);
       released(bytes);
       out = mkdtempSync(join(dir, "out-"));
-      expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: desktop/vm/${key}'s manifest does not name rootfs.img.zst and vmlinuz.zst\n` });
+      expect(publish("fetch")).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: desktop/vm/${key}'s manifest does not name initrd.zst, rootfs.img.zst and vmlinuz.zst\n` });
     }
   });
 

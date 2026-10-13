@@ -104,3 +104,24 @@ describe("the guest's disks, found by the bus the kernel's line names", () => {
     expect(diskOf("xsurogate.disks=virtio * /*", 1)).toEqual({ refused: "the kernel's command line names no surogate.disks=" });
   });
 });
+
+describe("the words of the kernel's line the guest's init reads", () => {
+  // The value init's named() reads of surogate.<name>= on *cmdline*, run alone.
+  const namedOf = (cmdline: string, name: string) => {
+    const ran = spawnSync("/bin/sh", ["-euc", `${fnOf(vm("init"), "named")}\nnamed "$1" "$2"`, "sh", cmdline, name], { encoding: "utf8" });
+    return ran.status === 0 ? { value: ran.stdout.trim() } : { refused: ran.stdout.trim() };
+  };
+
+  it("reads the one word of a name, and refuses none, or two", () => {
+    expect(namedOf("console=hvc0 surogate.transport=vsock panic=-1", "transport")).toEqual({ value: "vsock" });
+    expect(namedOf("console=hvc0", "transport")).toEqual({ refused: "the kernel's command line names no surogate.transport=" });
+    expect(namedOf("surogate.transport=vsock surogate.transport=vsock", "transport")).toEqual({ refused: "the kernel's command line names surogate.transport= twice" });
+    expect(namedOf("xsurogate.transport=vsock * /*", "transport")).toEqual({ refused: "the kernel's command line names no surogate.transport=" });
+  });
+
+  it("stops the boot on a transport it does not know, and loads the folders' filesystem the transport's shares need", () => {
+    expect(vm("init")).toContain('transport=$(named "$(cat /proc/cmdline)" transport) || { echo "surogate: $transport, so the guest stops" >&2; exit 1; }');
+    expect(vm("init")).toMatch(/case "\$transport" in\n {2}virtio-serial \| vsock\) ;;\n {2}\*\) echo "surogate: surogate\.transport=\$transport is not a transport this guest knows, so the guest stops" >&2; exit 1 ;;\nesac/);
+    expect(vm("init")).toContain('if [ "$transport" = vsock ]; then\n  modprobe 9p\n  modprobe 9pnet_fd\nelse\n  modprobe virtiofs\nfi\nmodprobe overlay\n');
+  });
+});
