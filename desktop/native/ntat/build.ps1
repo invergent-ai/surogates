@@ -29,7 +29,9 @@ Fetch "node-v$Version-headers.tar.gz" $HeadersSha256 $Headers
 Fetch 'win-x64/node.lib' $LibSha256 $Lib
 $Include = Join-Path $Build "node-v$Version\include\node"
 if (-not (Test-Path (Join-Path $Include 'node_api.h'))) {
-  tar -xzf $Headers -C $Build "node-v$Version/include/node"
+  # Windows's own tar, by its path: a shell's that comes first on the PATH, as Git for Windows' GNU tar, reads C: in a
+  # path as a host to reach.
+  & (Join-Path $env:SystemRoot 'System32\tar.exe') -xzf $Headers -C $Build "node-v$Version/include/node"
   if ($LASTEXITCODE -ne 0) { throw 'ntat: the headers did not unpack' }
 }
 
