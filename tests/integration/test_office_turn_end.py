@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 
@@ -116,4 +117,56 @@ async def test_a_closed_page_still_gets_its_save_and_nothing_unsaved_ends_at_onc
     await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
                              session_factory=session_factory, redis=None)
     assert len(sent) == 1
+    assert time.monotonic() - started < 5
+
+
+def _flushing(result: bool):
+    class Runtime:
+        def __init__(self, office):
+            pass
+
+        async def flush(self, page):
+            return result
+
+    return Runtime
+
+
+async def test_the_turns_slots_go_back_only_for_a_turn_that_edited(session_factory, storage, monkeypatch):
+    store, session, _, after = await _turn(session_factory, storage)
+    entered: list[bool] = []
+
+    @contextlib.asynccontextmanager
+    async def recording_wait():
+        entered.append(True)
+        yield
+
+    async def nothing_unsaved(office, doc_key, userdata):
+        return 4
+
+    monkeypatch.setattr(turn_end, "turn_waiting", recording_wait)
+    monkeypatch.setattr(turn_end, "RuntimeOffice", _flushing(True))
+    monkeypatch.setattr(turn_end, "force_save", nothing_unsaved)
+    edited_none = await store.last_event_id(session.id)
+    await turn_end.save_turn(store=store, session=session, after=edited_none, office=OFFICE, storage=storage,
+                             session_factory=session_factory, redis=None)
+    assert entered == []
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
+                             session_factory=session_factory, redis=None)
+    assert entered == [True]
+
+
+async def test_an_editor_with_unsent_changes_gets_no_forced_save(session_factory, storage, monkeypatch):
+    store, session, _, after = await _turn(session_factory, storage)
+    sent: list[str] = []
+
+    async def force_save(office, doc_key, userdata):
+        sent.append(userdata)
+        return 0
+
+    monkeypatch.setattr(turn_end, "RuntimeOffice", _flushing(False))
+    monkeypatch.setattr(turn_end, "force_save", force_save)
+    started = time.monotonic()
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
+                             session_factory=session_factory, redis=None)
+    assert sent == []
     assert time.monotonic() - started < 5

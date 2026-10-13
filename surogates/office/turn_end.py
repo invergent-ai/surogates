@@ -14,6 +14,7 @@ from surogates.office import sessions as office_sessions
 from surogates.office.agent import relative_path
 from surogates.office.commands import force_save
 from surogates.office.runtime_office import PageGone, RuntimeOffice, RuntimeOfficeError, page_id
+from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
 from surogates.session.files import session_files
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
@@ -47,36 +48,43 @@ async def save_turn(
     paths = await edited_paths(store, session.id, after)
     if not paths:
         return
-    locations: list[str] = []
-    async with session_files(session, storage=storage, session_factory=session_factory, redis=redis) as files:
-        if not isinstance(files, StorageWorkspaceIO):
-            return
-        for path in paths:
-            try:
-                # As office_edit read it: stripped, then relative to the workspace.
-                location = files.location(await files.resolve(relative_path(path.strip(), session)))
-            except (WorkspaceSandboxError, ValueError):  # a traversal, or a NUL: the call itself was refused
-                continue
-            if location not in locations:
-                locations.append(location)
-    runtime = RuntimeOffice(office)
-    for location in locations:
-        document = await office_sessions.open_at(session_factory, location)
-        if document is not None:
-            await _save(runtime, office, session_factory, document, str(session.id))
+    # Waiting on the document server holds none of the worker's turn slots; a turn that edited nothing gives none back.
+    async with turn_waiting():
+        locations: list[str] = []
+        async with session_files(session, storage=storage, session_factory=session_factory, redis=redis) as files:
+            if not isinstance(files, StorageWorkspaceIO):
+                return
+            for path in paths:
+                try:
+                    # As office_edit read it: stripped, then relative to the workspace.
+                    location = files.location(await files.resolve(relative_path(path.strip(), session)))
+                except (WorkspaceSandboxError, ValueError):  # a traversal, or a NUL: the call itself was refused
+                    continue
+                if location not in locations:
+                    locations.append(location)
+        runtime = RuntimeOffice(office)
+        for location in locations:
+            document = await office_sessions.open_at(session_factory, location)
+            if document is not None:
+                await _save(runtime, office, session_factory, document, str(session.id))
 
 
 async def _save(runtime: RuntimeOffice, office: OfficeSettings, session_factory: Any,
                 document: office_sessions.OpenDocument, session_id: str) -> None:
+    # A forced save goes only once the agent's editor has no unsent changes: else it would save without them.
     try:
         if not await runtime.flush(page_id(document.doc_key, session_id)):
-            logger.warning("the agent's editor of %s had not sent all its changes when the turn ended", document.path)
+            logger.warning("the agent's editor of %s still had unsent changes as the turn ended; "
+                           "autosave or the editor closing saves them", document.path)
+            return
     except PageGone:
         pass  # Its page closed; what it sent is on the document server, and the save below takes it.
     except RuntimeOfficeError:
-        logger.warning("could not flush the agent's editor of %s", document.path, exc_info=True)
+        logger.warning("could not flush the agent's editor of %s; autosave or the editor closing saves it",
+                       document.path, exc_info=True)
+        return
     userdata = json.dumps({"turn": uuid4().hex})
-    # 0: a save is coming; 4: nothing was unsaved, every edit is saved already; None: could not ask (logged).
+    # After the flush: 0, a save is coming; 4, nothing is unsaved, so every edit is saved; None, could not ask (logged).
     if await force_save(office, document.doc_key, userdata) != 0:
         return
     deadline = time.monotonic() + SAVE_WAIT_S
