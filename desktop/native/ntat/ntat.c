@@ -549,8 +549,10 @@ static napi_value unlink_at(napi_env env, napi_callback_info info) {
 
 // The FILE_RENAME_INFORMATION or FILE_LINK_INFORMATION for *to* in the folder *dir*, which the caller frees.
 static MoveInformation *move_to(HANDLE dir, const WCHAR *to, size_t units, ULONG flags, ULONG *length) {
-  *length = (ULONG)(FIELD_OFFSET(MoveInformation, FileName) + units * sizeof(WCHAR));
-  MoveInformation *move = (MoveInformation *)calloc(1, *length + sizeof(WCHAR));
+  // Windows takes no less than the whole structure, its one WCHAR and padding with it, whatever the name's length (a
+  // shorter one answers STATUS_INFO_LENGTH_MISMATCH): the name's own length is FileNameLength.
+  *length = (ULONG)(sizeof(MoveInformation) + units * sizeof(WCHAR));
+  MoveInformation *move = (MoveInformation *)calloc(1, *length);
   if (move == NULL) return NULL;
   move->Flags = flags;
   move->RootDirectory = dir;
