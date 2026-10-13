@@ -23,6 +23,7 @@ from surogates.runtime import (
     build_agent_runtime_context,
 )
 from surogates.runtime.rate_limiter import PerTenantRateLimiter
+from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_service_account_session_token
@@ -549,7 +550,14 @@ async def turn_calling(
     monkeypatch.setattr(registry, "dispatch", ran)
     store = AsyncMock()
     store.emit_event = AsyncMock(side_effect=range(100, 300))
-    store.get_events = AsyncMock(return_value=[])
+    # The user has answered a question in this turn, as a routine's confirmation is.
+    answered = SimpleNamespace(id=1, type=EventType.ASK_USER_QUESTION_RESPONSE.value, data={})
+    store.get_events = AsyncMock(
+        side_effect=lambda *_, types=None, **__: [answered] if EventType.ASK_USER_QUESTION_RESPONSE in (types or ()) else [],
+    )
+    store.resolve_acting_principal = AsyncMock(
+        return_value=ActingPrincipal(user_id=session.user_id, service_account_id=session.service_account_id),
+    )
     harness = _make_loop_harness(session_store=store)
     harness._tools = registry
     harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")

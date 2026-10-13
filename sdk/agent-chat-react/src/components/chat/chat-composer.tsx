@@ -608,7 +608,6 @@ function ChatComposerInner({
       { value: "/loop 30m summarize new threads in support inbox", label: "/loop 30m support inbox", description: "Every 30 minutes: summarize support traffic" },
       { value: "/loop 1h review the on-call dashboard and flag anomalies", label: "/loop 1h on-call check", description: "Hourly: review the on-call dashboard" },
       { value: "/loop 2h scan production error rates and alert if elevated", label: "/loop 2h error scan", description: "Every 2 hours: production error scan" },
-      { value: "/loop 1d give me a morning briefing of yesterday's activity", label: "/loop 1d daily briefing", description: "Daily: morning briefing of prior day" },
       { value: "/loop every 5 minutes check whether CI on the current branch has finished", label: "/loop every 5 minutes (verbose)", description: "Verbose interval form" },
       { value: "/loop watch the active deploy and notify me when it stabilises or rolls back", label: "/loop <prompt> (dynamic)", description: "Dynamic loop — model self-paces 1m–1h via loop_wait" },
       { value: "/loop babysit the long-running data migration and only ping me on errors or completion", label: "/loop migration watcher (dynamic)", description: "Dynamic loop — best when cadence is unpredictable" },
