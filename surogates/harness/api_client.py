@@ -447,9 +447,23 @@ class HarnessAPIClient:
 
 
 def _error_response(exc: httpx.HTTPStatusError) -> str:
-    """Extract error detail from an HTTP error response."""
+    """Extract error detail from an HTTP error response.
+
+    ``error`` is always a string: the model reads it and the chat UI
+    renders it as text.  A FastAPI 422 ``detail`` is a list of pydantic
+    error objects, flattened here to ``field: msg`` pairs.
+    """
     try:
         detail = exc.response.json().get("detail", str(exc))
     except Exception:
         detail = str(exc)
+    if isinstance(detail, list):
+        detail = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc'] if p != 'body')}: {e['msg']}"
+            if isinstance(e, dict) and "loc" in e and "msg" in e
+            else str(e)
+            for e in detail
+        )
+    elif not isinstance(detail, str):
+        detail = json.dumps(detail, ensure_ascii=False)
     return json.dumps({"success": False, "error": detail}, ensure_ascii=False)
