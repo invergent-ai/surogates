@@ -942,7 +942,9 @@ async def record_outreach_delivery(
     return True
 
 
-async def _opener_of_outbox(db: Any, outbox_id: int) -> Any:
+async def _opener_of_outbox(
+    db: Any, outbox_id: int, marker: str = OUTREACH_OPENER_MARKER,
+) -> Any:
     """The outreach row a template's outbox row was written for.
 
     The dispatcher can claim and report the template before ``_reopen`` has
@@ -955,17 +957,17 @@ async def _opener_of_outbox(db: Any, outbox_id: int) -> Any:
     )
     if event_id is None:
         return None
-    marker = (
+    found = (
         await db.execute(
             sa.select(
                 Event.data["synthetic"].astext, Event.data["outreach_id"].astext,
             ).where(Event.id == event_id)
         )
     ).first()
-    if marker is None:
+    if found is None:
         return None
-    synthetic, outreach_id = marker
-    if synthetic != OUTREACH_OPENER_MARKER or not outreach_id:
+    synthetic, outreach_id = found
+    if synthetic != marker or not outreach_id:
         return None
     return await db.get(OutreachMessageRow, uuid.UUID(outreach_id))
 
@@ -976,20 +978,10 @@ async def record_outreach_text(
     """The provider's id for an outreach text the outbox sent, so a later
     ``read`` status can find it.  True when the row was an outreach text."""
     async with session_factory() as db:
-        marker = (
-            await db.execute(
-                sa.select(Event.data["synthetic"].astext, Event.data["outreach_id"].astext)
-                .join(DeliveryOutbox, DeliveryOutbox.event_id == Event.id)
-                .where(DeliveryOutbox.id == outbox_id)
-            )
-        ).first()
-        if marker is None or marker[0] != "outreach" or not marker[1]:
+        row = await _opener_of_outbox(db, outbox_id, marker="outreach")
+        if row is None:
             return False
-        await db.execute(
-            sa.update(OutreachMessageRow)
-            .where(OutreachMessageRow.id == uuid.UUID(marker[1]))
-            .values(text_message_id=provider_message_id)
-        )
+        row.text_message_id = provider_message_id
         await db.commit()
     return True
 
