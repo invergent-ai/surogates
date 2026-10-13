@@ -285,10 +285,9 @@ def test_the_passes_look_back_past_the_longest_setting():
 
 
 @pytest.mark.asyncio
-async def test_a_team_enrolment_is_recorded_as_team_and_an_old_care_team_row_stays_valid(sf):
-    for source in ("team", "care_team"):
-        row = await store.upsert_enrollment(
-            sf, org_id=ORG, agent_id="a1", user_id=uuid.uuid4(), protocol="p",
-            start_date=None, phase=None, enrolled_by=source,
-        )
-        assert row.enrolled_by == source
+async def test_a_team_enrolment_is_recorded_as_team(sf):
+    row = await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id="a1", user_id=uuid.uuid4(), protocol="p",
+        start_date=None, phase=None, enrolled_by="team",
+    )
+    assert row.enrolled_by == "team"

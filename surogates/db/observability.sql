@@ -1090,3 +1090,9 @@ ALTER TABLE outreach_messages
     ADD COLUMN IF NOT EXISTS text_message_id text;
 CREATE INDEX IF NOT EXISTS ix_outreach_messages_text_message_id
     ON outreach_messages (text_message_id);
+
+-- ── "care team" became "team": rewrite what was recorded under the old name
+UPDATE outreach_messages
+    SET created_by = 'team:' || substr(created_by, length('care-team:') + 1)
+    WHERE created_by LIKE 'care-team:%';
+UPDATE followup_enrollments SET enrolled_by = 'team' WHERE enrolled_by = 'care_team';

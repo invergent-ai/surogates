@@ -61,9 +61,7 @@ __all__ = [
 ]
 
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
-#: ``care_team`` is what team enrolments were recorded as before ``team``;
-#: kept so those rows stay valid.
-ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "team", "care_team")
+ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "team")
 OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome", "notice")
 #: Where outreach can reach a person.  WhatsApp only: it is the one channel
 #: whose rules (a template outside the 24-hour window) outreach implements.

@@ -114,7 +114,7 @@ BATCH = 200
 
 _HELD = ("queued", "awaiting_reply")
 _CREATED_BY = sa.func.coalesce(OutreachMessageRow.created_by, "")
-_TEAM_REQUESTED = sa.or_(_CREATED_BY.like("team:%"), _CREATED_BY.like("care-team:%"))
+_TEAM_REQUESTED = _CREATED_BY.like("team:%")
 _UNANSWERED_REASON = "The recipient did not answer the template"
 
 
@@ -360,7 +360,7 @@ async def _expire_unanswered(session_factory: Any, *, now: datetime) -> int:
 def _requester(created_by: str | None) -> uuid.UUID | None:
     """The team member who asked for a message, from ``team:<uid>``."""
     prefix, _, raw = (created_by or "").partition(":")
-    if prefix not in ("team", "care-team"):
+    if prefix != "team":
         return None
     try:
         return uuid.UUID(raw)

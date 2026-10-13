@@ -441,7 +441,7 @@ async def _team_message(sf, *, hours=None):
         sf, org_id=ORG, agent_id=AGENT, user_id=person, platform="whatsapp",
         channel_identifier=SENDER, kind="operator", text="Come tomorrow",
         template_name="msg", template_language="ro", subject_user_id=person,
-        created_by=f"care-team:{member}",
+        created_by=f"team:{member}",
     )
     await _send(sf, _Store(), _Delivery())
     assert (await _row(sf, row.id)).state == "awaiting_reply"
