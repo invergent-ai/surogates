@@ -1,12 +1,13 @@
 // The browsers the app knows on this computer's OS (spec, Section 5, "Choosing the browser"): where
 // each may be, why a program found or picked is not one the app drives, and the program that a
-// pick in Custom… names. Linux's (known-linux.ts) and macOS's (known-darwin.ts); an OS the app
-// drives no browser on yet knows none, and refuses each one picked.
+// pick in Custom… names. Linux's (known-linux.ts), macOS's (known-darwin.ts) and Windows's
+// (known-win32.ts); an OS the app drives no browser on yet knows none, and refuses each one picked.
 
 import { forThisOs, notBuiltWords } from "../platform.js";
 import type { BrowserId, Disk } from "./choose.js";
 import { DARWIN } from "./known-darwin.js";
 import { LINUX } from "./known-linux.js";
+import { WIN32 } from "./known-win32.js";
 
 export interface KnownBrowser {
   id: BrowserId;
@@ -28,6 +29,10 @@ export interface KnownBrowsers {
   programOf(picked: string, disk: Disk): string | null;
   /** Settles once what refused() says of *real* waits on no check under way. */
   checked(real: string): Promise<void>;
+  /** The kinds of file Custom…'s dialog offers, where this OS names its programs by one: none, any file. */
+  pickFilters?: ReadonlyArray<{ name: string; extensions: string[] }>;
+  /** The version of the browser at *executable*, read without starting it, where `--version` would start it: else run so. */
+  version?(executable: string): Promise<string | null>;
 }
 
 const NONE: KnownBrowsers = {
@@ -37,4 +42,4 @@ const NONE: KnownBrowsers = {
   checked: async () => {},
 };
 
-export const KNOWN_BROWSERS: KnownBrowsers = forThisOs({ linux: LINUX, darwin: DARWIN }) ?? NONE;
+export const KNOWN_BROWSERS: KnownBrowsers = forThisOs({ linux: LINUX, darwin: DARWIN, win32: WIN32 }) ?? NONE;

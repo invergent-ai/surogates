@@ -32,6 +32,14 @@ export const WINDOWS = [
   // The file host on Windows: what needs nothing built. Its other suites need ntat, rg and dist/: the workflow's
   // file-host job runs them, each on its own.
   "test/names-win32.test.ts", "test/srt-win32.test.ts", "test/glob-win32.test.ts",
+  // The shell and the browser on Windows.
+  "test/session-path-win32.test.ts", "test/shell-places-win32.test.ts", "test/host-user.test.ts", "test/computer-name-win32.test.ts",
+  "test/credentials-win32.test.ts", "test/backups.test.ts",
+  "test/login-item-win32.test.ts", "test/deep-link-win32.test.ts", "test/app-identity-win32.test.ts", "test/notifications-win32.test.ts",
+  "test/menus-win32.test.ts", "test/main-window-win32.test.ts", "test/quick-entry-win32.test.ts",
+  "test/ca-source-win32.test.ts", "test/tools-look.test.ts",
+  "test/browser-known-win32.test.ts", "test/browser-processes-win32.test.ts", "test/browser-host-win32.test.ts",
+  "test/folders-held-win32.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

@@ -9,3 +9,4 @@ test/vm/darwin/measure/out/
 test/vm/win32/hcs-probe/target/
 native/windows/target/
 test/vm/win32/measure/out/
+native/windows/helper/target/

@@ -19,7 +19,7 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
+  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, pickFilters, profileOf, profilesOf,
   unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
@@ -27,8 +27,9 @@ import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
 import { hostUser } from "../host-user.js";
-import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
-import { FolderLooks, LOOK_MS } from "./folders-held.js";
+import { fileToolsMissing, hostToolsPath, toolsMissing } from "../hosts/policy.js";
+import { NODE } from "../hosts/tool-hosts.js";
+import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
@@ -40,6 +41,7 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
+import { nameTheApp, quitAsked } from "./app-identity.js";
 import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
@@ -96,6 +98,8 @@ const places = placesFor(process.env, app.getPath("home"));
 const { root } = places;
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
+// Before the first window: the OS groups the app's windows, and names its notifications and login item, by it (app-identity.ts).
+nameTheApp(app, app.isPackaged);
 app.setPath("userData", join(root, "electron"));
 // Before ready too: the default session is made then, and spell-checks with the app's own dictionary.
 ownSpelling(app, DICTIONARIES, console.error);
@@ -416,7 +420,7 @@ function lookForTools(): void {
 // with it. One that does not answer in time is not held (FolderLooks).
 const folderLooks = new FolderLooks(undefined, undefined, (folder, why) => report(new Error(why === "busy"
   ? `${folder}, a folder a chat is bound to, was not looked at, the app's looks all waiting on folders that do not answer: its tools are not looked for until one does`
-  : (process.env.PATH ?? "").split(":").includes(folder)
+  : onPath(process.env.PATH, folder)
     ? `${folder}, on the app's PATH, did not answer in ${LOOK_MS / 1000} s: no tool is looked for there until it answers`
     : `${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
 function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
@@ -435,15 +439,16 @@ const toolsPath = (): Promise<string> => folderLooks.path(process.env.PATH);
 
 // The file helper's tools, looked for again beside what the VM was last found to lack: with each
 // look, once the device's folders are known, and at each change of them. They are looked for where
-// the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
+// the folders' file hosts look, by the hosts' own rule (hostToolsPath): on the app's PATH without its
 // relative entries, and without any entry in a folder a chat is bound to, where a command may have
-// written a program. So the line and a file tool's answer name the same tools. *said*: tell the
-// pages even when nothing changed, as Check again asks.
+// written a program, after the app's own tools beside the node the hosts run on, where this OS puts
+// them first. So the line and a file tool's answer name the same tools. *said*: tell the pages even
+// when nothing changed, as Check again asks.
 let toolsOwedSaid = false;
 function lookForFileTools(said = false, folders = boundFolders(), path = toolsPath()): void {
   toolsOwedSaid ||= said;
   const look: Promise<string[]> = Promise.all([vmLacking, folders, path]).then(([vm, held, on]) => {
-    const found = [...fileToolsMissing(BWRAP, pathOutside(on, held)), ...vm];
+    const found = [...fileToolsMissing(BWRAP, hostToolsPath(on, held, NODE)), ...vm];
     // A look that a later one has overtaken says nothing: the later one's folders are the newer,
     // and it tells the pages what this one owed them.
     if (lackingFound !== look) return lackingFound;
@@ -1732,7 +1737,7 @@ function state() {
 let tray: Tray | null = null;
 let trayDrawn = "";
 
-const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP));
+const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP, nativeTheme.shouldUseDarkColorsForSystemIntegratedUI));
 
 function updateTray(): void {
   if (!tray) return;
@@ -2019,7 +2024,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserSetting.set({ choice: value } as BrowserChoice);
       return;
     }
-    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const] };
+    const filters = pickFilters();
+    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const], ...(filters.length > 0 ? { filters } : {}) };
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;
@@ -2746,7 +2752,8 @@ async function quit(): Promise<void> {
   }
 }
 
-if (!app.requestSingleInstanceLock()) {
+// A launch that asks the app to quit, where this OS's launches can, hands that to the running app, or quits at once.
+if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
   app.quit();
 } else {
   // The company's CA, as an administrator gave it for every user of this computer (ca-source.ts), or a
@@ -2759,6 +2766,8 @@ if (!app.requestSingleInstanceLock()) {
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
+    // As the menu's Quit asks: through the quit's questions.
+    if (quitAsked(argv)) return void app.quit();
     if (!loginItem.startedHidden(argv)) main?.show();
     const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);

@@ -4,11 +4,18 @@
 // what it tells of. Its title may be the agent's words, as a chat's or a question's; its body
 // is the app's own, since some notification services read markup in a body.
 
+import { forThisOs } from "../platform.js";
 import { report } from "../report.js";
+
+// Windows moves a toast that timed out to its Action Center, where Electron still emits its click: its close then
+// says so (Electron, Notification, close: "via system timeout", reason "timedOut"). There such a notice is held for its
+// click. Elsewhere a notification closed in any way opens nothing.
+const HELD_PAST_TIMEOUT = forThisOs({ linux: false, darwin: false, win32: true }) ?? false;
 
 // Electron's Notification, as far as the service uses it. On Linux, failed is emitted too.
 export interface Shown {
-  on(event: "click" | "close", listener: () => void): unknown;
+  on(event: "click", listener: () => void): unknown;
+  on(event: "close", listener: (details?: { reason?: string }) => void): unknown;
   on(event: "failed", listener: (event: unknown, error: string) => void): unknown;
   show(): void;
   close(): void;
@@ -44,7 +51,10 @@ export class Notifications {
       this.shown.delete(notice.tag);
       notice.open();
     });
-    shown.on("close", done);
+    shown.on("close", (details) => {
+      if (HELD_PAST_TIMEOUT && details?.reason === "timedOut") return;
+      done();
+    });
     shown.on("failed", (_event, error) => {
       done();
       report(this.onError, new Error(`Surogate could not show a notification: ${error || "the system has no notification service"}`));

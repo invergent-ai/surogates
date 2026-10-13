@@ -536,7 +536,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-boot], jobs.keys
+    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-boot shell], jobs.keys
     jobs.each do |name, job|
       assert_equal "windows-2025", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -566,6 +566,16 @@ class ReleaseWorkflowTest < Minitest::Test
     suites = host.fetch("steps").select { |step| step["run"].to_s.include?("npx vitest run") }
     assert_equal 3, suites.size
     suites.each { |step| assert step.key?("timeout-minutes"), step["name"] }
+    # The shell's and the browser's suites, which gate: the helper's lints and its tests, those that fill the
+    # runner's stores among them, built as its lock file has it; the app end to end; the browser host on Chrome and Edge.
+    shell = jobs.fetch("shell")
+    refute shell.key?("continue-on-error")
+    shell_runs = shell.fetch("steps").map { |step| step["run"].to_s.strip }
+    assert_includes shell_runs, "cargo clippy --locked --all-targets -- -D warnings"
+    assert_includes shell_runs, "cargo test --locked -- --include-ignored"
+    assert_includes shell_runs, "npx vitest run -c vitest.e2e.config.ts test/e2e/windows.e2e.ts"
+    browsers = shell.fetch("steps").select { |step| step["run"].to_s.include?("browser-host-win32.test.ts") }.map { |step| step.fetch("env").fetch("SUROGATE_TEST_BROWSER") }
+    assert_equal ['C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'], browsers
     # What the runner offers the VM, recorded and never gating: its Rust probe built as its lock file has it.
     probe = jobs.fetch("vm-probe")
     assert_equal true, probe.fetch("continue-on-error")
@@ -735,6 +745,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
         "vm-boot" => ["61fe7ddc5fb5c138", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 24591223ab9a9cbb d1980ca93217776e 1edc8d7d3216b9d8]],
+        "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 b79c69cbcbdd1875 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],

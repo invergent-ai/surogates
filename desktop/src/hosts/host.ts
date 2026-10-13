@@ -30,7 +30,7 @@ import { FolderBusy, type FolderRecord, lockFolder, readRecord, writeRecord } fr
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { closeHanded } from "./handed.js";
-import { fileToolsMissing, GLOB, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
+import { fileToolsMissing, GLOB, hostToolsPath, quote, sandboxPolicy, toolsMissing } from "./policy.js";
 import { srtOs } from "./srt-os.js";
 import { isOf, startOn } from "./start.js";
 
@@ -230,11 +230,11 @@ async function start(message: HostStart): Promise<void> {
   // swaps in later moves none, and is dropped when it is the folder or the working folder, or
   // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
   // .. through a folder in it. srt's own tools go by absolute path. So no program a command
-  // wrote runs, out here or in the helper. The rule is pathOutside's: the app looks for the
-  // helper's tools by it too. What a helper is given beside its folder is held as the folder is:
-  // a command wrote a landing's copy, and its helper writes what it keeps.
-  // On macOS the app's own rg comes first (srt-darwin.ts).
-  const hostPath = srtOs.toolsPath(pathOutside(process.env.PATH, [{ dev, ino }, statSync(tmp), ...beside.map((dir) => statSync(dir))]));
+  // wrote runs, out here or in the helper. The rule is hostToolsPath's: the app looks for the
+  // helper's tools by it too, by the node its hosts run on. What a helper is given beside its folder
+  // is held as the folder is: a command wrote a landing's copy, and its helper writes what it keeps.
+  // On macOS the app's own rg, beside that node, comes first (srt-darwin.ts).
+  const hostPath = hostToolsPath(process.env.PATH, [{ dev, ino }, statSync(tmp), ...beside.map((dir) => statSync(dir))], process.execPath);
   process.env.PATH = hostPath;
   // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
   const lacking = fileToolsMissing(message.bwrapPath, hostPath);

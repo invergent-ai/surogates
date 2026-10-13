@@ -1,5 +1,5 @@
-// A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux, in the
-// arguments it starts with, or in a second launch's, which the running app is given by Electron's
+// A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux and Windows, in
+// the arguments it starts with, or in a second launch's, which the running app is given by Electron's
 // second-instance with its argv; on macOS, in an event of
 // the running app's, which Launch Services sends it, starting it first where it is not running. Only
 // surogate://open?url=<agent address> is one: it opens that agent, at a page of its web client
@@ -39,6 +39,9 @@ export const linkOfLaunch: (argv: readonly string[]) => OpenLink | null = forThi
   linux: linkIn,
   // macOS hands no link in a launch's arguments: each comes as an event (listenForLinks).
   darwin: () => null,
+  // Windows starts the command the scheme's registration names, the link after it: the MSI registers it machine-wide,
+  // and test/win32/dev-app.ps1 for a development build's user (Microsoft, "Registering an Application to a URI Scheme").
+  win32: linkIn,
 }) ?? (() => notBuilt("The arrival of surogate:// links"));
 
 /** What of Electron's app a link comes by on macOS: its open-url event. */
@@ -59,8 +62,8 @@ function openUrls(app: LinkEvents, open: (link: OpenLink) => void): void {
 
 /**
  * Each link the system hands the running app as an event, from now on, given to *open*: on macOS, by
- * *app*'s open-url, a listener set before the app is ready; Linux hands none so (linkOfLaunch).
+ * *app*'s open-url, a listener set before the app is ready; Linux and Windows hand none so (linkOfLaunch).
  */
 export const listenForLinks: (app: LinkEvents, open: (link: OpenLink) => void) => void = forThisOs<(app: LinkEvents, open: (link: OpenLink) => void) => void>({
-  linux: () => {}, darwin: openUrls,
+  linux: () => {}, darwin: openUrls, win32: () => {},
 }) ?? (() => notBuilt("The arrival of surogate:// links"));

@@ -259,3 +259,107 @@ Measure-Command { npx vitest run --project unit test/file-tools-race-win32.test.
 ```
 
 - Record both times. Nothing passes or fails: the owner weighs an exclusion against the cost.
+
+## 5. The shell and the browser, by hand
+
+These run in the test account of step 0, after step 1. Each says what a pass looks like. **The first is a security check: a FAIL there is a security finding. Stop and report it before anything else.**
+
+```
+$env:NPM_CONFIG_SCRIPT_SHELL = "C:\Program Files\Git\bin\bash.exe"
+npm run build:win32
+```
+
+- This builds the app's code and `native\windows\target\release\surogate-helper.exe`. Pass: no error.
+
+### 5.1 The user's Group Policy certificates are not the user's to write (security)
+
+The app trusts the roots Group Policy gives this user, from a key under `HKCU\Software\Policies`, as Group Policy writes it. A standard user must not be able to write there. In a **standard** account (`net user surogate-std <a password> /add`, then sign in as it), in a PowerShell that is not elevated:
+
+```
+New-Item -Path "HKCU:\Software\Policies\Microsoft\SystemCertificates\Root\Certificates\surogate-check" -Force
+```
+
+- Pass: PowerShell refuses it, with "Requested registry access is not allowed" or another access error.
+- **FAIL, a security finding:** the key is made. Remove it (`Remove-Item -Path "HKCU:\Software\Policies\Microsoft\SystemCertificates\Root\Certificates\surogate-check"`) and report it.
+- **Send back:** the output.
+
+### 5.2 The helper's own tests, with the computer's certificate stores
+
+In an elevated PowerShell, in the administrator test account, from `desktop\native\windows\helper`:
+
+```
+cargo test --locked -- --include-ignored
+```
+
+- They add five test roots to this computer's and this user's stores, list them, and take them out again.
+- Pass: `test result: ok` for each part, 0 failed.
+- **Send back:** the last 20 lines.
+
+### 5.3 The development app
+
+```
+test\win32\dev-app.ps1
+```
+
+- It makes "Surogate Dev" in the Start menu, registers `surogate://` for this user to start it, and starts it. Pass: the window opens, "Surogate Dev" is in the Start menu, and the script says it registered `surogate://`.
+- Quit it from its icon in the notification area, and start "Surogate Dev" from the Start menu, so that it has no console of PowerShell's. Open Settings › Browser, close Settings, and open it again. Pass: no console window flashes up at any time.
+- Sign in to an agent, as the app asks.
+
+### 5.4 The window and the notification area
+
+1. In Settings › Appearance, take the light theme, then the dark one. Pass: the window's own minimise, maximise and close buttons are in the window's colours each time, and nothing of the page lies under them.
+2. Open Settings, and press its close button (its upper half too). Pass: Settings closes at the first press.
+3. In Windows's Settings › Personalization › Colors, take "Custom", then "Dark" for Windows mode and "Light" for app mode, then the other way round. Pass: Surogate's icon in the notification area is light on the dark taskbar and dark on the light one. If it does not change until Surogate is started again, record that.
+4. Close the window with its close button. Pass: it goes, and Surogate's icon stays in the notification area. Click the icon. Pass: the window comes back.
+5. Pin "Surogate Dev" to the taskbar. Close the window, then click the pinned button. Pass: the window comes back. Minimise it, then start "Surogate Dev" from the Start menu. Pass: the window comes back, in front of the other windows, not only flashing in the taskbar.
+
+### 5.5 Notifications
+
+1. Close the window. In a chat on the agent's own site, ask the agent something it must ask you about, as a file it wants to change.
+2. Pass: a toast names "Surogate Dev" and says what the agent asks. Click it. Pass: the window opens on that chat.
+3. Again, but wait until the toast has left the screen, then click it in the notification centre (Win+N). Pass: the window opens on that chat.
+
+### 5.6 Links and start at login
+
+1. With the app running, open `surogate://open?url=<the agent's address>` from the Run box (Win+R). Pass: the window comes forward, on that agent.
+2. Quit the app from its icon's menu, and open the link again. Pass: the app starts, on that agent.
+3. In Settings, turn Start at login on. In Task Manager › Startup apps, record the name it is listed by, and its status. Sign out and in again. Pass: Surogate is in the notification area, its window not shown.
+4. In Task Manager › Startup apps, disable it. Open Settings again. Pass: Start at login shows off.
+
+### 5.7 Quick entry
+
+1. With another app in front, as Notepad, press Ctrl+Alt+Space. Pass: quick entry opens in front of it, and takes what you type.
+2. Add the German keyboard (Settings › Time & language › Language & region), switch to it with Win+Space, and press AltGr+Space in Notepad. Record whether quick entry opens, and whether Notepad loses a character it would have typed.
+
+### 5.8 The company's certificate authority
+
+Make a test root with `New-SelfSignedCertificate -Subject "CN=Surogate test company root" -KeyUsage CertSign -TextExtension @("2.5.29.19={critical}{text}ca=1") -CertStoreLocation Cert:\CurrentUser\My`, export it with `Export-Certificate`, and remove it from `Cert:\CurrentUser\My`. Then, each in turn:
+
+1. In an elevated PowerShell: `Import-Certificate -FilePath <the .cer> -CertStoreLocation Cert:\LocalMachine\Root`.
+2. By Group Policy: `gpedit.msc` › Computer Configuration › Windows Settings › Security Settings › Public Key Policies › Trusted Root Certification Authorities › Import; then `gpupdate /force`.
+3. Where the PC is enrolled in Intune: a trusted certificate profile to the computer's Root store.
+4. As the user, in a PowerShell that is not elevated: `Import-Certificate -FilePath <the .cer> -CertStoreLocation Cert:\CurrentUser\Root`, answering Windows's question Yes.
+5. With the root in `Cert:\LocalMachine\Root` as in 1: in `certlm.msc`, open its Properties and choose "Disable all purposes for this certificate"; then, again, "Enable only the following purposes" with Server Authentication unticked.
+6. With the root in `Cert:\LocalMachine\Root` as in 1, its purposes as they were: import it into `Cert:\LocalMachine\Disallowed` too (certlm's Untrusted Certificates), then instead by Group Policy (Public Key Policies › Untrusted Certificates).
+
+After each, run `native\windows\target\release\surogate-helper.exe trust | Select-String -Pattern "BEGIN CERTIFICATE" | Measure-Object` before and after, and `certutil -store root "Surogate test company root"`.
+
+- Pass: the count goes up by one after 1, 2 and 3, and **not** after 4, nor in either step of 5, nor in either step of 6.
+- Take each root out again (`certlm.msc` and `certmgr.msc`, or `Remove-Item` on its `Cert:\` path).
+- **Send back:** the counts.
+
+### 5.9 The person's browsers
+
+1. Install Chrome for this user alone (its installer run from a PowerShell that is not elevated puts it in `%LOCALAPPDATA%\Google\Chrome`). Open Settings › Browser. Pass: Google Chrome and Microsoft Edge are listed, and neither says its signature does not check out.
+2. Take Edge in Settings › Browser. In a chat, ask the agent to open a page in the browser. Pass: Edge opens the page, in a window of its own profile, and the agent says what the page shows.
+3. In Settings › Browser, Custom…: the dialog offers programs (.exe) alone. Pick `C:\Windows\notepad.exe`. Pass: it is refused, and Settings says why.
+
+### 5.10 The development app's removal
+
+```
+test\win32\dev-app.ps1 -Remove
+```
+
+- Pass: the app quits (where a thread is working, it asks first: answer it), and the script says it removed the shortcut.
+- Pass: Task Manager › Startup apps no longer lists it; the Start menu has no "Surogate Dev"; `surogate://open?url=<the agent's address>` from the Run box starts nothing.
+- **Send back:** the script's output, and what Startup apps listed in 5.6.

@@ -18,14 +18,23 @@ import { identityOf } from "../files/identity.js";
 import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./folders-held-darwin.js";
 import * as linux from "./folders-held-linux.js";
+import * as win32 from "./folders-held-win32.js";
 
 /** How long a folder has to answer. */
 export const LOOK_MS = 5_000;
 const LOOKS_AT_ONCE = 2;
 
-// The look in a child process of its own, by this OS (folders-held-linux.ts, folders-held-darwin.ts).
-const lookCommand: (folder: string) => [string, string[]] = forThisOs({ linux: linux.lookCommand, darwin: darwin.lookCommand })
-  ?? (() => notBuilt("Surogate Desktop's look at a folder"));
+// The look in a child process of its own, by this OS (folders-held-linux.ts, folders-held-darwin.ts, folders-held-win32.ts).
+const lookCommand: (folder: string) => [string, string[]] = forThisOs({
+  linux: linux.lookCommand, darwin: darwin.lookCommand, win32: win32.lookCommand,
+}) ?? (() => notBuilt("Surogate Desktop's look at a folder"));
+
+// A PATH's entries, by this OS: apart by ":", each a whole path from "/", as POSIX writes one; Windows's its own.
+const POSIX_PATHS = { delimiter: ":", whole: (entry: string): boolean => entry.startsWith("/") };
+const PATHS = forThisOs({ linux: POSIX_PATHS, darwin: POSIX_PATHS, win32: win32.PATHS }) ?? POSIX_PATHS;
+
+/** Whether *folder* is an entry of the PATH *path*, as this OS writes one. */
+export const onPath = (path: string | undefined, folder: string): boolean => (path ?? "").split(PATHS.delimiter).includes(folder);
 
 /**
  * What a look at *folder* in a child process of its own found within *ms*, following links as the
@@ -93,10 +102,10 @@ export class FolderLooks {
    * mount that has stopped answering would stop. A program in one could not be run anyway.
    */
   async path(path: string | undefined): Promise<string> {
-    const entries = (path ?? "").split(":").filter((entry) => entry.startsWith("/"));
+    const entries = (path ?? "").split(PATHS.delimiter).filter(PATHS.whole);
     const found = await Promise.all(entries.map((entry) => lookApart(entry, this.ms)));
     entries.forEach((entry, n) => found[n] === "silent" && this.said(entry, "silent"));
-    return entries.filter((_entry, n) => found[n] === "there").join(":");
+    return entries.filter((_entry, n) => found[n] === "there").join(PATHS.delimiter);
   }
 
   // What *folder* is, by the look at it that runs, or by one begun once there is room for it.
