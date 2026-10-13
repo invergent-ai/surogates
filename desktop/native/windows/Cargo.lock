@@ -94,6 +94,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "service"
+version = "0.0.0"
+dependencies = [
+ "hcs",
+ "pipe",
+ "serde_json",
+ "windows-sys",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
