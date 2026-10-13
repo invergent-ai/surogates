@@ -125,3 +125,27 @@ describe("the words of the kernel's line the guest's init reads", () => {
     expect(vm("init")).toContain('if [ "$transport" = vsock ]; then\n  modprobe 9p\n  modprobe 9pnet_fd\nelse\n  modprobe virtiofs\nfi\nmodprobe overlay\n');
   });
 });
+
+describe("the rule's names, by the set the kernel's line names", () => {
+  // The value init's name_set() prints for *cmdline*, with named() beside it, run alone.
+  const setOf = (cmdline: string) => {
+    const ran = spawnSync("/bin/sh", ["-euc", `${fnOf(vm("init"), "named")}${fnOf(vm("init"), "name_set")}\nname_set "$1"`, "sh", cmdline], { encoding: "utf8" });
+    return ran.status === 0 ? { set: ran.stdout.trim() } : { refused: ran.stdout.trim() };
+  };
+
+  it("takes posix's, which adds none, and windows's, the names Explorer acts on, as the map takes each", () => {
+    expect(setOf("root=/dev/vda console=hvc0 surogate.names=posix")).toEqual({ set: "0" });
+    expect(setOf("console=ttyS0 surogate.names=windows")).toEqual({ set: "1" });
+  });
+
+  it("refuses a line that names neither, or both, or another, which fails the rule's load and the boot", () => {
+    expect(setOf("root=/dev/vda console=hvc0")).toEqual({ refused: "the kernel's command line names no surogate.names=" });
+    expect(setOf("surogate.names=posix surogate.names=windows")).toEqual({ refused: "the kernel's command line names surogate.names= twice" });
+    expect(setOf("surogate.names=macos")).toEqual({ refused: "surogate.names=macos is not a set of names this guest knows" });
+    expect(vm("init")).toContain('elif ! names=$(name_set "$(cat /proc/cmdline)"); then\n    echo "failed: $names"');
+    // Set and frozen before the rule is said to be attached, as the scope is.
+    expect(vm("init")).toContain('/usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/names key 0 0 0 0 value "$names" 0 0 0 \\\n'
+      + '      && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/names; } >&2; then\n    echo "failed: could not set the protected-names rule\'s names"');
+    expect(vm("rule.bpf.c")).toMatch(/^#define NAMES_POSIX 0\n#define NAMES_WINDOWS 1\n/m);
+  });
+});

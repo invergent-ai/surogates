@@ -1,6 +1,7 @@
 // The guest-kernel rule on protected names. Refuses a session's writes to
 // the paths files/protect.ts protects, in a folder a chat shares into the guest, by
-// walking the dentry up and feeding each component to rule-match.h's stepper. Loaded
+// walking the dentry up and feeding each component to rule-match.h's stepper; and,
+// where the kernel's line names that set, of the names Windows's Explorer acts on. Loaded
 // once at boot (vm/init); a session (uid >= FIRST_UID, or the scope's one uid) cannot unload it.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -65,6 +66,39 @@ struct {
 	__uint(map_flags, RDONLY_PROG);
 } scope SEC(".maps");
 
+// The names refused besides the protected ones, a set the kernel's command line names (surogate.names=), which
+// vm/init writes and freezes as it does the scope: NAMES_POSIX, Linux's and macOS's, none more; NAMES_WINDOWS,
+// those Windows's Explorer acts on (rule-match.h, sg_explorer). A load whose line names neither fails the boot.
+#define NAMES_POSIX 0
+#define NAMES_WINDOWS 1
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(map_flags, RDONLY_PROG);
+} names SEC(".maps");
+
+static __always_inline int windows_names(void)
+{
+	__u32 key = 0;
+	__u32 *set = bpf_map_lookup_elem(&names, &key);
+	return set && *set == NAMES_WINDOWS;
+}
+
+// Whether *dentry*'s own name is one Windows's Explorer acts on, by its end: its last SG_TAIL bytes, or the
+// whole of a shorter one. One whose end cannot be read is taken for one: the set refuses what it cannot judge.
+static __noinline int explorer_name(struct dentry *dentry)
+{
+	struct sg_tail tail = {};
+	const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
+	unsigned int len = BPF_CORE_READ(dentry, d_name.len);
+	long got = len > SG_TAIL ? bpf_probe_read_kernel(tail.b, SG_TAIL, name + (len - SG_TAIL)) : bpf_probe_read_kernel_str(tail.b, SG_TAIL + 1, name);
+	if (got < 0)
+		return 1;
+	return sg_explorer(&tail, len > SG_TAIL ? SG_TAIL : (int)len);
+}
+
 static __always_inline int in_scope(__u32 uid)
 {
 	__u32 key = 0;
@@ -84,6 +118,8 @@ static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry
 	__u32 uid = bpf_get_current_uid_gid();
 	if (!in_scope(uid) || !dentry || !share_sb(sb))
 		return 0;
+	if (windows_names() && explorer_name(dentry))
+		return REFUSED;
 	return judge(dentry, dir);
 }
 

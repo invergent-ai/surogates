@@ -52,10 +52,41 @@ SG_INLINE unsigned sg_below(unsigned x, unsigned y)
 	return t >> 31;
 }
 
+// One character of a name, from its first byte *b0* and the two after it, *b1* and *b2*, as sg_fold takes it
+// to letters: ASCII lower-cased; ſ (U+017F) as s; ı (U+0131) and İ (U+0130) as i; ß (U+00DF) and ẞ (U+1E9E)
+// as ss; the Kelvin sign (U+212A) as k; the ligatures U+FB00 to U+FB06 as the letters they join. Each value
+// as sg_fold's: arithmetic, never a branch. *at0* to *at2*, its letters; *count*, how many; *span*, its bytes.
+struct sg_char { unsigned at0, at1, at2, count, span; };
+SG_INLINE struct sg_char sg_char(unsigned b0, unsigned b1, unsigned b2)
+{
+	unsigned two = b0 << 8 | b1, three = two << 8 | b2;
+	unsigned long_s = sg_zero(two ^ 0xc5bf);
+	unsigned dotless = sg_zero(two ^ 0xc4b1) | sg_zero(two ^ 0xc4b0);
+	unsigned sharp = sg_zero(two ^ 0xc39f);
+	unsigned kelvin = sg_zero(three ^ 0xe284aa);
+	unsigned capital_sharp = sg_zero(three ^ 0xe1ba9e);
+	// U+FB00 + l, for l from 0 to 6: ff, fi, fl, ffi, ffl, st, st.
+	unsigned l = (b2 - 0x80u) & 0xffu;
+	unsigned lig = sg_zero((three >> 8) ^ 0xefac) & sg_below(l, 7);
+	unsigned l3 = sg_zero(l ^ 3), l4 = sg_zero(l ^ 4), st = sg_zero(l ^ 5) | sg_zero(l ^ 6);
+	unsigned lig0 = 'f' + st * ('s' - 'f');
+	unsigned lig1 = (sg_zero(l) | l3 | l4) * 'f' + sg_zero(l ^ 1) * 'i' + sg_zero(l ^ 2) * 'l' + st * 't';
+	unsigned lig2 = l3 * 'i' + l4 * 'l';
+	unsigned paired = long_s | dotless | sharp, tripled = kelvin | capital_sharp | lig;
+	unsigned plain = 1 - paired - tripled;
+	unsigned upper = sg_below('A' - 1, b0) & sg_below(b0, 'Z' + 1);
+	struct sg_char c;
+	c.at0 = plain * (b0 + (upper << 5)) + (long_s | sharp | capital_sharp) * 's' + dotless * 'i' + kelvin * 'k' + lig * lig0;
+	c.at1 = (sharp | capital_sharp) * 's' + lig * lig1;
+	c.at2 = lig * lig2;
+	c.count = plain + long_s + dotless + kelvin + 2 * (sharp | capital_sharp) + lig * (2 + l3 + l4);
+	c.span = plain + 2 * paired + 3 * tripled;
+	return c;
+}
+
 // The component *raw*, *len* bytes, into *nm* as a volume that compares names without case may compare
-// it, as files/protect.ts's folded does: ASCII lower-cased; ſ (U+017F) as s; ı (U+0131) and İ (U+0130) as
-// i; ß (U+00DF) and ẞ (U+1E9E) as ss; the Kelvin sign (U+212A) as k; the ligatures U+FB00 to U+FB06 as the
-// letters they join. Returns the folded name's length, or *len* for a name too long to be read whole.
+// it, as files/protect.ts's folded does: each character as sg_char takes it. Returns the folded name's
+// length, or *len* for a name too long to be read whole.
 // Branch-free (SG_OPAQUE), and writing *nm* at fixed places alone: each byte of a name is a value here,
 // never a branch or an address, so the verifier walks one path, once, for every name. Each character
 // writes its letters at *o*, where the folded name has got to: each place k of *nm* takes the letter, of
@@ -66,36 +97,78 @@ SG_NOINLINE int sg_fold(const struct sg_raw *raw SG_ARG_NONNULL, int len, struct
 	for (int k = 0; k < SG_NAMELEN; k++)
 		nm->b[k] = 0;
 	for (int j = 0; j < SG_RAWLEN; j++) {
-		unsigned b0 = raw->b[j], b1 = raw->b[j + 1], b2 = raw->b[j + 2];
-		unsigned two = b0 << 8 | b1, three = two << 8 | b2;
-		unsigned long_s = sg_zero(two ^ 0xc5bf);
-		unsigned dotless = sg_zero(two ^ 0xc4b1) | sg_zero(two ^ 0xc4b0);
-		unsigned sharp = sg_zero(two ^ 0xc39f);
-		unsigned kelvin = sg_zero(three ^ 0xe284aa);
-		unsigned capital_sharp = sg_zero(three ^ 0xe1ba9e);
-		// U+FB00 + l, for l from 0 to 6: ff, fi, fl, ffi, ffl, st, st.
-		unsigned l = (b2 - 0x80u) & 0xffu;
-		unsigned lig = sg_zero((three >> 8) ^ 0xefac) & sg_below(l, 7);
-		unsigned l3 = sg_zero(l ^ 3), l4 = sg_zero(l ^ 4), st = sg_zero(l ^ 5) | sg_zero(l ^ 6);
-		unsigned lig0 = 'f' + st * ('s' - 'f');
-		unsigned lig1 = (sg_zero(l) | l3 | l4) * 'f' + sg_zero(l ^ 1) * 'i' + sg_zero(l ^ 2) * 'l' + st * 't';
-		unsigned lig2 = l3 * 'i' + l4 * 'l';
-		unsigned paired = long_s | dotless | sharp, tripled = kelvin | capital_sharp | lig;
-		unsigned plain = 1 - paired - tripled;
-		unsigned upper = sg_below('A' - 1, b0) & sg_below(b0, 'Z' + 1);
-		unsigned at0 = plain * (b0 + (upper << 5)) + (long_s | sharp | capital_sharp) * 's' + dotless * 'i' + kelvin * 'k' + lig * lig0;
-		unsigned at1 = (sharp | capital_sharp) * 's' + lig * lig1;
-		unsigned at2 = lig * lig2;
-		unsigned count = plain + long_s + dotless + kelvin + 2 * (sharp | capital_sharp) + lig * (2 + l3 + l4);
+		struct sg_char c = sg_char(raw->b[j], raw->b[j + 1], raw->b[j + 2]);
 		// A byte of the name, and none of a character taken already.
 		unsigned active = sg_below(j, len) & sg_zero(skip);
 		for (int k = 0; k < SG_NAMELEN; k++)
-			nm->b[k] = (char)(nm->b[k] + active * (sg_zero(o ^ k) * at0 + sg_zero((o + 1) ^ k) * at1 + sg_zero((o + 2) ^ k) * at2));
-		o += active * count;
-		skip = active * (plain + 2 * paired + 3 * tripled - 1) + (1 - active) * (skip - 1 + sg_zero(skip));
+			nm->b[k] = (char)(nm->b[k] + active * (sg_zero(o ^ k) * c.at0 + sg_zero((o + 1) ^ k) * c.at1 + sg_zero((o + 2) ^ k) * c.at2));
+		o += active * c.count;
+		skip = active * (c.span - 1) + (1 - active) * (skip - 1 + sg_zero(skip));
 	}
 	unsigned whole = sg_below(len, SG_RAWLEN);
 	return (int)(whole * o + (1 - whole) * (unsigned)len);
+}
+
+// The names Windows's Explorer acts on when it shows a folder (files/explorer-names.ts), which the rule refuses
+// besides the protected ones where the kernel's line names surogate.names=windows: desktop.ini, autorun.inf, and
+// a name ending .lnk, .url, .scf, .library-ms or .searchconnector-ms. Judged by a name's end: its last SG_TAIL
+// bytes, or the whole of a shorter one. The most the longest of them takes, written with the characters
+// sg_char takes to its letters, is 21 bytes (.searchconnector-ms, with ſ for both its s), and a character a
+// name's end begins within adds nothing to it: what is cut of it is bytes no character starts with.
+#define SG_TAIL 24
+// The folded end, right-aligned: never more letters than bytes.
+#define SG_TAILOUT 32
+struct sg_tail { unsigned char b[SG_TAIL + 2]; }; // a name's end, NUL-padded, with two NULs past for the look ahead
+struct sg_tailname { char b[SG_TAILOUT]; };
+
+// A name's end, *raw*, *len* bytes of it, folded as sg_fold folds a name, into *nm* right-aligned: its last
+// letter at nm->b[SG_TAILOUT - 1]. Returns how many letters. Two passes, so each write is at a fixed place
+// as sg_fold's are: the first counts the letters, the second puts each where it lands from the end.
+SG_NOINLINE int sg_fold_tail(const struct sg_tail *raw SG_ARG_NONNULL, int len, struct sg_tailname *nm SG_ARG_NONNULL)
+{
+	unsigned total = 0, skip = 0;
+	for (int j = 0; j < SG_TAIL; j++) {
+		struct sg_char c = sg_char(raw->b[j], raw->b[j + 1], raw->b[j + 2]);
+		unsigned active = sg_below(j, len) & sg_zero(skip);
+		total += active * c.count;
+		skip = active * (c.span - 1) + (1 - active) * (skip - 1 + sg_zero(skip));
+	}
+	for (int k = 0; k < SG_TAILOUT; k++)
+		nm->b[k] = 0;
+	unsigned o = SG_TAILOUT - total;
+	skip = 0;
+	for (int j = 0; j < SG_TAIL; j++) {
+		struct sg_char c = sg_char(raw->b[j], raw->b[j + 1], raw->b[j + 2]);
+		unsigned active = sg_below(j, len) & sg_zero(skip);
+		for (int k = 0; k < SG_TAILOUT; k++)
+			nm->b[k] = (char)(nm->b[k] + active * (sg_zero(o ^ k) * c.at0 + sg_zero((o + 1) ^ k) * c.at1 + sg_zero((o + 2) ^ k) * c.at2));
+		o += active * c.count;
+		skip = active * (c.span - 1) + (1 - active) * (skip - 1 + sg_zero(skip));
+	}
+	return (int)total;
+}
+
+// 1 when the folded end *nm*, *total* letters, ends with *lit*, its *n* bytes; branch-free.
+SG_INLINE unsigned sg_ends(const struct sg_tailname *nm, unsigned total, const char *lit, int n)
+{
+	unsigned same = 1 - sg_below(total, (unsigned)n);
+	for (int k = 0; k < n; k++)
+		same &= sg_zero((unsigned)(unsigned char)nm->b[SG_TAILOUT - n + k] ^ (unsigned)(unsigned char)lit[k]);
+	return same;
+}
+#define SG_ENDS(nm, total, lit) sg_ends((nm), (total), lit, sizeof(lit) - 1)
+
+// Whether the name whose end *tail* holds, its *len* bytes, is one Windows's Explorer acts on. Out-of-line on BPF,
+// as sg_classify is. A name longer than its end as read is never desktop.ini or autorun.inf: those take 16 bytes
+// at most, written with the characters sg_char takes to their letters, and every byte past them adds a letter
+// or is of a character that does.
+SG_NOINLINE int sg_explorer(const struct sg_tail *tail SG_ARG_NONNULL, int len)
+{
+	struct sg_tailname nm = {};
+	unsigned total = (unsigned)sg_fold_tail(tail, len, &nm);
+	unsigned named = sg_zero(total ^ 11) & (SG_ENDS(&nm, total, "desktop.ini") | SG_ENDS(&nm, total, "autorun.inf"));
+	return (int)(named | SG_ENDS(&nm, total, ".lnk") | SG_ENDS(&nm, total, ".url") | SG_ENDS(&nm, total, ".scf")
+		| SG_ENDS(&nm, total, ".library-ms") | SG_ENDS(&nm, total, ".searchconnector-ms"));
 }
 
 #define SB_PROTECTED (1 << 0) // a shell's, editor's or agent's name: not below a dependency folder

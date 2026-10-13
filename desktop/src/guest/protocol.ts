@@ -34,13 +34,17 @@ export const HELD = "What this chat ran is waiting on its folder, which does not
 export const INBOUND_PORT = "ai.surogate.inbound";
 
 // What the guest's kernel line names of the machine it runs on, so that no part of the guest guesses
-// (vm/qemu.ts, kernelLine): the bus of its disks, virtio's or SCSI's (Hyper-V's); and how its ports reach
-// the host, as virtio-serial ports or as vsock streams (Hyper-V's sockets).
+// (vm/qemu.ts, kernelLine): the bus of its disks, virtio's or SCSI's (Hyper-V's); how its ports reach
+// the host, as virtio-serial ports or as vsock streams (Hyper-V's sockets); and the set of names the
+// guest's rule refuses a session besides the protected ones (vm/rule.bpf.c): none more on posix, and on
+// windows those Windows's Explorer acts on (files/explorer-names.ts).
 export type DiskBus = "virtio" | "scsi";
 export type Transport = "virtio-serial" | "vsock";
+export type NameSet = "posix" | "windows";
 export interface GuestDevices {
   disks: DiskBus;
   transport: Transport;
+  names: NameSet;
 }
 
 // Each of the agent's ports on vsock: the host's port it is a stream to, at the host's CID, 2. The host

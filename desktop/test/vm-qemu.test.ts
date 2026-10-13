@@ -19,7 +19,7 @@ describe("QEMU's command line", () => {
       "-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host", "-smp", "4", "-m", "2G",
       "-object", "memory-backend-memfd,id=mem,size=2G,share=on",
       "-kernel", "/i/vmlinuz",
-      "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.disks=virtio surogate.transport=virtio-serial",
+      "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix",
       "-drive", "if=none,id=root,file=/i/rootfs.img,format=raw,readonly=on", "-device", "virtio-blk-pci,drive=root",
       "-drive", "if=none,id=agent,file=/a/agent.img,format=raw,readonly=on", "-device", "virtio-blk-pci,drive=agent",
       "-drive", "if=none,id=sessions,file=/d/sessions.img,format=raw,discard=unmap", "-device", "virtio-blk-pci,drive=sessions",
@@ -40,14 +40,14 @@ describe("QEMU's command line", () => {
     ]);
   });
 
-  it("names the guest's disks and transport on the kernel's line: virtio's, with the image's disk as root and the console on hvc0", () => {
-    expect(kernelLine({ disks: "virtio", transport: "virtio-serial" })).toBe(
+  it("names the guest's disks, transport and names on the kernel's line: virtio's, with the image's disk as root and the console on hvc0", () => {
+    expect(kernelLine({ disks: "virtio", transport: "virtio-serial", names: "posix" })).toBe(
       "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
-        + " surogate.disks=virtio surogate.transport=virtio-serial",
+        + " surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix",
     );
     // Hyper-V's: the initrd finds the image's disk at its LUN and runs the stub init on it, and the console is the UART.
-    expect(kernelLine({ disks: "scsi", transport: "vsock" })).toBe(
-      "console=ttyS0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.disks=scsi surogate.transport=vsock",
+    expect(kernelLine({ disks: "scsi", transport: "vsock", names: "windows" })).toBe(
+      "console=ttyS0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.disks=scsi surogate.transport=vsock surogate.names=windows",
     );
   });
 

@@ -75,10 +75,10 @@ export function fitting(run: string): string | null {
 }
 
 /**
- * The guest kernel's command line on macOS: every OS's for the framework's devices, virtio's disks and ports, with
- * the uid every root runs as, which the protected-names rule judges.
+ * The guest kernel's command line on macOS: every OS's for the framework's devices, virtio's disks and ports, and no
+ * names refused but the protected ones, with the uid every root runs as, which the protected-names rule judges.
  */
-export const commandLine = (user: HostUser): string => `${kernelLine({ disks: "virtio", transport: "virtio-serial" })} surogate.uid=${user.uid}`;
+export const commandLine = (user: HostUser): string => `${kernelLine({ disks: "virtio", transport: "virtio-serial", names: "posix" })} surogate.uid=${user.uid}`;
 
 // What surogate-vm says, one JSON object a line.
 type Said =

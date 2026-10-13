@@ -75,6 +75,17 @@ scope_uid() {
   done
   echo "$found"
 }
+# The rule's names besides the protected ones (rule.bpf.c, names), as the kernel's command line, $1, names
+# their set in surogate.names=: printed as the map takes it, 0 for posix, which adds none, and 1 for windows,
+# those Windows's Explorer acts on. Refused, with why printed: a line that names no set, two, or another.
+name_set() {
+  set_named=$(named "$1" names) || { echo "$set_named"; return 1; }
+  case "$set_named" in
+    posix) echo 0 ;;
+    windows) echo 1 ;;
+    *) echo "surogate.names=$set_named is not a set of names this guest knows"; return 1 ;;
+  esac
+}
 # A uid as the map takes it: its four bytes, the low first.
 le32() {
   echo "$(($1 & 255)) $(($1 >> 8 & 255)) $(($1 >> 16 & 255)) $(($1 >> 24 & 255))"
@@ -84,6 +95,8 @@ le32() {
     echo "failed: the bpf LSM is not active; refusing to run commands unprotected"
   elif ! scope=$(scope_uid "$(cat /proc/cmdline)"); then
     echo "failed: $scope"
+  elif ! names=$(name_set "$(cat /proc/cmdline)"); then
+    echo "failed: $names"
   elif ! /usr/sbin/bpftool prog loadall /usr/lib/surogate/rule.bpf.o /sys/fs/bpf/surogate pinmaps /sys/fs/bpf/surogate-maps autoattach >&2; then
     echo "failed: could not load the guest-kernel protected-names rule"
   # Its scope set, then frozen before any session runs: nothing, the agent included, changes it after.
@@ -92,6 +105,10 @@ le32() {
   elif ! { /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/scope key 0 0 0 0 value $(le32 "${scope:-0}") \
       && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/scope && echo "$scope" > /run/surogate/scope; } >&2; then
     echo "failed: could not set the protected-names rule's scope"
+  # Its names set and frozen as its scope is.
+  elif ! { /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/names key 0 0 0 0 value "$names" 0 0 0 \
+      && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/names; } >&2; then
+    echo "failed: could not set the protected-names rule's names"
   else
     # grep -c exits 1 on a count of 0, which would end this without a word.
     have=$(/usr/sbin/bpftool link show | grep -c lsm || true)

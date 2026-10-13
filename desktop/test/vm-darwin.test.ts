@@ -56,7 +56,7 @@ describe("the macOS VM backend", () => {
   });
 
   it("tells the guest kernel the uid every root runs as, which the protected-names rule judges, on every OS's command line", () => {
-    expect(commandLine(ANA)).toBe(`root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.disks=virtio surogate.transport=virtio-serial surogate.uid=501`);
+    expect(commandLine(ANA)).toBe(`root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix surogate.uid=501`);
     expect(fitting(runtimeFolder("/Users/ana/Library/Application Support/Surogate", "/var/folders/ab/cdefghij/T"))).toBeNull();
   });
 });
