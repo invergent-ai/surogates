@@ -3,7 +3,8 @@
 A document written to the user's request is a thread's, so the chat has no
 skill that makes one: they are not in its prompt or its ``skills_list``,
 and ``skill_view`` of one is refused with words that send the work to a
-thread.  The project's threads, and every other chat, keep them.
+thread.  An MCP server's tools do work too, so the chat is sent none of
+them.  The project's threads, and every other chat, keep both.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
+import surogates.harness.loop as loop_module
 from surogates.harness.api_client import HarnessAPIClient
 from surogates.harness.prompt import PromptBuilder
 from surogates.orchestrator import worker as worker_module
@@ -24,7 +26,10 @@ from surogates.session.models import Session
 from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.skills import _skill_view_handler, _skills_list_handler
 from surogates.tools.loader import ResourceLoader, SkillDef
+from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams import master_config, thread_config
+from tests.test_steer_loop import _final_response, _make_loop_harness
 
 pytestmark = pytest.mark.asyncio
 
@@ -189,3 +194,58 @@ async def test_a_thread_and_any_other_chat_view_a_skill_that_makes_a_document(mo
     kwargs = skill_kwargs(monkeypatch, config, through_the_api=through_the_api)
     viewed = json.loads(await _skill_view_handler({"name": name}, **kwargs))
     assert f"The {name} playbook." in viewed["content"]
+
+
+# -- MCP tools ----------------------------------------------------------------------------------
+
+#: An MCP tool of this session's agent, and one the shared worker discovered for another agent.
+MINE = "mcp__tool_router__REMOTE_BASH_TOOL"
+FOREIGN = "mcp__another_agents_server__search"
+
+
+async def sent_tools(monkeypatch, session: Session) -> set[str]:
+    """The tools a session's model is sent in a turn, its agent's MCP tools discovered."""
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    for name in (MINE, FOREIGN):
+        registry.register(
+            name=name, schema=ToolSchema(name=name, description="Runs it remotely.", parameters={}),
+            handler=AsyncMock(return_value="{}"), toolset="mcp",
+        )
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._tools = registry
+    harness._mcp_tool_names = frozenset({MINE})
+    sent: list[set[str]] = []
+
+    async def llm(**kwargs):
+        sent.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
+        return _final_response("Done.")
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
+    await harness._run_loop(
+        session, [{"role": "user", "content": "Draft the NDA"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    )
+    return sent[0]
+
+
+ALLOWED = pytest.mark.parametrize("allowed", [None, ["memory", "todo", MINE]], ids=["no-allowlist", "an-allowlist"])
+
+
+@ALLOWED
+async def test_a_project_chat_is_sent_no_mcp_tool(monkeypatch, allowed):
+    config = {**MASTER, **({"allowed_tools": allowed} if allowed else {})}
+    sent = await sent_tools(monkeypatch, session_with(config))
+    assert {"propose_threads", "start_thread", "memory"} <= sent
+    assert {name for name in sent if name.startswith("mcp__")} == set()
+
+
+@ALLOWED
+async def test_a_thread_and_any_other_chat_keep_their_agents_mcp_tools(monkeypatch, allowed):
+    for config, parent in ((THREAD, True), ({}, False)):
+        config = {**config, **({"allowed_tools": allowed} if allowed else {})}
+        sent = await sent_tools(monkeypatch, session_with(config, parent=parent))
+        assert {name for name in sent if name.startswith("mcp__")} == {MINE}, config
