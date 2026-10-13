@@ -85,10 +85,11 @@ async def test_enrol_records_consent_and_tells_the_care_team(sf, patient, care_t
     doctor, _ = care_team
     result = await followup.handle_followup_enroll(
         {"protocol": "post-op", "start_date": "2026-10-05", "consent": True,
-         "summary": "Pacient nou, procedură pe 5 octombrie."},
+         "summary": "Pacient nou, procedură pe 5 octombrie.",
+         "patient_name": "Ion Popescu"},
         **_kw(sf, session_id),
     )
-    assert "Enrolled in post-op from 2026-10-05" in result
+    assert "Enrolled in post-op for Ion Popescu from 2026-10-05" in result
     assert "notified (1)" in result
     [enrollment] = await store.enrollments(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
@@ -177,7 +178,7 @@ async def test_enrol_counts_days_ago_in_the_protocols_timezone(sf, patient, days
     user_id, session_id = patient
     result = await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x",
-         "start_date": "", "days_ago": days_ago},
+         "start_date": "", "days_ago": days_ago, "name_unknown": True},
         **_kw(sf, session_id),
     )
     expected = datetime.now(ZoneInfo("Europe/Bucharest")).date() - timedelta(days=5)
@@ -221,7 +222,8 @@ async def test_enrol_only_in_a_whatsapp_conversation(sf, patient):
 async def test_enrol_without_a_care_team_still_enrols_and_says_so(sf, patient):
     _, session_id = patient
     result = await followup.handle_followup_enroll(
-        {"protocol": "post-op", "consent": True, "summary": "x"},
+        {"protocol": "post-op", "consent": True, "summary": "x",
+         "date_unknown": True, "name_unknown": True},
         **_kw(sf, session_id),
     )
     assert "Enrolled in post-op" in result
@@ -405,7 +407,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     _, session_id = patient
     result = await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x",
-         "patient_name": " Petre Marin ", "answered_by": "Ana, fiica"},
+         "patient_name": " Petre Marin ", "answered_by": "Ana, fiica", "date_unknown": True},
         **_kw(sf, session_id),
     )
     assert "for Petre Marin (answered by Ana, fiica)" in result
@@ -462,7 +464,7 @@ async def test_a_rough_period_is_enrolled_as_approximate(sf, patient):
     user_id, session_id = patient
     result = await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x",
-         "days_ago": 14, "start_date_approximate": True},
+         "days_ago": 14, "start_date_approximate": True, "name_unknown": True},
         **_kw(sf, session_id),
     )
     expected = datetime.now(ZoneInfo("Europe/Bucharest")).date() - timedelta(days=14)
@@ -484,12 +486,50 @@ async def test_approximate_without_a_start_date_is_not_recorded(sf, patient):
     user_id, session_id = patient
     await followup.handle_followup_enroll(
         {"protocol": "post-op", "consent": True, "summary": "x",
-         "start_date_approximate": True},
+         "start_date_approximate": True, "date_unknown": True,
+         "name_unknown": True},
         **_kw(sf, session_id),
     )
     [row] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
     assert row.start_date is None
     assert row.start_date_approximate is False
+
+
+@pytest.mark.asyncio
+async def test_enrol_without_a_date_or_a_name_says_what_to_pass(sf, patient, care_team):
+    # Seen live: a model sent only protocol, consent and summary, and the
+    # person was enrolled with no start date, out of every Program's reach.
+    user_id, session_id = patient
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x"},
+        **_kw(sf, session_id),
+    )
+    assert result.startswith("Not enrolled: pass days_ago")
+    assert "date_unknown: true" in result
+    assert "pass patient_name" in result and "name_unknown: true" in result
+    assert await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id) == []
+    assert await _outreach(sf) == []
+
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 3},
+        **_kw(sf, session_id),
+    )
+    assert "days_ago" not in result and "pass patient_name" in result
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_date_enrols_but_says_no_program_will_write(sf, patient, care_team):
+    user_id, session_id = patient
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x",
+         "date_unknown": True, "patient_name": "Ion Popescu"},
+        **_kw(sf, session_id),
+    )
+    assert "Enrolled in post-op for Ion Popescu" in result
+    assert "no Program will message this person until the date is set" in result
+    assert "escalate" in result
+    [row] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
+    assert row.start_date is None
 
 
 # --- next scheduled contact -------------------------------------------------
@@ -511,7 +551,8 @@ async def test_enrol_and_status_say_when_the_next_message_comes(sf, patient):
     _, session_id = patient
     await _morning_program(sf)
     result = await followup.handle_followup_enroll(
-        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 2},
+        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 2,
+         "name_unknown": True},
         **_kw(sf, session_id),
     )
     assert "Next scheduled message: " in result
@@ -525,7 +566,8 @@ async def test_someone_past_every_program_is_promised_no_time(sf, patient):
     _, session_id = patient
     await _morning_program(sf)
     result = await followup.handle_followup_enroll(
-        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 40},
+        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 40,
+         "name_unknown": True},
         **_kw(sf, session_id),
     )
     assert "No scheduled message ahead" in result

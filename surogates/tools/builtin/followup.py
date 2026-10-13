@@ -66,8 +66,8 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "Day 0 of the protocol as YYYY-MM-DD, e.g. the procedure "
-                    "date. Give this or days_ago, not both; omit both if the "
-                    "person does not know it yet."
+                    "date. Give this or days_ago, not both. Without either "
+                    "the person is not enrolled unless date_unknown is true."
                 ),
             },
             "days_ago": {
@@ -90,6 +90,14 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                     "care team knows to confirm it."
                 ),
             },
+            "date_unknown": {
+                "type": "boolean",
+                "description": (
+                    "True only when the person really cannot say when day 0 "
+                    "was, even roughly. No Program reaches them until a date "
+                    "is set, so ask for days_ago first."
+                ),
+            },
             "phase": {
                 "type": "string",
                 "description": "The phase to start in, when the protocol uses phases.",
@@ -99,7 +107,15 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "description": (
                     "The patient's full name, as they or their relative gave "
                     "it. Ask for it: the WhatsApp profile name is whoever is "
-                    "writing, which may be a relative."
+                    "writing, which may be a relative. Required unless "
+                    "name_unknown is true."
+                ),
+            },
+            "name_unknown": {
+                "type": "boolean",
+                "description": (
+                    "True only when the person would not give the patient's "
+                    "name after you asked."
                 ),
             },
             "answered_by": {
@@ -414,6 +430,9 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         start = _start_date(arguments, offered[protocol])
     except ValueError as exc:
         return f"Not enrolled: {exc}."
+    missing = _enrol_missing(arguments)
+    if missing:
+        return "Not enrolled: " + " ".join(missing)
     phase = str(arguments.get("phase") or "").strip() or None
     approximate = arguments.get("start_date_approximate") is True if start else None
     patient_name = str(arguments.get("patient_name") or "").strip() or None
@@ -443,10 +462,46 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         parts.append(f"from {_start_text(enrollment)}")
     if enrollment.phase:
         parts.append(f"phase {enrollment.phase}")
+    if enrollment.start_date is None:
+        return (
+            " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
+            + " No start date is recorded, so no Program will message this "
+            "person until the date is set. Call escalate so the care team can "
+            "set it, and do not promise the person any message."
+        )
     return (
         " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
         + " " + await _next_contact_text(sf, ctx, enrollment, configs)
     )
+
+
+def _enrol_missing(arguments: dict) -> list[str]:
+    """What a model left out that would leave the enrolment useless.
+
+    Models drop optional arguments; a person enrolled without a start date
+    is never reached by a day-windowed Program, so silence must be explicit.
+    """
+    missing = []
+    has_date = any(
+        str(arguments.get(key) if arguments.get(key) is not None else "").strip()
+        for key in ("start_date", "days_ago")
+    )
+    if not has_date and arguments.get("date_unknown") is not True:
+        missing.append(
+            "pass days_ago (e.g. 30 with start_date_approximate: true for "
+            "'about a month'), start_date as YYYY-MM-DD, or date_unknown: true "
+            "if the person really doesn't know."
+        )
+    if (
+        not str(arguments.get("patient_name") or "").strip()
+        and arguments.get("name_unknown") is not True
+    ):
+        missing.append(
+            "pass patient_name (the patient's full name; ask for it if you "
+            "do not have it), or name_unknown: true if the person will not "
+            "give it."
+        )
+    return missing
 
 
 def _start_text(row: Any) -> str:
