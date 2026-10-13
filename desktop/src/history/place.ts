@@ -438,7 +438,7 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
   const data = realpathSync(dataDir);
   // Apart from the folder, both ways: in a folder that held the app's data, the place's own files would
   // be the folder's, recorded and landed as such; in one that lay in it, a thread would work in the app's data.
-  if (within(data, bound.folder) || within(bound.folder, data)) {
+  if (within(data, hostPathOf(bound.folder)) || within(hostPathOf(bound.folder), data)) {
     throw new Error(`The folder ${bound.folder} holds the app's own data, or lies in it, so its history cannot be kept apart from it`);
   }
   const histories = join(data, "history");

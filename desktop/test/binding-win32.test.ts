@@ -1,7 +1,7 @@
 // A chat's folder on Windows, as the app binds and looks at it outside the file host's walk (binding/folder.ts,
-// binding/links.ts, shell/folders-held.ts): named by its path in the guest, /mnt/<drive>/…, its identity read through
-// ntat as the walk reads it, and its guards compared by those paths. On Windows alone, with ntat built
-// (native/ntat/build.ps1).
+// binding/links.ts, shell/folders-held.ts, history/place.ts): named by its path in the guest, /mnt/<drive>/…, its
+// identity read through ntat as the walk reads it, its guards compared by those paths, and its history kept apart from
+// the app's data by this computer's own paths. On Windows alone, with ntat built (native/ntat/build.ps1).
 
 import { execFileSync } from "node:child_process";
 import { closeSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -14,6 +14,7 @@ import { BOOT_ID, checkFolder, type FolderGuards } from "../src/binding/folder.j
 import { scanLinks } from "../src/binding/links.js";
 import { identityFrom } from "../src/files/fd-paths-win32.js";
 import { ntat } from "../src/files/ntat.js";
+import { placeOf } from "../src/history/place.js";
 import { guestPathOf } from "../src/session-path.js";
 import { FolderLooks } from "../src/shell/folders-held.js";
 
@@ -73,4 +74,12 @@ describe.runIf(process.platform === "win32")("a chat's folder on Windows", () =>
     expect(await scanLinks(guestPathOf(work))).toEqual({ count: 1, examples: ["inside.txt"], complete: true });
   });
 
+  it("has its history kept apart from the app's data, the two compared by this computer's own paths", async () => {
+    const work = join(base, "work");
+    const bound = { folder: guestPathOf(work), ...walkedIdentity(work), boot: BOOT_ID };
+    // The app's data in the folder: no history of the folder's could be kept apart from it.
+    await expect(placeOf(join(work, "appdata"), bound, { letGo: () => Promise.resolve() })).rejects.toThrow("holds the app's own data, or lies in it");
+    const placed = await placeOf(join(base, "data"), bound, { letGo: () => Promise.resolve() });
+    expect(placed.place.real.path).toBe(guestPathOf(work));
+  });
 });

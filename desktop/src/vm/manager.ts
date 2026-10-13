@@ -21,6 +21,7 @@ import { hostLstat } from "../host-stat.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { forThisOs, notBuilt } from "../platform.js";
+import { hostPathOf } from "../session-path.js";
 import { backendFor, backendHere } from "./backends.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
@@ -507,10 +508,11 @@ export class Guest {
     const deadline = performance.now() + this.shareMs;
     // On a mount that does not answer, as a dead network or FUSE one, the look never
     // returns, and Node cannot cancel it: it is given up on at the deadline, in a thread of its own.
-    const looked = await Promise.race([look(folder.path), late(deadline - performance.now())]);
+    const at = hostPathOf(folder.path);
+    const looked = await Promise.race([look(at), late(deadline - performance.now())]);
     if (looked === "late") throw new Error(`it did not answer within ${this.shareMs / 1000} s`);
     const { found, real } = looked;
-    if (!found?.directory || !confirmedFolder(folder, found) || real !== folder.path) throw new FolderGone();
+    if (!found?.directory || !confirmedFolder(folder, found) || real !== at) throw new FolderGone();
     const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
     if (!given) {
       this.lose();
@@ -521,7 +523,7 @@ export class Guest {
     if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
-    return this.vm.share(folder.path, uid, deadline, { copy });
+    return this.vm.share(at, uid, deadline, { copy });
   }
 
   /**
@@ -569,18 +571,20 @@ export class Guest {
     const deadline = performance.now() + this.shareMs;
     // Each looked at as a root's folder is, and given up on at the deadline: the one that did not answer is named.
     const looked = (path: string) => Promise.race([look(path), late(deadline - performance.now())]);
-    const [store, real] = await Promise.all([looked(place.history), looked(place.real.path)]);
+    // The folder by this computer's own path, as the history in the app's data is named: the two are compared so.
+    const at = hostPathOf(place.real.path);
+    const [store, real] = await Promise.all([looked(place.history), looked(at)]);
     if (store === "late") throw new Error(`its place in the app's data did not answer within ${this.shareMs / 1000} s`);
     if (real === "late") throw new Error(`the folder did not answer within ${this.shareMs / 1000} s`);
     // The app's own data: a link there would share whatever it leads to with the guest's root.
     if (!store.found?.directory || store.real !== place.history) throw new Error("it is not where the app keeps it");
-    if (!real.found?.directory || !confirmedFolder(place.real, real.found) || real.real !== place.real.path) throw new FolderGone();
+    if (!real.found?.directory || !confirmedFolder(place.real, real.found) || real.real !== at) throw new FolderGone();
     // Neither in the other: the agent's git would write the user's folder, or the history's share serve it for writing.
-    if (within(place.history, place.real.path) || within(place.real.path, place.history)) throw new Error("it is not kept apart from the folder");
+    if (within(place.history, at) || within(at, place.history)) throw new Error("it is not kept apart from the folder");
     const history = await this.vm.share(place.history, 0, deadline);
     const shares = [history];
     try {
-      const folder = await this.vm.share(place.real.path, 0, deadline, { readonly: true });
+      const folder = await this.vm.share(at, 0, deadline, { readonly: true });
       shares.push(folder);
       const answer = await this.request({ type: "place", key: place.key, history, real: folder }, this.setupMs);
       if (answer?.type === "done") return { history, real: folder, store: store.found };
