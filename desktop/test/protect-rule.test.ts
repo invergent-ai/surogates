@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-// The oracle is protect.ts itself, as the source has it: a change to it shows here.
+// The oracle is protect.ts itself, as the source has it: a change to it shows here; and, for the names a kernel's
+// line can add, explorer-names.ts.
+import { EXPLORER_EXTENSIONS, EXPLORER_NAMES, explorerActsOn } from "../src/files/explorer-names.js";
 import {
   DEPENDENCY_FOLDERS, folded, GIT_CONFIGS, GIT_STATE, KEY_FOLDERS, movesOutOfDependency, PROTECTED_NAMES, PROTECTED_PAIRS, protectedInFolder,
 } from "../src/files/protect.js";
@@ -104,6 +106,41 @@ const PAIRS = PAIR_PATHS.flatMap((from) => PAIR_PATHS.map((to) => [from, to] as 
 const DEP_PAST = [["node_modules", ...numbered(SG_WALK), "d"].join("/"), "d"] as const;
 const MOVED_ALLOWED = [".git/refs/heads", ".git/rebase-merge", ".git/objects/ab", ".git/info", ".claude/skills", "src", "modules/foo", "worktrees/wt"];
 
+// The names Windows's Explorer acts on, each as it is, in other cases, and folded from the characters a volume that
+// compares names without case may take to its letters; after names of every length about where the rule's read
+// of a name's end begins (SG_TAIL, 24 bytes), and of characters of one to three bytes, which it may begin within;
+// beside their near misses; and in a folder, and as a folder. The last three are near misses by their fold alone:
+// their trailing dot or space, and their ':', are forms NTFS may resolve to the name, which the rule refuses under
+// windows (windowsAlias), so the oracle below has them refused there and allowed on posix.
+const EXPLORER_SUFFIXES = [
+  ...EXPLORER_NAMES, ...EXPLORER_EXTENSIONS, "DESKTOP.INI", "Desktop.ini", "AutoRun.INF", ".LNK", ".Url", ".SCF", ".Library-MS", ".SEARCHCONNECTOR-MS",
+  "deſktop.ini", "desktop.ını", "desktop.İni", "de\u017Fk\u0131top.ini".replace("\u0131t", "t"), "desktop.ini".replace("k", "\u212A"), "autorun.ınf", ".ln\u212A",
+  ".ſcf", ".lıbrary-mſ", ".ſearchconnector-mſ", ".ſearchconnector-ms",
+  "desktop.ini.txt", "desktop.in", "esktop.ini", "desktop.inix", ".lnk2", ".lnkx", "lnk", ".ur", ".library", ".library-m", ".searchconnector", ".lnk.bak", "autorun.inf.old",
+  ".ﬂk", "desktop.ıni.", ".scf ", ".lnk:stream",
+];
+const EXPLORER_PREFIXES = [
+  "", "x", "a".repeat(5), "a".repeat(13), "a".repeat(19), "a".repeat(20), "a".repeat(21), "a".repeat(40), "a".repeat(200),
+  "é".repeat(3), "é".repeat(12), "€".repeat(2), "€".repeat(9), "ß".repeat(10), "\u212A".repeat(8), "ﬃ".repeat(8), "ſ".repeat(11),
+];
+const EXPLORER_CORPUS = [
+  ...EXPLORER_PREFIXES.flatMap((prefix) => EXPLORER_SUFFIXES.map((suffix) => `${prefix}${suffix}`)),
+  "a/b/desktop.ini", "desktop.ini/x", "x.lnk/notes.txt", ".git/x.lnk", "node_modules/pkg/x.url", ".vscode/desktop.ini", "sub/Autorun.inf",
+];
+
+// A component NTFS may resolve to another name, which the rule refuses under windows (rule-match.h, sg_windows_alias):
+// a ':' or '\' or an 8.3 short name's '~' + digit in its first SG_RAWLEN - 1 bytes, or a trailing dot or space on
+// one no longer than that. Matched over the component's bytes, as the rule reads them, so a cut lands as the rule's does.
+const windowsAlias = (path: string): boolean => path.split("/").some((comp) => {
+  const bytes = Buffer.from(comp, "utf8");
+  const read = Math.min(bytes.length, 31);
+  for (let i = 0; i < read; i += 1) {
+    if (bytes[i] === 0x3a || bytes[i] === 0x5c) return true;
+    if (bytes[i] === 0x7e && i + 1 < read && bytes[i + 1]! >= 0x30 && bytes[i + 1]! <= 0x39) return true;
+  }
+  return bytes.length >= 1 && bytes.length < 32 && (bytes.at(-1) === 0x2e || bytes.at(-1) === 0x20);
+});
+
 function pairRefuses(from: string, to: string, exchange: boolean): boolean {
   return movedRefuses(from) || movedRefuses(to) || movesOutOfDependency("/f", `/f/${from}`, `/f/${to}`, exchange);
 }
@@ -198,6 +235,50 @@ describe("the guest rule mirrors protect.ts", { timeout: VERDICTS_MS }, () => {
     expect([movesOutOfDependency("/f", "/f/node_moduleſ/p", "/f/planted"), movesOutOfDependency("/f", "/f/diſt-packages/p", "/f/ſite-packages/p")]).toEqual([true, false]);
     // A name too long to be read whole is too long to fold to a protected one: the longest that can is 18 bytes.
     expect(verdicts(harness(), [`.git/${"x".repeat(40)}`, `.git/hooKs`])).toEqual([false, true]);
+  });
+
+  it("refuses the names Windows's Explorer acts on where the kernel's line names that set, and with posix's decides as it does without one", () => {
+    const paths = [...CORPUS, ...probes, ...GIT_STATE_ONLY, ...ALIASES, ...NOT_ALIASES, ...EXPLORER_CORPUS];
+    const windows = verdicts(harness(), paths, ["windows"]);
+    const bad = paths.flatMap((p, i) => {
+      const want = ruleRefuses(p) || explorerActsOn(p) || windowsAlias(p);
+      return windows[i] === want ? [] : [`${p}: rule=${windows[i]} expected=${want}`];
+    });
+    expect(bad).toEqual([]);
+    // posix's, as Linux's and macOS's lines name it: the rule's own decisions alone, the Explorer's names among them.
+    const posix = verdicts(harness(), EXPLORER_CORPUS);
+    expect(EXPLORER_CORPUS.flatMap((p, i) => (posix[i] === ruleRefuses(p) ? [] : [`${p}: rule=${posix[i]} expected=${ruleRefuses(p)}`]))).toEqual([]);
+    // The corpus holds both answers, at both ends of the read of a name's end.
+    expect(EXPLORER_CORPUS.filter(explorerActsOn).length).toBeGreaterThan(250);
+    expect(EXPLORER_CORPUS.filter((p) => !explorerActsOn(p) && !ruleRefuses(p)).length).toBeGreaterThan(300);
+    expect(verdicts(harness(), [`${"a".repeat(200)}.searchconnector-ms`, `${"€".repeat(9)}.ſearchconnector-mſ`, "desktop.ini", `${"a".repeat(13)}desktop.ini`], ["windows"]))
+      .toEqual([true, true, true, false]);
+  });
+
+  it("refuses, under windows, a component NTFS may resolve to another name, and leaves every one of them on posix", () => {
+    // The reviewer's six, with a trailing-space form and a second 8.3 short name: each a path whose protected or
+    // Explorer target the rule would read only as the guest spells it, so the alias is the one thing that refuses it.
+    const aliases = [
+      "GIT~1/hooks/pre-commit", ".git./hooks/x", ".git /hooks/x", ".git::$INDEX_ALLOCATION/hooks/x",
+      "x.lnk::$DATA", "desktop.ini.", "desktop.ini ", "sub\\desktop.ini", "DOCUME~1.LIB", "notes~9.txt",
+    ];
+    expect(verdicts(harness(), aliases, ["windows"])).toEqual(aliases.map(() => true));
+    // posix never judges these forms: on it each is a name no git or editor path, allowed as it is today.
+    expect(verdicts(harness(), aliases)).toEqual(aliases.map((p) => ruleRefuses(p)));
+    expect(aliases.every((p) => windowsAlias(p) && !ruleRefuses(p))).toBe(true);
+    // Their near neighbours, which hold no such form: windows refuses only what the rule or an Explorer name already does.
+    const near = ["GIT1/hooks/x", "git~x/hooks/x", "a.lnkx", "notes.txt", "sub.desktop.ini", "~/x", "a~/b"];
+    expect(near.some(windowsAlias)).toBe(false);
+    expect(verdicts(harness(), near, ["windows"])).toEqual(near.map((p) => ruleRefuses(p) || explorerActsOn(p)));
+  });
+
+  it("folds a name's end as protect.ts folds the name: all of one read whole, and of a longer one its last 24 bytes", () => {
+    const names = ["Desktop.INI", "ﬁle.LNK", "deſ\u212Atop.ını", "ẞtraße.url", "x", `${"a".repeat(40)}.Library-MS`, `${"€".repeat(9)}.ſearchconnector-mſ`];
+    const out = execFileSync(harness(), ["tail"], { input: `${names.join("\n")}\n` }).toString("latin1").split("\n").slice(0, -1);
+    expect(out.slice(0, 5)).toEqual(names.slice(0, 5).map((name) => `${folded(name).length}\t${folded(name)}`));
+    expect(out[5]).toBe(`24\t${"a".repeat(13)}.library-ms`);
+    // Its end begins at the last of the nine euro signs, whose three bytes are none of a letter's.
+    expect(out[6]).toBe(`22\t${Buffer.from("€").toString("latin1")}.searchconnector-ms`);
   });
 
   it("refuses moving a directory to or from a key folder's place", () => {

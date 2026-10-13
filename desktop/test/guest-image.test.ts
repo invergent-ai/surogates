@@ -3,7 +3,7 @@
 
 import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -172,7 +172,7 @@ describe("the image's build", () => {
       "#!/bin/sh",
       `printf '%s\\n' "$@" > '${join(dir, "docker-argv")}'`,
       'for arg; do case "$arg" in type=local,dest=*) out="${arg#type=local,dest=}" ;; esac; done',
-      'mkdir -p "$out" && printf disk | zstd -q -c > "$out/rootfs.img.zst" && printf kernel | zstd -q -c > "$out/vmlinuz.zst"',
+      'mkdir -p "$out" && printf initrd | zstd -q -c > "$out/initrd.zst" && printf disk | zstd -q -c > "$out/rootfs.img.zst" && printf kernel | zstd -q -c > "$out/vmlinuz.zst"',
     ].join("\n"), { mode: 0o755 });
   });
   afterEach(() => {
@@ -193,7 +193,13 @@ describe("the image's build", () => {
         name, size: unpacked.length, sha256: sha256(unpacked), download: `${name}.zst`,
         downloadSize: download(name).length, downloadSha256: createHash("sha256").update(download(name)).digest("hex"),
       });
-      expect(JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"))).toEqual({ key: inputs(REPO, arch), arch, files: [file("rootfs.img", "disk"), file("vmlinuz", "kernel")] });
+      expect(JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"))).toEqual({
+        key: inputs(REPO, arch), arch, files: [file("initrd", "initrd"), file("rootfs.img", "disk"), file("vmlinuz", "kernel")],
+      });
+      // Unpacked beside the downloads for the VM tests, unless packed.
+      expect(readdirSync(out).sort()).toEqual((args as readonly string[]).includes("--packed")
+        ? ["initrd.zst", "manifest.json", "rootfs.img.zst", "vmlinuz.zst"]
+        : ["initrd", "initrd.zst", "manifest.json", "rootfs.img", "rootfs.img.zst", "vmlinuz", "vmlinuz.zst"]);
     }
   });
 
@@ -254,12 +260,23 @@ describe("the arm64 kernel's BTF, which the rule is compiled and checked against
   });
 });
 
-it("keeps of the kernel's modules only those the guest's init loads", () => {
-  const kept = [...(STAGES.get("kernel") ?? "").matchAll(/! -name (\S+)\.ko\.zst/g)].map(([, name]) => name);
+// The names the kernel stage's modules.sh *mode* is given, in their order.
+const modulesGiven = (mode: string) => {
+  const run = runsOf("modules").flatMap(chain).find((command) => command.startsWith(`modules.sh ${mode} `)) ?? "";
+  return run.split(" ").slice(3).filter((word) => !word.startsWith("$(") && word !== "'s/#.*//'" && !word.endsWith(")"));
+};
+
+it("keeps of the kernel's modules only those the guest's init loads, with those they need, and copies out the initrd's", () => {
   const init = readFileSync(new URL("../vm/init", import.meta.url), "utf8");
-  const loaded = [...init.matchAll(/^modprobe (\S+)$/gm)].map(([, name]) => name);
-  expect(kept.sort()).toEqual(loaded.sort());
-  expect(kept.length).toBeGreaterThan(0);
+  const loaded = [...init.matchAll(/^\s*modprobe (\S+)$/gm)].map(([, name]) => name);
+  // The two the 9P client and its fd transport need, which the image's build checks against modules.dep (modules.sh).
+  expect(modulesGiven("keep")).toEqual(["netfs", "9pnet", "9pnet_fd", "9p", "virtiofs", "overlay"]);
+  expect(modulesGiven("keep").filter((name) => !["netfs", "9pnet"].includes(name)).sort()).toEqual([...loaded].sort());
+  // Never Hyper-V's time sync, which would set the guest's clock under the agent; the initrd's, from its list.
+  expect(loaded).not.toContain("hv_utils");
+  expect(runsOf("modules").flatMap(chain)).toContain('modules.sh copy "/image/lib/modules/$KERNEL" /initrd/lib $(sed \'s/#.*//\' /initrd/modules)');
+  const listed = readFileSync(join(REPO, "images/guest/initrd/modules"), "utf8").replace(/#.*/g, "").split(/\s+/).filter(Boolean);
+  expect(listed).toEqual(["hv_vmbus", "scsi_transport_fc", "hv_storvsc", "vsock", "hv_sock", "hv_balloon"]);
 });
 
 // Each RUN of *stage* as its shell reads it: its continuations joined, and each run of spaces one space.
@@ -274,7 +291,7 @@ const branchOf = (stage: string, arch: string) => {
 };
 
 it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles the rule for the arch it builds, in the stages that need each", () => {
-  for (const [stage, scripts] of [["kernel", ["kernel-config.sh"]], ["bpf", ["kernel-image.sh", "kernel-btf.sh"]], ["guest-disk-build", ["kernel-image.sh"]]] as const) {
+  for (const [stage, scripts] of [["kernel", ["kernel-config.sh"]], ["modules", ["modules.sh"]], ["bpf", ["kernel-image.sh", "kernel-btf.sh"]], ["guest-disk-build", ["kernel-image.sh"]], ["initrd", ["initrd.sh"]]] as const) {
     for (const script of scripts) {
       expect(new RegExp(`^COPY --chmod=0755 (?:\\S+ )*images/guest/${script.replace(".", "\\.")} (?:\\S+ )*/usr/local/bin/`, "m").test(STAGES.get(stage) ?? ""), `${stage} copies ${script}`).toBe(true);
     }
@@ -283,8 +300,21 @@ it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles
   expect(runsOf("kernel").map(chain)).toEqual([[
     "dpkg-deb -x /tmp/image.deb /kernel", "dpkg-deb -x /tmp/modules.deb /kernel", "dpkg-deb -x /tmp/tools.deb /tools", "dpkg-deb -x /tmp/hwe-tools.deb /tools",
     'kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL"',
-    expect.stringMatching(/^find \/kernel\/lib\/modules\/\*\/kernel -type f .* -delete$/),
   ]]);
+  // The modules, by the modules.dep depmod makes of the pinned kernel's whole tree, before any is kept or copied out.
+  expect(runsOf("modules").at(-1)?.split(" && ").map((command) => command.trim())).toEqual([
+    '--mount=type=bind,from=kernel,source=/kernel/lib/modules,target=/all mkdir -p /image/lib/modules', 'cp -a "/all/$KERNEL" /image/lib/modules/',
+    'depmod -b /image "$KERNEL"', expect.stringMatching(/^modules\.sh copy .* \/initrd\/lib /),
+    'modules.sh copy "/image/lib/modules/$KERNEL" /standin/lib vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport',
+    expect.stringMatching(/^modules\.sh keep /),
+  ]);
+  // The stand-in's modules, for the tests alone, in a target of their own: in neither the image nor its disk.
+  expect((STAGES.get("guest-standin") ?? "").split("\n").filter((line) => line && !line.startsWith("#"))).toEqual(["COPY --from=modules /standin/lib/ /"]);
+  for (const stage of ["guest", "guest-disk-build", "guest-disk", "initrd"]) expect(STAGES.get(stage), stage).not.toMatch(/standin/);
+  expect(STAGES.get("guest")).toContain("COPY --from=modules /image/lib/modules/ /usr/lib/modules/");
+  // The initrd, from the kernel stage's copy of its modules, beside the kernel the VM boots.
+  expect(runsOf("initrd").at(-1)).toBe("--mount=type=bind,from=modules,source=/initrd,target=/modules mkdir /out && initrd.sh /src/init /bin/busybox /modules/lib /modules/modules /out/initrd");
+  expect(runsOf("guest-disk-build").flatMap(chain)).toContain("zstd -q -19 -o /out/initrd.zst /initrd/initrd");
   // The rule's BTF: amd64's the vmlinux its bzImage holds, arm64's read out of the Image. Each compiled for its own arch.
   expect(branchOf("bpf", "amd64").at(-1)).toBe("bpf_arch=x86");
   expect(branchOf("bpf", "amd64").join(" ")).not.toContain("kernel-");
@@ -300,8 +330,12 @@ it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles
 describe("the check of the kernel's configuration", () => {
   // What the guest boots on without an initrd, built in; on arm64 the virt machine's PCIe host too.
   const BUILT_IN = ["VIRTIO_BLK", "EXT4_FS", "VIRTIO_CONSOLE", "VIRTIO_PCI", "BPF_LSM", "DEBUG_INFO_BTF", "FUSE_FS"];
-  // What vm/init loads, a module or built in.
-  const LOADED = ["VIRTIO_FS", "OVERLAY_FS"];
+  // What it boots on with Hyper-V's initrd, built in: on amd64 Hyper-V's clock and the UART too.
+  const HYPERV_BUILT_IN = ["BLK_DEV_INITRD", "HYPERV", "SCSI", "BLK_DEV_SD"];
+  // What vm/init loads, and what the initrd does, a module or built in.
+  const LOADED = ["VIRTIO_FS", "OVERLAY_FS", "NETFS_SUPPORT", "NET_9P", "NET_9P_FD", "9P_FS"];
+  const INITRD = ["HYPERV_VMBUS", "SCSI_FC_ATTRS", "HYPERV_STORAGE", "VSOCKETS", "HYPERV_VSOCKETS", "HYPERV_BALLOON"];
+  const hyperv = (arch: string) => [...HYPERV_BUILT_IN, ...(arch === "amd64" ? ["HYPERV_TIMER", "SERIAL_8250_CONSOLE"] : [])];
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "kernel-config-"));
@@ -317,27 +351,30 @@ describe("the check of the kernel's configuration", () => {
     return file;
   };
   const whole = (arch: string): Record<string, string> => ({
-    ...Object.fromEntries(BUILT_IN.map((name) => [name, "y"])), ...Object.fromEntries(LOADED.map((name) => [name, "m"])),
+    ...Object.fromEntries([...BUILT_IN, ...hyperv(arch)].map((name) => [name, "y"])), ...Object.fromEntries([...LOADED, ...INITRD].map((name) => [name, "m"])),
     ...(arch === "arm64" ? { PCI_HOST_GENERIC: "y" } : {}),
   });
   const checked = (...args: string[]) => spawnSync(join(REPO, "images/guest/kernel-config.sh"), args, { encoding: "utf8" });
 
-  it("passes a kernel that builds in what the guest boots on, with what vm/init loads a module or built in", () => {
+  it("passes a kernel that builds in what the guest boots on, with what vm/init and the initrd load a module or built in", () => {
     for (const arch of ARCHES) {
       expect(checked(arch, config(whole(arch)))).toMatchObject({ status: 0, stderr: "" });
-      expect(checked(arch, config({ ...whole(arch), VIRTIO_FS: "y", OVERLAY_FS: "y" })).status).toBe(0);
+      expect(checked(arch, config({ ...whole(arch), VIRTIO_FS: "y", OVERLAY_FS: "y", HYPERV_VMBUS: "y" })).status).toBe(0);
     }
-    // amd64's q35 has a PCIe host of its own: the generic one is arm64's alone.
+    // amd64's q35 has a PCIe host of its own: the generic one is arm64's alone. Hyper-V's clock and UART are amd64's.
     expect(checked("amd64", config({ ...whole("amd64"), PCI_HOST_GENERIC: "unset" })).status).toBe(0);
+    expect(checked("arm64", config({ ...whole("arm64"), HYPERV_TIMER: "unset", SERIAL_8250_CONSOLE: "unset" })).status).toBe(0);
   });
 
   it("fails on a kernel that lacks any of them, or has one that must be built in as a module, and names each", () => {
-    const file = config({ ...whole("arm64"), VIRTIO_BLK: "m", EXT4_FS: "unset", PCI_HOST_GENERIC: "unset", VIRTIO_FS: "unset" });
+    const file = config({ ...whole("arm64"), VIRTIO_BLK: "m", EXT4_FS: "unset", PCI_HOST_GENERIC: "unset", VIRTIO_FS: "unset", HYPERV: "m", HYPERV_STORAGE: "unset" });
     const { DEBUG_INFO_BTF: _btf, ...withoutBtf } = whole("arm64");
     expect(checked("arm64", file)).toMatchObject({
       status: 1,
       stderr: `kernel-config.sh: ${file} does not build in CONFIG_VIRTIO_BLK CONFIG_EXT4_FS CONFIG_PCI_HOST_GENERIC, which the guest boots on without an initrd\n`
-        + `kernel-config.sh: ${file} has no CONFIG_VIRTIO_FS, which vm/init loads\n`,
+        + `kernel-config.sh: ${file} does not build in CONFIG_HYPERV, which the guest boots on with Hyper-V's initrd\n`
+        + `kernel-config.sh: ${file} has no CONFIG_VIRTIO_FS, which vm/init loads\n`
+        + `kernel-config.sh: ${file} has no CONFIG_HYPERV_STORAGE, which Hyper-V's initrd loads\n`,
     });
     expect(checked("arm64", config(withoutBtf))).toMatchObject({ status: 1, stderr: expect.stringContaining("does not build in CONFIG_DEBUG_INFO_BTF,") });
     // A line that names the option within another's is not it.
@@ -347,10 +384,14 @@ describe("the check of the kernel's configuration", () => {
   it("fails on a kernel without any one of them, or with any one that must be built in as a module, and names that one", () => {
     for (const arch of ARCHES) {
       for (const name of Object.keys(whole(arch))) {
-        const loaded = LOADED.includes(name);
-        const said = (file: string) => loaded
+        const loaded = LOADED.includes(name) || INITRD.includes(name);
+        const said = (file: string) => LOADED.includes(name)
           ? `kernel-config.sh: ${file} has no CONFIG_${name}, which vm/init loads\n`
-          : `kernel-config.sh: ${file} does not build in CONFIG_${name}, which the guest boots on without an initrd\n`;
+          : INITRD.includes(name)
+            ? `kernel-config.sh: ${file} has no CONFIG_${name}, which Hyper-V's initrd loads\n`
+            : hyperv(arch).includes(name)
+              ? `kernel-config.sh: ${file} does not build in CONFIG_${name}, which the guest boots on with Hyper-V's initrd\n`
+              : `kernel-config.sh: ${file} does not build in CONFIG_${name}, which the guest boots on without an initrd\n`;
         const without = config(Object.fromEntries(Object.entries(whole(arch)).filter(([option]) => option !== name)));
         expect(checked(arch, without), `${arch} without ${name}`).toMatchObject({ status: 1, stderr: said(without) });
         if (loaded) continue;
@@ -565,5 +606,142 @@ describe("the release's check of the arm64 guest's kernel", () => {
 
   it("refuses an arch it builds no guest for", async () => {
     expect(await check("--arch", "riscv64")).toMatchObject({ status: 2, stderr: "usage: images/guest/kernel-current.sh [--arch amd64|arm64]\n" });
+  });
+});
+
+describe("the modules each part of the guest loads, out of the kernel's tree", () => {
+  let tree: string;
+  beforeEach(() => {
+    tree = mkdtempSync(join(tmpdir(), "modules-"));
+    // A kernel's tree as its modules package lays it out: each module's file, zstd's, and modules.dep naming what each needs.
+    const modules: Record<string, string[]> = {
+      "kernel/fs/netfs/netfs.ko.zst": [], "kernel/net/9p/9pnet.ko.zst": ["kernel/fs/netfs/netfs.ko.zst"],
+      "kernel/fs/9p/9p.ko.zst": ["kernel/net/9p/9pnet.ko.zst", "kernel/fs/netfs/netfs.ko.zst"], "kernel/fs/overlayfs/overlay.ko.zst": [],
+      "kernel/drivers/hv/hv_utils.ko.zst": [], "kernel/sound/snd.ko.zst": [],
+    };
+    for (const file of Object.keys(modules)) {
+      mkdirSync(dirname(join(tree, file)), { recursive: true });
+      writeFileSync(join(tree, file), spawnSync("zstd", ["-q", "-c"], { input: `module ${file}` }).stdout);
+    }
+    writeFileSync(join(tree, "modules.dep"), Object.entries(modules).map(([file, needs]) => `${file}:${needs.map((need) => ` ${need}`).join("")}\n`).join(""));
+  });
+  afterEach(() => {
+    rmSync(tree, { recursive: true, force: true });
+  });
+  const modules = (...args: string[]) => spawnSync(join(REPO, "images/guest/modules.sh"), args, { encoding: "utf8" });
+  const left = () => spawnSync("find", [join(tree, "kernel"), "-type", "f", "-printf", "%f\\n"], { encoding: "utf8" }).stdout.trim().split("\n").sort();
+
+  it("keeps the modules it is given and none other, each after those it needs", () => {
+    expect(modules("keep", tree, "netfs", "9pnet", "9p", "overlay")).toMatchObject({ status: 0, stderr: "" });
+    expect(left()).toEqual(["9p.ko.zst", "9pnet.ko.zst", "netfs.ko.zst", "overlay.ko.zst"]);
+    expect(readFileSync(join(tree, "modules.dep"), "utf8")).toContain("kernel/fs/9p/9p.ko.zst:");
+  });
+
+  it("copies the modules it is given out, as their files", () => {
+    const out = join(tree, "out");
+    expect(modules("copy", tree, out, "netfs", "9pnet")).toMatchObject({ status: 0, stderr: "" });
+    expect(readdirSync(out).sort()).toEqual(["9pnet.ko.zst", "netfs.ko.zst"]);
+    expect(readFileSync(join(out, "9pnet.ko.zst")).equals(readFileSync(join(tree, "kernel/net/9p/9pnet.ko.zst")))).toBe(true);
+    expect(left()).toHaveLength(6);
+  });
+
+  it("fails on a module the tree lacks, and one given before a module it needs or without it, names each, and changes nothing", () => {
+    expect(modules("keep", tree, "9p", "netfs", "virtiofs")).toMatchObject({
+      status: 1, stderr: "modules.sh: 9p needs 9pnet, which is not given before it\nmodules.sh: 9p needs netfs, which is not given before it\nmodules.sh: the kernel has no module virtiofs\n",
+    });
+    expect(left()).toHaveLength(6);
+    expect(modules("copy", tree, join(tree, "out"), "9pnet")).toMatchObject({ status: 1, stderr: "modules.sh: 9pnet needs netfs, which is not given before it\n" });
+    expect(readdirSync(tree)).not.toContain("out");
+    // A name that merely holds another's is not it.
+    expect(modules("keep", tree, "net")).toMatchObject({ status: 1, stderr: "modules.sh: the kernel has no module net\n" });
+    expect(modules("keep", tree).status).toBe(2);
+    expect(modules("keep", join(tree, "missing"), "netfs")).toMatchObject({ status: 1, stderr: expect.stringContaining("cannot read") });
+  });
+});
+
+describe("Hyper-V's initrd", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "initrd-"));
+    mkdirSync(join(dir, "modules"));
+    for (const name of ["hv_vmbus", "hv_storvsc"]) writeFileSync(join(dir, "modules", `${name}.ko.zst`), spawnSync("zstd", ["-q", "-c"], { input: `the module ${name}` }).stdout);
+    writeFileSync(join(dir, "busybox"), "#!/bin/sh\n# busybox\n");
+    writeFileSync(join(dir, "list"), "# its comment\nhv_vmbus\n\nhv_storvsc  # its own\n");
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const INIT = join(REPO, "images/guest/initrd/init");
+  const made = (out: string, list = join(dir, "list")) =>
+    spawnSync(join(REPO, "images/guest/initrd.sh"), [INIT, join(dir, "busybox"), join(dir, "modules"), list, out], { encoding: "utf8" });
+  // The archive's entries, with their modes and owners, as cpio lists them; and the archive unpacked into *into*.
+  const listed = (archive: string) => spawnSync("cpio", ["-t", "-v", "--quiet", "-F", archive], { encoding: "utf8" }).stdout.trim().split("\n");
+  const unpacked = (archive: string, into: string) => {
+    mkdirSync(into);
+    expect(spawnSync("cpio", ["-i", "-d", "--quiet", "-F", archive], { cwd: into }).status).toBe(0);
+    return into;
+  };
+
+  it("holds its init, busybox, and the modules of its list unpacked, which /modules names in the list's order, all root's", () => {
+    expect(made(join(dir, "initrd"))).toMatchObject({ status: 0, stderr: "" });
+    const names = listed(join(dir, "initrd")).map((line) => line.split(/\s+/).at(-1));
+    expect(names).toEqual(["bin", "bin/busybox", "dev", "init", "lib", "lib/modules", "lib/modules/hv_storvsc.ko", "lib/modules/hv_vmbus.ko", "modules", "proc", "root", "sys"]);
+    for (const line of listed(join(dir, "initrd"))) expect(line).toMatch(/^\S+\s+\d+ root\s+root\s/);
+    const root = unpacked(join(dir, "initrd"), join(dir, "root"));
+    expect(readFileSync(join(root, "lib/modules/hv_vmbus.ko"), "utf8")).toBe("the module hv_vmbus");
+    expect(readFileSync(join(root, "modules"), "utf8")).toBe("hv_vmbus\nhv_storvsc\n");
+    expect(readFileSync(join(root, "init")).equals(readFileSync(INIT))).toBe(true);
+    expect(statSync(join(root, "init")).mode & 0o777).toBe(0o755);
+  });
+
+  it("makes the same bytes of the same inputs, and nothing of a list whose module is missing", () => {
+    expect(made(join(dir, "one")).status).toBe(0);
+    expect(made(join(dir, "two")).status).toBe(0);
+    expect(readFileSync(join(dir, "one")).equals(readFileSync(join(dir, "two")))).toBe(true);
+    writeFileSync(join(dir, "missing"), "hv_vmbus\nhv_sock\n");
+    expect(made(join(dir, "three"), join(dir, "missing"))).toMatchObject({ status: 1, stderr: `initrd.sh: ${join(dir, "modules")} has no module hv_sock\n` });
+    expect(readdirSync(dir)).not.toContain("three");
+    expect(readdirSync(dir)).not.toContain("three.partial");
+  });
+
+  // A function of the initrd's init, by its name.
+  const fnOf = (name: string) => new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}\\n`, "m").exec(readFileSync(INIT, "utf8"))?.[0] ?? "";
+  // The image's disk the init's disks() finds, as busybox's shell runs it, with sysfs at *sys* and devtmpfs at *dev*, waiting *tenths*.
+  const disks = (sys: string, dev: string, tenths = 10) => {
+    const ran = spawnSync("busybox", ["sh", "-euc", `WAIT=${tenths}\n${fnOf("at")}${fnOf("disks")}disks "$1" "$2"`, "sh", sys, dev], { encoding: "utf8" });
+    return ran.status === 0 ? { root: ran.stdout.trim() } : { refused: ran.stdout.trim() };
+  };
+  const scsi = (address: string, name: string) => {
+    mkdirSync(join(dir, "sys", "class", "scsi_disk", address, "device", "block", name), { recursive: true });
+    mkdirSync(join(dir, "dev"), { recursive: true });
+    writeFileSync(join(dir, "dev", name), "");
+  };
+
+  it("parses as busybox's shell, loads its list's modules in order, and waits 5 s for the disks", () => {
+    expect(spawnSync("busybox", ["sh", "-n", INIT]).status).toBe(0);
+    const init = readFileSync(INIT, "utf8");
+    expect(init.startsWith("#!/bin/busybox sh\n")).toBe(true);
+    expect(init).toMatch(/^WAIT=50$/m);
+    expect(init).toContain('while read -r module; do\n  insmod "/lib/modules/$module.ko" || fail "the kernel did not load $module"\ndone < /modules');
+    expect(init).toContain('root=$(disks /sys /dev) || fail "$root"');
+    expect(init.trim().split("\n").at(-1)).toBe("exec switch_root /root /usr/sbin/surogate-init");
+  });
+
+  it("takes the image's disk at LUN 0 once the agent disk and the sessions disk are there too", () => {
+    scsi("0:0:0:0", "sdc");
+    scsi("0:0:0:1", "sda");
+    scsi("0:0:0:2", "sdb");
+    expect(disks(join(dir, "sys"), join(dir, "dev"))).toEqual({ root: join(dir, "dev", "sdc") });
+  });
+
+  it("fails with words when a disk does not come in time, or two are at one LUN", () => {
+    scsi("0:0:0:0", "sda");
+    scsi("0:0:0:1", "sdb");
+    const started = performance.now();
+    expect(disks(join(dir, "sys"), join(dir, "dev"))).toEqual({ refused: "no disk came at LUN 2 within 1 s" });
+    expect(performance.now() - started).toBeGreaterThan(900);
+    scsi("0:0:0:2", "sdc");
+    scsi("1:0:0:1", "sdd");
+    expect(disks(join(dir, "sys"), join(dir, "dev"))).toEqual({ refused: "two SCSI disks are at LUN 1" });
   });
 });

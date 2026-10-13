@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import type { Outcome } from "../link/protocol.js";
 import { CANCELLED, SANDBOX_STOPPED } from "./command.js";
 import { PLACE_KEY, type Share } from "./protocol.js";
-import { BOUNDS, checkShare, DEVICE, mountDevice } from "./root.js";
+import { BOUNDS, checkShare, DEVICE, mountDevice, p9Mount, SUROGATE_VSOCK } from "./root.js";
 
 export const PLACES = "/run/surogate/places";
 const MOUNT_RETRY_MS = 25;
@@ -137,6 +137,7 @@ function read(said: string): Outcome {
 export interface PlacesOptions {
   folder?: string; // where the places are mounted: PLACES
   mount?(args: string[]): Promise<unknown>; // mount(8), by its arguments
+  vsock?(args: string[]): Promise<unknown>; // surogate-vsock, by its arguments, for a Plan 9 share's mount
   unmount?(args: string[]): Promise<unknown>; // umount(8)
   // A share the host has just added is there once the guest's kernel has found its device: until then its mount is tried again.
   mountMs?: number;
@@ -156,8 +157,9 @@ interface Mounted {
   real: Share;
 }
 
-// Whether two shares are one: their kind, tag and, in Apple's one device, the folder's name.
-const sameShare = (a: Share, b: Share) => a.kind === b.kind && a.tag === b.tag && (a.kind === "vz" ? a.name : undefined) === (b.kind === "vz" ? b.name : undefined);
+// Whether two shares are one: their kind, tag and, in Apple's one device, the folder's name; a Plan 9 share's port and options.
+const sameShare = (a: Share, b: Share) => a.kind === b.kind && a.tag === b.tag && (a.kind === "vz" ? a.name : undefined) === (b.kind === "vz" ? b.name : undefined)
+  && (a.kind === "p9" ? `${a.port};${a.aname}` : undefined) === (b.kind === "p9" ? `${b.port};${b.aname}` : undefined);
 
 export class Places {
   private readonly mounted = new Map<string, Mounted>();
@@ -173,13 +175,16 @@ export class Places {
   private readonly historyMs: number;
   private readonly waitMs: number;
   private readonly folder: string;
-  private readonly run: { mount(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown>; device(): Promise<string> };
+  private readonly run: {
+    mount(args: string[]): Promise<unknown>; vsock(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown>; device(): Promise<string>;
+  };
   private readonly mountMs: number;
 
   constructor(options: PlacesOptions = {}) {
     this.folder = options.folder ?? PLACES;
     this.run = {
       mount: options.mount ?? ((args) => execute("/usr/bin/mount", args)),
+      vsock: options.vsock ?? ((args) => execute(SUROGATE_VSOCK, args)),
       unmount: options.unmount ?? ((args) => execute("/usr/bin/umount", args)),
       device: options.device ?? mountDevice,
     };
@@ -235,9 +240,9 @@ export class Places {
     await mkdir(join(at, "history"), { recursive: true });
     await mkdir(join(at, "real"), { recursive: true });
     await chmod(this.folder, 0o700);
-    await this.attach(await this.from(history, OPTIONS, join(at, "history")));
+    await this.attach(history, await this.from(history, OPTIONS, join(at, "history")));
     try {
-      await this.attach(await this.from(real, `ro,${OPTIONS}`, join(at, "real")));
+      await this.attach(real, await this.from(real, `ro,${OPTIONS}`, join(at, "real")));
     } catch (error) {
       await this.run.unmount(["-l", join(at, "history")]).catch(() => {});
       throw error;
@@ -245,16 +250,18 @@ export class Places {
   }
 
   // mount(8)'s arguments for *share* at *at* with *options*: a virtio-fs device by its tag, or a folder in
-  // Apple's one device for every folder, bound from where that is mounted (bind and its options in one: util-linux's).
+  // Apple's one device for every folder, bound from where that is mounted (bind and its options in one: util-linux's);
+  // or surogate-vsock's, for a Plan 9 share, whose mount(8) it runs (root.ts).
   private async from(share: Share, options: string, at: string): Promise<string[]> {
+    if (share.kind === "p9") return p9Mount(share, options, at);
     if (share.kind === "vz" && share.tag === DEVICE) return ["--bind", "-o", options, join(await this.run.device(), share.name ?? ""), at];
     return ["-t", "virtiofs", "-o", options, share.tag, at];
   }
 
-  private async attach(args: string[]): Promise<void> {
+  private async attach(share: Share, args: string[]): Promise<void> {
     for (const deadline = performance.now() + this.mountMs; ;) {
       try {
-        await this.run.mount(args);
+        await (share.kind === "p9" ? this.run.vsock(args) : this.run.mount(args));
         return;
       } catch (error) {
         if (performance.now() > deadline) throw error;

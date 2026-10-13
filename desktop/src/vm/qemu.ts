@@ -6,7 +6,7 @@ import type { Socket } from "node:net";
 import { availableParallelism } from "node:os";
 import { createInterface } from "node:readline";
 
-import { INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
+import { type GuestDevices, INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
 import { dirname, join } from "../host-path.js";
 import { type GuestArch, QEMU_ARCH } from "./qemu-arch.js";
 import { socketsIn } from "./sockets.js";
@@ -29,9 +29,21 @@ export interface Disks {
 // QEMU reads a comma as the start of the next option: a path's own is doubled.
 const option = (path: string) => path.replaceAll(",", ",,");
 
-// The guest kernel's command line, every OS's: the image's disk, the stub init, the console on hvc0, and
-// lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
-export const KERNEL_COMMAND_LINE = "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf";
+/**
+ * The guest kernel's command line, every OS's, for the machine's *devices* and the rule's set of *names*
+ * (protocol.ts, GuestDevices), each of which it names, so no part of the guest guesses. On virtio, the image's disk, its first, as root, and the
+ * stub init; on SCSI the initrd finds the image's disk at its LUN and runs the stub init on it (images/guest/
+ * initrd). The console on the transport's: virtio-serial's console port, hvc0, or else the UART, ttyS0. Last,
+ * lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
+ */
+export function kernelLine({ disks, transport, names }: GuestDevices): string {
+  const root = disks === "virtio" ? "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init " : "";
+  return `${root}console=${transport === "virtio-serial" ? "hvc0" : "ttyS0"} panic=-1 quiet`
+    + ` surogate.disks=${disks} surogate.transport=${transport} surogate.names=${names} lsm=landlock,lockdown,yama,integrity,apparmor,bpf`;
+}
+
+// QEMU's guest, Linux's: virtio's disks and ports, and no names refused but the protected ones.
+export const QEMU_DEVICES: GuestDevices = { disks: "virtio", transport: "virtio-serial", names: "posix" };
 
 // Half this computer's threads, at most 4.
 export function guestCpus(threads = availableParallelism()): number {
@@ -53,7 +65,7 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     // vhost-user-fs needs the guest's memory shared with virtiofsd.
     "-object", `memory-backend-memfd,id=mem,size=${MEMORY},share=on`,
     "-kernel", disks.kernel,
-    "-append", `${KERNEL_COMMAND_LINE}${emulated ? " surogate.emulated=1" : ""}`,
+    "-append", `${kernelLine(QEMU_DEVICES)}${emulated ? " surogate.emulated=1" : ""}`,
     "-drive", `if=none,id=root,file=${option(disks.rootfs)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=root",
     "-drive", `if=none,id=agent,file=${option(disks.agentDisk)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=agent",
     "-drive", `if=none,id=sessions,file=${option(disks.sessions)},format=raw,discard=unmap`, "-device", "virtio-blk-pci,drive=sessions",

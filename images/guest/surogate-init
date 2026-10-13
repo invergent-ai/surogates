@@ -1,14 +1,71 @@
 #!/bin/sh
-# The guest's PID 1 until the agent disk's init replaces it. The kernel has
-# mounted this image read-only at / and devtmpfs at /dev. The agent disk is the
-# second disk, read-only: it changes with every app release, and this file only
-# when the image does. Anything that fails here ends PID 1, so the guest panics
-# and QEMU exits (panic=-1, -no-reboot).
+# The guest's PID 1 until the agent disk's init replaces it. The kernel, or on
+# SCSI the initrd, has mounted this image read-only at / and devtmpfs at /dev.
+# The agent disk is the second disk, read-only: it changes with every app release,
+# and this file only when the image does. Anything that fails here ends PID 1, so
+# the guest panics and QEMU exits (panic=-1, -no-reboot).
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# The guest's disk of the role $2 (1, the agent disk; 2, the sessions disk), on the bus the kernel's
+# command line, $1, names in surogate.disks=: virtio's by its name, vd<letter> in the disks' order; SCSI's
+# by its LUN, the one disk whose address under $3/class/scsi_disk ends :0:0:<role>, there being no udev
+# to name it. Printed, or why not. Refused: a line that names no bus, two, or one this guest does not
+# know. vm/init holds the same function, which a host test keeps the same.
+disk() {
+  bus=
+  set -f
+  # shellcheck disable=SC2086 # split into words, never into files
+  for word in $1; do
+    case "$word" in
+      surogate.disks=*)
+        [ -z "$bus" ] || { set +f; echo "the kernel's command line names surogate.disks= twice"; return 1; }
+        bus=${word#surogate.disks=}
+        ;;
+    esac
+  done
+  set +f
+  case "$bus" in
+    virtio)
+      case "$2" in
+        1) echo /dev/vdb ;;
+        2) echo /dev/vdc ;;
+        *) echo "the guest has no disk of role $2"; return 1 ;;
+      esac
+      ;;
+    scsi)
+      found=
+      for address in "$3"/class/scsi_disk/*:0:0:"$2"; do
+        [ -e "$address" ] || continue
+        [ -z "$found" ] || { echo "two SCSI disks are at LUN $2"; return 1; }
+        found=$address
+      done
+      [ -n "$found" ] || { echo "no SCSI disk is at LUN $2"; return 1; }
+      for block in "$found"/device/block/*; do
+        [ -e "$block" ] || break
+        echo "/dev/${block##*/}"
+        return 0
+      done
+      echo "the SCSI disk at LUN $2 has no block device"
+      return 1
+      ;;
+    '') echo "the kernel's command line names no surogate.disks="; return 1 ;;
+    *) echo "surogate.disks=$bus is not a bus this guest knows"; return 1 ;;
+  esac
+}
+
+# Words that stop the boot, then the stop: through the kernel's log, at a level a quiet kernel prints (KERN_CRIT),
+# which the console prints before the guest panics, where what is written to the console itself may be lost then on a
+# UART (Hyper-V's COM1); else on stderr.
+stop() {
+  { echo "<2>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2
+  exit 1
+}
+
 mount -t proc -o nosuid,nodev,noexec proc /proc
 mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
 mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
 mkdir -p /run/surogate/agent
-mount -t ext4 -o ro,nodev,nosuid /dev/vdb /run/surogate/agent
+agent=$(disk "$(cat /proc/cmdline)" 1 /sys) || stop "$agent, so the guest stops"
+mount -t ext4 -o ro,nodev,nosuid "$agent" /run/surogate/agent
 exec /run/surogate/agent/init

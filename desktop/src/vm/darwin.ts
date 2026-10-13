@@ -20,7 +20,7 @@ import type { HostUser, Share } from "../guest/protocol.js";
 import { MAX_SHARES } from "../guest/protocol.js";
 import { basename, dirname, join } from "../host-path.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
-import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
+import { guestCpus, kernelLine } from "./qemu.js";
 import { ended, reach, socketsIn } from "./sockets.js";
 import { Helper, late, type Said, type Start } from "./vm-helper.js";
 
@@ -75,8 +75,11 @@ export function fitting(run: string): string | null {
   return bytes > SOCKET_MAX ? `this Mac's temp folder's path is too long for the sandbox's sockets: ${longest} is ${bytes} bytes, over ${SOCKET_MAX}` : null;
 }
 
-/** The guest kernel's command line on macOS: every OS's, with the uid every root runs as, which the protected-names rule judges. */
-export const commandLine = (user: HostUser): string => `${KERNEL_COMMAND_LINE} surogate.uid=${user.uid}`;
+/**
+ * The guest kernel's command line on macOS: every OS's for the framework's devices, virtio's disks and ports, and no
+ * names refused but the protected ones, with the uid every root runs as, which the protected-names rule judges.
+ */
+export const commandLine = (user: HostUser): string => `${kernelLine({ disks: "virtio", transport: "virtio-serial", names: "posix" })} surogate.uid=${user.uid}`;
 
 /**
  * A boot on macOS, as *start* starts surogate-vm: spawnClean in the app; the measurements on a Mac

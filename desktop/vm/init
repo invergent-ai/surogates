@@ -13,6 +13,40 @@ sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_di
   fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2 \
   kernel.io_uring_disabled=2
 
+# The value of the word surogate.$2= on the kernel's command line, $1, which must name it once: printed,
+# or why not.
+named() {
+  found= value=
+  set -f
+  # shellcheck disable=SC2086 # split into words, never into files
+  for word in $1; do
+    case "$word" in
+      "surogate.$2="*)
+        [ -z "$found" ] || { set +f; echo "the kernel's command line names surogate.$2= twice"; return 1; }
+        found=1 value=${word#"surogate.$2="}
+        ;;
+    esac
+  done
+  set +f
+  [ -n "$found" ] || { echo "the kernel's command line names no surogate.$2="; return 1; }
+  echo "$value"
+}
+
+# Words that stop the boot, then the stop: through the kernel's log, at a level a quiet kernel prints (KERN_CRIT),
+# which the console prints before the guest panics, where what is written to the console itself may be lost then on a
+# UART (Hyper-V's COM1); else on stderr.
+stop() {
+  { echo "<2>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2
+  exit 1
+}
+
+# How the agent's ports reach the host (guest/port.ts): virtio-serial's ports, or vsock's streams, Hyper-V's.
+transport=$(named "$(cat /proc/cmdline)" transport) || stop "$transport, so the guest stops"
+case "$transport" in
+  virtio-serial | vsock) ;;
+  *) stop "surogate.transport=$transport is not a transport this guest knows, so the guest stops" ;;
+esac
+
 # The guest-kernel rule on protected names (rule.bpf.c), loaded beside the rest of the
 # boot: bpftool takes about a second, and the sessions disk's check, the cgroups and the
 # agent's start go on meanwhile. Its outcome lands in /run/surogate/rule, and the agent
@@ -22,7 +56,7 @@ sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_di
 mount -t securityfs -o nosuid,nodev,noexec securityfs /sys/kernel/security
 mount -t bpf -o nosuid,nodev,noexec bpf /sys/fs/bpf
 mkdir -p /sys/fs/bpf/surogate /sys/fs/bpf/surogate-maps
-want=15 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
+want=16 # the rule's lsm programs; a host test keeps this in step with rule.bpf.c
 
 # The rule's scope (rule.bpf.c, scope): the one uid it judges besides those from 10000 up, as the
 # kernel's command line, given as $1, names it in surogate.uid=. A VM whose shares map no owner to
@@ -49,6 +83,17 @@ scope_uid() {
   done
   echo "$found"
 }
+# The rule's names besides the protected ones (rule.bpf.c, names), as the kernel's command line, $1, names
+# their set in surogate.names=: printed as the map takes it, 0 for posix, which adds none, and 1 for windows,
+# those Windows's Explorer acts on. Refused, with why printed: a line that names no set, two, or another.
+name_set() {
+  set_named=$(named "$1" names) || { echo "$set_named"; return 1; }
+  case "$set_named" in
+    posix) echo 0 ;;
+    windows) echo 1 ;;
+    *) echo "surogate.names=$set_named is not a set of names this guest knows"; return 1 ;;
+  esac
+}
 # A uid as the map takes it: its four bytes, the low first.
 le32() {
   echo "$(($1 & 255)) $(($1 >> 8 & 255)) $(($1 >> 16 & 255)) $(($1 >> 24 & 255))"
@@ -58,6 +103,8 @@ le32() {
     echo "failed: the bpf LSM is not active; refusing to run commands unprotected"
   elif ! scope=$(scope_uid "$(cat /proc/cmdline)"); then
     echo "failed: $scope"
+  elif ! names=$(name_set "$(cat /proc/cmdline)"); then
+    echo "failed: $names"
   elif ! /usr/sbin/bpftool prog loadall /usr/lib/surogate/rule.bpf.o /sys/fs/bpf/surogate pinmaps /sys/fs/bpf/surogate-maps autoattach >&2; then
     echo "failed: could not load the guest-kernel protected-names rule"
   # Its scope set, then frozen before any session runs: nothing, the agent included, changes it after.
@@ -66,6 +113,10 @@ le32() {
   elif ! { /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/scope key 0 0 0 0 value $(le32 "${scope:-0}") \
       && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/scope && echo "$scope" > /run/surogate/scope; } >&2; then
     echo "failed: could not set the protected-names rule's scope"
+  # Its names set and frozen as its scope is.
+  elif ! { /usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/names key 0 0 0 0 value "$names" 0 0 0 \
+      && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/names; } >&2; then
+    echo "failed: could not set the protected-names rule's names"
   else
     # grep -c exits 1 on a count of 0, which would end this without a word.
     have=$(/usr/sbin/bpftool link show | grep -c lsm || true)
@@ -78,6 +129,54 @@ le32() {
   mv /run/surogate/rule.partial /run/surogate/rule
 ) &
 
+# The guest's disk of the role $2 (1, the agent disk; 2, the sessions disk), on the bus the kernel's
+# command line, $1, names in surogate.disks=: virtio's by its name, vd<letter> in the disks' order; SCSI's
+# by its LUN, the one disk whose address under $3/class/scsi_disk ends :0:0:<role>, there being no udev
+# to name it. Printed, or why not. Refused: a line that names no bus, two, or one this guest does not
+# know. The image's stub init (images/guest/surogate-init) holds the same function, which a host test
+# keeps the same.
+disk() {
+  bus=
+  set -f
+  # shellcheck disable=SC2086 # split into words, never into files
+  for word in $1; do
+    case "$word" in
+      surogate.disks=*)
+        [ -z "$bus" ] || { set +f; echo "the kernel's command line names surogate.disks= twice"; return 1; }
+        bus=${word#surogate.disks=}
+        ;;
+    esac
+  done
+  set +f
+  case "$bus" in
+    virtio)
+      case "$2" in
+        1) echo /dev/vdb ;;
+        2) echo /dev/vdc ;;
+        *) echo "the guest has no disk of role $2"; return 1 ;;
+      esac
+      ;;
+    scsi)
+      found=
+      for address in "$3"/class/scsi_disk/*:0:0:"$2"; do
+        [ -e "$address" ] || continue
+        [ -z "$found" ] || { echo "two SCSI disks are at LUN $2"; return 1; }
+        found=$address
+      done
+      [ -n "$found" ] || { echo "no SCSI disk is at LUN $2"; return 1; }
+      for block in "$found"/device/block/*; do
+        [ -e "$block" ] || break
+        echo "/dev/${block##*/}"
+        return 0
+      done
+      echo "the SCSI disk at LUN $2 has no block device"
+      return 1
+      ;;
+    '') echo "the kernel's command line names no surogate.disks="; return 1 ;;
+    *) echo "surogate.disks=$bus is not a bus this guest knows"; return 1 ;;
+  esac
+}
+
 # The sessions disk holds each root's home and temp folder, which can be lost.
 # It is made, empty, when it holds no ext4 superblock yet: its first boot. At
 # every later boot it is checked and repaired, and made again only when the
@@ -85,26 +184,34 @@ le32() {
 # failure, such as a feature this e2fsck does not know, stops the boot and
 # leaves the homes on the disk as they are: the app keeps that disk aside, by
 # this line on the console, and boots again on a new one (vm/manager.ts).
-if [ "$(od -An -tx2 -j1080 -N2 /dev/vdc)" != " ef53" ]; then
-  mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || stop "$sessions, so the guest stops"
+if [ "$(od -An -tx2 -j1080 -N2 "$sessions")" != " ef53" ]; then
+  mke2fs -q -F -t ext4 -E nodiscard -L sessions "$sessions"
 else
   checked=0
-  e2fsck -p /dev/vdc || checked=$?
+  e2fsck -p "$sessions" || checked=$?
   if [ "$checked" -ge 4 ]; then
     checked=0
-    e2fsck -y /dev/vdc || checked=$?
+    e2fsck -y "$sessions" || checked=$?
   fi
   if [ "$checked" -ge 8 ]; then
-    echo "surogate: e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one" >&2
-    exit 1
+    stop "e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one"
   fi
-  [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+  [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions "$sessions"
 fi
 mkdir -p /run/surogate/sessions
-mount -t ext4 -o nodev,nosuid,discard /dev/vdc /run/surogate/sessions
+mount -t ext4 -o nodev,nosuid,discard "$sessions" /run/surogate/sessions
 mkdir -p -m 0711 /run/surogate/sessions/roots
 
-modprobe virtiofs
+# The folders' filesystem: virtio-fs where the ports are virtio's, and on vsock the 9P client with its
+# transport over a descriptor, which a Plan 9 share is mounted through (guest/root.ts). The machine's own
+# drivers on Hyper-V the initrd loaded (images/guest/initrd). Then overlay, for each root's layers.
+if [ "$transport" = vsock ]; then
+  modprobe 9p
+  modprobe 9pnet_fd
+else
+  modprobe virtiofs
+fi
 modprobe overlay
 # The kernel loads no more modules: a command opening a socket of a rare family
 # would otherwise pull that family's code into the kernel every root shares.
@@ -133,4 +240,11 @@ echo $(( (total - 262144) * 1024 )) > /sys/fs/cgroup/roots/memory.max
 echo 28672 > /sys/fs/cgroup/roots/pids.max
 echo -1000 > /proc/self/oom_score_adj
 
+# On vsock, each of the agent's three ports is a stream to its port of the host's (guest/protocol.ts,
+# VSOCK_PORTS), which surogate-vsock connects and relays to a socket the agent opens by its path, root's
+# alone (guest/port.ts), so nothing the agent runs inherits a port. Its words, if it cannot, are on the console.
+if [ "$transport" = vsock ]; then
+  mkdir -m 0700 /run/surogate/ports
+  /usr/sbin/surogate-vsock 2:5000=/run/surogate/ports/ai.surogate.control 2:5001=/run/surogate/ports/ai.surogate.net 2:5002=/run/surogate/ports/ai.surogate.inbound &
+fi
 exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js

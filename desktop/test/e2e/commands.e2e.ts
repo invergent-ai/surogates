@@ -622,7 +622,7 @@ async function installedFrom(state: { held: boolean; missing: boolean }) {
   const server = createServer((request, response) => void (async () => {
     const name = request.url?.startsWith(`/desktop/vm/${key}/`) ? request.url.slice(`/desktop/vm/${key}/`.length) : "";
     heard.push({ name, range: request.headers.range, cookie: request.headers.cookie });
-    if (state.missing || !["rootfs.img.zst", "vmlinuz.zst"].includes(name)) return void response.writeHead(404).end();
+    if (state.missing || !["initrd.zst", "rootfs.img.zst", "vmlinuz.zst"].includes(name)) return void response.writeHead(404).end();
     const file = await open(join(REPO_IMAGE, name));
     const { size } = await file.stat();
     const from = Number(/^bytes=(\d+)-$/.exec(request.headers.range ?? "")?.[1] ?? 0);
@@ -791,7 +791,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect([await page.textContent("#sandbox-log"), await page.textContent("#sandbox-retry")]).toEqual(["Show log", "Retry"]);
     await page.click("#sandbox-retry");
     await expect.poll(() => page.isHidden("#sandbox"), { timeout: 90_000 }).toBe(true);
-    expect(served.heard.map(({ name }) => name).sort()).toEqual(["rootfs.img.zst", "vmlinuz.zst"]);
+    expect(served.heard.map(({ name }) => name).sort()).toEqual(["initrd.zst", "rootfs.img.zst", "vmlinuz.zst"]);
     expect(await operation("run", { command: "echo checked", workdir: null, timeout: 30 })).toEqual({ ok: { output: "checked\n", returncode: 0, timed_out: false } });
   });
 

@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GUEST_ARCH, hostArch, QEMU_ARCH } from "../src/vm/qemu-arch.js";
-import { guestCpus, Qmp, qemuArgs, virtiofsdArgs } from "../src/vm/qemu.js";
+import { guestCpus, kernelLine, Qmp, qemuArgs, virtiofsdArgs } from "../src/vm/qemu.js";
 
 const DISKS = { kernel: "/i/vmlinuz", rootfs: "/i/rootfs.img", agentDisk: "/a/agent.img", sessions: "/d/sessions.img" };
 
@@ -19,7 +19,7 @@ describe("QEMU's command line", () => {
       "-machine", "q35,accel=kvm,memory-backend=mem", "-cpu", "host", "-smp", "4", "-m", "2G",
       "-object", "memory-backend-memfd,id=mem,size=2G,share=on",
       "-kernel", "/i/vmlinuz",
-      "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
+      "-append", "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
       "-drive", "if=none,id=root,file=/i/rootfs.img,format=raw,readonly=on", "-device", "virtio-blk-pci,drive=root",
       "-drive", "if=none,id=agent,file=/a/agent.img,format=raw,readonly=on", "-device", "virtio-blk-pci,drive=agent",
       "-drive", "if=none,id=sessions,file=/d/sessions.img,format=raw,discard=unmap", "-device", "virtio-blk-pci,drive=sessions",
@@ -38,6 +38,17 @@ describe("QEMU's command line", () => {
       "-pidfile", "/run/user/1000/surogate/vm/qemu.pid",
       "-sandbox", "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",
     ]);
+  });
+
+  it("names the guest's disks, transport and names on the kernel's line: virtio's, with the image's disk as root and the console on hvc0", () => {
+    expect(kernelLine({ disks: "virtio", transport: "virtio-serial", names: "posix" })).toBe(
+      "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet"
+        + " surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
+    );
+    // Hyper-V's: the initrd finds the image's disk at its LUN and runs the stub init on it, and the console is the UART.
+    expect(kernelLine({ disks: "scsi", transport: "vsock", names: "windows" })).toBe(
+      "console=ttyS0 panic=-1 quiet surogate.disks=scsi surogate.transport=vsock surogate.names=windows lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
+    );
   });
 
   it("runs an emulated guest on QEMU's TCG, a host thread a vCPU, with the CPU TCG gives, and tells the agent so", () => {

@@ -35,8 +35,9 @@ export interface ImageManifest {
 }
 
 const HASH = /^[0-9a-f]{64}$/;
-// The files the VM boots from: a manifest names exactly these.
-const NAMES = ["rootfs.img", "vmlinuz"];
+// The files the VM boots from: a manifest names exactly these. The initrd is Hyper-V's: Linux and macOS
+// boot without it, and download it with the image, which is one for every OS of its arch.
+const NAMES = ["initrd", "rootfs.img", "vmlinuz"];
 const size = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
 /** This computer's own image arch, by Node's name for its arch (*arch*), or null for one no image is built for. */
