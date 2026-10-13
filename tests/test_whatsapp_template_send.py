@@ -608,6 +608,7 @@ async def test_ops_projection_of_the_flow_button_by_flow_id_is_sent(monkeypatch,
         return {
             "template_name": "daily", "template_language": "ro", "channel_identifier": "127",
             "template_flow_button": {"index": 1, "flow_id": "1187"},
+            "form_data": {"reminder": "Evening pills"},
         }
 
     await make_opener_enqueue(
@@ -617,7 +618,9 @@ async def test_ops_projection_of_the_flow_button_by_flow_id_is_sent(monkeypatch,
 
     token = emitted["flow_token"]
     assert token.startswith("1187:")
-    assert sent["template"]["flow_button"] == {"index": "1", "flow_token": token}
+    assert sent["template"]["flow_button"] == {
+        "index": "1", "flow_token": token, "flow_action_data": {"reminder": "Evening pills"},
+    }
 
 
 @pytest.mark.asyncio
@@ -644,3 +647,31 @@ async def test_the_flow_button_goes_out_as_a_template_button_component(monkeypat
             "parameters": [{"type": "action", "action": {"flow_token": "vitals:abc"}}],
         }],
     }
+
+
+@pytest.mark.asyncio
+async def test_form_data_rides_on_the_flow_button_after_quick_replies(monkeypatch):
+    sent = {}
+
+    async def _fake_send(client, *, token, phone_number_id, payload, api_version):
+        sent.update(payload)
+        return "wamid.4", None
+
+    monkeypatch.setattr("surogates.channels.platforms.whatsapp.send_message", _fake_send)
+    # Quick replies at 0 and 1 take no component; the FLOW button at 2 does.
+    await WhatsAppPlatform().send(
+        _item({"template": {
+            "name": "daily", "language": "ro",
+            "flow_button": {
+                "index": "2", "flow_token": "1187:abc",
+                "flow_action_data": {"reminder": "Evening pills"},
+            },
+        }}),
+        creds={"access_token": "T"},
+    )
+    assert sent["template"]["components"] == [{
+        "type": "button", "sub_type": "flow", "index": "2",
+        "parameters": [{"type": "action", "action": {
+            "flow_token": "1187:abc", "flow_action_data": {"reminder": "Evening pills"},
+        }}],
+    }]

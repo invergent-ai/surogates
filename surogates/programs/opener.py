@@ -227,6 +227,11 @@ def make_opener_enqueue(
             template["flow_button"] = {
                 "index": str(button.get("index") or 0), "flow_token": metadata["flow_token"],
             }
+            # One generic form serves several Programs by reading which one
+            # opened it from ``${data.*}``.
+            form_data = config.get("form_data")
+            if isinstance(form_data, dict) and form_data:
+                template["flow_button"]["flow_action_data"] = form_data
         event_id = await session_store.emit_synthetic_user_message(
             session_id, content=_opener_text(config), synthetic=CHECKIN_OPENER_MARKER,
             metadata=metadata,

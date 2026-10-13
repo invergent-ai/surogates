@@ -623,15 +623,23 @@ _DEFAULT_LIST_BUTTON = "☰"
 
 
 def _template_object(template: dict) -> dict:
-    """The Cloud API ``template`` object, with a FLOW button's token when one is set."""
+    """The Cloud API ``template`` object, with a FLOW button's token when one is set.
+
+    Only the FLOW button takes a parameter: quick replies on the same
+    template have fixed payloads and need no component.  ``index`` is the
+    button's position among all the template's buttons.
+    """
     out: dict[str, Any] = {"name": template["name"], "language": {"code": template["language"]}}
     button = template.get("flow_button")
     if isinstance(button, dict) and button.get("flow_token"):
+        action: dict[str, Any] = {"flow_token": button["flow_token"]}
+        if button.get("flow_action_data"):
+            action["flow_action_data"] = button["flow_action_data"]
         out["components"] = [{
             "type": "button",
             "sub_type": "flow",
             "index": str(button.get("index") or "0"),
-            "parameters": [{"type": "action", "action": {"flow_token": button["flow_token"]}}],
+            "parameters": [{"type": "action", "action": action}],
         }]
     return out
 
