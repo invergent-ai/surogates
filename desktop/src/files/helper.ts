@@ -57,9 +57,10 @@ const found = (path: string | undefined): string | null => {
   try {
     const is = fdPaths.lstat(path ?? "");
     if (!is.isDirectory()) return null;
-    // As numbers, as its host wrote them (hosts/start.ts, isOf).
+    // As numbers, as its host wrote them (hosts/start.ts, isOf): Node fills a bigint stat from a signed array, so a
+    // device or an inode at or above 2^63 is read back to the number its host's number stat gives (as revisionOf does).
     const { dev, ino } = identityOf(is);
-    return `${Number(dev)}:${Number(ino)}`;
+    return `${Number(BigInt.asUintN(64, dev))}:${Number(BigInt.asUintN(64, ino))}`;
   } catch {
     return null;
   }
