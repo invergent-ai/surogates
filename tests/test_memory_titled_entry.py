@@ -1,23 +1,67 @@
 """A titled memory entry is one record that adding again keeps current."""
 
-from surogates.api.routes.memory import _titled_entry
+import pytest
+
+from surogates.memory.r2_store import R2MemoryStore
+from surogates.memory.store import MemoryStore, titled_entry_index
 
 RECORD = "FIȘA\nPacient: Vasile Ionescu\nRăspunde: pacientul"
+UPDATED = "FIȘA\nPacient: Vasile Ionescu\nRăspunde: fiica"
+# Holds RECORD as a substring, before it: a str.replace of RECORD edits this one.
+QUOTING = "Note: copied from " + RECORD
 
 
 def test_adding_a_record_with_the_same_title_finds_the_old_one():
-    entries = ["Prefers mornings", RECORD]
-    assert _titled_entry("FIȘA\nPacient: Vasile Ionescu\nRăspunde: fiica", entries) == RECORD
+    assert titled_entry_index(UPDATED, ["Prefers mornings", RECORD]) == 1
 
 
 def test_a_different_title_is_a_new_entry():
-    assert _titled_entry("NOTE\nsomething", [RECORD]) is None
+    assert titled_entry_index("NOTE\nsomething", [RECORD]) is None
 
 
 def test_a_long_first_line_is_prose_not_a_title():
     prose = "The user said they prefer to be contacted in the morning after breakfast, never late"
-    assert _titled_entry(prose + "\nmore", [prose + "\nolder"]) is None
+    assert titled_entry_index(prose + "\nmore", [prose + "\nolder"]) is None
 
 
 def test_empty_content_has_no_title():
-    assert _titled_entry("   ", [RECORD]) is None
+    assert titled_entry_index("   ", [RECORD]) is None
+
+
+def test_disk_store_add_replaces_the_titled_entry_by_position(tmp_path):
+    store = MemoryStore(tmp_path)
+    store.load_from_disk()
+    store.add("user", QUOTING)
+    store.add("user", RECORD)
+
+    result = store.add("user", UPDATED)
+
+    assert result["success"]
+    assert store.get_entries("user") == [QUOTING, UPDATED]
+
+
+class _Backend:
+    def __init__(self):
+        self.objects = {}
+
+    async def read(self, bucket, key):
+        return self.objects[key]
+
+    async def write(self, bucket, key, data):
+        self.objects[key] = data
+
+
+@pytest.mark.asyncio
+async def test_r2_store_add_replaces_the_titled_entry_by_position():
+    store = R2MemoryStore(
+        backend=_Backend(), bucket="b", keys={"memory": "m", "user": "u"},
+    )
+    await store.load_from_r2()
+    await store.add("user", QUOTING)
+    await store.add("user", RECORD)
+
+    await store.add("user", UPDATED)
+
+    assert store.get_entries("user") == [QUOTING, UPDATED]
+    await store.add("user", "NOTE\nnew")
+    assert store.get_entries("user") == [QUOTING, UPDATED, "NOTE\nnew"]

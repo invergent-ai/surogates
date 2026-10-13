@@ -25,7 +25,7 @@ from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.memory.r2_store import (
     MEMORY_TARGETS, R2MemoryStore,
 )
-from surogates.memory.store import scan_memory_content
+from surogates.memory.store import scan_memory_content, titled_entry_index
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -223,20 +223,6 @@ async def get_memory(
     )
 
 
-_TITLE_MAX = 60
-
-
-def _titled_entry(content: str, entries: list[str]) -> str | None:
-    """The existing entry with the same short first line as ``content``."""
-    title = content.strip().split("\n", 1)[0].strip()
-    if not title or len(title) > _TITLE_MAX:
-        return None
-    return next(
-        (e for e in entries if e.strip().split("\n", 1)[0].strip() == title),
-        None,
-    )
-
-
 @router.post("/memory", response_model=MemoryMutateResponse)
 async def mutate_memory(
     body: MemoryMutateRequest,
@@ -266,14 +252,10 @@ async def mutate_memory(
         scan_err = scan_memory_content(body.content)
         if scan_err:
             return MemoryMutateResponse(success=False, error=scan_err)
-        # A titled entry (short first line, e.g. a patient record headed
-        # "FIȘA") is kept as one record: adding it again replaces the old
-        # one.  Models fill ``content`` reliably on ``add`` but often omit it
-        # on ``replace``, which left records stale and looped the turn.
-        titled = _titled_entry(body.content, current_entries)
+        titled = titled_entry_index(body.content, current_entries)
         used = (
             sum(len(e) for e in current_entries)
-            - (len(titled) if titled else 0)
+            - (len(current_entries[titled]) if titled is not None else 0)
             + len(body.content)
         )
         if used > limit:
@@ -284,12 +266,7 @@ async def mutate_memory(
                     f"({used}/{limit}). Remove or replace an entry first."
                 ),
             )
-        if titled:
-            result = await store.replace(body.target, titled, body.content)
-            if result.get("error"):
-                return MemoryMutateResponse(success=False, error=result["error"])
-        else:
-            await store.add(body.target, body.content)
+        await store.add(body.target, body.content)
 
     elif body.action == "replace":
         if not body.old_text:

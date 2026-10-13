@@ -159,6 +159,26 @@ def _file_lock(path: Path):
             lock.release()
 
 
+_TITLE_MAX = 60
+
+
+def titled_entry_index(content: str, entries: list[str]) -> int | None:
+    """Index of the existing entry with the same short first line as *content*.
+
+    A titled entry (short first line, e.g. a patient record headed "FIȘA") is
+    kept as one record that adding again replaces.  Models fill ``content``
+    reliably on ``add`` but often omit it on ``replace``, which left records
+    stale and looped the turn.
+    """
+    title = content.strip().split("\n", 1)[0].strip()
+    if not title or len(title) > _TITLE_MAX:
+        return None
+    return next(
+        (i for i, e in enumerate(entries) if e.strip().split("\n", 1)[0].strip() == title),
+        None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # MemoryStore
 # ---------------------------------------------------------------------------
@@ -211,7 +231,7 @@ class MemoryStore:
         }
 
     def add(self, target: str, content: str) -> dict[str, Any]:
-        """Append a new entry.  Returns error if it would exceed the char limit."""
+        """Append a new entry, or replace the one with its title.  Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
@@ -230,8 +250,12 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
-            # Calculate what the new total would be.
-            new_entries = entries + [content]
+            titled = titled_entry_index(content, entries)
+            new_entries = entries.copy()
+            if titled is None:
+                new_entries.append(content)
+            else:
+                new_entries[titled] = content
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
             if new_total > limit:
@@ -247,11 +271,10 @@ class MemoryStore:
                     "usage": f"{current:,}/{limit:,}",
                 }
 
-            entries.append(content)
-            self._set_entries(target, entries)
+            self._set_entries(target, new_entries)
             self._save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+        return self._success_response(target, "Entry added." if titled is None else "Entry replaced.")
 
     def replace(self, target: str, old_text: str, new_content: str) -> dict[str, Any]:
         """Find entry containing *old_text* substring, replace it with *new_content*."""
