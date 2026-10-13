@@ -1,6 +1,8 @@
-# Surogate Desktop on a Mac: the first day's tests
+# Surogate Desktop on a Mac: the test days
 
 This runbook tests branch `test/macos-cde`: master with the macOS VM backend, the file host under Seatbelt, and the shell and browser joined. Run it on an Apple-silicon Mac with macOS 14 or later.
+
+Steps 0 to 5 are the first day's. The second day runs them again, then the checks under "Second day" at the end.
 
 Work in a fresh macOS user account made for this (System Settings › Users & Groups, an administrator), never your own. Everything below runs as that user.
 
@@ -9,7 +11,8 @@ Each step says what a pass looks like. When something fails, keep going where yo
 ## 0. Install once
 
 - **Xcode 16 or later**, from the App Store. Open it once and accept its licence. Then run `sudo xcode-select -s /Applications/Xcode.app`.
-- **Homebrew**, then `brew install zstd gh nvm`, and `nvm install 22.14.0 && nvm use 22.14.0`. Check that `node -v` prints `v22.14.0`.
+- **Homebrew**, then `brew install zstd gh nvm`, and `nvm install 22.14.0 && nvm use 22.14.0`. Check that `node -v` prints `v22.14.0`. Leave the PATH as Homebrew sets it, its own `bash` included: the app starts its sandbox through the system's `/bin/bash` whatever comes first.
+- **Google Chrome and Microsoft Edge**, from their own sites. Open each once by hand and close it: a browser that is new, still quarantined, dies when a script starts it before its first normal launch.
 - **A container runtime for the agent's disk:** OrbStack, Docker Desktop or colima, running, with arm64 Linux containers.
 - **`gh auth login`**, so the guest image can be downloaded.
 
@@ -31,13 +34,14 @@ test/acceptance/macos/file-host.sh
 ```
 
 - What it does:
-  - builds surogate-spawn, fsat, the app's rg and `bin/node`;
-  - runs the file host's suites;
+  - builds surogate-spawn, fsat, surogate-helper, the app's rg and `bin/node`;
+  - runs the file host's suites, then the macos project's files;
   - starts a host in Seatbelt on a folder in `~/Documents`, an exFAT disk image, and iCloud Drive if you're signed in;
   - races a link flip in each.
+- On macOS 27, `hdiutil` can't make an exFAT image ("Operation not permitted"). The script then names the exFAT place as skipped, with `hdiutil`'s words, and goes on with the others.
 - When macOS asks whether Terminal may reach Documents, or iCloud Drive, allow it. Note which you allowed.
 - Pass:
-  - the last line is `PASS`;
+  - the last line is `PASS; places skipped: …`, naming only the places you expect it to skip (iCloud Drive when you're not signed in, the exFAT image on macOS 27). Each skipped place is printed above it, with the words of what refused it;
   - `Seatbelt:` says `ok` only for the designed tries, and `load a copy of fsat in the folder`, which is recorded:
     - read, list and write the folder, and write the working folder;
     - the three hard links a landing makes: in the folder, from it into the working folder, and back;
@@ -95,11 +99,11 @@ test/darwin/dev-bundle.sh
 
 Then:
 
-1. **The helper:** `cd native/helper && swift test && cd ../..`. Pass: "Executed 10 tests, with 0 failures".
+1. **The helper:** `cd native/helper && swift test && cd ../..`. Pass: "Executed 13 tests, with 0 failures".
 2. **The company CA:** `test/darwin/admin-trust.sh --keep`, which asks your password.
    - Pass: it prints `{"ssl":true,"smime":false,"denied":false}` and "Node reached https://localhost:<port> …: trusted".
    - Open that URL in Chrome and Safari: no warning. Ctrl+C removes the test roots.
-   - Then install a test root through a configuration profile, run `native/helper/.build/surogate-helper trust`, and note whether that root is listed.
+   - Then install a test root through a configuration profile, run `native/helper/.build/surogate-helper trust`, and note whether that root is listed. Pass: it is.
 3. **By eye, in Surogate Dev:**
    - the window's buttons are inset top left;
    - the menu bar reads Surogate (About Surogate, Settings… ⌘,, Services, Hide, Hide Others, Show All, Quit ⌘Q), then File, Edit, View, Window, and Help with its search field;
@@ -112,13 +116,13 @@ Then:
 7. **The Keychain:** sign in to your agent.
    - `security find-generic-password -s "Surogate Safe Storage"` finds the item, and `session.json` and `credentials.json` hold no `"plain"`.
    - Note any Keychain prompt, at sign-in and at the next start.
-8. **Notifications:** hide the window and let a chat ask a question. A notification appears, and clicking it opens the chat.
+8. **Notifications:** first turn Focus off, and allow Surogate Dev's notifications in System Settings → Notifications: with Focus on, macOS shows none, and the app can't tell. Hide the window and let a chat ask a question. A notification appears, and clicking it opens the chat.
 9. **The login item:** turn on Settings → Start at login, then log out and in. Note what System Settings → General → Login Items shows, and whether the window showed.
 10. **This computer and the browser:**
     - Settings → This computer shows your Mac's Sharing name.
     - `tmutil isexcluded "$HOME/Library/Application Support/Surogate/vm"` prints `[Excluded]`.
     - Settings → Browser lists your Chrome and Edge with versions, and an app run from a mounted `.dmg` is refused.
-11. **Headed tests on your own browsers:** `CI=true SUROGATE_BROWSER_TESTS_MAC=1 SUROGATE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npx vitest run --project macos test/browser-host-darwin.test.ts`, then the same with Edge. Pass: 6 passed.
+11. **Headed tests on your own browsers:** open Chrome and Edge once by hand first, if you haven't (step 0). Then `CI=true SUROGATE_BROWSER_TESTS_MAC=1 SUROGATE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npx vitest run --project macos test/browser-host-darwin.test.ts`, then the same with Edge. Pass: 6 passed.
 
 ## 5. The whole app
 
@@ -128,7 +132,7 @@ In Surogate Dev, signed in to your agent:
 2. Ask it to run a command in that folder, such as `ls -la && git status`. Pass: it runs in the guest, and sees the folder's files.
 3. Create a project with a folder of this Mac, and start a thread from a proposed card. Pass: the thread works in its own copy, and its turn lands its change in the folder.
 
-Clean up with `test/darwin/dev-bundle.sh --remove`.
+Clean up with `test/darwin/dev-bundle.sh --remove`, which quits Surogate Dev and takes out its login item first.
 
 ## What to send back
 
@@ -137,3 +141,34 @@ Clean up with `test/darwin/dev-bundle.sh --remove`.
 - Every FAIL, with its words.
 - Every privacy prompt and Keychain prompt you saw, and the app each named.
 - Anything that looked wrong, even if no step asked about it.
+
+## Second day
+
+Run steps 0 to 5 again first, on the branch's newest head, but leave Surogate Dev in place: skip step 5's clean-up. Then these, in order. Each says what a pass looks like; send back every one that fails, with its words.
+
+### The shell and the file host
+
+1. **Homebrew's bash.** `brew install bash`, then check that `command -v bash` prints `/opt/homebrew/bin/bash`. With that PATH, as Homebrew leaves it, run `test/acceptance/macos/file-host.sh`.
+   - Pass: no `execvp() of '/opt/homebrew/bin/bash' failed`, and the last line starts `PASS`.
+2. **The macos project in file-host.sh.** In the same run, `computer-name-darwin` passes: surogate-helper is built before the macos project runs.
+   - Pass: the last line names only the places you expected skipped, and on macOS 27 the exFAT image's line above it gives `hdiutil`'s words.
+3. **Commands from the Dock.** Quit Surogate Dev. Start it from the Dock, or by a double-click in Finder, never from Terminal. In a chat on a folder in `~/Documents`, ask the agent to run `ls`.
+   - Pass: neither the sidebar's sandbox line nor the command's answer says "Surogate's sandbox tools are missing". If the VM refuses the command, note its own words.
+4. **The Dock.** With Surogate Dev running, press ⌘W, then click its Dock icon.
+   - Pass: the window comes back.
+   - If it doesn't, try each of these and note which brings the window back:
+     - `open "$HOME/Applications/Surogate Dev.app"`, without `-n`;
+     - `osascript -e 'tell application id "ai.invergent.surogate.development" to reopen'`.
+5. **Settings' close button.** Open Settings, and click its close button (×) near the button's top edge. Then open a project's settings, and click its Cancel.
+   - Pass: each closes at the first click.
+6. **A company root from a configuration profile.** Install the test root's `.mobileconfig` by a double-click, as on the first day, and run `native/helper/.build/surogate-helper trust`.
+   - Pass: the root is listed, as PEM.
+   - Then remove the profile (System Settings → General → Device Management), and run `test/darwin/admin-trust.sh --user`. macOS asks for your password in its own window, once for each test root.
+   - Pass: it prints `{"ssl":true,"smime":false,"denied":false}` and ends "The user's trust domain is read as it should be".
+   - Note any prompt `surogate-helper trust` itself raised.
+7. **Removing the dev bundle.** Turn on Settings → Start at login, leave Surogate Dev running, and run `test/darwin/dev-bundle.sh --remove`.
+   - Pass: it prints "Took out its login item", then "Removed …".
+   - `pgrep -fl "Surogate Dev.app"` prints nothing.
+   - System Settings → General → Login Items no longer lists Surogate Dev.
+8. **The spelling dictionary.** Make the bundle again with `scripts/mac-build.sh && test/darwin/dev-bundle.sh`, and start it from Terminal with `"$HOME/Applications/Surogate Dev.app/Contents/MacOS/Electron"`.
+   - Pass: its output has no `ENOENT` for `dictionaries/en-US-10-1.bdic`. Quit it with ⌘Q.
