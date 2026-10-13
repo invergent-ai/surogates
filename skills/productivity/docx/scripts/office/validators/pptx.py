@@ -111,7 +111,7 @@ class PPTXSchemaValidator(BaseSchemaValidator):
 
         problems = find_chart_problems(self._package_map())
         if problems:
-            print(f"FAILED - Found {len(problems)} chart problem(s) PowerPoint rejects:")
+            print(f"FAILED - Found {len(problems)} chart problem(s) PowerPoint rejects or draws empty:")
             for message in problems:
                 print(f"  {message}")
             return False
