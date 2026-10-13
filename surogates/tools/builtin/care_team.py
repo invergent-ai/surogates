@@ -10,7 +10,9 @@ withheld from every other session's tool list.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -104,9 +106,10 @@ CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
     description=(
         "Care team only. Send an enrolled patient the doctor's message, word "
         "for word, from the practice's WhatsApp number. First call without "
-        "confirmed: it shows who would receive what and sends nothing. Show "
-        "that to the doctor and call again with confirmed=true only after "
-        "they answer yes. Never reword the doctor's text."
+        "confirmation: it shows who would receive what, sends nothing and "
+        "gives a confirmation code. Show that to the doctor and only after "
+        "they answer yes call again with the same arguments and that code. "
+        "Never reword the doctor's text."
     ),
     parameters={
         "type": "object",
@@ -119,9 +122,12 @@ CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "The doctor's message exactly as they wrote it.",
             },
-            "confirmed": {
-                "type": "boolean",
-                "description": "True only after the doctor confirmed this exact preview.",
+            "confirmation": {
+                "type": "string",
+                "description": (
+                    "The code the preview of this exact action gave, only "
+                    "after the doctor answered yes to that preview."
+                ),
             },
         },
         "required": ["patient", "text"],
@@ -134,9 +140,10 @@ CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
         "Care team only. Change an enrolled patient's follow-up on the "
         "doctor's word: pause, end or resume it, correct the start date, the "
         "patient's name or who answers for them. First call without "
-        "confirmed: it shows exactly what would change and changes nothing. "
-        "Show that to the doctor and call again with confirmed=true only "
-        "after they answer yes."
+        "confirmation: it shows exactly what would change, changes nothing "
+        "and gives a confirmation code. Show that to the doctor and only "
+        "after they answer yes call again with the same arguments and that "
+        "code."
     ),
     parameters={
         "type": "object",
@@ -185,9 +192,12 @@ CARE_TEAM_UPDATE_PATIENT_SCHEMA = ToolSchema(
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
-            "confirmed": {
-                "type": "boolean",
-                "description": "True only after the doctor confirmed this exact preview.",
+            "confirmation": {
+                "type": "string",
+                "description": (
+                    "The code the preview of this exact action gave, only "
+                    "after the doctor answered yes to that preview."
+                ),
             },
         },
         "required": ["patient"],
@@ -200,9 +210,10 @@ CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
         "Care team only. Enrol a new patient by their WhatsApp number on the "
         "doctor's word: it records their permission to be messaged as the "
         "doctor's say-so and sends them the practice's welcome message. First "
-        "call without confirmed: it shows who would be enrolled and how, and "
-        "changes nothing. Show that to the doctor and call again with "
-        "confirmed=true only after they answer yes."
+        "call without confirmation: it shows who would be enrolled and how, "
+        "changes nothing and gives a confirmation code. Show that to the "
+        "doctor and only after they answer yes call again with the same "
+        "arguments and that code."
     ),
     parameters={
         "type": "object",
@@ -243,9 +254,12 @@ CARE_TEAM_ENROLL_PATIENT_SCHEMA = ToolSchema(
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
-            "confirmed": {
-                "type": "boolean",
-                "description": "True only after the doctor confirmed this exact preview.",
+            "confirmation": {
+                "type": "string",
+                "description": (
+                    "The code the preview of this exact action gave, only "
+                    "after the doctor answered yes to that preview."
+                ),
             },
         },
         "required": ["phone", "patient_name"],
@@ -682,6 +696,57 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Confirmation
+# ---------------------------------------------------------------------------
+
+CONFIRM_TTL_SECONDS = 15 * 60
+
+
+def _confirm_key(session_id: Any, tool: str, code: str) -> str:
+    return f"surogates:care_team:confirm:{session_id}:{tool}:{code}"
+
+
+async def _unconfirmed(
+    kwargs: dict, tool: str, arguments: dict, preview: str, nothing_done: str,
+) -> str | None:
+    """None when *arguments* carry the code that a preview of this exact
+    action issued in this session; otherwise the preview with a fresh code.
+
+    The preview text is what the doctor said yes to, so its hash is the
+    binding: any change to who, what or the record's current state since
+    the preview makes the old code worthless.
+    """
+    redis = kwargs.get("redis")
+    session_id = kwargs["session_id"]
+    digest = hashlib.sha256(f"{tool}\n{preview}".encode()).hexdigest()
+    code = str(arguments.get("confirmation") or "").strip().upper()
+    lead = ""
+    if code and redis is not None:
+        held = await redis.getdel(_confirm_key(session_id, tool, code))
+        if isinstance(held, bytes):
+            held = held.decode()
+        if held == digest:
+            return None
+        lead = (
+            "Not done: that confirmation code has expired or was given for a "
+            "different action. "
+        )
+    elif code:
+        lead = "Not done: confirmations are unavailable right now. "
+    elif arguments.get("confirmed") is True:
+        lead = "Not done: a yes needs the confirmation code from the preview. "
+    if redis is None:
+        return f"{lead}{preview} {nothing_done}"
+    fresh = secrets.token_hex(3).upper()
+    await redis.set(_confirm_key(session_id, tool, fresh), digest, ex=CONFIRM_TTL_SECONDS)
+    return (
+        f"{lead}{preview} Show this to the doctor; only after they answer yes, "
+        f"call again with the same arguments and confirmation=\"{fresh}\". "
+        f"{nothing_done}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # care_team_message_patient
 # ---------------------------------------------------------------------------
 
@@ -734,12 +799,13 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
             "the practice has none chosen under Follow-up."
         )
 
-    if arguments.get("confirmed") is not True:
-        return (
-            f"Will send to {person.label} ({_masked(identity.platform_user_id)}): "
-            f"«{text}». Ask the doctor to confirm with a yes before calling "
-            "again with confirmed=true. Nothing has been sent."
-        )
+    refused = await _unconfirmed(
+        kwargs, "care_team_message_patient", arguments,
+        f"Will send to {person.label} ({_masked(identity.platform_user_id)}): «{text}».",
+        "Nothing has been sent.",
+    )
+    if refused:
+        return refused
 
     row = await followup_store.queue_outreach(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
@@ -834,12 +900,13 @@ async def handle_care_team_update_patient(arguments: dict, **kwargs: Any) -> str
     if not changes:
         return "Nothing to change: say what to change."
 
-    if arguments.get("confirmed") is not True:
-        return (
-            f"Will change {person.label}'s {row.protocol}: " + "; ".join(described)
-            + ". Ask the doctor to confirm with a yes before calling again with "
-            "confirmed=true. Nothing has been changed."
-        )
+    refused = await _unconfirmed(
+        kwargs, "care_team_update_patient", arguments,
+        f"Will change {person.label}'s {row.protocol}: " + "; ".join(described) + ".",
+        "Nothing has been changed.",
+    )
+    if refused:
+        return refused
 
     updated = await followup_store.update_enrollment(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
@@ -991,20 +1058,22 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
         )
     sender = _sender(ctx, settings)
 
-    if arguments.get("confirmed") is not True:
-        when = (
-            f"from {start}" + (" (approximate)" if approximate else "")
-            if start else "with no start date, so no Program reaches them until one is set"
-        )
-        return (
-            f"Will enrol {name} (+{wa_id}) in {protocol} {when}"
-            + (f", answered by {answered_by}" if answered_by else "")
-            + (f"; the number is already known as {holder.display_name}" if holder else "")
-            + "; record their permission to be messaged on your say-so"
-            + ("; and send them the practice's welcome message" if sender else "")
-            + ". Ask the doctor to confirm with a yes before calling again with "
-            "confirmed=true. Nothing has been changed."
-        )
+    when = (
+        f"from {start}" + (" (approximate)" if approximate else "")
+        if start else "with no start date, so no Program reaches them until one is set"
+    )
+    refused = await _unconfirmed(
+        kwargs, "care_team_enroll_patient", arguments,
+        f"Will enrol {name} (+{wa_id}) in {protocol} {when}"
+        + (f", answered by {answered_by}" if answered_by else "")
+        + (f"; the number is already known as {holder.display_name}" if holder else "")
+        + "; record their permission to be messaged on your say-so"
+        + ("; and send them the practice's welcome message" if sender else "")
+        + ".",
+        "Nothing has been changed.",
+    )
+    if refused:
+        return refused
 
     user_id = await _patient_account(sf, ctx, wa_id, name, holder)
     if isinstance(user_id, str):

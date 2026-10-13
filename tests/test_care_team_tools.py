@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -74,8 +75,38 @@ async def practice(sf):
     )
 
 
+class _Redis:
+    def __init__(self):
+        self.data, self.ttl = {}, {}
+
+    async def set(self, key, value, ex=None):
+        self.data[key], self.ttl[key] = value, ex
+
+    async def getdel(self, key):
+        return self.data.pop(key, None)
+
+
+_redis = _Redis()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_redis():
+    global _redis
+    _redis = _Redis()
+
+
 def _kw(sf, session_id):
-    return {"session_id": str(session_id), "session_factory": sf}
+    return {"session_id": str(session_id), "session_factory": sf, "redis": _redis}
+
+
+def _code(preview):
+    return re.search(r'confirmation="([0-9A-F]{6})"', preview).group(1)
+
+
+async def _confirmed(handler, arguments, kw):
+    """What the doctor's yes does: the preview, then the same call with its code."""
+    preview = await handler(arguments, **kw)
+    return await handler({**arguments, "confirmation": _code(preview)}, **kw)
 
 
 async def _outreach(sf):
@@ -225,16 +256,71 @@ async def test_unconfirmed_is_a_preview_and_sends_nothing(sf, practice):
         **_kw(sf, practice.doctor_session),
     )
     assert out.startswith("Will send to Ioana Popa (+40…002): «Veniți mâine la 10.»")
-    assert "confirmed=true" in out
+    assert _redis.ttl[next(iter(_redis.data))] == care_team.CONFIRM_TTL_SECONDS
+    assert f'confirmation="{_code(out)}"' in out
     assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_a_yes_without_the_previews_code_only_previews(sf, practice):
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Ioana", "text": "x", "confirmed": True, "confirmation": "ABC123"},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Not done:") and "Will send to Ioana Popa" in out
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Ioana", "text": "x", "confirmed": True},
+        **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Not done:") and "Nothing has been sent" in out
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_a_code_confirms_only_the_exact_previewed_action_once_in_its_session(sf, practice):
+    doctor = _kw(sf, practice.doctor_session)
+    send = care_team.handle_care_team_message_patient
+    code = _code(await send({"patient": "Ioana", "text": "Vino la 10."}, **doctor))
+
+    other_text = await send({"patient": "Ioana", "text": "Vino la 11.", "confirmation": code}, **doctor)
+    assert other_text.startswith("Not done:") and "«Vino la 11.»" in other_text
+
+    code = _code(await send({"patient": "Ioana", "text": "Vino la 10."}, **doctor))
+    other_patient = await send({"patient": "Ion", "text": "Vino la 10.", "confirmation": code}, **doctor)
+    assert other_patient.startswith("Not done:")
+
+    code = _code(await send({"patient": "Ioana", "text": "Vino la 10."}, **doctor))
+    other_tool = await care_team.handle_care_team_update_patient(
+        {"patient": "Ioana", "status": "ended", "reason": "x", "confirmation": code}, **doctor,
+    )
+    assert other_tool.startswith("Not done:")
+    assert (await _enrollment(sf, practice.ioana[0])).status == "active"
+
+    colleague, colleague_session = await _person(sf, "Asistenta Maria", "40700000098", enrol=False)
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[practice.doctor, colleague],
+    )
+    other_session = await send(
+        {"patient": "Ioana", "text": "Vino la 10.", "confirmation": code},
+        **_kw(sf, colleague_session),
+    )
+    assert other_session.startswith("Not done:")
+    assert await _outreach(sf) == []
+
+    sent = await send({"patient": "Ioana", "text": "Vino la 10.", "confirmation": code}, **doctor)
+    assert sent.startswith("Queued for Ioana Popa")
+    replay = await send({"patient": "Ioana", "text": "Vino la 10.", "confirmation": code}, **doctor)
+    assert replay.startswith("Not done:")
+    assert len(await _outreach(sf)) == 1
 
 
 @pytest.mark.asyncio
 async def test_confirmed_queues_the_text_verbatim_like_studio(sf, practice):
     ioana, _ = practice.ioana
-    out = await care_team.handle_care_team_message_patient(
-        {"patient": "0002", "text": "  Veniți mâine la 10.  ", "confirmed": True},
-        **_kw(sf, practice.doctor_session),
+    out = await _confirmed(
+        care_team.handle_care_team_message_patient,
+        {"patient": "0002", "text": "  Veniți mâine la 10.  "},
+        _kw(sf, practice.doctor_session),
     )
     assert "Queued for Ioana Popa (state queued)" in out
     [row] = await _outreach(sf)
@@ -335,12 +421,12 @@ async def test_confirmed_update_writes_and_tells_the_rest_of_the_care_team(sf, p
         alert_recipient_user_ids=[practice.doctor, colleague],
     )
     ioana, _ = practice.ioana
-    out = await care_team.handle_care_team_update_patient(
+    out = await _confirmed(
+        care_team.handle_care_team_update_patient,
         {"patient": "0002", "status": "paused", "reason": "internată",
          "start_date": (date.today() - timedelta(days=2)).isoformat(),
-         "start_date_approximate": True, "patient_name": "Ioana M. Popa",
-         "confirmed": True},
-        **_kw(sf, practice.doctor_session),
+         "start_date_approximate": True, "patient_name": "Ioana M. Popa"},
+        _kw(sf, practice.doctor_session),
     )
     assert "Updated Ioana" in out and "status paused" in out
     row = await _enrollment(sf, ioana)
@@ -405,8 +491,9 @@ async def test_confirmed_enrol_creates_the_phone_only_person_and_welcomes_them(s
         sf, org_id=ORG, agent_id=AGENT, welcome_template_name="welcome",
         welcome_template_language="ro", texts={"welcome_text": "Bun venit!"},
     )
-    out = await care_team.handle_care_team_enroll_patient(
-        _enrol(start_date_approximate=True, confirmed=True), **_kw(sf, practice.doctor_session),
+    out = await _confirmed(
+        care_team.handle_care_team_enroll_patient,
+        _enrol(start_date_approximate=True), _kw(sf, practice.doctor_session),
     )
     assert "Enrolled Elena Dumitru (+40711222333) in post-op" in out
     assert "Welcome message queued" in out
@@ -430,8 +517,8 @@ async def test_confirmed_enrol_creates_the_phone_only_person_and_welcomes_them(s
     assert (welcome.template_name, welcome.template_language) == ("welcome", "ro")
     assert welcome.channel_identifier == "pn1"
 
-    again = await care_team.handle_care_team_enroll_patient(
-        _enrol(confirmed=True), **_kw(sf, practice.doctor_session),
+    again = await _confirmed(
+        care_team.handle_care_team_enroll_patient, _enrol(), _kw(sf, practice.doctor_session),
     )
     assert "Enrolled" in again
     assert len(await _outreach(sf)) == 1  # the same day's welcome is not sent twice
@@ -443,8 +530,8 @@ async def test_enrol_attaches_someone_who_already_wrote(sf, practice, bindings):
     async with sf() as db:
         (await db.get(User, shadow)).auth_provider = "whatsapp"
         await db.commit()
-    await care_team.handle_care_team_enroll_patient(
-        _enrol(confirmed=True), **_kw(sf, practice.doctor_session),
+    await _confirmed(
+        care_team.handle_care_team_enroll_patient, _enrol(), _kw(sf, practice.doctor_session),
     )
     async with sf() as db:
         assert (await db.get(User, shadow)).auth_provider == "external"
