@@ -1,7 +1,6 @@
 // The bridge's calls in the main process (spec, Section 8). Each is checked before it
-// does anything, as Claude Desktop checks claude.ai's (its main bundle validates every
-// call's sender frame, then each argument's type): the sender is the top frame of a
-// view of the agent's web client, on the agent's exact origin, and each argument has
+// does anything, its sender frame first, then each argument: the sender is the top frame
+// of a view of the agent's web client, on the agent's exact origin, and each argument has
 // its shape. What the page sends is copied field by field. No call answers an approval.
 
 import type {

@@ -1,7 +1,7 @@
-// The app's menu, as Claude Desktop builds its own (index.chunk-B33tFrRY.js): File, Edit,
-// View, Developer and Help, in place of Electron's default. Its accelerators are the app's
-// keys, from every page and view: Chromium matches them on the key's place, whatever the
-// keyboard's layout. View acts on the agent's page, never on the window's own. And the tray's menu and icon.
+// The app's menu: File, Edit, View, Developer and Help, in place of Electron's default. Its
+// accelerators are the app's keys, from every page and view: Chromium matches them on the
+// key's place, whatever the keyboard's layout. View acts on the agent's page, never on the
+// window's own. And the tray's menu and icon.
 
 import type { MenuItemConstructorOptions } from "electron";
 
@@ -81,7 +81,7 @@ export interface TrayActions {
   quitNow(): void; // a quit that waits goes now, with no question
 }
 
-// The tray's menu, as Claude Desktop's (index.chunk-B33tFrRY.js): the window and quick entry first, then what to know, then Quit.
+// The tray's menu: the window and quick entry first, then what to know, then Quit.
 export function trayMenu(state: TrayState, act: TrayActions): MenuItemConstructorOptions[] {
   return [
     { label: "Show Surogate", click: () => act.show() },

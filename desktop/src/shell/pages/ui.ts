@@ -96,8 +96,8 @@ export function mark(size = 64): SVGSVGElement {
   return svg;
 }
 
-// A project's mark, as Claude Desktop gives each project its own: an icon and a hue, chosen by its id,
-// so a project keeps its mark wherever it shows. The agent's icon field is not read: no client sets one.
+// Each project's own mark: an icon and a hue, chosen by its id, so a project keeps its mark
+// wherever it shows. The agent's icon field is not read: no client sets one.
 const MARKS: IconName[] = ["folder", "briefcase", "book-open", "chart-column", "file-text", "lightbulb"];
 const HUES = 6; // shell.css's [data-hue]
 

@@ -1,9 +1,8 @@
 // The fuses the app's Electron is built with (spec, Section 11): Electron never runs as Node, takes
-// no NODE_OPTIONS and no inspector, and encrypts its cookies, as Claude Desktop sets them. Electron
-// calls the cookie fuse a one-way transition: once a release has it, none may turn it off, or the
-// web client's cookies cannot be read. Claude Desktop also loads only an asar, which this app does
-// not: Electron validates an asar only on macOS and Windows, and the app's own node cannot read
-// one, so on Linux the app ships as a folder.
+// no NODE_OPTIONS and no inspector, and encrypts its cookies. Electron calls the cookie fuse a
+// one-way transition: once a release has it, none may turn it off, or the web client's cookies
+// cannot be read. The app does not load only an asar: Electron validates an asar only on macOS and
+// Windows, and the app's own node cannot read one, so on Linux the app ships as a folder.
 //
 //   node scripts/fuses.mjs <electron>            the app's fuses, as its build sets them
 //   node scripts/fuses.mjs <electron> --inspect  the same with the inspector kept: this package's own
