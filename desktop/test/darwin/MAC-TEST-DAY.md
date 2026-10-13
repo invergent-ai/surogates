@@ -99,11 +99,11 @@ test/darwin/dev-bundle.sh
 
 Then:
 
-1. **The helper:** `cd native/helper && swift test && cd ../..`. Pass: "Executed 13 tests, with 0 failures".
+1. **The helper:** `cd native/helper && swift test && cd ../..`. Pass: "Executed 11 tests, with 0 failures".
 2. **The company CA:** `test/darwin/admin-trust.sh --keep`, which asks your password.
    - Pass: it prints `{"ssl":true,"smime":false,"denied":false}` and "Node reached https://localhost:<port> …: trusted".
    - Open that URL in Chrome and Safari: no warning. Ctrl+C removes the test roots.
-   - Then install a test root through a configuration profile, run `native/helper/.build/surogate-helper trust`, and note whether that root is listed. Pass: it is.
+   - A root from a configuration profile you install by a double-click goes in your own trust settings, not the administrator's, and the app doesn't take it: by design, as on Linux it takes a company's CA only from where an administrator alone can put it.
 3. **By eye, in Surogate Dev:**
    - the window's buttons are inset top left;
    - the menu bar reads Surogate (About Surogate, Settings… ⌘,, Services, Hide, Hide Others, Show All, Quit ⌘Q), then File, Edit, View, Window, and Help with its search field;
@@ -161,11 +161,10 @@ Run steps 0 to 5 again first, on the branch's newest head, but leave Surogate De
      - `osascript -e 'tell application id "ai.invergent.surogate.development" to reopen'`.
 5. **Settings' close button.** Open Settings, and click its close button (×) near the button's top edge. Then open a project's settings, and click its Cancel.
    - Pass: each closes at the first click.
-6. **A company root from a configuration profile.** Install the test root's `.mobileconfig` by a double-click, as on the first day, and run `native/helper/.build/surogate-helper trust`.
-   - Pass: the root is listed, as PEM.
-   - Then remove the profile (System Settings → General → Device Management), and run `test/darwin/admin-trust.sh --user`. macOS asks for your password in its own window, once for each test root.
-   - Pass: it prints `{"ssl":true,"smime":false,"denied":false}` and ends "The user's trust domain is read as it should be".
-   - Note any prompt `surogate-helper trust` itself raised.
+6. **The company CA.** Run `test/darwin/admin-trust.sh`, as in step 4.
+   - Pass: it prints `{"ssl":true,"smime":false,"denied":false}` and ends "The admin trust domain is read as it should be".
+   - A root from a configuration profile installed by a double-click is not listed by `native/helper/.build/surogate-helper trust`. That is by design: such a profile puts its root in your own trust settings, and the app takes a company's root only from the administrator's.
+   - If this Mac is enrolled in an MDM, a root from a device profile it installs must be listed by `surogate-helper trust`. Note whether it is.
 7. **Removing the dev bundle.** Turn on Settings → Start at login, leave Surogate Dev running, and run `test/darwin/dev-bundle.sh --remove`.
    - Pass: it prints "Took out its login item", then "Removed …".
    - `pgrep -fl "Surogate Dev.app"` prints nothing.
