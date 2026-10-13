@@ -69,7 +69,7 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
   control.hello();
   let made = 0;
   return {
-    control: host, net, inbound, exited, emulated: null, kill,
+    control: host, net, inbound, exited, emulated: null, opensByPath: false, kill,
     share: async (folder, uid, _deadline, as) => {
       made += 1;
       asked.push(["share", folder, uid, as?.readonly === true]);

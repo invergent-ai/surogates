@@ -1037,7 +1037,7 @@ describe("the VM manager, asked for a folder's history", () => {
     createInterface({ input: agent }).on("line", (line) => control.receive(line));
     control.hello();
     let made = 0;
-    return { control: host, net, inbound, exited, emulated: null, kill, share: async () => ({ kind: "virtiofs", tag: `r${(made += 1)}` }), unshare: async () => {} };
+    return { control: host, net, inbound, exited, emulated: null, opensByPath: false, kill, share: async () => ({ kind: "virtiofs", tag: `r${(made += 1)}` }), unshare: async () => {} };
   };
 
   it("places the folder first, then asks the agent, and checks its answer", async () => {
