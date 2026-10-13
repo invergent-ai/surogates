@@ -26,7 +26,8 @@ export class ContentError extends Error {}
 
 const MAX_BLOCKS = 400;
 const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
-const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
+// Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
+const SAFE_LINK = /^(?:https?|mailto):/i;
 
 type Style = Omit<Run, "text">;
 type Lists = { next: number };
@@ -48,7 +49,7 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
     }
     flush();
     const key = placeholder[1]!;
-    if (!(key in blocks)) throw new ContentError(`<?block ${key}?> names no entry in "blocks".`);
+    if (!Object.hasOwn(blocks, key)) throw new ContentError(`<?block ${key}?> names no entry in "blocks".`);
     out.push(typedBlock(key, blocks[key]));
   }
   flush();
@@ -107,17 +108,20 @@ function listOf(list: Tokens.List, id: number, level: number, lists: Lists): Blo
   const out: Block[] = [];
   for (const item of list.items) {
     const runs: Run[] = [];
-    const nested: Tokens.List[] = [];
+    const after: Token[] = [];
     for (const part of item.tokens) {
-      if (part.type === "list") nested.push(part as Tokens.List);
-      else if (part.type === "text" || part.type === "paragraph") {
+      if (part.type === "text" || part.type === "paragraph") {
         if (runs.length) runs.push({ text: " " });
         runs.push(...runsOf((part as Tokens.Text).tokens ?? [part]));
-      }
+      } else after.push(part);
     }
     out.push({ t: "li", list: id, ordered: list.ordered, level, runs: merge(runs) });
-    // A nested list of the same kind continues its parent's numbering one level down.
-    for (const sub of nested) out.push(...listOf(sub, sub.ordered === list.ordered ? id : lists.next++, level + 1, lists));
+    // The item's code, tables, quotes and nested lists follow its line in order.
+    for (const part of after) {
+      if (part.type !== "list") out.push(...blocksOf([part], lists));
+      // A nested list of the same kind continues its parent's numbering one level down.
+      else out.push(...listOf(part as Tokens.List, (part as Tokens.List).ordered === list.ordered ? id : lists.next++, level + 1, lists));
+    }
   }
   return out;
 }
@@ -136,18 +140,20 @@ function runsOf(tokens: Token[] | undefined, style: Style = {}): Run[] {
         out.push(...runsOf((token as Tokens.Del).tokens, { ...style, s: true }));
         break;
       case "codespan":
-        out.push({ ...style, code: true, text: decode((token as Tokens.Codespan).text) });
+        out.push({ ...style, code: true, text: (token as Tokens.Codespan).text });
         break;
-      case "link":
-        out.push(...runsOf((token as Tokens.Link).tokens, { ...style, href: (token as Tokens.Link).href }));
+      case "link": {
+        const link = token as Tokens.Link;
+        out.push(...runsOf(link.tokens, SAFE_LINK.test(link.href) ? { ...style, href: link.href } : style));
         break;
+      }
       case "br":
         out.push({ ...style, text: "\n" });
         break;
       case "image": {
         // A picture by URL is not fetched: its description stays as text.
         const text = (token as Tokens.Image).text;
-        if (text) out.push({ ...style, text: decode(text) });
+        if (text) out.push({ ...style, text });
         break;
       }
       case "html":
@@ -155,14 +161,15 @@ function runsOf(tokens: Token[] | undefined, style: Style = {}): Run[] {
       case "text": {
         const text = token as Tokens.Text;
         if (text.tokens?.length) out.push(...runsOf(text.tokens, style));
-        else if (text.text) out.push({ ...style, text: decode(text.text) });
+        // A newline inside a paragraph is a soft break: it reads as a space. Hard breaks arrive as "br".
+        else if (text.text) out.push({ ...style, text: text.text.replace(/[ \t]*\n[ \t]*/g, " ") });
         break;
       }
       case "escape":
         out.push({ ...style, text: (token as Tokens.Escape).text });
         break;
       default:
-        if ("text" in token && typeof token.text === "string" && token.text) out.push({ ...style, text: decode(token.text) });
+        if ("text" in token && typeof token.text === "string" && token.text) out.push({ ...style, text: token.text });
     }
   }
   return merge(out);
@@ -172,17 +179,13 @@ function typedBlock(key: string, value: unknown): Block {
   const block = (value ?? {}) as Record<string, unknown>;
   switch (block.type) {
     case "pending": {
-      const intent = String(block.intent ?? "").trim();
+      const intent = typeof block.intent === "string" ? block.intent.trim() : "";
       if (!intent) throw new ContentError(`Pending block ${key} needs an "intent": the section it stands for.`);
       return { t: "pending", key, intent: intent.slice(0, 300) };
     }
     default:
       throw new ContentError(`Block ${key} has type ${JSON.stringify(block.type)}; use "pending", "chart" or "image".`);
   }
-}
-
-function decode(text: string): string {
-  return text.replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity] ?? entity);
 }
 
 function merge(runs: Run[]): Run[] {

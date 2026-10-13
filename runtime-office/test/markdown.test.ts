@@ -61,6 +61,41 @@ describe("compileContent", () => {
     ]);
   });
 
+  it("keeps the code blocks and tables inside a list item, after its line", () => {
+    expect(compileContent("1. step\n\n   ```\n   cmd\n   ```\n\n   | A |\n   |---|\n   | 1 |\n2. next")).toEqual([
+      { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "step" }] },
+      { t: "code", lines: ["cmd"] },
+      { t: "table", rows: [[[{ text: "A" }]], [[{ text: "1" }]]] },
+      { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "next" }] },
+    ]);
+  });
+
+  it("writes entities and tags the agent typed literally", () => {
+    expect(compileContent('Use `&amp; <b>` and &amp; \\<b> "q" a < b')).toEqual([
+      { t: "p", runs: [{ text: "Use " }, { text: "&amp; <b>", code: true }, { text: ' and &amp; <b> "q" a < b' }] },
+    ]);
+  });
+
+  it("keeps only web and mail links", () => {
+    expect(compileContent("[x](javascript:alert(1)) [y](https://x.test) [z](mailto:a@b.test) [w](data:text/html,hi)")).toEqual([
+      {
+        t: "p",
+        runs: [{ text: "x " }, { text: "y", href: "https://x.test" }, { text: " " }, { text: "z", href: "mailto:a@b.test" }, { text: " w" }],
+      },
+    ]);
+  });
+
+  it("turns a soft line break into a space and keeps a hard one", () => {
+    expect(compileContent("line one\nline two  \nthree\\\nfour")).toEqual([
+      { t: "p", runs: [{ text: "line one line two\nthree\nfour" }] },
+    ]);
+  });
+
+  it("refuses a placeholder that names an inherited property, and an intent that is not text", () => {
+    expect(() => compileContent("<?block constructor?>", {})).toThrow(/names no entry/);
+    expect(() => compileContent("<?block x?>", { x: { type: "pending", intent: 5 } })).toThrow(/intent/);
+  });
+
   it("refuses more than 400 blocks in one op", () => {
     expect(() => compileContent("p\n\n".repeat(401))).toThrow(ContentError);
   });
