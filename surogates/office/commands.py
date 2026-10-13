@@ -24,5 +24,10 @@ async def drop_editors(office: OfficeSettings, doc_key: str, users: list[str]) -
                 json={**command, "token": sign(office.jwt_secret, command)},
             )
             response.raise_for_status()
-    except httpx.HTTPError:
+            error = response.json().get("error")
+    except (httpx.HTTPError, ValueError):
         logger.warning("could not drop the editors of %s", doc_key, exc_info=True)
+        return
+    # The Command Service answers 200 even when it refuses: the refusal is in the body.
+    if error:
+        logger.warning("the document server refused to drop the editors of %s (error %s)", doc_key, error)
