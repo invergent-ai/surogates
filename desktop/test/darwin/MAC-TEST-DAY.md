@@ -54,12 +54,19 @@ test/vm/darwin/measure/prepare.sh
 swift test --package-path native/macos && native/out/surogate-vm check
 ```
 
-- `prepare.sh` builds the app's code and `native/out/surogate-vm`, signed ad hoc. In a container, it makes `dist/agent.img` and `dist/agent-measure.img`. Its last lines say "ready".
-- The check passes with 27 tests, 0 failures, and `{"supported":true}`.
+- `prepare.sh` builds the app's code and `native/out/surogate-vm`, signed ad hoc. In a container, it makes `dist/agent.img`, and the measurements' own agent disk, `test/vm/darwin/measure/probing/agent.img`. Its last lines say "ready".
+- The check passes with 28 tests, 0 failures, and `{"supported":true}`.
+- Until a session can run on Apple's share (the second day's `share-owners` decides how), every measurement that runs a command stops at "This chat's folder shows as root's in the sandbox, so no command runs in it": `escape`, `ports`, `disks`, `shares`, `coherence`, `owners`, `mmap`, `descriptors`, `tcc`, `network`, `sleep` and `memory`. That refusal is expected, not a finding.
 
 Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`. Each prints `MEASURE …` lines and a `PASS` or `FAIL` for each check, and writes `test/vm/darwin/measure/out/<name>.json`.
 
-1. **`boot`:** the first real boot. Pass: the guest says hello in under 1.5 s at the median of three, and the rule attached 15 of 15. If it fails, its words name the reason.
+1. **`boot`:** a first boot, which makes the sessions disk, then three boots that find it there, and one whose console has the kernel's own log. Pass:
+   - the three later boots say hello in under 1.5 s at their median;
+   - the rule attached 15 of 15 at every boot;
+   - the kernel gzipped is refused ("did not boot");
+   - `surogate-vm check` says `"supported":true`, and `false` when signed without its entitlement.
+
+   If it fails, its words name the reason, and `out/boot.json` says where the time went.
 2. **`escape`:** the guest's walls, as a session meets them. Pass:
    - only `lo`, and no host `~/.ssh`;
    - no other root's folder or processes;
@@ -74,7 +81,7 @@ Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/me
 7. **`owners`:** the guest sees your uid, a session runs as it, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
 8. **`mmap`:** recorded only.
 9. **`descriptors`:** all 150,000 files found, 1,000 read, git commits them, and no EMFILE.
-10. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, and the folder on the Mac is unchanged.
+10. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, and the folder on the Mac is unchanged. It runs whether or not its chat's setup is refused.
 11. **`tcc`:** watch for privacy prompts and note which app each names. Optionally, set `MEASURE_VOLUME=/Volumes/<a USB stick>` to include a removable drive.
 12. **`network`:** if macOS asks about the local network, note the app it names, and allow it. Pass: a command reaches this Mac's LAN address through the proxy.
 13. **`lifetime`:** nothing of the VM is left after `surogate-vm` is killed.
@@ -137,3 +144,42 @@ Clean up with `test/darwin/dev-bundle.sh --remove`.
 - Every FAIL, with its words.
 - Every privacy prompt and Keychain prompt you saw, and the app each named.
 - Anything that looked wrong, even if no step asked about it.
+
+## Second day
+
+The same Mac and the same test account as the first day, on the branch you are sent. Steps 1 to 5 of the first day stand, but for what this section changes.
+
+### The VM
+
+1. **A new guest image.** The image now loads its entropy device's driver at boot, so the first day's image no longer boots. From the checkout's top:
+   ```
+   rm -rf images/guest/out
+   gh run download IMAGE_RUN -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+   cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh
+   ```
+   Pass: `prepare.sh` ends with "ready", and `test/vm/darwin/measure/probing/agent.img` is there.
+2. **surogate-vm's tests on this Xcode:** `swift test --package-path native/macos`. Pass: "Executed 28 tests, with 0 failures".
+3. **The boot and its timings:** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts boot`.
+   - Pass: as the first day's step 3.1 says.
+   - Whatever it says, send back `test/vm/darwin/measure/out/boot.json`: its "where the kernel's boot went", its timelines and its console say where the time goes.
+4. **Owners on Apple's share, in this account (uid 502):** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts share-owners`.
+   - It takes a few minutes, and runs although the chat's setup is refused.
+   - Pass: `PASS the probe ran to its end`.
+   - Then `cp test/vm/darwin/measure/out/share-owners.json ~/share-owners-502.json`.
+5. **The same in the Mac's first account (uid 501).**
+   - In this account, copy the prepared checkout and its Node where the other account can use them:
+     ```
+     mkdir -p /Users/Shared/surogate-measure
+     cp -Rc ~/surogates "$(dirname "$(dirname "$(command -v node)")")" /Users/Shared/surogate-measure/
+     chmod -R a+rwX /Users/Shared/surogate-measure
+     ```
+   - Log in to the first account, and in its Terminal:
+     ```
+     cd /Users/Shared/surogate-measure/surogates/desktop
+     PATH=/Users/Shared/surogate-measure/v22.14.0/bin:$PATH npx vitest run -c test/vm/darwin/measure/vitest.config.ts share-owners
+     ```
+   - Pass: `PASS the probe ran to its end`, and its `the Mac user` line says uid 501.
+   - Copy `test/vm/darwin/measure/out/share-owners.json` there to `share-owners-501.json`. Then remove `/Users/Shared/surogate-measure` and that account's `~/SurogateMeasure`.
+6. **The read-only share:** back in the test account, `npx vitest run -c test/vm/darwin/measure/vitest.config.ts readonly`. Pass: every write refused, and the folder on the Mac as it was. **A write that is allowed is a security finding: stop and report it before anything else.**
+
+**Send back:** `boot.json`, `share-owners-502.json`, `share-owners-501.json` and `readonly.json`, and every FAIL with its words.
