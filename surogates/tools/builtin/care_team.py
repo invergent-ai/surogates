@@ -34,7 +34,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc, day_index, next_contact
-from surogates.followup.outreach import window_open
+from surogates.followup.outreach import operator_unanswered_hours, plain_reason, window_open
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
@@ -453,6 +453,29 @@ async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]
     }
 
 
+async def _undelivered(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[str]]:
+    """Why each person's recent messages failed to reach them, once per reason."""
+    async with sf() as db:
+        rows = (
+            await db.execute(
+                sa.select(OutreachMessageRow.user_id, OutreachMessageRow.reason)
+                .where(OutreachMessageRow.org_id == org_id)
+                .where(OutreachMessageRow.agent_id == agent_id)
+                .where(OutreachMessageRow.kind.in_(("operator", "welcome")))
+                .where(OutreachMessageRow.state == "failed")
+                .where(OutreachMessageRow.user_id.in_(ids))
+                .where(OutreachMessageRow.created_at >= now - ALERT_WINDOW)
+                .order_by(OutreachMessageRow.created_at)
+            )
+        ).all()
+    out: dict[uuid.UUID, list[str]] = {}
+    for user_id, reason in rows:
+        out.setdefault(user_id, [])
+        if reason not in out[user_id]:
+            out[user_id].append(reason)
+    return out
+
+
 def _unanswered_streak(invitations: list) -> int:
     count = 0
     for inv in invitations:
@@ -618,6 +641,7 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
     ) if sender else {}
     invitations = await _invitations(sf, ctx.org_id, ctx.agent_id, ids, now)
     alerts = await _alerts(sf, ctx.org_id, ctx.agent_id, ids, now)
+    undelivered = await _undelivered(sf, ctx.org_id, ctx.agent_id, ids, now)
 
     new, changed, silent = [], [], []
     blocks: list[str] = []
@@ -682,6 +706,10 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
         f"New enrolments (last {since_hours}h): " + ("; ".join(new) or "none"),
         f"Paused or ended (last {since_hours}h): " + ("; ".join(changed) or "none"),
         "Silent 3 days or more: " + ("; ".join(silent) or "none"),
+        "Open items, messages that did not arrive (last 72h): " + ("; ".join(
+            f"{p.label}: {plain_reason(reason)}, call {readable_phone(p.phone) if p.phone else 'no number'}"
+            for p in people for reason in undelivered.get(p.user_id, [])
+        ) or "none"),
     ]
     out = "\n".join(header)
     shown = 0
@@ -844,9 +872,11 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
             f"Sent now: {person.label} wrote in the last 24 hours, so your text "
             "goes out as a normal WhatsApp message within a minute."
         )
+    hours = operator_unanswered_hours(settings)
     return (
         f"{person.label}'s 24h window is closed: I sent the opener template; "
-        "your text goes the moment they answer."
+        "your text goes the moment they answer. You will be told here when it "
+        f"arrives, or if they have not answered within {hours} hours."
     )
 
 

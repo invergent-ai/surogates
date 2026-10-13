@@ -25,15 +25,21 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
+from sqlalchemy.orm import aliased
 
+from surogates.channels.identity import readable_phone
 from surogates.db.models import (
     ChannelContactRow,
+    ChannelIdentity,
     DeliveryOutbox,
     Event,
+    FollowupSettingsRow,
     OutreachMessageRow,
     SessionLease,
+    User,
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
@@ -62,6 +68,18 @@ BATCH_WINDOW = timedelta(minutes=15)
 #: How long a template that reopened a conversation waits for an answer
 #: before its held texts are given up as undelivered.
 UNANSWERED_AFTER = timedelta(hours=72)
+#: The same for a team member's message to a person, unless the agent's
+#: settings say otherwise: whoever asked should hear about it the same day.
+OPERATOR_UNANSWERED_HOURS = 24
+#: How far back the outcome pass looks.  Longer than any wait above, so
+#: every held text has settled inside it.
+OUTCOME_LOOKBACK = timedelta(days=4)
+#: The team's notices about a message's outcome, overridable per agent in
+#: ``followup_settings.texts`` like every other platform wording.
+DEFAULT_TEXTS = {
+    "delivered_notice": "✅ {name} received your message ({time}).",
+    "undelivered_notice": "⚠️ {name} did not receive your message: {why}. Call them? {phone}",
+}
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
 
@@ -201,24 +219,172 @@ async def deliver_pending(
     return delivered
 
 
+def operator_unanswered_hours(settings: Any) -> int:
+    return int(getattr(settings, "operator_unanswered_hours", None) or OPERATOR_UNANSWERED_HOURS)
+
+
+def _unanswered(hours: int) -> str:
+    return f"The recipient did not answer the template within {hours} hours"
+
+
 async def _expire_unanswered(session_factory: Any, *, now: datetime) -> int:
     """Give up on held texts whose template has gone unanswered too long."""
+    held = (
+        sa.update(OutreachMessageRow)
+        .where(OutreachMessageRow.state == "awaiting_reply")
+        .where(OutreachMessageRow.sent_at.isnot(None))
+    )
     async with session_factory() as db:
         result = await db.execute(
-            sa.update(OutreachMessageRow)
-            .where(OutreachMessageRow.state == "awaiting_reply")
-            .where(OutreachMessageRow.sent_at.isnot(None))
+            held.where(OutreachMessageRow.kind != "operator")
             .where(OutreachMessageRow.sent_at <= now - UNANSWERED_AFTER)
-            .values(
-                state="failed",
-                reason=(
-                    "The recipient did not answer the template within "
-                    f"{int(UNANSWERED_AFTER.total_seconds() // 3600)} hours"
-                ),
-            )
+            .values(state="failed", reason=_unanswered(int(UNANSWERED_AFTER.total_seconds() // 3600)))
         )
+        expired = int(result.rowcount or 0)
+        operator = (
+            await db.execute(
+                sa.select(OutreachMessageRow.id, OutreachMessageRow.sent_at, FollowupSettingsRow)
+                .outerjoin(FollowupSettingsRow, sa.and_(
+                    FollowupSettingsRow.org_id == OutreachMessageRow.org_id,
+                    FollowupSettingsRow.agent_id == OutreachMessageRow.agent_id,
+                ))
+                .where(OutreachMessageRow.state == "awaiting_reply")
+                .where(OutreachMessageRow.kind == "operator")
+                .where(OutreachMessageRow.sent_at.isnot(None))
+                .where(OutreachMessageRow.sent_at <= now - timedelta(hours=1))
+            )
+        ).all()
+        for row_id, sent_at, settings in operator:
+            hours = operator_unanswered_hours(settings)
+            if as_utc(sent_at) <= as_utc(now) - timedelta(hours=hours):
+                result = await db.execute(
+                    held.where(OutreachMessageRow.id == row_id)
+                    .values(state="failed", reason=_unanswered(hours))
+                )
+                expired += int(result.rowcount or 0)
         await db.commit()
-        return int(result.rowcount or 0)
+        return expired
+
+
+def _requester(created_by: str | None) -> uuid.UUID | None:
+    """The team member who asked for a message, from ``team:<uid>``."""
+    prefix, _, raw = (created_by or "").partition(":")
+    if prefix not in ("team", "care-team"):
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+async def describe_person(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID,
+) -> tuple[str, str, str]:
+    """(name, readable phone, timezone) of a person, as the team knows them."""
+    rows = await followup_store.enrollments(
+        session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+    )
+    enrollment = followup_store.labelling_enrollment(rows)
+    async with session_factory() as db:
+        user = await db.get(User, user_id)
+        wa_id = (
+            await db.execute(
+                sa.select(ChannelIdentity.platform_user_id)
+                .where(ChannelIdentity.org_id == org_id)
+                .where(ChannelIdentity.platform == "whatsapp")
+                .where(ChannelIdentity.user_id == user_id)
+            )
+        ).scalars().first()
+    zones = await followup_store.protocol_timezones(
+        session_factory, org_id=org_id, agent_id=agent_id,
+    )
+    zone = zones.get(getattr(enrollment, "protocol", None)) or next(iter(zones.values()), "UTC")
+    name = followup_store.patient_label(user.display_name if user else None, enrollment)
+    return name or "?", readable_phone(wa_id) if wa_id else "?", zone
+
+
+def plain_reason(reason: str | None) -> str:
+    """Why a message did not arrive, in words a team member can act on."""
+    text = (reason or "").strip()
+    lowered = text.lower()
+    if "did not answer the template" in lowered:
+        return f"no answer to the opening template ({text.rsplit('within ', 1)[-1]})"
+    if "131047" in lowered:
+        return "their 24h WhatsApp window had closed"
+    if "permission" in lowered:
+        return "no permission to message them"
+    if "no whatsapp identity" in lowered:
+        return "no WhatsApp number on record"
+    if "no approved template" in lowered or "no approved" in lowered:
+        return "their 24h window is closed and no approved template is chosen"
+    if "template was not" in lowered:
+        return f"WhatsApp refused the template ({text.split(': ', 1)[-1][:160]})"
+    return text[:200] or "unknown reason"
+
+
+async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
+    """Tell a team member what became of a message they asked for.
+
+    One notice per message, keyed on it: a delivery after a held wait, or
+    a failure for whatever reason.  A text written straight into an open
+    window needs none: the tool already told them it went out.
+    """
+    notice = aliased(OutreachMessageRow)
+    told = sa.exists().where(
+        notice.org_id == OutreachMessageRow.org_id,
+        notice.dedupe_key.like(
+            "outcome:" + sa.cast(OutreachMessageRow.id, sa.Text) + ":%"
+        ),
+    )
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(OutreachMessageRow)
+                .where(OutreachMessageRow.kind == "operator")
+                .where(OutreachMessageRow.state.in_(("delivered", "failed")))
+                .where(OutreachMessageRow.created_at >= now - OUTCOME_LOOKBACK)
+                .where(sa.or_(
+                    OutreachMessageRow.created_by.like("team:%"),
+                    OutreachMessageRow.created_by.like("care-team:%"),
+                ))
+                .where(~told)
+                .limit(BATCH)
+            )
+        ).scalars().all()
+    reported = 0
+    for row in rows:
+        requester = _requester(row.created_by)
+        if requester is None:
+            continue
+        try:
+            settings = await followup_store.get_settings(
+                session_factory, org_id=row.org_id, agent_id=row.agent_id,
+            )
+            name, phone, zone = await describe_person(
+                session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
+            )
+            texts = (settings.texts or {}) if settings else {}
+            if row.state == "delivered":
+                at = as_utc(row.delivered_at or now).astimezone(ZoneInfo(zone))
+                text = followup_store.render_text(
+                    texts.get("delivered_notice"), DEFAULT_TEXTS["delivered_notice"],
+                    name=name, time=f"{at:%H:%M}", phone=phone,
+                )
+            else:
+                text = followup_store.render_text(
+                    texts.get("undelivered_notice"), DEFAULT_TEXTS["undelivered_notice"],
+                    name=name, why=plain_reason(row.reason), phone=phone,
+                )
+            queued, _ = await followup_store.notify_care_team(
+                session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
+                kind="notice", text=text, created_by="outreach",
+                subject_user_id=row.user_id, dedupe_prefix=f"outcome:{row.id}",
+                only_user_id=requester, fallback_sender=row.channel_identifier,
+            )
+            reported += queued
+        except Exception:  # noqa: BLE001 — one notice, not the pass
+            logger.exception("[outreach] could not report the outcome of %s", row.id)
+    return reported
 
 
 async def send_queued_outreach(
@@ -239,6 +405,7 @@ async def send_queued_outreach(
     turn is running.  A held row still waiting for its answer is not re-read.
     """
     await _expire_unanswered(session_factory, now=now)
+    await _report_outcomes(session_factory, now=now)
 
     answered = sa.exists().where(
         ChannelContactRow.org_id == OutreachMessageRow.org_id,

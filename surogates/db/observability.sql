@@ -1055,3 +1055,7 @@ ALTER TABLE followup_enrollments
     ADD COLUMN IF NOT EXISTS patient_name text,
     ADD COLUMN IF NOT EXISTS answered_by text,
     ADD COLUMN IF NOT EXISTS start_date_approximate boolean NOT NULL DEFAULT false;
+
+-- ── followup_settings: how long a doctor's held message may wait ─────
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS operator_unanswered_hours integer;

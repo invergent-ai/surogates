@@ -57,7 +57,7 @@ __all__ = [
 
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
 ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "care_team")
-OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome")
+OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome", "notice")
 #: Where outreach can reach a person.  WhatsApp only: it is the one channel
 #: whose rules (a template outside the 24-hour window) outreach implements.
 OUTREACH_PLATFORMS = ("whatsapp",)
@@ -69,6 +69,7 @@ SETTINGS_FIELDS = frozenset({
     "alert_template_language", "message_template_name",
     "message_template_language", "welcome_template_name",
     "welcome_template_language", "offer_protocols", "texts",
+    "operator_unanswered_hours",
 })
 
 
@@ -473,15 +474,19 @@ async def notify_care_team(
     dedupe_prefix: str | None = None,
     exclude_user_id: uuid.UUID | None = None,
     fallback_sender: str | None = None,
+    only_user_id: uuid.UUID | None = None,
 ) -> tuple[int, str | None]:
     """Queue *text* for every alert recipient.  Returns (queued, why none).
 
     The one place an alert fans out to the care team's phones, whatever
     raised it: the agent, a silence streak, a purchase.  With
     *dedupe_prefix*, each recipient's message is keyed on it, so a retried
-    cause never writes twice.
+    cause never writes twice.  With *only_user_id*, the one person it
+    concerns (the doctor who asked for something) is told instead.
     """
     recipients = list(settings.alert_recipient_user_ids or []) if settings else []
+    if only_user_id is not None:
+        recipients = [only_user_id]
     if not recipients:
         return 0, "no care-team phones are configured"
     sender = (settings.channel_identifier if settings else None) or fallback_sender
@@ -499,8 +504,9 @@ async def notify_care_team(
         await queue_outreach(
             session_factory, org_id=org_id, agent_id=agent_id,
             user_id=recipient_id, platform="whatsapp", channel_identifier=sender,
-            kind=kind, text=text, template_name=settings.alert_template_name,
-            template_language=settings.alert_template_language,
+            kind=kind, text=text,
+            template_name=settings.alert_template_name if settings else None,
+            template_language=settings.alert_template_language if settings else None,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=f"{dedupe_prefix}:{recipient_id}" if dedupe_prefix else None,
         )

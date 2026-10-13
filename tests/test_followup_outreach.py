@@ -407,3 +407,94 @@ async def test_a_failed_template_spares_texts_behind_another_template(sf, doctor
     )
     assert (await _row(sf, routine.id)).state == "failed"
     assert (await _row(sf, alert.id)).state == "awaiting_reply"
+
+
+# --- what became of a team member's message ---------------------------------
+
+
+async def _team_message(sf, *, hours=None):
+    """A practice with one team member, and his message to an enrolled person."""
+    from datetime import date
+
+    from surogates.db.models import ChannelIdentity, User
+
+    member, person = uuid.uuid4(), uuid.uuid4()
+    async with sf() as db:
+        db.add(User(id=person, org_id=ORG, email=f"{person}@x", display_name="Ion"))
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=person, platform="whatsapp",
+            platform_user_id="40711111111", platform_meta={},
+        ))
+        await db.commit()
+    await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=person, protocol="p",
+        start_date=date(2026, 10, 1), phase=None, enrolled_by="agent",
+        patient_name="Ion Pop",
+    )
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, channel_identifier=SENDER,
+        alert_recipient_user_ids=[member], alert_template_name="alert",
+        alert_template_language="ro", operator_unanswered_hours=hours,
+    )
+    row = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=person, platform="whatsapp",
+        channel_identifier=SENDER, kind="operator", text="Come tomorrow",
+        template_name="msg", template_language="ro", subject_user_id=person,
+        created_by=f"care-team:{member}",
+    )
+    await _send(sf, _Store(), _Delivery())
+    assert (await _row(sf, row.id)).state == "awaiting_reply"
+    return member, row
+
+
+async def _notices(sf):
+    async with sf() as db:
+        return (await db.execute(
+            sa.select(OutreachMessageRow).where(OutreachMessageRow.kind == "notice")
+        )).scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_the_requester_hears_once_that_a_held_message_arrived(sf, doctor_session):
+    member, row = await _team_message(sf)
+    at = NOW + timedelta(hours=2)
+    await outreach.deliver_pending(
+        sf, _Store(), org_id=ORG, agent_id=AGENT, user_id=row.user_id,
+        platform="whatsapp", channel_identifier=SENDER, session_id=uuid.uuid4(), now=at,
+    )
+    await _send(sf, _Store(), _Delivery(), now=at)
+    await _send(sf, _Store(), _Delivery(), now=at)
+
+    [notice] = await _notices(sf)
+    assert notice.user_id == member
+    # No Program names a timezone, so the time is UTC.
+    assert notice.text == "✅ Ion Pop received your message (04:00)."
+    assert notice.template_name == "alert"
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_message_expires_after_a_day_and_the_requester_is_told(sf, doctor_session):
+    member, row = await _team_message(sf)
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=23))
+    assert (await _row(sf, row.id)).state == "awaiting_reply"
+    assert await _notices(sf) == []
+
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=24, minutes=1))
+    assert (await _row(sf, row.id)).state == "failed"
+    [notice] = await _notices(sf)
+    assert notice.user_id == member
+    assert notice.text == (
+        "⚠️ Ion Pop did not receive your message: no answer to the opening "
+        "template (24 hours). Call them? +40 711 111 111"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_agents_setting_moves_the_expiry_but_not_other_texts(sf, doctor_session):
+    _, row = await _team_message(sf, hours=6)
+    alert = await _queue(sf, uuid.uuid4())
+    await _send(sf, _Store(), _Delivery())
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=7))
+    assert (await _row(sf, row.id)).state == "failed"
+    assert "6 hours" in (await _row(sf, row.id)).reason
+    assert (await _row(sf, alert.id)).state == "awaiting_reply"

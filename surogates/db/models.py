@@ -1223,6 +1223,12 @@ class FollowupSettingsRow(Base):
     texts: Mapped[dict[str, str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
     )
+    #: How long a care-team message held behind a template waits for the
+    #: patient's answer before the doctor is told it did not arrive.  NULL
+    #: is the platform default; other held texts always wait 72 hours.
+    operator_unanswered_hours: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
         onupdate=func.now(),
@@ -1282,7 +1288,7 @@ class OutreachMessageRow(Base):
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     #: The business sender to write from.
     channel_identifier: Mapped[str] = mapped_column(Text, nullable=False)
-    #: ``alert`` · ``operator`` · ``enrolment`` · ``welcome``.
+    #: ``alert`` · ``operator`` · ``enrolment`` · ``welcome`` · ``notice``.
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     dedupe_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)

@@ -674,3 +674,23 @@ def test_the_care_team_reads_a_whole_tappable_number_that_redaction_leaves_alone
     assert readable_phone("447911123456") == "+447 911 123 456"
     footer = f"— Florica Enache · {readable_phone('40712000601')}"
     assert redact_sensitive_text(footer) == footer
+
+
+@pytest.mark.asyncio
+async def test_overview_lists_messages_that_did_not_arrive_as_open_items(sf, practice):
+    ioana, _ = practice.ioana
+    row = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ioana, platform="whatsapp",
+        channel_identifier="pn1", kind="operator", text="x", template_name="msg",
+        template_language="ro",
+    )
+    async with sf() as db:
+        saved = await db.get(OutreachMessageRow, row.id)
+        saved.state = "failed"
+        saved.reason = "No permission to message the recipient"
+        await db.commit()
+    out = await care_team.handle_care_team_overview({}, **_kw(sf, practice.doctor_session))
+    assert (
+        "Open items, messages that did not arrive (last 72h): Ioana Popa: no "
+        "permission to message them, call +40 700 000 002"
+    ) in out
