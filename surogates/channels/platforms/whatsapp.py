@@ -37,6 +37,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -621,6 +622,10 @@ _ROW_DESCRIPTION_CHARS = 72
 #: "Choose" would be the only foreign text on the screen.
 _DEFAULT_LIST_BUTTON = "☰"
 
+#: Graph errors for an interactive message Meta will not accept as built
+#: (131009: parameter value is not valid; 100: invalid parameter).
+_INTERACTIVE_REFUSED = re.compile(r"graph error (131009|100) ")
+
 
 def _template_object(template: dict) -> dict:
     """The Cloud API ``template`` object, with a FLOW button's token when one is set.
@@ -657,6 +662,10 @@ def _interactive_prompt(payload: dict) -> dict | None:
     question = questions[0]
     choices = [c for c in question.get("choices") or [] if isinstance(c, dict) and c.get("label")]
     if not choices or len(choices) > _MAX_LIST_ROWS:
+        return None
+    # Meta refuses repeated button or row titles, and a tap carries only the
+    # title, so two equal labels could not tell their choices apart anyway.
+    if len({c["label"].strip().casefold() for c in choices}) != len(choices):
         return None
 
     body = "\n".join(
@@ -910,10 +919,14 @@ class WhatsAppPlatform:
                     },
                     api_version=api_version,
                 )
-                if wamid is None:
+                if wamid is not None:
+                    self._stop_typing(phone_number_id, wa_id)
+                    return SendResult(success=True, message_id=wamid)
+                # A refused interactive question would dead-letter while
+                # ask_user_question waits on an answer the person never saw.
+                if flow or not _INTERACTIVE_REFUSED.match(error or ""):
                     return SendResult(success=False, error=error or "send failed")
-                self._stop_typing(phone_number_id, wa_id)
-                return SendResult(success=True, message_id=wamid)
+                logger.warning("[whatsapp] interactive prompt refused, sending it as text: %s", error)
             text = _render_input_prompt(item.payload)
         else:
             text = render_whatsapp(item.payload.get("content", "") or "")

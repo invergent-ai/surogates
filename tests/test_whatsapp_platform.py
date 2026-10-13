@@ -312,11 +312,52 @@ class TestWhatsAppInputPrompt:
         {"questions": [{"prompt": "a", "choices": [{"label": "x", "description": "d" * 73}]}]},
         # a body over the interactive cap
         {"questions": [{"prompt": "p" * 1025, "choices": [{"label": "x"}]}]},
+        # repeated titles, which Meta refuses and a tap could not tell apart
+        {"questions": [{"prompt": "a", "choices": [{"label": "Da"}, {"label": "da "}]}]},
+        {"questions": [{"prompt": "a", "choices": [{"label": str(n % 3)} for n in range(5)]}]},
     ])
     def test_prompts_beyond_meta_limits_stay_text(self, payload):
         from surogates.channels.platforms.whatsapp import _interactive_prompt
 
         assert _interactive_prompt(payload) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [131009, 100])
+    async def test_a_refused_interactive_question_goes_out_once_as_text(self, code):
+        p = WhatsAppPlatform()
+        item = _item(
+            "", input_prompt=True, tool_call_id="tc1",
+            questions=_questions([{
+                "prompt": "Cum vă simțiți azi?",
+                "choices": [{"label": "Bine"}, {"label": "Rău"}],
+            }]),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(side_effect=[
+                httpx.Response(400, json={"error": {
+                    "code": code, "message": "(#%d) Invalid parameter" % code,
+                }}),
+                httpx.Response(200, json={"messages": [{"id": "wamid.T"}]}),
+            ])
+            result = await p.send(item, creds=_creds())
+        assert [_json.loads(c.request.content)["type"] for c in route.calls] == ["interactive", "text"]
+        assert "Cum vă simțiți azi?" in _json.loads(route.calls[1].request.content)["text"]["body"]
+        assert result.success is True and result.message_id == "wamid.T"
+
+    @pytest.mark.asyncio
+    async def test_other_interactive_errors_are_not_retried_as_text(self):
+        p = WhatsAppPlatform()
+        item = _item(
+            "", input_prompt=True, tool_call_id="tc1",
+            questions=_questions([{"prompt": "?", "choices": [{"label": "Bine"}]}]),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(return_value=httpx.Response(
+                400, json={"error": {"code": 131047, "message": "Re-engagement message"}},
+            ))
+            result = await p.send(item, creds=_creds())
+        assert len(route.calls) == 1
+        assert result.success is False and "131047" in result.error
 
     @pytest.mark.asyncio
     async def test_choices_are_answerable_by_label(self):
