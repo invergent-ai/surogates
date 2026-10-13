@@ -167,6 +167,42 @@ async def test_enrol_refuses_a_bad_date(sf, patient, raw):
     assert result.startswith("Not enrolled")
 
 
+@pytest.mark.parametrize("days_ago", [5, "5"])
+@pytest.mark.asyncio
+async def test_enrol_counts_days_ago_in_the_protocols_timezone(sf, patient, days_ago):
+    # "acum 5 zile": the model reached for the terminal to do the arithmetic.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    user_id, session_id = patient
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x",
+         "start_date": "", "days_ago": days_ago},
+        **_kw(sf, session_id),
+    )
+    expected = datetime.now(ZoneInfo("Europe/Bucharest")).date() - timedelta(days=5)
+    assert f"from {expected.isoformat()}" in result
+    [enrollment] = await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id)
+    assert enrollment.start_date == expected
+
+
+@pytest.mark.parametrize("arguments, error", [
+    ({"start_date": "2026-10-05", "days_ago": 5}, "not both"),
+    ({"days_ago": -3}, "whole number"),
+    ({"days_ago": True}, "whole number"),
+    ({"days_ago": 4000}, "too far"),
+])
+@pytest.mark.asyncio
+async def test_enrol_refuses_a_bad_days_ago(sf, patient, arguments, error):
+    _, session_id = patient
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x", **arguments},
+        **_kw(sf, session_id),
+    )
+    assert result.startswith("Not enrolled")
+    assert error in result
+
+
 @pytest.mark.asyncio
 async def test_enrol_only_in_a_whatsapp_conversation(sf, patient):
     _, session_id = patient

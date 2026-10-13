@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -62,7 +62,18 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "Day 0 of the protocol as YYYY-MM-DD, e.g. the procedure "
-                    "date. Omit it if the person does not know it yet."
+                    "date. Give this or days_ago, not both; omit both if the "
+                    "person does not know it yet."
+                ),
+            },
+            "days_ago": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Day 0 as a number of days before today, when the person "
+                    "answers that way (\"5 days ago\" is 5, \"yesterday\" is "
+                    "1, \"today\" is 0). Counted in the protocol's timezone; "
+                    "do not work out the date yourself."
                 ),
             },
             "phase": {
@@ -219,6 +230,24 @@ def _parse_date(raw: Any) -> date | None:
     return parsed
 
 
+def _start_date(arguments: dict, timezone_name: str) -> date | None:
+    """Day 0 from ``start_date`` or ``days_ago``, never both.
+
+    ``days_ago`` exists because people answer "five days ago", and a model
+    left to turn that into a date reaches for a shell to do the arithmetic.
+    It counts back from today where the protocol's Program counts days.
+    """
+    raw_days = arguments.get("days_ago")
+    if raw_days is None or (isinstance(raw_days, str) and not raw_days.strip()):
+        return _parse_date(arguments.get("start_date"))
+    if str(arguments.get("start_date") or "").strip():
+        raise ValueError("give start_date or days_ago, not both")
+    if isinstance(raw_days, bool) or not str(raw_days).strip().isdigit():
+        raise ValueError(f"days_ago must be a whole number of days, got {raw_days!r}")
+    today = datetime.now(ZoneInfo(timezone_name)).date()
+    return _parse_date((today - timedelta(days=int(str(raw_days).strip()))).isoformat())
+
+
 async def _tell_care_team(sf: Any, ctx: _Context, settings: Any, *, kind: str, text: str):
     """The care team's phones, with who it is about, never the person talking."""
     return await followup_store.notify_care_team(
@@ -287,7 +316,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     if not summary:
         return "Not enrolled: write a short summary for the care team."
     try:
-        start = _parse_date(arguments.get("start_date"))
+        start = _start_date(arguments, offered[protocol])
     except ValueError as exc:
         return f"Not enrolled: {exc}."
     phase = str(arguments.get("phase") or "").strip() or None
