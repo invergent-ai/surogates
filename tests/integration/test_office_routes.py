@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from urllib.parse import quote
@@ -12,6 +13,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
 
+from surogates.devices.binding import Binding
+from surogates.office import sessions as office_sessions
 from surogates.office.tokens import read_url_token
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import session_workspace_key
@@ -116,6 +119,8 @@ async def test_service_account_names_the_person(client, app, session_factory):
     url = f"/v1/api/sessions/{session_id}/workspace/editor"
     missing = await client.get(url, params={"path": "a.xlsx"}, headers=sa_headers)
     assert missing.status_code == 400
+    ambiguous = await client.get(url, params={"path": "a.xlsx"}, headers={**sa_headers, "X-Surogate-Acting-User-Id": "42:7"})
+    assert ambiguous.status_code == 400
     named = await client.get(url, params={"path": "a.xlsx"}, headers={
         **sa_headers, "X-Surogate-Acting-User-Id": "42", "X-Surogate-Acting-User-Name": quote("Ana Popescu"),
     })
@@ -144,3 +149,79 @@ async def test_not_office_missing_and_disabled(client, app, session_factory):
         assert (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).status_code == 503
     finally:
         app.state.settings.office = saved
+
+
+def _row_id(config) -> UUID:
+    return read_url_token(TOKEN_SECRET, config["document"]["url"].rsplit("/", 1)[1], "file")
+
+
+async def test_a_closing_document_answers_409_after_the_wait(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+
+    monkeypatch.setattr(office_route, "CLOSING_WAIT_S", 0.2)
+    monkeypatch.setattr(office_route, "CLOSING_POLL_S", 0.05)
+    session_id, headers, _, _ = await _user_chat(client, app, session_factory)
+    url = f"/v1/sessions/{session_id}/workspace/editor"
+    first = (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()
+    await office_sessions.set_pending(session_factory, _row_id(first["config"]), bucket="b", key="k", close=True)
+    response = await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "The document is still being saved; try again in a moment."
+
+
+async def test_a_closing_document_that_lands_during_the_wait_opens_fresh(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+
+    monkeypatch.setattr(office_route, "CLOSING_WAIT_S", 3.0)
+    monkeypatch.setattr(office_route, "CLOSING_POLL_S", 0.05)
+    session_id, headers, _, _ = await _user_chat(client, app, session_factory)
+    url = f"/v1/sessions/{session_id}/workspace/editor"
+    first = (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()
+    row_id = _row_id(first["config"])
+    await office_sessions.set_pending(session_factory, row_id, bucket="b", key="k", close=True)
+
+    async def land_later():
+        await asyncio.sleep(0.2)
+        await office_sessions.close(session_factory, row_id)
+
+    landing = asyncio.create_task(land_later())
+    response = await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)
+    await landing
+    assert response.status_code == 200, response.text
+    assert response.json()["config"]["document"]["key"] != first["config"]["document"]["key"]
+
+
+async def test_computer_folder_chats(client, app, session_factory, monkeypatch):
+    """Hidden from the org's other members, as every workspace route hides them; refused to their own user."""
+    _, headers, user_id, chat = await _user_chat(client, app, session_factory)
+    store = SessionStore(session_factory)
+    device_chat = await store.create_session(
+        user_id=user_id, org_id=chat.org_id, agent_id=chat.agent_id,
+        config={"storage_bucket": chat.config["storage_bucket"],
+                "execution": {"kind": "device", "device_id": str(uuid.uuid4())}},
+    )
+    url = f"/v1/sessions/{device_chat.id}/workspace/editor"
+    other = await create_user(session_factory, chat.org_id)
+    other_token = create_access_token(chat.org_id, other, {"sessions:read", "sessions:write", "tools:read"})
+    hidden = await client.get(url, params={"path": "a.docx"}, headers={"Authorization": f"Bearer {other_token}"})
+    assert hidden.status_code == 404
+
+    async def bound(_db, _root):
+        return Binding("bound")
+
+    monkeypatch.setattr("surogates.api.session_guards.binding_of", bound)
+    refused = await client.get(url, params={"path": "a.docx"}, headers=headers)
+    assert refused.status_code == 409
+    assert "folder on a computer" in refused.json()["detail"]
+
+
+async def test_scheduled_run_opens_read_only(client, app, session_factory):
+    _, headers, user_id, chat = await _user_chat(client, app, session_factory)
+    run = await SessionStore(session_factory).create_session(
+        user_id=user_id, org_id=chat.org_id, agent_id=chat.agent_id, channel="scheduled",
+        config={"storage_bucket": chat.config["storage_bucket"], "scheduled_session_id": str(uuid.uuid4())},
+    )
+    await app.state.storage.write(run.config["storage_bucket"], session_workspace_key(str(run.id), "r.docx"), b"PK")
+    response = await client.get(f"/v1/sessions/{run.id}/workspace/editor", params={"path": "r.docx"}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["config"]["editorConfig"]["mode"] == "view"

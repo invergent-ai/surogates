@@ -3,7 +3,9 @@ fetches, and the saves it calls back with."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any, Literal
 from urllib.parse import unquote
 from uuid import UUID
@@ -19,7 +21,7 @@ from surogates.api.routes.workspace import (
     _validate_path,
     workspace_files,
 )
-from surogates.api.session_guards import require_user_writable_session
+from surogates.api.session_guards import is_scheduled_run_session, require_device_access
 from surogates.db.models import User
 from surogates.devices.binding import device_of
 from surogates.office import sessions as office_sessions
@@ -32,6 +34,10 @@ from surogates.tools.workspace_io import StorageWorkspaceIO
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# How long an open waits for a closing document's last save to land, and how often it looks.
+CLOSING_WAIT_S = 10.0
+CLOSING_POLL_S = 0.5
 
 
 class EditorConfigResponse(BaseModel):
@@ -61,6 +67,7 @@ async def get_workspace_editor(
     session, _bucket, _root = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant, path=path, change=True,
     )
+    await require_device_access(request, session, tenant)
     if device_of(session.config) is not None:
         raise HTTPException(status_code=409, detail="Documents in a folder on a computer cannot be opened in the editor yet.")
     user_id, user_name = await _acting_user(request, tenant)
@@ -71,14 +78,31 @@ async def get_workspace_editor(
         if await files.stat(key) is None:
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
         location = files.location(key)
-    document = await office_sessions.open_or_reuse(
-        request.app.state.session_factory, location=location, path=path, session_id=session.id,
-    )
+    document = await _open_document(request, location=location, path=path, session_id=session.id)
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
-        user_id=user_id, user_name=user_name, edit=kind.editable and not view and _writable(session), theme=theme,
+        user_id=user_id, user_name=user_name, theme=theme,
+        edit=kind.editable and not view and not is_scheduled_run_session(session),
     )
     return EditorConfigResponse(document_server_url=office.public_url.rstrip("/"), config=config)
+
+
+async def _open_document(
+    request: Request, *, location: str, path: str, session_id: UUID,
+) -> office_sessions.OpenDocument:
+    """The document's open row, waiting up to CLOSING_WAIT_S for a closing one's last save to land."""
+    deadline = time.monotonic() + CLOSING_WAIT_S
+    while True:
+        try:
+            return await office_sessions.open_or_reuse(
+                request.app.state.session_factory, location=location, path=path, session_id=session_id,
+            )
+        except office_sessions.DocumentClosing:
+            if time.monotonic() >= deadline:
+                raise HTTPException(
+                    status_code=409, detail="The document is still being saved; try again in a moment.",
+                ) from None
+            await asyncio.sleep(CLOSING_POLL_S)
 
 
 async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, str]:
@@ -90,7 +114,13 @@ async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, st
                 status_code=400,
                 detail="A service account opening the editor names the person in X-Surogate-Acting-User-Id.",
             )
+        if ":" in acting_id or len(acting_id) > 128:
+            raise HTTPException(
+                status_code=400, detail="X-Surogate-Acting-User-Id is at most 128 characters, without ':'.",
+            )
         name = unquote(request.headers.get("X-Surogate-Acting-User-Name", "")).strip() or acting_id
+        if len(name) > 200:
+            raise HTTPException(status_code=400, detail="X-Surogate-Acting-User-Name is at most 200 characters.")
         return f"sa:{tenant.service_account_id}:{acting_id}", name
     if tenant.user_id is not None:
         async with request.app.state.session_factory() as db:
@@ -98,10 +128,3 @@ async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, st
         return f"user:{tenant.user_id}", user.display_name if user is not None else "You"
     raise HTTPException(status_code=403, detail="Only a person can open the editor.")
 
-
-def _writable(session: Any) -> bool:
-    try:
-        require_user_writable_session(session)
-    except HTTPException:
-        return False
-    return True
