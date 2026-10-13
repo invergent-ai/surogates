@@ -241,6 +241,9 @@ async function mountShare(share: Share): Promise<string> {
   return sharePath(share);
 }
 
+// The largest 9P message a Plan 9 share's mount asks for, as hcsshim's guest asks.
+const P9_MSIZE = 64 * 1024;
+
 /**
  * surogate-vsock's arguments that mount the Plan 9 share *share* at *at*, with mount(8)'s *options*: a stream to
  * its port of the host's (CID 2), at descriptor 3, which the 9P client's fd transport takes and keeps once mounted
@@ -252,7 +255,7 @@ export function p9Mount(share: Extract<Share, { kind: "p9" }>, options: string, 
   const aname = share.aname === undefined ? share.tag : `${share.tag};${share.aname}`;
   return [
     `2:${share.port}:3`, "--", "/usr/bin/mount", "-t", "9p",
-    "-o", `trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client,${options},aname=${aname}`, share.tag, at,
+    "-o", `trans=fd,rfdno=3,wfdno=3,msize=${P9_MSIZE},version=9p2000.L,cache=none,access=client,${options},aname=${aname}`, share.tag, at,
   ];
 }
 
