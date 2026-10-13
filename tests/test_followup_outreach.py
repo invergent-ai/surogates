@@ -595,7 +595,10 @@ async def test_the_reminder_wait_is_the_agents_setting_and_marks_the_check_in(sf
     await _send(sf, _Store(), _Delivery())
     assert len(await _alerts(sf, "reminder")) == 1
     async with sf() as db:
-        assert (await db.get(ProgramInvitationRow, invitation_id)).escalation_state == "reminded"
+        invitation = await db.get(ProgramInvitationRow, invitation_id)
+    # Run counts read escalation_state == "raised"; the reminder must not move it.
+    assert invitation.escalation_state == "raised"
+    assert invitation.reminder_state == "reminded"
 
 
 # --- failures reaching a person ---------------------------------------------

@@ -475,7 +475,7 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
                 await db.execute(
                     sa.update(ProgramInvitationRow)
                     .where(ProgramInvitationRow.id == uuid.UUID(invitation_id))
-                    .values(escalation_state="reminded" if queued else "reminder_failed")
+                    .values(reminder_state="reminded" if queued else "reminder_failed")
                 )
                 await db.commit()
         if not queued:

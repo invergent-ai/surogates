@@ -497,6 +497,8 @@ def _last_checkin(invitations: list) -> str:
         )
         if inv.escalation_state != "none":
             text += f", escalation {inv.escalation_state}"
+        if inv.reminder_state:
+            text += f" ({inv.reminder_state})"
         if inv.reason:
             text += f" — {inv.reason[:200]}"
         return text

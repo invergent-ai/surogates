@@ -1066,3 +1066,7 @@ ALTER TABLE followup_settings
 ALTER TABLE outreach_messages
     ADD COLUMN IF NOT EXISTS severity text,
     ADD COLUMN IF NOT EXISTS reminded_at timestamptz;
+
+-- ── a red alert's reminder, kept off the escalation it reminds of ────
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS reminder_state text;

@@ -1080,6 +1080,10 @@ class ProgramInvitationRow(Base):
     escalation_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="none",
     )
+    #: ``reminded`` or ``reminder_failed`` once an unopened red alert of this
+    #: check-in's escalation was sent again.  Its own column: the escalation
+    #: stays ``raised``, which is what run counts read.
+    reminder_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     deadline_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
     )
