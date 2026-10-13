@@ -6,6 +6,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, wr
 
 import type { ProcessHandle } from "../guest/processes.js";
 import { dirname } from "../host-path.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { type FolderLock, takeLock } from "./folder-lock.js";
 
 // How long a host waits for another host on the same folder to let it go.
@@ -71,14 +72,18 @@ export function isHandle(value: unknown): value is ProcessHandle {
       && short(handle.ended.output) && (handle.ended.note === null || short(handle.ended.note))));
 }
 
-// Whole or not at all, and on disk before it returns: a crash right after must find it.
+// Whether this OS syncs a folder: Linux and macOS do, by fsync on it; Windows does not, flushing no folder's handle
+// (FlushFileBuffers on a folder opened to read fails), and journals each rename on NTFS itself.
+const SYNCS_FOLDERS = forThisOs({ linux: true, darwin: true, win32: false });
+
+// Whole or not at all, and on disk before it returns where this OS syncs a folder: a crash right after must find it.
 export function writeRecord(path: string, record: FolderRecord): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}`;
   syncFile(temp, "w", (fd) => writeFileSync(fd, JSON.stringify(record)));
   renameSync(temp, path);
   // The rename is on disk only once its folder is.
-  syncFile(dirname(path), "r", () => {});
+  if (SYNCS_FOLDERS ?? notBuilt("A folder's record")) syncFile(dirname(path), "r", () => {});
 }
 
 function syncFile(path: string, flags: string, write: (fd: number) => void): void {
