@@ -162,3 +162,13 @@ def test_only_a_sent_form_ends_the_turn():
     calls = [{"id": "c1", "function": {"name": "send_form"}}]
     assert _form_sent(calls, [{"tool_call_id": "c1", "content": "Form sent. End your turn"}])
     assert not _form_sent(calls, [{"tool_call_id": "c1", "content": "Not sent: no"}])
+
+
+def test_send_form_is_offered_only_where_there_are_forms():
+    from surogates.harness.tool_schemas import drop_unusable_tools
+
+    schemas = [{"function": {"name": n}} for n in ("send_form", "memory")]
+    names = lambda **kw: [s["function"]["name"] for s in drop_unusable_tools(  # noqa: E731
+        schemas, has_kbs=True, has_channel=True, makes_routines=False, **kw)]
+    assert names() == ["memory"]
+    assert names(has_forms=True) == ["send_form", "memory"]

@@ -102,10 +102,10 @@ from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
-from surogates.tools.builtin.ask_user_question import widen_for_channel
-from surogates.tools.builtin.send_form import SENT as FORM_SENT, describe_forms
+from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
+    describe_for_conversation,
     describe_for_device,
     drop_unusable_tools,
     filter_schemas_for_tenant,
@@ -2803,6 +2803,7 @@ class AgentHarness(
         # Drop tools whose backing resource this agent does not have.
         # Schemas ship on every request, so an unusable one is paid for
         # on every turn of every session.
+        whatsapp_forms = getattr(self, "_whatsapp_forms", ())
         tool_schemas = drop_unusable_tools(
             tool_schemas,
             # Default to "has it" when the attribute is absent: an
@@ -2823,14 +2824,12 @@ class AgentHarness(
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+            has_forms=session.channel == "whatsapp" and bool(whatsapp_forms),
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
-        tool_schemas = [
-            describe_forms(s, getattr(self, "_whatsapp_forms", ())) if s["function"]["name"] == "send_form"
-            else widen_for_channel(s, session.channel) if s["function"]["name"] == "ask_user_question"
-            else s
-            for s in tool_schemas
-        ]
+        tool_schemas = describe_for_conversation(
+            tool_schemas, channel=session.channel, forms=whatsapp_forms,
+        )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
         offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)

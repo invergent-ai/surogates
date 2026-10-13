@@ -1990,8 +1990,6 @@ async def run_worker(settings: Settings) -> None:
         entitlement_excluded_tools |= await team_tool_exclusions(
             session_factory, session, programs_enabled=ctx.programs_enabled,
         )
-        if session.channel != "whatsapp" or not ctx.whatsapp_forms:
-            entitlement_excluded_tools.add("send_form")
         if entitlement_excluded_tools:
             effective_tools.difference_update(entitlement_excluded_tools)
 

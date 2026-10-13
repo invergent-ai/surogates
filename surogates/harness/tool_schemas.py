@@ -14,7 +14,9 @@ from typing import Any
 
 from surogates.channels.constants import ADAPTER_CHANNELS, VOICE_TOOLS
 from surogates.devices.binding import device_of
+from surogates.tools.builtin.ask_user_question import widen_for_channel
 from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
+from surogates.tools.builtin.send_form import describe_forms
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
 
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
@@ -92,6 +94,7 @@ def drop_unusable_tools(
     makes_routines: bool,
     is_whiteboard: bool = False,
     is_voice: bool = False,
+    has_forms: bool = False,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -100,6 +103,9 @@ def drop_unusable_tools(
     stays, because "not called yet" is not "cannot be called" -- that
     distinction is what makes this safe to apply to every agent rather
     than to one benchmark workload.
+
+    ``send_form`` goes only where it *has_forms*: a WhatsApp conversation
+    of an agent with published forms.
 
     The cron tools go to a session that *makes_routines* through its
     model: a chat with an owner, ``/loop`` on and ``ask_user_question``
@@ -119,6 +125,8 @@ def drop_unusable_tools(
         drop |= _WHITEBOARD_TOOLS
     if not is_voice:
         drop |= VOICE_TOOLS
+    if not has_forms:
+        drop.add("send_form")
     if not drop:
         return schemas
 
@@ -150,5 +158,25 @@ def describe_for_device(
         elif schema["function"]["name"] == "browser_navigate":
             schema = copy.deepcopy(schema)
             schema["function"]["description"] += f" {DEVICE_SERVERS_NOTE}"
+        described.append(schema)
+    return described
+
+
+def describe_for_conversation(
+    schemas: list[dict[str, Any]],
+    *,
+    channel: str | None,
+    forms: Any,
+) -> list[dict[str, Any]]:
+    """Return *schemas* with ``send_form`` limited to the agent's *forms* and
+    ``ask_user_question`` taking as many choices as *channel* does.  Input is
+    never mutated."""
+    described: list[dict[str, Any]] = []
+    for schema in schemas:
+        name = schema["function"]["name"]
+        if name == "send_form":
+            schema = describe_forms(schema, forms)
+        elif name == "ask_user_question":
+            schema = widen_for_channel(schema, channel)
         described.append(schema)
     return described
