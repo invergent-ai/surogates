@@ -229,7 +229,9 @@ def disclosure_config(
     deployment default like an unconfigured agent.
 
     Otherwise returns ``{"enabled", "level", "text"}`` with the level
-    clamped to the harness vocabulary.  Unknown levels degrade to
+    clamped to the harness vocabulary.  The text is the block's own
+    ``text`` when set, else the level's copy in the block's ``language``,
+    else English; level ``none`` is silent whatever ``text`` says.  Unknown levels degrade to
     ``basic`` (disclosure still shown) rather than ``none`` so a
     vocabulary drift upstream can never silently switch disclosure off.
     An explicitly disabled block returns
@@ -246,14 +248,18 @@ def disclosure_config(
     if not raw.get("enabled", False):
         return {"enabled": False, "level": "none", "text": ""}
     level = str(raw.get("level", "basic")).strip().lower()
+    text = disclosure_text(level, str(raw.get("language") or ""))
+    custom = raw.get("text")
+    if text and isinstance(custom, str) and custom.strip():
+        text = custom.strip()
     return {
         "enabled": True,
         "level": level if level in _LEVEL_VALUES else "basic",
-        "text": disclosure_text(level),
+        "text": text,
     }
 
 
-def disclosure_text(level: str) -> str:
+def disclosure_text(level: str, language: str = "") -> str:
     """The disclosure copy for a level string, empty for ``none``.
 
     Adds string normalisation and the ``none`` case on top of
@@ -265,6 +271,6 @@ def disclosure_text(level: str) -> str:
     if normalized == "none":
         return ""
     try:
-        return disclosure_text_for(TransparencyLevel(normalized))
+        return disclosure_text_for(TransparencyLevel(normalized), language)
     except ValueError:
-        return disclosure_text_for(TransparencyLevel.BASIC)
+        return disclosure_text_for(TransparencyLevel.BASIC, language)
