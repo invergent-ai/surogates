@@ -109,9 +109,12 @@ export function MemoryToolBlock({ tc }: { tc: ToolCallInfo }) {
           {action === "remove" && args.old_text && (
             <MemoryEntry content={args.old_text} variant="removed" />
           )}
+          {/* Older harnesses stored a 422's pydantic error list here. */}
           {result?.error && (
             <div className="rounded bg-red-500/10 px-2 py-1 text-xs text-red-500">
-              {result.error}
+              {typeof result.error === "string"
+                ? result.error
+                : JSON.stringify(result.error)}
             </div>
           )}
         </div>
