@@ -1,6 +1,7 @@
 //! The helper's answers from Windows's own libraries.
 
 pub mod app_path;
+pub mod look;
 pub mod procs;
 pub mod trust;
 pub mod verify;

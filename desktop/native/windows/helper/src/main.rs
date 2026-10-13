@@ -9,11 +9,12 @@
 //!   procs             this user's processes, a JSON object a line: {"pid":…,"path":…,"args":[…]}
 //!   verify <path>     the program's Authenticode signature, one JSON object: {"trusted":…,"signer":…,"status":…,"remote":…}
 //!   app-path <name>   where the App Paths key says the program <name> is: HKLM's, then HKCU's, a line each
+//!   look <path>       nothing: whether <path> is there, opened through its links, by the run's end alone (0 or 1)
 
 use std::ffi::OsString;
 use std::io::Write;
 
-const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name>";
+const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path>";
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -21,6 +22,7 @@ fn main() {
         Answer::Said(text) => (0, text, None),
         Answer::Failed(words) => (1, String::new(), Some(words)),
         Answer::Usage => (2, String::new(), Some(USAGE.to_string())),
+        Answer::Not => (1, String::new(), None),
     };
     // A reader that has gone, or a full pipe that fails, ends the run as a failure: nothing half said is an answer.
     if std::io::stdout().lock().write_all(out.as_bytes()).and_then(|()| std::io::stdout().lock().flush()).is_err() {
@@ -38,6 +40,8 @@ enum Answer {
     Said(String),
     Failed(String),
     Usage,
+    // No, said by the run's end alone.
+    Not,
 }
 
 impl From<Result<String, String>> for Answer {
@@ -55,6 +59,7 @@ fn run(args: &[OsString]) -> Answer {
         (Some("trust"), 1) => windows::trust::roots().map(|roots| roots.iter().map(|der| pem::certificate(der)).collect()).into(),
         (Some("procs"), 1) => windows::procs::listed().map(|listed| listed.iter().map(|one| one.json() + "\n").collect()).into(),
         (Some("verify"), 2) => windows::verify::verdict(&args[1]).map(|verdict| verdict.json() + "\n").into(),
+        (Some("look"), 2) => if windows::look::there(&args[1]) { Answer::Said(String::new()) } else { Answer::Not },
         (Some("app-path"), 2) => match args[1].to_str() {
             Some(name) => windows::app_path::paths(name).map(|paths| paths.iter().map(|path| format!("{path}\n")).collect()).into(),
             None => Answer::Usage,

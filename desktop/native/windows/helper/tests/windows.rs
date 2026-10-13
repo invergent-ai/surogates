@@ -208,6 +208,27 @@ fn says_where_the_app_paths_key_puts_a_program_and_refuses_a_name_that_is_not_on
 }
 
 #[test]
+fn looks_at_a_folder_through_its_links_and_says_nothing() {
+    let folder = std::env::temp_dir().join(format!("surogate-helper-look-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    // A junction to the folder, and one to a folder that is not there, as `mklink /J` makes them.
+    for (link, to) in [("link", folder.clone()), ("dangling", folder.join("gone"))] {
+        let made = Command::new("C:\\Windows\\System32\\cmd.exe").args(["/d", "/c", "mklink", "/J"]).arg(folder.join(link)).arg(&to).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    }
+    let looked: Vec<Option<i32>> = [folder.clone(), folder.join("link"), folder.join("gone"), folder.join("dangling")]
+        .iter()
+        .map(|path| {
+            let done = helper(&[OsStr::new("look"), path.as_os_str()]);
+            assert!(done.stdout.is_empty() && done.stderr.is_empty(), "{path:?} says nothing");
+            done.status.code()
+        })
+        .collect();
+    std::fs::remove_dir_all(&folder).ok();
+    assert_eq!(looked, vec![Some(0), Some(0), Some(1), Some(1)]);
+}
+
+#[test]
 fn says_how_it_is_run_when_it_is_not() {
     for args in [&[][..], &["nothing"], &["trust", "extra"], &["verify"]] {
         let done = helper(&args.iter().map(OsStr::new).collect::<Vec<_>>());

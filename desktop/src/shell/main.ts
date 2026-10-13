@@ -29,7 +29,7 @@ import { revokeDevice, verifyDevice } from "../device.js";
 import { hostUser } from "../host-user.js";
 import { fileToolsMissing, hostToolsPath, toolsMissing } from "../hosts/policy.js";
 import { NODE } from "../hosts/tool-hosts.js";
-import { FolderLooks, LOOK_MS } from "./folders-held.js";
+import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
@@ -420,7 +420,7 @@ function lookForTools(): void {
 // with it. One that does not answer in time is not held (FolderLooks).
 const folderLooks = new FolderLooks(undefined, undefined, (folder, why) => report(new Error(why === "busy"
   ? `${folder}, a folder a chat is bound to, was not looked at, the app's looks all waiting on folders that do not answer: its tools are not looked for until one does`
-  : (process.env.PATH ?? "").split(":").includes(folder)
+  : onPath(process.env.PATH, folder)
     ? `${folder}, on the app's PATH, did not answer in ${LOOK_MS / 1000} s: no tool is looked for there until it answers`
     : `${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
 function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
