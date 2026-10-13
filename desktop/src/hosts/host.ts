@@ -22,6 +22,7 @@ import { confirmedFolder } from "../binding/folder.js";
 import { identityOf } from "../files/identity.js";
 import { findOnPath } from "../files/operations.js";
 import { isAbsolute, join, resolve } from "../host-path.js";
+import { notBuiltWords } from "../platform.js";
 import type { Outcome } from "../link/protocol.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
 import type { FolderLock } from "./folder-lock.js";
@@ -164,6 +165,9 @@ const unsupported = (what: string): Outcome => ({ error: { type: "unsupported", 
 class FolderUnavailable extends Error {}
 
 async function start(message: HostStart): Promise<void> {
+  // Where no srt wraps the helper, its walk alone contains it (fd-paths-win32.ts), and the host's own checks of what it
+  // is started on, its record and its hook guard take a folder by the guest's path for it: not built yet.
+  if (!srtOs.wraps) throw new Error(notBuiltWords("A file host without a sandbox"));
   const home = message.env.HOME;
   if (!home) throw new Error("the app's environment has no HOME");
   if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
