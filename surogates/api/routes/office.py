@@ -3,9 +3,7 @@ fetches, and the saves it calls back with."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -40,10 +38,6 @@ from surogates.tools.workspace_io import StorageWorkspaceIO
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# How long an open waits for a closing document's last save to land, and how often it looks.
-CLOSING_WAIT_S = 10.0
-CLOSING_POLL_S = 0.5
 
 PENDING_PREFIX = "_office/pending/"
 
@@ -98,19 +92,13 @@ async def get_workspace_editor(
 async def _open_document(
     request: Request, *, location: str, path: str, session_id: UUID, user: tuple[str, str],
 ) -> office_sessions.OpenDocument:
-    """The document's open row, waiting up to CLOSING_WAIT_S for a closing one's last save to land."""
-    deadline = time.monotonic() + CLOSING_WAIT_S
-    while True:
-        try:
-            return await office_sessions.open_or_reuse(
-                request.app.state.session_factory, location=location, path=path, session_id=session_id, user=user,
-            )
-        except office_sessions.DocumentClosing:
-            if time.monotonic() >= deadline:
-                raise HTTPException(
-                    status_code=409, detail="The document is still being saved; try again in a moment.",
-                ) from None
-            await asyncio.sleep(CLOSING_POLL_S)
+    """The document's open row, once a closing one's last save has landed."""
+    try:
+        return await office_sessions.open_waiting(
+            request.app.state.session_factory, location=location, path=path, session_id=session_id, user=user,
+        )
+    except office_sessions.DocumentClosing:
+        raise HTTPException(status_code=409, detail="The document is still being saved; try again in a moment.") from None
 
 
 async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, str]:

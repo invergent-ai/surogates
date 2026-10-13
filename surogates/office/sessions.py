@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,6 +18,9 @@ from surogates.db.models import OfficeSession
 
 OPEN = "open"
 CLOSED = "closed"
+# How long an open waits for a closing document's last save to land, and how often it looks.
+CLOSING_WAIT_S = 10.0
+CLOSING_POLL_S = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,21 @@ async def open_or_reuse(
         row.updated_at = datetime.now(timezone.utc)
         await db.flush()
         return _snapshot(row)
+
+
+async def open_waiting(
+    session_factory: Any, *, location: str, path: str, session_id: UUID, user: tuple[str, str] | None = None,
+) -> OpenDocument:
+    """:func:`open_or_reuse`, waiting up to CLOSING_WAIT_S for a closing row's last save to land;
+    raises :class:`DocumentClosing` once the wait is over."""
+    deadline = time.monotonic() + CLOSING_WAIT_S
+    while True:
+        try:
+            return await open_or_reuse(session_factory, location=location, path=path, session_id=session_id, user=user)
+        except DocumentClosing:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(CLOSING_POLL_S)
 
 
 async def _insert_and_lock(db: Any, *, location: str, path: str, session_id: UUID) -> OfficeSession | None:

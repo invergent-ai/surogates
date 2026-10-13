@@ -167,10 +167,8 @@ def _row_id(config) -> UUID:
 
 
 async def test_a_closing_document_answers_409_after_the_wait(client, app, session_factory, monkeypatch):
-    from surogates.api.routes import office as office_route
-
-    monkeypatch.setattr(office_route, "CLOSING_WAIT_S", 0.2)
-    monkeypatch.setattr(office_route, "CLOSING_POLL_S", 0.05)
+    monkeypatch.setattr(office_sessions, "CLOSING_WAIT_S", 0.2)
+    monkeypatch.setattr(office_sessions, "CLOSING_POLL_S", 0.05)
     session_id, headers, _, _ = await _user_chat(client, app, session_factory)
     url = f"/v1/sessions/{session_id}/workspace/editor"
     first = (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()
@@ -181,10 +179,8 @@ async def test_a_closing_document_answers_409_after_the_wait(client, app, sessio
 
 
 async def test_a_closing_document_that_lands_during_the_wait_opens_fresh(client, app, session_factory, monkeypatch):
-    from surogates.api.routes import office as office_route
-
-    monkeypatch.setattr(office_route, "CLOSING_WAIT_S", 3.0)
-    monkeypatch.setattr(office_route, "CLOSING_POLL_S", 0.05)
+    monkeypatch.setattr(office_sessions, "CLOSING_WAIT_S", 3.0)
+    monkeypatch.setattr(office_sessions, "CLOSING_POLL_S", 0.05)
     session_id, headers, _, _ = await _user_chat(client, app, session_factory)
     url = f"/v1/sessions/{session_id}/workspace/editor"
     first = (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,9 +21,6 @@ from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
 from surogates.workstreams import is_project_thread
 
 BLANK_DOCX = Path(__file__).with_name("templates") / "blank.docx"
-# How long an open waits for a closing document's last save to land, as the editor route does.
-CLOSING_WAIT_S = 10.0
-CLOSING_POLL_S = 0.5
 
 
 class AgentDocumentError(Exception):
@@ -77,7 +72,7 @@ async def open_for_agent(
             raise AgentDocumentError("This workspace cannot be edited live yet.")
         try:
             key = await files.resolve(path)
-        except WorkspaceSandboxError as exc:
+        except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
             raise AgentDocumentError(str(exc)) from None
         if await files.etag(key) is None:
             if not create:
@@ -92,7 +87,12 @@ async def open_for_agent(
                 pass  # someone made it meanwhile: open theirs
         location = files.location(key)
     user_id = agent_user_id(agent_id, session.id)
-    document = await _join(session_factory, location=location, path=path, session_id=session.id, user=(user_id, agent_name))
+    try:
+        document = await office_sessions.open_waiting(
+            session_factory, location=location, path=path, session_id=session.id, user=(user_id, agent_name),
+        )
+    except office_sessions.DocumentClosing:
+        raise AgentDocumentError("The document is still being saved; try again in a moment.") from None
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
         user_id=user_id, user_name=agent_name, edit=True, theme="light", plugins=False,
@@ -101,13 +101,3 @@ async def open_for_agent(
                               document_server_url=office.internal_url)
     return AgentDocument(page_id=page, document=document, path=path, user_id=user_id, created=created)
 
-
-async def _join(session_factory: Any, **opening: Any) -> office_sessions.OpenDocument:
-    deadline = time.monotonic() + CLOSING_WAIT_S
-    while True:
-        try:
-            return await office_sessions.open_or_reuse(session_factory, **opening)
-        except office_sessions.DocumentClosing:
-            if time.monotonic() >= deadline:
-                raise AgentDocumentError("The document is still being saved; try again in a moment.") from None
-            await asyncio.sleep(CLOSING_POLL_S)

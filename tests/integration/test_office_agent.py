@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete
@@ -14,6 +16,8 @@ from surogates.office.runtime_office import page_id
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import session_workspace_key
+from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
+from surogates.workstreams import THREAD
 
 from .conftest import create_org, create_user
 
@@ -93,6 +97,8 @@ async def test_other_files_and_computer_folders_are_refused(session_factory, red
     session = await _chat(session_factory)
     with pytest.raises(AgentDocumentError, match=r"\.docx"):
         await _open(session, storage, session_factory, redis_client, FakeRuntime(), "sheet.xlsx")
+    with pytest.raises(AgentDocumentError, match="NUL"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a\x00.docx", create=True)
     on_a_computer = await _chat(session_factory, config={"execution": {"kind": "device", "device_id": "00000000-0000-0000-0000-000000000001"}})
     with pytest.raises(AgentDocumentError, match="computer"):
         await _open(on_a_computer, storage, session_factory, redis_client, FakeRuntime(), "a.docx", create=True)
@@ -105,3 +111,35 @@ async def test_open_locations_names_the_open_ones(session_factory, storage):
     assert await office_sessions.open_locations(session_factory, [location, location_of(session, "b.docx")]) == {location}
     assert (await office_sessions.open_at(session_factory, location)).path == "a.docx"
     assert await office_sessions.open_at(session_factory, location_of(session, "b.docx")) is None
+
+
+async def test_a_thread_is_told_its_documents_reach_the_project_when_the_turn_ends(session_factory, redis_client, storage):
+    thread = await _chat(session_factory, config={"workstream_role": THREAD, "workspace_boundary": f"workstream:{uuid4()}"})
+    with pytest.raises(AgentDocumentError, match="in the project's files"):
+        await _open(thread, storage, session_factory, redis_client, FakeRuntime(), "memo.docx")
+
+
+async def test_a_document_made_meanwhile_is_opened_not_replaced(session_factory, redis_client, storage, monkeypatch):
+    session = await _chat(session_factory)
+    key = session_workspace_key(session.id, "a.docx")
+
+    async def made_meanwhile(self, file_key, data, *, expected):
+        await storage.write("b", key, b"PK-theirs")
+        raise RevisionConflict(file_key)
+
+    monkeypatch.setattr(StorageWorkspaceIO, "write_if", made_meanwhile)
+    document = await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.docx", create=True)
+    assert document.created is False
+    assert await storage.read("b", key) == b"PK-theirs"
+
+
+async def test_a_document_still_closing_is_refused_after_the_wait(session_factory, redis_client, storage, monkeypatch):
+    monkeypatch.setattr(office_sessions, "CLOSING_WAIT_S", 0.2)
+    monkeypatch.setattr(office_sessions, "CLOSING_POLL_S", 0.05)
+    session = await _chat(session_factory)
+    await storage.write("b", session_workspace_key(session.id, "a.docx"), b"PK-docx")
+    users = await office_sessions.open_or_reuse(session_factory, location=location_of(session, "a.docx"), path="a.docx",
+                                                session_id=session.id)
+    await office_sessions.set_pending(session_factory, users.id, bucket="b", key="k", close=True)
+    with pytest.raises(AgentDocumentError, match="still being saved"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.docx")
