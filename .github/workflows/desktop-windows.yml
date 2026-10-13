@@ -162,7 +162,7 @@ jobs:
 
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
   # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
-  # fetches milestone B's guest image if a run of it is named, and runs the boot and requirements measurements. If the
+  # fetches the guest build's image if a run of it is named, and runs the boot and requirements measurements. If the
   # guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's own words. Either
   # way the result is kept, and the job does not fail the branch.
   vm-boot:

@@ -1,7 +1,7 @@
 // Whether a command in the guest sees at once what the host wrote to a Plan 9 share under cache=none (the 9p client's
 // default, as cache=never gives Linux): a host write then a guest read, 1 000 times; a large file written whole then
 // read; and git status over 50 000 files after the host changed 10. Decides whether a command follows a file tool's
-// write at once (Mw4).
+// write at once.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts coherence
 // PASS or FAIL: no stale read of 1 000, the large file seen whole, and git status sees the 10.
 

@@ -3,7 +3,7 @@
 // - Virtual Machine Platform, by the Host Compute Service's own service, vmcompute, and HNS: WSL's own check reads
 //   these present (WSL, src/windows/common/wslutil.cpp, IsVirtualMachinePlatformInstalled). Unsure: the optional
 //   feature's own state through DISM, which this does not read; whether the feature is off though the services linger
-//   is left to the first boot's HCS answer (recorded on a PC, the test day) and to Mw14.
+//   is left to the first boot's HCS answer, recorded on a PC on the test day.
 // - The Surogate VM service, present or not (service.rs).
 // - The Host Compute Service: whether computecore.dll loads and names schema 2.6 among its supported versions
 //   (hcs::api::service_properties). Whether virtualization is on at all is HCS_E_HYPERV_NOT_INSTALLED at the first

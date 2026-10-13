@@ -1,7 +1,7 @@
 // The Windows VM backend (src/vm/win32.ts) against a stand-in for surogate-vm.exe (test/vm/win32/fake-vm.mjs), with
 // the VM manager's guest above it: what it does with the program it drives, on Linux as on the Windows runner. The
 // real backend starts surogate-vm.exe through the app's clean spawn, which on Windows is the shell's helper
-// (surogate-helper.exe spawn, milestone E); the tests start the stand-in with Node's own spawn, through win32Boot's
+// (surogate-helper.exe spawn, the shell's); the tests start the stand-in with Node's own spawn, through win32Boot's
 // factory, so they need nothing of that, as macOS's measurements start surogate-vm with Node's own.
 
 import { spawn } from "node:child_process";
@@ -156,9 +156,9 @@ describe("the VM manager's guest on the Windows backend", () => {
     return { path, dev, ino };
   };
 
-  // The manager's folder identity and realpath on Windows are the file host's (milestone D); until its win32 row
+  // The manager's folder identity and realpath on Windows are the file host's; until its win32 row
   // lands, a folder under the runner's temp folder is seen as unavailable. The whole guest on Windows is run by hand
-  // on a PC (C6's VM suite); here the test runs on Linux, where the backend's driver is what is exercised.
+  // on a PC (the VM suite run by hand); here the test runs on Linux, where the backend's driver is what is exercised.
   it.skipIf(process.platform === "win32")("sets a root up on its folder and runs its operations", async () => {
     mkdirSync(options.run, { recursive: true });
     let captured: VmBackend | undefined;

@@ -1,7 +1,7 @@
 // The guest's three disks on Hyper-V: the SCSI addresses it sees (the init finds the image at :0:0:0, the agent disk
 // at :0:0:1 and the sessions disk at :0:0:2, since the guest has no udev), which are read-only, and whether the
 // sessions disk takes discard (UNMAP). Also that the sparse image is taken with AlwaysAllowSparseFiles (native/
-// windows/hcs). Decides the init's lookup (Mw13).
+// windows/hcs). Decides the init's lookup.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts disks
 // PASS or FAIL: the three addresses and read-only flags are Linux's SCSI order.
 

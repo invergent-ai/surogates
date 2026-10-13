@@ -63,7 +63,7 @@ const DARWIN: Backend = {
 
 const WIN32: Backend = {
   boot: bootWin32,
-  // No tool on the PATH: the image is unpacked with Node's own zstd, and the file host is the file tools' (milestone D).
+  // No tool on the PATH: the image is unpacked with Node's own zstd, and the file host is the file tools' own.
   requirements: () => requirementsWin32(),
   // This user's own, under %LOCALAPPDATA% (not Roaming, which would copy the sessions disk at sign-out), one per data folder.
   runtimeFolder: (_user, env, dataDir) => runtimeFolderWin32(env, dataDir),

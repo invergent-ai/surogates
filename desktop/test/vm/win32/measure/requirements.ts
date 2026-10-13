@@ -1,4 +1,4 @@
-// What this computer says of its sandbox when something is missing (Mw14's VM half, C5): Virtual Machine Platform
+// What this computer says of its sandbox when something is missing (the VM half of install and first run): Virtual Machine Platform
 // off; virtualization off in the firmware; a VM without nested virtualization. Record each one's HCS answer and the
 // words the backend gives. Run this on a PC in each of those states (the test day sets them); it reads surogate-vm
 // check and a boot attempt, and records both.

@@ -1,6 +1,6 @@
 // The guest's three ports on Hyper-V sockets, relayed to surogate-vm.exe's named pipes (native/windows/vm): a
 // command's round trip through the control port, a 261 KB result through it, and what the VM does when the host's end
-// of the inbound port's pipe ends. Decides the relay's design (Mw2).
+// of the inbound port's pipe ends. Decides the relay's design.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts ports
 // PASS or FAIL: the 261 KB come back whole. The round trip and the ended connection are written down.
 

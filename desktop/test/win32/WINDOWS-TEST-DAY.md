@@ -125,7 +125,7 @@ powershell -ExecutionPolicy Bypass -File dev-service.ps1
 
 It builds `surogate-service.exe` and `surogate-vm.exe` (`cargo build --locked --release`), installs the development service as LocalSystem on demand, lets interactive users start it, and grants the VM group read on `desktop\dist\agent.vhd`. Remove it afterwards with `-Remove`.
 
-- Get milestone B's x64 guest image into `images\guest\out` (`gh run download` of the image, initrd and agent-disk artifacts), so nothing is built in a Linux container. Point the measurements at it: `$env:SUROGATE_VM_IMAGE = "<repo>\images\guest\out"`, and `$env:SUROGATE_VM_AGENT_DISK` at the agent disk with its VHD footer.
+- Get the guest image build's x64 image into `images\guest\out` (`gh run download` of the image, initrd and agent-disk artifacts), so nothing is built in a Linux container. Point the measurements at it: `$env:SUROGATE_VM_IMAGE = "<repo>\images\guest\out"`, and `$env:SUROGATE_VM_AGENT_DISK` at the agent disk with its VHD footer.
 
 ### The measurements, in order
 
@@ -136,7 +136,7 @@ cd desktop
 npx vitest run -c test/vm/win32/measure/vitest.config.ts identity
 ```
 
-1. **`identity` — whose rights the Plan 9 server serves a folder with. THE SECURITY STOP, FIRST.** A share added with your own token and `UseShareRootIdentity`: the guest reads your own file, cannot read a subfolder only an administrator can, and cannot write a file you may only read; another user's folder is refused at the service, and if forced, is unreadable in the guest. **A FAIL is a security finding: stop and report it before anything else. Folder sharing stays off, and the app's own Plan 9 server (C3b) is built.** Set `SUROGATE_OTHER_USER_FOLDER` to another user's folder, and run this on a standard account and on an administrator's. The admin-only subfolder is set with `icacls`; run elevated to set it, or have an administrator set it beforehand on the standard account.
+1. **`identity` — whose rights the Plan 9 server serves a folder with. THE SECURITY STOP, FIRST.** A share added with your own token and `UseShareRootIdentity`: the guest reads your own file, cannot read a subfolder only an administrator can, and cannot write a file you may only read; another user's folder is refused at the service, and if forced, is unreadable in the guest. **A FAIL is a security finding: stop and report it before anything else. Folder sharing stays off, and the app's own Plan 9 server is built instead.** Set `SUROGATE_OTHER_USER_FOLDER` to another user's folder, and run this on a standard account and on an administrator's. The admin-only subfolder is set with `icacls`; run elevated to set it, or have an administrator set it beforehand on the standard account.
 2. **`boot`** — the guest booted directly by HCS with its initrd, three SCSI disks, the rule attached, the console on COM1; median of three, under 1.5 s.
 3. **`ports`** — the agent's three ports relayed through the pipes: a round trip, a 261 KB result whole, and what an ended connection does.
 4. **`disks`** — the SCSI addresses `:0:0:0`, `:0:0:1`, `:0:0:2`, the read-only flags, and discard on the sessions disk.
@@ -145,7 +145,7 @@ npx vitest run -c test/vm/win32/measure/vitest.config.ts identity
 7. **`shares`** — adding and removing shares while the guest runs: latency, 40 cycles with two roots, and a removal while a process holds the mount.
 8. **`coherence`** — a host write then a guest read, 1 000 times; `git status` on 50 000 files after the host changed 10.
 9. **`mmap`** — a shared map of a file in a share (EINVAL on 9p is the safe answer).
-10. **`folders`** — Documents in OneDrive, an exFAT USB drive, a ReFS Dev Drive, a `subst` drive, a compressed or encrypted folder; each by its environment variable (`SUROGATE_ONEDRIVE_FOLDER` and the rest). A network drive's refusal at binding is milestone D's.
+10. **`folders`** — Documents in OneDrive, an exFAT USB drive, a ReFS Dev Drive, a `subst` drive, a compressed or encrypted folder; each by its environment variable (`SUROGATE_ONEDRIVE_FOLDER` and the rest). A network drive's refusal at binding is the file host's.
 11. **`lifetime`** — `surogate-vm.exe` killed, the manager killed, the app ended, the service killed and restarted: look for a `vmmem` or `vmwp` left.
 12. **`sleep`** — by hand: start it, put the PC to sleep for about a minute, wake it, and read what the command saw across the sleep. Do this on a modern-standby laptop and an S3 desktop, and a hibernate.
 13. **`memory`** — `vmmem`'s working set idle, at a 1.5 GiB peak, and each minute after, for `MEASURE_MINUTES`.
@@ -153,7 +153,12 @@ npx vitest run -c test/vm/win32/measure/vitest.config.ts identity
 15. **`defender`** — the unpack, the boot and an `npm install` in a share, with real-time protection on, and with a hand-set exclusion of the data and share folders; compare.
 16. **`requirements`** — on a PC with Virtual Machine Platform off, with virtualization off in the firmware, and on a VM without nested virtualization: each case's HCS answer and the backend's words.
 
-### The VM suite and the escape probes (C6)
+Two of the service's safeguards rest on undocumented Host Compute Service behaviour; measure each by hand, and treat a FAIL as a security finding.
+
+17. **Whose rights a granted disk uses. SECURITY STOP.** The service grants the VM group access to the caller's disk files while impersonating the caller (`HcsGrantVmAccess`), so a caller can grant only on files whose ACL the caller may edit — its own. Confirm it: as a standard user, ask the service (through a development build) to boot with a disk path the user can read but whose ACL the user may **not** change (e.g. a file `icacls`-set to deny the user `WRITE_DAC`), and with a path to a file the user cannot read at all. **A boot that grants the VM group on a file the caller could not have ACL-edited, or on a file the caller cannot read, is a security finding** (it would mean the grant runs as SYSTEM, not the caller): stop and report it. Record, for a normal boot, the VM-group ACE that appears on each disk and that it is gone after the VM ends.
+18. **Which account opens the disks and the kernel. SECURITY STOP.** For direct kernel boot, confirm the kernel, the initrd and the disks are opened by the low-privilege VM worker account (granted above), not by SYSTEM or `vmcompute`. Boot with the kernel/initrd/rootfs readable by that worker account alone (not by your user), through a path with **no** reparse point, and check the guest comes up; then put a kernel the worker account can read but **your user cannot** behind an ancestor your user controls, and confirm the service refuses the path (the walk refuses any reparse point on the way) and the file never loads. **A SYSTEM-only file loading into a guest you control is a security finding:** stop and report it.
+
+### The VM suite and the escape probes
 
 With the backend on win32 and the development service running:
 

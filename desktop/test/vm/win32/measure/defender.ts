@@ -1,4 +1,4 @@
-// Microsoft Defender's cost (Mw16): the image's unpack, the first boot and npm install in a share, with real-time
+// Microsoft Defender's cost: the image's unpack, the first boot and npm install in a share, with real-time
 // protection on, and with a test exclusion set by hand. The plan adds no exclusion; this measures whether the owner
 // is asked about one. Run it twice: once with real-time protection on, once with a hand-set exclusion of the data and
 // share folders, and compare. It records Defender's state and the boot and install times.

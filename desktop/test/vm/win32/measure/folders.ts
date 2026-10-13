@@ -1,6 +1,6 @@
-// Folders of every kind a Windows PC has, read through the share and the file tools (Mw12): Documents moved into
+// Folders of every kind a Windows PC has, read through the share and the file tools: Documents moved into
 // OneDrive with cloud-only files; a USB exFAT drive; a ReFS Dev Drive (its identity); a subst drive (by its real
-// path); a network drive (refused at binding, milestone D's binding/folder.ts); a folder inside a compressed or
+// path); a network drive (refused at binding by the file host's folder binding); a folder inside a compressed or
 // EFS-encrypted folder. Decides the binding's words. Each path comes from an environment variable the tester sets to
 // a folder of that kind; a network drive the tester sets to a mapped drive, which the binding must refuse.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts folders

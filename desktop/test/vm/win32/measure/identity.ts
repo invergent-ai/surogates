@@ -1,9 +1,9 @@
-// WHOSE RIGHTS HCS'S PLAN 9 SERVER SERVES A FOLDER WITH (the plan's largest unknown and its first security stop).
+// WHOSE RIGHTS HCS'S PLAN 9 SERVER SERVES A FOLDER WITH: the largest unknown of the Windows VM, and its first security stop.
 // A share is added with the caller's own token and UseShareRootIdentity (native/windows/hcs, flags); the guest must
 // reach exactly what the user can, and nothing more. On a standard account and on an administrator's: a folder with a
 // subfolder only an administrator can read, another user's folder, and a file the user may read but not write. A
 // server that serves a share with the VM's or SYSTEM's rights would let a user read what they cannot, and is a
-// security finding: folder sharing stays off, and the app's own Plan 9 server is built (C3b).
+// security finding: folder sharing stays off, and the app's own Plan 9 server is built instead.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts identity
 // FAIL is a security finding: STOP and report it before anything else.
 

@@ -1,4 +1,4 @@
-// A real sleep during a command (Mw10), by hand: on a modern-standby laptop and an S3 desktop, and a hibernate, the
+// A real sleep during a command, by hand: on a modern-standby laptop and an S3 desktop, and a hibernate, the
 // guest's clock, the link's keepalive and the command's timeout. Hyper-V's VMs stay in memory through S3 and modern
 // standby, and powerMonitor's resume fires on Windows, so the keepalive reset and the time message are unchanged.
 // This starts a command that sleeps the guest then reports its clock; the tester sleeps the PC while it runs.

@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 
 // The measurements of the Windows VM, on a PC alone (harness.ts): each file of this folder is one, run by name, one
-// at a time, each with an hour at most. Their order on the test day is Mw17's security stop first (identity), then
+// at a time, each with an hour at most. Their order on the test day is the share-identity security stop first (identity), then
 // boot, ports, disks, owners, readonly, shares, coherence, mmap, folders, lifetime, memory, beside, defender,
 // requirements; sleep is by hand.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts identity

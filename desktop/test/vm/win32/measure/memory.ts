@@ -1,4 +1,4 @@
-// The host memory a 2 GiB guest holds over a working day (Mw11), with the cold discard hint and the page reporting
+// The host memory a 2 GiB guest holds over a working day, with the cold discard hint and the page reporting
 // order WSL picks (native/windows/hcs): vmmem's working set idle, at a command's 1.5 GiB peak, and each minute after
 // it ends, for MEASURE_MINUTES (20 unless set). Decides a ceiling to write down.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts memory

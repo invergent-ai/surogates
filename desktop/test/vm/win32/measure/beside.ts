@@ -1,4 +1,4 @@
-// Beside the other virtualization a PC may run (Mw15): WSL2 and Docker Desktop running; VirtualBox and VMware
+// Beside the other virtualization a PC may run: WSL2 and Docker Desktop running; VirtualBox and VMware
 // Workstation installed; Memory Integrity and Credential Guard on; beside Windows Sandbox. Nothing fails if all pass.
 // This boots the guest and runs a command, and records what else the PC is running, for the tester to read beside the
 // matrix of what was on.

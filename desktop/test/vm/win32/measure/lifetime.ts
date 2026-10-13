@@ -1,4 +1,4 @@
-// What is left behind when a VM ends each way (Mw9): surogate-vm.exe killed, the VM manager killed, the app ended
+// What is left behind when a VM ends each way: surogate-vm.exe killed, the VM manager killed, the app ended
 // from Task Manager, the service killed and restarted. Look for a vmmem or vmwp left, a pipe, or an app process.
 // Decides whether anything needs a sweep (the service ends a VM at its next boot for the data root, by the VM's ID).
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts lifetime

@@ -7,7 +7,7 @@
 //
 // Each folder is a Plan 9 share of HCS's own server (guest/protocol.ts, the p9 kind): its uid is applied at the
 // guest's mount, in the share's aname, so each root's files are its own, as on Linux. Whose rights the server serves
-// a folder with is this plan's open question (Mw17): until a standard account has passed it, no folder is shared, and
+// a folder with is an open question answered only on a PC: until a standard account has passed that check, no folder is shared, and
 // a 9P server of the app's own is built instead. surogate-vm.exe stops the VM when its stdin ends; the service ends it
 // besides when surogate-vm.exe, the VM manager or the service itself goes.
 
@@ -140,7 +140,7 @@ export function checkWin32(program = VM_PROGRAM, ms = 5_000): Promise<Lacks> {
 /**
  * What this computer lacks of what its VM runs on, in Section 11's words, from *probe* (surogate-vm check). The
  * sandbox needs no tool on the PATH on Windows: the image is unpacked with Node's own zstd, and the file host is the
- * file tools' (milestone D). Whether this computer's processor has virtualization at all is HCS's own answer at the
+ * file tools' own. Whether this computer's processor has virtualization at all is HCS's own answer at the
  * first boot, HCS_E_HYPERV_NOT_INSTALLED, which the boot surfaces, not a requirement read up front.
  */
 export async function requirementsWin32(probe: () => Promise<Lacks> = () => checkWin32()): Promise<string[]> {

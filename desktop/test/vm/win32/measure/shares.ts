@@ -1,6 +1,6 @@
 // Plan 9 shares added and removed while the guest runs (HcsModifyComputeSystem): how long a share and its removal
 // take, 40 cycles with two roots, eight at once, and a removal while the guest still holds the mount. Decides the
-// share's deadline and what a held share does (Mw3).
+// share's deadline and what a held share does.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts shares
 // PASS or FAIL: 40 cycles each read their own folder, and a removal of a held share ends the VM by the deadline.
 

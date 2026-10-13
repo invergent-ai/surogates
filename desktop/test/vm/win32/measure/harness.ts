@@ -1,5 +1,5 @@
 // What every measurement of the Windows VM shares: the guest booted on this PC through the real surogate-vm.exe, as
-// the app's VM manager boots it but for the clean spawn (the shell's helper, milestone E), a root set up on a folder
+// the app's VM manager boots it but for the clean spawn (the shell's helper), a root set up on a folder
 // of the measurement's own, its commands, and its findings written down. Run on a Windows PC alone, each a vitest file
 // of this folder, run by its own config (vitest.config.ts here), after an elevated dev-service.ps1 has installed the
 // Surogate VM service (native/windows/dev-service.ps1) and the Rust programs are built.
@@ -22,7 +22,7 @@ import { identityOf } from "../../../../src/files/identity.js";
 import { win32Boot } from "../../../../src/vm/win32.js";
 
 export const DESKTOP = realpathSync(fileURLToPath(new URL("../../../../", import.meta.url)));
-/** The x64 guest image (gh run download of milestone B's artifact): SUROGATE_VM_IMAGE, else the repository's out folder. */
+/** The x64 guest image (gh run download of the guest build's artifact): SUROGATE_VM_IMAGE, else the repository's out folder. */
 export const IMAGE = realpathSync(process.env.SUROGATE_VM_IMAGE ?? join(DESKTOP, "..", "images", "guest", "out"));
 /** The agent disk as a fixed VHD: the app's, or the one whose init runs a measurement's probe as root. */
 export const AGENT_DISK = process.env.SUROGATE_VM_AGENT_DISK ?? join(DESKTOP, "dist", "agent.vhd");

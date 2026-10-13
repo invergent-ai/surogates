@@ -1,7 +1,7 @@
 // The read-only share: a folder's place shares the folder itself to the guest's root with ReadOnly (native/windows/
 // hcs, flags). The guest's root, as the measurements' agent disk runs it, tries everything that writes: a remount
 // read-write, a write, chmod, setxattr, truncate, hard and symbolic links, a rename, an unlink and a mkdir. Decides
-// that a place's folder stays safe from the guest's root (Mw8).
+// that a place's folder stays safe from the guest's root.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts readonly
 // A write that reaches the folder is a SECURITY finding: STOP and report it.
 

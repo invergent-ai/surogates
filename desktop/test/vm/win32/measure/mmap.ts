@@ -1,6 +1,6 @@
 // A shared map (mmap MAP_SHARED) of a file in a Plan 9 share: on 9p under cache=none the guest refuses it with EINVAL
-// where virtio-fs gives ENODEV (milestone B's stand-in showed EINVAL), so SQLite's WAL fails plainly either way.
-// Decides the model's note about databases in a folder (Mw6).
+// where virtio-fs gives ENODEV (the guest's stand-in showed EINVAL), so SQLite's WAL fails plainly either way.
+// Decides the model's note about databases in a folder.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts mmap
 // Written down, no PASS or FAIL: "refused" is the safe behaviour; "allowed" needs the note.
 
