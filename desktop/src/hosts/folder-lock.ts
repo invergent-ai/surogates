@@ -1,7 +1,7 @@
 // The lock that gives a folder one host at a time, as each OS takes it: one try, which a host repeats while it waits
 // (folder-record.ts, lockFolder). The kernel lets go of it when its holder dies, however it dies.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { takeDarwinLock } from "./folder-lock-darwin.js";
 import { takeLinuxLock } from "./folder-lock-linux.js";
 
@@ -15,5 +15,4 @@ export interface FolderLock {
  */
 export type TakeLock = (uid: number, dev: number, ino: number, dataDir?: string) => Promise<FolderLock | null>;
 
-const TAKE: Partial<Record<NodeJS.Platform, TakeLock>> = { linux: takeLinuxLock, darwin: takeDarwinLock };
-export const takeLock: TakeLock = TAKE[process.platform] ?? (async () => notBuilt("The folder lock"));
+export const takeLock: TakeLock = forThisOs<TakeLock>({ linux: takeLinuxLock, darwin: takeDarwinLock }) ?? (async () => notBuilt("The folder lock"));

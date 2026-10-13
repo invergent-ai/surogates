@@ -17,7 +17,7 @@
 import { type ChildProcess, spawn, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { notBuilt } from "./platform.js";
+import { forThisOs, notBuilt } from "./platform.js";
 
 const PERL = "/usr/bin/perl";
 // Its first argument: the last descriptor the program keeps. What follows: the program, by its whole
@@ -29,12 +29,11 @@ const LINE = 'use POSIX (); my $keep = shift; opendir(my $dir, "/proc/self/fd") 
 const SPAWN = fileURLToPath(new URL("../bin/surogate-spawn", import.meta.url));
 
 type Clean = (program: string, args: string[], keep: number) => [file: string, args: string[]];
-const CLEAN: Partial<Record<NodeJS.Platform, Clean>> = {
+const clean: Clean | null = forThisOs<Clean>({
   linux: (program, args, keep) => [PERL, ["-e", LINE, "--", String(keep), program, ...args]],
   // Its arguments: the last descriptor the program keeps, then the program and its arguments, as perl's.
   darwin: (program, args, keep) => [SPAWN, [String(keep), program, ...args]],
-};
-const clean: Clean | null = CLEAN[process.platform] ?? null;
+});
 
 /** What to run in place of *program* with *args*, so that it holds its first *keep* + 1 descriptors and no other. */
 export function cleanly(program: string, args: string[], keep = 2): [file: string, args: string[]] {

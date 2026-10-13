@@ -3,7 +3,7 @@
 
 import { expect, it } from "vitest";
 
-import { notBuilt, notBuiltWords, TARGETS, targetOf } from "../src/platform.js";
+import { forThisOs, notBuilt, notBuiltWords, TARGETS, targetOf } from "../src/platform.js";
 import { importedOn } from "./platforms.js";
 
 it("is the target of Linux on x64 and of macOS on Apple silicon, and of no other computer", () => {
@@ -30,6 +30,16 @@ it("names macOS's files in folders of their own, beside Linux's", () => {
   expect(darwin.tarball("1.2.3")).toBe("surogate-desktop-1.2.3-darwin-arm64.tar.gz");
   expect(darwin.releaseDir("1.2.3")).toBe("releases/1.2.3/darwin-arm64");
   expect(darwin.latest).toBe("darwin-arm64/latest.json");
+});
+
+it("gives a part its row for the OS it runs on, by one lookup, or null on an OS it has none for", () => {
+  const rows = { linux: "Linux's", darwin: "macOS's" };
+  expect(forThisOs(rows, "linux")).toBe("Linux's");
+  expect(forThisOs(rows, "darwin")).toBe("macOS's");
+  expect(forThisOs(rows, "win32")).toBeNull();
+  expect(forThisOs({ win32: 0 }, "win32")).toBe(0);
+  // This computer's, by default.
+  expect(forThisOs({ [process.platform]: "here" })).toBe("here");
 });
 
 it("says plainly, of a part that has only Linux's side so far, that it is not built for another OS yet", () => {

@@ -1,11 +1,11 @@
 // A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux, in the
-// arguments it starts with, or in a second launch's, which the running app is given, as Claude
-// Desktop's second-instance hands its argv to its link handler (index.js); on macOS, in an event of
+// arguments it starts with, or in a second launch's, which the running app is given by Electron's
+// second-instance with its argv; on macOS, in an event of
 // the running app's, which Launch Services sends it, starting it first where it is not running. Only
 // surogate://open?url=<agent address> is one: it opens that agent, at a page of its web client
 // when the address names one. A link names no local path, and grants nothing.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { canonicalOrigin } from "./agents.js";
 import { webClientPath } from "./window-policy.js";
 
@@ -35,10 +35,11 @@ export function linkIn(argv: readonly string[]): OpenLink | null {
 }
 
 /** The link a launch with *argv* hands the app, the first launch or a second, by this OS's way of handing one. */
-export const linkOfLaunch: (argv: readonly string[]) => OpenLink | null = process.platform === "linux"
-  ? linkIn
+export const linkOfLaunch: (argv: readonly string[]) => OpenLink | null = forThisOs<(argv: readonly string[]) => OpenLink | null>({
+  linux: linkIn,
   // macOS hands no link in a launch's arguments: each comes as an event (listenForLinks).
-  : process.platform === "darwin" ? () => null : () => notBuilt("The arrival of surogate:// links");
+  darwin: () => null,
+}) ?? (() => notBuilt("The arrival of surogate:// links"));
 
 /** What of Electron's app a link comes by on macOS: its open-url event. */
 export interface LinkEvents {
@@ -60,6 +61,6 @@ function openUrls(app: LinkEvents, open: (link: OpenLink) => void): void {
  * Each link the system hands the running app as an event, from now on, given to *open*: on macOS, by
  * *app*'s open-url, a listener set before the app is ready; Linux hands none so (linkOfLaunch).
  */
-export const listenForLinks: (app: LinkEvents, open: (link: OpenLink) => void) => void = process.platform === "linux"
-  ? () => {}
-  : process.platform === "darwin" ? openUrls : () => notBuilt("The arrival of surogate:// links");
+export const listenForLinks: (app: LinkEvents, open: (link: OpenLink) => void) => void = forThisOs<(app: LinkEvents, open: (link: OpenLink) => void) => void>({
+  linux: () => {}, darwin: openUrls,
+}) ?? (() => notBuilt("The arrival of surogate:// links"));

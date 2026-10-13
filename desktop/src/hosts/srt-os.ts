@@ -2,7 +2,7 @@
 // the helper in bubblewrap on Linux (srt-linux.ts) and in Apple's sandbox-exec on macOS (srt-darwin.ts). The
 // policy (policy.ts) and the host (host.ts) take each from here, picked once, as this module is imported.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { DARWIN_SRT } from "./srt-darwin.js";
 import { LINUX_SRT } from "./srt-linux.js";
 
@@ -39,4 +39,4 @@ const UNBUILT: SrtOs = {
   tempFolder: refused, socketsFit: refused, sweep: refused, folderBytes: null,
 };
 
-export const srtOs: SrtOs = ({ linux: LINUX_SRT, darwin: DARWIN_SRT } as Partial<Record<NodeJS.Platform, SrtOs>>)[process.platform] ?? UNBUILT;
+export const srtOs: SrtOs = forThisOs<SrtOs>({ linux: LINUX_SRT, darwin: DARWIN_SRT }) ?? UNBUILT;

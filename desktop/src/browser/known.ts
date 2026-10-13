@@ -3,7 +3,7 @@
 // pick in Custom… names. Linux's (known-linux.ts) and macOS's (known-darwin.ts); an OS the app
 // drives no browser on yet knows none, and refuses each one picked.
 
-import { notBuiltWords } from "../platform.js";
+import { forThisOs, notBuiltWords } from "../platform.js";
 import type { BrowserId, Disk } from "./choose.js";
 import { DARWIN } from "./known-darwin.js";
 import { LINUX } from "./known-linux.js";
@@ -37,4 +37,4 @@ const NONE: KnownBrowsers = {
   checked: async () => {},
 };
 
-export const KNOWN_BROWSERS: KnownBrowsers = process.platform === "linux" ? LINUX : process.platform === "darwin" ? DARWIN : NONE;
+export const KNOWN_BROWSERS: KnownBrowsers = forThisOs({ linux: LINUX, darwin: DARWIN }) ?? NONE;

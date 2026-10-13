@@ -2,6 +2,7 @@
 // files have on the release bucket, under <base>/desktop/ (release/publish.sh, target_files, names
 // them the same). Linux's are the names every release before macOS's had; macOS's are in folders of
 // their own beside them, so that neither's latest.json names the other's release.
+// And the one lookup by which each part of the app picks its side for the OS it runs on.
 // Electron-free.
 
 export type Target = "linux-x64" | "darwin-arm64";
@@ -34,8 +35,16 @@ export const TARGETS: Readonly<Record<Target, TargetFiles>> = {
   },
 };
 
+/**
+ * A part's row for *platform*, this computer's OS by default, or null where it has none: one lookup for every part
+ * that differs by OS, so that an OS is a row of each, and a part is picked once, as its module is imported.
+ */
+export function forThisOs<T>(rows: Partial<Record<NodeJS.Platform, T>>, platform: NodeJS.Platform = process.platform): T | null {
+  return rows[platform] ?? null;
+}
+
 // The OS this app runs on, by the name a person knows it by: read once, as each part picks its side.
-const OS = process.platform === "darwin" ? "macOS" : process.platform;
+const OS = forThisOs({ darwin: "macOS" }) ?? process.platform;
 
 /** What a part of the app that has only Linux's side so far says on another OS: that *what* is not built for that OS yet. */
 export const notBuiltWords = (what: string): string => `${what} is not built for ${OS} yet`;

@@ -1,7 +1,7 @@
 // Where the app keeps what it keeps, by this computer's OS: Linux's (places-linux.ts) and macOS's
 // (places-darwin.ts). Electron-free.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { DARWIN } from "./places-darwin.js";
 import { LINUX } from "./places-linux.js";
 
@@ -18,6 +18,5 @@ export interface Places {
 }
 
 /** The app's places for the user whose home is *home*, by *env*. */
-export const placesFor: (env: NodeJS.ProcessEnv, home: string) => Places = process.platform === "linux"
-  ? LINUX.placesFor
-  : process.platform === "darwin" ? DARWIN.placesFor : () => notBuilt("Surogate Desktop's data folder");
+export const placesFor: (env: NodeJS.ProcessEnv, home: string) => Places = forThisOs({ linux: LINUX.placesFor, darwin: DARWIN.placesFor })
+  ?? (() => notBuilt("Surogate Desktop's data folder"));

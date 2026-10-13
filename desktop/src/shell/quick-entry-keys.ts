@@ -3,15 +3,16 @@
 
 import type { App, BrowserWindow } from "electron";
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./quick-entry-darwin.js";
 import * as linux from "./quick-entry-linux.js";
 
-export const QUICK_ENTRY: {
+interface QuickEntry {
   quickEntryKeys(env: NodeJS.ProcessEnv): string | null;
   unheld(keys: string): string | null;
   present(app: Pick<App, "focus">, window: BrowserWindow): void;
-} = process.platform === "linux" ? linux : process.platform === "darwin" ? darwin : {
+}
+export const QUICK_ENTRY: QuickEntry = forThisOs<QuickEntry>({ linux, darwin }) ?? {
   quickEntryKeys: () => notBuilt("Surogate Desktop's quick entry shortcut"),
   unheld: () => notBuilt("Surogate Desktop's quick entry shortcut"),
   present: () => notBuilt("Surogate Desktop's quick entry"),

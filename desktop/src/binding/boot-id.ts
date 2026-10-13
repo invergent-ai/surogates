@@ -5,8 +5,9 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 import { cleanly } from "../clean-child.js";
+import { forThisOs } from "../platform.js";
 
-const READ: Partial<Record<NodeJS.Platform, () => string>> = {
+const read = forThisOs<() => string>({
   // The kernel's boot id.
   linux: () => readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
   // The kernel's boot session UUID, which sysctl(8) reads for any user; started cleanly, as every program the app runs.
@@ -15,9 +16,8 @@ const READ: Partial<Record<NodeJS.Platform, () => string>> = {
     const read = spawnSync(file, args, { encoding: "utf8", env: {}, stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 });
     return read.status === 0 ? read.stdout.trim() : "";
   },
-};
 // Another OS has none until its own is read here.
-const read = READ[process.platform] ?? (() => "");
+}) ?? (() => "");
 
 /** This boot's identity; "" where it cannot be read, which counts as this boot. */
 export function bootId(): string {

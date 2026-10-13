@@ -5,7 +5,7 @@
 
 import type { MenuItemConstructorOptions } from "electron";
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./menus-darwin.js";
 import * as linux from "./menus-linux.js";
 
@@ -22,7 +22,12 @@ export interface MenuActions {
 
 // What differs by OS: the menus before Edit, those after View and Developer, and the tray's icon
 // (menus-linux.ts, menus-darwin.ts).
-const OS = process.platform === "linux" ? linux : process.platform === "darwin" ? darwin : {
+interface OsMenus {
+  firstMenus(act: MenuActions): MenuItemConstructorOptions[];
+  lastMenus(act: MenuActions): MenuItemConstructorOptions[];
+  trayIcon(dark: boolean, desktop: string | undefined): string;
+}
+const OS: OsMenus = forThisOs<OsMenus>({ linux, darwin }) ?? {
   firstMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
   lastMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
   trayIcon: (): string => notBuilt("Surogate Desktop's tray icon"),

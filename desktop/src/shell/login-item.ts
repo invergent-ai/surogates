@@ -2,7 +2,7 @@
 // autostart folder (login-item-linux.ts); macOS's, the app itself as the user's login item
 // (login-item-darwin.ts). Electron-free.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./login-item-darwin.js";
 import * as linux from "./login-item-linux.js";
 import type { Places } from "./places.js";
@@ -25,6 +25,6 @@ export interface LoginSystem {
 }
 
 /** The login item of the app whose places are *places*, which *system*, Electron's app, keeps where the OS does. */
-export const loginItemFor: (places: Places, system: LoginSystem) => LoginItem = process.platform === "linux"
-  ? linux.loginItem
-  : process.platform === "darwin" ? darwin.loginItem : () => notBuilt("Surogate Desktop's start at login");
+export const loginItemFor: (places: Places, system: LoginSystem) => LoginItem = forThisOs<(places: Places, system: LoginSystem) => LoginItem>({
+  linux: linux.loginItem, darwin: darwin.loginItem,
+}) ?? (() => notBuilt("Surogate Desktop's start at login"));

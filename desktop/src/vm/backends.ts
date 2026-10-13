@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { HostUser } from "../guest/protocol.js";
+import { forThisOs } from "../platform.js";
 import { bootDarwin, requirementsDarwin, runtimeFolder, SOCKET_MAX } from "./darwin.js";
 import { bootLinux, missingTools } from "./linux.js";
 import type { BootVm } from "./manager.js";
@@ -46,5 +47,5 @@ const DARWIN: Backend = {
 
 /** The backend for *platform*: Linux's or macOS's, or null on an OS whose backend is not built yet. */
 export function backendFor(platform: NodeJS.Platform): Backend | null {
-  return platform === "linux" ? LINUX : platform === "darwin" ? DARWIN : null;
+  return forThisOs({ linux: LINUX, darwin: DARWIN }, platform);
 }
