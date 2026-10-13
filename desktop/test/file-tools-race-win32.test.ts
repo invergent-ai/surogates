@@ -1,4 +1,4 @@
-// Spike Q7's race on Windows (file-tools-race.test.ts on Linux and macOS): a program of this computer's flips a folder
+// The race on Windows (file-tools-race.test.ts on Linux and macOS): a program of this computer's flips a folder
 // in the chat's folder between a folder and a junction to one beside it, while the file tools work through it. On
 // Windows there is no sandbox: the file helper the app starts, on its own node, is contained by its walk alone
 // (src/files/fd-paths-win32.ts), so the race goes to that helper as the host starts it. A bare control does the same
@@ -68,7 +68,7 @@ async function race(answer: Answer, folder: string) {
   let wrote = 0;
   try {
     for (let i = 0; i < ROUNDS; i += 1) {
-      if ("ok" in (await answer("write", { key: `${folder}/sub/x-${i}`, data: Buffer.from("m8\n").toString("base64") }))) wrote += 1;
+      if ("ok" in (await answer("write", { key: `${folder}/sub/x-${i}`, data: Buffer.from("raced\n").toString("base64") }))) wrote += 1;
       const read = await answer("read", { key: `${folder}/sub/only-outside`, max_bytes: null });
       if ("ok" in read && typeof read.ok === "string" && Buffer.from(read.ok, "base64").toString() === "OUTSIDE\n") reached += 1;
       const listed = await answer("list_dir", { key: `${folder}/sub` });
