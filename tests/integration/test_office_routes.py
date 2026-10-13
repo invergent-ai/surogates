@@ -12,10 +12,12 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+from sqlalchemy import delete
 
+from surogates.db.models import OfficeSession
 from surogates.devices.binding import Binding
 from surogates.office import sessions as office_sessions
-from surogates.office.tokens import read_url_token
+from surogates.office.tokens import read_url_token, sign
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import session_workspace_key
 from surogates.tenant.auth.jwt import create_access_token
@@ -26,6 +28,13 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 JWT_SECRET = "j" * 32
 TOKEN_SECRET = "t" * 32
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _no_rows(session_factory):
+    """Each test sees only its own rows: the save worker claims pending rows across the whole table."""
+    async with session_factory() as db, db.begin():
+        await db.execute(delete(OfficeSession))
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -225,3 +234,121 @@ async def test_scheduled_run_opens_read_only(client, app, session_factory):
     response = await client.get(f"/v1/sessions/{run.id}/workspace/editor", params={"path": "r.docx"}, headers=headers)
     assert response.status_code == 200, response.text
     assert response.json()["config"]["editorConfig"]["mode"] == "view"
+
+
+def _tokens(config):
+    file_token = config["document"]["url"].rsplit("/", 1)[1]
+    callback_token = config["editorConfig"]["callbackUrl"].rsplit("/", 1)[1]
+    return file_token, callback_token
+
+
+async def _opened(client, app, session_factory, **kwargs):
+    session_id, headers, user_id, session = await _user_chat(client, app, session_factory, **kwargs)
+    config = (await client.get(f"/v1/sessions/{session_id}/workspace/editor",
+                               params={"path": kwargs.get("path", "docs/Plan.docx")}, headers=headers)).json()["config"]
+    row_id = read_url_token(TOKEN_SECRET, _tokens(config)[0], "file")
+    return session_id, headers, session, config, row_id
+
+
+async def test_document_server_fetches_the_file(client, app, session_factory):
+    _, _, _, config, row_id = await _opened(client, app, session_factory, content=b"PK-original")
+    file_token, _ = _tokens(config)
+    response = await client.get(f"/v1/office/files/{file_token}")
+    assert response.status_code == 200
+    assert response.content == b"PK-original"
+    assert (await office_sessions.get_open(session_factory, row_id)).base_version
+
+
+async def test_bad_file_token_is_refused(client):
+    assert (await client.get("/v1/office/files/not-a-token")).status_code == 403
+
+
+async def test_status_1_records_editors(client, app, session_factory):
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    body = {"key": config["document"]["key"], "status": 1, "users": ["user:1"]}
+    response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+    assert response.json() == {"error": 0}
+    assert (await office_sessions.get_open(session_factory, row_id)).editors == ("user:1",)
+
+
+async def test_unsigned_callback_is_refused(client, app, session_factory):
+    _, _, _, config, _ = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    response = await client.post(f"/v1/office/callback/{callback_token}", json={"status": 1, "users": []})
+    assert response.status_code == 403
+
+
+async def test_callback_for_another_document_is_refused(client, app, session_factory, monkeypatch):
+    """A body the document server signed for one document cannot act on another's row."""
+    from surogates.api.routes import office as office_route
+    downloads: list[str] = []
+
+    async def fake_download(url: str) -> bytes:
+        downloads.append(url)
+        return b"PK-other"
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, _, _, other, _ = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    for body in (
+        {"key": other["document"]["key"], "status": 1, "users": ["user:1"]},
+        {"key": other["document"]["key"], "status": 2, "url": "https://office.example/cache/files/y/output.docx"},
+    ):
+        response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+        assert response.status_code == 403
+    document = await office_sessions.get_open(session_factory, row_id)
+    assert document.editors == ()
+    assert document.pending_save is None
+    assert downloads == []
+
+
+async def test_save_is_taken_and_kept_pending(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+    downloads: list[str] = []
+
+    async def fake_download(url: str) -> bytes:
+        downloads.append(url)
+        return b"PK-edited"
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    _, _, session, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    body = {"key": config["document"]["key"], "status": 2, "url": "https://office.example/cache/files/x/output.docx?md5=1"}
+    response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+    assert response.json() == {"error": 0}
+    assert downloads == ["http://docs.internal/cache/files/x/output.docx?md5=1"]
+    pending = (await office_sessions.get_open(session_factory, row_id)).pending_save
+    assert pending["close"] is True
+    assert pending["key"].startswith(f"_office/pending/{config['document']['key']}/")
+    assert await app.state.storage.read(pending["bucket"], pending["key"]) == b"PK-edited"
+
+
+async def test_newer_save_removes_the_older_pending_object(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+    contents = iter([b"first", b"second"])
+
+    async def fake_download(url: str) -> bytes:
+        return next(contents)
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    url = "https://office.example/cache/files/x/output.docx"
+    for status in (6, 6):
+        body = {"key": config["document"]["key"], "status": status, "url": url}
+        await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+    pending = (await office_sessions.get_open(session_factory, row_id)).pending_save
+    assert await app.state.storage.read(pending["bucket"], pending["key"]) == b"second"
+    keys = [e["key"] for e in await app.state.storage.list_entries(pending["bucket"], prefix=f"_office/pending/{config['document']['key']}/")]
+    assert keys == [pending["key"]]
+
+
+async def test_closed_document_refuses_callbacks(client, app, session_factory):
+    _, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    await office_sessions.close(session_factory, row_id)
+    body = {"key": config["document"]["key"], "status": 1, "users": []}
+    response = await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+    assert response.status_code == 404
