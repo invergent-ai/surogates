@@ -39,6 +39,8 @@ export default defineConfig({
     environment: "node",
     testTimeout: 10_000,
     globalSetup: ["test/srt-tmp.ts", "test/isolated.ts"],
+    // The VM suite on the stand-in for Hyper-V's devices, where a run asks for it (test/vm/hyperv/standin.ts).
+    setupFiles: process.env.SUROGATE_VM_STANDIN ? ["test/vm/hyperv/setup.ts"] : [],
     projects: [
       { extends: true, test: { name: "unit", include: ["test/**/*.test.ts"], exclude: [...configDefaults.exclude, ...MOUNTING] } },
       { extends: true, test: { name: "mounting", include: MOUNTING, sequence: { groupOrder: 1 } } },
