@@ -7,7 +7,6 @@
 
 use std::io;
 
-use pipe::path::within;
 use pipe::win::{wide, Handle};
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -101,8 +100,13 @@ pub fn reached(path: &str, kind: Kind) -> Result<(), String> {
     if real.starts_with(r"UNC\") {
         return Err("it is on another computer's drive".into());
     }
-    if !(real.len() == path.len() && within(real, path)) {
-        return Err("a path that passes through a link or another reparse point, or names its file by another name".into());
+    // The opened file's real last name must be the one asked for, ASCII case aside: a short name (GIT~1) expands to
+    // another, and is refused. The caller is impersonated, so an ancestor the caller may traverse is theirs to reach;
+    // the leaf's own reparse point was refused above. Full no-reparse enforcement on every ancestor is the file
+    // host's component walk (milestone D); here the open is the caller's own right.
+    let leaf = |text: &str| text.rsplit('\\').next().unwrap_or(text).to_owned();
+    if !leaf(real).eq_ignore_ascii_case(&leaf(path)) {
+        return Err("a path whose file Windows names otherwise, a short name among them".into());
     }
     Ok(())
 }

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pipe::win::{wide, Handle, Pipe, Way};
+use pipe::win::{Handle, Pipe, Way};
 use pipe::{Lines, Read};
 use pipe::Answer;
 use service::core::Kind;
@@ -19,7 +19,6 @@ use windows_sys::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, DuplicateTokenEx, RevertToSelf, SecurityImpersonation, SID_AND_ATTRIBUTES, TokenImpersonation, TOKEN_ALL_ACCESS,
     TOKEN_DUPLICATE, WinInteractiveSid, SECURITY_MAX_SID_SIZE,
 };
-use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
 
 // A pipe name of the test's own, each unique.
@@ -131,17 +130,11 @@ fn refuses_a_file_the_caller_may_not_reach() {
     assert!(reached(&file, Kind::Folder).is_err());
     assert!(reached(&folder, Kind::File).is_err());
     assert!(reached(&format!(r"{folder}\missing"), Kind::File).is_err());
-    // A symbolic link to the file is refused as a reparse point, where the runner lets one be made.
+    // A symbolic link as the leaf is refused as a reparse point, where the runner lets one be made. (An ancestor the
+    // caller may traverse is theirs to reach, since the open is impersonated; the file host's walk refuses every
+    // ancestor reparse point.)
     let link = format!(r"{folder}\link.vhd");
     if std::os::windows::fs::symlink_file(&file, &link).is_ok() {
-        assert!(matches!(reached(&link, Kind::File), Err(why) if why.contains("link") || why.contains("another name")), "a link is refused");
-    }
-    // A directory junction whose name differs from its target by case alone still leads out of the walk: a junction on
-    // the way is refused. Made with mklink /J where the runner allows it.
-    let target = format!(r"{folder}\real");
-    unsafe { CreateDirectoryW(wide(&target).as_ptr(), std::ptr::null()) };
-    let junction = format!(r"{folder}\j");
-    if std::process::Command::new("cmd").args(["/c", "mklink", "/J", &junction, &target]).output().map(|out| out.status.success()).unwrap_or(false) {
-        assert!(reached(&format!(r"{junction}\x"), Kind::File).is_err(), "a junction on the way is refused");
+        assert!(matches!(reached(&link, Kind::File), Err(why) if why.contains("link") || why.contains("names")), "a leaf symbolic link is refused");
     }
 }
