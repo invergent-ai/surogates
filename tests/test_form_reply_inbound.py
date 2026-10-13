@@ -130,6 +130,18 @@ def test_answers_read_as_the_options_the_person_picked():
     )
 
 
+def test_a_multi_line_answer_continues_on_indented_lines():
+    from surogates.channels.whatsapp_flows import form_reply_text
+
+    form = {"name": "n", "title": "Notă", "fields": [
+        {"name": "note", "label": "Notă", "type": "TextArea"},
+        {"name": "pain", "label": "Durere", "type": "TextInput"},
+    ]}
+    assert form_reply_text(form, {"note": "Dimineața: bine\r\nSeara: rău", "pain": "3"}) == (
+        "Form 'Notă' submitted:\nNotă: Dimineața: bine\n  Seara: rău\nDurere: 3"
+    )
+
+
 async def test_a_program_button_token_names_the_form_by_its_flow_id(monkeypatch):
     async def sent_in_session(sf, session_id, token):
         return token.split(":", 1)[0]
