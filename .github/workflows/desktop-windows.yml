@@ -99,7 +99,7 @@ jobs:
         run: npm ci
 
       - name: Record what the runner's file system does
-        run: powershell -NoProfile -File test/win32/ntfs-facts.ps1 >> $env:GITHUB_STEP_SUMMARY
+        run: powershell -NoProfile -File test/win32/ntfs-facts.ps1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
 
       - name: Build the file host
         run: |

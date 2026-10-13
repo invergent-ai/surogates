@@ -6,13 +6,13 @@
 // dist/native/ntat.node and the app's rg at bin/rg.exe, and runs on Windows alone, on real NTFS.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { Outcome } from "../src/link/protocol.js";
 import { built } from "./built.js";
@@ -121,15 +121,17 @@ let guest = "";
 
 describe.runIf(WINDOWS)("the file tools on Windows, against a process of this computer's racing them", { timeout: 600_000 }, () => {
   it("reach nothing beside the folder through the helper's walk, where the same operations on Node's own fs do", async () => {
-    vi.resetModules();
-    const { win32FdPaths, guestPathOf } = await import("../src/files/fd-paths-win32.js");
+    const { identityFrom, guestPathOf } = await import("../src/files/fd-paths-win32.js");
+    const { ntat } = await import("../src/files/ntat.js");
     guest = guestPathOf(host)!;
     const control = await race(bare, guest);
     expect(control.reached + control.wroteOutside).toBeGreaterThan(0);
 
-    // The helper as its host starts it on Windows: the app's node, the helper's own line, no sandbox.
-    win32FdPaths.bind([guest]);
-    const is = win32FdPaths.lstat(guest);
+    // The helper as its host starts it on Windows: the app's node, the helper's own line, no sandbox, and the folder's
+    // identity as its host read it.
+    const root = ntat().openRoot(`\\\\?\\${host}`);
+    const is = identityFrom(ntat().query(root));
+    closeSync(root);
     const helper = spawn(process.execPath, ["--disable-sigusr1", built(join(DESKTOP, "dist", "files", "helper.js"))], {
       cwd: base,
       env: { SystemRoot: process.env.SystemRoot ?? "", SUROGATE_FOLDER: guest, HOME: guest, SUROGATE_FOLDER_IS: `${Number(is.dev)}:${Number(is.ino)}`, PATH: BIN },
@@ -162,6 +164,7 @@ describe.runIf(WINDOWS)("the file tools on Windows, against a process of this co
       expect(contained.wrote).toBeLessThan(ROUNDS);
     } finally {
       helper.kill();
+      await new Promise((resolve) => helper.once("exit", resolve));
     }
   });
 });

@@ -81,3 +81,92 @@ Each comes here with its part, as a measurement of its own, run in this order. *
 18. **Install and first run**, on Windows 11 Home and Pro: Virtual Machine Platform off, the MSI turning it on, the restart and the first boot; virtualization off in the firmware; a VM without nested virtualization; the boot's identity across a restart.
 19. **Updates.** UAC's prompt and the publisher it names; a standard user's words; a dismissed prompt; nothing left waiting for a restart; the new app started as the user, not elevated.
 20. **SmartScreen and Smart App Control** on the signed MSI's first download on a clean PC.
+
+## The file host's walk on this PC (security first)
+
+Windows has no sandbox for the file helper: the walk is the only thing that keeps the file tools inside the folder (`src/files/fd-paths-win32.ts`, `native/ntat/ntat.c`). These steps run its suites on this PC's own disks, and the race in each kind of folder a person binds. **A FAIL of the race, or of any test that names a junction, a link or a short name, is a security finding: stop and report it before anything else.**
+
+### Build
+
+From `desktop`, in PowerShell:
+
+```
+npx tsc -p tsconfig.build.json
+powershell -File native\ntat\build.ps1
+& "C:\Program Files\Git\bin\bash.exe" scripts/rg.sh
+```
+
+- `build.ps1` finds Visual Studio's C++ tools by itself, and fetches Node's headers and `node.lib`, each checked against its pinned sha256.
+- Pass: `dist\native\ntat.node` and `bin\rg.exe` are there.
+
+### The suites
+
+```
+npx vitest run --project unit --reporter=verbose test/ntat-win32.test.ts test/folder-lock-win32.test.ts test/fs-through-walk.test.ts test/file-host-win32.test.ts test/file-tools-race-win32.test.ts
+```
+
+- The short-name test sets a short name with `fsutil file setshortname`, which needs an administrator: run this one elevated, in the test account.
+- Pass: every test passes. The race prints one line, `the race on Windows: {...}`, whose `contained` part is `{"reached":0,...,"wroteOutside":0,"kept":"OUTSIDE\n"}`.
+- **Send back:** the whole output, and the `short name of .git` and `case sensitive` lines it prints.
+
+### The race in each kind of folder
+
+The suites work in the temp folder. Point it at each kind of folder in turn, and run the race there:
+
+```
+foreach ($dir in "$env:USERPROFILE\Documents\race", "$env:OneDrive\race", "E:\race") {
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  $env:TEMP = $dir; $env:TMP = $dir
+  npx vitest run --project unit test/file-tools-race-win32.test.ts test/file-host-win32.test.ts 2>&1 | Select-String "the race on Windows|Tests "
+}
+```
+
+- `E:` stands for a USB drive formatted exFAT; use its letter. Add a ReFS Dev Drive's folder if the PC has one (`fsutil devdrv query`).
+- Pass, on NTFS and ReFS: `"reached":0` and `"wroteOutside":0` in each `contained` part.
+- On exFAT, which has no reparse points, no junction can be made: the control reaches nothing either, and its test fails with `expected 0 to be greater than 0`. That is the pass there; any other failure is not.
+- In OneDrive, record whether the files the suites make stay "Available on this device", and whether OneDrive shows any of them as a conflict.
+
+### OneDrive's placeholders
+
+In a folder of OneDrive's with Files On-Demand on, make a file "Online-only" (right click › Free up space), then from `desktop`:
+
+```
+$folder = "$env:OneDrive\race"   # the folder that holds the online-only file
+node --input-type=module -e "const w = await import('./dist/files/fd-paths-win32.js'); const root = w.guestPathOf(process.argv[1]); w.win32FdPaths.bind([root]); for (const name of w.win32FdPaths.readdir(root)) { const s = w.win32FdPaths.lstat(root + '/' + name); console.log(name, s.isFile(), s.isDirectory(), s.isSymbolicLink(), Number(s.size)); }" $folder
+```
+
+- Pass: the online-only file is listed as a file (`true false false`), not a link, with its size; Explorer still shows it online-only afterwards (a listing does not download it).
+- Then read it with the file tools: `node --input-type=module -e "const w = await import('./dist/files/fd-paths-win32.js'); const { perform } = await import('./dist/files/operations.js'); const root = w.guestPathOf(process.argv[1]); w.win32FdPaths.bind([root]); console.log(JSON.stringify(await perform('read', { key: root + '/' + process.argv[2], max_bytes: 64 }, { folder: root, home: root, env: {} }, new AbortController().signal)))" $folder <name>`
+- Record: whether it reads the file's bytes (OneDrive downloads it), or what error it answers. Either is safe; which one it is decides the words a person sees.
+
+### A folder on a network volume
+
+```
+net use Z: \\<a PC or server>\<a share>
+node --input-type=module -e "const { onNetworkVolume } = await import('./dist/binding/folder.js'); console.log(process.argv.slice(1).map(onNetworkVolume))" 'Z:\' '\\<a PC or server>\<a share>' $env:USERPROFILE
+net use Z: /delete
+```
+
+- Pass: `[ true, true, false ]`.
+
+### The boot's identity, across a restart, and in the app's own process
+
+```
+node -e "console.log(require(process.argv[1]).bootId())" (Resolve-Path dist\native\ntat.node)
+Set-Content "$env:TEMP\ntat-electron.cjs" "const { app } = require('electron'); app.whenReady().then(() => { const n = require(process.argv.at(-1)); console.log('bootId', n.bootId(), 'sid', n.userSid()); app.quit(); });"
+.\node_modules\electron\dist\electron.exe "$env:TEMP\ntat-electron.cjs" (Resolve-Path dist\native\ntat.node)
+```
+
+- The second loads ntat in Electron's main process, as the app's binder does, through the hook that finds node's exports in Electron's own program.
+- Restart the PC, and run the first line again.
+- Pass: Electron prints the same number as node; after the restart the number is one more (or larger).
+
+### Defender's cost
+
+With real-time protection on, then with the test's temp folder excluded by hand (Windows Security › Virus & threat protection › Exclusions), and the exclusion removed after:
+
+```
+Measure-Command { npx vitest run --project unit test/file-tools-race-win32.test.ts } | Select-Object TotalSeconds
+```
+
+- Record both times. Nothing passes or fails: the owner weighs an exclusion against the cost.

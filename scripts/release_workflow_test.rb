@@ -720,7 +720,7 @@ class ReleaseWorkflowTest < Minitest::Test
       },
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
-        "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 f40dd9c77e86b457 0e5aca50928ffe67 f4bd44c606874e67 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f]],
+        "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 987851a1dbf1a172 0e5aca50928ffe67 f4bd44c606874e67 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f]],
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
       },
       "release.yml" => {

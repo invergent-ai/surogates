@@ -4,7 +4,7 @@
 // rg at bin/rg.exe (scripts/rg.sh) and dist/native/ntat.node, and runs on Windows alone.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -153,8 +153,11 @@ describe.runIf(WINDOWS)("the file kinds on Windows", { timeout: 60_000 }, () => 
 
 describe.runIf(WINDOWS)("the file helper on Windows", { timeout: 60_000 }, () => {
   let helper: ChildProcess | null = null;
-  afterEach(() => {
-    helper?.kill();
+  afterEach(async () => {
+    if (helper && helper.exitCode === null && helper.signalCode === null) {
+      helper.kill();
+      await new Promise((resolve) => helper!.once("exit", resolve));
+    }
     helper = null;
   });
 
@@ -170,11 +173,14 @@ describe.runIf(WINDOWS)("the file helper on Windows", { timeout: 60_000 }, () =>
   }
 
   it("answers a request in a folder moved away and another made at its path as the folder unavailable", async () => {
-    const { fdPaths, guestPathOf, FOLDER_UNAVAILABLE } = await fresh();
+    const { identityFrom, guestPathOf, FOLDER_UNAVAILABLE } = await fresh();
+    const { ntat } = await import("../src/files/ntat.js");
     writeFileSync(join(host, "a"), "a");
     const root = guestPathOf(host)!;
-    fdPaths.bind([root]);
-    const is = fdPaths.lstat(root);
+    // Its identity as its host read it, by a handle let go at once: nothing of this process holds the folder.
+    const fd = ntat().openRoot(`\\\\?\\${host}`);
+    const is = identityFrom(ntat().query(fd));
+    closeSync(fd);
     const run = await started({ SUROGATE_FOLDER: root, HOME: root, SUROGATE_FOLDER_IS: `${Number(is.dev)}:${Number(is.ino)}`, PATH: BIN });
     expect(await run.next()).toBe('{"ready":true}');
     run.child.stdin!.write(`${JSON.stringify({ id: "1", kind: "read", args: { key: `${root}/a`, max_bytes: null } })}\n`);

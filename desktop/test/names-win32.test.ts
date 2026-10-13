@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { explorerActsOn } from "../src/files/explorer-names.js";
 import { nameRefusal, refusedName, windowsTakes } from "../src/files/names-win32.js";
-import { explorerRefusal, writeRefusal } from "../src/files/protect.js";
+import { explorerRefusal } from "../src/files/protect.js";
 import { importedOn } from "./platforms.js";
 import { REFUSED, TAKEN } from "./windows-names.js";
 
@@ -36,8 +36,9 @@ describe("the names Explorer acts on", () => {
     for (const name of written) {
       expect(explorerActsOn(name), name).toBe(true);
       expect(windows.writeRefusal(folder, `${folder}/${name}`), name).toBe(windows.explorerRefusal(`${folder}/${name}`));
-      expect(writeRefusal(folder, `${folder}/${name}`), name).toBeNull();
     }
+    const linux = await importedOn("linux", () => import("../src/files/protect.js"));
+    expect(written.map((name) => linux.writeRefusal(folder, `${folder}/${name}`))).toEqual(written.map(() => null));
     const darwin = await importedOn("darwin", () => import("../src/files/protect.js"));
     expect(written.map((name) => darwin.writeRefusal(folder, `${folder}/${name}`))).toEqual(written.map(() => null));
     expect(explorerRefusal("/x/desktop.ini")).toBe("Write denied: '/x/desktop.ini' is a name Windows's Explorer acts on when it shows this folder.");
