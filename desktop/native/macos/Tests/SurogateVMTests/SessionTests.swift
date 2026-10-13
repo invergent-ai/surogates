@@ -26,6 +26,9 @@ final class SessionTests: XCTestCase {
   private var exits: [Int32] = []
   private var made: [(MachinePlan, [Int32])] = []
   private var stand = Stand()
+  // The session's clock, in milliseconds: making the machine takes 7, and each start 30, from the boot line.
+  private var clock = 0.0
+  private let STARTED = Answer.started(BootTimes(validated: 7, running: 37))
 
   private func session(_ laid: Laid) -> Session {
     Session(places: laid.places, around: Surroundings(
@@ -33,9 +36,10 @@ final class SessionTests: XCTestCase {
       exit: { [unowned self] in exits.append($0) },
       machine: { [unowned self] plan, ports in
         made.append((plan, ports))
+        clock += 7
         return stand
       },
-      cpus: 1...8, memory: (128 << 20)...(16 << 30)
+      cpus: 1...8, memory: (128 << 20)...(16 << 30), now: { [unowned self] in clock }
     ))
   }
 
@@ -43,6 +47,7 @@ final class SessionTests: XCTestCase {
     let run = session(laid)
     run.connected([7, 8, 9])
     run.receive(.success(.boot(laid.boot)))
+    clock += 30
     stand.started?(nil)
     return run
   }
@@ -56,11 +61,24 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(made.map(\.1), [[7, 8, 9]])
     XCTAssertEqual(made.first?.0.disks.map(\.identifier), ["root", "agent", "sessions"])
     XCTAssertEqual(said, [])
+    clock += 30
     stand.started?(nil)
-    XCTAssertEqual(said, [.started])
+    XCTAssertEqual(said, [STARTED])
     run.receive(.success(.boot(laid.boot)))
     XCTAssertEqual(said.last, .refused(id: nil, why: "a boot after the first"))
     XCTAssertEqual(exits, [])
+  }
+
+  func testSaysHowLongAfterTheBootLineTheVMWasMadeAndRanWaitingForThePortsIncluded() throws {
+    let laid = try Laid(self)
+    clock = 1_000
+    let run = session(laid)
+    run.receive(.success(.boot(laid.boot)))
+    clock += 100.4
+    run.connected([7, 8, 9])
+    clock += 250
+    stand.started?(nil)
+    XCTAssertEqual(said, [.started(BootTimes(validated: 107, running: 357))])
   }
 
   func testFailsABootOfFilesItDoesNotTakeOrThatDoesNotStartAndExits() throws {
@@ -98,7 +116,7 @@ final class SessionTests: XCTestCase {
     stand.refuse = "the device took no new share"
     run.receive(.success(.share(id: 7, name: "r3", path: work, readOnly: false)))
     XCTAssertEqual(said, [
-      .started, .shared(id: 2, tag: "surogate", name: "r1"),
+      STARTED, .shared(id: 2, tag: "surogate", name: "r1"),
       .refused(id: 3, why: "the folder to share is the app's own, or holds it: \(laid.places.data)"),
       .refused(id: 4, why: "the name r1 was given before in this boot"),
       .unshared(id: 5), .unshared(id: 6), .refused(id: 7, why: "the device took no new share"),
@@ -111,7 +129,7 @@ final class SessionTests: XCTestCase {
     let run = running(laid)
     run.receive(.success(.kill))
     run.managerGone()
-    XCTAssertEqual(said, [.started, .stopped(reason: "killed", why: nil)])
+    XCTAssertEqual(said, [STARTED, .stopped(reason: "killed", why: nil)])
     XCTAssertEqual(exits, [0])
     XCTAssertEqual(stand.stops, 1)
     XCTAssertTrue(run.ended)
@@ -128,14 +146,14 @@ final class SessionTests: XCTestCase {
     let powered = running(laid)
     powered.guestStopped()
     powered.receive(.success(.kill))
-    XCTAssertEqual(said, [.started, .stopped(reason: "guest", why: nil)])
+    XCTAssertEqual(said, [STARTED, .stopped(reason: "guest", why: nil)])
     XCTAssertEqual(exits, [0])
     XCTAssertEqual(stand.stops, 0)
     said = []
     exits = []
     let failed = running(laid)
     failed.machineFailed(Refusal("the hypervisor failed"))
-    XCTAssertEqual(said, [.started, .stopped(reason: "error", why: "the hypervisor failed")])
+    XCTAssertEqual(said, [STARTED, .stopped(reason: "error", why: "the hypervisor failed")])
     XCTAssertEqual(exits, [0])
   }
 

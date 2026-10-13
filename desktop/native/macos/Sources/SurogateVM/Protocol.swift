@@ -46,10 +46,23 @@ public struct Boot: Equatable {
   }
 }
 
+/// Where a boot's time went in surogate-vm, in whole milliseconds after it read the boot line, on this Mac's
+/// monotonic clock: the VM's configuration made and validated (VZVirtualMachineConfiguration.validate()), and
+/// the VM running (VZVirtualMachine.start(completionHandler:) completed).
+public struct BootTimes: Equatable {
+  public let validated: Int
+  public let running: Int
+
+  public init(validated: Int, running: Int) {
+    self.validated = validated
+    self.running = running
+  }
+}
+
 /// What surogate-vm says.
 public enum Answer: Equatable {
   case listening
-  case started
+  case started(BootTimes)
   case failed(why: String)
   case shared(id: Int, tag: String, name: String?)
   case unshared(id: Int)
@@ -62,7 +75,7 @@ public enum Answer: Equatable {
     var object: [String: Any]
     switch self {
     case .listening: object = ["type": "listening"]
-    case .started: object = ["type": "started"]
+    case let .started(times): object = ["type": "started", "ms": ["validated": times.validated, "running": times.running]]
     case let .failed(why): object = ["type": "failed", "why": why]
     case let .shared(id, tag, name):
       object = ["type": "shared", "id": id, "tag": tag]

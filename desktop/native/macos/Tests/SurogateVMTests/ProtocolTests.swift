@@ -44,6 +44,7 @@ final class ProtocolTests: XCTestCase {
 
   func testWritesEachAnswerAsOneJSONLine() {
     XCTAssertEqual(Answer.listening.line, #"{"type":"listening"}"#)
+    XCTAssertEqual(Answer.started(BootTimes(validated: 12, running: 250)).line, #"{"ms":{"running":250,"validated":12},"type":"started"}"#)
     XCTAssertEqual(Answer.shared(id: 3, tag: "surogate", name: "r3").line, #"{"id":3,"name":"r3","tag":"surogate","type":"shared"}"#)
     XCTAssertEqual(Answer.shared(id: 3, tag: "s2", name: nil).line, #"{"id":3,"tag":"s2","type":"shared"}"#)
     XCTAssertEqual(Answer.refused(id: nil, why: "no").line, #"{"type":"refused","why":"no"}"#)
