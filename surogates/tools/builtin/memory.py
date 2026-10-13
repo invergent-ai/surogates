@@ -37,7 +37,7 @@ def register(registry: ToolRegistry) -> None:
                 "TWO TARGETS:\n"
                 "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
                 "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
-                "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
+                "ACTIONS: add (new entry; an entry whose first line is a short title, e.g. a record headed FIȘA, replaces the existing entry with that same first line), replace (update existing -- old_text identifies it), "
                 "remove (delete -- old_text identifies it).\n\n"
                 "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
             ),
