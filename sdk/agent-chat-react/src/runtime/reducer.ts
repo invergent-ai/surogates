@@ -747,6 +747,23 @@ function applyLlmResponse(
   const message = objectValue(event.data.message);
   const responseContent = stringValue(message?.content) ||
     stringValue(event.data.content);
+  // A command's status line (/compress), not an answer: a quiet marker.
+  // It measured nothing, so the context meter keeps the last call's usage.
+  if (event.data.notice === true) {
+    return {
+      ...state,
+      messages: [...messages, {
+        id: `evt-${event.eventId}`,
+        role: "system",
+        systemKind: "notice",
+        content: responseContent,
+        createdAt: new Date(),
+        status: "complete",
+      }],
+      hadDeltas: false,
+      isRunning: false,
+    };
+  }
   const toolCalls = Array.isArray(message?.tool_calls)
     ? message?.tool_calls
     : [];
