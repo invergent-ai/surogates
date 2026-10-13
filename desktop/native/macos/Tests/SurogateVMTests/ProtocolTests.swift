@@ -28,7 +28,7 @@ final class ProtocolTests: XCTestCase {
     let long = #"{"type":"kill","pad":""# + String(repeating: "x", count: MAX_LINE) + "\"}"
     let first = lines.take(Data(long.prefix(40_000).utf8))
     XCTAssertEqual(first.count, 0)
-    let rest = lines.take(Data((long.dropFirst(40_000) + "\n" + #"{"type":"kill"}"# + "\n").utf8))
+    let rest = lines.take(Data((String(long.dropFirst(40_000)) + "\n" + #"{"type":"kill"}"# + "\n").utf8))
     XCTAssertEqual(rest, [.failure(Refusal("a line over \(MAX_LINE) bytes")), .success(.kill)])
     XCTAssertEqual(parse(Data(String(repeating: " ", count: MAX_LINE + 1).utf8)), .failure(Refusal("a line over \(MAX_LINE) bytes")))
     // One that has not ended by MAX_LINE is refused then, and the rest of it, to its newline, dropped.
