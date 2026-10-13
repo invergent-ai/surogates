@@ -73,17 +73,17 @@ def match_choice_label(text: str, choices: list[dict]) -> str | None:
     free-text channel resolver and the server-side ``is_other`` check so
     the two cannot drift.
     """
-    target = _fold(text)
+    target = fold_label(text)
     if not target:
         return None
     for choice in choices:
         label = (choice.get("label") or "").strip()
-        if label and _fold(label) == target:
+        if label and fold_label(label) == target:
             return label
     return None
 
 
-def _fold(text: str) -> str:
+def fold_label(text: str) -> str:
     """People often type without diacritics: "Nu stiu" for "Nu știu"."""
     decomposed = unicodedata.normalize("NFKD", (text or "").strip())
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()

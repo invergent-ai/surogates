@@ -61,6 +61,7 @@ from surogates.channels.registry import ChannelDescriptor, VerificationResult
 from surogates.channels.text_split import split_text
 from surogates.channels.whatsapp_flows import form_reply_text
 from surogates.programs.delivery import schedule_status_apply
+from surogates.session.interactive_input import fold_label
 
 __all__ = [
     "WhatsAppPlatform",
@@ -652,7 +653,7 @@ def _interactive_prompt(payload: dict) -> dict | None:
         return None
     # Meta refuses repeated button or row titles, and a tap carries only the
     # title, so two equal labels could not tell their choices apart anyway.
-    if len({c["label"].strip().casefold() for c in choices}) != len(choices):
+    if len({fold_label(c["label"]) for c in choices}) != len(choices):
         return None
 
     body = "\n".join(

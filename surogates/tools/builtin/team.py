@@ -40,7 +40,7 @@ from surogates.followup.outreach import operator_unanswered_hours, plain_reason,
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
-from surogates.session.interactive_input import _fold
+from surogates.session.interactive_input import fold_label
 from surogates.tools.builtin.followup import _context, _start_date, _start_text, _told
 from surogates.tools.registry import ToolSchema
 
@@ -324,9 +324,9 @@ class _Person:
         digits = "".join(c for c in fragment if c.isdigit())
         if len(digits) >= 4 and digits in self.phone:
             return True
-        needle = _fold(fragment.strip())
+        needle = fold_label(fragment.strip())
         names = [self.display_name] + [r.patient_name or "" for r in self.rows]
-        return bool(needle) and any(needle in _fold(n) for n in names)
+        return bool(needle) and any(needle in fold_label(n) for n in names)
 
 
 async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> list[_Person]:
