@@ -100,6 +100,8 @@ async def test_user_gets_a_signed_config(client, app, session_factory):
     assert config["editorConfig"]["mode"] == "edit"
     assert config["editorConfig"]["customization"]["uiTheme"] == "theme-dark"
     assert jwt.decode(config["token"], JWT_SECRET, algorithms=["HS256"])["document"]["key"] == config["document"]["key"]
+    document = await office_sessions.get_open(session_factory, _row_id(config))
+    assert list(document.user_names) == [f"user:{user_id}"]
 
 
 async def test_reopening_joins_the_same_session(client, app, session_factory):

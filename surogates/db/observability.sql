@@ -1047,3 +1047,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_username
 -- Without this every one of those reads scans the Program's whole history.
 CREATE INDEX IF NOT EXISTS idx_program_invitations_program_user
     ON program_invitations (program_id, user_id, created_at);
+
+-- Who opened a document in the editor, by editor user id.
+ALTER TABLE office_sessions ADD COLUMN IF NOT EXISTS user_names JSONB NOT NULL DEFAULT '{}'::jsonb;

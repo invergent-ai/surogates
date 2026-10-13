@@ -875,6 +875,8 @@ class OfficeSession(Base):
     base_version: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="open")
     editors: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # Who opened the document, by editor user id: people's names and the agent's, for the agent's "open by".
+    user_names: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     # A save waiting to land: {"bucket", "key", "close", "attempts"}.  None is SQL NULL,
     # not a JSON null, so a landed or closed row drops out of ``pending_save IS NOT NULL``.
     pending_save: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB(none_as_null=True), nullable=True)

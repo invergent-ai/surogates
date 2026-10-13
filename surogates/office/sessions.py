@@ -27,6 +27,8 @@ class OpenDocument:
     base_version: str | None
     editors: tuple[str, ...]
     pending_save: dict[str, Any] | None
+    user_names: dict[str, str]
+    connected_at: datetime | None
 
 
 def _snapshot(row: OfficeSession) -> OpenDocument:
@@ -38,6 +40,8 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
         base_version=row.base_version,
         editors=tuple(str(value) for value in row.editors),
         pending_save=dict(row.pending_save) if row.pending_save is not None else None,
+        user_names={str(key): str(value) for key, value in (row.user_names or {}).items()},
+        connected_at=row.connected_at,
     )
 
 
@@ -45,8 +49,11 @@ class DocumentClosing(Exception):
     """The file's open row only waits for its last save to land; open the file again once it has."""
 
 
-async def open_or_reuse(session_factory: Any, *, location: str, path: str, session_id: UUID) -> OpenDocument:
-    """The open row for *location*, created when there is none; *session_id* joins its chats.
+async def open_or_reuse(
+    session_factory: Any, *, location: str, path: str, session_id: UUID, user: tuple[str, str] | None = None,
+) -> OpenDocument:
+    """The open row for *location*, created when there is none; *session_id* joins its chats,
+    and *user* (editor user id, name) its names.
 
     Raises :class:`DocumentClosing` for a row whose pending save closes it: the document
     server ended that key's session, so edits made under the key would be lost.
@@ -59,6 +66,8 @@ async def open_or_reuse(session_factory: Any, *, location: str, path: str, sessi
             raise DocumentClosing(location)
         if str(session_id) not in row.session_ids:
             row.session_ids = [*row.session_ids, str(session_id)]
+        if user is not None and (row.user_names or {}).get(user[0]) != user[1]:
+            row.user_names = {**(row.user_names or {}), user[0]: user[1]}
         # Every open moves the clock close_never_opened measures from.
         row.updated_at = datetime.now(timezone.utc)
         await db.flush()
@@ -86,6 +95,24 @@ async def get_open(session_factory: Any, row_id: UUID) -> OpenDocument | None:
     async with session_factory() as db:
         row = await db.scalar(select(OfficeSession).where(OfficeSession.id == row_id, OfficeSession.status == OPEN))
         return _snapshot(row) if row is not None else None
+
+
+async def open_at(session_factory: Any, location: str) -> OpenDocument | None:
+    """The open row of the file at *location*, or None."""
+    async with session_factory() as db:
+        row = await db.scalar(select(OfficeSession).where(OfficeSession.location == location, OfficeSession.status == OPEN))
+        return _snapshot(row) if row is not None else None
+
+
+async def open_locations(session_factory: Any, locations: list[str]) -> set[str]:
+    """Those of *locations* whose file is open in the editor."""
+    if not locations:
+        return set()
+    async with session_factory() as db:
+        found = await db.scalars(
+            select(OfficeSession.location).where(OfficeSession.location.in_(locations), OfficeSession.status == OPEN)
+        )
+        return set(found.all())
 
 
 async def open_documents(session_factory: Any) -> list[OpenDocument]:

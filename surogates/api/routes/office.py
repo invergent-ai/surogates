@@ -86,7 +86,7 @@ async def get_workspace_editor(
         if await files.stat(key) is None:
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
         location = files.location(key)
-    document = await _open_document(request, location=location, path=path, session_id=session.id)
+    document = await _open_document(request, location=location, path=path, session_id=session.id, user=(user_id, user_name))
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
         user_id=user_id, user_name=user_name, theme=theme,
@@ -96,14 +96,14 @@ async def get_workspace_editor(
 
 
 async def _open_document(
-    request: Request, *, location: str, path: str, session_id: UUID,
+    request: Request, *, location: str, path: str, session_id: UUID, user: tuple[str, str],
 ) -> office_sessions.OpenDocument:
     """The document's open row, waiting up to CLOSING_WAIT_S for a closing one's last save to land."""
     deadline = time.monotonic() + CLOSING_WAIT_S
     while True:
         try:
             return await office_sessions.open_or_reuse(
-                request.app.state.session_factory, location=location, path=path, session_id=session_id,
+                request.app.state.session_factory, location=location, path=path, session_id=session_id, user=user,
             )
         except office_sessions.DocumentClosing:
             if time.monotonic() >= deadline:

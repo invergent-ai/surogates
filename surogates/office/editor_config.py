@@ -22,6 +22,7 @@ def build_editor_config(
     user_name: str,
     edit: bool,
     theme: Literal["light", "dark"],
+    plugins: bool = True,
 ) -> dict[str, Any]:
     base = settings.callback_base_url.rstrip("/")
     config: dict[str, Any] = {
@@ -45,6 +46,7 @@ def build_editor_config(
             "customization": {
                 "forcesave": True,
                 "uiTheme": "theme-dark" if theme == "dark" else "theme-light",
+                **({} if plugins else {"plugins": False}),
             },
         },
     }
