@@ -1,6 +1,6 @@
-// The company's certificate authority on macOS: the admin trust domain's roots for SSL, as surogate-helper
-// lists them, taken by the rules a company's CA file is read by, trusted in Node's TLS and given to the
-// guest; Chromium has no step of the app's, macOS's verifier trusting them already. Node's half needs
+// The company's certificate authority on macOS: the roots for SSL of the user's and the admin trust domains,
+// as surogate-helper lists them, taken by the rules a company's CA file is read by, trusted in Node's TLS and
+// given to the guest; Chromium has no step of the app's, macOS's verifier trusting them already. Node's half needs
 // Node 24's tls.setDefaultCACertificates, which the tests' Node 22 lacks: kept here as the app's Node keeps it.
 
 import { spawnSync } from "node:child_process";
@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { adminCertificates, companyTrust } from "../src/shell/ca-source-darwin.js";
+import { listedCertificates, companyTrust } from "../src/shell/ca-source-darwin.js";
 import { importedOn } from "./platforms.js";
 
 // Node's default CAs, as they were set last.
@@ -63,25 +63,25 @@ afterAll(() => {
 
 const fail = (): never => expect.unreachable("nothing is listed");
 
-describe("the admin trust domain's certificates", () => {
+describe("the trust domains' certificates", () => {
   it("are each certificate authority it lists, as it lists them", () => {
-    expect(adminCertificates(`${ca}\n${other}\n`)).toEqual([ca.trim(), other.trim()]);
-    expect(adminCertificates("")).toEqual([]);
+    expect(listedCertificates(`${ca}\n${other}\n`)).toEqual([ca.trim(), other.trim()]);
+    expect(listedCertificates("")).toEqual([]);
   });
 
   it("leave out each that is not a certificate authority's, or that cannot be read, and take the rest", () => {
     const broken = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----";
-    expect(adminCertificates(`${site}\n${broken}\n${ca}`)).toEqual([ca.trim()]);
+    expect(listedCertificates(`${site}\n${broken}\n${ca}`)).toEqual([ca.trim()]);
   });
 
   it("are none where the answer holds a private key, or more than a megabyte", () => {
-    expect(() => adminCertificates(`${ca}\n-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n`)).toThrow("This Mac's admin trust settings hold a private key");
-    expect(() => adminCertificates(`${ca}\n${"x".repeat(1024 * 1024)}`)).toThrow("This Mac's admin trust settings hold more than a megabyte of certificates");
+    expect(() => listedCertificates(`${ca}\n-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n`)).toThrow("This Mac's trust settings hold a private key");
+    expect(() => listedCertificates(`${ca}\n${"x".repeat(1024 * 1024)}`)).toThrow("This Mac's trust settings hold more than a megabyte of certificates");
   });
 });
 
 describe("what a start of the app on macOS trusts", () => {
-  it("is, in an installed app, each root the admin domain lists, in Node's TLS beside its own roots, and no word to the user", () => {
+  it("is, in an installed app, each root the helper lists, in Node's TLS beside its own roots, and no word to the user", () => {
     expect(companyTrust(true, {}, "/Users/ana", () => `${ca}\n${site}`)).toEqual({ certificates: [ca.trim()], untrusted: null });
     expect(node.trusted).toEqual(["a public root", ca.trim()]);
   });
