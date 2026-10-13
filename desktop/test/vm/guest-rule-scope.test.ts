@@ -1,12 +1,13 @@
 // The protected-names rule (vm/rule.bpf.c) as the guest kernel runs it, for whom and what it judges: the
 // names a volume that compares names without case takes as protected ones, folded (rule-match.h,
-// sg_fold), which the drift test checks against protect.ts on the host; and its scope, the sessions'
+// sg_fold), and those a volume takes as protected ones once it drops what they hold, which the drift
+// test checks against protect.ts on the host; and its scope, the sessions'
 // uids from 10000 up and none below, on every OS. With it, the owner a root's folder shows when asked
 // as the root's own uid, as a root's setup on Apple's share asks it (guest/root.ts, shownTo and
 // checkOwner), here of Linux's shares, whose server maps the host user to each root's uid. Under QEMU
 // and KVM, behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -97,6 +98,39 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the protected-names rule
         "refused .git/hookſ", "refused .git/hooKs", "refused .vſcode", "refused .gıt", "made .claude", "refused .claude/commandſ", "made sub", "refused sub/.Gİt",
         "made hookſ", "made ſrc", "made .git/refs-ſ", "refused .git/conﬁg",
       ]);
+    } finally {
+      await guest.stop();
+    }
+  });
+
+  // HFS+ compares names without the code points it ignores (Apple's TN1150), and FAT's and exFAT's volumes drop the
+  // dots and spaces a name ends with: there each refused name here is a protected one. Each name is read whole.
+  it("refuses a session the names a volume that drops what a name holds takes as protected ones, however long, and their neighbours not", async () => {
+    // The user's, on this computer's volume, where it holds no protected name.
+    mkdirSync(join(folder, ".git.", "hooks"), { recursive: true });
+    const guest = await Guest.boot(bootLinux, { ...options, agentDisk: agentDiskWith(dir, altered()) });
+    try {
+      expect(await guest.ready(ROOT, folderOf(folder))).toBeNull();
+      const probes: Array<[string, string]> = [
+        [".git./hooks/x", "touch '.git./hooks/x'"],
+        ["hooks with a zero-width non-joiner", "mkdir '.git/ho‌oks'"],
+        [".vscode and a space", "mkdir '.vscode '"],
+        [".mcp.json.", "touch '.mcp.json.'"],
+        [".idea after a byte order mark", "mkdir '﻿.idea'"],
+        ["hooks and 200 dots", `mkdir '.git/hooks${".".repeat(200)}'`],
+        ["hooks with 80 zero-width non-joiners", `mkdir '.git/ho${"‌".repeat(80)}oks'`],
+        ["notes.", "touch 'notes.'"],
+        ["hooks with a zero-width space", "mkdir '.git/ho​oks'"],
+        [".gi.t", "mkdir '.gi.t'"],
+        ["src and a zero-width non-joiner", "mkdir 'src‌'"],
+      ];
+      const command = probes.map(([name, does]) => `${does} 2>/dev/null && echo 'made ${name}' || echo 'refused ${name}'`).join("\n");
+      const ran = await guest.op(ROOT, "run", { command, workdir: null, timeout: 30 }, signal());
+      expect(ran).toMatchObject({ ok: { returncode: 0, timed_out: false } });
+      expect((ran as { ok: { output: string } }).ok.output.trim().split("\n")).toEqual([
+        ...probes.slice(0, 7).map(([name]) => `refused ${name}`), ...probes.slice(7).map(([name]) => `made ${name}`),
+      ]);
+      expect(readdirSync(join(folder, ".git.", "hooks"))).toEqual([]);
     } finally {
       await guest.stop();
     }

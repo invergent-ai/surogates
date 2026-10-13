@@ -16,11 +16,10 @@ static int refuses(char *path, int dir, int *in_dep)
 	struct sg_state st; sg_init(&st, dir);
 	*in_dep = 0;
 	for (int i = 0; i < nc && i < SG_WALK; i++) {
-		char *c = comps[nc - 1 - i];
-		// Read as the rule reads a name: at most SG_RAWLEN bytes, its NUL among them.
-		struct sg_raw raw = {{0}}; struct sg_name nm; int len = strlen(c);
-		memcpy(raw.b, c, len < SG_RAWLEN - 1 ? len : SG_RAWLEN - 1);
-		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, len, &nm)))) return 1;
+		// Read whole, as the rule reads a name.
+		const unsigned char *c = (const unsigned char *)comps[nc - 1 - i];
+		struct sg_name nm;
+		if (sg_step(&st, sg_classify(&nm, sg_fold(c, strlen((const char *)c), &nm)))) return 1;
 	}
 	*in_dep = sg_in_dep(&st);
 	return sg_end(&st);
@@ -36,9 +35,8 @@ int main(int argc, char **argv)
 		line[strcspn(line, "\n")] = 0;
 		int old_dep, new_dep;
 		if (fold) {
-			struct sg_raw raw = {{0}}; struct sg_name nm; int len = strlen(line);
-			memcpy(raw.b, line, len < SG_RAWLEN - 1 ? len : SG_RAWLEN - 1);
-			int folded = sg_fold(&raw, len, &nm);
+			struct sg_name nm;
+			int folded = sg_fold((const unsigned char *)line, strlen(line), &nm);
 			printf("%d\t%.*s\n", folded, folded < SG_NAMELEN ? folded : SG_NAMELEN, nm.b);
 			continue;
 		}

@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 
 import { fdPaths, type Where } from "../files/fd-paths.js";
 import { inside, realpath as followed } from "../files/paths.js";
-import { dependencyFolder, folded, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
+import { dependencyFolder, folded, foldedParts, KEY_FOLDERS, protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
 const SCAN_TIMEOUT_MS = 30_000;
@@ -69,7 +69,7 @@ export interface GuardOptions {
 // A key under a hooks folder inside a .git folder, at any depth, in any case, and as folded (protect.ts).
 export function isGitHook(folder: string, key: string): boolean {
   if (key === folder || !inside(key, folder)) return false;
-  const parts = folded(key.slice(folder.length + 1)).split("/");
+  const parts = foldedParts(key.slice(folder.length + 1));
   const git = parts.indexOf(".git");
   const hooks = git < 0 ? -1 : parts.indexOf("hooks", git + 1);
   return hooks > git && hooks < parts.length - 1;
@@ -100,7 +100,7 @@ async function describe(path: string): Promise<string | null> {
 // Where the guest's rule refuses to move a folder to or from, since what it holds would arrive
 // unjudged: a KEY_FOLDERS leaf (.claude, .git), or a place at or under .git/modules or .git/worktrees.
 function keyPlace(folder: string, path: string): boolean {
-  const parts = folded(path.slice(folder.length + 1)).split("/");
+  const parts = foldedParts(path.slice(folder.length + 1));
   return KEY_FOLDERS.has(parts.at(-1) ?? "") || parts.some((part, i) => part === ".git" && (parts[i + 1] === "modules" || parts[i + 1] === "worktrees"));
 }
 
@@ -159,7 +159,8 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
         return;
       }
       const name = entry.name.toLowerCase();
-      const key = !(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path);
+      const git = folded(entry.name) === ".git";
+      const key = !(entry.isDirectory() && git) && protectedInFolder(folder, path);
       const to = entry.isSymbolicLink() && (key || keyPlace(folder, path)) && !isGitHook(folder, path) ? linkedInto(folder, path) : null;
       if (to !== null) scan.links.set(path, to);
       else if (entry.isSymbolicLink() && !isGitHook(folder, path) && dependencyFolder(folder, path) === null) {
@@ -170,7 +171,7 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
         const store = gitFolder && name === "objects"
           && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
         if (name === "node_modules" || store) return;
-        await walk(path, inGit || name === ".git");
+        await walk(path, inGit || git);
       } else if ((entry.isFile() || entry.isSymbolicLink()) && isGitHook(folder, path)) {
         const signature = await describe(path);
         if (signature) scan.hooks.set(path, signature);

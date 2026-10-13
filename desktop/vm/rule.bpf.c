@@ -27,21 +27,19 @@ char LICENSE[] SEC("license") = "GPL";
 #define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component (dir: as a directory being moved) as folded (sg_fold). One bounded
-// pass: sg_fold and sg_classify are out-of-line, each verified once, and sg_fold and sg_step
+// judging each component (dir: as a directory being moved) as folded (sg_fold), read whole.
+// One bounded pass: sg_fold and sg_classify are out-of-line, each verified once, sg_fold's
+// loop over a name's bytes until its state stops changing, and sg_fold and sg_step
 // branch-free, so the walk stays within the verifier's budget at SG_WALK=12.
 static __noinline int judge(struct dentry *dentry, int dir)
 {
-	struct sg_raw raw = {};
 	struct sg_name nm;
 	struct sg_state st;
 	sg_init(&st, dir);
 	for (int i = 0; i < SG_WALK; i++) {
 		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
 		int len = BPF_CORE_READ(dentry, d_name.len);
-		// NUL-terminated: what a longer name before it left past the NUL completes no character.
-		long got = bpf_core_read_str(raw.b, SG_RAWLEN, name);
-		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, got < 0 ? 0 : len, &nm))))
+		if (sg_step(&st, sg_classify(&nm, sg_fold((sg_text)name, len, &nm))))
 			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
 		if (parent == dentry)
