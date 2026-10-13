@@ -561,10 +561,9 @@ class ReleaseWorkflowTest < Minitest::Test
     host = jobs.fetch("file-host")
     refute host.key?("continue-on-error")
     host_runs = host.fetch("steps").map { |step| step["run"].to_s }
-    assert(host_runs.any? { |run| run.include?("native/ntat/build.ps1") })
-    assert(host_runs.any? { |run| run.include?("scripts/rg.sh") })
+    assert_includes host_runs, "npm run build:win32"
     suites = host.fetch("steps").select { |step| step["run"].to_s.include?("npx vitest run") }
-    assert_equal 3, suites.size
+    assert_equal 4, suites.size
     suites.each { |step| assert step.key?("timeout-minutes"), step["name"] }
     # The shell's and the browser's suites, which gate: the helper's lints and its tests, those that fill the
     # runner's stores among them, built as its lock file has it; the app end to end; the browser host on Chrome and Edge.
@@ -740,7 +739,7 @@ class ReleaseWorkflowTest < Minitest::Test
       },
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
-        "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 987851a1dbf1a172 0e5aca50928ffe67 f4bd44c606874e67 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f]],
+        "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 987851a1dbf1a172 425e4aed22ec6aa0 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f df980f3cfa08ab88]],
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],

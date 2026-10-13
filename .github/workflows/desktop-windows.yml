@@ -68,10 +68,11 @@ jobs:
         run: npx vitest run --project windows
 
   # The file host on Windows, where no srt contains its helper and its walk does (desktop/native/ntat): what the
-  # runner's file system does recorded first, in the job's summary; then ntat built with Visual Studio's C++ tools,
-  # the app's code and the app's rg; then the walk's, the file kinds' and the lock's suites on the runner's own NTFS,
-  # and the race of a process of this computer's against the helper. Each suite a step of its own with a bound of its
-  # own, so that one that hangs leaves the others' results, and the log, to read.
+  # runner's file system does recorded first, in the job's summary; then the app built for Windows, ntat with Visual
+  # Studio's C++ tools, the app's rg and its native programs among it; then the walk's, the file kinds' and the lock's
+  # suites on the runner's own NTFS, the race of a process of this computer's against the helper, and the app's own
+  # path to the file host: its clean spawns, a chat's folder bound and looked at, and the host itself. Each suite a step
+  # of its own with a bound of its own, so that one that hangs leaves the others' results, and the log, to read.
   file-host:
     runs-on: windows-2025
     timeout-minutes: 60
@@ -101,15 +102,10 @@ jobs:
       - name: Record what the runner's file system does
         run: powershell -NoProfile -File test/win32/ntfs-facts.ps1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
 
-      - name: Build the file host
-        run: |
-          npx tsc -p tsconfig.build.json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          powershell -NoProfile -File native/ntat/build.ps1
-
-      - name: Fetch the app's rg
-        shell: bash
-        run: scripts/rg.sh
+      - name: Build the app for Windows, with every native part of it
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
 
       # As a PC's system volume does by default: the walk's refusal of a short name is tested on one NTFS made.
       - name: Let the runner's volumes make short names
@@ -128,6 +124,11 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 20
         run: npx vitest run --project unit --reporter=verbose test/file-tools-race-win32.test.ts
+
+      - name: The app's own path to the file host
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: npx vitest run --project unit --reporter=verbose test/clean-child-win32.test.ts test/binding-win32.test.ts test/host-win32.test.ts
 
   # What a Windows runner offers the VM, recorded and never gating: GitHub calls nested
   # virtualization on its runners experimental. Whether Virtual Machine Platform is on, and what the

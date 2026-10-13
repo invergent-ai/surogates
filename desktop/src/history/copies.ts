@@ -35,6 +35,7 @@ import { hostLooked } from "../host-stat.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
 import type { Outcome } from "../link/protocol.js";
+import { guestPathOf } from "../session-path.js";
 import type { VmClient } from "../vm/client.js";
 import type { HistoryCode } from "../vm/history.js";
 import { type Folder, late, type Place } from "../vm/manager.js";
@@ -714,5 +715,5 @@ export class Copies {
 
 // *root*'s copy in *place*, as it was found: a folder of the app's own with that identity.
 function copyIn(place: Place, root: string, { dev, ino }: Identity, bound: BoundFolder): Copy {
-  return { place, folder: { path: copyOf(place, root), dev, ino, boot: BOOT_ID }, at: bound.folder };
+  return { place, folder: { path: guestPathOf(copyOf(place, root)), dev, ino, boot: BOOT_ID }, at: bound.folder };
 }

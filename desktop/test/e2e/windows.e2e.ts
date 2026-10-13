@@ -2,13 +2,14 @@
 // application data, its AppUserModelID before its first window and no surogate:// scheme of its own, Linux's menus,
 // Windows's own buttons over the window's corner, an .ico in the notification area, the window brought back by the
 // notification area's icon and by a second launch, Ctrl+Alt+Space for quick entry, the login item in the Run key,
-// sign-in tokens sealed, the PC's own name, a toast's click, Settings' close button, a launch that asks it to quit,
-// and test/win32/dev-app.ps1, whose scheme opens a link and whose removal quits the app. With no VM: none boots on the
-// Windows runner. On Windows alone.
+// sign-in tokens sealed, the PC's own name, a toast's click, Settings' close button, a launch that asks it to quit, a
+// chat's folder bound by its path in the guest and worked in through its file host, and test/win32/dev-app.ps1, whose
+// scheme opens a link and whose removal quits the app. With no VM: none boots on the Windows runner.
+// On Windows alone.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
@@ -16,7 +17,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
 import {
-  clickNotice, dataHome, dataRoot, ELECTRON, icons, launch, MAIN, notices, quit, secondLaunch, shellEnv, shellPage, stubNative, stubNotifications, watchTray,
+  clickNotice, dataHome, dataRoot, ELECTRON, icons, launch, MAIN, notices, press, prompt, quit, secondLaunch, shellEnv, shellPage, stubNative,
+  stubNotifications, watchTray,
 } from "./launch.js";
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
@@ -32,6 +34,24 @@ let home: string;
 let agent: FakeAgent;
 let origin: string;
 let app: ElectronApplication | undefined;
+
+let next = 0;
+// An operation of the chat's, as the agent sends it: its id.
+function send(kind: string, args: Record<string, unknown>): string {
+  const id = `op-${(next += 1)}`;
+  agent.link.send({
+    type: "op", id, session_id: CHAT, calling_session_id: CHAT, invocation_id: kind === "bind" ? "bind" : "call",
+    ordinal: kind === "bind" ? 0 : 1, kind, args, digest: `d-${id}`,
+  });
+  return id;
+}
+
+async function outcome(id: string): Promise<unknown> {
+  const results = () => agent.link.received.filter((frame) => frame.type === "op_result" && frame.id === id);
+  await agent.link.until(() => results().length === 1, 60_000);
+  agent.link.send({ type: "op_ack", id });
+  return results()[0]?.outcome;
+}
 
 // A registry value of the user's, as reg.exe prints it, or null where there is none.
 function registry(key: string, name: string | null): string | null {
@@ -263,6 +283,30 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
       .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith("/settings.html"))))).toBe(false);
     await expect.poll(dragging).toBeGreaterThan(0);
   });
+
+  it("works in a chat's folder by its path in the guest: bound in its sheet, written and read through its file host", async () => {
+    const folder = realpathSync.native(mkdtempSync(join(tmpdir(), "chat-")));
+    try {
+      const { shell, client } = await signedIn();
+      // The folder the dialog picks, by this computer's own path.
+      await shell.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+      const prepared = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+      const sheet = await prompt(shell);
+      await sheet.check('input[value="free"]');
+      await press(sheet, "accept");
+      const ready = (await prepared)!;
+      expect(ready.folder).toBe(`/mnt/${folder[0]!.toLowerCase()}/${folder.slice(3).split("\\").join("/")}`);
+      expect(await outcome(send("bind", { folder: ready.folder, nonce: ready.nonce }))).toEqual({ ok: null });
+      const written = Buffer.from("written through the file host\n").toString("base64");
+      expect(await outcome(send("write", { key: `${ready.folder}/notes.txt`, data: written }))).toEqual({ ok: null });
+      expect(readFileSync(join(folder, "notes.txt"), "utf8")).toBe("written through the file host\n");
+      expect(await outcome(send("read", { key: `${ready.folder}/notes.txt`, max_bytes: null }))).toEqual({ ok: written });
+    } finally {
+      await quit(app);
+      app = undefined;
+      rmSync(folder, { recursive: true, force: true, maxRetries: 10 });
+    }
+  }, 120_000);
 
   it("quits at a launch that asks it to, as its own Quit does", async () => {
     app = await launch(home);

@@ -794,7 +794,8 @@ function runSearch(
     };
     function run(batch: Batch) {
       try {
-        child = spawn(rg, batch.argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+        // With no console window on Windows, where the helper has none to give it (Node, child_process, windowsHide).
+        child = spawn(rg, batch.argv, { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
       } catch (error) {
         batch.release();
         settle(() => reject(spawnFailure(error, rg)));

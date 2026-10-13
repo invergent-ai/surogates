@@ -91,13 +91,12 @@ Windows has no sandbox for the file helper: the walk is the only thing that keep
 From `desktop`, in PowerShell:
 
 ```
-npx tsc -p tsconfig.build.json
-powershell -File native\ntat\build.ps1
-& "C:\Program Files\Git\bin\bash.exe" scripts/rg.sh
+$env:NPM_CONFIG_SCRIPT_SHELL = "C:\Program Files\Git\bin\bash.exe"
+npm run build:win32
 ```
 
-- `build.ps1` finds Visual Studio's C++ tools by itself, and fetches Node's headers and `node.lib`, each checked against its pinned sha256.
-- Pass: `dist\native\ntat.node` and `bin\rg.exe` are there.
+- It builds the app's code and every native part of the Windows app. ntat's `build.ps1` finds Visual Studio's C++ tools by itself, and fetches Node's headers and `node.lib`, each checked against its pinned sha256; the app's file hosts run on the node first on the `PATH`, copied to `bin\node.exe`.
+- Pass: `dist\native\ntat.node`, `bin\rg.exe`, `bin\node.exe` and `native\windows\target\release\surogate-helper.exe` are there.
 
 ### The suites
 
@@ -108,6 +107,15 @@ npx vitest run --project unit --reporter=verbose test/ntat-win32.test.ts test/fo
 - The short-name test sets a short name with `fsutil file setshortname`, which needs an administrator: run this one elevated, in the test account.
 - Pass: every test passes. The race prints one line, `the race on Windows: {...}`, whose `contained` part is `{"reached":0,...,"wroteOutside":0,"kept":"OUTSIDE\n"}`.
 - **Send back:** the whole output, and the `short name of .git` and `case sensitive` lines it prints.
+
+Then the app's own path to the file host: the clean spawns through `surogate-helper.exe`, a chat's folder bound by its path in the guest, and the host itself, with its hook guard, a landing and a recovery:
+
+```
+npx vitest run --project unit --reporter=verbose test/clean-child-win32.test.ts test/binding-win32.test.ts test/host-win32.test.ts
+```
+
+- Pass: every test passes. **A git hook that a test leaves under `.git\hooks` and that is still at its own name afterwards is a security finding: stop and report it.**
+- **Send back:** the whole output.
 
 ### The race in each kind of folder
 

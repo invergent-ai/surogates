@@ -28,6 +28,7 @@ import type { Copy, Handle, Opened } from "../history/copies.js";
 import { forgettingOf, NOT_A_FORGETTING_ASKED, notPutBack, RECORDS_UNREAD, unrecorded } from "../history/kinds.js";
 import { KEPT_NAME, keptOf, keyOf, recordedFolder } from "../history/place.js";
 import { basename, dirname, join } from "../host-path.js";
+import { guestPathOf } from "../session-path.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
@@ -765,7 +766,7 @@ export class ToolHosts implements Executor {
     const works: Works = { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } };
     const lockWaitMs = this.options.landWaitMs ?? LAND_WAIT_MS;
     // A working folder of its own: the thread's host on its copy runs beside it, and each sandbox writes its own.
-    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${root}.land`)), landing: { copy: copy.folder.path, kept }, lockWaitMs };
+    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${root}.land`)), landing: { copy: copy.folder.path, kept: guestPathOf(kept) }, lockWaitMs };
     // Its wait for the folder, then a host's own start. What a landing there cut short its helper puts back in the first
     // step it is asked, which no stop of this host cuts (files/land.ts).
     const startMs = lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS);
@@ -919,7 +920,7 @@ export class ToolHosts implements Executor {
   private recoverer(folder: Folder, kept: string, name: string): Host {
     const works: Works = { folder };
     const lockWaitMs = this.options.landWaitMs ?? LAND_WAIT_MS;
-    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${name}.recover`)), recovery: { kept }, lockWaitMs };
+    const start: HostStart = { ...this.startOf(works, join(this.options.dataDir, "tmp", `${name}.recover`)), recovery: { kept: guestPathOf(kept) }, lockWaitMs };
     const host = new Host(
       (this.options.spawnHost ?? forkHost)(), start, works, lockWaitMs + (this.options.startTimeoutMs ?? START_TIMEOUT_MS), this.options.idleMs ?? IDLE_MS,
       () => {}, () => Promise.resolve("deny"), () => Promise.resolve(),

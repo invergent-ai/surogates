@@ -105,6 +105,9 @@ const WIN32_FOLDERS: FolderPaths = {
 const FOLDERS = forThisOs<FolderPaths>({ linux: POSIX_FOLDERS, darwin: POSIX_FOLDERS, win32: WIN32_FOLDERS });
 const spellings = (path: string, links: string[] = []): string[] => (FOLDERS ?? notBuilt("A chat's folder")).spellings(path, links);
 
+/** The session's path *path* as spelled, and as the file system resolves it, the part that exists at least. */
+export const spellingsOf = (path: string): string[] => spellings(path);
+
 // Whether *path* lies on a network volume, which a chat's folder may not be on Windows: a drive letter is mapped per
 // logon session (Microsoft Learn, "Mapped drives are not available from an elevated command"), and on SMB every
 // reparse tag but a symlink's is "processed on the server" (MS-FSCC, "Reparse Tags"), out of the walk's sight. Its
