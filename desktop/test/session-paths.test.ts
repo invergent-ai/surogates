@@ -59,13 +59,10 @@ it("names a session's paths by POSIX's functions on every OS, and this computer'
   expect(host.delimiter).toBe(path.delimiter);
 });
 
-it("gives a folder's path in the session as the folder's own on Linux and macOS, either way, and is not built for Windows yet", async () => {
+it("gives a folder's path in the session as the folder's own on Linux and macOS, either way (Windows's: session-path-win32.test.ts)", async () => {
   for (const os of ["linux", "darwin"] as const) {
     const there = await importedOn(os, () => import("../src/session-path.js"));
     expect(there.guestPathOf("/home/ana/Documents/shop"), os).toBe("/home/ana/Documents/shop");
     expect(there.hostPathOf("/Users/ana/My folder's"), os).toBe("/Users/ana/My folder's");
   }
-  const windows = await importedOn("win32", () => import("../src/session-path.js"));
-  expect(() => windows.guestPathOf("C:\\Users\\Ana\\Documents\\shop")).toThrow(new Error("A folder's path in the guest is not built for Windows yet"));
-  expect(() => windows.hostPathOf("/mnt/c/Users/Ana/Documents/shop")).toThrow(new Error("A folder's path in the guest is not built for Windows yet"));
 });
