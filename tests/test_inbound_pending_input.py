@@ -109,3 +109,34 @@ async def test_a_command_typed_while_a_question_waits_goes_on_as_a_message(monke
     said = [data for _, event_type, data in deps.session_store.events if event_type == EventType.USER_MESSAGE]
     assert [data["content"] for data in said] == [text]
     assert deps._enqueued
+
+
+@pytest.mark.parametrize("pending, expected", [
+    # An answer resumes the waiting turn: the person sees it working again.
+    ({"tool_call_id": "tc1", "questions": [{"prompt": "Da sau nu?"}], "context": ""}, InboundOutcome.DROPPED),
+    (None, InboundOutcome.PROCESSED),
+])
+async def test_typing_starts_for_a_new_turn_and_for_an_answer(monkeypatch, pending, expected):
+    deps = _make_deps()
+    typing = []
+
+    async def pending_input(session_id):
+        return pending
+
+    async def keep_typing(session_id, msg):
+        typing.append(session_id)
+
+    deps.pending_input = pending_input
+    deps.keep_typing = keep_typing
+    monkeypatch.setattr(
+        "surogates.session.interactive_input.resolve_input_response", AsyncMock(return_value=True),
+    )
+
+    result = await ChannelInboundPipeline().handle(
+        _make_msg(is_dm=True, text="Da", ts="703.0"),
+        routing=_Routing(platform="whatsapp", identifier="A0APP"),
+        config=_make_config(),
+        deps=deps,
+    )
+
+    assert (result, len(typing)) == (expected, 1)

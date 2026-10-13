@@ -169,6 +169,15 @@ class InboundOutcome(str, Enum):
     session message was emitted or enqueued."""
 
 
+async def _keep_typing(deps: PipelineDeps, session_id: Any, msg: InboundMessage) -> None:
+    if deps.keep_typing is None:
+        return
+    try:
+        await deps.keep_typing(session_id, msg)
+    except Exception:
+        logger.warning("[channels] typing indicator failed — ignoring", exc_info=True)
+
+
 @lru_cache(maxsize=256)
 def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     """Compile a routing config's ``mention_patterns`` CSV into one regex.
@@ -230,6 +239,10 @@ _PendingInput = Callable[[Any], Awaitable[dict | None]]
 
 #: Async callable: (session_id, msg, text) -> None. Posts a nudge to the channel/thread.
 _InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[None]]
+
+#: Async callable: (session_id, msg) -> None. Shows the sender the agent is
+#: working on *msg* for as long as its turn runs; returns at once.
+_KeepTyping = Callable[[Any, "InboundMessage"], Awaitable[None]]
 
 #: Async callable: (agent_id) -> runtime-config payload dict (for the
 #: projected ``end_user_token_allowance``).
@@ -299,6 +312,7 @@ class PipelineDeps:
     attachments: _Attachments | None = None
     pending_input: _PendingInput | None = None
     input_nudge: _InputNudge | None = None
+    keep_typing: _KeepTyping | None = None
     # Per-user token allowance enforcement (a slice of the operator's
     # subscription). ``platform_client`` reserves against ops;
     # ``runtime_config`` resolves the agent's projected allowance. Both
@@ -961,6 +975,8 @@ class ChannelInboundPipeline:
                     exc_info=True,
                 )
 
+        await _keep_typing(deps, session_id, msg)
+
         # ------------------------------------------------------------------
         # Gate 8: Enqueue for worker pickup.
         # ------------------------------------------------------------------
@@ -1055,6 +1071,7 @@ class ChannelInboundPipeline:
         if resolved:
             # No acknowledgement of our own: the agent's next message is the
             # reply, in the language it speaks with this person.
+            await _keep_typing(deps, session_id, msg)
             return InboundOutcome.DROPPED
         return None
 

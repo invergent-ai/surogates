@@ -31,10 +31,13 @@ so ``thread_key`` is always ``None`` and ``visibility`` is ``"dm"``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -78,6 +81,26 @@ _MAX_MESSAGE_CHARS = 4096
 #: reaction, system, unsupported, order, location, contacts — returns None
 #: rather than starting an agent turn with an empty prompt.
 _MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+
+#: Meta drops the typing indicator after 25 s, or as soon as any message is
+#: sent, so a longer turn needs it re-sent.
+_TYPING_EVERY_S = 20.0
+#: A turn whose end we never observe (lost outbox row, crashed worker whose
+#: lease has not expired yet) must not type forever.
+_TYPING_CAP_S = 300.0
+
+
+@dataclass
+class _Typing:
+    token: str
+    phone_number_id: str
+    wamid: str
+    api_version: str
+    turn_active: Callable[[], Awaitable[bool]]
+    deadline: float
+    task: asyncio.Task | None = None
+
+
 #: Taps: a reply button or list row from an interactive message, a WhatsApp
 #: Flow completion, or a quick-reply button on an approved template.
 _TAP_TYPES = ("interactive", "button")
@@ -671,6 +694,8 @@ class WhatsAppPlatform:
         # WhatsAppPlatform instances are process-lifetime singletons; no
         # explicit close is needed.
         self._http = httpx.AsyncClient(timeout=30.0)
+        # (phone_number_id, wa_id) -> the typing keep-alive of the turn under way.
+        self._typing: dict[tuple[str, str], _Typing] = {}
 
     # ------------------------------------------------------------------
     # Route path
@@ -816,6 +841,7 @@ class WhatsAppPlatform:
                 )
                 if wamid is None:
                     return SendResult(success=False, error=error or "send failed")
+                self._stop_typing(phone_number_id, wa_id)
                 return SendResult(success=True, message_id=wamid)
             text = _render_input_prompt(item.payload)
         else:
@@ -854,6 +880,12 @@ class WhatsAppPlatform:
 
         if last_id is None:
             return SendResult(success=False, error="send failed")
+        # A question or an answer ends the turn's visible work; a coding run's
+        # heartbeat is the turn still going.
+        if item.payload.get("code_run"):
+            self._rearm_typing(phone_number_id, wa_id)
+        else:
+            self._stop_typing(phone_number_id, wa_id)
         return SendResult(success=True, message_id=last_id)
 
     # ------------------------------------------------------------------
@@ -927,20 +959,27 @@ class WhatsAppPlatform:
         return uploaded
 
     # ------------------------------------------------------------------
-    # ack_received — read receipt + typing indicator in one call
+    # keep_typing — read receipt + typing indicator, held for the turn
     # ------------------------------------------------------------------
 
-    async def ack_received(self, msg: Any, *, creds: dict, config: dict) -> None:
-        """Mark the inbound message read and show the typing pip.
+    def keep_typing(
+        self,
+        msg: Any,
+        *,
+        creds: dict,
+        turn_active: Callable[[], Awaitable[bool]],
+    ) -> None:
+        """Mark *msg* read and keep the typing pip up while its turn runs.
 
-        One request sets blue double-checkmarks *and* the typing indicator.
         This is the only progress signal WhatsApp offers: it cannot edit a
         sent message, so the dispatcher swallows every intermediate
-        narration event and the agent would otherwise be silent for the
-        whole tool-calling phase.
+        narration event.  Meta shows the pip for at most 25 s and drops it
+        on any outbound message, so it is re-sent every 20 s, and right
+        after a message that does not end the turn, until a question or an
+        answer goes out, *turn_active* says the turn is over, or the cap.
 
-        Called only when the pipeline accepted the message, so filtered
-        senders never receive a receipt.  Best-effort; never raises.
+        Called only for messages that reach the agent, so filtered senders
+        never receive a receipt.  Returns at once; never raises.
         """
         token: str = (creds or {}).get("access_token") or ""
         source = getattr(msg, "source", None) or {}
@@ -948,20 +987,68 @@ class WhatsAppPlatform:
         phone_number_id = source.get("phone_number_id") or (creds or {}).get(
             "phone_number_id"
         )
-        if not token or not wamid or not phone_number_id:
+        wa_id = getattr(msg, "identifier", "") or ""
+        if not token or not wamid or not phone_number_id or not wa_id:
             return
-
-        _, error = await send_message(
-            self._http,
+        key = (phone_number_id, wa_id)
+        self._stop_typing(*key)
+        state = _Typing(
             token=token,
             phone_number_id=phone_number_id,
+            wamid=wamid,
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+            turn_active=turn_active,
+            deadline=asyncio.get_running_loop().time() + _TYPING_CAP_S,
+        )
+        self._typing[key] = state
+        self._start_typing(key, state)
+
+    def _start_typing(self, key: tuple[str, str], state: _Typing) -> None:
+        state.task = asyncio.get_running_loop().create_task(
+            self._typing_loop(key, state)
+        )
+
+    def _rearm_typing(self, phone_number_id: str, wa_id: str) -> None:
+        state = self._typing.get((phone_number_id, wa_id))
+        if state is None:
+            return
+        if state.task is not None:
+            state.task.cancel()
+        self._start_typing((phone_number_id, wa_id), state)
+
+    def _stop_typing(self, phone_number_id: str, wa_id: str) -> None:
+        state = self._typing.pop((phone_number_id, wa_id), None)
+        if state is not None and state.task is not None:
+            state.task.cancel()
+
+    async def _typing_loop(self, key: tuple[str, str], state: _Typing) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                await self._mark_read_typing(state)
+                await asyncio.sleep(_TYPING_EVERY_S)
+                if loop.time() >= state.deadline or not await state.turn_active():
+                    break
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.warning("[whatsapp] typing keep-alive failed", exc_info=True)
+        if self._typing.get(key) is state:
+            del self._typing[key]
+
+    async def _mark_read_typing(self, state: _Typing) -> None:
+        """One request sets blue double-checkmarks *and* the typing pip."""
+        _, error = await send_message(
+            self._http,
+            token=state.token,
+            phone_number_id=state.phone_number_id,
             payload={
                 "messaging_product": "whatsapp",
                 "status": "read",
-                "message_id": wamid,
+                "message_id": state.wamid,
                 "typing_indicator": {"type": "text"},
             },
-            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+            api_version=state.api_version,
         )
         if error and "131009" in error:
             # wamid older than 30 days — common after a long-quiet

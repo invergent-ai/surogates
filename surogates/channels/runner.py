@@ -323,6 +323,21 @@ def _make_deps_factory(
                 text=text,
             )
 
+        async def _keep_typing(session_id: Any, msg: Any) -> None:
+            keep = getattr(platform, "keep_typing", None)
+            if keep is None:
+                return
+
+            # The worker holds the lease for the whole wake, including while
+            # ask_user_question waits, so a pending question also ends the turn.
+            async def _turn_active() -> bool:
+                return (
+                    await session_store.has_live_lease(session_id)
+                    and await _pending_input(session_id) is None
+                )
+
+            keep(msg, creds=creds, turn_active=_turn_active)
+
         return PipelineDeps(
             session_store=session_store,
             redis=redis,
@@ -340,6 +355,7 @@ def _make_deps_factory(
             attachments=_attachments,
             pending_input=_pending_input,
             input_nudge=_input_nudge,
+            keep_typing=_keep_typing,
             platform_client=platform_client,
             runtime_config=runtime_config,
         )

@@ -366,42 +366,117 @@ class TestWhatsAppInputPrompt:
         assert "What is the deploy tag?" in sent
 
 
-class TestAckReceived:
+class TestKeepTyping:
+    """Meta drops the pip after 25 s or on any outbound message; the turn
+    can run for minutes."""
+
+    @pytest.fixture
+    def calls(self, monkeypatch):
+        import surogates.channels.platforms.whatsapp as wa
+
+        sent: list[dict] = []
+
+        async def fake_send(_http, *, payload, **_kw):
+            sent.append(payload)
+            if payload.get("status") == "read":
+                return None, None
+            return "wamid.OUT", None
+
+        monkeypatch.setattr(wa, "send_message", fake_send)
+        monkeypatch.setattr(wa, "_TYPING_EVERY_S", 0.01)
+        return sent
+
+    @staticmethod
+    def _typing(calls):
+        return [c for c in calls if c.get("status") == "read"]
+
+    @staticmethod
+    def _active(flag):
+        async def turn_active():
+            return flag["on"]
+        return turn_active
+
     @pytest.mark.asyncio
-    async def test_marks_read_and_sets_typing(self):
+    async def test_resends_until_the_turn_ends(self, calls):
+        import asyncio
+
         p = WhatsAppPlatform()
         msg = parse(_text_message(), creds=_creds(), identifier=PNID)
-        with respx.mock(assert_all_called=True) as router:
-            route = router.post(MESSAGES_URL).mock(
-                return_value=httpx.Response(200, json={"success": True})
-            )
-            await p.ack_received(msg, creds=_creds(), config={})
-        body = _json.loads(route.calls[0].request.content)
-        assert body == {
+        flag = {"on": True}
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active(flag))
+        await asyncio.sleep(0.05)
+        assert self._typing(calls)[0] == {
             "messaging_product": "whatsapp",
             "status": "read",
             "message_id": msg.source["wamid"],
             "typing_indicator": {"type": "text"},
         }
+        assert len(self._typing(calls)) >= 3
+        flag["on"] = False
+        await asyncio.sleep(0.03)
+        assert p._typing == {}
+        n = len(self._typing(calls))
+        await asyncio.sleep(0.03)
+        assert len(self._typing(calls)) == n
 
     @pytest.mark.asyncio
-    async def test_no_call_without_wamid(self):
-        p = WhatsAppPlatform()
-        msg = SimpleNamespace(identifier=WA_ID, source={"phone_number_id": PNID})
-        with respx.mock(assert_all_called=False) as router:
-            route = router.post(MESSAGES_URL).mock(
-                return_value=httpx.Response(200, json={})
-            )
-            await p.ack_received(msg, creds=_creds(), config={})
-        assert len(route.calls) == 0
+    async def test_reply_or_question_stops_it_heartbeat_rearms_it(self, calls):
+        import asyncio
 
-    @pytest.mark.asyncio
-    async def test_never_raises_on_transport_error(self):
         p = WhatsAppPlatform()
         msg = parse(_text_message(), creds=_creds(), identifier=PNID)
-        with respx.mock(assert_all_called=True) as router:
-            router.post(MESSAGES_URL).mock(side_effect=httpx.ConnectError("down"))
-            await p.ack_received(msg, creds=_creds(), config={})
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await asyncio.sleep(0)
+        await p.send(_item("still running", code_run="r1"), creds=_creds())
+        await asyncio.sleep(0)
+        assert calls[-1].get("status") == "read"
+        await p.send(_item("Gata."), creds=_creds())
+        assert p._typing == {}
+        n = len(calls)
+        await asyncio.sleep(0.03)
+        assert len(calls) == n
+
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await p.send(
+            _item("", input_prompt=True, questions=[{"prompt": "Da?"}]), creds=_creds(),
+        )
+        assert p._typing == {}
+
+    @pytest.mark.asyncio
+    async def test_stops_at_the_cap(self, calls, monkeypatch):
+        import asyncio
+
+        import surogates.channels.platforms.whatsapp as wa
+
+        monkeypatch.setattr(wa, "_TYPING_CAP_S", 0.02)
+        p = WhatsAppPlatform()
+        msg = parse(_text_message(), creds=_creds(), identifier=PNID)
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await asyncio.sleep(0.08)
+        assert p._typing == {}
+
+    @pytest.mark.asyncio
+    async def test_no_call_without_wamid(self, calls):
+        import asyncio
+
+        p = WhatsAppPlatform()
+        msg = SimpleNamespace(identifier=WA_ID, source={"phone_number_id": PNID})
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await asyncio.sleep(0.02)
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_never_raises_when_the_turn_check_fails(self, calls):
+        import asyncio
+
+        async def broken():
+            raise RuntimeError("db down")
+
+        p = WhatsAppPlatform()
+        msg = parse(_text_message(), creds=_creds(), identifier=PNID)
+        p.keep_typing(msg, creds=_creds(), turn_active=broken)
+        await asyncio.sleep(0.05)
+        assert p._typing == {}
 
 
 class TestDownloadFile:
