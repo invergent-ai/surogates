@@ -74,3 +74,17 @@ pub fn roots() -> Result<Vec<Vec<u8>>, String> {
     }
     Ok(found)
 }
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::Security::Cryptography::{CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID};
+
+    use super::STORES;
+
+    #[test]
+    fn reads_the_stores_an_administrator_writes_and_never_the_user_s_own() {
+        let ids: Vec<u32> = STORES.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, 8, 9, 7]);
+        assert!(!ids.contains(&CERT_SYSTEM_STORE_CURRENT_USER_ID));
+    }
+}

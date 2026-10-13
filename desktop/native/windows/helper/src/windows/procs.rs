@@ -9,7 +9,9 @@
 use std::ptr::null_mut;
 
 use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
+};
 use windows_sys::Win32::Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -99,12 +101,15 @@ fn image(process: HANDLE) -> Option<String> {
     (unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) } != 0).then(|| text(&path[..length as usize]))
 }
 
-// *process*'s command line, as the UNICODE_STRING at the head of NtQueryInformationProcess's buffer names it.
+// *process*'s command line, as the UNICODE_STRING at the head of NtQueryInformationProcess's buffer names it. The first
+// call asks for its size: Microsoft documents no one status for that answer, and a call too small for its information
+// answers any of three (STATUS_INFO_LENGTH_MISMATCH, STATUS_BUFFER_TOO_SMALL, STATUS_BUFFER_OVERFLOW).
 fn command_line(process: HANDLE) -> Option<Vec<u16>> {
     let mut size = 0u32;
     // SAFETY: the first call asks for the size alone.
     let asked = unsafe { NtQueryInformationProcess(process, ProcessCommandLineInformation, null_mut(), 0, &mut size) };
-    if asked != STATUS_INFO_LENGTH_MISMATCH || size < size_of::<UNICODE_STRING>() as u32 || size > MOST_BYTES {
+    let sized = [STATUS_INFO_LENGTH_MISMATCH, STATUS_BUFFER_TOO_SMALL, STATUS_BUFFER_OVERFLOW].contains(&asked);
+    if !sized || size < size_of::<UNICODE_STRING>() as u32 || size > MOST_BYTES {
         return None;
     }
     let mut buffer = vec![0u64; (size as usize).div_ceil(8)];

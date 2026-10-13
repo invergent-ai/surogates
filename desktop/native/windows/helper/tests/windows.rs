@@ -12,7 +12,7 @@ use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError};
 use windows_sys::Win32::Security::Cryptography::{
     CertAddEncodedCertificateToStore, CertCloseStore, CertCreateCertificateContext, CertDeleteCertificateFromStore, CertEnumCertificatesInStore,
     CertFindCertificateInStore, CertFreeCertificateContext, CertOpenStore, CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_REG,
-    CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID,
+    CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID,
     CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT, HCERTSTORE, X509_ASN_ENCODING,
 };
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_NON_VOLATILE};
@@ -128,16 +128,17 @@ fn lists_the_computer_s_roots_and_group_policy_s_for_the_user_and_never_the_user
     for (location, der) in given {
         Store::system(location).add(der);
     }
+    // The user's own root, in the registry key of the user's Root store. Windows lists from that store only the roots
+    // the user agreed to at its question (its protected roots), which no test can answer: so a root a program put
+    // there is read back by the registry's own provider alone, and whatever Windows would list, the helper lists none.
     Store::user_registry().add(own);
-    let listed = std::panic::catch_unwind(|| {
-        // The user's own root is in the user's Root store as Windows reads it: what the helper must pass over.
-        assert!(Store::system(CERT_SYSTEM_STORE_CURRENT_USER_ID).holds(own), "the user's own root is read back from the user's Root store");
-        said(&["trust"])
-    });
+    let held = Store::user_registry().holds(own);
+    let listed = std::panic::catch_unwind(|| said(&["trust"]));
     for (location, der) in given {
         Store::system(location).remove(der);
     }
     Store::user_registry().remove(own);
+    assert!(held, "the user's own root is in its store's registry key");
     let listed = listed.expect("listed");
     for (location, der) in given {
         assert!(listed.contains(&certificate(der)), "the root of store {location} is listed");
@@ -157,7 +158,9 @@ fn lists_this_user_s_processes_with_their_programs_and_arguments_and_no_one_else
     let listed = said(&["procs"]);
     child.kill().ok();
     child.wait().ok();
-    let line = listed.lines().find(|line| line.starts_with(&format!("{{\"pid\":{},", child.id()))).expect("the child is listed");
+    let lines: Vec<&str> = listed.lines().collect();
+    let line = lines.iter().find(|line| line.starts_with(&format!("{{\"pid\":{},", child.id())))
+        .unwrap_or_else(|| panic!("the child {} is listed among {} lines: {:?}", child.id(), lines.len(), &lines[..lines.len().min(5)]));
     assert!(line.to_ascii_lowercase().contains("\"path\":\"c:\\\\windows\\\\system32\\\\cmd.exe\""), "{line}");
     assert!(line.ends_with(&format!(",\"/d\",\"/c\",\"ping -n 30 127.0.0.1 >nul & rem {marker} with spaces\"]}}")), "{line}");
     // The helper itself, as this user's.
