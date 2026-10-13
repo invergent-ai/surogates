@@ -100,3 +100,27 @@ describe("compileContent", () => {
     expect(() => compileContent("p\n\n".repeat(401))).toThrow(ContentError);
   });
 });
+
+describe("typed pictures and charts", () => {
+  it("compiles a picture the worker read", () => {
+    expect(compileContent("<?block p?>", { p: { type: "image", data: "AAAA", mime: "image/png", width: 10, height: 5 } })).toEqual([
+      { t: "image", src: "data:image/png;base64,AAAA", width: 10, height: 5 },
+    ]);
+    expect(() => compileContent("<?block p?>", { p: { type: "image", path: "a.png" } })).toThrow(/PNG or JPEG/);
+  });
+
+  it("compiles a chart's rows into series", () => {
+    expect(compileContent("<?block c?>", {
+      c: { type: "chart", chart: "line", title: "Growth", rows: [["", "2025", "2026"], ["North", 10, 12], ["East", 8, "9"]] },
+    })).toEqual([{
+      t: "chart", chart: "line", title: "Growth", categories: ["North", "East"],
+      series: [{ name: "2025", values: [10, 8] }, { name: "2026", values: [12, 9] }],
+    }]);
+  });
+
+  it("refuses a chart it cannot draw", () => {
+    expect(() => compileContent("<?block c?>", { c: { type: "chart", chart: "radar", rows: [["", "a"], ["x", 1]] } })).toThrow(/one of/);
+    expect(() => compileContent("<?block c?>", { c: { type: "chart", rows: [["", "a"]] } })).toThrow(/rows/);
+    expect(() => compileContent("<?block c?>", { c: { type: "chart", rows: [["", "a"], ["x", "lots"]] } })).toThrow(/number/);
+  });
+});

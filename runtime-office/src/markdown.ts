@@ -28,6 +28,7 @@ const MAX_BLOCKS = 400;
 const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
+const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
 
 type Style = Omit<Run, "text">;
 type Lists = { next: number };
@@ -183,9 +184,37 @@ function typedBlock(key: string, value: unknown): Block {
       if (!intent) throw new ContentError(`Pending block ${key} needs an "intent": the section it stands for.`);
       return { t: "pending", key, intent: intent.slice(0, 300) };
     }
+    case "image": {
+      if (typeof block.data !== "string" || typeof block.mime !== "string") {
+        throw new ContentError(`Image block ${key} needs a "path" to a PNG or JPEG in the workspace.`);
+      }
+      const width = Number(block.width);
+      const height = Number(block.height);
+      if (!(width > 0 && height > 0)) throw new ContentError(`Image block ${key} has no size.`);
+      return { t: "image", src: `data:${block.mime};base64,${block.data}`, width, height };
+    }
+    case "chart":
+      return chartOf(key, block);
     default:
       throw new ContentError(`Block ${key} has type ${JSON.stringify(block.type)}; use "pending", "chart" or "image".`);
   }
+}
+
+function chartOf(key: string, block: Record<string, unknown>): Block {
+  const chart = String(block.chart ?? "bar");
+  if (!CHARTS.includes(chart)) throw new ContentError(`Chart block ${key}: "chart" is one of ${CHARTS.join(", ")}.`);
+  const rows = block.rows;
+  if (!Array.isArray(rows) || rows.length < 2 || !rows.every(Array.isArray)) {
+    throw new ContentError(`Chart block ${key} needs "rows": a header row naming the series, then one row per category.`);
+  }
+  const [header, ...data] = rows as unknown[][];
+  const names = header!.slice(1).map(String);
+  if (!names.length) throw new ContentError(`Chart block ${key}: the header row names at least one series after its first cell.`);
+  const series = names.map((name, column) => ({ name, values: data.map((row) => Number(row[column + 1] ?? 0)) }));
+  if (series.some((s) => s.values.some((value) => !Number.isFinite(value)))) {
+    throw new ContentError(`Chart block ${key}: every value is a number.`);
+  }
+  return { t: "chart", chart, title: String(block.title ?? ""), categories: data.map((row) => String(row[0] ?? "")), series };
 }
 
 function merge(runs: Run[]): Run[] {

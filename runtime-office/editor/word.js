@@ -268,6 +268,35 @@
     return sdt;
   }
 
+  // Pixels at 96 dpi as EMUs; nothing wider than the six inches a page's text usually spans.
+  var EMU_PER_PX = 9525, MAX_WIDTH_PX = 576;
+  var CHART_TYPES = {
+    bar: "bar", column: "bar", "horizontal-bar": "horizontalBar", line: "lineNormal",
+    pie: "pie", area: "area", doughnut: "doughnut", scatter: "scatter",
+  };
+
+  function imageOf(b) {
+    var scale = Math.min(1, MAX_WIDTH_PX / b.width), paragraph = Api.CreateParagraph();
+    paragraph.AddDrawing(Api.CreateImage(b.src, Math.round(b.width * scale * EMU_PER_PX), Math.round(b.height * scale * EMU_PER_PX)));
+    return paragraph;
+  }
+
+  function chartOf(b) {
+    var paragraph = Api.CreateParagraph();
+    var chart = Api.CreateChart(
+      CHART_TYPES[b.chart] || "bar",
+      b.series.map(function (s) { return s.values; }),
+      b.series.map(function (s) { return s.name; }),
+      b.categories,
+      MAX_WIDTH_PX * EMU_PER_PX,
+      336 * EMU_PER_PX,
+      24
+    );
+    if (b.title) chart.SetTitle(b.title, 13);
+    paragraph.AddDrawing(chart);
+    return paragraph;
+  }
+
   function build(blocks) {
     var out = [], lists = {};
     for (var i = 0; i < blocks.length; i++) {
@@ -283,6 +312,8 @@
         for (var l = 0; l < b.lines.length; l++) out.push(paragraphOf([{ text: b.lines[l], code: true }]));
       } else if (b.t === "table") out.push(tableOf(b.rows));
       else if (b.t === "pending") out.push(pendingOf(b.key, b.intent));
+      else if (b.t === "image") out.push(imageOf(b));
+      else if (b.t === "chart") out.push(chartOf(b));
       else throw new Error("unknown block " + b.t);
     }
     return out;
