@@ -656,3 +656,20 @@ async def test_a_failed_welcome_is_surfaced_but_a_team_message_is_reported_to_it
     assert len(notices) == 2
     assert notices[0].startswith("⚠️ A message to Ion Pop did not arrive: their 24h window")
     assert notices[1].startswith("⚠️ Ion Pop did not receive your message: no answer")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_welcome_a_team_member_asked_for_is_reported_to_them(sf, doctor_session):
+    member, row = await _team_message(sf)
+    welcome = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=row.user_id, platform="whatsapp",
+        channel_identifier=SENDER, kind="welcome", text="Welcome",
+        template_name=None, template_language=None, created_by=f"team:{member}",
+    )
+    await _send(sf, _Store(), _Delivery())
+    assert (await _row(sf, welcome.id)).state == "failed"
+    await _send(sf, _Store(), _Delivery())
+
+    [notice] = await _notices(sf)
+    assert notice.user_id == member
+    assert notice.text.startswith("⚠️ Ion Pop did not receive your message: their 24h window")

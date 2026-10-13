@@ -336,9 +336,11 @@ def plain_reason(reason: str | None) -> str:
 async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
     """Tell a team member what became of a message they asked for.
 
-    One notice per message, keyed on it: a delivery after a held wait, or
-    a failure for whatever reason.  A text written straight into an open
-    window needs none: the tool already told them it went out.
+    One notice per message, keyed on it: a failure of anything they asked
+    for (their message, the welcome of someone they enrolled, a notice to a
+    colleague), and the delivery of their own message after a held wait.  A
+    text written straight into an open window needs none: the tool already
+    told them it went out.
     """
     notice = aliased(OutreachMessageRow)
     told = sa.exists().where(
@@ -351,8 +353,13 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
         rows = (
             await db.execute(
                 sa.select(OutreachMessageRow)
-                .where(OutreachMessageRow.kind == "operator")
-                .where(OutreachMessageRow.state.in_(("delivered", "failed")))
+                .where(sa.or_(
+                    OutreachMessageRow.state == "failed",
+                    sa.and_(
+                        OutreachMessageRow.kind == "operator",
+                        OutreachMessageRow.state == "delivered",
+                    ),
+                ))
                 .where(OutreachMessageRow.created_at >= now - OUTCOME_LOOKBACK)
                 .where(sa.or_(
                     OutreachMessageRow.created_by.like("team:%"),
@@ -481,8 +488,8 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
 
     A check-in opener or a welcome that failed would otherwise only show in
     a run history nobody reads.  One notice per person per day of failure,
-    whatever number of messages failed that day.  A team member's own
-    message is reported to them by :func:`_report_outcomes` instead.
+    whatever number of messages failed that day.  Whatever a team member
+    asked for is reported to them by :func:`_report_outcomes` instead.
     """
     since = now - OUTCOME_LOOKBACK
     async with session_factory() as db:
@@ -511,7 +518,6 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                     OutreachMessageRow.user_id, OutreachMessageRow.created_at,
                     OutreachMessageRow.reason,
                 )
-                .where(OutreachMessageRow.kind.in_(("welcome", "operator")))
                 .where(OutreachMessageRow.state == "failed")
                 .where(OutreachMessageRow.created_at >= since)
                 .where(sa.or_(
