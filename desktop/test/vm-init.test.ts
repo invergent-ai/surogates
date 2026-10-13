@@ -156,7 +156,7 @@ describe("the words that stop the guest's boot", () => {
 
   it("goes through the kernel's log, which a UART's console prints before the panic, and else on stderr, then ends the boot", () => {
     for (const text of [vm("init"), STUB]) {
-      expect(fnOf(text, "stop")).toContain('{ echo "<3>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2');
+      expect(fnOf(text, "stop")).toContain('{ echo "<2>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2');
       if (spawnSync("/bin/sh", ["-c", "true > /dev/kmsg"]).status === 0) continue;
       expect(stopped(text)).toMatchObject({ status: 1, stdout: "", stderr: "surogate: the disk did not come, so the guest stops\n" });
     }
@@ -164,6 +164,6 @@ describe("the words that stop the guest's boot", () => {
     for (const text of [vm("init"), STUB]) expect(text).not.toMatch(/echo "surogate: [^"]*" >&2; exit 1/);
     expect(vm("init")).toContain('stop "e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one"');
     const initrd = readFileSync(new URL("../../images/guest/initrd/init", import.meta.url), "utf8");
-    expect(fnOf(initrd, "fail")).toContain('{ echo "<3>surogate: $*, so the guest stops" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*, so the guest stops"');
+    expect(fnOf(initrd, "fail")).toContain('{ echo "<2>surogate: $*, so the guest stops" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*, so the guest stops"');
   });
 });

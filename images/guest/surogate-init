@@ -54,10 +54,11 @@ disk() {
   esac
 }
 
-# Words that stop the boot, then the stop: through the kernel's log, which the console prints before the guest
-# panics, where what is written to the console itself may be lost then on a UART (Hyper-V's COM1); else on stderr.
+# Words that stop the boot, then the stop: through the kernel's log, at a level a quiet kernel prints (KERN_CRIT),
+# which the console prints before the guest panics, where what is written to the console itself may be lost then on a
+# UART (Hyper-V's COM1); else on stderr.
 stop() {
-  { echo "<3>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2
+  { echo "<2>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2
   exit 1
 }
 
