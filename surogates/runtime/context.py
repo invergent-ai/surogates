@@ -47,11 +47,16 @@ class LLMEndpoint:
     secret happens at LLM-call time through the credential vault so
     workers, audit logs, and intermediate proxies never observe the
     plaintext.
+
+    ``context_window`` is the window the management plane declares for a
+    model it knows better than the static catalog does (a builder's own
+    endpoint); ``None`` leaves sizing to the catalog.
     """
 
     model: str
     base_url: str
     api_key_ref: str
+    context_window: int | None = None
 
 
 # Canonical slash-command ids the harness can gate.  Hyphenated to match
