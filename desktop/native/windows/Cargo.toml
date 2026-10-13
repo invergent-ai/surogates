@@ -4,7 +4,7 @@
 # (pipe/). Each crate's pure parts build and test on any OS; what calls Windows builds on Windows alone.
 [workspace]
 resolver = "2"
-members = ["hcs", "pipe", "service"]
+members = ["hcs", "pipe", "service", "vm"]
 
 [workspace.package]
 version = "0.0.0"
