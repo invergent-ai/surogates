@@ -211,14 +211,14 @@ describe.runIf(WINDOWS)("the file helper on Windows", { timeout: 60_000 }, () =>
     expect(JSON.parse((await run.next())!)).toEqual({ id: "2", outcome: FOLDER_UNAVAILABLE });
   });
 
-  it("starts in no folder but the one its host checked, and lands nothing yet", async () => {
+  it("starts in no folder but the one its host checked, a landing's kept folder among them", async () => {
     const { guestPathOf } = await fresh();
     const root = guestPathOf(host)!;
     const wrong = await started({ SUROGATE_FOLDER: root, HOME: root, SUROGATE_FOLDER_IS: "1:2", PATH: BIN });
     expect(await wrong.exited).toBe(2);
     expect(wrong.stderr()).toMatch(/is not the folder its host checked/);
-    const landing = await started({ SUROGATE_FOLDER: root, HOME: root, SUROGATE_COPY: root, SUROGATE_KEPT: root, PATH: BIN });
+    const landing = await started({ SUROGATE_FOLDER: root, HOME: root, SUROGATE_COPY: root, SUROGATE_KEPT: root, SUROGATE_KEPT_IS: "1:2", PATH: BIN });
     expect(await landing.exited).toBe(2);
-    expect(landing.stderr()).toMatch(/Landing a thread's work is not built for Windows yet/);
+    expect(landing.stderr()).toMatch(/keeps replaced files in is not the folder its host checked/);
   });
 });
