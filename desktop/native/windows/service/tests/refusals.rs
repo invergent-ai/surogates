@@ -36,7 +36,7 @@ fn scratch(leaf: &str) -> String {
     std::fs::create_dir_all(&base).unwrap();
     let real = std::fs::canonicalize(&base).unwrap();
     let text = real.to_string_lossy().into_owned();
-    text.strip_prefix(r"\?").map(str::to_owned).unwrap_or(text)
+    text.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(text)
 }
 
 // The service serving a client that connects to a pipe of *sddl*, on a thread; the client's end.
@@ -120,21 +120,84 @@ fn refuses_an_oversized_message() {
 }
 
 #[test]
-fn refuses_a_file_the_caller_may_not_reach() {
-    let folder = scratch("files");
-    // A plain file the caller may read, and a folder: reached takes each as what it is, and refuses the other kind.
-    let file = format!(r"{folder}\rootfs.vhd");
-    std::fs::write(&file, b"disk").unwrap();
-    assert_eq!(reached(&file, Kind::File), Ok(()));
-    assert_eq!(reached(&folder, Kind::Folder), Ok(()));
-    assert!(reached(&file, Kind::Folder).is_err());
-    assert!(reached(&folder, Kind::File).is_err());
-    assert!(reached(&format!(r"{folder}\missing"), Kind::File).is_err());
-    // A symbolic link as the leaf is refused as a reparse point, where the runner lets one be made. (An ancestor the
-    // caller may traverse is theirs to reach, since the open is impersonated; the file host's walk refuses every
-    // ancestor reparse point.)
-    let link = format!(r"{folder}\link.vhd");
-    if std::os::windows::fs::symlink_file(&file, &link).is_ok() {
-        assert!(matches!(reached(&link, Kind::File), Err(why) if why.contains("link") || why.contains("names")), "a leaf symbolic link is refused");
+fn the_service_pipe_grants_a_client_no_right_to_make_an_instance() {
+    let name = name();
+    // The pipe with the service's descriptor, unlimited instances, first instance ours.
+    let server = Pipe::server(&name, Some(PIPE_SDDL), Way::Duplex, true, false).unwrap();
+    let accepting = thread::spawn(move || {
+        let _ = server.accept();
+        thread::sleep(Duration::from_millis(300));
+        drop(server);
+    });
+    // A client opens with exactly the rights a client needs (pipe::win), so the open succeeds under the narrowed DACL.
+    let mut client = None;
+    for _ in 0..200 {
+        if let Ok(pipe) = Pipe::open(&name) {
+            client = Some(pipe);
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
+    assert!(client.is_some(), "a client opens the service pipe with a client's rights");
+    // A second instance, as this interactive (non-SYSTEM) user, is refused: the descriptor grants interactive users no
+    // FILE_CREATE_PIPE_INSTANCE. (Only SYSTEM, which the GitHub runner's admin user is not, may make another.)
+    let second = Pipe::server(&name, None, Way::Duplex, false, false);
+    assert!(second.is_err(), "an interactive user cannot make another instance of the service pipe");
+    drop(client);
+    let _ = accepting.join();
+}
+
+#[test]
+fn reaches_a_file_as_the_caller_and_refuses_what_it_is_not() {
+    let root = scratch("files");
+    // A plain file and a folder, each reached from the root the caller owns; the wrong kind and a missing name refused.
+    let file = format!(r"{root}\image\rootfs.vhd");
+    std::fs::create_dir_all(format!(r"{root}\image")).unwrap();
+    std::fs::write(&file, b"disk").unwrap();
+    assert!(reached(&root, &file, Kind::File).is_ok());
+    assert!(reached(&root, &format!(r"{root}\image"), Kind::Folder).is_ok());
+    assert!(reached(&root, &file, Kind::Folder).is_err());
+    assert!(reached(&root, &format!(r"{root}\image"), Kind::File).is_err());
+    assert!(reached(&root, &format!(r"{root}\image\missing"), Kind::File).is_err());
+}
+
+#[test]
+fn refuses_a_reparse_point_on_the_way() {
+    let root = scratch("reparse");
+    let outside = scratch("reparse-outside");
+    std::fs::write(format!(r"{outside}\secret.vhd"), b"outside").unwrap();
+    // A leaf symbolic link to a file the caller can read is refused as a reparse point (the leaf is not followed).
+    let file = format!(r"{root}\rootfs.vhd");
+    std::fs::write(&file, b"disk").unwrap();
+    let link = format!(r"{root}\link.vhd");
+    if std::os::windows::fs::symlink_file(&file, &link).is_ok() {
+        assert!(matches!(reached(&root, &link, Kind::File), Err(why) if why.contains("reparse point")), "a leaf symbolic link is refused");
+    }
+    // A directory junction as an ancestor, leading outside the root: a file reached through it is refused, the
+    // junction never followed, though the caller could read the target.
+    let junction = format!(r"{root}\j");
+    if std::process::Command::new("cmd").args(["/c", "mklink", "/J", &junction, &outside]).output().map(|out| out.status.success()).unwrap_or(false) {
+        assert!(matches!(reached(&root, &format!(r"{junction}\secret.vhd"), Kind::File), Err(why) if why.contains("reparse point")), "an ancestor junction is refused");
+    }
+    // A directory symbolic link as an ancestor: refused the same way.
+    let dirlink = format!(r"{root}\d");
+    if std::os::windows::fs::symlink_dir(&outside, &dirlink).is_ok() {
+        assert!(matches!(reached(&root, &format!(r"{dirlink}\secret.vhd"), Kind::File), Err(why) if why.contains("reparse point")), "an ancestor directory symlink is refused");
+    }
+}
+
+#[test]
+fn holds_the_chain_so_a_swap_after_the_check_fails() {
+    let root = scratch("swap");
+    std::fs::create_dir_all(format!(r"{root}\image")).unwrap();
+    let file = format!(r"{root}\image\rootfs.vhd");
+    std::fs::write(&file, b"disk").unwrap();
+    // While the chain's handles are held, no component can be renamed or removed: a swap of the folder on the way, or
+    // of the file itself, fails. HCS reopens by string, so the held handles are what stop a swap mid-flight.
+    let held = reached(&root, &file, Kind::File).expect("the file is reached");
+    assert!(std::fs::rename(format!(r"{root}\image"), format!(r"{root}\image-swapped")).is_err(), "the held folder cannot be renamed");
+    assert!(std::fs::remove_file(&file).is_err(), "the held file cannot be removed");
+    drop(held);
+    // Once the handles are let go, the same operations succeed.
+    assert!(std::fs::rename(format!(r"{root}\image"), format!(r"{root}\image-swapped")).is_ok(), "once let go, the folder can be renamed");
 }

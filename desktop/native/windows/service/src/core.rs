@@ -31,14 +31,32 @@ pub enum Kind {
     Folder,
 }
 
+/// What a path's check holds until the Host Compute Service has opened it: on Windows, the opened handles of every
+/// component of the path, each without delete sharing, so nothing on the path can be renamed or swapped in between
+/// (files.rs); nothing on other OSes. Dropped once HCS is done, which closes the handles.
+pub struct Checked(#[allow(dead_code)] Box<dyn std::any::Any + Send>);
+
+impl Checked {
+    /// The handles (or whatever a backend must keep) held across the HCS call.
+    pub fn hold(held: Box<dyn std::any::Any + Send>) -> Checked {
+        Checked(held)
+    }
+
+    /// Nothing to hold (a check that opens no handle, as the fakes').
+    pub fn none() -> Checked {
+        Checked(Box::new(()))
+    }
+}
+
 /// The disk as the caller reaches it.
 pub trait Files {
     /// The caller's own profile folder (GetUserProfileDirectoryW of its token).
     fn profile(&self) -> &str;
     /// The installed app's folder, which only administrators write; None for a service not run from one.
     fn installed(&self) -> Option<&str>;
-    /// Whether *path* is there as *kind*, reached by the caller through no reparse point, by its own name; else why not.
-    fn check(&self, path: &str, kind: Kind) -> Result<(), String>;
+    /// That *path* is there as *kind*, reached by the caller through no reparse point on any component, by its own
+    /// name; its chain's handles, held so nothing on the path can be swapped before HCS opens it. Else why not.
+    fn check(&self, path: &str, kind: Kind) -> Result<Checked, String>;
 }
 
 /// A VM, as the Host Compute Service holds it for the service. Dropped, its handle closes, and the VM ends.
@@ -177,9 +195,11 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
         if !installed && (!within(agent_disk, data) || agent_disk.len() == data.len()) {
             return Err(refuse("the agent disk outside the caller's data folder and the installed app's"));
         }
-        self.files.check(data, Kind::Folder).map_err(|why| refuse(&format!("the data folder: {why}")))?;
+        // Every path's chain of handles, held without delete sharing until HCS has made the VM (which opens the
+        // disks and the kernel), so nothing on any path can be swapped between the check and HCS's open.
+        let mut held = vec![self.files.check(data, Kind::Folder).map_err(|why| refuse(&format!("the data folder: {why}")))?];
         for (path, kind, what) in [(kernel, Kind::File, "the kernel"), (initrd, Kind::File, "the initrd"), (rootfs, Kind::File, "the image"), (agent_disk, Kind::File, "the agent disk"), (sessions, Kind::Written, "the sessions disk")] {
-            self.files.check(path, kind).map_err(|why| refuse(&format!("{what}: {why}")))?;
+            held.push(self.files.check(path, kind).map_err(|why| refuse(&format!("{what}: {why}")))?);
         }
         if !self.roots.take(data) {
             return Err(refuse("a VM runs for this data folder already"));
@@ -201,7 +221,7 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
             let granted: Vec<String> = [kernel, initrd, rootfs, sessions].into_iter().chain((!installed).then_some(agent_disk)).map(str::to_owned).collect();
             self.hypervisor.create(&id, &document, &granted).map_err(refused)
         });
-        match made {
+        let outcome = match made {
             Ok((vm, runtime_id)) => {
                 self.booted = Some(Booted { vm, data: data.to_owned(), started: false, live: HashSet::new(), named: HashSet::new() });
                 Ok(runtime_id)
@@ -210,7 +230,10 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
                 self.roots.give_back(data);
                 Err(answer)
             }
-        }
+        };
+        // HCS has opened the disks and the kernel (or failed): the chain's handles can go.
+        drop(held);
+        outcome
     }
 
     fn start(&mut self) -> Result<(), Answer> {
@@ -234,9 +257,12 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
         if booted.live.len() >= MAX_SHARES {
             return Err(Answer::refused(None, format!("{LIMIT}: {MAX_SHARES} folders are shared already")));
         }
-        self.files.check(path, Kind::Folder).map_err(|why| Answer::refused(None, format!("the folder: {why}")))?;
+        // The folder's chain held until HCS has added the share (which opens the folder), so it cannot be swapped.
+        let held = self.files.check(path, Kind::Folder).map_err(|why| Answer::refused(None, format!("the folder: {why}")))?;
         booted.named.insert(name.to_owned());
-        booted.vm.share(name, path, read_only).map_err(refused)?;
+        let shared = booted.vm.share(name, path, read_only).map_err(refused);
+        drop(held);
+        shared?;
         booted.live.insert(name.to_owned());
         Ok(())
     }
@@ -376,11 +402,11 @@ mod tests {
         fn installed(&self) -> Option<&str> {
             Some(r"C:\Program Files\Surogate")
         }
-        fn check(&self, path: &str, kind: Kind) -> Result<(), String> {
+        fn check(&self, path: &str, kind: Kind) -> Result<Checked, String> {
             self.log.said(format!("check {path} {kind:?}"));
             match self.unreachable.iter().find(|(end, _)| path.ends_with(end)) {
                 Some((_, why)) => Err((*why).to_owned()),
-                None => Ok(()),
+                None => Ok(Checked::none()),
             }
         }
     }

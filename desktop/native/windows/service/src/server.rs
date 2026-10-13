@@ -34,8 +34,11 @@ use crate::hyper::{Hcs, Notice, Notify};
 
 /// The service's name, as the installer registers it and surogate-vm.exe starts it.
 pub const SERVICE_NAME: &str = "SurogateVM";
-/// The pipe's descriptor: SYSTEM all access, interactive users read and write, no one else.
-pub const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GRGW;;;IU)";
+/// The pipe's descriptor: SYSTEM all access; interactive users exactly the rights a client needs -- read and write
+/// the pipe, read its attributes and wait on it (0x00100083) -- and no more. Not FILE_APPEND_DATA (0x4), which for a
+/// pipe is FILE_CREATE_PIPE_INSTANCE, so no one but SYSTEM may make another instance of it (pipe::win opens a client
+/// with exactly these rights, never the generic ones the mapping would widen to include FILE_APPEND_DATA). No one else.
+pub const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;0x00100083;;;IU)";
 /// How long the service stays without a VM before it ends.
 pub const IDLE: Duration = Duration::from_secs(5 * 60);
 

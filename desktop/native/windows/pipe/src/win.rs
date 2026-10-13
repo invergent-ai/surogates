@@ -22,8 +22,11 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
-const GENERIC_READ: u32 = 0x8000_0000;
-const GENERIC_WRITE: u32 = 0x4000_0000;
+// The exact rights a byte-pipe client needs, and no more: read and write the pipe, read its attributes, and wait on
+// it. Not FILE_APPEND_DATA (0x4), which for a pipe is FILE_CREATE_PIPE_INSTANCE, so a client granted only these
+// cannot make another instance of the pipe. A client opens with these, not GENERIC_READ | GENERIC_WRITE, which the
+// generic mapping would widen to include FILE_APPEND_DATA.
+const CLIENT_RIGHTS: u32 = 0x0001 /* FILE_READ_DATA */ | 0x0002 /* FILE_WRITE_DATA */ | 0x0080 /* FILE_READ_ATTRIBUTES */ | 0x0010_0000 /* SYNCHRONIZE */;
 // The pipes' buffers: one line of the protocol.
 const BUFFER: u32 = 64 * 1024;
 
@@ -126,7 +129,7 @@ impl Pipe {
         let made = unsafe {
             CreateFileW(
                 wide(name).as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                CLIENT_RIGHTS,
                 0,
                 std::ptr::null(),
                 OPEN_EXISTING,
