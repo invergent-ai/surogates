@@ -17,7 +17,7 @@ import { backendFor } from "./backends.js";
 import { Backoff, MOST_MS } from "./backoff.js";
 import { type HistoryRequest, named, NOT_A_REQUEST, REFUSED } from "./history.js";
 import { imageArch, imageArchOf } from "./image.js";
-import { DOOR, REACH_MS } from "./inbound.js";
+import { REACH_MS } from "./inbound.js";
 import { aborted, type Boot, late, LET_GO, type Place, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
 import { GUEST_ARCH } from "./qemu-arch.js";
 
@@ -233,7 +233,7 @@ export class VmClient {
   readonly door: string;
 
   constructor(private readonly options: VmClientOptions) {
-    this.door = join(options.vm.run, DOOR);
+    this.door = (backendFor(process.platform) ?? backendFor("linux")!).addresses(options.vm.run, options.vm.user).door;
   }
 
   /**

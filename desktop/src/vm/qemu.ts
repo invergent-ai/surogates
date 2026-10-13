@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 
 import { INBOUND_PORT, MAX_SHARES } from "../guest/protocol.js";
 import { type GuestArch, QEMU_ARCH } from "./qemu-arch.js";
+import { socketsIn } from "./sockets.js";
 
 // Ubuntu's, whose AppArmor profile lets its namespace sandbox work under 24.04's restriction.
 export const VIRTIOFSD = "/usr/libexec/virtiofsd";
@@ -45,6 +46,7 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
   const ports: string[] = [];
   for (let n = 1; n <= ROOT_PORTS; n += 1) ports.push("-device", `pcie-root-port,id=rp${n},chassis=${n}`);
   const { machine, cpu } = QEMU_ARCH[arch];
+  const at = socketsIn(run);
   return [
     "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
     ...machine(!emulated), ...cpu(!emulated), "-smp", String(cpus), "-m", MEMORY,
@@ -56,11 +58,11 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     "-drive", `if=none,id=agent,file=${option(disks.agentDisk)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=agent",
     "-drive", `if=none,id=sessions,file=${option(disks.sessions)},format=raw,discard=unmap`, "-device", "virtio-blk-pci,drive=sessions",
     "-device", "virtio-serial-pci",
-    "-chardev", `socket,id=control,path=${option(join(run, "control.sock"))},server=on,wait=off`,
+    "-chardev", `socket,id=control,path=${option(at.control)},server=on,wait=off`,
     "-device", "virtserialport,chardev=control,name=ai.surogate.control",
-    "-chardev", `socket,id=net,path=${option(join(run, "net.sock"))},server=on,wait=off`,
+    "-chardev", `socket,id=net,path=${option(at.net)},server=on,wait=off`,
     "-device", "virtserialport,chardev=net,name=ai.surogate.net",
-    "-chardev", `socket,id=inbound,path=${option(join(run, "inbound.sock"))},server=on,wait=off`,
+    "-chardev", `socket,id=inbound,path=${option(at.inbound)},server=on,wait=off`,
     "-device", `virtserialport,chardev=inbound,name=${INBOUND_PORT}`,
     "-chardev", `file,id=console,path=${option(console)}`, "-device", "virtconsole,chardev=console",
     ...ports,

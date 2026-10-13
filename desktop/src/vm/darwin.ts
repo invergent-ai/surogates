@@ -22,7 +22,7 @@ import type { HostUser, Share } from "../guest/protocol.js";
 import { MAX_SHARES } from "../guest/protocol.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
 import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
-import { ended, reach } from "./sockets.js";
+import { ended, reach, socketsIn } from "./sockets.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const MEMORY_MIB = 2048;
@@ -35,7 +35,11 @@ export const LAYOUT: Layout = "multiple";
 const KILL_MS = 1_000;
 // The longest Unix socket path Darwin takes, its sockaddr_un's sun_path without the NUL.
 export const SOCKET_MAX = 103;
-const SOCKETS = ["control.sock", "net.sock", "inbound.sock"];
+// The sockets surogate-vm makes in the runtime folder *run*, in the order they are connected to.
+const sockets = (run: string): string[] => {
+  const { control, net, inbound } = socketsIn(run);
+  return [control, net, inbound];
+};
 
 // The same from src/vm and from dist/vm: desktop/, or a packaged app's Contents/Resources/app.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -69,7 +73,7 @@ export function runtimeFolder(dataDir: string, temp = tmpdir()): string {
 
 /** Why the VM's sockets cannot be made in *run*, its longest path over Darwin's SOCKET_MAX bytes, or null. */
 export function fitting(run: string): string | null {
-  const longest = join(run, SOCKETS.reduce((a, b) => (b.length > a.length ? b : a)));
+  const longest = sockets(run).reduce((a, b) => (b.length > a.length ? b : a));
   const bytes = Buffer.byteLength(longest);
   return bytes > SOCKET_MAX ? `this Mac's temp folder's path is too long for the sandbox's sockets: ${longest} is ${bytes} bytes, over ${SOCKET_MAX}` : null;
 }
@@ -184,15 +188,15 @@ export function darwinBoot(start: Start): BootVm {
     const helper = new Helper(start, program, ["run", options.run, "--data", data, "--image", dirname(options.kernel), "--bundle", options.bundle ?? dirname(options.agentDisk)]);
     const halt = () => helper.child.kill("SIGKILL");
     signal?.addEventListener("abort", halt, { once: true });
-    const sockets: Socket[] = [];
+    const connected: Socket[] = [];
     try {
       const listening = await helper.first((said) => said.type === "listening" || said.type === "failed", deadline);
       if (listening === "late") throw new Error("surogate-vm did not open its sockets");
       if (listening === "exited" || listening.type !== "listening") throw new Error(helper.words() || "surogate-vm exited");
-      for (const name of SOCKETS) {
-        const socket = await reach(join(options.run, name), helper.child, deadline);
+      for (const path of sockets(options.run)) {
+        const socket = await reach(path, helper.child, deadline);
         if (!socket) throw new Error(ended(helper.child) ? "surogate-vm exited" : "surogate-vm did not take a connection to its sockets");
-        sockets.push(socket);
+        connected.push(socket);
       }
       helper.send({
         type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
@@ -201,10 +205,10 @@ export function darwinBoot(start: Start): BootVm {
       const started = await helper.first((said) => said.type === "started" || said.type === "failed", deadline);
       if (started === "late") throw new Error("the VM did not start in time");
       if (started === "exited" || started.type !== "started") throw new Error(helper.words() || "surogate-vm exited");
-      const [control, net, inbound] = sockets as [Socket, Socket, Socket];
+      const [control, net, inbound] = connected as [Socket, Socket, Socket];
       return new DarwinVm(options, helper, control, net, inbound);
     } catch (error) {
-      for (const socket of sockets) socket.destroy();
+      for (const socket of connected) socket.destroy();
       helper.child.kill("SIGKILL");
       await helper.gone;
       const said = helper.words();

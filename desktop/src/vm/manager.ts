@@ -22,7 +22,7 @@ import { backendFor } from "./backends.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
 import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
-import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
+import { Carrier, Door, Forwarded, letGo } from "./inbound.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
 import type { GuestArch } from "./qemu-arch.js";
@@ -358,7 +358,7 @@ export class Guest {
     // Each connection made into a root from outside the guest.
     this.carrier = new Carrier(vm.inbound, options.reachMs);
     // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to.
-    this.door = new Door(join(options.run, DOOR), forwarded, (root, port, first) => this.reach(root, port, first));
+    this.door = new Door((backendFor(process.platform) ?? backendFor("linux")!).addresses(options.run, options.user).door, forwarded, (root, port, first) => this.reach(root, port, first));
   }
 
   /**

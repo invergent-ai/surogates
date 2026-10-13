@@ -11,6 +11,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 
 import { backendFor } from "../src/vm/backends.js";
 import { bootDarwin } from "../src/vm/darwin.js";
+import { DOOR } from "../src/vm/inbound.js";
 import { bootLinux, missingTools } from "../src/vm/linux.js";
 
 let dir: string;
@@ -56,4 +57,15 @@ it("on Linux, keeps the VM's sockets in this user's runtime folder, one for each
   expect(linux.runtimeFolder(ana, {}, data)).toBe(`/run/user/1234/surogate/${own}`);
   expect(linux.runtimeFolder(ana, { XDG_RUNTIME_DIR: "" }, data)).toBe(`/run/user/1234/surogate/${own}`);
   expect(linux.socketMax).toBe(107);
+});
+
+it("on Linux and macOS, reaches the guest's three ports and the browser's door as Unix sockets in the runtime folder, by the names they have always had", () => {
+  const ana = { uid: 1234, gid: 1234, name: "ana", home: "/home/ana" };
+  for (const os of ["linux", "darwin"] as const) {
+    const run = os === "linux" ? "/run/user/1234/surogate/vm-1a2b3c4d" : "/private/var/folders/ab/cdef/T/surogate/vm-1a2b3c4d";
+    expect(backendFor(os)!.addresses(run, ana), os).toEqual({
+      control: join(run, "control.sock"), net: join(run, "net.sock"), inbound: join(run, "inbound.sock"), door: join(run, DOOR),
+    });
+  }
+  expect(DOOR).toBe("browser.sock");
 });

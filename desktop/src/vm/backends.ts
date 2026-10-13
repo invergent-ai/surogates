@@ -1,6 +1,6 @@
 // The VM layer's backend for each OS, in one table (spec, Section 11): what boots the VM, what of
-// this computer the VM needs, where its runtime files go, and how long a socket's path may be
-// there. The VM manager, the app's start and the VM's files take each from here; an OS whose
+// this computer the VM needs, where its runtime files go, where the guest's ports and the browser's
+// door are, and how long a socket's path may be there. The VM manager, the app's start and the VM's files take each from here; an OS whose
 // backend is not built yet has none, and its sandbox is not available. Linux's is QEMU (linux.ts),
 // macOS's the Virtualization framework through surogate-vm (darwin.ts).
 
@@ -12,6 +12,15 @@ import { forThisOs } from "../platform.js";
 import { bootDarwin, requirementsDarwin, runtimeFolder, SOCKET_MAX } from "./darwin.js";
 import { bootLinux, missingTools } from "./linux.js";
 import type { BootVm } from "./manager.js";
+import { socketsIn } from "./sockets.js";
+
+/** Where the VM manager reaches the guest's control, net and inbound ports, and the browser's door: Unix socket paths, or pipe names. */
+export interface Addresses {
+  control: string;
+  net: string;
+  inbound: string;
+  door: string;
+}
 
 export interface Backend {
   boot: BootVm;
@@ -23,8 +32,10 @@ export interface Backend {
   requirements(ask: { unpacking: boolean; held: Array<{ dev: number; ino: number }>; path?: string }): Promise<string[]>;
   /** The user's own 0700 folder for the VM's sockets and pidfiles, a data root's own. */
   runtimeFolder(user: HostUser, env: NodeJS.ProcessEnv, dataDir: string): string;
-  /** The longest Unix socket path this OS takes, in bytes, without the NUL. */
-  socketMax: number;
+  /** Where the VM manager reaches the guest's three ports, and where the browser's door is, for the runtime folder *run*. */
+  addresses(run: string, user: HostUser): Addresses;
+  /** The longest Unix socket path this OS takes, in bytes, without the NUL, or null where the ports are not Unix sockets. */
+  socketMax: number | null;
 }
 
 const LINUX: Backend = {
@@ -34,6 +45,8 @@ const LINUX: Backend = {
   // for each data folder, so two apps never share one (a development build beside the installed
   // app, a test), and a boot's sweep reaches no other app's guest.
   runtimeFolder: (user, env, dataDir) => join(env.XDG_RUNTIME_DIR || `/run/user/${user.uid}`, "surogate", `vm-${createHash("sha256").update(dataDir).digest("hex").slice(0, 8)}`),
+  // QEMU's chardevs, made where the boot names them (qemu.ts), and the manager's door.
+  addresses: (run) => socketsIn(run),
   socketMax: 107,
 };
 
@@ -42,6 +55,8 @@ const DARWIN: Backend = {
   requirements: () => requirementsDarwin(),
   // The user's own, 0700, under /var/folders: short enough for Darwin's 104-byte socket paths. A folder for each data folder.
   runtimeFolder: (_user, env, dataDir) => (env.TMPDIR ? runtimeFolder(dataDir, env.TMPDIR) : runtimeFolder(dataDir)),
+  // The sockets surogate-vm makes where it is told (darwin.ts), and the manager's door.
+  addresses: (run) => socketsIn(run),
   socketMax: SOCKET_MAX,
 };
 

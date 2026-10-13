@@ -20,7 +20,7 @@ import { pathOutside } from "../hosts/policy.js";
 import type { BootVm, Emulated, VmBackend, VmOptions } from "./manager.js";
 import { type GuestArch, hostArch, QEMU_ARCH } from "./qemu-arch.js";
 import { Qmp, qemuArgs, readOnlyDaemon, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
-import { ended, reach, RETRY_MS } from "./sockets.js";
+import { ended, reach, RETRY_MS, socketsIn } from "./sockets.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 // QEMU's programs, one an arch: the last boot's may have been another arch's than the next's.
@@ -245,9 +245,10 @@ async function launchVm(options: VmOptions, signal: AbortSignal | undefined, dea
   let net: Socket | null = null;
   let inbound: Socket | null = null;
   try {
-    control = await reach(join(options.run, "control.sock"), qemu, deadline);
-    net = control ? await reach(join(options.run, "net.sock"), qemu, deadline) : null;
-    inbound = net ? await reach(join(options.run, "inbound.sock"), qemu, deadline) : null;
+    const at = socketsIn(options.run);
+    control = await reach(at.control, qemu, deadline);
+    net = control ? await reach(at.net, qemu, deadline) : null;
+    inbound = net ? await reach(at.inbound, qemu, deadline) : null;
     const monitor = inbound ? await reach(join(options.run, "qmp.sock"), qemu, deadline) : null;
     if (!control || !net || !inbound || !monitor) throw new Error(ended(qemu) ? "QEMU exited" : "QEMU did not open its sockets");
     return new LinuxVm(options, qemu, said, control, net, inbound, await Qmp.open(monitor, deadline), emulated);
