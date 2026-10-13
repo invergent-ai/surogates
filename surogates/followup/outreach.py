@@ -70,6 +70,7 @@ BATCH_WINDOW = timedelta(minutes=15)
 UNANSWERED_AFTER = timedelta(hours=72)
 #: The same for a team member's message to a person, unless the agent's
 #: settings say otherwise: whoever asked should hear about it the same day.
+#: A message from Studio keeps the general wait.
 OPERATOR_UNANSWERED_HOURS = 24
 #: How far back the outcome pass looks.  A day longer than the longest wait
 #: above or an agent may set, so every held text has settled inside it.
@@ -92,11 +93,22 @@ DEFAULT_TEXTS = {
     "undelivered_notice": "⚠️ {name} did not receive your message: {why}. Call them? {phone}",
     "red_alert_reminder": "🔴 Reminder, not yet opened after {minutes} minutes:\n\n{text}",
     "person_failure_notice": "⚠️ A message to {name} did not arrive: {why}. Call them? {phone}",
+    "late_answer_notice": (
+        "↩️ {name} answered after your message expired, so it was not "
+        "delivered. Send it again? {phone}"
+    ),
+    "expired_message_to_person": (
+        "A message from the team was waiting for your reply but expired "
+        "before you answered. They know you have written back."
+    ),
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
 
 _HELD = ("queued", "awaiting_reply")
+_CREATED_BY = sa.func.coalesce(OutreachMessageRow.created_by, "")
+_TEAM_REQUESTED = sa.or_(_CREATED_BY.like("team:%"), _CREATED_BY.like("care-team:%"))
+_UNANSWERED_REASON = "The recipient did not answer the template"
 
 
 def window_open(last_inbound_at: datetime | None, now: datetime) -> bool:
@@ -141,7 +153,9 @@ async def _fail(session_factory: Any, row_id: uuid.UUID, reason: str) -> int:
     return 1
 
 
-async def _write_text(session_store: Any, session_id: uuid.UUID, row: Any) -> None:
+async def _write_text(
+    session_store: Any, session_id: uuid.UUID, row: Any, text: str | None = None,
+) -> None:
     # An assistant reply as far as the transcript and the outbox are
     # concerned, so it is delivered exactly as the agent's own replies are,
     # and the agent sees what was said when the person answers.
@@ -149,7 +163,7 @@ async def _write_text(session_store: Any, session_id: uuid.UUID, row: Any) -> No
         session_id,
         EventType.LLM_RESPONSE,
         {
-            "message": {"role": "assistant", "content": row.text},
+            "message": {"role": "assistant", "content": text or row.text},
             "synthetic": "outreach",
             "outreach_id": str(row.id),
             "outreach_kind": row.kind,
@@ -215,7 +229,15 @@ async def deliver_pending(
                 .where(OutreachMessageRow.user_id == user_id)
                 .where(OutreachMessageRow.platform == platform)
                 .where(OutreachMessageRow.channel_identifier == channel_identifier)
-                .where(OutreachMessageRow.state.in_(_HELD))
+                .where(sa.or_(
+                    OutreachMessageRow.state.in_(_HELD),
+                    sa.and_(
+                        OutreachMessageRow.kind == "operator",
+                        OutreachMessageRow.state == "failed",
+                        OutreachMessageRow.reason.like(f"{_UNANSWERED_REASON}%"),
+                        OutreachMessageRow.sent_at >= now - OUTCOME_LOOKBACK,
+                    ),
+                ))
                 .order_by(OutreachMessageRow.created_at)
             )
         ).scalars().all()
@@ -224,7 +246,11 @@ async def deliver_pending(
 
     delivered = 0
     for row in rows:
-        if await _deliver_now(
+        if row.state == "failed":
+            await _answered_too_late(
+                session_factory, session_store, row, session_id=session_id, now=now,
+            )
+        elif await _deliver_now(
             session_factory, session_store, row,
             session_id=session_id, now=now, final_state="delivered",
         ):
@@ -232,12 +258,53 @@ async def deliver_pending(
     return delivered
 
 
+async def _answered_too_late(
+    session_factory: Any, session_store: Any, row: Any, *, session_id: uuid.UUID, now: datetime,
+) -> None:
+    """Someone answered a template after the message behind it expired.
+
+    Silence would read as being ignored: they are told the message expired,
+    and whoever asked for it that they wrote back.  Once, by moving the row
+    on from ``failed``.
+    """
+    if not await _transition(
+        session_factory, row.id, from_states=("failed",), state="answered_late",
+    ):
+        return
+    settings = await followup_store.get_settings(
+        session_factory, org_id=row.org_id, agent_id=row.agent_id,
+    )
+    texts = (settings.texts or {}) if settings else {}
+    await _write_text(
+        session_store, session_id, row,
+        followup_store.render_text(
+            texts.get("expired_message_to_person"), DEFAULT_TEXTS["expired_message_to_person"],
+        ),
+    )
+    requester = _requester(row.created_by)
+    if requester is None:
+        return
+    name, phone, _zone = await describe_person(
+        session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
+    )
+    await followup_store.notify_team(
+        session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
+        kind="notice", created_by="outreach", subject_user_id=row.user_id,
+        text=followup_store.render_text(
+            texts.get("late_answer_notice"), DEFAULT_TEXTS["late_answer_notice"],
+            name=name, phone=phone,
+        ),
+        dedupe_prefix=f"late:{row.id}", only_user_id=requester,
+        fallback_sender=row.channel_identifier,
+    )
+
+
 def operator_unanswered_hours(settings: Any) -> int:
     return int(getattr(settings, "operator_unanswered_hours", None) or OPERATOR_UNANSWERED_HOURS)
 
 
 def _unanswered(hours: int) -> str:
-    return f"The recipient did not answer the template within {hours} hours"
+    return f"{_UNANSWERED_REASON} within {hours} hours"
 
 
 async def _expire_unanswered(session_factory: Any, *, now: datetime) -> int:
@@ -249,7 +316,7 @@ async def _expire_unanswered(session_factory: Any, *, now: datetime) -> int:
     )
     async with session_factory() as db:
         result = await db.execute(
-            held.where(OutreachMessageRow.kind != "operator")
+            held.where(sa.not_(sa.and_(OutreachMessageRow.kind == "operator", _TEAM_REQUESTED)))
             .where(OutreachMessageRow.sent_at <= now - UNANSWERED_AFTER)
             .values(state="failed", reason=_unanswered(int(UNANSWERED_AFTER.total_seconds() // 3600)))
         )
@@ -263,6 +330,7 @@ async def _expire_unanswered(session_factory: Any, *, now: datetime) -> int:
                 ))
                 .where(OutreachMessageRow.state == "awaiting_reply")
                 .where(OutreachMessageRow.kind == "operator")
+                .where(_TEAM_REQUESTED)
                 .where(OutreachMessageRow.sent_at.isnot(None))
                 .where(OutreachMessageRow.sent_at <= now - timedelta(hours=1))
             )
@@ -371,10 +439,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                     ),
                 ))
                 .where(OutreachMessageRow.created_at >= now - OUTCOME_LOOKBACK)
-                .where(sa.or_(
-                    OutreachMessageRow.created_by.like("team:%"),
-                    OutreachMessageRow.created_by.like("care-team:%"),
-                ))
+                .where(_TEAM_REQUESTED)
                 .order_by(OutreachMessageRow.created_at.desc())
                 .limit(BATCH)
             )
@@ -557,13 +622,7 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                 .where(OutreachMessageRow.reported_at.is_(None))
                 .where(OutreachMessageRow.state == "failed")
                 .where(OutreachMessageRow.created_at >= since)
-                .where(sa.or_(
-                    OutreachMessageRow.created_by.is_(None),
-                    sa.not_(sa.or_(
-                        OutreachMessageRow.created_by.like("team:%"),
-                        OutreachMessageRow.created_by.like("care-team:%"),
-                    )),
-                ))
+                .where(sa.not_(_TEAM_REQUESTED))
                 .where(sa.tuple_(OutreachMessageRow.org_id, OutreachMessageRow.agent_id).in_(list(teams)))
                 .order_by(OutreachMessageRow.created_at.desc())
                 .limit(BATCH)

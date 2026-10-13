@@ -755,3 +755,41 @@ async def test_a_failing_bookkeeping_pass_never_skips_the_send_pass(sf, doctor_s
     row = await _queue(sf, uuid.uuid4())
     assert await _send(sf, _Store(), _Delivery()) == 1
     assert (await _row(sf, row.id)).state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_studio_message_keeps_the_general_wait(sf, doctor_session):
+    await _team_message(sf, hours=6)
+    studio = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(), platform="whatsapp",
+        channel_identifier=SENDER, kind="operator", text="From Studio",
+        template_name="msg", template_language="ro", created_by=None,
+    )
+    await _send(sf, _Store(), _Delivery())
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=25))
+    assert (await _row(sf, studio.id)).state == "awaiting_reply"
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=73))
+    assert "72 hours" in (await _row(sf, studio.id)).reason
+
+
+@pytest.mark.asyncio
+async def test_an_answer_after_expiry_is_told_kindly_and_the_requester_hears(sf, doctor_session):
+    member, row = await _team_message(sf)
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=25))
+    assert (await _row(sf, row.id)).state == "failed"
+
+    later = NOW + timedelta(hours=30)
+    person_store = _Store()
+    for _ in range(2):
+        await outreach.deliver_pending(
+            sf, person_store, org_id=ORG, agent_id=AGENT, user_id=row.user_id,
+            platform="whatsapp", channel_identifier=SENDER, session_id=uuid.uuid4(), now=later,
+        )
+    [(_, event_type, data)] = person_store.events
+    assert event_type == EventType.LLM_RESPONSE
+    assert "expired" in data["message"]["content"]
+    assert "Come tomorrow" not in data["message"]["content"]
+    assert (await _row(sf, row.id)).state == "answered_late"
+    late = [n for n in await _notices(sf) if n.text.startswith("↩️")]
+    assert [n.user_id for n in late] == [member]
+    assert late[0].text.startswith("↩️ Ion Pop answered after your message expired")
