@@ -97,9 +97,15 @@ def _advisor_layer() -> list["SkillDef"]:
     tenant-authored expert called "advisor" must not shadow the platform
     one, or a user could silently redirect every advisor consult to a
     model of their choosing.
+
+    Empty when ``llm.advisor_enabled`` is off: every catalog (prompt
+    roster, consult lookup, ``/advisor``) is built through here.
     """
+    from surogates.config import load_settings
     from surogates.tools.builtin.advisor_expert import build_advisor_expert
 
+    if not load_settings().llm.advisor_enabled:
+        return []
     return [build_advisor_expert()]
 
 

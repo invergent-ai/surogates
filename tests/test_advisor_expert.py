@@ -118,6 +118,23 @@ class TestNoAdvisorOnProTier:
         assert not advisor_available(ADVISOR_MODEL_SENTINEL)
 
 
+class TestAdvisorCanBeDisabled:
+    """``llm.advisor_enabled: false`` removes the advisor from the catalog.
+
+    The catalog is the only way in: the prompt roster, the consult
+    lookup and ``/advisor`` all resolve against it.
+    """
+
+    def test_flag_controls_the_advisor_layer(self, monkeypatch):
+        from surogates.tools.loader import _advisor_layer
+
+        monkeypatch.setenv("SUROGATES_LLM_ADVISOR_ENABLED", "false")
+        assert _advisor_layer() == []
+
+        monkeypatch.setenv("SUROGATES_LLM_ADVISOR_ENABLED", "true")
+        assert [s.name for s in _advisor_layer()] == [ADVISOR_EXPERT_NAME]
+
+
 class TestAdvisorNeedsNoEndpoint:
     """The whole point: a platform expert declares a model, not a URL.
 
