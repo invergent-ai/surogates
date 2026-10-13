@@ -49,7 +49,7 @@ const mark = (run: string): string => {
  * named pipes only this user may open, which reach() and Node's net take by name. The backend's tests drive it against
  * the fake over Unix sockets on Linux by giving win32Boot their own address maker (test/vm/win32).
  *
- * The door's name here is a stand-in, for tests and the measurements; the app's door name is a fresh random one made
+ * The door's name here is a fixed one, for tests and the measurements; the app's door name is a fresh random one made
  * at each start (freshDoorWin32), so no other local user can work it out and listen on it first.
  */
 export function addressesWin32(run: string): Addresses {
