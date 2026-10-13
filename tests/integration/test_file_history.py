@@ -3148,3 +3148,28 @@ async def test_an_editor_save_someone_edited_too_is_yours(api, tmp_path):
     you = {"name": str(api.user_id), "email": f"user:{api.user_id}@surogate"}
     await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=you, write=write)
     assert (await history_of(api, project, "Report.docx"))[0]["by"] == {"kind": "you"}
+
+
+async def test_an_editor_save_records_your_unrecorded_edit_first(api, tmp_path):
+    from surogates.workstreams.undo import land_editor_save
+
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    before = await history_of(api, project, "Report.docx")
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    edited = b"PK\x03\x04 report edited live by B's agent"
+
+    async def write() -> None:
+        (pods.project / "Report.docx").write_bytes(edited)
+
+    author = {"name": "Draft B", "email": f"thread:{second.id}@surogate"}
+    await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=author, write=write)
+    listed = await history_of(api, project, "Report.docx")
+    # Your edit is a version of its own, under the agent's: History can restore the file to before the agent's edit.
+    assert len(listed) == len(before) + 2
+    assert [(v["by"], v["change"]) for v in listed[:2]] == [
+        ({"kind": "thread", "thread_id": str(second.id), "title": "Draft B"}, "changed"), ({"kind": "you"}, "changed"),
+    ]
+    assert (await opened(api, project, listed[0]["id"], "Report.docx")).content == edited
+    assert (await opened(api, project, listed[1]["id"], "Report.docx")).content == YOURS
+    *_, yours, the_threads = await rows_of(api, project)
+    assert [(r.kind, r.saga_state) for r in (yours, the_threads)] == [("pickup", "completed"), ("pickup", "completed")]

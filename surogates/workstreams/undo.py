@@ -547,6 +547,7 @@ async def land_editor_save(
 ) -> None:
     """A document editor's save of *path* in a project: written by *write* under the project's lock, and
     recorded on ``main`` as one pickup entry by *author* (the thread whose agent alone edited it, or you).
+    Your edits to it not yet recorded are picked up first, by you, as every landing does.
 
     Outside history (a name history leaves out, a project over its history's cap) it is only written.
     Raises :class:`Refused` when the project stays busy past the patience, and whatever *write* raises (a
@@ -569,7 +570,12 @@ async def land_editor_save(
                 await settle_running(
                     session_factory, place, API, project.id, saga_settings, held, redis=state.redis, master=project.master_session_id,
                 )
+                # Your edits first, as every landing records them: the version the editor replaces is one in History.
+                you = {"name": str(project.user_id), "email": f"user:{project.user_id}@surogate"}
+                await _pick_up(session_factory, place, project, project.user_id, you, audit, [path], saga_settings, held, picked)
                 # Inside the lock: a thread's landing would otherwise pick the save up first, as yours.
+                # A lock lost unseen frees the project: the save is not written outside it.
+                await held()
                 await write()
                 await _pick_up(session_factory, place, project, project.user_id, author, audit, [path], saga_settings, held, picked)
     except ProjectBusy as exc:
