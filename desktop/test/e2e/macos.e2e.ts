@@ -170,6 +170,24 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
     expect(await page.textContent("#sandbox-text")).not.toContain("tools are missing");
   });
 
+  it("closes Settings from its close button: while Settings is open, nothing of the window beneath it drags the window", async () => {
+    const { shell, page } = await signedIn();
+    const dragging = () => page.evaluate(() => [...document.querySelectorAll("*")]
+      .filter((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region") === "drag").length);
+    expect(await dragging()).toBeGreaterThan(0);
+    await page.click("#open-settings");
+    let settings: Page | undefined;
+    await expect.poll(() => {
+      settings = shell.windows().find((found) => found.url().endsWith("/settings.html"));
+      return settings !== undefined;
+    }).toBe(true);
+    await expect.poll(dragging).toBe(0);
+    await settings!.click("#close");
+    await expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.contentView.children
+      .some((view) => (view as Electron.WebContentsView).webContents.getURL().endsWith("/settings.html"))))).toBe(false);
+    await expect.poll(dragging).toBeGreaterThan(0);
+  });
+
   it("names this Mac in Settings by the name System Settings gives it", async () => {
     const { shell, page } = await signedIn();
     await page.click("#open-settings");
