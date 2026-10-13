@@ -23,6 +23,7 @@ from surogates.db.models import (
     ProgramScheduleRow,
     User,
 )
+from surogates.channels.identity import readable_phone
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
 
@@ -176,7 +177,7 @@ async def _alert_if_streak(
         name=followup_store.patient_label(
             user.display_name if user else "", enrollment,
         ) or "?",
-        phone=f"+{inv.platform_user_id}" if inv.platform_user_id else "?",
+        phone=readable_phone(inv.platform_user_id) if inv.platform_user_id else "?",
         count=threshold,
         program=str(config.get("name") or "check-in"),
     )

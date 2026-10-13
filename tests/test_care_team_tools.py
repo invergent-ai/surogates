@@ -178,7 +178,7 @@ async def test_overview_lists_this_agents_people_and_nobody_elses(sf, practice):
         await store.queue_outreach(
             sf, org_id=ORG, agent_id=AGENT, user_id=recipient, platform="whatsapp",
             channel_identifier="pn1", kind="alert",
-            text="Durere în piept\n\n— Ion Popescu · +40700000001",
+            text="Durere în piept\n\n— Ion Popescu · +40 700 000 001",
             template_name=None, template_language=None, subject_user_id=ion,
         )
     await store.record_inbound(
@@ -234,7 +234,7 @@ async def test_an_ambiguous_patient_returns_candidates_and_sends_nothing(sf, pra
     )
     assert "more than one person" in out
     assert "Ion Popescu" in out and "Ioana Popa" in out
-    assert "40700000001" not in out  # masked
+    assert "+40 700 000 001" in out  # whole, to call or message
     assert await _outreach(sf) == []
 
 
@@ -255,7 +255,7 @@ async def test_unconfirmed_is_a_preview_and_sends_nothing(sf, practice):
         {"patient": "Ioana", "text": "Veniți mâine la 10."},
         **_kw(sf, practice.doctor_session),
     )
-    assert out.startswith("Will send to Ioana Popa (+40…002): «Veniți mâine la 10.»")
+    assert out.startswith("Will send to Ioana Popa (+40 700 000 002): «Veniți mâine la 10.»")
     assert _redis.ttl[next(iter(_redis.data))] == care_team.CONFIRM_TTL_SECONDS
     assert f'confirmation="{_code(out)}"' in out
     assert await _outreach(sf) == []
@@ -475,7 +475,7 @@ async def test_enrol_preview_writes_nothing(sf, practice, bindings):
     out = await care_team.handle_care_team_enroll_patient(
         _enrol(answered_by="Ana, fiica"), **_kw(sf, practice.doctor_session),
     )
-    assert out.startswith("Will enrol Elena Dumitru (+40711222333) in post-op from ")
+    assert out.startswith("Will enrol Elena Dumitru (+40 711 222 333) in post-op from ")
     assert "answered by Ana, fiica" in out and "welcome message" in out
     assert "Nothing has been changed" in out
     async with sf() as db:
@@ -495,7 +495,7 @@ async def test_confirmed_enrol_creates_the_phone_only_person_and_welcomes_them(s
         care_team.handle_care_team_enroll_patient,
         _enrol(start_date_approximate=True), _kw(sf, practice.doctor_session),
     )
-    assert "Enrolled Elena Dumitru (+40711222333) in post-op" in out
+    assert "Enrolled Elena Dumitru (+40 711 222 333) in post-op" in out
     assert "Welcome message queued" in out
     async with sf() as db:
         identity = (await db.execute(
@@ -553,7 +553,7 @@ async def test_a_care_team_number_is_refused(sf, practice, bindings):
 async def test_enrol_needs_a_date_or_date_unknown_and_a_valid_number(sf, practice, bindings):
     kw = _kw(sf, practice.doctor_session)
     no_date = await care_team.handle_care_team_enroll_patient(
-        {"phone": "+40711222333", "patient_name": "X", "confirmed": True}, **kw,
+        {"phone": "+40 711 222 333", "patient_name": "X", "confirmed": True}, **kw,
     )
     bad = await care_team.handle_care_team_enroll_patient(_enrol(phone="0711222333", confirmed=True), **kw)
     assert "days_ago" in no_date and "country code" in bad
@@ -622,3 +622,15 @@ async def test_overview_focus_without_memory_storage_still_answers(sf, practice)
         {"patient": "popescu"}, **_kw(sf, practice.doctor_session),
     )
     assert "Ion Popescu" in out and "memory cannot be read" in out
+
+
+def test_the_care_team_reads_a_whole_tappable_number_that_redaction_leaves_alone():
+    """Alert footers reached the doctor as "+407****0601": the practice must call
+    or message its patient, so the number is whole, spaced as WhatsApp links it."""
+    from surogates.channels.identity import readable_phone
+    from surogates.harness.redact import redact_sensitive_text
+
+    assert readable_phone("40712000403") == "+40 712 000 403"
+    assert readable_phone("447911123456") == "+447 911 123 456"
+    footer = f"— Florica Enache · {readable_phone('40712000601')}"
+    assert redact_sensitive_text(footer) == footer

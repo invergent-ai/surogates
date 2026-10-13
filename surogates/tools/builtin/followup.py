@@ -25,6 +25,7 @@ from surogates.db.models import (
     Session as SessionRow,
     User,
 )
+from surogates.channels.identity import readable_phone
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import (
     day_index,
@@ -264,7 +265,7 @@ class _Context:
         name = followup_store.patient_label(self.display_name, self.enrollment)
         parts = [name] if name else []
         if self.channel == "whatsapp" and self.platform_user_id:
-            parts.append(f"+{self.platform_user_id}")
+            parts.append(readable_phone(self.platform_user_id))
         return " · ".join(parts) or f"user {self.user_id}"
 
 

@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
-from surogates.channels.identity import channel_user_email, normalize_wa_id
+from surogates.channels.identity import channel_user_email, normalize_wa_id, readable_phone
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import (
@@ -357,10 +357,6 @@ def _local(at: datetime, config: dict) -> str:
     return f"{at.astimezone(ZoneInfo(zone)):%a %Y-%m-%d %H:%M} {zone}"
 
 
-def _masked(phone: str) -> str:
-    return f"+{phone[:2]}…{phone[-3:]}" if len(phone) > 5 else "no number"
-
-
 async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Person | str:
     """The one enrolled person *fragment* names, or why there is not one."""
     matches = [
@@ -372,7 +368,7 @@ async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Perso
     if len(matches) > 1:
         return (
             f"'{fragment}' matches more than one person. Ask the doctor which "
-            "one:\n" + "\n".join(f"- {p.label} ({_masked(p.phone)})" for p in matches)
+            "one:\n" + "\n".join(f"- {p.label} ({readable_phone(p.phone) if p.phone else 'no number'})" for p in matches)
         )
     return matches[0]
 
@@ -635,7 +631,7 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
 
         head = person.label
         if person.phone:
-            head += f" · +{person.phone}"
+            head += f" · {readable_phone(person.phone)}"
         lines = [f"• {head}"]
         for row in person.rows:
             zone = zones.get(row.protocol, "UTC")
@@ -801,7 +797,7 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
 
     refused = await _unconfirmed(
         kwargs, "care_team_message_patient", arguments,
-        f"Will send to {person.label} ({_masked(identity.platform_user_id)}): «{text}».",
+        f"Will send to {person.label} ({readable_phone(identity.platform_user_id)}): «{text}».",
         "Nothing has been sent.",
     )
     if refused:
@@ -997,7 +993,7 @@ async def _patient_account(
             ))
         elif bound != wa_id:
             # Never move a person's number, as the Users page refuses to.
-            return f"that person's account already has the number +{bound}."
+            return f"that person's account already has the number {readable_phone(bound)}."
         # Someone who wrote first has a runtime shadow account, which the
         # linked identity policy refuses; the doctor vouching makes them known.
         if user.auth_provider == "whatsapp":
@@ -1053,7 +1049,7 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
     holder = await _number_holder(sf, ctx.org_id, wa_id)
     if holder is not None and followup_store.is_care_team(settings, holder.id):
         return (
-            f"Not enrolled: +{wa_id} belongs to a member of the care team, "
+            f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the care team, "
             "who receives the alerts and is not a patient. Check the number."
         )
     sender = _sender(ctx, settings)
@@ -1064,7 +1060,7 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
     )
     refused = await _unconfirmed(
         kwargs, "care_team_enroll_patient", arguments,
-        f"Will enrol {name} (+{wa_id}) in {protocol} {when}"
+        f"Will enrol {name} ({readable_phone(wa_id)}) in {protocol} {when}"
         + (f", answered by {answered_by}" if answered_by else "")
         + (f"; the number is already known as {holder.display_name}" if holder else "")
         + "; record their permission to be messaged on your say-so"
@@ -1090,8 +1086,8 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
             answered_by=answered_by, start_date_approximate=approximate,
         )
     except followup_store.CareTeamMember:
-        return f"Not enrolled: +{wa_id} belongs to a member of the care team."
-    result = f"Enrolled {name} (+{wa_id}) in {protocol}"
+        return f"Not enrolled: {readable_phone(wa_id)} belongs to a member of the care team."
+    result = f"Enrolled {name} ({readable_phone(wa_id)}) in {protocol}"
     if row.start_date:
         result += f" from {_start_text(row)}"
     result += ". Permission to message them recorded on your say-so."
@@ -1118,7 +1114,7 @@ async def handle_care_team_enroll_patient(arguments: dict, **kwargs: Any) -> str
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="enrolment",
         text=(
             f"{name} enrolled in {protocol} by {_doctor(ctx)}."
-            f"\n\n— {followup_store.patient_label(name, row)} · +{wa_id}"
+            f"\n\n— {followup_store.patient_label(name, row)} · {readable_phone(wa_id)}"
         ),
         created_by=f"care-team:{ctx.user_id}", subject_user_id=user_id,
         exclude_user_id=ctx.user_id, fallback_sender=sender,

@@ -95,7 +95,7 @@ async def test_three_unanswered_in_a_row_alert_the_care_team(sf):
     assert alert.user_id == doctor
     assert alert.subject_user_id == patient
     assert alert.text == (
-        "Ion Pop (+40700000001) has not answered the last 3 messages of "
+        "Ion Pop (+40 700 000 001) has not answered the last 3 messages of "
         "“Prima lună”."
     )
     assert await _state(sf, third) == "raised"
@@ -158,7 +158,7 @@ async def test_the_operators_wording_is_used(sf):
     await _invitation(sf, program_id, patient, days_ago=0.10)
     await alert_missed_checkins(sf, now=NOW)
     [alert] = await _alerts(sf)
-    assert alert.text == "Ion Pop (+40700000001) nu a răspuns de 1 ori."
+    assert alert.text == "Ion Pop (+40 700 000 001) nu a răspuns de 1 ori."
 
 
 def test_a_broken_template_falls_back_to_the_default():

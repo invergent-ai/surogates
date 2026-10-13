@@ -103,7 +103,7 @@ async def test_enrol_records_consent_and_tells_the_care_team(sf, patient, care_t
     [note] = await _outreach(sf)
     assert note.user_id == doctor
     assert note.kind == "enrolment"
-    assert "Ion Popescu · +40700000001" in note.text
+    assert "Ion Popescu · +40 700 000 001" in note.text
 
 
 @pytest.mark.asyncio
@@ -335,7 +335,7 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.service_account_id == inbox_sa
-    assert item.title == "Needs your attention: Ion Popescu · +40700000001"
+    assert item.title == "Needs your attention: Ion Popescu · +40 700 000 001"
     [alert] = await _outreach(sf)
     assert alert.user_id == doctor
 
@@ -412,7 +412,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     )
     assert "for Petre Marin (answered by Ana, fiica)" in result
     [note] = await _outreach(sf)
-    assert note.text.endswith("— Petre Marin · via Ana, fiica · +40700000001")
+    assert note.text.endswith("— Petre Marin · via Ana, fiica · +40 700 000 001")
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert "patient Petre Marin, answered by Ana, fiica" in status
@@ -421,7 +421,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.title == (
-        "Needs your attention: Petre Marin · via Ana, fiica · +40700000001"
+        "Needs your attention: Petre Marin · via Ana, fiica · +40 700 000 001"
     )
 
 
