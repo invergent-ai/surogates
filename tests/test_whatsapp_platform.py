@@ -899,6 +899,25 @@ class TestQuestionNotRepeated:
         assert payload["context"] == "Am notat: TAVI acum 4 zile."
         assert payload["questions"] == [question]
 
+    def test_the_message_field_reaches_the_person_and_an_invented_context_does_not(self):
+        from surogates.session.events import EventType
+        from surogates.session.store import _build_channel_payload
+
+        question = {"prompt": "Îmi răspundeți dumneavoastră?", "choices": [{"label": "Da"}, {"label": "Nu"}]}
+        payload = _build_channel_payload(
+            EventType.INBOX_INPUT_REQUIRED,
+            {"tool_call_id": "call_1", "context": "Step 4 of the skill",
+             "message": "Am notat biletul de externare.", "questions": [question]},
+            "whatsapp",
+        )
+        assert payload["context"] == "Am notat biletul de externare."
+        no_message = _build_channel_payload(
+            EventType.INBOX_INPUT_REQUIRED,
+            {"tool_call_id": "call_1", "context": "Step 4 of the skill", "questions": [question]},
+            "whatsapp",
+        )
+        assert "context" not in no_message
+
     def test_the_closing_repeat_is_cut(self):
         payload = self._payload(
             "Mulțumesc.\n\nCum  vă numiți?\n(numele și prenumele)\n",

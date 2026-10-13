@@ -185,6 +185,15 @@ ASK_USER_QUESTION_SCHEMA = {
                 "single batch.  Each is rendered as a tab in the widget."
             ),
         },
+        "message": {
+            "type": "string",
+            "description": (
+                "Optional: what you say to the person right before the "
+                "question, in their language (an acknowledgement, the "
+                "answer to what they just wrote).  Sent to them as is on "
+                "messaging apps.  Never your reasoning or plans."
+            ),
+        },
     },
     "required": ["questions"],
 }
@@ -483,6 +492,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
             "tool_call_id": str(tool_call_id),
             "questions": questions,
             "context": arguments.get("context", ""),
+            "message": str(arguments.get("message") or "").strip(),
         },
     )
 

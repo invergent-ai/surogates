@@ -313,6 +313,10 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["context"] = _strip_trailing_question(
                     strip_next_action_blocks(data.get("context", "") or ""), questions,
                 )
+            elif data.get("message"):
+                # ``message`` is the schema's field for words to the person;
+                # an invented ``context`` stays the operator's.
+                payload["context"] = _strip_trailing_question(data["message"], questions)
     return payload
 
 
