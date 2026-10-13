@@ -32,13 +32,13 @@ const option = (path: string) => path.replaceAll(",", ",,");
  * The guest kernel's command line, every OS's, for the machine's *devices* and the rule's set of *names*
  * (protocol.ts, GuestDevices), each of which it names, so no part of the guest guesses. On virtio, the image's disk, its first, as root, and the
  * stub init; on SCSI the initrd finds the image's disk at its LUN and runs the stub init on it (images/guest/
- * initrd). The console on the transport's: virtio-serial's console port, hvc0, or else the UART, ttyS0. Then
+ * initrd). The console on the transport's: virtio-serial's console port, hvc0, or else the UART, ttyS0. Last,
  * lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
  */
 export function kernelLine({ disks, transport, names }: GuestDevices): string {
   const root = disks === "virtio" ? "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init " : "";
-  return `${root}console=${transport === "virtio-serial" ? "hvc0" : "ttyS0"} panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf`
-    + ` surogate.disks=${disks} surogate.transport=${transport} surogate.names=${names}`;
+  return `${root}console=${transport === "virtio-serial" ? "hvc0" : "ttyS0"} panic=-1 quiet`
+    + ` surogate.disks=${disks} surogate.transport=${transport} surogate.names=${names} lsm=landlock,lockdown,yama,integrity,apparmor,bpf`;
 }
 
 // QEMU's guest, Linux's: virtio's disks and ports, and no names refused but the protected ones.
