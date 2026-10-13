@@ -14,8 +14,8 @@
 # It builds dist/, surogate-vm (native/build.sh), the arm64 guest image into images/guest/out (unless
 # one is there, or SUROGATE_VM_IMAGE names one), and the agent disks in a Linux container: the app's,
 # and one for the measurements whose init also runs, as the guest's root, a probe a measurement leaves
-# in a shared folder (.measure-probe). That one is never the app's: it is made in probing/ here, never
-# in dist/.
+# in a shared folder (.measure-probe), and writes the kernel's log to the console. That one is never the
+# app's: it is made in probing/ here, never in dist/.
 set -euo pipefail
 
 DESKTOP="$(cd "$(dirname "$0")/../../../.." && pwd)"

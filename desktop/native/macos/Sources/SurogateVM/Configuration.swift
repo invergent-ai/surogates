@@ -86,7 +86,8 @@ func singleShare(_ folder: SharedFolder) -> VZSingleDirectoryShare {
 /// configuration with the least the framework takes, which "checks for the availability of the entitlement
 /// the framework requires". Its kernel is a file of *executable*'s: validate() reads no kernel. Unsure:
 /// Apple's documentation does not say what validate() checks of a kernel, or in what order; a Mac measures
-/// it, signed and unsigned (test/vm/darwin/measure/boot.ts).
+/// it, signed with the entitlement and without it (test/vm/darwin/measure/boot.ts): Apple silicon runs no
+/// program that is not signed at all.
 public func supported(executable: String) -> (supported: Bool, reason: String?) {
   guard VZVirtualMachine.isSupported else { return (false, "this Mac does not support virtualization") }
   let configuration = VZVirtualMachineConfiguration()
