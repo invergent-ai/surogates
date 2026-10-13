@@ -20,6 +20,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store
+from surogates.runtime.memory_protocol import _MemoryEnvelope, encode_envelope
 from surogates.tools.builtin import care_team
 
 ORG = uuid.uuid4()
@@ -470,3 +471,67 @@ async def test_enrol_needs_a_date_or_date_unknown_and_a_valid_number(sf, practic
     bad = await care_team.handle_care_team_enroll_patient(_enrol(phone="0711222333", confirmed=True), **kw)
     assert "days_ago" in no_date and "country code" in bad
     assert bindings == []
+
+
+# --- overview memory ----------------------------------------------------------
+
+
+class _Bucket:
+    def __init__(self, objects):
+        self.objects = objects
+        self.read_keys = []
+
+    async def read(self, bucket, key):
+        assert bucket == "mem"
+        self.read_keys.append(key)
+        if key not in self.objects:
+            raise KeyError(key)
+        return encode_envelope(_MemoryEnvelope(version=1, content=self.objects[key]))
+
+
+@pytest.mark.asyncio
+async def test_overview_focus_includes_what_the_agent_remembers(sf, practice, monkeypatch):
+    monkeypatch.setattr(care_team, "_memory_bucket", lambda: "mem")
+    ion, ion_session = practice.ion
+    ioana, ioana_session = practice.ioana
+    async with sf() as db:
+        for session_id, boundary in ((ion_session, "wa:ion"), (ioana_session, "wa:ioana")):
+            (await db.get(SessionRow, session_id)).config = {
+                "whatsapp_channel_id": "x", "memory_boundary": boundary,
+            }
+        db.add(SessionRow(
+            id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, channel="whatsapp", user_id=ion,
+            config={"memory_boundary": "wa:group", "multi_party": True},
+        ))
+        await db.commit()
+    bucket = _Bucket({
+        "p/a1/boundaries/wa:ion/user.json": "Alergic la penicilină\n---\nLocuiește singur",
+        "p/a1/boundaries/wa:ion/memory.json": "Alergic la penicilină\n---\n" + "x" * 5000,
+        f"p/a1/users/{ion}/user.json": "Preferă dimineața",
+        "p/a1/boundaries/wa:group/user.json": "group chatter",
+        "p/a1/boundaries/wa:ioana/user.json": "Ioana's secret",
+    })
+    out = await care_team.handle_care_team_overview(
+        {"patient": "popescu"}, **_kw(sf, practice.doctor_session),
+        storage=bucket, tenant=SimpleNamespace(asset_root="p/a1"),
+    )
+    assert "what the agent remembers about them:" in out
+    assert out.count("Alergic la penicilină") == 1
+    assert "Locuiește singur" in out and "Preferă dimineața" in out
+    assert "group chatter" not in out and "Ioana's secret" not in out
+    assert "x" * 601 not in out
+    assert not any("wa:ioana" in k or "wa:group" in k for k in bucket.read_keys)
+
+    digest = await care_team.handle_care_team_overview(
+        {}, **_kw(sf, practice.doctor_session),
+        storage=bucket, tenant=SimpleNamespace(asset_root="p/a1"),
+    )
+    assert "remembers" not in digest
+
+
+@pytest.mark.asyncio
+async def test_overview_focus_without_memory_storage_still_answers(sf, practice):
+    out = await care_team.handle_care_team_overview(
+        {"patient": "popescu"}, **_kw(sf, practice.doctor_session),
+    )
+    assert "Ion Popescu" in out and "memory cannot be read" in out

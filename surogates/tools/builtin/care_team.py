@@ -10,6 +10,7 @@ withheld from every other session's tool list.
 
 from __future__ import annotations
 
+import logging
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.identity import channel_user_email, normalize_wa_id
+from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import (
     ChannelIdentity,
@@ -32,9 +34,13 @@ from surogates.db.models import (
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc, day_index, next_contact
 from surogates.followup.outreach import window_open
+from surogates.runtime.memory_io import read_user_memory
+from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
 from surogates.tools.builtin.followup import _context, _start_date, _start_text, _told
 from surogates.tools.registry import ToolSchema
+
+logger = logging.getLogger(__name__)
 
 CARE_TEAM_TOOL_NAMES: frozenset[str] = frozenset({
     "care_team_overview", "care_team_message_patient", "care_team_update_patient",
@@ -54,6 +60,7 @@ HISTORY = timedelta(days=60)
 MAX_PEOPLE = 60
 MAX_CHARS = 12_000
 CONVERSATION_LINES = 10
+MEMORY_CHARS = 3000
 MAX_MESSAGE = 4000
 #: ops' default ``texts.welcome_text``, used when the practice set none.
 WELCOME_TEXT = (
@@ -84,7 +91,8 @@ CARE_TEAM_OVERVIEW_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "A name or phone fragment to show only that person, with "
-                    "their latest conversation lines."
+                    "their latest conversation lines and what the agent "
+                    "remembers about them."
                 ),
             },
         },
@@ -494,6 +502,75 @@ async def _conversation(sf, org_id, agent_id, user_id) -> list[str]:
     return lines[::-1]
 
 
+def _memory_bucket() -> str:
+    from surogates.config import load_settings
+
+    storage = load_settings().storage
+    return storage.memory_bucket or storage.bucket
+
+
+async def _memory(kwargs: dict, sf: Any, ctx: Any, user_id: uuid.UUID) -> list[str] | None:
+    """What the agent remembers about one person, from every partition the
+    worker keys their memory by: each of their one-to-one channel
+    conversations' boundary, then their per-user memory."""
+    backend, tenant = kwargs.get("storage"), kwargs.get("tenant")
+    if backend is None or tenant is None:
+        return None
+    try:
+        bucket = _memory_bucket()
+    except Exception:
+        logger.warning("[care_team] no memory bucket configured", exc_info=True)
+        return None
+    async with sf() as db:
+        sessions = (
+            await db.execute(
+                sa.select(SessionRow)
+                .where(SessionRow.org_id == ctx.org_id)
+                .where(SessionRow.agent_id == ctx.agent_id)
+                .where(SessionRow.user_id == user_id)
+                .order_by(SessionRow.created_at.desc())
+            )
+        ).scalars().all()
+    boundaries: dict[str | None, None] = {}
+    for session in sessions:
+        boundary = session_memory_boundary(session)
+        # A group's or Slack's shared partition describes a room, not them.
+        if boundary and boundary != "public" and not (session.config or {}).get("multi_party"):
+            boundaries[boundary] = None
+    boundaries[None] = None
+    entries: list[str] = []
+    for boundary in boundaries:
+        for target in ("user", "memory"):
+            key = memory_object_key(
+                storage_key_prefix=tenant.asset_root, user_id=str(user_id),
+                boundary=boundary, target=target,
+            )
+            try:
+                found = await read_user_memory(backend, bucket=bucket, key=key)
+            except Exception:
+                logger.warning("[care_team] memory read failed for %s", key, exc_info=True)
+                continue
+            if found:
+                entries.extend(e.strip() for e in found[0].split("\n---\n") if e.strip())
+    return list(dict.fromkeys(entries))
+
+
+def _memory_lines(entries: list[str] | None) -> list[str]:
+    if entries is None:
+        return ["  the agent's memory cannot be read here"]
+    if not entries:
+        return ["  the agent remembers nothing about them yet"]
+    lines, used = ["  what the agent remembers about them:"], 0
+    for entry in entries:
+        line = f"  - {' '.join(entry.split())[:600]}"
+        if used + len(line) > MEMORY_CHARS:
+            lines.append("  - … more not shown")
+            break
+        lines.append(line)
+        used += len(line)
+    return lines
+
+
 async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
@@ -580,6 +657,9 @@ async def handle_care_team_overview(arguments: dict, **kwargs: Any) -> str:
             convo = await _conversation(sf, ctx.org_id, ctx.agent_id, person.user_id)
             lines.append("  latest conversation:" if convo else "  no conversation yet")
             lines.extend(convo)
+            lines.extend(_memory_lines(
+                await _memory(kwargs, sf, ctx, person.user_id)
+            ))
         blocks.append("\n".join(lines))
 
     header = [
