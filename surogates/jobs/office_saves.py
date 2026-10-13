@@ -24,7 +24,7 @@ async def run_office_loop(*, session_factory: Any, session_store: Any, storage: 
     while True:
         try:
             await land_pending_saves(session_factory=session_factory, session_store=session_store,
-                                     storage=storage, redis=redis, office=office)
+                                     storage=storage, redis=redis, office=office, settings=settings)
             if passes % REAP_EVERY == 0:
                 await reap(session_factory=session_factory, session_store=session_store, office=office,
                            storage=storage)
