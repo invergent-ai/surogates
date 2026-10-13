@@ -105,20 +105,20 @@ Connector protocol, for `runtime-office` (Euro-Office ships no
    │ ① editor config (adapter → [ops →] runtime API)        │ ⑤ signs the agent's config;
    │ ② api.js + co-editing WebSocket                        │   read / edit via runtime-office
    ▼                                                        ▼
- runtime-office-docs  ◄───────────────────────────── runtime-office (Node + headless Chromium,
+ office-docs  ◄───────────────────────────── runtime-office (Node + headless Chromium,
  (Euro-Office proxy + docservice)              ②       one browser context per document per session)
    │ ③ fetch file   ④ save callback   ▲
    ▼                                  │
  runtime API ── pending saves (cache bucket) ── workspace layer ── bucket / project history / computer
    │
- runtime-office-converter ◄── RabbitMQ ──► docservice
+ office-converter ◄── RabbitMQ ──► docservice
 ```
 
 | Component | Lives in | Role |
 |---|---|---|
-| `runtime-office-docs` | new; surogate-ops chart | Euro-Office nginx proxy + docservice: serves the editor, holds co-editing sessions. One replica. |
-| `runtime-office-converter` | new; surogate-ops chart | Euro-Office converter workers: opens, saves, `/converter`. Two replicas. |
-| RabbitMQ | new; surogate-ops chart | Euro-Office's conversion queue and messages between its processes. |
+| `office-docs` | new; surogate-ops `charts/office` | Euro-Office nginx proxy + docservice: serves the editor, holds co-editing sessions. One replica. |
+| `office-converter` | new; surogate-ops `charts/office` | Euro-Office converter workers: opens, saves, `/converter`. Two replicas. |
+| RabbitMQ (`office-rabbitmq`) | new; surogate-ops `charts/office` | Euro-Office's conversion queue and messages between its processes. |
 | runtime API (new routes) | surogates | Users' editor configs, file fetch, save callbacks, the pending-save writer, Command Service calls, `office_sessions`. |
 | `surogates/office/` | new; surogates | The shared module: sessions, config signing, tokens, used by the runtime API and the worker. |
 | `runtime-office` | new; surogates | The agent's editor sessions, the connector shim, op compilation, slide measurement. |
@@ -478,12 +478,12 @@ A bundled skill with:
   pinned **by digest**. Never `:latest`; it failed to start once (Euro-Office
   issue #381). The first plan confirms which image runs the proxy and the
   schema job.
-- **`runtime-office-docs`:** a Deployment, one pod, two containers (proxy,
+- **`office-docs`:** a Deployment, one pod, two containers (proxy,
   docservice), one replica. Co-editing state lives in each docservice's memory
   and Euro-Office has no Redis store yet (server PRs #44/#46 open), so two pods
   serving one document could drop a save. Scaling it waits for that store or
   for document-key routing.
-- **`runtime-office-converter`:** a Deployment with two replicas. Autoscaling
+- **`office-converter`:** a Deployment with two replicas. Autoscaling
   waits until load shows the need.
 - **Schema:** Euro-Office's `createdb.sql`, copied out of the image, applied once
   with `psql` to the `docs` database.
@@ -533,7 +533,7 @@ empty the editor route answers 503 and the office tools are not offered.
 ```yaml
 office:
   public_url: https://office.surogate.ai                       # browsers load the editor from here
-  internal_url: http://runtime-office-docs.surogates.svc.surogate.local
+  internal_url: http://office-docs.office.svc
   callback_base_url: https://cloud.surogate.ai                  # document server → runtime API (public URL)
   runtime_office_url: http://runtime-office.surogates.svc.surogate.local:8080
   cache_bucket: surogate-office-cache
@@ -544,19 +544,10 @@ office:
 
 ### Delivery per environment
 
-- **Chart:** new templates in `/work/surogate-ops/k8s/surogates-runtime/`
-  (`office-docs`, `office-converter`, `office-rabbitmq`, `office-schema-job`,
-  `office-runtime`, `office-networkpolicies`), each gated on an `office:` values
-  block and built like the voice role (#533); the public Ingress follows
-  `channels-deployment.yaml`.
-- **PROD:** `helm template runtime k8s/surogates-runtime -f values.production.yaml
-  -s templates/<x>.yaml`, then `kubectl diff`, then `kubectl apply`, one template
-  at a time. Never `helm upgrade` (the `runtime` release is stale). Also: the
-  DNS record, the R2 bucket and token, the `docs` database, and
-  `runtime-office` added to master1's `restart-agent-pods.sh`. Order: RabbitMQ,
-  database and bucket; then the document server; then the runtime config.
-- **DEV:** the same templates rendered with a dev values file and applied to
-  node1, exposed under `office.densemax.local` with the mkcert certificate. The
+- **Chart:** a standalone chart, surogate-ops `charts/office`, installed as its own Helm release `office` in namespace `office` (like `browser-fleet` and `embedding-model`), with `values.yaml` for PROD and `values-dev.yaml` for DEV and secrets given at install time. The runtime chart `k8s/surogates-runtime` is stale and is not used.
+- **PROD:** `helm upgrade --install office charts/office -n office --create-namespace -f <secrets>`, plus the DNS record, the R2 bucket and token, the `docs` database, and `runtime-office` (plan 3) added to master1's `restart-agent-pods.sh`. Order: database and bucket; then the release; then the runtime config.
+- **DEV:** release `office` on node1 with `values-dev.yaml`, exposed under
+  `office.densemax.local` with the mkcert certificate (running since 2026-10-13). The
   runtime and `runtime-office` run on the workstation; `runtime-office` loads the
   editor from the public DEV URL, and `callback_base_url` points at the
   workstation.
