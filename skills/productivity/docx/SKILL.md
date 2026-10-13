@@ -33,6 +33,7 @@ Everything this skill uses is preinstalled in the sandbox. The sandbox runs as a
 - **Never use `\n`** — use separate `Paragraph` elements.
 - **TOC:** headings must use built-in `HeadingLevel.*`; custom heading styles need `outlineLevel` set or they won't appear.
 - **Don't use a table as a horizontal rule** — use a paragraph bottom border instead.
+- **Consecutive paragraphs with identical borders merge into one box** — Word and LibreOffice draw only the group's outer edges, so four bottom-bordered "Signature: / Name: / Title: / Date:" paragraphs show a single rule. Give each signature line its own table cell with a bottom border.
 - **Dot-leader / right-aligned-on-same-line:** use `PositionalTab` (`alignment: PositionalTabAlignment.RIGHT`, `leader: PositionalTabLeader.DOT`) inside a `TextRun`, not literal `.` or space padding.
 
 ## Verify the output

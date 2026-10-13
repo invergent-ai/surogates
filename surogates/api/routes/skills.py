@@ -801,6 +801,38 @@ async def read_skill_file(
         return _placeholder()
 
 
+async def _writable_skill(
+    ts: Any, name: str, request: Request, tenant: TenantContext,
+) -> dict:
+    """The tenant-storage skill a write route changes, or why it can't.
+
+    Platform skills (the built-in catalog and the agent's bundle) are
+    read-only here; answering "not found" for one sent an agent hunting
+    for a skill it had just loaded.
+    """
+    existing = await ts.skill_exists(name)
+    if existing:
+        return existing
+    from surogates.tools.loader import SKILL_SOURCE_PLATFORM
+
+    loader = _resource_loader(request)
+    bundle = await _resolve_agent_bundle(request)
+    system_bundle = await _resolve_system_bundle(request)
+    async with request.app.state.session_factory() as db_session:
+        skills = await loader.load_skills(
+            tenant, db_session=db_session, bundle=bundle, system_bundle=system_bundle,
+        )
+    if any(s.name == name and s.source == SKILL_SOURCE_PLATFORM for s in skills):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Skill '{name}' is a platform skill and is read-only from a "
+                "session. If it is wrong, tell the user."
+            ),
+        )
+    raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+
+
 @write_router.post("/skills", response_model=SkillActionResponse, status_code=status.HTTP_201_CREATED)
 async def create_skill(
     body: CreateSkillRequest,
@@ -845,9 +877,7 @@ async def edit_skill(
     raise_validation(validate_content_size(body.content))
 
     ts = _get_tenant_storage(request, tenant)
-    existing = await ts.skill_exists(name)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    existing = await _writable_skill(ts, name, request, tenant)
 
     await ts.overwrite_skill(existing["key_prefix"], body.content)
 
@@ -867,9 +897,7 @@ async def patch_skill(
     """Targeted find-and-replace within a skill file."""
     require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
-    existing = await ts.skill_exists(name)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    existing = await _writable_skill(ts, name, request, tenant)
 
     key_prefix = existing["key_prefix"]
     file_key = body.file_path or "SKILL.md"
@@ -919,9 +947,7 @@ async def delete_skill(
     """Delete a skill and all its files."""
     require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
-    existing = await ts.skill_exists(name)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    existing = await _writable_skill(ts, name, request, tenant)
 
     await ts.delete_skill(existing["key_prefix"])
 
@@ -940,9 +966,7 @@ async def write_skill_file(
     raise_validation(validate_file_size(body.file_content))
 
     ts = _get_tenant_storage(request, tenant)
-    existing = await ts.skill_exists(name)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    existing = await _writable_skill(ts, name, request, tenant)
 
     await ts.write_skill_file(existing["key_prefix"], body.file_path, body.file_content)
 
@@ -964,9 +988,7 @@ async def remove_skill_file(
     raise_validation(validate_file_path(path))
 
     ts = _get_tenant_storage(request, tenant)
-    existing = await ts.skill_exists(name)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    existing = await _writable_skill(ts, name, request, tenant)
 
     if not await ts.skill_file_exists(existing["key_prefix"], path):
         raise HTTPException(status_code=404, detail=f"File '{path}' not found in skill '{name}'.")
