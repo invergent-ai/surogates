@@ -14,6 +14,7 @@ from surogates.db.models import OfficeSession
 from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
+from surogates.office.runtime_office import close_pages
 from surogates.session.events import EventType
 from surogates.session.files import session_files
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
@@ -98,6 +99,7 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
             await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
                             {"path": row.path, "conflict_path": copy_path})
             await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
+            await close_pages(office, row.doc_key, row.session_ids)
             office_sessions.mark_closed(row)
         else:
             office_sessions.mark_landed(row, await files.etag(key))

@@ -156,3 +156,21 @@ async def test_a_save_already_written_lands_without_a_copy(session_factory, redi
     assert copies == []
     assert dropped == []
     assert not any(e.type == "office.conflict" for e in await store.get_events(session.id))
+
+
+async def test_a_conflict_closes_the_agents_pages(session_factory, redis_client, storage, monkeypatch):
+    closed: list[tuple[str, list[str]]] = []
+
+    async def close_pages(office, doc_key, session_ids):
+        closed.append((doc_key, [str(s) for s in session_ids]))
+
+    async def drop_editors(office, doc_key, users):
+        return None
+
+    monkeypatch.setattr(office_saves, "close_pages", close_pages)
+    monkeypatch.setattr(office_saves, "drop_editors", drop_editors)
+    store, session, key, document = await _chat_with_document(session_factory, storage)
+    await storage.write("b", key, b"changed outside the editor")
+    await _pend(session_factory, storage, document, b"v2")
+    await _land(session_factory, redis_client, storage, store)
+    assert closed == [(document.doc_key, [str(session.id)])]
