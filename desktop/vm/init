@@ -6,6 +6,11 @@
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+# The entropy device's driver, before anything here draws on the kernel's randomness: every VM has
+# the device, and the agent's node waits at its start until the kernel's random pool has been fed.
+# A CPU with no random-number instruction would leave it to timer jitter alone, which takes seconds.
+modprobe virtio-rng
+
 # What systemd's sysctl files set on a host, which the guest has none of, and no
 # io_uring, a large interface every root would share. First: the rule below loads under them.
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_disabled=1 \
