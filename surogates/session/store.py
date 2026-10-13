@@ -202,6 +202,7 @@ _DELIVERABLE_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
     EventType.CODE_RUN_CHANNEL_UPDATE,
     EventType.SESSION_STOPPED,
+    EventType.CHANNEL_FORM,
 })
 
 # Delivered to the channel when a /stop actually halts the running turn, so the
@@ -293,6 +294,8 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
+    elif event_type == EventType.CHANNEL_FORM and channel == "whatsapp":
+        payload["flow"] = data.get("interactive") or {}
     elif (
         event_type == EventType.INBOX_INPUT_REQUIRED
         and channel in INTERACTIVE_PROMPT_CHANNELS

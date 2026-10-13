@@ -196,6 +196,10 @@ class AgentRuntimeContext:
     # an agent whose Programs never reach the runtime anyway.
     programs_enabled: bool = False
 
+    # Published WhatsApp Flows the agent may send with ``send_form``, as
+    # projected by ops (see ``channels.whatsapp_flows``).
+    whatsapp_forms: tuple[dict[str, Any], ...] = ()
+
     # "Multi session" capability.  When False each end-user gets exactly
     # one session per channel — the create routes reuse the latest
     # reusable session instead of creating another.  Defaults True so a

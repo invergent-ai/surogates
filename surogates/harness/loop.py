@@ -102,6 +102,7 @@ from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
+from surogates.tools.builtin.send_form import SENT as FORM_SENT, describe_forms
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     describe_for_device,
@@ -632,6 +633,7 @@ class AgentHarness(
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
         runtime_config_cache: Any | None = None,
+        whatsapp_forms: tuple[dict[str, Any], ...] = (),
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
     ) -> None:
@@ -694,6 +696,7 @@ class AgentHarness(
         # The agent's runtime config, for the planes a project's turn is
         # held on at its wake (``admit_turn``).
         self._runtime_config_cache = runtime_config_cache
+        self._whatsapp_forms = tuple(whatsapp_forms or ())
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -1618,7 +1621,7 @@ class AgentHarness(
         return session.model_copy(update={"config": {**config, "history_off": await over_history_cap(self._storage, session)}})
 
     def _overlay_repos(self, session: Session) -> Session:
-        """Overlay the agent's configured repos + ssh targets onto a wake-local session.
+        """Overlay the agent's configured repos, ssh targets and WhatsApp forms onto a wake-local session.
 
         ``wake`` re-fetches the session from the store, so the runtime-projected
         repos/ssh_targets are applied here so ``/code``, the coding tool, and the
@@ -1626,9 +1629,11 @@ class AgentHarness(
         ``session.config['ssh_targets']``.  Never written back to the persisted
         row; with nothing configured the session is returned unchanged.
         """
-        if not self._coding_repos and not self._ssh_targets:
+        if not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms:
             return session
         config = dict(session.config or {})
+        if self._whatsapp_forms:
+            config["whatsapp_forms"] = [dict(form) for form in self._whatsapp_forms]
         if self._coding_repos:
             config["repos"] = [dict(repo) for repo in self._coding_repos]
         if self._ssh_targets:
@@ -2819,6 +2824,10 @@ class AgentHarness(
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
+        tool_schemas = [
+            describe_forms(s, self._whatsapp_forms) if s["function"]["name"] == "send_form" else s
+            for s in tool_schemas
+        ]
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
         offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)
@@ -4071,6 +4080,19 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="whiteboard_sketch_drawn",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A form's answers come back as the person's next message, so the
+            # turn has nothing left to do once it is sent; going on would put
+            # more text under the form.
+            if _form_sent(tool_calls_raw, tool_results) and not await self._said_to_the_model(session, steer_cursor):
+                logger.info("Session %s: a form was sent; ending turn", session.id)
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="form_sent",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -6409,6 +6431,14 @@ def _whiteboard_sketch_turn_done(
         if not str(result.get("content") or "").startswith("Error:"):
             return True
     return False
+
+
+def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
+    sent = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") == "send_form"}
+    return any(
+        r.get("tool_call_id") in sent and str(r.get("content") or "").startswith(FORM_SENT)
+        for r in tool_results
+    )
 
 
 def _whiteboard_sketch_filter(

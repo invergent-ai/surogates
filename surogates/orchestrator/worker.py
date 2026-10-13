@@ -1990,6 +1990,8 @@ async def run_worker(settings: Settings) -> None:
         entitlement_excluded_tools |= await care_team_tool_exclusions(
             session_factory, session, programs_enabled=ctx.programs_enabled,
         )
+        if session.channel != "whatsapp" or not ctx.whatsapp_forms:
+            entitlement_excluded_tools.add("send_form")
         if entitlement_excluded_tools:
             effective_tools.difference_update(entitlement_excluded_tools)
 
@@ -2182,6 +2184,7 @@ async def run_worker(settings: Settings) -> None:
             # A project's turns are held at their wake on the planes
             # this config names.
             runtime_config_cache=runtime_config_cache,
+            whatsapp_forms=ctx.whatsapp_forms,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

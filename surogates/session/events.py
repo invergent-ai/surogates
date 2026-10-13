@@ -76,6 +76,11 @@ class EventType(str, Enum):
     CODE_RUN_CHANNEL_UPDATE = "code.run_channel_update"
     CODE_RUN_RESULT = "code.run_result"
 
+    # A WhatsApp Flow (native form) sent by ``send_form``; delivered to the
+    # channel, and the record a submitted form's ``flow_token`` is checked
+    # against.
+    CHANNEL_FORM = "channel.form"
+
     # Session lifecycle
     SESSION_START = "session.start"
     SESSION_PAUSE = "session.pause"

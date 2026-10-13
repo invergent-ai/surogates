@@ -56,6 +56,7 @@ class ToolRuntime:
             care_team,
             checkin,
             followup,
+            send_form,
             voice_call,
             coding_agent,
             coordinator,
@@ -122,6 +123,7 @@ class ToolRuntime:
             checkin,  # checkin_outcome (Program check-ins)
             followup,  # followup_enroll/update/status, escalate
             care_team,  # care_team_overview / care_team_message_patient (care team only)
+            send_form,  # send_form (a WhatsApp Flow, for agents with published forms)
             voice_call,  # end_call (a phone call's agent hangs up)
         ]
 

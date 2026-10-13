@@ -857,8 +857,9 @@ class WhatsAppPlatform:
                 return SendResult(success=False, error=error or "send failed")
             return SendResult(success=True, message_id=wamid)
 
-        if item.payload.get("input_prompt"):
-            interactive = _interactive_prompt(item.payload)
+        flow = item.payload.get("flow")
+        if flow or item.payload.get("input_prompt"):
+            interactive = flow or _interactive_prompt(item.payload)
             if interactive is not None:
                 wamid, error = await send_message(
                     self._http,
