@@ -15,8 +15,8 @@ export interface SrtOs {
   toolsMissing(lacking: string[]): string;
   /** What the helper's sandbox lacks of this computer, by the names a person installs them by: looked for on *path*, and *bwrap* where it is given. */
   fileToolsMissing(bwrap: string | undefined, path: string): string[];
-  /** The PATH the host and its helper look for their tools on, of the app's PATH as pathOutside keeps it. */
-  toolsPath(outside: string): string;
+  /** The PATH a host on the app's node *node* and its helper look for their tools on, of the app's PATH as pathOutside keeps it. */
+  toolsPath(outside: string, node: string): string;
   /** srt's line for the helper, as the host runs it. */
   line(line: string): string;
   /**
