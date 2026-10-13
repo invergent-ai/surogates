@@ -18,15 +18,19 @@ import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STO
 import { PROXY_URL } from "./listeners.js";
 import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share, VZ_NAME, VZ_TAG } from "./protocol.js";
+import {
+  type Answer, HELD, type HostUser, MAX_SHARES, P9_ANAME, PLAN9_PORT, type Question, ROOT_ID, type Share, VZ_NAME, VZ_TAG,
+} from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 import { STORE } from "./trust.js";
 
 // The sessions disk (vm/init), and its folder of roots, each named by its root session id.
 const SESSIONS_DISK = "/run/surogate/sessions";
 export const SESSIONS = `${SESSIONS_DISK}/roots`;
-// Each share's virtiofs mount, readable by root only.
+// Each share's mount, readable by root only.
 const SHARES = "/run/surogate/shares";
+// The image's: a stream to a port of the host's on vsock, given to the program it runs at a descriptor (images/guest).
+export const SUROGATE_VSOCK = "/usr/sbin/surogate-vsock";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
 export const CGROUPS = "/sys/fs/cgroup/roots";
 /** 6 in a guest whose kernel's command line, *cmdline*, has surogate.emulated=1 (vm/qemu.ts), and 1 otherwise. */
@@ -212,6 +216,11 @@ export function checkShare(share: Share): void {
         throw new Error(`not one of Apple's shares: ${share.tag.slice(0, 64)} ${String(share.name ?? "").slice(0, 64)}`);
       }
       return;
+    case "p9":
+      if (!TAG.test(share.tag) || share.port !== PLAN9_PORT || (share.aname !== undefined && !P9_ANAME.test(share.aname))) {
+        throw new Error(`not one of the host's Plan 9 shares: ${share.tag.slice(0, 64)} ${String(share.port).slice(0, 16)} ${String(share.aname ?? "").slice(0, 64)}`);
+      }
+      return;
     default:
       throw new Error(UNMOUNTABLE);
   }
@@ -227,8 +236,24 @@ export function sharePath(share: Share): string {
 
 // Where *share*'s folder is in this guest, its device mounted the first time.
 async function mountShare(share: Share): Promise<string> {
+  if (share.kind === "p9") return mountOnce(share.tag, p9Mount(share, "nosuid,nodev", join(SHARES, share.tag)));
   await mountVirtiofs(ownMount(share) ?? DEVICE);
   return sharePath(share);
+}
+
+/**
+ * surogate-vsock's arguments that mount the Plan 9 share *share* at *at*, with mount(8)'s *options*: a stream to
+ * its port of the host's (CID 2), at descriptor 3, which the 9P client's fd transport takes and keeps once mounted
+ * (Linux's net/9p/trans_fd.c), as mount(8) makes the call in the process that holds it. Uncached, so a command
+ * sees each of the host's writes at once; the client checks each access by the owner the files show, the root's
+ * uid, which the server takes after the share's name (aname). A read-only share is mounted ro too.
+ */
+export function p9Mount(share: Extract<Share, { kind: "p9" }>, options: string, at: string): string[] {
+  const aname = share.aname === undefined ? share.tag : `${share.tag};${share.aname}`;
+  return [
+    `2:${share.port}:3`, "--", "/usr/bin/mount", "-t", "9p",
+    "-o", `trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client,${options},aname=${aname}`, share.tag, at,
+  ];
 }
 
 /** DEVICE, mounted the first time it is asked for; where it is. */
@@ -245,17 +270,26 @@ export function sessionUid(owner: number, scope: number | null): number {
   if (owner !== scope) throw new Error("This chat's folder shows as a user's in the sandbox whose writes its protected-names rule does not judge, so no command runs in it");
   return owner;
 }
+// A Plan 9 share made for another uid than its root's.
+export const OTHER_UID = "This chat's folder was shared for another user of the sandbox than its own, so no command runs in it";
+/** Throws for a Plan 9 *share* whose files show as another uid than *uid*, its root's: the uid it was made for, in its aname. */
+export function ownedBy(share: Share, uid: number): void {
+  if (share.kind === "p9" && share.aname !== undefined && share.aname !== `uid=${uid};gid=${uid}`) throw new Error(OTHER_UID);
+}
 // Apple's share in a guest whose rule judges no uid that the share shows.
 export const UNJUDGED = "This computer's sandbox judges no user's writes that this chat's folder shows, so no command runs in it";
 
-async function mountVirtiofs(tag: string): Promise<string> {
+const mountVirtiofs = (tag: string): Promise<string> => mountOnce(tag, ["-t", "virtiofs", "-o", "nosuid,nodev", tag, join(SHARES, tag)], "/usr/bin/mount");
+
+// The mount of *tag* under SHARES, by *program* with *args*, made the first time, and tried again until its device is there.
+async function mountOnce(tag: string, args: string[], program = SUROGATE_VSOCK): Promise<string> {
   const share = join(SHARES, tag);
   if (mounted.has(tag)) return share;
   await mkdir(share, { recursive: true });
   await chmod(SHARES, 0o700);
   for (const deadline = performance.now() + MOUNT_MS; ;) {
     try {
-      await execute("/usr/bin/mount", ["-t", "virtiofs", "-o", "nosuid,nodev", tag, share]);
+      await execute(program, args);
       break;
     } catch (error) {
       if (performance.now() > deadline) throw error;
@@ -354,6 +388,7 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root, SESSIONS, scope);
+  ownedBy(share, uid);
   // Made, if at all, before the host's answer to hello let any root be set up (Control), and kept for the boot.
   const companyCa = existsSync(STORE);
   const mount = await mountShare(share);

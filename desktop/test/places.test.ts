@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlPlaces, type ControlRoots } from "../src/guest/control.js";
 import { Places } from "../src/guest/places.js";
-import type { FromAgent, Share } from "../src/guest/protocol.js";
+import { type FromAgent, PLAN9_PORT, type Share } from "../src/guest/protocol.js";
 import { UNMOUNTABLE } from "../src/guest/root.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { readonlyFlag, refusesWrites } from "../src/vm/linux.js";
@@ -151,6 +151,7 @@ describe("the agent's places", () => {
     const places = new Places({
       folder: join(dir, "places"),
       mount: async (args) => void ran.push(["mount", ...args]),
+      vsock: async (args) => void ran.push(["surogate-vsock", ...args]),
       unmount: async (args) => void ran.push(["umount", ...args]),
       device: async () => {
         ran.push(["device"]);
@@ -208,6 +209,23 @@ describe("the agent's places", () => {
     await expect(places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r3" })).rejects.toThrow("already mounted from other shares");
     await places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r2" });
     expect(ran).toHaveLength(6);
+  });
+
+  it("mounts the host's Plan 9 shares through a stream to its server's port, the history for writing and the folder read-only, as the root's guest uid", async () => {
+    const { ran, places } = recorded();
+    const history: Share = { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=0;gid=0" };
+    const real: Share = { kind: "p9", tag: "r2", port: PLAN9_PORT, aname: "uid=0;gid=0" };
+    await places.mount(KEY, history, real);
+    const options = "trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client";
+    expect(ran).toEqual([
+      ["surogate-vsock", "2:564:3", "--", "/usr/bin/mount", "-t", "9p", "-o", `${options},nosuid,nodev,noexec,aname=r1;uid=0;gid=0`, "r1", join(dir, "places", KEY, "history")],
+      ["surogate-vsock", "2:564:3", "--", "/usr/bin/mount", "-t", "9p", "-o", `${options},ro,nosuid,nodev,noexec,aname=r2;uid=0;gid=0`, "r2", join(dir, "places", KEY, "real")],
+    ]);
+    // Another share's options are another share.
+    await expect(places.mount(KEY, history, { ...real, aname: "uid=1;gid=1" })).rejects.toThrow("already mounted from other shares");
+    await places.mount(KEY, history, real);
+    expect(ran).toHaveLength(2);
+    await expect(places.mount("fedcba9876543210", { ...history, port: 565 }, real)).rejects.toThrow("not one of the host's Plan 9 shares");
   });
 
   it("refuses what is none of Apple's shares, and makes nothing for it", async () => {

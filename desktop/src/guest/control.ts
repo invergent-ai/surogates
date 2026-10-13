@@ -5,7 +5,7 @@
 
 import type { Outcome } from "../link/protocol.js";
 import type { ProcessHandle } from "./processes.js";
-import { type FromAgent, type HostUser, type Share, type ToAgent, VZ_NAME, VZ_TAG } from "./protocol.js";
+import { type FromAgent, type HostUser, P9_ANAME, PLAN9_PORT, type Share, type ToAgent, VZ_NAME, VZ_TAG } from "./protocol.js";
 
 export const NO_HELLO = "The host has not answered hello";
 const NO_PLACES = "The agent keeps no folder's history";
@@ -53,10 +53,12 @@ const certificatesOf = (value: unknown): string[] => (Array.isArray(value) && va
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-// The kinds of share this agent mounts. Apple's names one of the VM's devices, and a folder's directory in it.
+// The kinds of share this agent mounts. Apple's names one of the VM's devices, and a folder's directory in it; a
+// Plan 9 share, the host's server's port and the options it takes, each in its form (root.ts, checkShare).
 function isShare(value: unknown): value is Share {
   if (!isRecord(value) || !isText(value.tag)) return false;
   if (value.kind === "virtiofs") return true;
+  if (value.kind === "p9") return value.port === PLAN9_PORT && (value.aname === undefined || (isText(value.aname) && P9_ANAME.test(value.aname)));
   return value.kind === "vz" && VZ_TAG.test(value.tag) && (value.name === undefined || (isText(value.name) && VZ_NAME.test(value.name)));
 }
 

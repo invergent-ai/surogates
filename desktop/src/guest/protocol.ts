@@ -68,8 +68,17 @@ export const MAX_INBOUND = 160;
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
 // vz: Apple's (macOS's Virtualization framework), which maps no owner. Its tag is one of
 // the VM's fixed devices (VZ_TAG); *name*, the folder's directory in a device that holds several.
+// p9: a share of the host's Plan 9 server (Hyper-V's), on its vsock *port*, PLAN9_PORT. Its *tag* is its name
+// there, given once in a boot as Linux's tags are; *aname*, what the server takes at the mount after that name:
+// "uid=<n>;gid=<n>", the owner the folder's files show as, the root's guest uid, so each root's are its own.
 // A backend whose share maps no owner, or maps them at the mount, adds its own kind.
-export type Share = { kind: "virtiofs"; tag: string } | { kind: "vz"; tag: string; name?: string };
+export type Share =
+  | { kind: "virtiofs"; tag: string }
+  | { kind: "vz"; tag: string; name?: string }
+  | { kind: "p9"; tag: string; port: number; aname?: string };
+
+// A p9 share's options at the mount, in their one form.
+export const P9_ANAME = /^uid=(0|[1-9][0-9]{0,9});gid=(0|[1-9][0-9]{0,9})$/;
 
 // Apple's share's devices: one that holds every folder, or one of MAX_SHARES of a folder each.
 export const VZ_TAG = /^(?:surogate|s[1-8])$/;

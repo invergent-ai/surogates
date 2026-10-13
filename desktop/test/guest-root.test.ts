@@ -9,9 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
-import type { HostUser, Share } from "../src/guest/protocol.js";
+import { type HostUser, PLAN9_PORT, type Share } from "../src/guest/protocol.js";
 import {
-  admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, scopeOf, sessionUid, sharePath, slowerFor, uidOf, UNJUDGED,
+  admit, boundsFor, checkShare, enter, NOT_SET_UP, OTHER_UID, ownedBy, p9Mount, rootEnvironment, Roots, scopeOf, sessionUid, sharePath, slowerFor, uidOf, UNJUDGED,
 } from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
@@ -778,6 +778,39 @@ describe("a root's inputs", () => {
     [{ kind: "vz", tag: "s9" }], [{ kind: "vz", tag: "r1" }], [{ kind: "other", tag: "r1" }],
   ] as unknown as Array<[Share]>)("refuses %j, which is none of the shares it mounts, before anything is given", async (share) => {
     await expect(enter("root-1", place, share, ana, 501)).rejects.toThrow(/^not one of Apple's shares|^This computer's sandbox cannot mount this kind of share$/);
+  });
+});
+
+describe("a root on the host's Plan 9 share", () => {
+  it("takes a share by its tag, at the Plan 9 server's port, with the owner it shows in its one form, and refuses any other", () => {
+    for (const share of [
+      { kind: "p9", tag: "r1", port: PLAN9_PORT }, { kind: "p9", tag: "r12", port: PLAN9_PORT, aname: "uid=10000;gid=10000" }, { kind: "p9", tag: "r3", port: 564, aname: "uid=0;gid=0" },
+    ] as Share[]) expect(() => checkShare(share)).not.toThrow();
+    for (const share of [
+      { kind: "p9", tag: "../r1", port: PLAN9_PORT }, { kind: "p9", tag: "r0", port: PLAN9_PORT }, { kind: "p9", tag: "r1", port: 5000 },
+      { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=10000" }, { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "gid=1;uid=1" },
+      { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=10000;gid=10000;path=/" }, { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=010;gid=10" },
+      { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=1;gid=1,ro" }, { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=-1;gid=1" },
+    ] as Share[]) expect(() => checkShare(share), JSON.stringify(share)).toThrow("not one of the host's Plan 9 shares");
+  });
+
+  it("mounts it through surogate-vsock, its stream at descriptor 3, with exactly the 9P client's options, its name and owner after them, and ro where asked", () => {
+    expect(p9Mount({ kind: "p9", tag: "r4", port: PLAN9_PORT, aname: "uid=10001;gid=10001" }, "nosuid,nodev", "/run/surogate/shares/r4")).toEqual([
+      "2:564:3", "--", "/usr/bin/mount", "-t", "9p",
+      "-o", "trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client,nosuid,nodev,aname=r4;uid=10001;gid=10001", "r4", "/run/surogate/shares/r4",
+    ]);
+    expect(p9Mount({ kind: "p9", tag: "r5", port: PLAN9_PORT }, "ro,nosuid,nodev,noexec", "/p")[6]).toBe(
+      "trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client,ro,nosuid,nodev,noexec,aname=r5",
+    );
+    expect(sharePath({ kind: "p9", tag: "r4", port: PLAN9_PORT })).toBe("/run/surogate/shares/r4");
+  });
+
+  it("refuses a share made for another uid than its root's", () => {
+    expect(() => ownedBy({ kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=10000;gid=10000" }, 10_000)).not.toThrow();
+    expect(() => ownedBy({ kind: "p9", tag: "r1", port: PLAN9_PORT }, 10_000)).not.toThrow();
+    for (const aname of ["uid=10001;gid=10001", "uid=10000;gid=0", "uid=0;gid=0"]) {
+      expect(() => ownedBy({ kind: "p9", tag: "r1", port: PLAN9_PORT, aname }, 10_000), aname).toThrow(new Error(OTHER_UID));
+    }
   });
 });
 
