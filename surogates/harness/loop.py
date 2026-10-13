@@ -2826,7 +2826,7 @@ class AgentHarness(
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = [
-            describe_forms(s, self._whatsapp_forms) if s["function"]["name"] == "send_form"
+            describe_forms(s, getattr(self, "_whatsapp_forms", ())) if s["function"]["name"] == "send_form"
             else widen_for_channel(s) if (
                 s["function"]["name"] == "ask_user_question"
                 and session.channel in INTERACTIVE_PROMPT_CHANNELS
