@@ -11,7 +11,6 @@ withheld from every other session's tool list.
 from __future__ import annotations
 
 import logging
-import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -37,6 +36,7 @@ from surogates.followup.outreach import window_open
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
+from surogates.session.interactive_input import _fold
 from surogates.tools.builtin.followup import _context, _start_date, _start_text, _told
 from surogates.tools.registry import ToolSchema
 
@@ -269,12 +269,6 @@ async def care_team_tool_exclusions(
 # ---------------------------------------------------------------------------
 # Who is enrolled
 # ---------------------------------------------------------------------------
-
-
-def _fold(text: str) -> str:
-    """Case- and accent-insensitive: "stefan" finds "Ștefan"."""
-    decomposed = unicodedata.normalize("NFKD", text or "")
-    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 class _Person:
