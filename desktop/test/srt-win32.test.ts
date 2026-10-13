@@ -38,7 +38,7 @@ describe("the file helper's sandbox on Windows", () => {
   it("runs its hosts on the app's own node.exe, in the app's bin folder, where the app looks for the tools too", async () => {
     const [{ NODE: windowsNode }, { NODE: linuxNode }] = [await importedOn("win32", () => import("../src/hosts/tool-hosts.js")), await importedOn("linux", () => import("../src/hosts/tool-hosts.js"))];
     expect(windowsNode).toBe(`${linuxNode.slice(0, -"node".length)}node.exe`);
-    expect(linuxNode).toMatch(/\/bin\/node$/);
+    expect(linuxNode).toMatch(/[\\/]bin[\\/]node$/);
   });
 
   it("keeps of the app's PATH each folder on a drive, by Windows's separator, and nothing in its stead where none is left", async () => {

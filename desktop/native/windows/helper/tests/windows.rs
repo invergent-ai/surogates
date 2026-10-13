@@ -418,8 +418,9 @@ fn spawned(program: &str, args: &[&str]) -> Output {
 #[test]
 fn starts_a_program_in_its_place_its_output_and_its_exit_code_the_program_s() {
     let cmd = format!("{SYSTEM32}\\cmd.exe");
-    let echoed = spawned(&cmd, &["/d", "/c", "echo", "the program's own words"]);
-    assert_eq!((echoed.status.code(), String::from_utf8_lossy(&echoed.stdout).trim_end().to_string()), (Some(0), "the program's own words".to_string()));
+    // cmd's echo prints its line as it is, quotes and all: one word each, which no quote surrounds.
+    let echoed = spawned(&cmd, &["/d", "/c", "echo", "the", "program's", "words"]);
+    assert_eq!((echoed.status.code(), String::from_utf8_lossy(&echoed.stdout).trim_end().to_string()), (Some(0), "the program's words".to_string()));
     assert_eq!(spawned(&cmd, &["/d", "/c", "exit", "7"]).status.code(), Some(7));
     // Each argument reaches the program as it is.
     let node = which_node();

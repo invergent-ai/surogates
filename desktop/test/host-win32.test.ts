@@ -36,14 +36,14 @@ function walkedIdentity(path: string): { dev: number; ino: number } {
   }
 }
 
-// A host the app's way, its messages kept.
+// A host the app's way, on the app's own node, beside which its rg.exe is, its messages kept.
 class Host {
   readonly said: FromHost[] = [];
   gone = false;
   readonly process: HostProcess;
 
   constructor(start: HostStart) {
-    this.process = forkHost({ execPath: process.execPath });
+    this.process = forkHost();
     this.process.onMessage((message) => this.said.push(message));
     this.process.onExit(() => (this.gone = true));
     this.process.send(start);
