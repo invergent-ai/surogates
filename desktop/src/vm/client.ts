@@ -13,7 +13,7 @@ import type { HostUser } from "../guest/protocol.js";
 import { join } from "../host-path.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
-import { backendFor } from "./backends.js";
+import { backendHere } from "./backends.js";
 import { Backoff, MOST_MS } from "./backoff.js";
 import { type HistoryRequest, named, NOT_A_REQUEST, REFUSED } from "./history.js";
 import { imageArch, imageArchOf } from "./image.js";
@@ -96,7 +96,7 @@ export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEn
     agentDisk: delivered.agentDisk ?? join(PACKAGE, "dist", "agent.img"),
     ...(env.SUROGATE_VM_KVM ? { kvm: env.SUROGATE_VM_KVM } : {}),
     sessions: join(dataDir, "vm", "sessions.img"),
-    run: (backendFor(process.platform) ?? backendFor("linux")!).runtimeFolder(user, env, dataDir),
+    run: backendHere().runtimeFolder(user, env, dataDir),
     console: join(dataDir, "logs", "vm-console.log"),
     user,
   };
@@ -233,7 +233,7 @@ export class VmClient {
   readonly door: string;
 
   constructor(private readonly options: VmClientOptions) {
-    this.door = (backendFor(process.platform) ?? backendFor("linux")!).addresses(options.vm.run, options.vm.user).door;
+    this.door = backendHere().addresses(options.vm.run, options.vm.user).door;
   }
 
   /**

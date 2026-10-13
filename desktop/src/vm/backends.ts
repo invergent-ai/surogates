@@ -8,9 +8,10 @@ import { createHash } from "node:crypto";
 
 import type { HostUser } from "../guest/protocol.js";
 import { join } from "../host-path.js";
-import { forThisOs } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { bootDarwin, requirementsDarwin, runtimeFolder, SOCKET_MAX } from "./darwin.js";
 import { bootLinux, missingTools } from "./linux.js";
+import { addressesWin32, bootWin32, requirementsWin32, runtimeFolderWin32 } from "./win32.js";
 import type { BootVm } from "./manager.js";
 import { socketsIn } from "./sockets.js";
 
@@ -60,7 +61,24 @@ const DARWIN: Backend = {
   socketMax: SOCKET_MAX,
 };
 
-/** The backend for *platform*: Linux's or macOS's, or null on an OS whose backend is not built yet. */
+const WIN32: Backend = {
+  boot: bootWin32,
+  // No tool on the PATH: the image is unpacked with Node's own zstd, and the file host is the file tools' (milestone D).
+  requirements: () => requirementsWin32(),
+  // This user's own, under %LOCALAPPDATA% (not Roaming, which would copy the sessions disk at sign-out), one per data folder.
+  runtimeFolder: (_user, env, dataDir) => runtimeFolderWin32(env, dataDir),
+  // The named pipes surogate-vm.exe makes, only this user's to open, and the manager's door.
+  addresses: (run) => addressesWin32(run),
+  // The ports are named pipes, not Unix sockets: no path-length limit.
+  socketMax: null,
+};
+
+/** The backend for *platform*: Linux's, macOS's or Windows's, or null on an OS whose backend is not built yet. */
 export function backendFor(platform: NodeJS.Platform): Backend | null {
-  return forThisOs({ linux: LINUX, darwin: DARWIN }, platform);
+  return forThisOs({ linux: LINUX, darwin: DARWIN, win32: WIN32 }, platform);
+}
+
+/** This computer's backend, or its refusal if the app's sandbox is not built for this OS: a value no caller may default. */
+export function backendHere(): Backend {
+  return backendFor(process.platform) ?? notBuilt("This computer's sandbox");
 }

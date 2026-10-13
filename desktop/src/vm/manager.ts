@@ -18,7 +18,7 @@ import { type FromAgent, HELD, type HostUser, PLACE_KEY, type Share } from "../g
 import { join, sep } from "../host-path.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
-import { backendFor } from "./backends.js";
+import { backendFor, backendHere } from "./backends.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
 import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
@@ -358,7 +358,7 @@ export class Guest {
     // Each connection made into a root from outside the guest.
     this.carrier = new Carrier(vm.inbound, options.reachMs);
     // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to.
-    this.door = new Door((backendFor(process.platform) ?? backendFor("linux")!).addresses(options.run, options.user).door, forwarded, (root, port, first) => this.reach(root, port, first));
+    this.door = new Door(backendHere().addresses(options.run, options.user).door, forwarded, (root, port, first) => this.reach(root, port, first));
   }
 
   /**
