@@ -15,12 +15,14 @@ def progress_key(kind: str, session_id) -> str:
 
 async def set_placeholder(
     redis, kind: str, session_id, *, channel: str, ts: str, thread_ts, ttl_s: int = 600,
+    text: str | None = None,
 ) -> None:
-    await redis.set(
-        progress_key(kind, session_id),
-        json.dumps({"channel": channel, "ts": ts, "thread_ts": thread_ts}),
-        ex=ttl_s,
-    )
+    """Record the message to edit next; *text* is what it already says, kept
+    when the next edit appends to it."""
+    record = {"channel": channel, "ts": ts, "thread_ts": thread_ts}
+    if text:
+        record["text"] = text
+    await redis.set(progress_key(kind, session_id), json.dumps(record), ex=ttl_s)
 
 
 async def read_placeholder(redis, kind: str, session_id) -> dict | None:

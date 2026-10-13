@@ -1111,54 +1111,120 @@ def _make_live_dispatcher(
 class TestLiveProgressDispatcher:
     """State-machine tests for the Thinking-placeholder hand-off."""
 
-    async def test_slack_intermediate_takes_the_placeholder_and_is_kept(self):
-        """Text beside a tool call edits the Thinking placeholder once and then
-        stays: the next message must not overwrite it."""
+    async def test_slack_keeps_one_progress_message_and_appends_to_it(self):
+        """Text beside each tool call is appended to the Thinking placeholder,
+        never written over: the patient-facing script once vanished under the
+        next step.  The answer then goes beside it, leaving it as it is."""
         import json
         from surogates.channels.channel_progress import progress_key, read_placeholder
 
         session_id = uuid4()
-        placeholder_ts = "111.0"
         redis = _FullRedis({
             progress_key("slack", session_id): json.dumps(
-                {"channel": "C001", "ts": placeholder_ts, "thread_ts": "100.0"}
+                {"channel": "C001", "ts": "111.0", "thread_ts": "100.0"}
             ),
         })
-
-        item = _FakeOutboxItem(
-            id=1,
-            session_id=session_id,
-            destination={
-                "channel_identifier": APP_ID,
-                "channel_id": "C001",
-                "thread_ts": "100.0",
-            },
-            payload={"content": "step", "intermediate": True},
-        )
-        delivery = _FakeDeliveryService(items=[item])
-        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id="222.0"))
+        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id="111.0"))
+        delivery = _FakeDeliveryService()
         dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery, redis=redis)
 
-        await dispatcher._deliver_item(platform, item)
+        def item(n, content, intermediate):
+            return _FakeOutboxItem(
+                id=n, session_id=session_id,
+                destination={"channel_identifier": APP_ID, "channel_id": "C001", "thread_ts": "100.0"},
+                payload={"content": content, "intermediate": intermediate},
+            )
 
-        assert item.destination["update_ts"] == placeholder_ts
-        assert len(platform.send_calls) == 1
+        for n, content, intermediate in (
+            (1, "Sunați la 112.", True), (2, "Anunț medicul.", True), (3, "Gata.", False),
+        ):
+            assert await dispatcher._deliver_item(platform, item(n, content, intermediate))
+            if n == 1:
+                assert (await read_placeholder(redis, "slack", session_id))["text"] == "Sunați la 112."
+
+        sent = [(i.destination.get("update_ts"), i.payload["content"]) for i, _ in platform.send_calls]
+        assert sent == [
+            ("111.0", "Sunați la 112."),
+            ("111.0", "Sunați la 112.\n\nAnunț medicul."),
+            (None, "Gata."),
+        ]
         assert await read_placeholder(redis, "slack", session_id) is None
-        assert delivery.delivered == [(1, "222.0")]
 
-    async def test_back_to_back_intermediates_are_all_sent(self):
+    async def test_slack_starts_a_new_progress_message_past_its_limit(self):
+        import json
+        from surogates.channels.channel_progress import progress_key
+
         session_id = uuid4()
-        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id="y"))
-        delivery = _FakeDeliveryService()
-        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery)
-        for n in (1, 2):
-            await dispatcher._deliver_item(platform, _FakeOutboxItem(
-                id=n,
-                session_id=session_id,
+        redis = _FullRedis({progress_key("slack", session_id): json.dumps(
+            {"channel": "C001", "ts": "111.0", "thread_ts": None, "text": "x" * 20},
+        )})
+        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id="222.0"))
+        platform._MAX_MESSAGE_CHARS = 25
+        dispatcher = _make_live_dispatcher(platform=platform, redis=redis)
+        await dispatcher._deliver_item(platform, _FakeOutboxItem(
+            id=1, session_id=session_id,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "step two", "intermediate": True},
+        ))
+        [(sent, _)] = platform.send_calls
+        assert "update_ts" not in sent.destination and sent.payload["content"] == "step two"
+
+    async def _burst(self, platform, gaps, *, redis=None):
+        session_id = uuid4()
+        start = datetime.now(timezone.utc)
+        items = [
+            _FakeOutboxItem(
+                id=n + 1, session_id=session_id,
                 destination={"channel_identifier": APP_ID, "channel_id": "C001"},
-                payload={"content": f"step {n}", "intermediate": True},
-            ))
-        assert len(platform.send_calls) == 2
+                payload={"content": f"step {n + 1}", "intermediate": True, "_trace_id": "t"},
+                created_at=start + timedelta(seconds=gap),
+            )
+            for n, gap in enumerate(gaps)
+        ]
+        delivery = _FakeDeliveryService(items=items)
+        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery, redis=redis)
+        await dispatcher.deliver_batch(platform)
+        return [i.payload["content"] for i, _ in platform.send_calls], delivery
+
+    async def test_slack_folds_a_burst_into_one_edit(self):
+        sent, delivery = await self._burst(
+            _FakeEditablePlatform(result=SendResult(success=True, message_id="1.0")), [0, 0.3, 0.6],
+        )
+        assert sent == ["step 1\n\nstep 2\n\nstep 3"]
+        assert sorted(i for i, _ in delivery.delivered) == [1, 2, 3]
+
+    async def test_messaging_apps_post_a_burst_as_one_message_and_the_rest_apart(self):
+        """WhatsApp and Telegram cannot edit: each text is its own message,
+        but a burst within a second is one, to stay under their rate limits."""
+        platform = _FakePlatform(result=SendResult(success=True, message_id="m"))
+        sent, delivery = await self._burst(platform, [0, 0.5, 2.0])
+        assert sent == ["step 1\n\nstep 2", "step 3"]
+        assert sorted(i for i, _ in delivery.delivered) == [1, 2, 3]
+
+    async def test_a_failed_burst_retries_every_message_it_carried(self):
+        platform = _FakePlatform(result=SendResult(success=False, error="timeout"))
+        _, delivery = await self._burst(platform, [0, 0.5])
+        assert sorted(i for i, _ in delivery.failed) == [1, 2]
+        assert delivery.delivered == []
+
+    async def test_a_burst_never_swallows_a_question_or_an_answer(self):
+        from surogates.channels.dispatcher import _bursts
+
+        session_id = uuid4()
+        dest = {"channel_identifier": APP_ID}
+        items = [
+            _FakeOutboxItem(id=1, session_id=session_id, destination=dest,
+                            payload={"content": "a", "intermediate": True}),
+            _FakeOutboxItem(id=2, session_id=session_id, destination=dest,
+                            payload={"input_prompt": True, "questions": []}),
+            _FakeOutboxItem(id=3, session_id=session_id, destination=dest,
+                            payload={"content": "b", "intermediate": True}),
+            _FakeOutboxItem(id=4, session_id=session_id, destination=dest,
+                            payload={"content": "final"}),
+        ]
+        assert [(h.id, [a.id for a in rest]) for h, rest in _bursts(items)] == [
+            (1, []), (2, []), (3, []), (4, []),
+        ]
 
     async def test_slack_final_with_placeholder_sends_and_clears(self):
         """Final message + placeholder → send with update_ts; clear_placeholder IS called."""
