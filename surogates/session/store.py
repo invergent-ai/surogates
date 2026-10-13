@@ -243,6 +243,11 @@ def _without_trailing_prompt(content: str, tool_calls: Any) -> str:
         questions = json.loads(asks[0]["function"].get("arguments") or "{}").get("questions")
     except (TypeError, ValueError, AttributeError):
         return content
+    return _strip_trailing_question(content, questions)
+
+
+def _strip_trailing_question(content: str, questions: Any) -> str:
+    """*content* without a closing repeat of a single question's prompt."""
     if not isinstance(questions, list) or len(questions) != 1 or not isinstance(questions[0], dict):
         return content
     words = str(questions[0].get("prompt") or "").split()
@@ -305,7 +310,9 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             # patients received it verbatim.  Only the harness rescue's
             # context is the agent's reply to the person.
             if tool_call_id.startswith(ASK_USER_QUESTION_RESCUE_PREFIX):
-                payload["context"] = strip_next_action_blocks(data.get("context", "") or "")
+                payload["context"] = _strip_trailing_question(
+                    strip_next_action_blocks(data.get("context", "") or ""), questions,
+                )
     return payload
 
 

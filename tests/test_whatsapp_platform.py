@@ -881,6 +881,24 @@ class TestQuestionNotRepeated:
             channel,
         )
 
+    def test_a_rescued_reply_does_not_end_with_its_own_prompt(self):
+        from surogates.session.events import EventType
+        from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
+        from surogates.session.store import _build_channel_payload
+
+        question = {"prompt": "Cum vă numiți? (numele și prenumele)"}
+        payload = _build_channel_payload(
+            EventType.INBOX_INPUT_REQUIRED,
+            {
+                "tool_call_id": ASK_USER_QUESTION_RESCUE_PREFIX + "x",
+                "context": "Am notat: TAVI acum 4 zile.\n\nCum vă numiți? (numele și prenumele)",
+                "questions": [question],
+            },
+            "whatsapp",
+        )
+        assert payload["context"] == "Am notat: TAVI acum 4 zile."
+        assert payload["questions"] == [question]
+
     def test_the_closing_repeat_is_cut(self):
         payload = self._payload(
             "Mulțumesc.\n\nCum  vă numiți?\n(numele și prenumele)\n",
