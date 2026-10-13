@@ -362,20 +362,25 @@ describe.runIf(process.platform === "win32" && process.env.CI === "true")("a dev
   }, 180_000);
 
   it("quits within its bound when signed in, at its removal's --quit, as its own Quit does", async () => {
-    const { shell } = await signedIn();
+    // Signed in through the test, which then lets it go; and started again as a person starts it, signed in still, with
+    // no debugger of the test's attached: Node holds a process at its end while a debugger is attached to it, saying
+    // "Waiting for the debugger to disconnect...", and a test's stays attached to the app it launched.
+    await signedIn();
+    await quit(app);
+    app = undefined;
     const env = { ...process.env, ...shellEnv(home) };
+    const hellos = agent.link.hellos.length;
+    const made = powershell(`& '${SCRIPT}'`, env);
+    expect(made.status, made.stderr).toBe(0);
+    // Its device's link says hello again: it is signed in.
+    await expect.poll(() => agent.link.hellos.length, { timeout: 60_000 }).toBeGreaterThan(hellos);
     const began = Date.now();
     const removed = powershell(`& '${SCRIPT}' -Remove`, env);
     const took = Date.now() - began;
-    // What the app still waited on where it had not gone: its main process's handles and requests, for the failure's words.
-    const held = removed.status === 0 ? null : await shell.evaluate(() => {
-      const own = process as unknown as { _getActiveHandles(): object[]; _getActiveRequests(): object[] };
-      return { handles: own._getActiveHandles().map((one) => one.constructor.name), requests: own._getActiveRequests().map((one) => one.constructor.name) };
-    }).catch((error: Error) => error.message);
-    expect({ status: removed.status, said: `${removed.stdout}${removed.stderr}`.trim(), held }).toEqual({ status: 0, said: expect.stringMatching(/^Removed /), held: null });
+    expect({ status: removed.status, said: `${removed.stdout}${removed.stderr}`.trim() }).toEqual({ status: 0, said: expect.stringMatching(/^Removed /) });
     expect(took).toBeLessThan(QUIT_MS);
-    app = undefined;
-  }, 180_000);
+    expect(running()).toBe("0");
+  }, 240_000);
 
   it("has a Start menu shortcut with its own AppUserModelID; its removal quits the app it started, and takes out its login item, its scheme and the shortcut", async () => {
     // Its data in the test's own folder, as the app's data home is a test's.
