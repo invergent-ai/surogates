@@ -1,7 +1,8 @@
 // The app's own native helper, per OS (native-helper.ts): where Windows's surogate-helper.exe is, as the installed
-// app lays it out and as a development build makes it. macOS's is pinned by mac-helper.test.ts.
+// app lays it out and as a development build makes it, and how it is started there. macOS's is pinned by
+// mac-helper.test.ts.
 
-import { expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { importedOn } from "./platforms.js";
 
@@ -12,4 +13,47 @@ it("is in the installed app's bin folder on Windows, and its build's own in a de
   expect(helperAt("C:\\Users\\ana\\surogates\\desktop\\dist")).toBe("C:\\Users\\ana\\surogates\\desktop\\native\\windows\\target\\release\\surogate-helper.exe");
   // Only the app's own code in an install: no other folder of one.
   expect(helperAt("C:\\Program Files\\Surogate\\resources\\other\\dist")).toBe("C:\\Program Files\\Surogate\\resources\\other\\native\\windows\\target\\release\\surogate-helper.exe");
+});
+
+describe("a run of surogate-helper.exe on Windows", () => {
+  // What the app hands child_process to start the helper with, as it is asked.
+  async function windowsStart(run: (helper: typeof import("../src/native-helper.js")) => unknown) {
+    const asked: Array<{ file: string; args: string[]; env: unknown }> = [];
+    vi.doMock("node:child_process", async (actual) => ({
+      ...(await actual<typeof import("node:child_process")>()),
+      spawnSync: (file: string, args: string[], options: { env: unknown }) => {
+        asked.push({ file, args, env: options.env });
+        return { status: 0, stdout: "answered", stderr: "" };
+      },
+    }));
+    const kept = process.env.SystemRoot;
+    process.env.SystemRoot = "C:\\Windows";
+    try {
+      const helper = await importedOn("win32", () => import("../src/native-helper.js"));
+      return { said: run(helper), asked };
+    } finally {
+      if (kept === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = kept;
+      vi.doUnmock("node:child_process");
+    }
+  }
+
+  it("starts the helper itself, the one program through which every other is started there, with no environment of the app's but the Windows folder", async () => {
+    const program = "C:\\Program Files\\Surogate\\bin\\surogate-helper.exe";
+    const { said, asked } = await windowsStart(({ helperSync }) => helperSync(["verify", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"], program));
+    expect(said).toBe("answered");
+    expect(asked).toEqual([{ file: program, args: ["verify", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"], env: { SystemRoot: "C:\\Windows" } }]);
+  });
+
+  it("starts none named by a path that is not whole", async () => {
+    const { said, asked } = await windowsStart(({ helperSync }) => {
+      try {
+        return helperSync(["trust"], "bin\\surogate-helper.exe");
+      } catch (error) {
+        return (error as Error).message;
+      }
+    });
+    expect(said).toBe("bin\\surogate-helper.exe is not named by its whole path");
+    expect(asked).toEqual([]);
+  });
 });

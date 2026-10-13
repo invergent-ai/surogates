@@ -7,3 +7,5 @@ native/out/
 native/macos/.build/
 test/vm/darwin/measure/out/
 test/vm/win32/hcs-probe/target/
+native/windows/target/
+native/windows/helper/target/

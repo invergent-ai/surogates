@@ -1,0 +1,218 @@
+//! surogate-helper as the app runs it, on Windows: what it prints for each command, against this computer's own stores,
+//! processes, programs and registry. The tests that add roots to the computer's stores need an administrator, as a CI
+//! runner's account is: `cargo test -- --include-ignored` runs them there, or elevated in a test account on a PC.
+#![cfg(windows)]
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use surogate_helper::pem::certificate;
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError};
+use windows_sys::Win32::Security::Cryptography::{
+    CertAddEncodedCertificateToStore, CertCloseStore, CertCreateCertificateContext, CertDeleteCertificateFromStore, CertEnumCertificatesInStore,
+    CertFindCertificateInStore, CertFreeCertificateContext, CertOpenStore, CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_REG,
+    CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID,
+    CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID, CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT, HCERTSTORE, X509_ASN_ENCODING,
+};
+use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_NON_VOLATILE};
+
+const HELPER: &str = env!("CARGO_BIN_EXE_surogate-helper");
+const EDGE: &str = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+const CHROME: &str = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+
+fn helper(args: &[&OsStr]) -> Output {
+    // As the app starts it: with no environment of the caller's but the Windows folder.
+    Command::new(HELPER).args(args).env_clear().env("SystemRoot", std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).output().expect("the helper runs")
+}
+
+fn said(args: &[&str]) -> String {
+    let done = helper(&args.iter().map(OsStr::new).collect::<Vec<_>>());
+    assert!(done.status.success(), "{args:?}: {}", String::from_utf8_lossy(&done.stderr));
+    String::from_utf8(done.stdout).expect("UTF-8")
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+// A test's own copy of a file, in a folder of its own.
+fn copy(from: &str, named: &str) -> PathBuf {
+    let folder = std::env::temp_dir().join(format!("surogate-helper-{}-{named}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let to = folder.join(named);
+    std::fs::copy(from, &to).unwrap();
+    to
+}
+
+// The Root store at *location*, opened for writing, made where it is not there; or, with *key*, the registry key's.
+struct Store(HCERTSTORE);
+
+impl Store {
+    fn system(location: u32) -> Store {
+        let name = wide("Root");
+        // SAFETY: the name outlives the call.
+        let store = unsafe { CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, location << CERT_SYSTEM_STORE_LOCATION_SHIFT, name.as_ptr().cast()) };
+        assert!(!store.is_null(), "store {location} opens for writing: 0x{:08x}", unsafe { GetLastError() });
+        Store(store)
+    }
+
+    // The user's own Root store as its registry key holds it, written as the registry provider writes it, without
+    // the question Windows asks before a root is added to that store.
+    fn user_registry() -> Store {
+        let mut key: HKEY = std::ptr::null_mut();
+        let path = wide("Software\\Microsoft\\SystemCertificates\\Root");
+        // SAFETY: the path outlives the call; the key is closed once the store has its own.
+        let made = unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, std::ptr::null(), REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, std::ptr::null(), &mut key, std::ptr::null_mut()) };
+        assert_eq!(made, ERROR_SUCCESS);
+        // SAFETY: the provider duplicates the key it is given.
+        let store = unsafe { CertOpenStore(CERT_STORE_PROV_REG, 0, 0, 0, key.cast_const().cast()) };
+        unsafe { RegCloseKey(key) };
+        assert!(!store.is_null());
+        Store(store)
+    }
+
+    fn add(&self, der: &[u8]) {
+        // SAFETY: the bytes outlive the call.
+        let added = unsafe { CertAddEncodedCertificateToStore(self.0, X509_ASN_ENCODING, der.as_ptr(), der.len() as u32, CERT_STORE_ADD_REPLACE_EXISTING, std::ptr::null_mut()) };
+        assert_ne!(added, 0, "added: 0x{:08x}", unsafe { GetLastError() });
+    }
+
+    fn holds(&self, der: &[u8]) -> bool {
+        let mut context = std::ptr::null();
+        loop {
+            // SAFETY: the enumeration frees each context it moves past.
+            context = unsafe { CertEnumCertificatesInStore(self.0, context) };
+            if context.is_null() {
+                return false;
+            }
+            // SAFETY: a context of the store's, not yet freed.
+            let found = unsafe { std::slice::from_raw_parts((*context).pbCertEncoded, (*context).cbCertEncoded as usize) };
+            if found == der {
+                unsafe { CertFreeCertificateContext(context) };
+                return true;
+            }
+        }
+    }
+
+    fn remove(&self, der: &[u8]) {
+        // SAFETY: the context made here is freed here; the one found is freed by its deletion.
+        unsafe {
+            let wanted = CertCreateCertificateContext(X509_ASN_ENCODING, der.as_ptr(), der.len() as u32);
+            let found = CertFindCertificateInStore(self.0, X509_ASN_ENCODING, 0, CERT_FIND_EXISTING, wanted.cast(), std::ptr::null());
+            if !found.is_null() {
+                CertDeleteCertificateFromStore(found);
+            }
+            CertFreeCertificateContext(wanted);
+        }
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        // SAFETY: opened by this Store alone.
+        unsafe { CertCloseStore(self.0, 0) };
+    }
+}
+
+#[test]
+#[ignore = "adds test roots to this computer's stores: run elevated, on a CI runner or in a test account"]
+fn lists_the_computer_s_roots_and_group_policy_s_for_the_user_and_never_the_user_s_own() {
+    let given: [(u32, &[u8]); 4] = [
+        (CERT_SYSTEM_STORE_LOCAL_MACHINE_ID, include_bytes!("fixtures/machine.der")),
+        (CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY_ID, include_bytes!("fixtures/machine-policy.der")),
+        (CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE_ID, include_bytes!("fixtures/enterprise.der")),
+        (CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY_ID, include_bytes!("fixtures/user-policy.der")),
+    ];
+    let own: &[u8] = include_bytes!("fixtures/user.der");
+    for (location, der) in given {
+        Store::system(location).add(der);
+    }
+    Store::user_registry().add(own);
+    let listed = std::panic::catch_unwind(|| {
+        // The user's own root is in the user's Root store as Windows reads it: what the helper must pass over.
+        assert!(Store::system(CERT_SYSTEM_STORE_CURRENT_USER_ID).holds(own), "the user's own root is read back from the user's Root store");
+        said(&["trust"])
+    });
+    for (location, der) in given {
+        Store::system(location).remove(der);
+    }
+    Store::user_registry().remove(own);
+    let listed = listed.expect("listed");
+    for (location, der) in given {
+        assert!(listed.contains(&certificate(der)), "the root of store {location} is listed");
+    }
+    assert!(!listed.contains(&certificate(own)), "the user's own root is never listed");
+    // PEM alone, each certificate whole.
+    assert_eq!(listed.matches("-----BEGIN CERTIFICATE-----\n").count(), listed.matches("-----END CERTIFICATE-----\n").count());
+    assert!(listed.lines().all(|line| line.starts_with("-----") || line.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))));
+}
+
+#[test]
+fn lists_this_user_s_processes_with_their_programs_and_arguments_and_no_one_else_s() {
+    let marker = format!("surogate-helper-test-{}", std::process::id());
+    let mut child = Command::new("C:\\Windows\\System32\\cmd.exe");
+    std::os::windows::process::CommandExt::raw_arg(&mut child, format!("/d /c \"ping -n 30 127.0.0.1 >nul & rem {marker} with spaces\""));
+    let mut child = child.spawn().unwrap();
+    let listed = said(&["procs"]);
+    child.kill().ok();
+    child.wait().ok();
+    let line = listed.lines().find(|line| line.starts_with(&format!("{{\"pid\":{},", child.id()))).expect("the child is listed");
+    assert!(line.to_ascii_lowercase().contains("\"path\":\"c:\\\\windows\\\\system32\\\\cmd.exe\""), "{line}");
+    assert!(line.ends_with(&format!(",\"/d\",\"/c\",\"ping -n 30 127.0.0.1 >nul & rem {marker} with spaces\"]}}")), "{line}");
+    // The helper itself, as this user's.
+    assert!(listed.lines().any(|line| line.contains("surogate-helper")));
+    // System's own, pid 4, is no user's.
+    assert!(!listed.lines().any(|line| line.starts_with("{\"pid\":4,")));
+    assert!(listed.lines().all(|line| line.starts_with("{\"pid\":") && line.ends_with("]}")));
+}
+
+#[test]
+fn says_whom_a_program_is_signed_by_and_that_a_changed_or_unsigned_one_does_not_check_out() {
+    assert_eq!(said(&["verify", EDGE]), "{\"trusted\":true,\"signer\":\"Microsoft Corporation\",\"status\":\"0x00000000\",\"remote\":false}\n");
+    // One byte of its code changed, its signature's digest no longer its own: TRUST_E_BAD_DIGEST.
+    let changed = copy(EDGE, "msedge.exe");
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0xff;
+    std::fs::write(&changed, bytes).unwrap();
+    let said_changed = said(&["verify", changed.to_str().unwrap()]);
+    assert!(said_changed.starts_with("{\"trusted\":false,\"signer\":null,\"status\":\"0x8"), "{said_changed}");
+    // This test's own build, which no one signed: TRUST_E_NOSIGNATURE.
+    let unsigned = copy(HELPER, "unsigned.exe");
+    assert_eq!(said(&["verify", unsigned.to_str().unwrap()]), "{\"trusted\":false,\"signer\":null,\"status\":\"0x800b0100\",\"remote\":false}\n");
+    // Nothing there.
+    assert!(said(&["verify", "C:\\nowhere\\none.exe"]).starts_with("{\"trusted\":false,\"signer\":null,"));
+    for file in [changed, unsigned] {
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+}
+
+#[test]
+#[ignore = "reads the runner's own Chrome"]
+fn says_chrome_is_signed_by_google() {
+    assert_eq!(said(&["verify", CHROME]), "{\"trusted\":true,\"signer\":\"Google LLC\",\"status\":\"0x00000000\",\"remote\":false}\n");
+}
+
+#[test]
+fn says_where_the_app_paths_key_puts_a_program_and_refuses_a_name_that_is_not_one() {
+    let found = said(&["app-path", "msedge.exe"]);
+    let first = found.lines().next().expect("Edge's App Paths key");
+    assert!(Path::new(first).is_file(), "{first}");
+    assert!(first.to_ascii_lowercase().ends_with("\\msedge.exe"), "{first}");
+    assert_eq!(said(&["app-path", "no-such-program-surogate.exe"]), "");
+    for name in ["..\\msedge.exe", "msedge", "C:\\x.exe"] {
+        let done = helper(&[OsStr::new("app-path"), OsStr::new(name)]);
+        assert_eq!(done.status.code(), Some(1), "{name}");
+    }
+}
+
+#[test]
+fn says_how_it_is_run_when_it_is_not() {
+    for args in [&[][..], &["nothing"], &["trust", "extra"], &["verify"]] {
+        let done = helper(&args.iter().map(OsStr::new).collect::<Vec<_>>());
+        assert_eq!(done.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&done.stderr).starts_with("usage: surogate-helper"), "{args:?}");
+        assert!(done.stdout.is_empty());
+    }
+}
