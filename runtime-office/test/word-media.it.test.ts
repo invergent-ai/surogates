@@ -15,7 +15,7 @@ describe.skipIf(!itEnabled)("pictures and charts", () => {
 
   beforeAll(async () => {
     fixture = await startFixture();
-    pool = new PagePool({ hostUrl: fixture.hostUrl, maxPages: 1, idleMs: 600_000, openTimeoutMs: 60_000, commandTimeoutMs: 20_000, ignoreTls: true });
+    pool = new PagePool({ hostUrl: fixture.hostUrl, maxPages: 2, idleMs: 600_000, openTimeoutMs: 60_000, commandTimeoutMs: 20_000, ignoreTls: true });
     office = new Office(pool);
   });
   afterAll(async () => {
@@ -40,5 +40,21 @@ describe.skipIf(!itEnabled)("pictures and charts", () => {
     expect(result.applied).toBe(true);
     const blocks: Any[] = ((await office.read(agent, { view: "outline" })) as Any).blocks;
     expect(blocks.slice(-2).map((b) => b.kind)).toEqual(["image", "image"]);
+  });
+
+  it("fits a tall picture within a page's height, keeping its shape", async () => {
+    const key = newKey();
+    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT), documentServerUrl: IT.dsUrl });
+    const result: Any = await office.edit(agent, compileOps([{
+      op: "insert",
+      target: { end: true },
+      content: { markdown: "<?block tall?>", blocks: { tall: { type: "image", data: DOT, mime: "image/png", width: 300, height: 1800 } } },
+    }]));
+    const size = await (await pool.get(agent)).command(
+      "function () { var d = Api.GetByInternalId(scope.id).GetAllDrawingObjects()[0]; return [Math.round(d.GetWidth()), Math.round(d.GetHeight())]; }",
+      { id: result.results[0].ids[0] },
+    );
+    // 576 px wide at most, and 864 px (nine inches) high: 300 x 1800 px becomes 144 x 864, in EMUs.
+    expect(size.value).toEqual([144 * 9525, 864 * 9525]);
   });
 });

@@ -29,9 +29,11 @@ file.
    formatting; replace a whole block only when it all changes.
 5. **When an edit is refused,** nothing of the call applied and no one saw any of it. The result names the op and
    why. When its block changed since you read it, the result shows the block as it stands now: someone edited it, and
-   their edit wins. A block that is gone was deleted. Read again and work from what is there; never put your old text
-   back over theirs. Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced
-   or deleted is gone for the later ones, and one it re-worded has a new hash.
+   their edit wins, or an earlier op of the same call changed it. A block that is gone was deleted or moved, by someone
+   or by an earlier op of the call. Read again and work from what is there; never put your old text back over theirs.
+   Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced, moved or deleted is
+   gone for the later ones (a moved block gets a new id, found in that op's result `ids`), and one it re-worded has a
+   new hash.
 6. **Never touch an open document any other way.** No `write_file`, `patch`, terminal, python-docx or the docx skill on
    it: the editor is its only writer, and anything else is refused or lands as a conflicting copy.
 7. **Finish with one line** in the chat saying what you did and what the user can do next (edit, comment, ask for

@@ -174,7 +174,9 @@
     if (target.end) return { end: true };
     if (target.block !== undefined) {
       var el = Api.GetByInternalId(String(target.block));
-      if (!el || !attached(el)) throw new Refusal("Block " + target.block + " is gone: someone deleted it. Read the outline again.");
+      if (!el || !attached(el)) {
+        throw new Refusal("Block " + target.block + " is gone: deleted or moved since you read it, or by an earlier op of this call. Read the outline again.");
+      }
       if (hash(textOf(el)) !== target.hash) {
         throw new Refusal("Block " + target.block + " changed since you read it. This is it now; work from it.", el);
       }
@@ -189,10 +191,17 @@
     if (found.length < target.nth) {
       throw new Refusal(found.length
         ? "Only " + found.length + " match(es) of \"" + target.find + "\"."
-        : "\"" + target.find + "\" is not in the document now: someone changed it. Read it again.");
+        : "\"" + target.find + "\" is not in the document now: it changed since you read it, or an earlier op of this call changed it. Read it again.");
     }
     var range = found[target.nth - 1];
     return { el: blockAt(spans(), range), range: range };
+  }
+
+  // A new document holds one empty paragraph: what is written first at its end takes that line's place.
+  function onlyBlankLine() {
+    if (doc.GetElementsCount() !== 1) return null;
+    var el = doc.GetElement(0);
+    return el.GetClassType() === "paragraph" && !textOf(el) && !el.GetAllDrawingObjects().length ? el : null;
   }
 
   function position(where, side) {
@@ -268,15 +277,15 @@
     return sdt;
   }
 
-  // Pixels at 96 dpi as EMUs; nothing wider than the six inches a page's text usually spans.
-  var EMU_PER_PX = 9525, MAX_WIDTH_PX = 576;
+  // Pixels at 96 dpi as EMUs; nothing wider than the six inches a page's text usually spans, nor higher than nine.
+  var EMU_PER_PX = 9525, MAX_WIDTH_PX = 576, MAX_HEIGHT_PX = 864;
   var CHART_TYPES = {
     bar: "bar", column: "bar", "horizontal-bar": "horizontalBar", line: "lineNormal",
     pie: "pie", area: "area", doughnut: "doughnut", scatter: "scatter",
   };
 
   function imageOf(b) {
-    var scale = Math.min(1, MAX_WIDTH_PX / b.width), paragraph = Api.CreateParagraph();
+    var scale = Math.min(1, MAX_WIDTH_PX / b.width, MAX_HEIGHT_PX / b.height), paragraph = Api.CreateParagraph();
     paragraph.AddDrawing(Api.CreateImage(b.src, Math.round(b.width * scale * EMU_PER_PX), Math.round(b.height * scale * EMU_PER_PX)));
     return paragraph;
   }
@@ -345,7 +354,10 @@
 
   var EDITS = {
     insert: function (op) {
-      return { ids: insertAt(position(resolveTarget(op.target), op.side), build(op.blocks)) };
+      var where = resolveTarget(op.target), blank = where.end ? onlyBlankLine() : null;
+      var ids = insertAt(position(where, op.side), build(op.blocks));
+      if (blank) blank.Delete();
+      return { ids: ids };
     },
     replace: function (op) {
       var where = resolveTarget(op.target), elements = build(op.blocks);

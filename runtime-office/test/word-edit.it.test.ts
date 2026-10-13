@@ -181,6 +181,23 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     expect((await edit(agent, [{ op: "delete", target: { find: "no such words" } }])).refused.reason).toMatch(/not in the document/);
   });
 
+  it("writes a new document's first blocks in place of its one empty line", async () => {
+    const key = newKey();
+    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT, "blank.docx"), documentServerUrl: IT.dsUrl });
+    opened.push(agent);
+    const result = await edit(agent, [{
+      op: "insert", target: { end: true },
+      content: { markdown: "# Plan\n\n## Risks\n\n<?block r?>", blocks: { r: { type: "pending", intent: "The risks" } } },
+    }]);
+    expect(result).toMatchObject({ applied: true });
+    const outline: Any = await office.read(agent, { view: "outline" });
+    // The editor keeps a paragraph after a content control that ends the document.
+    expect(outline.blocks.map((b: Any) => b.kind)).toEqual(["heading1", "heading2", "pending", "paragraph"]);
+    // A document with more in it keeps its first line.
+    expect(await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "More." } }])).toMatchObject({ applied: true });
+    expect(((await office.read(agent, { view: "outline" })) as Any).blocks[0].kind).toBe("heading1");
+  });
+
   it("flushes the agent's editor", async () => {
     const { agent } = await pair();
     await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "One more." } }]);

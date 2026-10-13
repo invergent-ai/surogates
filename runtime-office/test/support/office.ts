@@ -68,7 +68,9 @@ export async function startFixture(): Promise<Fixture> {
     const file = /^\/files\/([\w.-]+)$/.exec(req.url ?? "");
     try {
       if (!file) throw new Error("not found");
-      res.end(readFileSync(new URL(`../fixtures/${file[1]}`, import.meta.url)));
+      // blank.docx is the document office_edit creates a new one from.
+      const path = file[1] === "blank.docx" ? "../../../surogates/office/templates/blank.docx" : `../fixtures/${file[1]}`;
+      res.end(readFileSync(new URL(path, import.meta.url)));
     } catch {
       res.statusCode = 404;
       res.end();
