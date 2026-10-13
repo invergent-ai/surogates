@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 import { cleanly } from "../clean-child.js";
+import { ntat } from "../files/ntat.js";
 import { forThisOs } from "../platform.js";
 
 const read = forThisOs<() => string>({
@@ -16,6 +17,8 @@ const read = forThisOs<() => string>({
     const read = spawnSync(file, args, { encoding: "utf8", env: {}, stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 });
     return read.status === 0 ? read.stdout.trim() : "";
   },
+  // The number Windows counts up at each boot, from the registry (native/ntat/ntat.c, bootId).
+  win32: () => String(ntat().bootId()),
 // Another OS has none until its own is read here.
 }) ?? (() => "");
 
