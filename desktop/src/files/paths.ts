@@ -3,10 +3,11 @@
 // surogates/tools/utils/workspace_sandbox.py. In the file helper these run in the
 // sandbox's view of the filesystem, whose mounts are the real boundary.
 
-import { lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { posix } from "node:path";
 
 import { Failure, NUL_REFUSED, osError, sandboxError, valueError } from "./answers.js";
+import { fdPaths } from "./fd-paths.js";
 
 // A thread's copy of a folder stands for the folder (spec, Section 13, "The user's computer"): the helper works in the
 // copy, *folder*, and every request and answer names its files by the path of the folder the copy is of, *at*, as the
@@ -78,7 +79,7 @@ function joinRealPath(path: string, rest: string, seen: Map<string, string | nul
     const lies = edge ? lying(next, edge) : next;
     let link = false;
     try {
-      link = lies !== null && lstatSync(lies).isSymbolicLink();
+      link = lies !== null && fdPaths.lstat(lies).isSymbolicLink();
     } catch {
       link = false;
     }
@@ -96,7 +97,7 @@ function joinRealPath(path: string, rest: string, seen: Map<string, string | nul
     }
     seen.set(next, null);
     let resolved: boolean;
-    [path, resolved] = joinRealPath(path, readlinkSync(lies, "utf8"), seen, edge);
+    [path, resolved] = joinRealPath(path, fdPaths.readlink(lies), seen, edge);
     if (!resolved) return [pyJoin(path, rest), false];
     seen.set(next, path);
   }
@@ -166,7 +167,7 @@ export function inside(path: string, folder: string): boolean {
 function linkless(path: string): boolean {
   for (let end = path.indexOf("/", 1); ; end = path.indexOf("/", end + 1)) {
     try {
-      if (lstatSync(end < 0 ? path : path.slice(0, end)).isSymbolicLink()) return false;
+      if (fdPaths.lstat(end < 0 ? path : path.slice(0, end)).isSymbolicLink()) return false;
     } catch {
       // Not there, or not this user's to look at: no link that leads anywhere.
     }

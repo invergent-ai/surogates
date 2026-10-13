@@ -5,7 +5,7 @@
 
 import {
   accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, type Dirent, fchmodSync, fstatSync, linkSync, lstatSync,
-  mkdirSync, openSync, readdirSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
+  mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 
 import type { FdPaths, Listing, Where } from "./fd-paths.js";
@@ -160,6 +160,7 @@ export const darwinFdPaths: FdPaths = {
       closeSync(source);
     }
   },
+  readlink: (link) => readlinkSync(link, "utf8"),
   // One entry at a time, as Node's Dir hands them: a folder is read no further than its caller looks.
   listing(dir) {
     const listing = fsat().opendir(dir);

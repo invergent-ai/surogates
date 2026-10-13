@@ -4,7 +4,7 @@
 
 import { tmpdir } from "node:os";
 
-import { helper } from "../mac-helper.js";
+import { helper } from "../native-helper.js";
 
 /** A process the helper lists: its pid, its program, and its arguments. */
 export interface Listed {

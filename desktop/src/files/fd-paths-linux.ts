@@ -27,6 +27,7 @@ export const linuxFdPaths: FdPaths = {
   link: (from, to) => linkSync(path(from), path(to)),
   rename: (from, to) => renameSync(path(from), path(to)),
   copy: (from, to) => copyFileSync(path(from), path(to)),
+  readlink: (link) => readlinkSync(link, "utf8"),
   // @types/node names a Dir's entries as strings, and takes no "buffer" encoding; Node reads them as bytes with it.
   listing: (dir) => opendirSync(path({ dir }), { encoding: "buffer" as BufferEncoding }) as unknown as Listing,
   pathOf(fd) {

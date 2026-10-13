@@ -17,6 +17,7 @@
 import { type ChildProcess, spawn, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { isAbsolute } from "./host-path.js";
 import { forThisOs, notBuilt } from "./platform.js";
 
 const PERL = "/usr/bin/perl";
@@ -37,7 +38,7 @@ const clean: Clean | null = forThisOs<Clean>({
 
 /** What to run in place of *program* with *args*, so that it holds its first *keep* + 1 descriptors and no other. */
 export function cleanly(program: string, args: string[], keep = 2): [file: string, args: string[]] {
-  if (!program.startsWith("/")) throw new Error(`${program} is not named by its whole path`);
+  if (!isAbsolute(program)) throw new Error(`${program} is not named by its whole path`);
   if (!clean) notBuilt("Starting a program cleanly");
   return clean(program, args, keep);
 }

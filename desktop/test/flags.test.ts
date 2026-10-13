@@ -2,13 +2,14 @@
 // number in files/flags.ts alone, anywhere in the app, since a flag's number on one OS can be another flag on the next
 // (Linux's O_PATH is Darwin's O_SYMLINK); and a path through a descriptor's /proc entry in Linux's FdPaths alone.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { constants, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { LINUX_FLAGS } from "../src/files/flags.js";
+import { FLAGS, LINUX_FLAGS } from "../src/files/flags.js";
+import { importedOn } from "./platforms.js";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 // What the file host runs: the helper's operations and the host around it.
@@ -110,6 +111,12 @@ describe("the file host's open flags", () => {
 
   it("are Linux's own numbers for the two Node does not name", () => {
     expect(LINUX_FLAGS).toEqual({ O_PATH: 0o10000000, O_CLOEXEC: 0o2000000 });
+  });
+
+  it("are each OS's row: no link followed at a path's last name on Linux, and none on an OS the file host is not built for yet", async () => {
+    expect(FLAGS.NOFOLLOW).toBe(constants.O_NOFOLLOW);
+    const { FLAGS: windows } = await importedOn("win32", () => import("../src/files/flags.js"));
+    expect(() => windows.NOFOLLOW).toThrow(new Error("The file host is not built for Windows yet"));
   });
 });
 

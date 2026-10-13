@@ -5,7 +5,7 @@
 // verifier: the app has no step of its own for Chromium. Node's TLS, the device link's and the
 // updater's, trusts them as on Linux (company-ca.ts), and the guest is given them.
 
-import { helperSync } from "../mac-helper.js";
+import { helperSync } from "../native-helper.js";
 import { certificatesIn, certificatesOf, type CompanyTrust, MAX_BYTES, trustInNode } from "./company-ca.js";
 
 const NAMED = "This Mac's admin trust settings";

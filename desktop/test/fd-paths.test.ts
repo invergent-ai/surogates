@@ -2,7 +2,7 @@
 // they had an OS of their own, each on the path through the folder's /proc/self/fd entry; on an OS the file host
 // is not built for yet, every one is refused.
 
-import { closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -63,6 +63,11 @@ describe("Linux's FdPaths", () => {
     const [inner, more] = made(() => linuxFdPaths.hold({ dir: held, name: "sub" }));
     closeSync(inner);
     expect([calls, more]).toEqual([[["openSync", dir, HOLD]], [["openSync", at("sub"), HOLD]]]);
+  });
+
+  it("reads a link by its path, as the file host's realpath always read one", () => {
+    symlinkSync("a", join(dir, "to-a"));
+    expect(made(() => linuxFdPaths.readlink(join(dir, "to-a")))).toEqual(["a", [["readlinkSync", join(dir, "to-a"), "utf8"]]]);
   });
 
   it("reaches a name in a held folder through its descriptor's entry, and a path as it is", () => {
@@ -149,7 +154,7 @@ describe("the file host's FdPaths", () => {
     const words = "The file host is not built for Windows yet";
     expect(words).toBe(notBuiltWords("The file host"));
     // files/ keeps its own copy of the OSes' names, as the agent's disk holds no platform.js: the two name each OS alike.
-    const [own, app] = await Promise.all([import("../src/files/fd-paths.js"), import("../src/platform.js")]);
+    const [own, app] = await Promise.all([import("../src/files/os-names.js"), import("../src/platform.js")]);
     expect(own.OS_NAMES).toEqual(app.OS_NAMES);
     await expect(importedOn("freebsd", async () => (await import("../src/files/fd-paths.js")).fdPaths.hold(dir))).rejects.toThrow(new Error("The file host is not built for freebsd yet"));
     expect(() => fdPaths.hold(dir)).toThrow(new Error(words));

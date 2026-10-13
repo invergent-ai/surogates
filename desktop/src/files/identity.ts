@@ -4,6 +4,8 @@
 
 import type { BigIntStats, Stats } from "node:fs";
 
+import { notBuiltWords } from "./os-names.js";
+
 /** A file's device and inode, as numbers or as bigints, as fs gave them. */
 export interface Identity<N extends number | bigint = number> {
   dev: N;
@@ -12,9 +14,8 @@ export interface Identity<N extends number | bigint = number> {
 
 const own = (stats: Stats | BigIntStats): Identity<number | bigint> => ({ dev: stats.dev, ino: stats.ino });
 const ROWS: Partial<Record<NodeJS.Platform, typeof own>> = { linux: own, darwin: own };
-// On an OS whose identity is not built yet, in notBuilt's words (platform.ts).
-const NAMES: Partial<Record<NodeJS.Platform, string>> = { darwin: "macOS", win32: "Windows" };
-const NOT_BUILT = `A folder's identity is not built for ${NAMES[process.platform] ?? process.platform} yet`;
+// On an OS whose identity is not built yet, in notBuilt's words (os-names.ts).
+const NOT_BUILT = notBuiltWords("A folder's identity");
 const unbuilt = (): never => {
   throw new Error(NOT_BUILT);
 };

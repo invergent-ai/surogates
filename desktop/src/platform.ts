@@ -50,7 +50,7 @@ export function forThisOs<T>(rows: Partial<Record<NodeJS.Platform, T>>, platform
   return rows[platform] ?? null;
 }
 
-/** Each OS by the name a person knows it by, where that is not the name Node gives it (files/fd-paths.ts keeps a copy). */
+/** Each OS by the name a person knows it by, where that is not the name Node gives it (files/os-names.ts keeps a copy). */
 export const OS_NAMES: Readonly<Partial<Record<NodeJS.Platform, string>>> = { darwin: "macOS", win32: "Windows" };
 
 // The OS this app runs on, by the name a person knows it by: read once, as each part picks its side.

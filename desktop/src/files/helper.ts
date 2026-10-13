@@ -59,10 +59,13 @@ for (const [is, path, what] of checked) {
     process.exit(2);
   }
 }
-// On macOS the sandbox binds nothing: Seatbelt judges each access by its path, so a folder moved away and another
-// made at its path would be served. There the helper looks again before each request, and answers one in a folder
-// that is another now as its host does, with the folder unavailable.
-const LOOKS_EACH_REQUEST = process.platform === "darwin";
+// Whether this OS's sandbox binds the folders it is given, so what was found at each path stays there for the helper's
+// life: Linux's bwrap does. On macOS the sandbox binds nothing: Seatbelt judges each access by its path, so a folder
+// moved away and another made at its path would be served. Where it binds nothing, the helper looks again before each
+// request, and answers one in a folder that is another now as its host does, with the folder unavailable. files/ is on
+// the agent disk, which holds no platform.js, so the row is picked here.
+const BINDS: Partial<Record<NodeJS.Platform, boolean>> = { linux: true, darwin: false };
+const LOOKS_EACH_REQUEST = BINDS[process.platform] !== true;
 const stillChecked = (): boolean => checked.every(([is, path]) => is === undefined || found(path) === is);
 // A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing. A
 // recovery's is given where they are kept and no copy: it puts back what a landing in the folder cut short, and does

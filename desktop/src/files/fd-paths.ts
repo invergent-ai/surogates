@@ -7,6 +7,7 @@ import type { BigIntStats, Dirent, Stats } from "node:fs";
 
 import { darwinFdPaths } from "./fd-paths-darwin.js";
 import { linuxFdPaths } from "./fd-paths-linux.js";
+import { notBuiltWords } from "./os-names.js";
 
 /** A file by its path, or by its *name* in the folder held open as *dir*: with no name, that folder itself. */
 export type Where = string | { readonly dir: number; readonly name?: string };
@@ -32,6 +33,8 @@ export interface FdPaths {
   link(from: Where, to: Where): void;
   rename(from: Where, to: Where): void;
   copy(from: Where, to: Where): void;
+  /** What the link at *path* holds, as UTF-8. */
+  readlink(path: string): string;
   /** The entries of the folder held as *dir*. */
   listing(dir: number): Listing;
   /** Where the file open as *fd* is now: null for one removed since. */
@@ -42,17 +45,15 @@ export interface FdPaths {
   shown(where: Where): string;
 }
 
-// On a system the file host is not built for yet, every call is refused, in notBuilt's words (platform.ts): files/ is on
-// the agent's disk, which holds no platform.js, so it keeps its own copy of the OSes' names. The object itself is shown
-// as any other is.
-export const OS_NAMES: Readonly<Partial<Record<NodeJS.Platform, string>>> = { darwin: "macOS", win32: "Windows" };
-const NOT_BUILT = `The file host is not built for ${OS_NAMES[process.platform] ?? process.platform} yet`;
+// On a system the file host is not built for yet, every call is refused, in notBuilt's words (platform.ts, os-names.ts).
+// The object itself is shown as any other is.
+const NOT_BUILT = notBuiltWords("The file host");
 const refused = (): never => {
   throw new Error(NOT_BUILT);
 };
 const unbuilt: FdPaths = {
   hold: refused, open: refused, lstat: refused, stat: refused, access: refused, mkdir: refused, rmdir: refused, unlink: refused, chmod: refused,
-  link: refused, rename: refused, copy: refused, listing: refused, pathOf: refused, handed: refused, shown: refused,
+  link: refused, rename: refused, copy: refused, readlink: refused, listing: refused, pathOf: refused, handed: refused, shown: refused,
 };
 
 export const fdPaths: FdPaths = ({ linux: linuxFdPaths, darwin: darwinFdPaths } as Partial<Record<NodeJS.Platform, FdPaths>>)[process.platform] ?? unbuilt;
