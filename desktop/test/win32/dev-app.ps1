@@ -1,11 +1,12 @@
 # A development build of the app as a Windows app of its own, for the checks a person makes on a PC by hand: a shortcut
 # in the user's Start menu, "Surogate Dev", to this package's Electron on this checkout's dist\shell\main.js, with the
-# development build's AppUserModelID and toast activator, without which Windows shows none of its toasts. Its code is
-# this checkout's dist\, as `npm run build` built it. The app takes its surogate:// links for this user itself, at its
-# start, and its login item is its own, as Settings sets it.
+# development build's AppUserModelID and toast activator, without which Windows shows none of its toasts; and the
+# surogate:// scheme for this user, in the user's own classes, which the installed app's MSI registers machine-wide
+# and the app itself never does. Its code is this checkout's dist\, as `npm run build:win32` built it. Its login item
+# is the app's own, as Settings sets it.
 #
-#   test\win32\dev-app.ps1           make the shortcut, and start the app
-#   test\win32\dev-app.ps1 -Remove   quit the app, take out its login item and its links, and remove the shortcut
+#   test\win32\dev-app.ps1           make the shortcut, register the scheme, and start the app
+#   test\win32\dev-app.ps1 -Remove   quit the app, take out its login item and its scheme, and remove the shortcut
 param([switch]$Remove)
 $ErrorActionPreference = "Stop"
 
@@ -39,7 +40,7 @@ if ($Remove) {
   }
   # Its login item: Electron's value in the user's Run key, named by its AppUserModelID, and its Startup apps switch.
   foreach ($key in @($run, $approved)) { Remove-ItemProperty -Path $key -Name $id -ErrorAction SilentlyContinue }
-  # Its links, where they still start this checkout's Electron.
+  # Its scheme, where it still starts this checkout's Electron.
   $command = (Get-ItemProperty -Path "$links\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
   if ($command -and $command.StartsWith("`"$electron`"")) { Remove-Item -Path $links -Recurse }
   Remove-Item -Path $shortcut -ErrorAction SilentlyContinue
@@ -47,9 +48,17 @@ if ($Remove) {
   exit 0
 }
 
-if (-not (Test-Path $main)) { Write-Error "Build it first: npm run build" }
+if (-not (Test-Path $main)) { Write-Error "Build it first: npm run build:win32" }
 if (-not (Test-Path $electron)) { Write-Error "Install Electron first: npm ci, then npm run electron:install" }
 $made = Start-Process -FilePath $electron -ArgumentList "`"$PSScriptRoot\dev-shortcut.cjs`" `"$shortcut`" `"$main`" $id $activator" -Wait -PassThru
 if ($made.ExitCode -ne 0) { Write-Error "Windows did not make $shortcut" }
 "Made $shortcut"
+# The scheme for this user (Microsoft, "Registering an Application to a URI Scheme"): this checkout's Electron on its
+# main, the link Windows gives as "%1" after "--", which ends Chromium's switches, whatever the link holds. It takes
+# the user's scheme from whatever other build had it, until -Remove.
+New-Item -Path "$links\shell\open\command" -Force | Out-Null
+Set-ItemProperty -Path $links -Name "(default)" -Value "URL:Surogate"
+Set-ItemProperty -Path $links -Name "URL Protocol" -Value ""
+Set-ItemProperty -Path "$links\shell\open\command" -Name "(default)" -Value "`"$electron`" `"$main`" -- `"%1`""
+"Registered surogate:// for $env:USERNAME"
 Start-Process -FilePath $electron -ArgumentList "`"$main`""

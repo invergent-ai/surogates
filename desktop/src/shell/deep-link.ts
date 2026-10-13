@@ -39,7 +39,8 @@ export const linkOfLaunch: (argv: readonly string[]) => OpenLink | null = forThi
   linux: linkIn,
   // macOS hands no link in a launch's arguments: each comes as an event (listenForLinks).
   darwin: () => null,
-  // Windows starts the command the app took its links by, per user, the link after it (app-identity-win32.ts).
+  // Windows starts the command the scheme's registration names, the link after it: the MSI registers it machine-wide,
+  // and test/win32/dev-app.ps1 for a development build's user (Microsoft, "Registering an Application to a URI Scheme").
   win32: linkIn,
 }) ?? (() => notBuilt("The arrival of surogate:// links"));
 

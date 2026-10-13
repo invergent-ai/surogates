@@ -123,7 +123,7 @@ cargo test --locked -- --include-ignored
 test\win32\dev-app.ps1
 ```
 
-- It makes "Surogate Dev" in the Start menu and starts it. Pass: the window opens, and "Surogate Dev" is in the Start menu.
+- It makes "Surogate Dev" in the Start menu, registers `surogate://` for this user to start it, and starts it. Pass: the window opens, "Surogate Dev" is in the Start menu, and the script says it registered `surogate://`.
 - Sign in to an agent, as the app asks.
 
 ### 5.4 The window and the notification area

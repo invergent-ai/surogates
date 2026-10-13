@@ -1,6 +1,11 @@
 // The app as Windows knows it: the AppUserModelID its windows, its taskbar button, its toasts and its login item go
-// by, the installed app's and a development build's apart; surogate:// links taken per user, in the user's own
-// classes, by the command that starts the app; and a launch that asks the running app to quit.
+// by, the installed app's and a development build's apart; and a launch that asks the running app to quit. The app
+// registers no surogate:// scheme itself, on any OS: an install does (the MSI, machine-wide), or a development
+// build's script (test/win32/dev-app.ps1, for its user).
+
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
@@ -10,21 +15,18 @@ import { importedOn } from "./platforms.js";
 const windows = () => importedOn("win32", () => import("../src/shell/app-identity.js"));
 
 // Electron's app as far as the identity uses it, and what was asked of it, in order.
-function electronApp(registered: { path: string; args: string[] } | null = null) {
+function electronApp() {
   const asked: unknown[][] = [];
   return {
     asked,
     setAppUserModelId: (id: string) => void asked.push(["id", id]),
     setToastActivatorCLSID: (id: string) => void asked.push(["activator", id]),
-    isDefaultProtocolClient: (protocol: string, path?: string, args?: string[]) =>
-      protocol === "surogate" && registered !== null && registered.path === path && JSON.stringify(registered.args) === JSON.stringify(args),
-    setAsDefaultProtocolClient: (protocol: string, path?: string, args?: string[]) => {
-      asked.push(["links", protocol, path, args]);
-      registered = { path: path!, args: args! };
-      return true;
-    },
   };
 }
+
+const SRC = fileURLToPath(new URL("../src", import.meta.url));
+const sources = (dir: string): string[] => readdirSync(join(SRC, dir), { withFileTypes: true })
+  .flatMap((entry) => (entry.isDirectory() ? sources(join(dir, entry.name)) : /\.[cm]?ts$/.test(entry.name) ? [join(dir, entry.name)] : []));
 
 describe("the app as Windows knows it", () => {
   it("goes by the installed app's AppUserModelID and toast activator, and a development build by its own", async () => {
@@ -43,23 +45,9 @@ describe("the app as Windows knows it", () => {
     ]);
   });
 
-  it("takes surogate:// links per user by the command that starts it, its switches ended before the link, and asks nothing where it has them", async () => {
-    const { takeLinks } = await windows();
-    const app = electronApp();
-    takeLinks(app, ["C:\\Program Files\\Surogate\\Surogate.exe"]);
-    expect(app.asked).toEqual([["links", "surogate", "C:\\Program Files\\Surogate\\Surogate.exe", ["--"]]]);
-    takeLinks(app, ["C:\\Program Files\\Surogate\\Surogate.exe"]);
-    expect(app.asked).toHaveLength(1);
-    // A development build's Electron, on its main, as it is: Electron quotes it (windows.e2e.ts).
-    const development = electronApp();
-    takeLinks(development, ["C:\\a\\electron.exe", "C:\\my work\\dist\\shell\\main.js"]);
-    expect(development.asked).toEqual([["links", "surogate", "C:\\a\\electron.exe", ["C:\\my work\\dist\\shell\\main.js", "--"]]]);
-  });
-
-  it("says where Windows did not take the links", async () => {
-    const { takeLinks } = await windows();
-    const app = { ...electronApp(), setAsDefaultProtocolClient: () => false };
-    expect(() => takeLinks(app, ["C:\\Program Files\\Surogate\\Surogate.exe"])).toThrow("Windows did not give Surogate its surogate:// links");
+  it("registers no surogate:// scheme itself, on any OS: nothing of the app's writes or removes one", () => {
+    const writing = sources(".").filter((file) => /\b(?:setAsDefaultProtocolClient|removeAsDefaultProtocolClient)\b/.test(readFileSync(join(SRC, file), "utf8")));
+    expect(writing).toEqual([]);
   });
 
   it("is asked to quit by a launch whose arguments hold --quit", async () => {
@@ -71,12 +59,11 @@ describe("the app as Windows knows it", () => {
 });
 
 describe("the app as Linux and macOS know it", () => {
-  it("is named, given its links and asked to quit by nothing of the app's own: an install's files and the bundle do it", async () => {
+  it("is named and asked to quit by nothing of the app's own: an install's files and the bundle do it", async () => {
     for (const os of ["linux", "darwin"] as const) {
-      const { nameTheApp, takeLinks, quitAsked } = await importedOn(os, () => import("../src/shell/app-identity.js"));
+      const { nameTheApp, quitAsked } = await importedOn(os, () => import("../src/shell/app-identity.js"));
       const app = electronApp();
       nameTheApp(app, true);
-      takeLinks(app, ["/opt/surogate/current/surogate"]);
       expect(app.asked, os).toEqual([]);
       expect(quitAsked(["/opt/surogate/current/surogate", "--quit"]), os).toBe(false);
     }

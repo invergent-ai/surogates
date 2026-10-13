@@ -41,7 +41,7 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
-import { nameTheApp, quitAsked, takeLinks } from "./app-identity.js";
+import { nameTheApp, quitAsked } from "./app-identity.js";
 import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
@@ -2762,12 +2762,6 @@ if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
   // a CA it refuses is trusted no more than none.
   const { certificates, untrusted } = companyTrust(app.isPackaged, process.env, app.getPath("home"));
   companyCertificates = certificates;
-  // surogate:// links, for this user, where the app takes them itself (app-identity.ts): by the command that starts it.
-  try {
-    takeLinks(app, loginCommand());
-  } catch (error) {
-    report(error);
-  }
   // A second launch shows the window, unless it is a start at login, and hands it the link it was started
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {

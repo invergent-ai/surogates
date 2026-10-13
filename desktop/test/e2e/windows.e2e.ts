@@ -1,9 +1,10 @@
 // The app on a Windows PC, through the real app, as a development build runs there: its data in the user's local
-// application data, its AppUserModelID before its first window, surogate:// links taken for its user, Linux's menus,
+// application data, its AppUserModelID before its first window and no surogate:// scheme of its own, Linux's menus,
 // Windows's own buttons over the window's corner, an .ico in the notification area, the window brought back by the
 // notification area's icon and by a second launch, Ctrl+Alt+Space for quick entry, the login item in the Run key,
 // sign-in tokens sealed, the PC's own name, a toast's click, Settings' close button, a launch that asks it to quit,
-// and test/win32/dev-app.ps1's removal. With no VM: none boots on the Windows runner. On Windows alone.
+// and test/win32/dev-app.ps1, whose scheme opens a link and whose removal quits the app. With no VM: none boots on the
+// Windows runner. On Windows alone.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -96,7 +97,9 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
     await expect.poll(() => existsSync(join(dataRoot(home), "electron"))).toBe(true);
   });
 
-  it("names itself to Windows by its own AppUserModelID before its first window, and takes surogate:// links for its user", async () => {
+  it("names itself to Windows by its own AppUserModelID before its first window, and registers no surogate:// scheme of its own", async () => {
+    // The user's own scheme, none: an install registers it, or a development build's script.
+    spawnSync(REG, ["delete", "HKCU\\Software\\Classes\\surogate", "/f"], { stdio: "ignore" });
     const naming = join(home, "naming.cjs");
     writeFileSync(naming, [
       'const { app, BrowserWindow } = require("electron");',
@@ -106,19 +109,8 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
     app = await launch(home, {}, [], [naming]);
     await shellPage(app);
     expect(await app.evaluate(() => (globalThis as unknown as { named: unknown }).named)).toEqual({ id: DEVELOPMENT_ID, windows: 0 });
-    // Its own command, the link after the end of its switches.
-    const command = registry(LINKS, null);
-    expect(command?.startsWith(`"${ELECTRON}" `), command ?? "none").toBe(true);
-    expect(command).toContain(MAIN);
-    expect(command?.endsWith(' -- "%1"'), command ?? "none").toBe(true);
-    // Each argument of a scheme's command, as Electron writes it: a path with a space quoted, as Windows reads it back.
-    const probe = "HKCU\\Software\\Classes\\surogate-quoting-test";
-    try {
-      expect(await app.evaluate(({ app: running }) => running.setAsDefaultProtocolClient("surogate-quoting-test", "C:\\a b\\x.exe", ["C:\\a b\\main.js", "--"]))).toBe(true);
-      expect(registry(`${probe}\\shell\\open\\command`, null)).toBe('"C:\\a b\\x.exe" "C:\\a b\\main.js" -- "%1"');
-    } finally {
-      spawnSync(REG, ["delete", probe, "/f"], { stdio: "ignore" });
-    }
+    expect(registry(LINKS, null)).toBeNull();
+    expect(spawnSync(REG, ["query", "HKCU\\Software\\Classes\\surogate"], { stdio: "ignore" }).status).not.toBe(0);
   });
 
   it("puts File first and Help last, as on Linux, with no app menu", async () => {
@@ -283,23 +275,31 @@ describe.runIf(process.platform === "win32")("the app on a Windows PC", () => {
 });
 
 // The development build as a Windows app of its own (test/win32/dev-app.ps1), on a CI runner alone: it makes a
-// shortcut in the account's own Start menu, and its links and login item are the account's.
+// shortcut in the account's own Start menu, and registers the scheme for the account's user; its login item is the
+// account's.
 describe.runIf(process.platform === "win32" && process.env.CI === "true")("a development build made a Windows app of its own", () => {
   const SCRIPT = join(import.meta.dirname, "..", "win32", "dev-app.ps1");
   const shortcutPath = () => join(execFileSync(POWERSHELL, ["-NoProfile", "-Command", "[Environment]::GetFolderPath('Programs')"], { encoding: "utf8" }).trim(), "Surogate Dev.lnk");
   // Its app's processes: this package's Electron on its main.
   const running = () => powershell(`@(Get-CimInstance Win32_Process -Filter "Name = 'electron.exe'" | Where-Object { $_.CommandLine -like '*${MAIN}*' }).Count`).stdout.trim();
 
-  beforeEach(() => {
+  beforeEach(async () => {
     home = dataHome();
+    agent = new FakeAgent();
+    origin = await agent.start();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await quit(app);
+    app = undefined;
+    await agent.stop();
+    await agent.link.stop();
     rmSync(home, { recursive: true, force: true, maxRetries: 10 });
   });
 
-  it("has a Start menu shortcut with its own AppUserModelID; its removal quits it, and takes out its login item, its links and the shortcut", async () => {
-    // Its data in the test's own folder, as the app's data home is a test's.
+  it("has a Start menu shortcut with its own AppUserModelID, and a scheme whose link Windows opens in the running app; its removal quits it, and takes out its login item, its scheme and the shortcut", async () => {
+    // The running app, signed in, its data in the test's own folder; the script's runs are given that folder too.
+    const { shell, client } = await signedIn();
     const env = { ...process.env, ...shellEnv(home) };
     const made = powershell(`& '${SCRIPT}'`, env);
     expect(made.status, made.stderr).toBe(0);
@@ -307,12 +307,21 @@ describe.runIf(process.platform === "win32" && process.env.CI === "true")("a dev
     expect(existsSync(shortcut)).toBe(true);
     const named = powershell(`(New-Object -ComObject Shell.Application).NameSpace('${dirname(shortcut)}').ParseName('Surogate Dev.lnk').ExtendedProperty('System.AppUserModel.ID')`);
     expect(named.stdout.trim()).toBe(DEVELOPMENT_ID);
-    // Started, it takes its links; and its login item is on, as Settings sets it.
-    await expect.poll(() => registry(LINKS, null)?.startsWith(`"${ELECTRON}" `) ?? false, { timeout: 30_000 }).toBe(true);
-    expect(running()).not.toBe("0");
-    spawnSync(REG, ["add", RUN, "/v", DEVELOPMENT_ID, "/t", "REG_SZ", "/d", `"${ELECTRON}" ${MAIN} --login`, "/f"]);
+    // The scheme, for this user: this checkout's Electron on its main, the link after the end of its switches.
+    expect(registry(LINKS, null)).toBe(`"${ELECTRON}" "${MAIN}" -- "%1"`);
+    // A link Windows opens by it, as a browser or the Run box hands one to the shell, reaches the running app.
+    await closeWindow(shell);
+    const opened = powershell(`Start-Process '${link(`${origin}/chat/${CHAT}`)}'`, env);
+    expect(opened.status, opened.stderr).toBe(0);
+    await expect.poll(async () => (await mainWindow(shell))?.visible, { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => new URL(client.url()).pathname).toBe(`/chat/${CHAT}`);
+    // Its login item on, as Settings sets it.
+    spawnSync(REG, ["add", RUN, "/v", DEVELOPMENT_ID, "/t", "REG_SZ", "/d", `"${ELECTRON}" "${MAIN}" --login`, "/f"]);
+    const closed = shell.waitForEvent("close");
     const removed = powershell(`& '${SCRIPT}' -Remove`, env);
     expect(removed.status, removed.stderr).toBe(0);
+    await closed;
+    app = undefined;
     expect(running()).toBe("0");
     expect(registry(RUN, DEVELOPMENT_ID)).toBeNull();
     expect(registry(LINKS, null)).toBeNull();
