@@ -1,15 +1,14 @@
-// The company's certificate authority on macOS: the certificates trusted as roots for SSL for this user, as
-// Safari trusts them: those an administrator trusted for every user of this Mac, as an MDM profile or `sudo
-// security add-trusted-cert -d` trusts one, in macOS's admin trust domain, and those of a configuration profile
-// the user installed, in the user's own; none either domain denies. surogate-helper lists them (native/helper,
-// Trust.swift). Chromium, the window's and net.fetch's, and the user's own Chrome trust them already, through
-// macOS's own verifier: the app has no step of its own for Chromium. Node's TLS, the device link's and the
+// The company's certificate authority on macOS: the certificates an administrator trusted as roots for
+// every user of this Mac, as an MDM profile or `sudo security add-trusted-cert -d` trusts one, which
+// macOS keeps in its admin trust domain and surogate-helper lists (native/helper, Trust.swift). Chromium,
+// the window's and net.fetch's, and the user's own Chrome trust them already, through macOS's own
+// verifier: the app has no step of its own for Chromium. Node's TLS, the device link's and the
 // updater's, trusts them as on Linux (company-ca.ts), and the guest is given them.
 
 import { helperSync } from "../mac-helper.js";
 import { certificatesIn, certificatesOf, type CompanyTrust, MAX_BYTES, trustInNode } from "./company-ca.js";
 
-const NAMED = "This Mac's trust settings";
+const NAMED = "This Mac's admin trust settings";
 const NOT_TRUSTED = "Surogate could not trust your company's certificate authority";
 
 /**
@@ -18,7 +17,7 @@ const NOT_TRUSTED = "Surogate could not trust your company's certificate authori
  * that is not a certificate authority's, as a server's own certificate an administrator trusted, is left
  * to macOS, which trusts it as it was told, and is not taken.
  */
-export function listedCertificates(listed: string): string[] {
+export function adminCertificates(listed: string): string[] {
   if (Buffer.byteLength(listed) > MAX_BYTES) throw new Error(`${NAMED} hold more than a megabyte of certificates`);
   if (/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(listed)) throw new Error(`${NAMED} hold a private key`);
   return certificatesIn(listed).filter((pem) => {
@@ -31,7 +30,7 @@ export function listedCertificates(listed: string): string[] {
 }
 
 /**
- * What a start trusts of the company's CA, *packaged*: the roots for SSL of the user's and the admin trust domains, as
+ * What a start trusts of the company's CA, *packaged*: the admin trust domain's roots for SSL, as
  * *list* reads them, in Node's TLS; what the user is told where they could not be read, or null. A
  * development build takes none, as it never takes an installed app's CA on Linux. A list that cannot be
  * read gives Node nothing: no start trusts what it could not read whole.
@@ -40,7 +39,7 @@ export function companyTrust(packaged: boolean, _env: NodeJS.ProcessEnv, _home: 
   if (!packaged) return { certificates: [], untrusted: null };
   let certificates: string[];
   try {
-    certificates = listedCertificates(list());
+    certificates = adminCertificates(list());
   } catch (error) {
     const said = error instanceof Error ? error.message : String(error);
     return { certificates: [], untrusted: { message: NOT_TRUSTED, detail: `${said}. Ask your administrator to check the certificate authority this Mac trusts.` } };

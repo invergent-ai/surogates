@@ -1,8 +1,7 @@
-// The company's certificate authority on macOS: the certificates trusted as roots for SSL for this user, as
-// Safari trusts them for the user. An administrator trusts one for every user of this Mac by `sudo security
-// add-trusted-cert -d` or an MDM profile, which macOS keeps in the admin trust domain; a configuration profile the
-// user installs puts its root in the user's login keychain, with the user's own trust settings. Both domains are
-// read by the same rules, and a certificate either domain denies is never taken.
+// The company's certificate authority on macOS: the certificates an administrator trusted as roots for
+// every user of this Mac, by `sudo security add-trusted-cert -d` or an MDM profile, which macOS keeps
+// in the admin trust domain. A user's own trust settings are not taken: they are not an administrator's
+// word, as Linux takes /etc/surogate/ca.pem only where root alone can write it.
 
 import Foundation
 import Security
@@ -33,44 +32,20 @@ private let trustAsRoot = Int(SecTrustSettingsResult.trustAsRoot.rawValue)
 private let deny = Int(SecTrustSettingsResult.deny.rawValue)
 private let unspecified = Int(SecTrustSettingsResult.unspecified.rawValue)
 
-/// What one domain's trust settings say of their certificate for SSL on every connection.
-public enum Verdict: Equatable {
-  /// A root for SSL.
-  case root
-  /// Denied, or decided as no root: never taken, whatever another domain says.
-  case refused
-  /// Nothing that holds for SSL on every connection: another domain may say.
-  case silent
-}
-
-/// What *settings* say of their certificate for SSL on every connection. SecTrustSettings.h: "An empty Trust
-/// Settings array ... means 'always trust this cert, with an overall trust setting for the cert of
-/// kSecTrustSettingsResultTrustRoot'"; otherwise the settings are read in their order, and the first that
-/// holds for SSL, and does not leave it unspecified, decides. One narrowed to an app, a host or a use is not
-/// taken as a root's for every connection, and a denial is taken however narrowed it is.
-public func verdictForSSL(_ settings: [TrustSetting]) -> Verdict {
-  if settings.isEmpty { return .root }
+/// Whether *settings* make their certificate a root for SSL on every connection. SecTrustSettings.h: "An
+/// empty Trust Settings array ... means 'always trust this cert, with an overall trust setting for the cert
+/// of kSecTrustSettingsResultTrustRoot'"; otherwise the settings are read in their order, and the first
+/// that holds for SSL, and does not leave it unspecified, decides. One narrowed to an app, a host or a use
+/// is not taken as a root's for every connection, and a denial is taken however narrowed it is.
+public func rootForSSL(_ settings: [TrustSetting]) -> Bool {
+  if settings.isEmpty { return true }
   for setting in settings where setting.policy == nil || setting.policy == sslPolicy {
     let result = setting.result ?? trustRoot
-    if result == deny { return .refused }
+    if result == deny { return false }
     if setting.narrowed || result == unspecified { continue }
-    return result == trustRoot || result == trustAsRoot ? .root : .refused
+    return result == trustRoot || result == trustAsRoot
   }
-  return .silent
-}
-
-/// Whether *settings* make their certificate a root for SSL on every connection (verdictForSSL).
-public func rootForSSL(_ settings: [TrustSetting]) -> Bool {
-  verdictForSSL(settings) == .root
-}
-
-/// Whether a certificate is taken, by what the user's trust domain and the admin domain say of it (verdictForSSL),
-/// nil where a domain holds no settings for it: a root of either, and refused by neither. SecTrustSettings.h:
-/// "Per-user Trust Settings override locally administered Trust Settings", so the user's denial holds against an
-/// administrator's trust, as Safari reads it for the user; an administrator's denial holds against the user's too.
-public func taken(user: Verdict?, admin: Verdict?) -> Bool {
-  if user == .refused || admin == .refused { return false }
-  return user == .root || admin == .root
+  return false
 }
 
 /// What the Security framework said when it did not answer.
@@ -113,52 +88,24 @@ func settings(of certificate: SecCertificate, in domain: SecTrustSettingsDomain)
   return read
 }
 
-/// Every certificate with trust settings in *domain*; none where the domain holds none.
-func certificates(in domain: SecTrustSettingsDomain) throws -> [SecCertificate] {
+/// The certificates of the admin trust domain whose settings make them roots for SSL (rootForSSL), each
+/// as its DER bytes; none where the domain holds none.
+public func adminRoots() throws -> [Data] {
   var copied: CFArray?
-  // SecTrustSettingsCopyCertificates(_:_:) (Apple, Security): every certificate with trust settings in the
-  // domain, or errSecNoTrustSettings where there are none.
-  let status = SecTrustSettingsCopyCertificates(domain, &copied)
+  // SecTrustSettingsCopyCertificates(_:_:) (Apple, Security): every certificate with trust settings in
+  // kSecTrustSettingsDomainAdmin, or errSecNoTrustSettings where there are none.
+  let status = SecTrustSettingsCopyCertificates(.admin, &copied)
   if status == errSecNoTrustSettings { return [] }
   guard status == errSecSuccess else { throw TrustError(status: status) }
   guard let copied else { return [] }
-  var found: [SecCertificate] = []
+  var roots: [Data] = []
   for item in copied as NSArray {
     let object = item as AnyObject
     guard CFGetTypeID(object) == SecCertificateGetTypeID() else { continue }
-    found.append(object as! SecCertificate)
-  }
-  return found
-}
-
-/// What *domain* says of *certificate* for SSL: nil where it holds no settings for it, refused where they cannot be read.
-func verdict(of certificate: SecCertificate, in domain: SecTrustSettingsDomain) throws -> Verdict? {
-  do {
-    guard let read = try settings(of: certificate, in: domain) else { return .refused }
-    return verdictForSSL(read)
-  } catch let error as TrustError where error.status == errSecItemNotFound || error.status == errSecNoTrustSettings {
-    // SecTrustSettings.h: errSecItemNotFound "if no Trust settings exist for the cert". Unsure: Apple does not say
-    // whether a domain with no settings at all answers it, or errSecNoTrustSettings as SecTrustSettingsCopyCertificates does.
-    return nil
-  }
-}
-
-/// The certificates the user's trust domain and the admin domain make roots for SSL for this user (taken), each as
-/// its DER bytes, once: the admin domain's in its order, then the user's; none where neither holds one.
-public func roots() throws -> [Data] {
-  var found: [(certificate: SecCertificate, der: Data)] = []
-  for domain in [SecTrustSettingsDomain.admin, .user] {
-    for certificate in try certificates(in: domain) {
-      // SecCertificateCopyData(_:) (Apple, Security): the certificate's DER encoding.
-      let der = SecCertificateCopyData(certificate) as Data
-      if !found.contains(where: { $0.der == der }) { found.append((certificate: certificate, der: der)) }
-    }
-  }
-  var roots: [Data] = []
-  for entry in found {
-    let user = try verdict(of: entry.certificate, in: .user)
-    let admin = try verdict(of: entry.certificate, in: .admin)
-    if taken(user: user, admin: admin) { roots.append(entry.der) }
+    let certificate = object as! SecCertificate
+    guard let found = try settings(of: certificate, in: .admin), rootForSSL(found) else { continue }
+    // SecCertificateCopyData(_:) (Apple, Security): the certificate's DER encoding.
+    roots.append(SecCertificateCopyData(certificate) as Data)
   }
   return roots
 }

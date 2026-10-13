@@ -1,6 +1,6 @@
 // surogate-helper <command>: one answer a run, on stdout, and its words on stderr where it has none.
 //   name    this Mac's Computer Name, a line
-//   trust   the roots for SSL of the user's trust domain and the admin domain, as PEM; nothing where there are none
+//   trust   the admin trust domain's roots for SSL, as PEM; nothing where there are none
 //   procs   this user's processes, a JSON object a line: {"pid":…,"path":…,"args":[…]}
 // It reads no environment and no file of the caller's, and starts no program.
 
@@ -22,7 +22,7 @@ case ["name"]:
   write(name + "\n")
 case ["trust"]:
   do {
-    write(try roots().map(pem).joined())
+    write(try adminRoots().map(pem).joined())
   } catch {
     fail("This Mac's trust settings could not be read: \(error)")
   }

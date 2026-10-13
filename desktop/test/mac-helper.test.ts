@@ -78,7 +78,7 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("surogate-he
     }
   });
 
-  it("prints the roots for SSL of the user's and the admin trust domains as PEM certificates, each one a certificate authority's or a root's", () => {
+  it("prints the admin domain's roots for SSL as PEM certificates, each one a certificate authority's or a root's", () => {
     const done = run("trust");
     expect(done.status).toBe(0);
     for (const pem of certificatesIn(done.stdout)) expect(() => new X509Certificate(pem)).not.toThrow();

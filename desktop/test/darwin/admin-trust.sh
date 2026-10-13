@@ -4,24 +4,11 @@
 # domain as `sudo security add-trusted-cert -d` puts one, the first trusted for SSL, the second for S/MIME
 # alone, the third denied; then a site signed by the first, which Node reaches with what the app takes,
 # and a browser too, by hand. Each root is taken out again at the end, whatever happened. Asks for an
-# administrator's password once (sudo); on the macOS runner, sudo asks for none. With --user, the same three
-# go in the user's own trust domain and login keychain, as a configuration profile the user installs puts a
-# root there: macOS asks for the user's password in a window of its own, for each.
+# administrator's password once (sudo); on the macOS runner, sudo asks for none.
 #
 #   test/darwin/admin-trust.sh           the check; a pass ends "The admin trust domain is read as it should be"
-#   test/darwin/admin-trust.sh --user    the user's trust domain; a pass ends "The user's trust domain is read as it should be"
-#   test/darwin/admin-trust.sh --keep    either, then waits with the site up, for a browser's check by hand
+#   test/darwin/admin-trust.sh --keep    the same, then waits with the site up, for a browser's check by hand
 set -euo pipefail
-
-keep=""
-user=""
-for arg in "$@"; do
-  case "$arg" in
-    --keep) keep=--keep ;;
-    --user) user=1 ;;
-    *) echo "usage: test/darwin/admin-trust.sh [--user] [--keep]" >&2; exit 2 ;;
-  esac
-done
 
 cd "$(dirname "$0")/../.."
 helper=native/helper/.build/surogate-helper
@@ -33,16 +20,10 @@ work=$(mktemp -d)
 # No config of this Mac's: LibreSSL's own would add its v3_ca extensions beside those given here.
 printf '[req]\ndistinguished_name = dn\n[dn]\n' > "$work/bare.cnf"
 names=()
-login="$HOME/Library/Keychains/login.keychain-db"
 cleanup() {
   for name in ${names[@]+"${names[@]}"}; do
-    if [ -n "$user" ]; then
-      security remove-trusted-cert "$work/$name.pem" 2>/dev/null || true
-      security delete-certificate -c "Surogate test $name $$" "$login" 2>/dev/null || true
-    else
-      sudo security remove-trusted-cert -d "$work/$name.pem" 2>/dev/null || true
-      sudo security delete-certificate -c "Surogate test $name $$" /Library/Keychains/System.keychain 2>/dev/null || true
-    fi
+    sudo security remove-trusted-cert -d "$work/$name.pem" 2>/dev/null || true
+    sudo security delete-certificate -c "Surogate test $name $$" /Library/Keychains/System.keychain 2>/dev/null || true
   done
   rm -rf "$work"
 }
@@ -61,34 +42,26 @@ root denied
 printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n' > "$work/site.ext"
 "$openssl" x509 -req -in "$work/site.csr" -CA "$work/ssl.pem" -CAkey "$work/ssl.key" -CAcreateserial -days 2 -extfile "$work/site.ext" -out "$work/site.pem" 2>/dev/null
 
-if [ -n "$user" ]; then
-  domain="The user's trust domain"
-  security add-trusted-cert -r trustRoot -p ssl -k "$login" "$work/ssl.pem"
-  security add-trusted-cert -r trustRoot -p smime -k "$login" "$work/smime.pem"
-  security add-trusted-cert -r deny -k "$login" "$work/denied.pem"
-else
-  domain="The admin trust domain"
-  sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain "$work/ssl.pem"
-  sudo security add-trusted-cert -d -r trustRoot -p smime -k /Library/Keychains/System.keychain "$work/smime.pem"
-  sudo security add-trusted-cert -d -r deny -k /Library/Keychains/System.keychain "$work/denied.pem"
-fi
+sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain "$work/ssl.pem"
+sudo security add-trusted-cert -d -r trustRoot -p smime -k /Library/Keychains/System.keychain "$work/smime.pem"
+sudo security add-trusted-cert -d -r deny -k /Library/Keychains/System.keychain "$work/denied.pem"
 
 "$helper" trust > "$work/listed.pem"
-node --input-type=module - "$work" "$keep" "$domain" <<'EOF'
+node --input-type=module - "$work" "${1:-}" <<'EOF'
 import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, get } from "node:https";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [work, keep, domain] = process.argv.slice(2);
-const { listedCertificates } = await import(pathToFileURL(join(process.cwd(), "dist", "shell", "ca-source-darwin.js")).href);
+const [work, keep] = process.argv.slice(2);
+const { adminCertificates } = await import(pathToFileURL(join(process.cwd(), "dist", "shell", "ca-source-darwin.js")).href);
 const fingerprint = (pem) => new X509Certificate(pem).fingerprint256;
-const listed = listedCertificates(readFileSync(join(work, "listed.pem"), "utf8"));
+const listed = adminCertificates(readFileSync(join(work, "listed.pem"), "utf8"));
 const has = (name) => listed.some((pem) => fingerprint(pem) === fingerprint(readFileSync(join(work, `${name}.pem`), "utf8")));
 const said = { ssl: has("ssl"), smime: has("smime"), denied: has("denied") };
 console.log("Listed by the helper and taken:", JSON.stringify(said));
-if (!said.ssl || said.smime || said.denied) throw new Error(`${domain} was not read as it should be: the SSL root alone is to be taken`);
+if (!said.ssl || said.smime || said.denied) throw new Error("The admin trust domain was not read as it should be: the SSL root alone is to be taken");
 const server = createServer({ key: readFileSync(join(work, "site.key")), cert: readFileSync(join(work, "site.pem")) }, (req, res) => res.end("trusted"));
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 const { port } = server.address();
@@ -102,5 +75,5 @@ if (keep === "--keep") {
   await new Promise(() => {});
 }
 server.close();
-console.log(`${domain} is read as it should be`);
+console.log("The admin trust domain is read as it should be");
 EOF
