@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, INTERACTIVE_PROMPT_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.history import (
@@ -102,6 +102,7 @@ from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
+from surogates.tools.builtin.ask_user_question import widen_for_channel
 from surogates.tools.builtin.send_form import SENT as FORM_SENT, describe_forms
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -2825,7 +2826,12 @@ class AgentHarness(
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = [
-            describe_forms(s, self._whatsapp_forms) if s["function"]["name"] == "send_form" else s
+            describe_forms(s, self._whatsapp_forms) if s["function"]["name"] == "send_form"
+            else widen_for_channel(s) if (
+                s["function"]["name"] == "ask_user_question"
+                and session.channel in INTERACTIVE_PROMPT_CHANNELS
+            )
+            else s
             for s in tool_schemas
         ]
         # The model may call only what it was sent.  The registry is the

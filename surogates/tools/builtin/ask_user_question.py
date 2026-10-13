@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 from typing import Any
@@ -45,6 +46,9 @@ logger = logging.getLogger(__name__)
 # Schema limits ------------------------------------------------------------
 MAX_QUESTIONS = 5
 MAX_CHOICES_PER_QUESTION = 4
+#: A messaging app's list holds ten rows (WhatsApp's interactive list), so a
+#: channel conversation may offer that many; the web widget keeps four.
+MAX_CHANNEL_CHOICES_PER_QUESTION = 10
 MAX_PROMPT_LENGTH = 1000
 MAX_LABEL_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
@@ -208,7 +212,9 @@ class AskUserQuestionSchemaError(ValueError):
     """Raised when the LLM-supplied ``questions`` payload is invalid."""
 
 
-def _validate_questions(raw: Any) -> list[dict[str, Any]]:
+def _validate_questions(
+    raw: Any, *, max_choices: int = MAX_CHOICES_PER_QUESTION,
+) -> list[dict[str, Any]]:
     """Return a normalised list of questions, or raise :class:`AskUserQuestionSchemaError`."""
     if not isinstance(raw, list):
         raise AskUserQuestionSchemaError("`questions` must be an array of objects.")
@@ -236,10 +242,10 @@ def _validate_questions(raw: Any) -> list[dict[str, Any]]:
                 raise AskUserQuestionSchemaError(
                     f"questions[{i}].choices must be an array.",
                 )
-            if len(raw_choices) > MAX_CHOICES_PER_QUESTION:
+            if len(raw_choices) > max_choices:
                 raise AskUserQuestionSchemaError(
                     f"questions[{i}].choices supports at most "
-                    f"{MAX_CHOICES_PER_QUESTION} entries.",
+                    f"{max_choices} entries.",
                 )
             for j, c in enumerate(raw_choices):
                 if not isinstance(c, dict):
@@ -480,8 +486,18 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
         else UUID(str(raw_session_id))
     )
 
+    from surogates.channels.constants import INTERACTIVE_PROMPT_CHANNELS
+
+    session = await session_store.get_session(session_id)
     try:
-        questions = _validate_questions(arguments.get("questions"))
+        questions = _validate_questions(
+            arguments.get("questions"),
+            max_choices=(
+                MAX_CHANNEL_CHOICES_PER_QUESTION
+                if getattr(session, "channel", None) in INTERACTIVE_PROMPT_CHANNELS
+                else MAX_CHOICES_PER_QUESTION
+            ),
+        )
     except AskUserQuestionSchemaError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -543,6 +559,23 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
         },
         ensure_ascii=False,
     )
+
+
+def widen_for_channel(schema: dict[str, Any]) -> dict[str, Any]:
+    """*schema* allowing a channel conversation's ten choices.  Not mutated."""
+    schema = copy.deepcopy(schema)
+    function = schema["function"]
+    choices = function["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]
+    choices["maxItems"] = MAX_CHANNEL_CHOICES_PER_QUESTION
+    choices["description"] = (
+        f"Up to {MAX_CHANNEL_CHOICES_PER_QUESTION} labeled options; with more "
+        "than 3, or with descriptions, they show as a list to pick from. Omit "
+        "for an open-ended question."
+    )
+    function["description"] = function["description"].replace(
+        "up to 4 labeled options", f"up to {MAX_CHANNEL_CHOICES_PER_QUESTION} labeled options",
+    )
+    return schema
 
 
 def register(registry: ToolRegistry) -> None:

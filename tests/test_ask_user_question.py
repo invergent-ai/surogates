@@ -532,3 +532,46 @@ async def test_a_rescued_reply_reaches_the_person_word_for_word():
         harness, session=session, messages=[], assistant_message=message, model="m", tool_filter=None)
     assert out == "ask_user_question"
     assert json.loads(message["tool_calls"][0]["function"]["arguments"])["context"] == reply
+
+
+_SIX = [{"label": f"Opțiunea {i}"} for i in range(6)]
+
+
+@pytest.mark.asyncio
+async def test_the_web_widget_keeps_four_choices():
+    from surogates.tools.builtin.ask_user_question import _ask_user_question_handler
+
+    result = json.loads(await _ask_user_question_handler(
+        {"questions": [{"prompt": "Care?", "choices": _SIX}]},
+        session_store=FakeSessionStore(), session_id=uuid4(), tool_call_id="c1",
+    ))
+    assert result == {"error": "questions[0].choices supports at most 4 entries."}
+
+
+def test_a_channel_conversation_takes_up_to_ten_choices():
+    from surogates.tools.builtin.ask_user_question import (
+        AskUserQuestionSchemaError,
+        MAX_CHANNEL_CHOICES_PER_QUESTION,
+        _validate_questions,
+    )
+
+    [q] = _validate_questions([{"prompt": "Care?", "choices": _SIX}], max_choices=MAX_CHANNEL_CHOICES_PER_QUESTION)
+    assert len(q["choices"]) == 6
+    with pytest.raises(AskUserQuestionSchemaError):
+        _validate_questions(
+            [{"prompt": "Care?", "choices": [{"label": str(i)} for i in range(11)]}],
+            max_choices=MAX_CHANNEL_CHOICES_PER_QUESTION,
+        )
+
+
+def test_the_channel_schema_offers_ten_choices_without_touching_the_original():
+    from surogates.tools.builtin import ask_user_question
+    from surogates.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    ask_user_question.register(registry)
+    [schema] = registry.get_schemas()
+    wide = ask_user_question.widen_for_channel(schema)
+    choices = lambda s: s["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]  # noqa: E731
+    assert choices(wide)["maxItems"] == 10 and choices(schema)["maxItems"] == 4
+    assert "up to 10 labeled options" in wide["function"]["description"]
