@@ -40,7 +40,7 @@ export class Office {
   /** Applies the batch, all of it or none; then waits until the editor has sent it to the document server. */
   async edit(id: string, ops: EditorOp[]): Promise<Record<string, unknown>> {
     const page = await this.pool.get(id);
-    const { sentAt, value } = await this.run(page, { action: "edit", ops, agent: page.user });
+    const { sentAt, value } = await this.inGroup(id, page, { action: "edit", ops, agent: page.user });
     if (value === undefined || value === null) throw new EditorError("the editor could not run the edit; nothing of it applied");
     const result = value as Record<string, unknown>;
     if (result.__timeout) {
@@ -48,8 +48,6 @@ export class Office {
       await this.pool.close(id);
       throw new EditorError("the editor stopped answering; the edit may have applied: read the document again before editing");
     }
-    // One command is one undo step: Undo takes back whatever part of the batch applied.
-    if ((result.refused || result.__error) && (result.mutated === true || result.__mutated === true)) await page.method("Undo");
     if (typeof result.__error === "string") throw new EditorError(result.__error);
     if (result.refused) return { applied: false, refused: result.refused };
     return { applied: true, results: result.results, flushed: await this.flushed(page, sentAt) };
@@ -86,6 +84,29 @@ export class Office {
     }
     if (typeof result.__error === "string") throw new EditorError(result.__error);
     return result;
+  }
+
+  // Runs the command in a group of actions: the editor holds its changes, sending none, until the group ends, and a
+  // cancel takes them all back before any co-editor saw them. (An Undo after the command cannot: the change is sent
+  // within 40 ms, and an Undo while the server has not acknowledged it does nothing.) A page that stopped answering is
+  // closed by the caller, its group never ended.
+  private async inGroup(id: string, page: EditorPage, scope: unknown): Promise<{ sentAt: number; value: unknown }> {
+    const started = await page.method("StartAction", ["GroupActions"]);
+    if ((started.value as { __timeout?: true } | undefined)?.__timeout) {
+      // Nothing ran: a fresh page may run the edit.
+      await this.pool.close(id);
+      throw new PageGone("the editor stopped answering");
+    }
+    let end: string[] | null = ["GroupActions", "", "cancel"];
+    try {
+      const reply = await this.run(page, scope);
+      const result = reply.value as Record<string, unknown> | null | undefined;
+      if (result?.__timeout) end = null;
+      else if (result && !result.refused && result.__error === undefined) end = ["GroupActions", ""];
+      return reply;
+    } finally {
+      if (end) await page.method("EndAction", end);
+    }
   }
 
   // An edit that changed nothing fires no state change: the flag is read first.

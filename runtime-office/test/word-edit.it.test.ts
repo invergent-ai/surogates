@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { EditorPage } from "../src/connector.js";
 import { compileOps } from "../src/ops.js";
 import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
@@ -6,6 +7,18 @@ import { AGENT, editorConfig, IT, itEnabled, newKey, startFixture, USER, type Fi
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Holds an edit's reply before the office acts on it, long enough for a sent change to reach the user: about 0.15 s
+// usually, and a second for the first change on a fresh pair of pages.
+class SlowOffice extends Office {
+  protected override async run(page: EditorPage, scope: unknown): Promise<{ sentAt: number; value: unknown }> {
+    const reply = await super.run(page, scope);
+    if ((scope as { action?: string }).action === "edit") await sleep(2_000);
+    return reply;
+  }
+}
 
 describe.skipIf(!itEnabled)("editing a document", () => {
   let fixture: Fixture;
@@ -45,7 +58,7 @@ describe.skipIf(!itEnabled)("editing a document", () => {
         return await check();
       } catch (error) {
         if (Date.now() > until) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await sleep(250);
       }
     }
   }
@@ -109,6 +122,28 @@ describe.skipIf(!itEnabled)("editing a document", () => {
       expect(byText(await blocks(user), "Should not stay")).toBeUndefined();
       expect(byText(await blocks(user), "North grew").text).toContain("Edited.");
     });
+  });
+
+  it("never shows a co-editor part of a batch it refuses", async () => {
+    const { agent, user } = await pair();
+    const north = byText(await blocks(agent), "North grew");
+    let settled = false;
+    const editing = new SlowOffice(pool)
+      .edit(agent, compileOps([
+        { op: "insert", target: { end: true }, content: { markdown: "Should not stay." } },
+        { op: "replace", target: { block: north.id, hash: "00000000" }, content: { markdown: "Replaced." } },
+      ]))
+      .finally(() => { settled = true; });
+    const seen: string[] = [];
+    while (!settled) {
+      if (byText(await blocks(user), "Should not stay")) seen.push("user");
+      await sleep(100);
+    }
+    expect(((await editing) as Any).refused.op).toBe(1);
+    expect(seen).toEqual([]);
+    await sleep(1_000);
+    expect(byText(await blocks(agent), "Should not stay")).toBeUndefined();
+    expect(byText(await blocks(user), "Should not stay")).toBeUndefined();
   });
 
   it("refuses a block the user deleted, and keeps nothing of the batch", async () => {

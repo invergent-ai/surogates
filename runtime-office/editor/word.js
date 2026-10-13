@@ -1,10 +1,10 @@
 // The script runtime-office runs in a Word editor through its connector, with `scope` set to the request.
 // It runs in the editor's command sandbox (strict mode, no window or document). Every exception is caught
-// here, because the editor swallows them; one run is one undo step.
+// here, because the editor swallows them. runtime-office runs an edit inside a group of actions, which it cancels
+// when the edit is refused or fails: nothing of a batch is kept unless all of it applied.
 (function () {
   "use strict";
   var doc = Api.GetDocument();
-  var MUTATED = false;
 
   function hash(text) {
     var h = 0x811c9dc5;
@@ -292,15 +292,12 @@
     var ids = [];
     for (var i = 0; i < elements.length; i++) {
       doc.AddElement(pos + i, elements[i]);
-      MUTATED = true;
       ids.push(String(elements[i].GetInternalId()));
     }
     return ids;
   }
 
   function fill(sdt, elements) {
-    // Marked first: a failure after the block is emptied is undone too.
-    MUTATED = true;
     sdt.SetLock("unlocked");
     sdt.RemoveAllElements();
     for (var i = 0; i < elements.length; i++) sdt.AddElement(elements[i], i);
@@ -313,7 +310,6 @@
     if (where.range) where.range.Delete();
     else if (where.pending) where.el.Delete(false);
     else where.el.Delete();
-    MUTATED = true;
   }
 
   var EDITS = {
@@ -330,7 +326,6 @@
     reword: function (op) {
       var where = resolveTarget(op.target), start = where.range.GetStartPos(), length = where.range.GetText().length;
       // The new words go in after the old, inside its last run, so they keep its formatting; then the old go.
-      MUTATED = true;
       where.range.AddText(op.text, "after");
       var old = doc.GetRange(start, start + length);
       if (old.GetText() !== op.target.find) throw new Error("the words moved while they were being changed");
@@ -359,11 +354,11 @@
         result.op = i;
         results.push(result);
       } catch (e) {
-        if (e instanceof Refusal) return { refused: { op: i, reason: e.reason, block: e.block }, mutated: MUTATED };
+        if (e instanceof Refusal) return { refused: { op: i, reason: e.reason, block: e.block } };
         throw e;
       }
     }
-    return { results: results, mutated: MUTATED };
+    return { results: results };
   }
 
   try {
@@ -374,6 +369,6 @@
     if (scope.action === "modified") return doc.Document.Api.isDocumentModified();
     return { __error: "unknown action " + scope.action };
   } catch (e) {
-    return { __error: String((e && e.message) || e), __mutated: MUTATED };
+    return { __error: String((e && e.message) || e) };
   }
 })
