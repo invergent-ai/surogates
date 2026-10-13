@@ -19,6 +19,7 @@ declare global {
 }
 
 const loads = new Map<string, Promise<void>>();
+const LOAD_TIMEOUT_MS = 30_000;
 
 /** Loads the document server's `api.js` once per server. */
 export function loadDocsApi(documentServerUrl: string): Promise<void> {
@@ -27,14 +28,20 @@ export function loadDocsApi(documentServerUrl: string): Promise<void> {
   if (!load) {
     load = new Promise<void>((resolve, reject) => {
       const script = document.createElement("script");
-      script.src = src;
-      script.async = true;
-      script.onload = () => resolve();
-      script.onerror = () => {
+      // A failed or hung load leaves no cache entry and no script, so the next open retries.
+      const settle = (loaded: boolean) => {
+        clearTimeout(timer);
+        script.onload = script.onerror = null;
+        if (loaded) return resolve();
         loads.delete(src);
         script.remove();
         reject(new Error("The document editor could not be loaded."));
       };
+      const timer = setTimeout(() => settle(false), LOAD_TIMEOUT_MS);
+      script.src = src;
+      script.async = true;
+      script.onload = () => settle(Boolean(window.DocsAPI));
+      script.onerror = () => settle(false);
       document.head.appendChild(script);
     });
     loads.set(src, load);

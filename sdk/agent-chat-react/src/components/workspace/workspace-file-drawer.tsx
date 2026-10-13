@@ -26,7 +26,7 @@ interface WorkspaceFileDrawerProps {
 }
 
 export function WorkspaceFileDrawer({ adapter, sessionId, path, view = false, onClose }: WorkspaceFileDrawerProps) {
-	if (isOfficeDocument(path) && adapter.getWorkspaceEditorConfig) {
+	if (isOfficeDocument(path)) {
 		return <OfficeEditorPane adapter={adapter} sessionId={sessionId} path={path} view={view} onClose={onClose} />;
 	}
 	return <WorkspaceFilePreview adapter={adapter} sessionId={sessionId} path={path} onClose={onClose} />;

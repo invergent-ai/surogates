@@ -27,7 +27,7 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, onClose }: Of
 		setLoading(true);
 		void (async () => {
 			try {
-				if (!adapter.getWorkspaceEditorConfig) throw new Error("This app cannot open office documents.");
+				if (!adapter.getWorkspaceEditorConfig) throw new Error("Preview not available. Download the file to open it.");
 				const opened = await adapter.getWorkspaceEditorConfig({ sessionId, path, theme, view });
 				await loadDocsApi(opened.document_server_url);
 				if (cancelled) return;
