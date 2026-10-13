@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,12 +43,15 @@ def agent_user_id(agent_id: str, session_id: UUID | str) -> str:
 
 
 def relative_path(path: str, session: Any) -> str:
-    """*path* as the model may write it (``/workspace/x``, ``__WORKSPACE__/x``), relative to the workspace."""
-    root = str(session.config.get("workspace_path") or "/workspace").rstrip("/") + "/"
-    for prefix in ("__WORKSPACE__/", root):
-        if path.startswith(prefix):
-            return path[len(prefix):]
-    return path
+    """*path* as the model may write it (``/workspace/x``, ``__WORKSPACE__/x``, ``~/x``: the sandbox's HOME is the
+    workspace), relative to the workspace and normalised; ``.`` is the workspace itself. A ``..`` out of it is kept,
+    for the workspace to refuse."""
+    root = str(session.config.get("workspace_path") or "/workspace").rstrip("/")
+    for prefix in ("~", "$HOME", "${HOME}", "__WORKSPACE__", root):
+        if path == prefix or path.startswith(prefix + "/"):
+            path = path[len(prefix):].lstrip("/")
+            break
+    return posixpath.normpath(path or ".")
 
 
 def location_of(session: Any, path: str) -> str:
