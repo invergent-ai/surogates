@@ -17,17 +17,20 @@ import { type Agent, partitionFor } from "./agents.js";
 import { chrome } from "./appearance.js";
 import * as darwin from "./main-window-darwin.js";
 import * as linux from "./main-window-linux.js";
+import * as win32 from "./main-window-win32.js";
 import { external, permitted, sameOrigin, windowOpen } from "./window-policy.js";
 import type { Bounds, WindowStates } from "./window-state.js";
 
-// The window's controls, by this OS (main-window-linux.ts, main-window-darwin.ts): drawn at its making,
-// and painted again at each change of theme; and whether the app's other windows drop the menu.
+// The window's controls, by this OS (main-window-linux.ts, main-window-darwin.ts, main-window-win32.ts): drawn at
+// its making, and painted again at each change of theme; and whether the app's other windows drop the menu.
 interface WindowControls {
   options(overlay: TitleBarOverlay): BrowserWindowConstructorOptions;
   paint(window: BrowserWindow, overlay: TitleBarOverlay): void;
   dropMenu(window: BrowserWindow): void;
 }
-const CONTROLS: WindowControls = forThisOs<WindowControls>({ linux: linux.windowControls, darwin: darwin.windowControls }) ?? {
+const CONTROLS: WindowControls = forThisOs<WindowControls>({
+  linux: linux.windowControls, darwin: darwin.windowControls, win32: win32.windowControls,
+}) ?? {
   options: () => notBuilt("Surogate Desktop's window controls"),
   paint: () => notBuilt("Surogate Desktop's window controls"),
   dropMenu: () => notBuilt("Surogate Desktop's window controls"),

@@ -8,6 +8,7 @@ import type { MenuItemConstructorOptions } from "electron";
 import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./menus-darwin.js";
 import * as linux from "./menus-linux.js";
+import * as win32 from "./menus-win32.js";
 
 export interface MenuActions {
   newChat(): void;
@@ -21,13 +22,13 @@ export interface MenuActions {
 }
 
 // What differs by OS: the menus before Edit, those after View and Developer, and the tray's icon
-// (menus-linux.ts, menus-darwin.ts).
+// (menus-linux.ts, menus-darwin.ts, menus-win32.ts).
 interface OsMenus {
   firstMenus(act: MenuActions): MenuItemConstructorOptions[];
   lastMenus(act: MenuActions): MenuItemConstructorOptions[];
-  trayIcon(dark: boolean, desktop: string | undefined): string;
+  trayIcon(dark: boolean, desktop: string | undefined, systemDark: boolean | undefined): string;
 }
-const OS: OsMenus = forThisOs<OsMenus>({ linux, darwin }) ?? {
+const OS: OsMenus = forThisOs<OsMenus>({ linux, darwin, win32 }) ?? {
   firstMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
   lastMenus: (): MenuItemConstructorOptions[] => notBuilt("Surogate Desktop's menus"),
   trayIcon: (): string => notBuilt("Surogate Desktop's tray icon"),
@@ -95,7 +96,10 @@ export function trayMenu(state: TrayState, act: TrayActions): MenuItemConstructo
   ];
 }
 
-/** The tray's icon, among the app's assets, for a theme that is *dark* or not, on the desktop *desktop* (XDG_CURRENT_DESKTOP). */
-export function trayIcon(dark: boolean, desktop: string | undefined): string {
-  return OS.trayIcon(dark, desktop);
+/**
+ * The tray's icon, among the app's assets, for a theme that is *dark* or not, on the desktop *desktop*
+ * (XDG_CURRENT_DESKTOP), where the system's own UI is *systemDark* or not, as Windows's taskbar has a mode of its own.
+ */
+export function trayIcon(dark: boolean, desktop: string | undefined, systemDark?: boolean): string {
+  return OS.trayIcon(dark, desktop, systemDark);
 }

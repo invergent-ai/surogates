@@ -1735,7 +1735,7 @@ function state() {
 let tray: Tray | null = null;
 let trayDrawn = "";
 
-const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP));
+const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP, nativeTheme.shouldUseDarkColorsForSystemIntegratedUI));
 
 function updateTray(): void {
   if (!tray) return;

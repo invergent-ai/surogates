@@ -33,6 +33,7 @@ export const WINDOWS = [
   "test/session-path-win32.test.ts", "test/shell-places-win32.test.ts", "test/host-user.test.ts", "test/computer-name-win32.test.ts",
   "test/credentials-win32.test.ts", "test/backups.test.ts",
   "test/login-item-win32.test.ts", "test/deep-link-win32.test.ts", "test/app-identity-win32.test.ts", "test/notifications-win32.test.ts",
+  "test/menus-win32.test.ts", "test/main-window-win32.test.ts", "test/quick-entry-win32.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it
