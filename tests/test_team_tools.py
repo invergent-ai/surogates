@@ -702,7 +702,7 @@ def test_the_care_team_reads_a_whole_tappable_number_that_redaction_leaves_alone
     from surogates.harness.redact import redact_sensitive_text
 
     assert readable_phone("40712000403") == "+40 712 000 403"
-    assert readable_phone("447911123456") == "+447 911 123 456"
+    assert readable_phone("447911123456") == "+44 7911 123456"
     footer = f"— Florica Enache · {readable_phone('40712000601')}"
     assert redact_sensitive_text(footer) == footer
 
@@ -755,3 +755,26 @@ async def test_the_model_never_reads_a_whole_number_and_the_platform_sends_it(sf
     assert notice.user_id == practice.doctor
     assert "+40 700 000 001" in notice.text and "+40 700 000 002" in notice.text
     assert mask_readable_phones("Ion · +40 700 000 001") == "Ion · +40…001"
+
+
+@pytest.mark.parametrize("wa_id,shown", [
+    ("12025550123", "+1 202 555 0123"),
+    ("40712000103", "+40 712 000 103"),
+    ("447946095812", "+44 7946 095812"),
+    ("491512345678", "+49 151 234 5678"),
+    ("4915123456789", "+49 151 2345 6789"),
+    ("33612345678", "+33 6 12 34 56 78"),
+    ("393123456789", "+39 312 345 6789"),
+    ("34612345678", "+34 612 345 678"),
+    ("36201234567", "+36 20 123 4567"),
+    # Unknown plan or length: country code, then threes.
+    ("3531234567", "+353 123 4567"),
+    ("40712000", "+40 712 000"),
+    ("971501234567", "+971 501 234 567"),
+])
+def test_a_phone_is_grouped_the_way_its_country_writes_it_and_masks_whole(wa_id, shown):
+    from surogates.channels.identity import mask_readable_phones, masked_phone, readable_phone
+
+    assert readable_phone(wa_id) == shown
+    assert all(len(g) < 7 for g in shown.split())
+    assert mask_readable_phones(f"call {shown}.") == f"call {masked_phone(wa_id)}."

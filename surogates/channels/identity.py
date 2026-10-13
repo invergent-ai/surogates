@@ -59,22 +59,69 @@ def channel_user_email(platform: str, platform_user_id: str, org_id: UUID | str)
     return f"{platform}-{local_part}@{org_id}.channels.surogate.local"
 
 
+# ITU-T E.164 country codes of one and two digits; every other is three.
+_ONE_DIGIT_CC = {"1", "7"}
+_TWO_DIGIT_CC = {
+    "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43",
+    "44", "45", "46", "47", "48", "49", "51", "52", "53", "54", "55", "56",
+    "57", "58", "60", "61", "62", "63", "64", "65", "66", "81", "82", "84",
+    "86", "90", "91", "92", "93", "94", "95", "98",
+}
+# (country code, subscriber digits) -> group sizes, as the country writes it.
+_GROUPS = {
+    ("1", 10): (3, 3, 4),        # +1 202 555 0123
+    ("40", 9): (3, 3, 3),        # +40 712 000 103
+    ("44", 10): (4, 6),          # +44 7946 095812
+    ("49", 10): (3, 3, 4),       # +49 151 234 5678
+    ("49", 11): (3, 4, 4),       # +49 151 2345 6789
+    ("33", 9): (1, 2, 2, 2, 2),  # +33 6 12 34 56 78
+    ("39", 10): (3, 3, 4),       # +39 312 345 6789
+    ("34", 9): (3, 3, 3),        # +34 612 345 678
+    ("36", 9): (2, 3, 4),        # +36 20 123 4567
+}
+
+
 def readable_phone(wa_id: str) -> str:
     """A bare-digit WhatsApp id as a team member reads and taps it.
 
-    "+40 712 000 403": WhatsApp links it as a number to call or message, and
-    the spaces keep event redaction, which masks a run of seven or more
-    digits after a "+", off a number the team needs whole.  Only for text
-    the platform delivers to a team member; the model and the event log
-    get :func:`masked_phone`, see :func:`mask_readable_phones`.
+    The rule, kept identical to ops' ``surogate_ops.utils.phone.readable_phone``
+    and the Studio frontend:
+
+    1. Keep the digits only. The country code is the first one digit when
+       that is 1 or 7, the first two when they are a two-digit E.164 code,
+       else the first three.
+    2. When the country code and the number of digits after it match a row
+       of ``_GROUPS``, split them by that row's sizes.
+    3. Otherwise split them into threes from the left, a lone last digit
+       joining the group before it.
+
+    No group is longer than six digits: WhatsApp links the result as a
+    number to call, and event redaction masks seven or more digits after a
+    ``+``.  Only for text the platform delivers to a team member; the model
+    and the event log get :func:`masked_phone`, see
+    :func:`mask_readable_phones`.
     """
     digits = "".join(c for c in str(wa_id or "") if c.isdigit())
-    head = len(digits) % 3 or 3
-    groups = [digits[:head]] + [digits[i:i + 3] for i in range(head, len(digits), 3)]
-    return "+" + " ".join(groups)
+    if digits[:1] in _ONE_DIGIT_CC:
+        cc = digits[:1]
+    elif digits[:2] in _TWO_DIGIT_CC:
+        cc = digits[:2]
+    else:
+        cc = digits[:3]
+    rest = digits[len(cc):]
+    sizes = _GROUPS.get((cc, len(rest)))
+    if sizes is None:
+        sizes = [3] * (len(rest) // 3) + ([len(rest) % 3] if len(rest) % 3 else [])
+        if len(sizes) > 1 and sizes[-1] == 1:
+            sizes[-2:] = [4]
+    groups, at = [], 0
+    for size in sizes:
+        groups.append(rest[at:at + size])
+        at += size
+    return " ".join(["+" + cc, *groups])
 
 
-_READABLE_PHONE_RE = re.compile(r"\+\d{1,3}(?: \d{2,4}){2,}")
+_READABLE_PHONE_RE = re.compile(r"\+\d{1,3}(?: \d{1,6})+")
 
 
 def masked_phone(wa_id: str) -> str:
