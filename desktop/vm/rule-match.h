@@ -171,6 +171,28 @@ SG_NOINLINE int sg_explorer(const struct sg_tail *tail SG_ARG_NONNULL, int len)
 		| SG_ENDS(&nm, total, ".library-ms") | SG_ENDS(&nm, total, ".searchconnector-ms"));
 }
 
+// Whether the component *raw*, its *len* bytes, is a spelling NTFS may resolve to another name, which the rule
+// refuses under surogate.names=windows so HCS's Plan 9 server is not the only wall holding a session's write out
+// of a protected or an Explorer name (the file tools refuse the same, files/names-win32.ts): a stream or a path
+// separator (':' or '\\'), an 8.3 short name's tail ('~' then a digit), or a trailing dot or space. Only the bytes
+// the walk read are judged, SG_RAWLEN at most; a component longer than that cannot be a shorter name's alias, so its
+// trailing byte, unread, is left. Out-of-line on BPF, as sg_classify is; fed the walk's raw, so it reads nothing more.
+SG_NOINLINE int sg_windows_alias(const struct sg_raw *raw SG_ARG_NONNULL, int len)
+{
+	int read = len < SG_RAWLEN ? len : SG_RAWLEN;
+	int alias = 0;
+	for (int i = 0; i < SG_RAWLEN; i++) {
+		int active = i < read;
+		unsigned char c = raw->b[i], next = raw->b[i + 1];
+		alias |= active & ((c == ':') | (c == '\\') | ((c == '~') & (next >= '0') & (next <= '9')));
+	}
+	if (len >= 1 && len < SG_RAWLEN) {
+		unsigned char last = raw->b[len - 1];
+		alias |= (last == '.') | (last == ' ');
+	}
+	return alias;
+}
+
 #define SB_PROTECTED (1 << 0) // a shell's, editor's or agent's name: not below a dependency folder
 #define SB_DOTGIT    (1 << 1)
 #define SB_HOOKS     (1 << 2)

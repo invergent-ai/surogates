@@ -31,10 +31,11 @@ char LICENSE[] SEC("license") = "GPL";
 #define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component (dir: as a directory being moved) as folded (sg_fold). One bounded
-// pass: sg_fold and sg_classify are out-of-line, each verified once, and sg_fold and sg_step
-// branch-free, so the walk stays within the verifier's budget at SG_WALK=12.
-static __noinline int judge(struct dentry *dentry, int dir)
+// judging each component (dir: as a directory being moved) as folded (sg_fold), and, where the kernel's line
+// names *windows*, as a spelling NTFS may resolve to another name (sg_windows_alias). One bounded pass: sg_fold,
+// sg_classify and sg_windows_alias are out-of-line, each verified once, and sg_fold and sg_step branch-free, so
+// the walk stays within the verifier's budget at SG_WALK=12.
+static __noinline int judge(struct dentry *dentry, int dir, int windows)
 {
 	struct sg_raw raw = {};
 	struct sg_name nm;
@@ -45,6 +46,8 @@ static __noinline int judge(struct dentry *dentry, int dir)
 		int len = BPF_CORE_READ(dentry, d_name.len);
 		// NUL-terminated: what a longer name before it left past the NUL completes no character.
 		long got = bpf_core_read_str(raw.b, SG_RAWLEN, name);
+		if (windows && sg_windows_alias(&raw, got < 0 ? 0 : len))
+			return REFUSED;
 		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, got < 0 ? 0 : len, &nm))))
 			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
@@ -122,9 +125,10 @@ static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry
 	__u32 uid = bpf_get_current_uid_gid();
 	if (!in_scope(uid) || !dentry || !share_sb(sb))
 		return 0;
-	if (windows_names() && explorer_name(dentry))
+	int windows = windows_names();
+	if (windows && explorer_name(dentry))
 		return REFUSED;
-	return judge(dentry, dir);
+	return judge(dentry, dir, windows);
 }
 
 static __always_inline int refused(struct super_block *sb, struct dentry *dentry, int dir)

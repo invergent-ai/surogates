@@ -6,8 +6,9 @@
 // judged as on_rename judges them. With "fold", each line is one name, printed as sg_fold folds it:
 // its folded length, a tab, and its first SG_NAMELEN folded bytes; with "tail", its end as sg_fold_tail
 // folds it, its last SG_TAIL bytes or all of a shorter one: its folded length, a tab, and those letters.
-// With "windows", each path is judged as with none, and also as the rule judges its last component with
-// the kernel's line naming surogate.names=windows (rule.bpf.c, explorer_name).
+// With "windows", each path is judged as with none, and also as the rule judges it with the kernel's line
+// naming surogate.names=windows: its last component for an Explorer name (rule.bpf.c, explorer_name), and each
+// component for a spelling NTFS may resolve to another name (sg_windows_alias).
 #include <stdio.h>
 #include <string.h>
 #include "rule-match.h"
@@ -39,6 +40,7 @@ static int refuses(char *path, int dir, int *in_dep)
 		// Read as the rule reads a name: at most SG_RAWLEN bytes, its NUL among them.
 		struct sg_raw raw = {{0}}; struct sg_name nm; int len = strlen(c);
 		memcpy(raw.b, c, len < SG_RAWLEN - 1 ? len : SG_RAWLEN - 1);
+		if (windows && sg_windows_alias(&raw, len)) return 1;
 		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, len, &nm)))) return 1;
 	}
 	*in_dep = sg_in_dep(&st);
