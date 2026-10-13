@@ -244,9 +244,9 @@ it("keep no browser picked in Custom… that a Mac refuses", async () => {
 
 // codesign and plutil started as the app starts them (clean-child.ts).
 describe.runIf(process.platform === "darwin")("the browsers the app knows on a Mac", () => {
-  // What codesign says of *app*: whose its signature is, its own check, and the check against the vendor's requirement
-  // alone, for a failure to name which of them refused it.
-  const signatureOf = (app: string) => [["-dv", "--verbose=2", app], ["--verify", "--strict", app], ["--verify", "-R", `=${requirementOf(app)}`, app]]
+  // What codesign says of *app*: whose its signature is, its own check, and the check against the vendor's requirement,
+  // for a failure to name which of them refused it.
+  const signatureOf = (app: string) => [["-dv", "--verbose=2", app], ["--verify", app], ["--verify", "-R", `=${requirementOf(app)}`, app]]
     .map((args) => {
       const done = spawnSync("/usr/bin/codesign", args, { encoding: "utf8" });
       return `codesign ${args.join(" ")}: ${done.status}\n${done.stderr.trim()}`;
@@ -264,7 +264,8 @@ describe.runIf(process.platform === "darwin")("the browsers the app knows on a M
   }
 
   // A chat's commands can write ~/Applications where a chat is bound to it, and sign what they make there ad hoc: the
-  // signature checks out, and is no one's.
+  // signature checks out, and is no one's. A real app copied there under a known browser's name is signed, by another
+  // than that browser's vendor; one changed since it was signed, or signed again ad hoc, is no longer what was signed.
   it("refuse an app whose signature is not there, a known browser's app or any other signed ad hoc, and take one of Apple's", async () => {
     const unsigned = app(join(home, "Applications", "Brave Browser.app"), "Brave Browser");
     const adHoc = (at: string, program: string) => {
@@ -279,9 +280,21 @@ describe.runIf(process.platform === "darwin")("the browsers the app knows on a M
     const apple = "/System/Applications/Calculator.app/Contents/MacOS/Calculator";
     const known = darwinBrowsers(SYSTEM);
     expect(known.candidates(home).find(({ id }) => id === "brave")?.paths.at(-1)).toBe(unsigned);
-    const programs = [unsigned, vivaldi, custom, apple];
+    // Apple's Calculator, copied whole: as Google Chrome, as it is under another name, with a file added, and signed again ad hoc.
+    const copied = (at: string) => {
+      execFileSync("/usr/bin/ditto", ["/System/Applications/Calculator.app", at]);
+      return join(at, "Contents", "MacOS", "Calculator");
+    };
+    const asChrome = copied(join(home, "Applications", "Google Chrome.app"));
+    const asItIs = copied(join(home, "tools", "Calc.app"));
+    const changed = copied(join(home, "tools", "Changed.app"));
+    // A file added where the signature seals every file.
+    writeFileSync(join(home, "tools", "Changed.app", "Contents", "Resources", "planted.txt"), "planted\n");
+    const resigned = copied(join(home, "tools", "Resigned.app"));
+    execFileSync("/usr/bin/codesign", ["--sign", "-", "--force", "--deep", join(home, "tools", "Resigned.app")]);
+    const programs = [unsigned, vivaldi, custom, apple, asChrome, asItIs, changed, resigned];
     for (const program of programs) known.refused(program, DISK);
     await Promise.all(programs.map((program) => known.checked(program)));
-    expect(programs.map((program) => known.refused(program, DISK))).toEqual([NOT_SIGNED, NOT_SIGNED, NOT_SIGNED, null]);
+    expect(programs.map((program) => known.refused(program, DISK))).toEqual([NOT_SIGNED, NOT_SIGNED, NOT_SIGNED, null, NOT_SIGNED, null, NOT_SIGNED, NOT_SIGNED]);
   }, 120_000);
 });

@@ -2,7 +2,7 @@
 // Applications folder, or in the user's own, where its installer or a drag from its disk image puts it.
 // Its program is the one its Info.plist names (Apple, Information Property List, CFBundleExecutable), in
 // its Contents/MacOS. The app drives one only where its code signature checks out against whose it must be
-// (Apple, codesign(1), --verify --strict and -R), as Linux refuses a Snap, and only where the app stays: not
+// (Apple, codesign(1), --verify and -R), as Linux refuses a Snap, and only where the app stays: not
 // on a mounted disk image, which goes when it is ejected, nor in the temporary copy macOS runs a downloaded app
 // from until it is moved (App Translocation), which goes at the next restart. Both Applications folders can be
 // the user's to write, so no chat's folder may hold a place the app looks for one at (binding/folder.ts).
@@ -74,9 +74,13 @@ export const SYSTEM: AppTools = {
     if (done.status !== 0) throw new Error(`${plist} names no program: ${(done.stderr || done.error?.message || "").trim()}`);
     return done.stdout.replace(/\n$/, "");
   },
-  // -R's argument, after an equals sign, is a requirement's text (codesign(1), "Specifying Requirements").
+  // -R's argument, after an equals sign, is a requirement's text (codesign(1), "Specifying Requirements"). The check
+  // and the requirement say the app is its vendor's code, as signed: a file changed or added since, or a signature made
+  // again, fails them. Not --strict: what it adds refuses, among other things, "detritus" (a resource fork, Finder
+  // information) that an install leaves on a vendor's own files, as on Edge's framework on the macOS runner, and stops
+  // no app planted in its place.
   verify: (app, requirement) => new Promise((resolve) => {
-    execFile(...cleanly(CODESIGN, ["--verify", "--strict", "-R", `=${requirement}`, app]), { env: ENV, timeout: VERIFY_MS }, (error) => {
+    execFile(...cleanly(CODESIGN, ["--verify", "-R", `=${requirement}`, app]), { env: ENV, timeout: VERIFY_MS }, (error) => {
       resolve(error === null ? null : error.killed ? UNCHECKED : NOT_SIGNED);
     });
   }),
