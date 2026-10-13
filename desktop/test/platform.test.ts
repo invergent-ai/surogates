@@ -52,7 +52,7 @@ it("gives a part its row for the OS it runs on, by one lookup, or null on an OS 
 });
 
 it("says plainly, of a part that has only Linux's side so far, that it is not built for another OS yet", () => {
-  const os = process.platform === "darwin" ? "macOS" : process.platform;
+  const os = ({ darwin: "macOS", win32: "Windows" } as Partial<Record<NodeJS.Platform, string>>)[process.platform] ?? process.platform;
   expect(() => notBuilt("Surogate Desktop's data folder")).toThrow(`Surogate Desktop's data folder is not built for ${os} yet`);
   expect(notBuiltWords("driving a browser")).toBe(`driving a browser is not built for ${os} yet`);
 });

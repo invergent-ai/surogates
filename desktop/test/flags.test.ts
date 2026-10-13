@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { FLAGS, LINUX_FLAGS } from "../src/files/flags.js";
+import { LINUX_FLAGS } from "../src/files/flags.js";
 import { importedOn } from "./platforms.js";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
@@ -114,7 +114,8 @@ describe("the file host's open flags", () => {
   });
 
   it("are each OS's row: no link followed at a path's last name on Linux, and none on an OS the file host is not built for yet", async () => {
-    expect(FLAGS.NOFOLLOW).toBe(constants.O_NOFOLLOW);
+    const { FLAGS: linux } = await importedOn("linux", () => import("../src/files/flags.js"));
+    expect(linux.NOFOLLOW).toBe(constants.O_NOFOLLOW);
     const { FLAGS: windows } = await importedOn("win32", () => import("../src/files/flags.js"));
     expect(() => windows.NOFOLLOW).toThrow(new Error("The file host is not built for Windows yet"));
   });
