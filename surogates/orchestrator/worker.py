@@ -2262,6 +2262,19 @@ async def run_worker(settings: Settings) -> None:
         name="browser-registry-reaper",
     )
 
+    # Saves from the document editor, landed in the workspace; stale editing sessions closed.
+    from surogates.jobs.office_saves import run_office_loop
+    office_task = asyncio.create_task(
+        run_office_loop(
+            session_factory=session_factory,
+            session_store=session_store,
+            storage=storage_backend,
+            redis=redis_client,
+            settings=settings,
+        ),
+        name="office-saves",
+    )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -2307,6 +2320,11 @@ async def run_worker(settings: Settings) -> None:
         browser_reaper_task.cancel()
         try:
             await browser_reaper_task
+        except asyncio.CancelledError:
+            pass
+        office_task.cancel()
+        try:
+            await office_task
         except asyncio.CancelledError:
             pass
         await health_server.stop()
