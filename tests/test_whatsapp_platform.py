@@ -705,6 +705,30 @@ def test_channel_prompt_keeps_the_rescued_reply() -> None:
     assert payload["context"] == "Am notat data procedurii."
 
 
+def test_text_beside_a_question_is_delivered_not_narration() -> None:
+    """The mandatory introduction came in the same message as the first
+    ask_user_question and never reached the patient."""
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    def payload(tool_name: str) -> dict:
+        return _build_channel_payload(
+            EventType.LLM_RESPONSE,
+            {"message": {
+                "role": "assistant",
+                "content": "Bună ziua. Sunt asistentul digital.",
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": tool_name, "arguments": "{}"}}],
+            }},
+            "whatsapp",
+        )
+
+    assert payload("ask_user_question") == {
+        "content": "Bună ziua. Sunt asistentul digital.", "intermediate": False,
+    }
+    assert payload("web_search")["intermediate"] is True
+
+
 class TestInboundTaps:
     """Taps reach the agent as the text of what was tapped.  Shapes are
     Meta's webhook samples for each message type."""

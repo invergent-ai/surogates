@@ -227,7 +227,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
     """Extract the deliverable payload from an event. Empty dict = nothing to
     deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
     message still has tool_calls, i.e. it is narration before a tool call rather
-    than the turn's final answer)."""
+    than the turn's final answer — unless one of them is ``ask_user_question``)."""
     payload: dict[str, Any] = {}
     if event_type == EventType.LLM_RESPONSE:
         msg = data.get("message", {})
@@ -236,8 +236,14 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             content = strip_next_action_blocks(content)
         if content:
             payload["content"] = content
-            payload["intermediate"] = bool(
-                isinstance(msg, dict) and msg.get("tool_calls")
+            tool_calls = (msg.get("tool_calls") or []) if isinstance(msg, dict) else []
+            # Text written alongside a question is said to the person (the
+            # first-contact introduction), not progress narration; it has to
+            # reach them, and it does before the question's own outbox row.
+            payload["intermediate"] = bool(tool_calls) and not any(
+                isinstance(c, dict)
+                and (c.get("function") or {}).get("name") == "ask_user_question"
+                for c in tool_calls
             )
     elif event_type == EventType.CODE_RUN_CHANNEL_UPDATE:
         # A throttled "still working" heartbeat during a coding run — delivered
