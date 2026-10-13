@@ -48,6 +48,7 @@ export function createInitialAgentChatState(
     viewMode: options.viewMode ?? "simple",
     researchSources: [],
     deviceWait: null,
+    officeEvents: {},
   };
 }
 
@@ -258,6 +259,24 @@ export function applyAgentChatEvent(
 
     case "device.resumed":
       return { ...nextState, deviceWait: null };
+
+    case "office.conflict":
+    case "office.save_failed": {
+      const path = stringValue(event.data.path);
+      if (!path) return nextState;
+      const conflict = event.type === "office.conflict";
+      return {
+        ...nextState,
+        officeEvents: {
+          ...nextState.officeEvents,
+          [path]: conflict
+            ? { type: event.type, eventId: event.eventId, conflictPath: stringValue(event.data.conflict_path) }
+            : { type: event.type, eventId: event.eventId },
+        },
+        // The copy the conflicting save landed as shows in the tree.
+        workspaceRefreshKey: nextState.workspaceRefreshKey + (conflict ? 1 : 0),
+      };
+    }
 
     case "worker.spawned":
       return withMessages(nextState, applyWorkerSpawned(nextState.messages, event));

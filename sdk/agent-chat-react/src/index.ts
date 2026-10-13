@@ -113,6 +113,7 @@ export type {
   AgentChatBrowserProfile,
   AgentChatChartArtifactSpec,
   AgentChatDeviceWaitState,
+  AgentChatOfficeEvent,
   CodingAgentConnection,
   AgentChatAskUserQuestionArgs,
   AgentChatAskUserQuestionAnswer,

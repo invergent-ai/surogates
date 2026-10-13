@@ -2,23 +2,31 @@ import { useEffect, useId, useState } from "react";
 import { useTheme } from "next-themes";
 import { AlertCircleIcon, DownloadIcon, FileTextIcon, XIcon } from "lucide-react";
 import { type DocEditorInstance, loadDocsApi } from "../../lib/office";
-import type { AgentChatAdapter } from "../../types";
+import type { AgentChatAdapter, AgentChatOfficeEvent } from "../../types";
 
 interface OfficeEditorPaneProps {
 	adapter: AgentChatAdapter;
 	sessionId: string;
 	path: string;
 	view: boolean;
+	/** The latest save trouble reported for this file. */
+	officeEvent?: AgentChatOfficeEvent;
 	onClose: () => void;
 }
 
 /** An office document open in the document server's editor, in the file pane. */
-export function OfficeEditorPane({ adapter, sessionId, path, view, onClose }: OfficeEditorPaneProps) {
+export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, onClose }: OfficeEditorPaneProps) {
 	const { resolvedTheme } = useTheme();
 	const theme = resolvedTheme === "dark" ? "dark" : "light";
 	const placeholderId = `office-editor-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
+	// Trouble reported before the pane opened is old news: the editor opens the file as it stands.
+	const [openedAfter] = useState(() => officeEvent?.eventId ?? 0);
+	const notice = officeEvent && officeEvent.eventId > openedAfter ? officeEvent : null;
+	// A conflict ended the editor's session: open the file again, with a fresh config.
+	const [reopenedFor, setReopenedFor] = useState(0);
+	if (notice?.type === "office.conflict" && notice.eventId !== reopenedFor) setReopenedFor(notice.eventId);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -43,7 +51,7 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, onClose }: Of
 			cancelled = true;
 			editor?.destroyEditor();
 		};
-	}, [adapter, sessionId, path, theme, view, placeholderId]);
+	}, [adapter, sessionId, path, theme, view, placeholderId, reopenedFor]);
 
 	const fileName = path.split("/").pop() ?? path;
 	return (
@@ -76,6 +84,13 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, onClose }: Of
 				<div role="alert" className="flex items-start gap-2 p-3 text-xs text-destructive">
 					<AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
 					<span>{error}</span>
+				</div>
+			)}
+			{notice && (
+				<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+					{notice.type === "office.conflict"
+						? `This document changed outside the editor. Your edits were saved to ${notice.conflictPath}.`
+						: "Your latest changes could not be saved yet."}
 				</div>
 			)}
 			{loading && !error && <div className="p-3 text-sm text-muted-foreground">Opening {fileName}…</div>}

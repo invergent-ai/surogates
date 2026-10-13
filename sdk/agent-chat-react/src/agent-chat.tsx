@@ -644,6 +644,7 @@ export function AgentChat({
                   sessionId={sessionId}
                   path={previewPath}
                   view={effectiveDisabled}
+                  officeEvent={runtime.state.officeEvents[previewPath]}
                   onClose={() => setOpenPane(null)}
                 />
               )}

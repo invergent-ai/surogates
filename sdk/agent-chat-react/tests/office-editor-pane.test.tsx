@@ -117,6 +117,60 @@ describe("office documents in the file pane", () => {
   });
 });
 
+describe("save notices in the editor pane", () => {
+  const conflict = { type: "office.conflict" as const, eventId: 12, conflictPath: "docs/Plan (edited 2026-10-13 09.05 UTC).docx" };
+
+  async function rerender(node: React.ReactElement) {
+    await act(async () => {
+      root?.render(node);
+    });
+    await act(async () => {});
+  }
+
+  it("reopens the document with a fresh config after a conflict and links the copy", async () => {
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config: {} });
+    const host = adapter({ getWorkspaceEditorConfig });
+    const pane = (officeEvent?: typeof conflict) => (
+      <WorkspaceFileDrawer adapter={host} sessionId="s-1" path="docs/Plan.docx"
+        officeEvent={officeEvent} onClose={() => {}} />
+    );
+    const view = await mount(pane());
+    expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(1);
+    await rerender(pane(conflict));
+    expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(2);
+    expect(destroyEditor).toHaveBeenCalledTimes(1);
+    expect(DocEditor).toHaveBeenCalledTimes(2);
+    expect(view.querySelector('[role="status"]')?.textContent).toBe(
+      "This document changed outside the editor. Your edits were saved to docs/Plan (edited 2026-10-13 09.05 UTC).docx.",
+    );
+    expect(view.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("says a save failed without reopening the document", async () => {
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config: {} });
+    const host = adapter({ getWorkspaceEditorConfig });
+    const pane = (officeEvent?: { type: "office.save_failed"; eventId: number }) => (
+      <WorkspaceFileDrawer adapter={host} sessionId="s-1" path="a.docx"
+        officeEvent={officeEvent} onClose={() => {}} />
+    );
+    const view = await mount(pane());
+    await rerender(pane({ type: "office.save_failed", eventId: 13 }));
+    expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(1);
+    expect(view.querySelector('[role="status"]')?.textContent).toBe("Your latest changes could not be saved yet.");
+    expect(view.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("does not show a notice from before the pane opened", async () => {
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config: {} });
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceEditorConfig })} sessionId="s-1" path="docs/Plan.docx"
+        officeEvent={conflict} onClose={() => {}} />,
+    );
+    expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(1);
+    expect(view.querySelector('[role="status"]')).toBeNull();
+  });
+});
+
 describe("loadDocsApi", () => {
   let scripts: HTMLScriptElement[];
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type {
 	AgentChatAdapter,
+	AgentChatOfficeEvent,
 	AgentChatWorkspaceFile,
 } from "../../types";
 import { isOfficeDocument } from "../../lib/office";
@@ -22,12 +23,16 @@ interface WorkspaceFileDrawerProps {
 	sessionId: string;
 	path: string;
 	view?: boolean;
+	/** The latest save trouble the document editor reported for the file. */
+	officeEvent?: AgentChatOfficeEvent;
 	onClose: () => void;
 }
 
-export function WorkspaceFileDrawer({ adapter, sessionId, path, view = false, onClose }: WorkspaceFileDrawerProps) {
+export function WorkspaceFileDrawer({ adapter, sessionId, path, view = false, officeEvent, onClose }: WorkspaceFileDrawerProps) {
 	if (isOfficeDocument(path)) {
-		return <OfficeEditorPane adapter={adapter} sessionId={sessionId} path={path} view={view} onClose={onClose} />;
+		return (
+			<OfficeEditorPane adapter={adapter} sessionId={sessionId} path={path} view={view} officeEvent={officeEvent} onClose={onClose} />
+		);
 	}
 	return <WorkspaceFilePreview adapter={adapter} sessionId={sessionId} path={path} onClose={onClose} />;
 }

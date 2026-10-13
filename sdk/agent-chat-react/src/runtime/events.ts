@@ -55,6 +55,8 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "worker.complete",
   "worker.failed",
   "thread.proposed",
+  "office.conflict",
+  "office.save_failed",
 ] as const satisfies readonly AgentChatEventType[];
 
 /** Membership set for the listened events above.  The reconciliation poll
