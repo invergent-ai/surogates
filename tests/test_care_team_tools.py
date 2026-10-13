@@ -308,7 +308,7 @@ async def test_a_code_confirms_only_the_exact_previewed_action_once_in_its_sessi
     assert await _outreach(sf) == []
 
     sent = await send({"patient": "Ioana", "text": "Vino la 10.", "confirmation": code}, **doctor)
-    assert sent.startswith("Queued for Ioana Popa")
+    assert sent.startswith("Ioana Popa's 24h window is closed")
     replay = await send({"patient": "Ioana", "text": "Vino la 10.", "confirmation": code}, **doctor)
     assert replay.startswith("Not done:")
     assert len(await _outreach(sf)) == 1
@@ -322,7 +322,7 @@ async def test_confirmed_queues_the_text_verbatim_like_studio(sf, practice):
         {"patient": "0002", "text": "  Veniți mâine la 10.  "},
         _kw(sf, practice.doctor_session),
     )
-    assert "Queued for Ioana Popa (state queued)" in out
+    assert "Ioana Popa's 24h window is closed: I sent the opener template" in out
     [row] = await _outreach(sf)
     assert row.user_id == ioana
     assert row.kind == "operator"
@@ -342,7 +342,46 @@ async def test_closed_window_without_a_template_is_refused(sf, practice):
         **_kw(sf, practice.doctor_session),
     )
     assert "24 hours" in out
+    assert "+40 700 000 002" in out
     assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_an_open_window_says_the_text_is_sent_now(sf, practice):
+    await store.record_inbound(
+        sf, org_id=ORG, platform="whatsapp", platform_user_id="40700000002",
+        channel_identifier="pn1", at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    out = await _confirmed(
+        care_team.handle_care_team_message_patient,
+        {"patient": "Ioana", "text": "Veniți mâine."}, _kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Sent now:")
+    [row] = await _outreach(sf)
+    assert row.subject_user_id == practice.ioana[0]
+
+
+@pytest.mark.asyncio
+async def test_a_paused_patient_is_messaged_only_when_the_doctor_insists(sf, practice):
+    ioana, _ = practice.ioana
+    await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ioana, protocol="post-op",
+        status="paused", status_reason="internată",
+    )
+    kw = _kw(sf, practice.doctor_session)
+    out = await care_team.handle_care_team_message_patient(
+        {"patient": "Ioana", "text": "x"}, **kw,
+    )
+    assert "not active (post-op paused (internată))" in out
+    assert "even_if_paused" in out and "+40 700 000 002" in out
+    assert await _outreach(sf) == []
+
+    out = await _confirmed(
+        care_team.handle_care_team_message_patient,
+        {"patient": "Ioana", "text": "x", "even_if_paused": True}, kw,
+    )
+    assert "window is closed" in out
+    assert len(await _outreach(sf)) == 1
 
 
 @pytest.mark.asyncio
@@ -353,6 +392,7 @@ async def test_no_permission_is_refused(sf, practice):
         **_kw(sf, practice.doctor_session),
     )
     assert "permission" in out
+    assert "Call them instead: +40 700 000 006" in out
     assert await _outreach(sf) == []
 
 

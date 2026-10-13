@@ -122,6 +122,13 @@ CARE_TEAM_MESSAGE_PATIENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "The doctor's message exactly as they wrote it.",
             },
+            "even_if_paused": {
+                "type": "boolean",
+                "description": (
+                    "Only true after you told the doctor the patient's "
+                    "follow-up is paused or ended and they still want this sent."
+                ),
+            },
             "confirmation": {
                 "type": "string",
                 "description": (
@@ -776,47 +783,71 @@ async def handle_care_team_message_patient(arguments: dict, **kwargs: Any) -> st
         ).scalars().first()
     if identity is None:
         return f"Nothing sent: {person.label} has no WhatsApp number."
+    phone = readable_phone(identity.platform_user_id)
+    call = f"Call them instead: {phone}."
+    active = any(r.status == "active" for r in person.rows)
+    if not active and arguments.get("even_if_paused") is not True:
+        status = "; ".join(
+            f"{r.protocol} {r.status}" + (f" ({r.status_reason})" if r.status_reason else "")
+            for r in person.rows
+        )
+        return (
+            f"Nothing sent: {person.label}'s follow-up is not active ({status}). "
+            "Ask the doctor whether to message them anyway; only if they say "
+            f"yes, call again with even_if_paused: true. {call}"
+        )
     if followup_store.permission_status(identity) != "granted":
-        return f"Nothing sent: {person.label} has not given permission to be messaged."
+        return (
+            f"Nothing sent: {person.label} has not given permission to be "
+            f"messaged on WhatsApp. {call}"
+        )
     sender = _sender(ctx, settings)
     if not sender:
-        return "Nothing sent: WhatsApp is not switched on for this practice."
+        return f"Nothing sent: WhatsApp is not switched on for this practice. {call}"
     template = settings.message_template_name if settings else None
-    if not template and not window_open(
+    is_open = window_open(
         await followup_store.last_inbound(
             sf, org_id=ctx.org_id, platform="whatsapp",
             platform_user_id=identity.platform_user_id, channel_identifier=sender,
         ),
         datetime.now(timezone.utc),
-    ):
+    )
+    if not is_open and not template:
         return (
             f"Nothing sent: {person.label} has not written in the last 24 hours, "
             "so WhatsApp only lets an approved message template reach them, and "
-            "the practice has none chosen under Follow-up."
+            f"the practice has none chosen under Follow-up. {call}"
         )
 
     refused = await _unconfirmed(
         kwargs, "care_team_message_patient", arguments,
-        f"Will send to {person.label} ({readable_phone(identity.platform_user_id)}): «{text}».",
+        f"Will send to {person.label} ({phone}): «{text}»"
+        + (
+            ", now, as a normal WhatsApp message." if is_open else
+            ". Their 24h window is closed, so the approved opener template goes "
+            "first and your text follows the moment they answer."
+        ),
         "Nothing has been sent.",
     )
     if refused:
         return refused
 
-    row = await followup_store.queue_outreach(
+    await followup_store.queue_outreach(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
         platform="whatsapp", channel_identifier=sender, kind="operator",
         text=text, template_name=template,
         template_language=settings.message_template_language if settings else None,
-        created_by=f"care-team:{ctx.user_id}",
+        subject_user_id=person.user_id, created_by=f"care-team:{ctx.user_id}",
     )
-    how = (
-        "it goes out as a message within a minute"
-        if not template else
-        "it goes out within a minute: as a message if they wrote in the last "
-        "24 hours, otherwise after the approved template and their answer to it"
+    if is_open:
+        return (
+            f"Sent now: {person.label} wrote in the last 24 hours, so your text "
+            "goes out as a normal WhatsApp message within a minute."
+        )
+    return (
+        f"{person.label}'s 24h window is closed: I sent the opener template; "
+        "your text goes the moment they answer."
     )
-    return f"Queued for {person.label} (state {row.state}); {how}."
 
 
 # ---------------------------------------------------------------------------
