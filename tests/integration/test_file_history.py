@@ -3173,3 +3173,23 @@ async def test_an_editor_save_records_your_unrecorded_edit_first(api, tmp_path):
     assert (await opened(api, project, listed[1]["id"], "Report.docx")).content == YOURS
     *_, yours, the_threads = await rows_of(api, project)
     assert [(r.kind, r.saga_state) for r in (yours, the_threads)] == [("pickup", "completed"), ("pickup", "completed")]
+
+
+async def test_an_editor_save_in_a_busy_project_is_refused_without_waiting(api, tmp_path):
+    from surogates.workstreams.undo import BUSY, Refused, land_editor_save
+
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    written: list[bool] = []
+
+    async def write() -> None:
+        written.append(True)
+
+    you = {"name": str(api.user_id), "email": f"user:{api.user_id}@surogate"}
+    async with rows_module.project_lock(api.app.state.session_factory, project["id"]):
+        began = time.monotonic()
+        with pytest.raises(Refused) as refused:
+            await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=you, write=write)
+        waited = time.monotonic() - began
+    # The save job holds the document's row meanwhile, and tries again in a moment.
+    assert str(refused.value) == BUSY and waited < 2
+    assert written == []

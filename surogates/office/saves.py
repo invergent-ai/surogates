@@ -22,7 +22,7 @@ from surogates.session.store import SessionNotFoundError
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
 from surogates.workstreams import is_project_thread
 from surogates.workstreams.stream import project_of
-from surogates.workstreams.undo import land_editor_save
+from surogates.workstreams.undo import BUSY, Refused, land_editor_save
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,12 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
                 blob = await _land(row, session_factory=session_factory, session_store=session_store,
                                    storage=storage, redis=redis, office=office, settings=settings)
                 landed += 1
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, Refused) and str(exc) == BUSY:
+                    # The project is busy: not a failed try. Its new updated_at moves the row behind the others.
+                    row.updated_at = datetime.now(timezone.utc)
+                    logger.info("the project of %s is busy: its save waits", row.path)
+                    continue
                 # Commits with the row; its new updated_at moves it behind the others.
                 attempts = office_sessions.mark_attempt(row)
                 logger.exception("could not land the save of %s (attempt %d)", row.path, attempts)

@@ -550,8 +550,9 @@ async def land_editor_save(
     Your edits to it not yet recorded are picked up first, by you, as every landing does.
 
     Outside history (a name history leaves out, a project over its history's cap) it is only written.
-    Raises :class:`Refused` when the project stays busy past the patience, and whatever *write* raises (a
-    changed file's RevisionConflict): the save job tries again later, or lands a copy.
+    Raises :class:`Refused` (:data:`BUSY`) at once when the project is busy, since the save job holds the
+    document's row meanwhile, and whatever *write* raises (a changed file's RevisionConflict): the save job
+    tries again later, or lands a copy.
     """
     session_factory, saga_settings = state.session_factory, state.settings.saga
     master = await state.session_store.get_session(project.master_session_id)
@@ -561,7 +562,8 @@ async def land_editor_save(
     place = BucketHistory.of(state.storage, master, state.settings.history, within=saga_settings.default_step_timeout)
     audit = [["Surogate-Project", str(project.id)], ["Surogate-Agent", str(project.agent_id)], ["Surogate-User", str(project.user_id)]]
     picked: list[str] = []
-    until = time.monotonic() + LOCK_PATIENCE
+    # One try of the lock: the job tries again in a moment.
+    until = time.monotonic()
     try:
         async with _locked(session_factory, project.id, until) as held:
             with place.steady():
