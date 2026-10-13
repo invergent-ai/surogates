@@ -21,7 +21,7 @@ import { cleanly, spawnClean } from "../clean-child.js";
 import type { HostUser, Share } from "../guest/protocol.js";
 import { MAX_SHARES } from "../guest/protocol.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
-import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
+import { guestCpus, kernelLine } from "./qemu.js";
 import { ended, reach } from "./sockets.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
@@ -74,8 +74,11 @@ export function fitting(run: string): string | null {
   return bytes > SOCKET_MAX ? `this Mac's temp folder's path is too long for the sandbox's sockets: ${longest} is ${bytes} bytes, over ${SOCKET_MAX}` : null;
 }
 
-/** The guest kernel's command line on macOS: every OS's, with the uid every root runs as, which the protected-names rule judges. */
-export const commandLine = (user: HostUser): string => `${KERNEL_COMMAND_LINE} surogate.uid=${user.uid}`;
+/**
+ * The guest kernel's command line on macOS: every OS's for the framework's devices, virtio's disks and ports, with
+ * the uid every root runs as, which the protected-names rule judges.
+ */
+export const commandLine = (user: HostUser): string => `${kernelLine({ disks: "virtio", transport: "virtio-serial" })} surogate.uid=${user.uid}`;
 
 // What surogate-vm says, one JSON object a line.
 type Said =

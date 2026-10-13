@@ -33,6 +33,16 @@ export const HELD = "What this chat ran is waiting on its folder, which does not
 // stream on it for each connection the agent's browser makes to a server of a root's own (inbound.ts).
 export const INBOUND_PORT = "ai.surogate.inbound";
 
+// What the guest's kernel line names of the machine it runs on, so that no part of the guest guesses
+// (vm/qemu.ts, kernelLine): the bus of its disks, virtio's or SCSI's (Hyper-V's); and how its ports reach
+// the host, as virtio-serial ports or as vsock streams (Hyper-V's sockets).
+export type DiskBus = "virtio" | "scsi";
+export type Transport = "virtio-serial" | "vsock";
+export interface GuestDevices {
+  disks: DiskBus;
+  transport: Transport;
+}
+
 // What a root's runner sends on the root's socket for a connection the agent asked it for (ToRunner's
 // dial): "/in/<id>", then the connection's bytes, or "/in/<id> <errno>" when nothing took it. No
 // destination a command names starts with '/' (network.ts).

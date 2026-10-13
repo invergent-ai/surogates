@@ -78,6 +78,54 @@ le32() {
   mv /run/surogate/rule.partial /run/surogate/rule
 ) &
 
+# The guest's disk of the role $2 (1, the agent disk; 2, the sessions disk), on the bus the kernel's
+# command line, $1, names in surogate.disks=: virtio's by its name, vd<letter> in the disks' order; SCSI's
+# by its LUN, the one disk whose address under $3/class/scsi_disk ends :0:0:<role>, there being no udev
+# to name it. Printed, or why not. Refused: a line that names no bus, two, or one this guest does not
+# know. The image's stub init (images/guest/surogate-init) holds the same function, which a host test
+# keeps the same.
+disk() {
+  bus=
+  set -f
+  # shellcheck disable=SC2086 # split into words, never into files
+  for word in $1; do
+    case "$word" in
+      surogate.disks=*)
+        [ -z "$bus" ] || { set +f; echo "the kernel's command line names surogate.disks= twice"; return 1; }
+        bus=${word#surogate.disks=}
+        ;;
+    esac
+  done
+  set +f
+  case "$bus" in
+    virtio)
+      case "$2" in
+        1) echo /dev/vdb ;;
+        2) echo /dev/vdc ;;
+        *) echo "the guest has no disk of role $2"; return 1 ;;
+      esac
+      ;;
+    scsi)
+      found=
+      for address in "$3"/class/scsi_disk/*:0:0:"$2"; do
+        [ -e "$address" ] || continue
+        [ -z "$found" ] || { echo "two SCSI disks are at LUN $2"; return 1; }
+        found=$address
+      done
+      [ -n "$found" ] || { echo "no SCSI disk is at LUN $2"; return 1; }
+      for block in "$found"/device/block/*; do
+        [ -e "$block" ] || break
+        echo "/dev/${block##*/}"
+        return 0
+      done
+      echo "the SCSI disk at LUN $2 has no block device"
+      return 1
+      ;;
+    '') echo "the kernel's command line names no surogate.disks="; return 1 ;;
+    *) echo "surogate.disks=$bus is not a bus this guest knows"; return 1 ;;
+  esac
+}
+
 # The sessions disk holds each root's home and temp folder, which can be lost.
 # It is made, empty, when it holds no ext4 superblock yet: its first boot. At
 # every later boot it is checked and repaired, and made again only when the
@@ -85,23 +133,24 @@ le32() {
 # failure, such as a feature this e2fsck does not know, stops the boot and
 # leaves the homes on the disk as they are: the app keeps that disk aside, by
 # this line on the console, and boots again on a new one (vm/manager.ts).
-if [ "$(od -An -tx2 -j1080 -N2 /dev/vdc)" != " ef53" ]; then
-  mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || { echo "surogate: $sessions, so the guest stops" >&2; exit 1; }
+if [ "$(od -An -tx2 -j1080 -N2 "$sessions")" != " ef53" ]; then
+  mke2fs -q -F -t ext4 -E nodiscard -L sessions "$sessions"
 else
   checked=0
-  e2fsck -p /dev/vdc || checked=$?
+  e2fsck -p "$sessions" || checked=$?
   if [ "$checked" -ge 4 ]; then
     checked=0
-    e2fsck -y /dev/vdc || checked=$?
+    e2fsck -y "$sessions" || checked=$?
   fi
   if [ "$checked" -ge 8 ]; then
     echo "surogate: e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one" >&2
     exit 1
   fi
-  [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+  [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions "$sessions"
 fi
 mkdir -p /run/surogate/sessions
-mount -t ext4 -o nodev,nosuid,discard /dev/vdc /run/surogate/sessions
+mount -t ext4 -o nodev,nosuid,discard "$sessions" /run/surogate/sessions
 mkdir -p -m 0711 /run/surogate/sessions/roots
 
 modprobe virtiofs
