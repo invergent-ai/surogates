@@ -424,47 +424,34 @@ def get_model_info(model_id: str) -> ModelInfo | None:
 def resolve_model_info(
     model_id: str,
     *,
-    base_url: str = "",
-    api_key: str = "",
     overrides: dict[str, dict] | None = None,
 ) -> ModelInfo | None:
-    """Resolve :class:`ModelInfo` using the full fallback chain.
+    """Resolve :class:`ModelInfo` from the catalog plus operator overrides.
 
     Precedence (first match wins):
 
     1. ``overrides`` — a ``{model_id: {context_window, max_output_tokens}}``
-       map sourced from operator config.  Applied on top of whatever the
-       catalog or provider reports, so operators can correct a single
-       field (e.g., context window) without re-stating pricing.
+       map sourced from operator config.  Applied on top of the catalog,
+       so operators can correct a single field (e.g., context window)
+       without re-stating pricing.
     2. Static catalog (:data:`MODEL_CATALOG`) + its aliases.  Human-curated
        pricing and capability flags.
-    3. Provider discovery via :mod:`surogates.harness.model_discovery` —
-       a one-shot lazy fetch of ``{base_url}/models`` that covers every
-       model the provider routes (OpenRouter, LM Studio, vLLM, etc.).
 
-    Returns ``None`` when every source comes up empty.  Callers are
-    expected to warn and fall back to a safe default; we don't fabricate
-    a :class:`ModelInfo` here because doing so hides the configuration
-    gap from the operator.
+    Returns ``None`` when both come up empty.  Callers are expected to
+    warn and fall back to a safe default; we don't fabricate a
+    :class:`ModelInfo` here because doing so hides the configuration gap
+    from the operator.
     """
     from dataclasses import replace
 
     override = (overrides or {}).get(model_id)
-    base: ModelInfo | None = None
 
     # 2. Static catalog first — it's the authoritative source for any
     # model it knows about.  We still apply override fields (if any) on
     # top, so operators can tweak without replacing the whole record.
-    base = get_model_info(model_id)
+    base: ModelInfo | None = get_model_info(model_id)
 
-    # 3. Provider discovery — only consulted when the static catalog
-    # misses.  Importing at call time keeps ``model_metadata`` usable
-    # without a transitive httpx dependency (tests / minimal runtimes).
-    if base is None and base_url:
-        from surogates.harness.model_discovery import discover_model
-        base = discover_model(model_id, base_url=base_url, api_key=api_key)
-
-    # 1. Apply override last so it wins over both sources above.
+    # 1. Apply override last so it wins over the catalog.
     if override:
         if base is None:
             # Build a skeleton the override can layer onto.  Pricing

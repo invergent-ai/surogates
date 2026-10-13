@@ -64,11 +64,16 @@ _PROTECTED_PATH_PREFIXES: tuple[str, ...] = ("/v1/",)
 # publishable key (bootstrap) or a signed session cookie (follow-up
 # requests); neither is shaped as an ``Authorization: Bearer`` JWT, so
 # they must bypass this middleware entirely.  The route handlers under
-# ``/v1/website/*`` do their own origin + CSRF enforcement.
+# ``/v1/website/*`` do their own origin + CSRF enforcement.  The document
+# server fetches office files and calls back with saves: those URLs carry a
+# signed token naming the open document, and a callback's body is signed
+# with the document server's own secret.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/v1/auth/",
     "/v1/transparency",
     "/v1/website/",
+    "/v1/office/files/",
+    "/v1/office/callback/",
 )
 
 # Path prefix for routes that service-account tokens are allowed to hit.

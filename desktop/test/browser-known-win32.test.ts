@@ -71,6 +71,16 @@ describe("where the app looks for each browser on Windows", () => {
     expect(candidates.find(({ id }) => id === "chrome")?.paths).toEqual(["C:\\Users\\Ana\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"]);
   });
 
+  it("guards the folder of each program it looks for a browser at, and of the program picked in Custom…, from every chat's folder", () => {
+    const { own } = tools({ "chrome.exe": ["D:\\Apps\\Chrome\\chrome.exe"] });
+    const known = windowsBrowsers(own, ENV);
+    const folders = known.guarded("C:\\Users\\Ana", null);
+    expect(folders).toEqual(known.candidates("C:\\Users\\Ana").flatMap(({ paths }) => paths.map((path) => win32.dirname(path))));
+    expect(folders).toContain("C:\\Users\\Ana\\AppData\\Local\\Google\\Chrome\\Application");
+    expect(folders).toContain("D:\\Apps\\Chrome");
+    expect(known.guarded("C:\\Users\\Ana", "E:\\Tools\\Thorium\\thorium.exe")).toEqual([...folders, "E:\\Tools\\Thorium"]);
+  });
+
   it("asks App Paths again only once its answer is half a minute old", () => {
     const { own, asked } = tools();
     const known = windowsBrowsers(own, ENV);

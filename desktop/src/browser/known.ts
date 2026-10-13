@@ -29,6 +29,12 @@ export interface KnownBrowsers {
   programOf(picked: string, disk: Disk): string | null;
   /** Settles once what refused() says of *real* waits on no check under way. */
   checked(real: string): Promise<void>;
+  /**
+   * The folders no chat's folder may be, hold or lie in, for the user whose home is *home*: each place the user can
+   * write that this OS's app looks for a browser at, and the folder of its own of the program picked in Custom…,
+   * *chosen*, as kept. The app runs the browser outside every sandbox.
+   */
+  guarded(home: string, chosen: string | null): string[];
   /** The kinds of file Custom…'s dialog offers, where this OS names its programs by one: none, any file. */
   pickFilters?: ReadonlyArray<{ name: string; extensions: string[] }>;
   /** The version of the browser at *executable*, read without starting it, where `--version` would start it: else run so. */
@@ -40,6 +46,7 @@ const NONE: KnownBrowsers = {
   refused: () => notBuiltWords("driving a browser"),
   programOf: (picked) => picked,
   checked: async () => {},
+  guarded: () => [],
 };
 
 export const KNOWN_BROWSERS: KnownBrowsers = forThisOs({ linux: LINUX, darwin: DARWIN, win32: WIN32 }) ?? NONE;

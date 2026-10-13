@@ -19,7 +19,12 @@ beforeAll(needsKvm);
 // init's read of the set, given *line* in place of the kernel's whole command line.
 const named = (line: string): [string, string] => ['name_set "$(cat /proc/cmdline)"', `name_set "${line}"`];
 // Each name, made, renamed to, and written to where it is already, by a session in its folder; and two names beside them.
-const NAMES = ["desktop.ini", "autorun.inf", "a.lnk", "b.url", "c.scf", "d.library-ms", "e.searchconnector-ms", "Desktop.INI", "f.LNK", "x.ſcf"];
+// The last three are read whole: one that is an Explorer name once the code points HFS+ ignores are dropped, one
+// longer than any Explorer name, and a spelling NTFS may resolve to another name, its trailing dot, after forty bytes.
+const NAMES = [
+  "desktop.ini", "autorun.inf", "a.lnk", "b.url", "c.scf", "d.library-ms", "e.searchconnector-ms", "Desktop.INI", "f.LNK", "x.ſcf",
+  `g.lnk${"\u200c".repeat(40)}`, `${"h".repeat(40)}.url`, `${"i".repeat(40)}.`,
+];
 const PROBE = [
   ...NAMES.flatMap((name, n) => [
     `touch '${name}' 2>/dev/null && echo 'made ${name}' || echo 'refused ${name}'`,
@@ -68,7 +73,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the rule's names by the 
     }
   };
 
-  it("refuses a session's make, write and rename of each name Explorer acts on where the line names windows's set, and its neighbours not", async () => {
+  it("refuses a session's make, write and rename of each name Explorer acts on, and of a spelling NTFS may resolve to another, where the line names windows's set, and its neighbours not", async () => {
     expect(await said("surogate.names=windows", join(dir, "windows"))).toEqual([
       ...NAMES.flatMap((name) => [`refused ${name}`, `kept ${name}`, `left ${name}`]), "made notes.txt", "made desktop.ini.txt",
     ]);

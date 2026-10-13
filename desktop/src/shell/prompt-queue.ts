@@ -1,10 +1,9 @@
 // The desktop's prompts take turns (spec, Section 4): one at a time over the app's
-// window, in the order asked, as Claude Desktop queues its local consent (one at a
-// time, index.chunk-CHp2HdS0.js). Each has 10 minutes from the moment it is asked,
+// window, in the order asked. Each has 10 minutes from the moment it is asked,
 // whether it waits its turn or is open: one still waiting then is never shown, and
 // one open then is closed. A prompt whose asker goes leaves the line, or is closed.
 
-// Claude Desktop's own deadline for its local consent.
+// Each prompt's time, from the moment it is asked.
 export const PROMPT_MS = 10 * 60_000;
 
 // What a prompt settles with when nobody answered it within its time.

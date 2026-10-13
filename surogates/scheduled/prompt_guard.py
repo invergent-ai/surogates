@@ -40,6 +40,9 @@ def validate_scheduled_prompt(prompt: str, *, source: str = "cron_create") -> No
     text = (prompt or "").strip()
     if not text:
         raise ScheduledPromptBlocked("Scheduled prompt cannot be empty.")
+    if text.startswith("/loop"):
+        # Every run would make a schedule of its own.
+        raise ScheduledPromptBlocked("A scheduled prompt cannot be another /loop.")
     for char in _INVISIBLE_CHARS:
         if char in text:
             raise ScheduledPromptBlocked(

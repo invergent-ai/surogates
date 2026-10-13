@@ -1,9 +1,7 @@
 /* The desktop's own pages: the main window's sidebar, the centre's header and pages,
-   and the Overview pane, and Settings. The layout and the colours follow Claude Desktop's main window
-   (docs/superpowers/specs/2026-10-06-desktop-ui-reference): dark values sampled from it,
-   light values from its local pages' stylesheet (window-shared.css). One set of tokens,
-   each with its light and dark value; data-theme picks one, and before the page's script
-   sets it, prefers-color-scheme does, which the main process sets from the user's choice. */
+   and the Overview pane, and Settings. One set of tokens, each with its light and dark
+   value; data-theme picks one, and before the page's script sets it, prefers-color-scheme
+   does, which the main process sets from the user's choice. */
 :root {
   color-scheme: light dark;
   --sidebar: light-dark(#f5f4ed, #111111);
@@ -705,7 +703,7 @@ body.main.first {
   height: 40px;
 }
 
-/* Three columns at most, as Claude Desktop's Projects page, and fewer where they would be under 240 px. */
+/* Three columns at most, and fewer where they would be under 240 px. */
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(max(240px, calc((100% - 24px) / 3)), 1fr));
@@ -1357,11 +1355,10 @@ body.settings-page {
   color: var(--fg);
 }
 
-/* The desktop's prompts: a window of their own, 460 px wide, as Claude Desktop's local consent.
-   What the agent sent and the user's paths are drawn in the order they are written, left to
-   right, right-to-left letters included, so a path cannot be made to look like another; they
-   scroll whole. A title, a lead and a note are drawn so too, for the names and paths in them:
-   their own words are English. */
+/* The desktop's prompts: a window of their own, 460 px wide. What the agent sent and the
+   user's paths are drawn in the order they are written, left to right, right-to-left letters
+   included, so a path cannot be made to look like another; they scroll whole. A title, a lead
+   and a note are drawn so too, for the names and paths in them: their own words are English. */
 body.prompt-page {
   background: var(--panel);
   user-select: text;
@@ -1520,7 +1517,7 @@ body.prompt-page {
   cursor: default;
 }
 
-/* About Surogate: a small window of its own, as Claude Desktop's, moved by any of its bare parts. */
+/* About Surogate: a small window of its own, moved by any of its bare parts. */
 body.about-page {
   height: 100vh;
   background: var(--panel);

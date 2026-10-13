@@ -408,6 +408,7 @@ function messageToEntries(
     if (
       msg.systemKind === "browser_marker"
       || msg.systemKind === "browser_marker_warning"
+      || msg.systemKind === "notice"
     ) {
       return [{
         kind: "browser_marker",
@@ -708,6 +709,7 @@ function OrphanSystemMarker({
   if (
     message.systemKind === "browser_marker"
     || message.systemKind === "browser_marker_warning"
+    || message.systemKind === "notice"
   ) {
     const warning = message.systemKind === "browser_marker_warning";
     return (

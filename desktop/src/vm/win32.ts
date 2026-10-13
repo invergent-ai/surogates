@@ -174,6 +174,9 @@ export async function requirementsWin32(probe: () => Promise<Lacks> = () => chec
 class Win32Vm implements VmBackend {
   readonly exited: Promise<string>;
   readonly emulated = null;
+  // HCS's Plan 9 server is given each share's folder by its path (a Plan9Share, native/windows/hcs), and Microsoft's
+  // documentation does not say when the server opens it: as it is shared, at the guest's attach, or at each.
+  readonly opensByPath = true;
   // Each share in the guest, by its tag; each tag, r<n>, is never given again in this VM.
   private readonly shares = new Map<string, { held: "chat" | "copy" | "place"; removal: Promise<void> | null }>();
   private made = 0;

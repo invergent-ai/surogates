@@ -145,11 +145,15 @@ class ContentWithToolsCache:
         self._cached: str | None = None
 
     def maybe_cache(self, message: dict[str, Any]) -> None:
-        """Cache content if the message has both content and tool calls."""
-        content = (message.get("content") or "").strip()
-        tool_calls = message.get("tool_calls")
-        if content and tool_calls:
-            self._cached = content
+        """Hold the words of the latest tool-calling step, or nothing.
+
+        Every tool step replaces the cache, a silent one with ``None``: only
+        what the model said at its last tool call can stand in for a final
+        answer.  Kept across silent steps, an opening line ("I'll load the
+        skill first") was replayed as the answer a whole turn later.
+        """
+        if message.get("tool_calls"):
+            self._cached = (message.get("content") or "").strip() or None
 
     def get_fallback(self) -> str | None:
         """Return the cached content, or ``None`` if nothing is cached."""

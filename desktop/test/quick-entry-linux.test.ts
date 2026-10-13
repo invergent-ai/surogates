@@ -1,6 +1,6 @@
-// Quick entry's shortcut on Linux: Claude Desktop's own, from anywhere on the display, where the X
-// server grabs keys for an app; none in a Wayland session, whose portal for global shortcuts the
-// app does not ask, and where the tray opens quick entry.
+// Quick entry's shortcut on Linux, from anywhere on the display, where the X server grabs keys
+// for an app; none in a Wayland session, whose portal for global shortcuts the app does not
+// ask, and where the tray opens quick entry.
 
 import { expect, it } from "vitest";
 

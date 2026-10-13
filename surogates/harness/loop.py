@@ -52,7 +52,11 @@ from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
-from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
+from surogates.harness.llm_call import (
+    apply_developer_role,
+    call_llm_with_retry,
+    sampling_kwargs,
+)
 from surogates.harness.message_utils import (
     coerce_message_content,
     content_as_text,
@@ -94,6 +98,7 @@ from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrail
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.history import PRUNE_DAYS
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
@@ -276,9 +281,19 @@ def _format_loop_list(rows: list[Any]) -> str:
     for row in rows:
         reason = row.schedule.get("last_delay_reason") if row.schedule else None
         suffix = f" (last wait: {reason})" if reason else ""
+        # A model's routine is listed here too: its time in its own zone, and
+        # whether it ever ends, are what tell it apart from a short loop.
+        next_run = (
+            None if row.next_run_at is None
+            else f"{local_iso(row.next_run_at, row.timezone)} {row.timezone}"
+        )
+        until = (
+            "until cancelled" if row.expires_at is None
+            else f"expires {local_iso(row.expires_at, row.timezone)}"
+        )
         lines.append(
             f"- `{row.id}` {row.schedule_display}: {row.prompt} "
-            f"(next: {row.next_run_at}){suffix}"
+            f"(next: {next_run}; {until}){suffix}"
         )
     return "\n".join(lines)
 
@@ -2787,12 +2802,16 @@ class AgentHarness(
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
             **channel_tool_flags(getattr(session, "channel", None)),
-            # A master's routines are the project's, and its model makes
-            # them.  A scheduled run is never a master, and its filter
-            # already took the cron tools away.
+            # Any chat's model makes its routines, where they have an owner
+            # and someone it can ask first: not an anonymous visitor's, nor
+            # a thread's, helper's or run's (each has a parent; a scheduled
+            # run's filter already took the cron tools away), nor where no
+            # one is asked anything.
             makes_routines=(
-                is_project_master(session.config)
+                session.parent_id is None
+                and (session.user_id or session.service_account_id) is not None
                 and self._slash_command_enabled("loop", session)
+                and any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
             ),
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
@@ -2964,8 +2983,7 @@ class AgentHarness(
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
                 "messages": api_messages,
-                "temperature": session.config.get("temperature", 0.3),
-                "max_tokens": session.config.get("max_tokens", 16384),
+                **sampling_kwargs(session.config),
             }
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
@@ -5109,6 +5127,21 @@ class AgentHarness(
         base.difference_update(excluded)
         return base
 
+    def _drop_project_master_mcp_tools(
+        self, tool_filter: set[str] | None, session: Session,
+    ) -> set[str] | None:
+        """A project's master has no MCP tool: an MCP server's tools do work, and work is a thread's.
+
+        Runs after ``_apply_mcp_schema_filter`` on purpose: that filter
+        re-adds this agent's discovered MCP set to a session without an
+        explicit ``allowed_tools``, which would give the master back a
+        tool stripped earlier.  Beats an explicit ``allowed_tools`` too.
+        """
+        if not is_project_master(session.config):
+            return tool_filter
+        names = set(self._tools.tool_names) if tool_filter is None else tool_filter
+        return {name for name in names if not name.startswith("mcp__")}
+
     def _apply_mcp_schema_filter(
         self, tool_filter: set[str] | None, *, explicit_allowed: bool,
     ) -> set[str] | None:
@@ -5357,19 +5390,7 @@ class AgentHarness(
                 tool_filter.discard("loop_wait")
                 if "loop_complete" in self._tools.tool_names:
                     tool_filter.add("loop_complete")
-            tool_filter = self._apply_mcp_schema_filter(
-                tool_filter, explicit_allowed=explicit_allowed,
-            )
-            tool_filter = self._apply_entitlement_exclusions(tool_filter)
-            tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
-            return self._drop_eval_excluded_tools(
-                self._ensure_always_available_tools(
-                    tool_filter, explicit_allowed=explicit_allowed,
-                ),
-                session,
-            )
-
-        if tool_filter is not None and not explicit_allowed:
+        elif tool_filter is not None and not explicit_allowed:
             tool_filter = set(tool_filter)
             tool_filter.discard("loop_wait")
             tool_filter.discard("loop_complete")
@@ -5377,6 +5398,7 @@ class AgentHarness(
             tool_filter, explicit_allowed=explicit_allowed,
         )
         tool_filter = self._apply_entitlement_exclusions(tool_filter)
+        tool_filter = self._drop_project_master_mcp_tools(tool_filter, session)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
         return self._drop_eval_excluded_tools(
             self._ensure_always_available_tools(
@@ -5569,8 +5591,7 @@ class AgentHarness(
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
                 "messages": api_messages,
-                "temperature": session.config.get("temperature", 0.7),
-                "max_tokens": session.config.get("max_tokens", 16384),
+                **sampling_kwargs(session.config),
                 # No tools -- force a text-only response.
             }
 
@@ -6043,14 +6064,21 @@ class AgentHarness(
         message: str,
         *,
         user_content: str | None = None,
+        notice: bool = False,
     ) -> None:
         # The cursor is the turn's end's to move (``_end_command_turn``): it
         # must not pass what the user sent while this was being answered.
+        # A *notice* is a status line, not an answer: the chat shows it as
+        # a quiet marker.
         assistant_message = {"role": "assistant", "content": message}
         await self._store.emit_event(
             session.id,
             EventType.LLM_RESPONSE,
-            {"message": assistant_message, **self._names_its_message()},
+            {
+                "message": assistant_message,
+                **self._names_its_message(),
+                **({"notice": True} if notice else {}),
+            },
             lease_token=lease.lease_token,
         )
 
@@ -6074,11 +6102,10 @@ class AgentHarness(
         if compacted is not None:
             await self._emit_loop_response(
                 session, lease,
-                f"Context compressed to {len(compacted.data.get('compacted_messages') or [])} messages. "
-                f"Strategy: {compacted.data.get('strategy', 'unknown')}.",
+                f"Context compressed to {len(compacted.data.get('compacted_messages') or [])} messages.",
+                notice=True,
             )
             return
-        original_count = len(messages)
 
         # Remove the /compress message itself — it's not real conversation.
         # Dispatch only reaches here once the latest user *event* text is
@@ -6092,23 +6119,13 @@ class AgentHarness(
             None,
         )
         messages = [m for m in messages if m is not last_user]
+        original_count = len(messages)
 
-        if len(messages) <= 5:
-            # Too few messages to compress.
-            await self._store.emit_event(
-                session.id,
-                EventType.LLM_RESPONSE,
-                {
-                    **self._names_its_message(),
-                    "message": {
-                        "role": "assistant",
-                        "content": "Context is too small to compress — only "
-                                   f"{len(messages)} messages.",
-                    },
-                },
-                lease_token=lease.lease_token,
+        if original_count <= 5:
+            # Too short to be worth a pass; the compressor is not asked.
+            await self._emit_loop_response(
+                session, lease, "Nothing to compress yet.", notice=True,
             )
-            # Lease released by the outer wake() finally block.
             return
 
         try:
@@ -6132,8 +6149,13 @@ class AgentHarness(
             # Lease released by the outer wake() finally block.
             return
 
-        compressed_count = len(compressed)
-        saved = original_count - compressed_count
+        # As in automatic compaction, a pass that changed nothing writes no
+        # compaction.
+        if summary_data.get("strategy") in NOOP_STRATEGIES:
+            await self._emit_loop_response(
+                session, lease, "Nothing to compress yet.", notice=True,
+            )
+            return
 
         # Emit the compacted messages as a CONTEXT_COMPACT event.
         await self._store.emit_event(
@@ -6147,26 +6169,10 @@ class AgentHarness(
             lease_token=lease.lease_token,
         )
         self._forget_compacted_reads(session)
-
-        # Emit an assistant message summarising the result.
-        await self._store.emit_event(
-            session.id,
-            EventType.LLM_RESPONSE,
-            {
-                **self._names_its_message(),
-                "message": {
-                    "role": "assistant",
-                    "content": (
-                        f"Context compressed: {original_count} → {compressed_count} messages "
-                        f"({saved} removed). "
-                        f"Strategy: {summary_data.get('strategy', 'unknown')}."
-                    ),
-                },
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "context_window": self._compressor.context_length,
-            },
-            lease_token=lease.lease_token,
+        await self._emit_loop_response(
+            session, lease,
+            f"Context compressed: {original_count} → {len(compressed)} messages.",
+            notice=True,
         )
         # Lease released by the outer wake() finally block.
 

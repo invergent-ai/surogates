@@ -61,7 +61,7 @@ export function scanWalked(folder: string): Promise<HookScan> {
       }
       if (stats.isDirectory()) {
         const store = gitFolder && lower === "objects" && !fdPaths.exists(join(path, "HEAD"));
-        if (lower !== "node_modules" && !store) walk(path, inGit || lower === ".git");
+        if (lower !== "node_modules" && !store) walk(path, inGit || folded(name) === ".git");
       } else if (hook && !REFUSED_NAME.test(name)) {
         scan.hooks.set(path, described(stats));
       }

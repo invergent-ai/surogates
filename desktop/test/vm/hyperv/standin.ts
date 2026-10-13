@@ -251,6 +251,8 @@ function dialed(path: string, qemu: ChildProcess): Duplex {
 
 class StandinVm implements VmBackend {
   readonly exited: Promise<string>;
+  // As Windows's backend says of HCS's Plan 9 server (vm/win32.ts).
+  readonly opensByPath = true;
   private made = 0;
   // Each share in the guest, by its tag, with what it holds, as Linux's backend counts them.
   private readonly held = new Map<string, "chat" | "copy" | "place">();

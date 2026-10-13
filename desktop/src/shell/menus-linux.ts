@@ -35,7 +35,7 @@ export function lastMenus(act: MenuActions): MenuItemConstructorOptions[] {
   ];
 }
 
-/** The tray's icon, by Claude Desktop's rule: the light one on a dark panel, as GNOME's always is, the dark one on a light panel. */
+/** The tray's icon: the light one on a dark panel, as GNOME's always is, the dark one on a light panel. */
 export function trayIcon(dark: boolean, desktop: string | undefined): "tray-dark.png" | "tray-light.png" {
   const gnome = (desktop ?? "").split(":").some((name) => name.toLowerCase() === "gnome");
   return dark || gnome ? "tray-dark.png" : "tray-light.png";

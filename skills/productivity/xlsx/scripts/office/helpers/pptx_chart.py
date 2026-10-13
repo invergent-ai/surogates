@@ -1,4 +1,4 @@
-"""Find chart XML that PowerPoint refuses but the schema accepts.
+"""Find chart XML that PowerPoint refuses or draws empty but the schema accepts.
 
 Detection only: for either fault more than one repair is valid, and only the
 author knows which was meant.
@@ -158,7 +158,21 @@ def _ext_lst_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-CHART_CHECKS = (_check_stacked_label_positions, _check_chart_axis_references)
+_SERIES_RE = re.compile(r"<(?:\w+:)?ser[\s>]")
+
+
+def _check_chart_has_series(part: str, xml: str) -> list[str]:
+    if _SERIES_RE.search(_strip_ext_lst(xml)):
+        return []
+    return [
+        f"{part}: the chart has no data series, so every viewer draws an empty frame. "
+        "With pptxgenjs that means an unknown chart type or empty data: ChartType has "
+        "area, bar, bar3d, bubble, doughnut, line, pie, radar, scatter -- a column chart "
+        "is ChartType.bar with barDir: 'col' (there is no ChartType.col)"
+    ]
+
+
+CHART_CHECKS = (_check_stacked_label_positions, _check_chart_axis_references, _check_chart_has_series)
 
 
 def find_chart_problems(files: Mapping[str, bytes]) -> list[str]:

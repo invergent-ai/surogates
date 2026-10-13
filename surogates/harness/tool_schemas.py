@@ -102,8 +102,8 @@ def drop_unusable_tools(
     than to one benchmark workload.
 
     The cron tools go to a session that *makes_routines* through its
-    model: a project's master with ``/loop`` on.  Any other chat makes
-    one by typing ``/loop``, and a scheduled run may not make another.
+    model: a chat with an owner, ``/loop`` on and ``ask_user_question``
+    to confirm with.  A scheduled run may not make another.
 
     Never returns an empty list: a request with no tools at all is worse
     than an oversized one.

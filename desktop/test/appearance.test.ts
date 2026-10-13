@@ -79,7 +79,7 @@ describe("the appearance settings", () => {
 });
 
 describe("the theme", () => {
-  it("paints the window and the controls over the title bar in the theme's colours, 36 px high as Claude Desktop's", () => {
+  it("paints the window and the controls over the title bar in the theme's colours, 36 px high", () => {
     expect(chrome(true)).toEqual({ background: "#151515", overlay: { color: "#1a1a19", symbolColor: "#c2c0b6", height: 36 } });
     expect(chrome(false)).toEqual({ background: "#faf9f5", overlay: { color: "#f5f4ed", symbolColor: "#3d3d3a", height: 36 } });
   });

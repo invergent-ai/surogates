@@ -1,13 +1,12 @@
-// One of the desktop's own prompts, in a window of its own (spec, Section 4), as Claude
-// Desktop draws its local consent (index.chunk-CHp2HdS0.js, renderer/local_exec_consent/):
-// 460 px wide, frameless and modal over the app's window, its page one of the app's
-// files, with no web content in it. An answer counts only once the window has been
-// shown, or focused again, for the input protection's 500 ms, and not from a key or a
-// press that came sooner than that after the one before it: keys already on their way
-// when the prompt took the keyboard, as of a person typing into the agent's browser,
-// answer nothing, whichever button they would reach. An answer with no key and no press
-// behind it, as assistive technology presses a button, counts once no key and no press
-// has come for that long. The page holds back the same keys and presses.
+// One of the desktop's own prompts, in a window of its own (spec, Section 4): 460 px wide,
+// frameless and modal over the app's window, its page one of the app's files, with no web
+// content in it. An answer counts only once the window has been shown, or focused again,
+// for the input protection's 500 ms, and not from a key or a press that came sooner than
+// that after the one before it: keys already on their way when the prompt took the keyboard,
+// as of a person typing into the agent's browser, answer nothing, whichever button they would
+// reach. An answer with no key and no press behind it, as assistive technology presses a
+// button, counts once no key and no press has come for that long. The page holds back the
+// same keys and presses.
 // Over a hidden window, a prompt waits to be shown until the window is, and the user is told.
 
 import { BrowserWindow } from "electron";
@@ -18,11 +17,11 @@ import type { PromptQueue } from "./prompt-queue.js";
 import { ownPage } from "./window-policy.js";
 
 export const WIDTH = 460;
-// Claude Desktop's own: LOCAL_EXEC_CONSENT_INPUT_PROTECTION_MS.
+// The input protection: how long a prompt is shown, or focused again, before an answer counts.
 export const INPUT_PROTECTION_MS = 500;
 // The keys that only change what another key means.
 const MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph"]);
-// How long a window that was asked to close has before it is destroyed (Claude Desktop's own).
+// How long a window that was asked to close has before it is destroyed.
 const CLOSE_MS = 5_000;
 
 export interface PromptWindowOptions {

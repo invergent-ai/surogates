@@ -186,6 +186,30 @@ story.append(Paragraph("Content for page 2", styles['Normal']))
 doc.build(story)
 ```
 
+#### Fonts: any text beyond plain English
+
+reportlab's built-in fonts (Helvetica, Times-Roman, Courier) only cover Western European letters. Romanian ș ț ă, Polish, Czech, Turkish, Greek and Cyrillic come out as **black boxes**. Register a TrueType font before building — Liberation Sans is installed (and is metric-compatible with Arial):
+
+```python
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+FONTS = "/usr/share/fonts/truetype/liberation2/LiberationSans-"
+for name, file in [("Sans", "Regular"), ("Sans-Bold", "Bold"),
+                   ("Sans-Italic", "Italic"), ("Sans-BoldItalic", "BoldItalic")]:
+    pdfmetrics.registerFont(TTFont(name, f"{FONTS}{file}.ttf"))
+pdfmetrics.registerFontFamily("Sans", normal="Sans", bold="Sans-Bold",
+                              italic="Sans-Italic", boldItalic="Sans-BoldItalic")
+
+styles = getSampleStyleSheet()
+for s in styles.byName.values():
+    if hasattr(s, "fontName"):  # the list styles have none
+        s.fontName = "Sans-Bold" if "Bold" in s.fontName else "Sans"
+```
+
+Then use `"Sans"` / `"Sans-Bold"` everywhere a font is named: table styles (`("FONTNAME", (0, 0), (-1, -1), "Sans")`) and canvas text (`c.setFont("Sans", 12)`). `LiberationSerif-*` is the Times equivalent. Use it for every document whose text isn't plain English: names and places carry these letters even in English text.
+
 #### Subscripts and Superscripts
 
 **IMPORTANT**: Never use Unicode subscript/superscript characters (₀₁₂₃₄₅₆₇₈₉, ⁰¹²³⁴⁵⁶⁷⁸⁹) in ReportLab PDFs. The built-in fonts do not include these glyphs, causing them to render as solid black boxes.
@@ -205,6 +229,15 @@ squared = Paragraph("x<super>2</super> + y<super>2</super>", styles['Normal'])
 ```
 
 For canvas-drawn text (not Paragraph objects), manually adjust font the size and position rather than using Unicode subscripts/superscripts.
+
+#### Check what you created
+
+```bash
+pdftotext output.pdf - | grep -c "■"          # must print 0
+pdftoppm -png -r 80 output.pdf page && ls -1 "$PWD"/page-*.png
+```
+
+Each `■` is a character the font couldn't draw: switch to the TrueType font above. Then ask `vision_analyze` about each page image once, for the look: layout, tables, the watermark. Render with `pdftoppm`, not `pypdfium2`.
 
 ## Command-Line Tools
 
@@ -271,23 +304,15 @@ print(text)
 ```
 
 ### Add Watermark
-```python
-from pypdf import PdfReader, PdfWriter
 
-# Create watermark (or load existing)
-watermark = PdfReader("watermark.pdf").pages[0]
+Use the script. It stamps diagonal text **on top of** every page, tables and images included, in translucent grey, so the content stays readable under it:
 
-# Apply to all pages
-reader = PdfReader("document.pdf")
-writer = PdfWriter()
-
-for page in reader.pages:
-    page.merge_page(watermark)
-    writer.add_page(page)
-
-with open("watermarked.pdf", "wb") as output:
-    writer.write(output)
+```bash
+python scripts/watermark.py document.pdf watermarked.pdf "CONFIDENTIAL"                 # opacity 0.15
+python scripts/watermark.py document.pdf watermarked.pdf "DRAFT" --opacity 0.25
 ```
+
+For a PDF you create, build it first without a watermark, then stamp it. Don't draw the watermark in reportlab's `onFirstPage`/`onLaterPages`: those run before the page content, so tables and filled shapes cover it.
 
 ### Extract Images
 ```bash
@@ -322,7 +347,8 @@ with open("encrypted.pdf", "wb") as output:
 | Merge PDFs | pypdf | `writer.add_page(page)` |
 | Split PDFs | pypdf | One page per file |
 | Layout-precise text / structured tables (fallback) | pdfplumber | `page.extract_text()` / `page.extract_tables()` |
-| Create PDFs | reportlab | Canvas or Platypus |
+| Create PDFs | reportlab | Canvas or Platypus; a TrueType font for non-English text |
+| Watermark | `scripts/watermark.py` | `python scripts/watermark.py in.pdf out.pdf "CONFIDENTIAL"` |
 | Command line merge | qpdf | `qpdf --empty --pages ...` |
 | OCR scanned PDFs | `pdf-reading` skill or pytesseract | Convert to image first |
 | Fill PDF forms | pdf-lib or pypdf (see FORMS.md) | See FORMS.md |

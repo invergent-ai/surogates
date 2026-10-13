@@ -1,9 +1,9 @@
-// A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux and Windows, in
-// the arguments it starts with, or in a second launch's, which the running app is given by Electron's
-// second-instance with its argv; on macOS, in an event of
-// the running app's, which Launch Services sends it, starting it first where it is not running. Only
-// surogate://open?url=<agent address> is one: it opens that agent, at a page of its web client
-// when the address names one. A link names no local path, and grants nothing.
+// A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux and Windows, in the
+// arguments it starts with, or in a second launch's, which the running app's second-instance
+// hands to its link handler; on macOS, in an event of the running app's, which Launch Services
+// sends it, starting it first where it is not running. Only surogate://open?url=<agent address> is
+// one: it opens that agent, at a page of its web client when the address names one. A link names no
+// local path, and grants nothing.
 
 import { forThisOs, notBuilt } from "../platform.js";
 import { canonicalOrigin } from "./agents.js";

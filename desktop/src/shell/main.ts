@@ -1,6 +1,6 @@
-// The desktop shell's main process (spec, Sections 1 and 7): one window, as Claude
-// Desktop has, signed in to one agent, and this computer's device link to that agent,
-// which stays up with the window closed. It never runs what a tool call asks for.
+// The desktop shell's main process (spec, Sections 1 and 7): one window, signed in to
+// one agent, and this computer's device link to that agent, which stays up with the
+// window closed. It never runs what a tool call asks for.
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
@@ -19,7 +19,7 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, pickFilters, profileOf, profilesOf,
+  BROWSER_SETTING, type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, pickFilters, profileOf, profilesOf,
   unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
@@ -114,7 +114,7 @@ const loginItem = loginItemFor(places, app);
 const loginCommand = (): string[] => (app.isPackaged ? [places.launcher ?? process.execPath] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
-const browserSetting = new BrowserSetting(join(root, "browser.json"));
+const browserSetting = new BrowserSetting(join(root, BROWSER_SETTING));
 let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.

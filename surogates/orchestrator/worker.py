@@ -1031,18 +1031,22 @@ async def _load_prompt_catalogs_entitled(
 
     A restricted ``skills`` dimension hides non-included skills from
     the system prompt; the skill tool and the API listing apply the
-    same allowlist per call, so a remembered name still refuses.
+    same allowlist per call, so a remembered name still refuses.  A
+    project's master has no skill that makes a document either: the skill
+    tools leave the same ones out.
     """
     from surogates.runtime.entitlements import (
         entitled_skills,
         filter_entitled_skills,
     )
+    from surogates.workstreams import skills_left_out
 
     agents_catalog, skills_catalog = await _load_prompt_catalogs(**kwargs)
     skills_catalog = filter_entitled_skills(
         skills_catalog, entitled_skills(session_config),
     )
-    return agents_catalog, skills_catalog
+    left_out = skills_left_out(session_config)
+    return agents_catalog, [s for s in skills_catalog if s.name not in left_out]
 
 
 def build_agent_principal_resolver(*, session_factory: Any):
@@ -1681,8 +1685,7 @@ async def run_worker(settings: Settings) -> None:
         compressor = ContextCompressor(
             model_id,
             threshold_percent=settings.llm.compression_threshold,
-            base_url=settings.llm.base_url,
-            api_key=settings.llm.api_key,
+            context_window=llm_bundle.main.context_window,
             model_overrides=settings.llm.models,
             prune_browser_state=settings.llm.prune_browser_state,
             browser_state_keep_last=settings.llm.browser_state_keep_last,
@@ -2259,6 +2262,19 @@ async def run_worker(settings: Settings) -> None:
         name="browser-registry-reaper",
     )
 
+    # Saves from the document editor, landed in the workspace; stale editing sessions closed.
+    from surogates.jobs.office_saves import run_office_loop
+    office_task = asyncio.create_task(
+        run_office_loop(
+            session_factory=session_factory,
+            session_store=session_store,
+            storage=storage_backend,
+            redis=redis_client,
+            settings=settings,
+        ),
+        name="office-saves",
+    )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -2304,6 +2320,11 @@ async def run_worker(settings: Settings) -> None:
         browser_reaper_task.cancel()
         try:
             await browser_reaper_task
+        except asyncio.CancelledError:
+            pass
+        office_task.cancel()
+        try:
+            await office_task
         except asyncio.CancelledError:
             pass
         await health_server.stop()

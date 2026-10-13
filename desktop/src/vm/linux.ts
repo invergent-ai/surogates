@@ -276,6 +276,8 @@ interface Shared {
 // One QEMU, and a virtiofsd for each folder shared into it.
 class LinuxVm implements VmBackend {
   readonly exited: Promise<string>;
+  // Each folder's virtiofsd opens it as it starts, and serves that folder wherever it is moved.
+  readonly opensByPath = false;
   private readonly daemons: ChildProcess[] = [];
   // Each share in the guest, by its tag.
   private readonly shares = new Map<string, Shared>();

@@ -6,7 +6,7 @@
 // as macOS checks a browser's code signature; and only where it stays: not on a network volume, which can go.
 // Custom… takes any program whose signature checks out, as its maker is not known.
 
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { win32 } from "node:path";
 
 import { helper, helperSync } from "../native-helper.js";
@@ -158,18 +158,34 @@ export function windowsBrowsers(tools: ProgramTools = SYSTEM, env: NodeJS.Proces
     return check;
   };
 
+  const candidates = (home: string): readonly KnownBrowser[] => BROWSERS.map(({ id, name, places, registered: named, verified }) => {
+    const paths: string[] = [];
+    for (const [under, path] of places) {
+      const root = folder(under, home);
+      if (root !== null) paths.push(win32.join(root, path));
+    }
+    for (const path of named === null ? [] : appPaths().get(named) ?? []) {
+      if (!paths.some((known) => known.toLowerCase() === path.toLowerCase())) paths.push(path);
+    }
+    return { id, name, verified, paths };
+  });
+
   return {
-    candidates: (home): readonly KnownBrowser[] => BROWSERS.map(({ id, name, places, registered: named, verified }) => {
-      const paths: string[] = [];
-      for (const [under, path] of places) {
-        const root = folder(under, home);
-        if (root !== null) paths.push(win32.join(root, path));
+    candidates,
+    // The folder of each program the app looks for a browser at, one there or not yet, and of the program picked in
+    // Custom…: a program loads what its own folder holds, a library put beside it among them (Microsoft Learn,
+    // "Dynamic-link library search order"), whatever its own signature says.
+    guarded: (home, chosen) => {
+      const folders = candidates(home).flatMap(({ paths }) => paths.map((path) => win32.dirname(path)));
+      if (chosen === null) return folders;
+      let real = chosen;
+      try {
+        real = realpathSync.native(chosen);
+      } catch {
+        // Gone: guarded where it was kept.
       }
-      for (const path of named === null ? [] : appPaths().get(named) ?? []) {
-        if (!paths.some((known) => known.toLowerCase() === path.toLowerCase())) paths.push(path);
-      }
-      return { id, name, verified, paths };
-    }),
+      return [...folders, win32.dirname(real)];
+    },
     refused: (real: string, _disk: Disk) => {
       if (!isProgram(real)) return NOT_A_PROGRAM;
       if (!ON_A_DRIVE.test(real)) return ON_A_NETWORK;

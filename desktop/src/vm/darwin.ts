@@ -186,6 +186,9 @@ interface Shared {
 class DarwinVm implements VmBackend {
   readonly exited: Promise<string>;
   readonly emulated = null;
+  // VZSharedDirectory's init(url:readOnly:) takes a folder by its URL, and Apple's documentation does not say when the
+  // framework's server opens it: as it is shared, at the guest's first look, or at each.
+  readonly opensByPath = true;
   // Each share in the guest, by its tag and name; each name, r<n>, is never given again in this VM.
   private readonly shares = new Map<string, Shared>();
   private made = 0;

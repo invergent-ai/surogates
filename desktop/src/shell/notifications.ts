@@ -1,8 +1,7 @@
-// The system's notifications, raised by the main process as Claude Desktop raises its own
-// (index.chunk-CV5ohobO.js): one per tag, a newer one replacing it, each held until it is
-// clicked, closed or fails to show, so that its click still reaches the app. A click opens
-// what it tells of. Its title may be the agent's words, as a chat's or a question's; its body
-// is the app's own, since some notification services read markup in a body.
+// The system's notifications, raised by the main process: one per tag, a newer one replacing
+// it, each held until it is clicked, closed or fails to show, so that its click still reaches
+// the app. A click opens what it tells of. Its title may be the agent's words, as a chat's or a
+// question's; its body is the app's own, since some notification services read markup in a body.
 
 import { forThisOs } from "../platform.js";
 import { report } from "../report.js";

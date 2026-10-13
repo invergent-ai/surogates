@@ -31,24 +31,23 @@ char LICENSE[] SEC("license") = "GPL";
 #define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component (dir: as a directory being moved) as folded (sg_fold), and, where the kernel's line
-// names *windows*, as a spelling NTFS may resolve to another name (sg_windows_alias). One bounded pass: sg_fold,
-// sg_classify and sg_windows_alias are out-of-line, each verified once, and sg_fold and sg_step branch-free, so
-// the walk stays within the verifier's budget at SG_WALK=12.
+// judging each component (dir: as a directory being moved) as folded (sg_fold), read whole; and,
+// where the kernel's line names *windows*, as a spelling NTFS may resolve to another name
+// (sg_windows_alias), read whole too. One bounded pass: sg_fold, sg_classify and sg_windows_alias
+// are out-of-line, each verified once, sg_fold's and sg_windows_alias's loops over a name's bytes
+// until their state stops changing, and sg_fold and sg_step branch-free, so the walk stays within
+// the verifier's budget at SG_WALK=12.
 static __noinline int judge(struct dentry *dentry, int dir, int windows)
 {
-	struct sg_raw raw = {};
 	struct sg_name nm;
 	struct sg_state st;
 	sg_init(&st, dir);
 	for (int i = 0; i < SG_WALK; i++) {
 		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
 		int len = BPF_CORE_READ(dentry, d_name.len);
-		// NUL-terminated: what a longer name before it left past the NUL completes no character.
-		long got = bpf_core_read_str(raw.b, SG_RAWLEN, name);
-		if (windows && sg_windows_alias(&raw, got < 0 ? 0 : len))
+		if (windows && sg_windows_alias((sg_text)name, len))
 			return REFUSED;
-		if (sg_step(&st, sg_classify(&nm, sg_fold(&raw, got < 0 ? 0 : len, &nm))))
+		if (sg_step(&st, sg_classify(&nm, sg_fold((sg_text)name, len, &nm))))
 			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
 		if (parent == dentry)
@@ -79,17 +78,12 @@ static __always_inline int windows_names(void)
 	return set && *set == NAMES_WINDOWS;
 }
 
-// Whether *dentry*'s own name is one Windows's Explorer acts on, by its end: its last SG_TAIL bytes, or the
-// whole of a shorter one. One whose end cannot be read is taken for one: the set refuses what it cannot judge.
+// Whether *dentry*'s own name is one Windows's Explorer acts on, read whole, as judge reads each name (sg_explorer).
 static __noinline int explorer_name(struct dentry *dentry)
 {
-	struct sg_tail tail = {};
 	const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
-	unsigned int len = BPF_CORE_READ(dentry, d_name.len);
-	long got = len > SG_TAIL ? bpf_probe_read_kernel(tail.b, SG_TAIL, name + (len - SG_TAIL)) : bpf_probe_read_kernel_str(tail.b, SG_TAIL + 1, name);
-	if (got < 0)
-		return 1;
-	return sg_explorer(&tail, len > SG_TAIL ? SG_TAIL : (int)len);
+	int len = BPF_CORE_READ(dentry, d_name.len);
+	return sg_explorer((sg_text)name, len);
 }
 
 // A share's filesystem: a guest mounts its shares as one kind, virtio-fs or 9p, and nothing else as either.

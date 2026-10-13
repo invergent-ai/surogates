@@ -1,11 +1,10 @@
-// The app's one window, shaped as Claude Desktop shapes its main window (index.js):
-// frameless, with the system's own controls drawn as this OS draws them (main-window-linux.ts);
-// placed as the user left it; hidden when the user closes it, unless Keep running is off. Its own
-// page draws the sidebar, the centre's header and the Overview pane. The agent's web
-// client fills the centre's hole, in a WebContentsView of the agent's own partition
-// that stays on the agent's origin, as claude.ai fills Claude Desktop's window. A thread read in
-// the Overview pane fills the pane's hole, in a second view of the same partition that has no
-// bridge and stays on its transcript.
+// The app's one window: frameless, with the system's own controls drawn as this OS draws
+// them (main-window-linux.ts); placed as the user left it; hidden when the user closes it,
+// unless Keep running is off. Its own page draws the sidebar, the centre's header and the
+// Overview pane. The agent's web client fills the centre's hole, in a WebContentsView of the
+// agent's own partition that stays on the agent's origin. A thread read in the Overview pane
+// fills the pane's hole, in a second view of the same partition that has no bridge and stays
+// on its transcript.
 
 import {
   app, BrowserWindow, type BrowserWindowConstructorOptions, net, screen, shell, type TitleBarOverlay, type WebContents, WebContentsView, webContents,

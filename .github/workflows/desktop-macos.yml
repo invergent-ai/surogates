@@ -44,12 +44,14 @@ jobs:
       - name: Install Electron
         run: npm run electron:install
 
-      # The app's code, which a file of the project runs as the app does, and the app's own way of starting a program
-      # cleanly on macOS, beside its node.
-      - name: Build the app's code and surogate-spawn
+      # The app's code, which a file of the project runs as the app does; the app's own way of starting a program
+      # cleanly on macOS, beside its node; and surogate-helper, which reads this Mac's Computer Name, its processes and
+      # its admin trust domain for the project's files that look at them on a Mac.
+      - name: Build the app's code, surogate-spawn and surogate-helper
         run: |
           npx tsc -p tsconfig.build.json
           native/spawn/build.sh
+          native/helper/build.sh
 
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos

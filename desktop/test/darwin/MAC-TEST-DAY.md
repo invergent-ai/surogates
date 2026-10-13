@@ -1,6 +1,6 @@
 # Surogate Desktop on a Mac: the test days
 
-This runbook tests branch `test/macos-cde`: master with the macOS VM backend, the file host under Seatbelt, and the shell and browser joined. Run it on an Apple-silicon Mac with macOS 14 or later.
+This runbook tests the checkout it is in: the macOS VM backend, the file host under Seatbelt, and the shell and the browser. Run it on an Apple-silicon Mac with macOS 14 or later.
 
 Steps 0 to 5 are the first day's. The second day runs them again, then the checks under "Second day" at the end.
 
@@ -16,16 +16,22 @@ Each step says what a pass looks like. When something fails, keep going where yo
 - **A container runtime for the agent's disk:** OrbStack, Docker Desktop or colima, running, with arm64 Linux containers.
 - **`gh auth login`**, so the guest image can be downloaded.
 
-## 1. Get the branch and the guest image
+## 1. Get the code and the guest image
+
+Clone the branch you were asked to test (without `-b`, master), then download the arm64 guest image of the newest successful run of the "Desktop's arm64 guest" workflow (`desktop-guest-arm64.yml`), and compare its key with this checkout's:
 
 ```
-git clone -b test/macos-cde https://github.com/invergent-ai/surogates.git && cd surogates
-gh run download 38392091602 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+git clone -b <branch> https://github.com/invergent-ai/surogates.git && cd surogates
+run=$(gh run list -R invergent-ai/surogates --workflow desktop-guest-arm64.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$run" -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+node -p 'require("./images/guest/out/manifest.json").key'
+docker run --rm -v "$PWD:/repo" -w /repo ubuntu:24.04 images/guest/inputs.sh arm64
 cd desktop && npm ci
 ```
 
-- The guest image is the arm64 one built from this branch. With it in `images/guest/out`, step 3 doesn't build the image itself, which takes about an hour. GitHub keeps it a week after its run: once it is gone, leave `images/guest/out` empty and let step 3 build it.
-- Pass: no error, and `images/guest/out` holds `rootfs.img.zst` and `manifest.json`.
+- The two keys printed are the image's and this checkout's. When they are the same, the image is this checkout's, and step 3 doesn't build it itself, which takes about an hour.
+- When they differ, or no run is left (GitHub keeps an image a week after its run), run `rm -rf images/guest/out` and let step 3 build it.
+- Pass: no error, and `images/guest/out` holds `rootfs.img.zst` and `manifest.json` with this checkout's key, or is empty for step 3 to fill.
 
 ## 2. The file host under Seatbelt (security first)
 
@@ -47,7 +53,7 @@ test/acceptance/macos/file-host.sh
     - the three hard links a landing makes: in the folder, from it into the working folder, and back;
     - load fsat, and run rg;
   - in `Seatbelt:`, `hard-link a file of the app's into the folder` and `hard-link a file outside into the folder` are refused (`EPERM`). **Either one `ok` is a security finding: stop and report it before anything else;**
-  - `M8` shows `reached 0, wroteOutside 0, kept "OUTSIDE\n"`;
+  - in the `the link-flip race:` line, `sandboxed` shows `"reached":0`, `"wroteOutside":0` and `"kept":"OUTSIDE\n"`;
   - every place line shows `"reached":0` and `"left":["only-outside"]`.
 - **Send back:** the `Seatbelt:` line, and the two logs the script names at its end.
 
@@ -82,16 +88,19 @@ Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/me
 3. **`ports`:** the guest sees `ai.surogate.control`, `ai.surogate.net` and `ai.surogate.inbound`, and a 261 KB result comes back whole.
 4. **`disks`:** vda, vdb and vdc in that order, read-only 1, 1, 0, and vdc 32 GiB.
 5. **`shares`:** for each of `multiple` and `single`, every root reads its own folder and no other. If only `single` passes, say so: the backend then switches layout.
-6. **`coherence`:** 0 stale reads of 1,000, the large file seen whole, and `git status` sees the 10 changes.
-7. **`owners`:** a session runs as a uid from 10000 up, sees its folder as that uid's, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
-8. **`mmap`:** recorded only.
-9. **`descriptors`:** all 150,000 files found, 1,000 read, git commits them, and no EMFILE.
-10. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, and the folder on the Mac is unchanged. It runs whether or not its chat's setup is refused.
-11. **`tcc`:** watch for privacy prompts and note which app each names. Optionally, set `MEASURE_VOLUME=/Volumes/<a USB stick>` to include a removable drive.
-12. **`network`:** if macOS asks about the local network, note the app it names, and allow it. Pass: a command reaches this Mac's LAN address through the proxy.
-13. **`lifetime`:** nothing of the VM is left after `surogate-vm` is killed.
-14. **`sleep`, by hand:** when it says so, sleep the Mac for a minute or more, then wake it. Pass: the command went on, and the guest's clock is within 2 s.
-15. **`memory`:** about 20 minutes; recorded only.
+6. **`identity`:** recorded only: the inode numbers Apple's share shows the guest beside the Mac's own, and which folder a root is shown once the Mac has moved its folder aside and made another at its path. Pass: `PASS the root was set up and the look ran`.
+7. **`coherence`:** 0 stale reads of 1,000, the large file seen whole, and `git status` sees the 10 changes.
+8. **`owners`:** a session runs as a uid from 10000 up, sees its folder as that uid's, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
+9. **`mmap`:** recorded only.
+10. **`descriptors`:** all 150,000 files found, 1,000 read, git commits them, and no EMFILE.
+11. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, nor reach it from another folder on the same device: no rename, hard link or exchange into it or out of it, and no write through a link out. The folder on the Mac is unchanged. It runs whether or not its chat's setup is refused.
+
+    **A line that says `allowed`, or a FAIL of `the folder on the host as it was`, is a security finding: stop and report it before anything else. A place's read-only folder then needs a device of its own.**
+12. **`tcc`:** watch for privacy prompts and note which app each names. Optionally, set `MEASURE_VOLUME=/Volumes/<a USB stick>` to include a removable drive.
+13. **`network`:** if macOS asks about the local network, note the app it names, and allow it. Pass: a command reaches this Mac's LAN address through the proxy.
+14. **`lifetime`:** nothing of the VM is left after `surogate-vm` is killed.
+15. **`sleep`, by hand:** when it says so, sleep the Mac for a minute or more, then wake it. Pass: the command went on, and the guest's clock is within 2 s.
+16. **`memory`:** about 20 minutes; recorded only.
 
 **Send back** the whole `test/vm/darwin/measure/out/` folder.
 
@@ -156,12 +165,13 @@ The same Mac and the same test account as the first day. First bring the checkou
 
 ### The VM
 
-1. **The new guest image.** Each root now runs on its own uid, and the image loads its entropy device's driver, so the first day's image no longer boots. From the checkout's top:
+1. **The new guest image.** Each root now runs on its own uid, the image loads its entropy device's driver, and the guest's rule reads each name whole, so the first day's image is not this checkout's. From the checkout's top:
    ```
    rm -rf images/guest/out
-   gh run download 38392091602 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+   gh run download 38450928316 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
    ```
-   Pass: `images/guest/out` holds `rootfs.img.zst`, `vmlinuz.zst` and `manifest.json`.
+   Then compare its key with this checkout's, as the first day's step 1 does. If they differ, or the run's image is gone, find the newest run as step 1 does, or let `prepare.sh` build the image.
+   Pass: `images/guest/out` holds `rootfs.img.zst`, `vmlinuz.zst` and `manifest.json`, with this checkout's key.
 2. **Prepare:** `cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh`. Pass: it ends with "ready", and `test/vm/darwin/measure/probing/agent.img` is there.
 3. **surogate-vm's tests on this Xcode:** `swift test --package-path native/macos`. Pass: "Executed 28 tests, with 0 failures".
 4. **The boot and its timings:** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts boot`.
@@ -183,7 +193,8 @@ The same Mac and the same test account as the first day. First bring the checkou
      Pass: the same, and its `the Mac user` line says uid 501. Copy that `test/vm/darwin/measure/out/share-owners.json` to `share-owners-501.json`, then remove `/Users/Shared/surogate-measure` and that account's `~/SurogateMeasure`.
 6. **Every measurement of the first day's step 3, the rest after `boot`,** back in the test account, each as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`, in this order:
    1. **`escape` first.** Pass: as the first day's step 3.2 says. **A FAIL of a protected write is a security finding: stop and report it before anything else.**
-   2. Then `ports`, `disks`, `shares`, `coherence`, `owners`, `mmap`, `descriptors`, `readonly`, `tcc`, `network`, `lifetime`, `sleep` (by hand) and `memory`, each with the first day's pass lines. For `owners`: a session runs as a uid from 10000 up and sees its folder as that uid's. **A write `readonly` allows is a security finding: stop and report it before anything else.**
+   2. Then `ports`, `disks`, `shares`, `identity`, `coherence`, `owners`, `mmap`, `descriptors`, `readonly`, `tcc`, `network`, `lifetime`, `sleep` (by hand) and `memory`, each with the first day's pass lines. For `owners`: a session runs as a uid from 10000 up and sees its folder as that uid's. **A write `readonly` allows, in its own folder or from another on the device, is a security finding: stop and report it before anything else. A place's read-only folder then needs a device of its own.**
+   3. For `identity`, send back its two lines of inodes, the Mac's and the guest's, and what the root was shown after the move: whether the guest sees the Mac's own inode numbers decides whether the app can check a share's folder by its identity from the guest.
 
 **Send back:** the whole `test/vm/darwin/measure/out/` folder, `share-owners-502.json` and `share-owners-501.json`, and every FAIL with its words.
 
@@ -214,3 +225,16 @@ First make the app again, as the first day's step 4 does (`scripts/mac-build.sh`
    - System Settings → General → Login Items no longer lists Surogate Dev.
 8. **The spelling dictionary.** Make the bundle again with `scripts/mac-build.sh && test/darwin/dev-bundle.sh`, and start it from Terminal with `"$HOME/Applications/Surogate Dev.app/Contents/MacOS/Electron"`.
    - Pass: its output has no `ENOENT` for `dictionaries/en-US-10-1.bdic`. Quit it with ⌘Q.
+9. **Protected names on a USB stick formatted exFAT.** FAT's and exFAT's volumes drop the dots and spaces a name ends with, so there `.git.` can be `.git`. In Disk Utility, erase a USB stick as ExFAT, named `SGSTICK`. Then, in Terminal:
+   ```
+   mkdir -p /Volumes/SGSTICK/names/.git /Volumes/SGSTICK/work/.git/hooks
+   touch '/Volumes/SGSTICK/names/.git./x' '/Volumes/SGSTICK/names/.mcp.json.'; ls -a /Volumes/SGSTICK/names /Volumes/SGSTICK/names/.git
+   ```
+   - Note what `ls` shows: whether `x` is in `.git` and `.mcp.json` is there, so the volume dropped the dot, or the `touch` was refused.
+   - In Surogate Dev, start a chat on `/Volumes/SGSTICK/work`, allowing access to the removable volume when macOS asks. Ask the agent to write, with its file tools, `.git./hooks/pre-commit`, `.vscode /settings.json` and `.mcp.json.`. Then ask it to run, as one command, `touch '.git./hooks/x' '.mcp.json.'; mkdir '.vscode '; ls -a . .git/hooks`.
+   - Pass: each write is refused as protected in this folder, each step of the command says "Operation not permitted", and `ls -a /Volumes/SGSTICK/work /Volumes/SGSTICK/work/.git/hooks` on the Mac shows no `.vscode`, no `.mcp.json` and no `x`.
+   - **Any of those on the stick is a security finding: stop and report it before anything else.**
+   - If `hdiutil create -size 64m -fs HFS+ -volname SGHFS ~/sghfs.dmg && hdiutil attach ~/sghfs.dmg` works, make `/Volumes/SGHFS/work/.git/hooks` and do the same there, adding ``touch ".git/ho$(printf '\342\200\214')oks/x"`` to the command: HFS+ compares names without a zero-width non-joiner. Then `hdiutil detach /Volumes/SGHFS`.
+10. **The browser's signature, and its folder.**
+    - Settings → Browser lists Chrome and Edge, neither with "this browser's signature does not check out". If you can, install Brave or Vivaldi from its own site to `/Applications`: it is listed without those words too. Each is checked against its maker's signature, which a Mac shows only here for Brave and Vivaldi.
+    - Start a chat on `~/Applications`. Pass: the folder sheet refuses it, saying the app runs a browser there outside the sandbox.

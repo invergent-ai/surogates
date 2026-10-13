@@ -78,7 +78,7 @@ step "the file host on a Mac's own places" sh -c "SUROGATE_FILE_HOST_PLACES='$jo
 rm -rf "$documents" "$icloud/surogate-file-host-probe" 2>/dev/null
 
 echo "== what the suites measured"
-grep -h -E '^(Seatbelt|O_SEARCH|M8|/)' "$log/suites.log" "$log/places.log" || true
+grep -h -E '^(Seatbelt|O_SEARCH|the link-flip race|/)' "$log/suites.log" "$log/places.log" || true
 echo "== the logs: $log/suites.log, $log/places.log"
 echo "== the places it could not make"
 if [ ${#skipped[@]} -eq 0 ]; then echo "none"; else printf '%s\n' "${skipped[@]}"; fi
