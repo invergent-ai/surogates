@@ -184,7 +184,7 @@
     }
     if (target.pending !== undefined) {
       var sdt = doc.GetContentControlsByTag("pending:" + target.pending)[0];
-      if (!sdt) throw new Refusal("The pending block " + target.pending + " is gone: the user deleted it. Leave that section out.");
+      if (!sdt) throw new Refusal("The pending block " + target.pending + " is gone: the user deleted it (leave that section out), or an earlier op of this call filled or deleted it.");
       return { el: sdt, pending: true };
     }
     var found = find(target.find, true);
