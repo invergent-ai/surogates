@@ -304,8 +304,13 @@ it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles
   // The modules, by the modules.dep depmod makes of the pinned kernel's whole tree, before any is kept or copied out.
   expect(runsOf("modules").at(-1)?.split(" && ").map((command) => command.trim())).toEqual([
     '--mount=type=bind,from=kernel,source=/kernel/lib/modules,target=/all mkdir -p /image/lib/modules', 'cp -a "/all/$KERNEL" /image/lib/modules/',
-    'depmod -b /image "$KERNEL"', expect.stringMatching(/^modules\.sh copy /), expect.stringMatching(/^modules\.sh keep /),
+    'depmod -b /image "$KERNEL"', expect.stringMatching(/^modules\.sh copy .* \/initrd\/lib /),
+    'modules.sh copy "/image/lib/modules/$KERNEL" /standin/lib vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport',
+    expect.stringMatching(/^modules\.sh keep /),
   ]);
+  // The stand-in's modules, for the tests alone, in a target of their own: in neither the image nor its disk.
+  expect((STAGES.get("guest-standin") ?? "").split("\n").filter((line) => line && !line.startsWith("#"))).toEqual(["COPY --from=modules /standin/lib/ /"]);
+  for (const stage of ["guest", "guest-disk-build", "guest-disk", "initrd"]) expect(STAGES.get(stage), stage).not.toMatch(/standin/);
   expect(STAGES.get("guest")).toContain("COPY --from=modules /image/lib/modules/ /usr/lib/modules/");
   // The initrd, from the kernel stage's copy of its modules, beside the kernel the VM boots.
   expect(runsOf("initrd").at(-1)).toBe("--mount=type=bind,from=modules,source=/initrd,target=/modules mkdir /out && initrd.sh /src/init /bin/busybox /modules/lib /modules/modules /out/initrd");

@@ -228,6 +228,7 @@ RUN --mount=type=bind,from=kernel,source=/kernel/lib/modules,target=/all \
     mkdir -p /image/lib/modules && cp -a "/all/$KERNEL" /image/lib/modules/ \
     && depmod -b /image "$KERNEL" \
     && modules.sh copy "/image/lib/modules/$KERNEL" /initrd/lib $(sed 's/#.*//' /initrd/modules) \
+    && modules.sh copy "/image/lib/modules/$KERNEL" /standin/lib vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport \
     && modules.sh keep "/image/lib/modules/$KERNEL" netfs 9pnet 9pnet_fd 9p virtiofs overlay
 
 # ── The initrd, for Hyper-V ─────────────────────────────────────────
@@ -363,6 +364,11 @@ RUN --mount=type=bind,from=guest,target=/tree \
 
 FROM scratch AS guest-disk
 COPY --from=guest-disk-build /out/ /
+
+# For the tests alone, never the image's or the release's: the modules of QEMU's vsock device, which the stand-in
+# for Hyper-V's devices loads from the initrd in its sockets' drivers' place (desktop/test/vm/hyperv/).
+FROM scratch AS guest-standin
+COPY --from=modules /standin/lib/ /
 
 # ── The cloud sandbox ───────────────────────────────────────────────
 FROM tools AS sandbox
