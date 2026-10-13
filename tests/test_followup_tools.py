@@ -341,6 +341,24 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
 
 
 @pytest.mark.asyncio
+async def test_escalate_marks_red_when_an_emergency_script_was_sent(sf, patient, care_team):
+    _, session_id = patient
+    await followup.handle_escalate({"reason": "Durere în piept"}, **_kw(sf, session_id))
+    await followup.handle_escalate(
+        {"reason": "Durere în piept, i-am spus să sune la 112", "severity": "red"},
+        **_kw(sf, session_id),
+    )
+    yellow, red = sorted(await _outreach(sf), key=lambda r: r.severity == "red")
+    assert yellow.severity == "yellow" and not yellow.text.startswith("🔴")
+    assert red.severity == "red" and red.text.startswith("🔴 Durere în piept")
+    assert red.dedupe_key.startswith("escalation:-:")
+    assert yellow.dedupe_key.rsplit(":", 1)[0] != red.dedupe_key.rsplit(":", 1)[0]
+    assert (await followup.handle_escalate(
+        {"reason": "x", "severity": "orange"}, **_kw(sf, session_id),
+    )) == "severity must be red or yellow."
+
+
+@pytest.mark.asyncio
 async def test_escalate_with_nobody_configured_fails_visibly(sf, patient):
     _, session_id = patient
     result = await followup.handle_escalate(

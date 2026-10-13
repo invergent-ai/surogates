@@ -231,6 +231,15 @@ ESCALATE_SCHEMA = ToolSchema(
                     "act on, in their language."
                 ),
             },
+            "severity": {
+                "type": "string",
+                "enum": ["red", "yellow"],
+                "description": (
+                    "red when you gave the person an emergency script (call "
+                    "the emergency number, go to the emergency room); "
+                    "yellow otherwise. Default yellow."
+                ),
+            },
         },
         "required": ["reason"],
     },
@@ -323,13 +332,16 @@ def _start_date(arguments: dict, timezone_name: str) -> date | None:
     return _parse_date((today - timedelta(days=int(str(raw_days).strip()))).isoformat())
 
 
-async def _tell_care_team(sf: Any, ctx: _Context, settings: Any, *, kind: str, text: str):
+async def _tell_care_team(
+    sf: Any, ctx: _Context, settings: Any, *, kind: str, text: str, **extra: Any,
+):
     """The care team's phones, with who it is about, never the person talking."""
     return await followup_store.notify_care_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
         text=f"{text.strip()}\n\n— {ctx.person_label()}", created_by="agent",
         subject_user_id=ctx.user_id, exclude_user_id=ctx.user_id,
         fallback_sender=ctx.sender if ctx.channel == "whatsapp" else None,
+        **extra,
     )
 
 
@@ -693,6 +705,9 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     reason = str(arguments.get("reason") or "").strip()
     if not reason:
         return "reason is required — say what needs the care team's attention."
+    severity = arguments.get("severity") or "yellow"
+    if severity not in followup_store.ALERT_SEVERITIES:
+        return "severity must be red or yellow."
 
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
@@ -728,7 +743,14 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
         reason=reason, payload=payload,
     )
-    queued, why_not = await _tell_care_team(sf, ctx, settings, kind="alert", text=reason)
+    # The key groups this escalation's alerts so an unopened red one is
+    # reminded once, and names the check-in whose history records it.
+    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{uuid.uuid4().hex}"
+    queued, why_not = await _tell_care_team(
+        sf, ctx, settings, kind="alert",
+        text=f"🔴 {reason}" if severity == "red" else reason,
+        severity=severity, dedupe_prefix=escalation,
+    )
 
     if invitation is not None:
         # One write records what happened, on the check-in's own history.

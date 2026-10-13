@@ -498,3 +498,101 @@ async def test_the_agents_setting_moves_the_expiry_but_not_other_texts(sf, docto
     assert (await _row(sf, row.id)).state == "failed"
     assert "6 hours" in (await _row(sf, row.id)).reason
     assert (await _row(sf, alert.id)).state == "awaiting_reply"
+
+
+# --- red alerts nobody opened -----------------------------------------------
+
+
+async def _red_alert(sf, team, *, minutes=None, invitation_id="-"):
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, channel_identifier=SENDER,
+        alert_recipient_user_ids=team, alert_template_name="alert",
+        alert_template_language="ro", red_alert_reminder_minutes=minutes,
+    )
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    await store.notify_care_team(
+        sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="🔴 Faint",
+        created_by="agent", severity="red",
+        dedupe_prefix=f"escalation:{invitation_id}:{uuid.uuid4().hex}",
+    )
+
+
+async def _alerts(sf, created_by):
+    async with sf() as db:
+        return (await db.execute(
+            sa.select(OutreachMessageRow).where(OutreachMessageRow.created_by == created_by)
+        )).scalars().all()
+
+
+async def _at(sf, minutes):
+    """Pretend every alert was raised *minutes* before NOW."""
+    async with sf() as db:
+        await db.execute(
+            sa.update(OutreachMessageRow).values(created_at=NOW - timedelta(minutes=minutes))
+        )
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_an_unopened_red_alert_is_sent_once_more_to_the_whole_team(sf, doctor_session):
+    first, second = uuid.uuid4(), uuid.uuid4()
+    await _red_alert(sf, [first, second])
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=31))
+    await _at(sf, 29)
+    await _send(sf, _Store(), _Delivery())
+    assert await _alerts(sf, "reminder") == []
+
+    await _at(sf, 31)
+    delivery = _Delivery()
+    await _send(sf, _Store(), delivery)
+    reminders = await _alerts(sf, "reminder")
+    assert {r.user_id for r in reminders} == {first, second}
+    assert all(r.severity == "red" for r in reminders)
+    assert reminders[0].text.startswith("🔴 Reminder, not yet opened after 30 minutes")
+    # Each reminder reopens with a fresh template rather than riding on the first.
+    assert [p for *_, p in delivery.sent] == [{"template": {"name": "alert", "language": "ro"}}] * 2
+    assert all(r.reminded_at is not None for r in await _alerts(sf, "agent"))
+
+    for later in (5, 60, 600):
+        await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=later))
+    assert len(await _alerts(sf, "reminder")) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_opened_or_yellow_alert_is_not_reminded(sf, doctor_session):
+    member = uuid.uuid4()
+    await _wrote(sf, NOW - timedelta(hours=1))  # window open: the alert reads as text
+    await _red_alert(sf, [member])
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    await store.notify_care_team(
+        sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="Mild",
+        created_by="agent", severity="yellow", dedupe_prefix=f"escalation:-:{uuid.uuid4().hex}",
+    )
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    await _at(sf, 40)
+    await _send(sf, _Store(), _Delivery())
+    assert await _alerts(sf, "reminder") == []
+
+
+@pytest.mark.asyncio
+async def test_the_reminder_wait_is_the_agents_setting_and_marks_the_check_in(sf, doctor_session):
+    from surogates.db.models import ProgramInvitationRow
+
+    invitation_id = uuid.uuid4()
+    async with sf() as db:
+        db.add(ProgramInvitationRow(
+            id=invitation_id, org_id=ORG, agent_id=AGENT, program_id=uuid.uuid4(),
+            occurrence_id=uuid.uuid4(), user_id=uuid.uuid4(), platform="whatsapp",
+            platform_user_id="40700000001", escalation_state="raised",
+        ))
+        await db.commit()
+    await _red_alert(sf, [uuid.uuid4()], minutes=60, invitation_id=invitation_id)
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=61))
+    await _at(sf, 45)
+    await _send(sf, _Store(), _Delivery())
+    assert await _alerts(sf, "reminder") == []
+    await _at(sf, 61)
+    await _send(sf, _Store(), _Delivery())
+    assert len(await _alerts(sf, "reminder")) == 1
+    async with sf() as db:
+        assert (await db.get(ProgramInvitationRow, invitation_id)).escalation_state == "reminded"

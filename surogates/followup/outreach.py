@@ -35,6 +35,7 @@ from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
     DeliveryOutbox,
+    ProgramInvitationRow,
     Event,
     FollowupSettingsRow,
     OutreachMessageRow,
@@ -76,9 +77,14 @@ OPERATOR_UNANSWERED_HOURS = 24
 OUTCOME_LOOKBACK = timedelta(days=4)
 #: The team's notices about a message's outcome, overridable per agent in
 #: ``followup_settings.texts`` like every other platform wording.
+#: Minutes a red alert may wait unopened before the team is reminded,
+#: unless the agent's settings say otherwise.  Never below the burst
+#: window: a reminder sooner would ride on the alert's own template.
+RED_ALERT_REMINDER_MINUTES = 30
 DEFAULT_TEXTS = {
     "delivered_notice": "✅ {name} received your message ({time}).",
     "undelivered_notice": "⚠️ {name} did not receive your message: {why}. Call them? {phone}",
+    "red_alert_reminder": "🔴 Reminder, not yet opened after {minutes} minutes:\n\n{text}",
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
@@ -387,6 +393,84 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
     return reported
 
 
+def red_alert_reminder_minutes(settings: Any) -> int:
+    minutes = getattr(settings, "red_alert_reminder_minutes", None) or RED_ALERT_REMINDER_MINUTES
+    return max(int(minutes), int(BATCH_WINDOW.total_seconds() // 60))
+
+
+async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> int:
+    """Send a red alert again, once, when a team member has not opened it.
+
+    "Not opened" is a held alert: its template went out and its recipient
+    has not answered.  The reminder goes to the whole team, so a colleague
+    can act when the first recipient is away from their phone.  Claiming
+    the escalation's rows first makes it one reminder whichever pass gets
+    there, and never a second.
+    """
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(OutreachMessageRow, FollowupSettingsRow)
+                .outerjoin(FollowupSettingsRow, sa.and_(
+                    FollowupSettingsRow.org_id == OutreachMessageRow.org_id,
+                    FollowupSettingsRow.agent_id == OutreachMessageRow.agent_id,
+                ))
+                .where(OutreachMessageRow.kind == "alert")
+                .where(OutreachMessageRow.severity == "red")
+                .where(OutreachMessageRow.reminded_at.is_(None))
+                .where(OutreachMessageRow.dedupe_key.like("escalation:%"))
+                .where(OutreachMessageRow.state.in_(_HELD))
+                .where(OutreachMessageRow.created_at <= now - BATCH_WINDOW)
+                .where(OutreachMessageRow.created_at >= now - timedelta(days=1))
+                .limit(BATCH)
+            )
+        ).all()
+    due: dict[str, tuple[Any, Any]] = {}
+    for row, settings in rows:
+        wait = timedelta(minutes=red_alert_reminder_minutes(settings))
+        if as_utc(row.created_at) <= as_utc(now) - wait:
+            due.setdefault(row.dedupe_key.rsplit(":", 1)[0], (row, settings))
+
+    reminded = 0
+    for escalation, (row, settings) in due.items():
+        async with session_factory() as db:
+            claimed = await db.execute(
+                sa.update(OutreachMessageRow)
+                .where(OutreachMessageRow.org_id == row.org_id)
+                .where(OutreachMessageRow.dedupe_key.like(f"{escalation}:%"))
+                .where(OutreachMessageRow.reminded_at.is_(None))
+                .values(reminded_at=now)
+            )
+            await db.commit()
+        if not int(claimed.rowcount or 0):
+            continue
+        minutes = red_alert_reminder_minutes(settings)
+        queued, why_not = await followup_store.notify_care_team(
+            session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
+            kind="alert", severity="red", created_by="reminder",
+            text=followup_store.render_text(
+                ((settings.texts or {}) if settings else {}).get("red_alert_reminder"),
+                DEFAULT_TEXTS["red_alert_reminder"], minutes=minutes, text=row.text,
+            ),
+            subject_user_id=row.subject_user_id,
+            dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
+            fallback_sender=row.channel_identifier,
+        )
+        reminded += queued
+        invitation_id = escalation.split(":")[1]
+        if invitation_id != "-":
+            async with session_factory() as db:
+                await db.execute(
+                    sa.update(ProgramInvitationRow)
+                    .where(ProgramInvitationRow.id == uuid.UUID(invitation_id))
+                    .values(escalation_state="reminded" if queued else "reminder_failed")
+                )
+                await db.commit()
+        if not queued:
+            logger.warning("[outreach] red alert reminder for %s reached nobody: %s", escalation, why_not)
+    return reminded
+
+
 async def send_queued_outreach(
     session_factory: Any,
     *,
@@ -406,6 +490,7 @@ async def send_queued_outreach(
     """
     await _expire_unanswered(session_factory, now=now)
     await _report_outcomes(session_factory, now=now)
+    await _remind_unseen_red_alerts(session_factory, now=now)
 
     answered = sa.exists().where(
         ChannelContactRow.org_id == OutreachMessageRow.org_id,

@@ -1059,3 +1059,10 @@ ALTER TABLE followup_enrollments
 -- ── followup_settings: how long a doctor's held message may wait ─────
 ALTER TABLE followup_settings
     ADD COLUMN IF NOT EXISTS operator_unanswered_hours integer;
+
+-- ── red alerts nobody opened are sent again, once ────────────────────
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS red_alert_reminder_minutes integer;
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS severity text,
+    ADD COLUMN IF NOT EXISTS reminded_at timestamptz;

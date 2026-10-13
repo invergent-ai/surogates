@@ -35,6 +35,7 @@ __all__ = [
     "OUTREACH_KINDS",
     "OUTREACH_PLATFORMS",
     "SETTINGS_FIELDS",
+    "ALERT_SEVERITIES",
     "active_program_configs",
     "enrollments",
     "get_settings",
@@ -69,8 +70,9 @@ SETTINGS_FIELDS = frozenset({
     "alert_template_language", "message_template_name",
     "message_template_language", "welcome_template_name",
     "welcome_template_language", "offer_protocols", "texts",
-    "operator_unanswered_hours",
+    "operator_unanswered_hours", "red_alert_reminder_minutes",
 })
+ALERT_SEVERITIES = ("red", "yellow")
 
 
 class CareTeamMember(ValueError):
@@ -475,6 +477,7 @@ async def notify_care_team(
     exclude_user_id: uuid.UUID | None = None,
     fallback_sender: str | None = None,
     only_user_id: uuid.UUID | None = None,
+    severity: str | None = None,
 ) -> tuple[int, str | None]:
     """Queue *text* for every alert recipient.  Returns (queued, why none).
 
@@ -509,6 +512,7 @@ async def notify_care_team(
             template_language=settings.alert_template_language if settings else None,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=f"{dedupe_prefix}:{recipient_id}" if dedupe_prefix else None,
+            severity=severity,
         )
         queued += 1
     return queued, None if queued else "the only configured recipient is this person"
@@ -612,6 +616,7 @@ async def queue_outreach(
     subject_user_id: uuid.UUID | None = None,
     created_by: str | None = None,
     dedupe_key: str | None = None,
+    severity: str | None = None,
 ) -> OutreachMessageRow:
     """Queue one message.  With ``dedupe_key``, queuing the same cause twice
     returns the first row instead of writing to the person again.
@@ -621,6 +626,8 @@ async def queue_outreach(
     """
     if kind not in OUTREACH_KINDS:
         raise ValueError(f"kind must be one of {', '.join(OUTREACH_KINDS)}")
+    if severity is not None and severity not in ALERT_SEVERITIES:
+        raise ValueError(f"severity must be one of {', '.join(ALERT_SEVERITIES)}")
     if platform not in OUTREACH_PLATFORMS:
         raise ValueError(f"outreach is not available on {platform}")
     text = text.strip()
@@ -633,7 +640,7 @@ async def queue_outreach(
             kind=kind, text=text, template_name=template_name or None,
             template_language=template_language or None, state="queued",
             subject_user_id=subject_user_id, created_by=created_by,
-            dedupe_key=dedupe_key,
+            dedupe_key=dedupe_key, severity=severity,
         )
         db.add(row)
         try:

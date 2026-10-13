@@ -1229,6 +1229,11 @@ class FollowupSettingsRow(Base):
     operator_unanswered_hours: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True,
     )
+    #: Minutes a red alert may sit unopened by a team member before it is
+    #: sent again, once, to the whole team.  NULL is the platform default.
+    red_alert_reminder_minutes: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
         onupdate=func.now(),
@@ -1327,6 +1332,13 @@ class OutreachMessageRow(Base):
         GUID(), nullable=True, index=True,
     )
     created_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: On an alert: ``red`` when an emergency script went to the person,
+    #: else ``yellow``.  A red one left unopened is sent again once.
+    severity: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: When the one reminder for this alert's escalation went out.
+    reminded_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
     )
