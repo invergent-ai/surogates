@@ -1133,7 +1133,16 @@ class FollowupEnrollmentRow(Base):
     #: person enrolled without one is reached only by audiences with no day
     #: window.
     start_date: Mapped[Optional[Any]] = mapped_column(Date, nullable=True)
+    #: Set when the person only knew it roughly ("about two weeks ago").
+    start_date_approximate: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False,
+    )
     phase: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The patient's own name.  The user's display name is their WhatsApp
+    #: profile, which is a relative's when the relative enrolled them.
+    patient_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Who answers the check-ins when not the patient, e.g. "Ana, daughter".
+    answered_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="active",
     )

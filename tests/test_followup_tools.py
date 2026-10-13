@@ -394,3 +394,61 @@ async def test_the_care_team_is_recognised_and_never_enrolled(sf, patient):
     assert await store.enrollments(
         sf, org_id=ORG, agent_id=AGENT, user_id=user_id,
     ) == []
+
+
+# --- patient identity -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
+    # The WhatsApp profile is the daughter's: alerts named her, never him.
+    user_id, session_id = patient
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x",
+         "patient_name": " Petre Marin ", "answered_by": "Ana, fiica"},
+        **_kw(sf, session_id),
+    )
+    assert "for Petre Marin (answered by Ana, fiica)" in result
+    [note] = await _outreach(sf)
+    assert note.text.endswith("— Petre Marin · via Ana, fiica · +40700000001")
+
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "patient Petre Marin, answered by Ana, fiica" in status
+
+    await followup.handle_escalate({"reason": "durere"}, **_kw(sf, session_id))
+    async with sf() as db:
+        item = (await db.execute(sa.select(InboxItem))).scalar_one()
+    assert item.title == (
+        "Needs your attention: Petre Marin · via Ana, fiica · +40700000001"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_names_the_patient_and_reenrolling_keeps_the_name(sf, patient):
+    user_id, session_id = patient
+    await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user_id, protocol="post-op",
+        start_date=None, phase=None, enrolled_by="agent",
+    )
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "patient's name not recorded" in status
+    result = await followup.handle_followup_update(
+        {"protocol": "post-op", "patient_name": "Petre Marin",
+         "answered_by": "Ana, fiica"},
+        **_kw(sf, session_id),
+    )
+    assert "patient Petre Marin, answered by Ana, fiica" in result
+    row = await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user_id, protocol="post-op",
+        start_date=None, phase=None, enrolled_by="agent",
+    )
+    assert (row.patient_name, row.answered_by) == ("Petre Marin", "Ana, fiica")
+
+
+def test_patient_label_prefers_the_enrollment_over_the_profile():
+    from types import SimpleNamespace
+
+    assert store.patient_label("Ana (fiica)", None) == "Ana (fiica)"
+    assert store.patient_label(
+        "Ana (fiica)", SimpleNamespace(patient_name="Petre Marin", answered_by=None),
+    ) == "Petre Marin"

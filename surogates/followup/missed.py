@@ -165,9 +165,17 @@ async def _alert_if_streak(
         settings_cache[key] = await followup_store.get_settings(
             session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
         )
+    enrollment = followup_store.labelling_enrollment(
+        await followup_store.enrollments(
+            session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
+            user_id=inv.user_id,
+        )
+    )
     text = render_missed_text(
         config.get("missed_alert_text"),
-        name=(user.display_name if user else "") or "?",
+        name=followup_store.patient_label(
+            user.display_name if user else "", enrollment,
+        ) or "?",
         phone=f"+{inv.platform_user_id}" if inv.platform_user_id else "?",
         count=threshold,
         program=str(config.get("name") or "check-in"),

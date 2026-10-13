@@ -80,6 +80,22 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "The phase to start in, when the protocol uses phases.",
             },
+            "patient_name": {
+                "type": "string",
+                "description": (
+                    "The patient's full name, as they or their relative gave "
+                    "it. Ask for it: the WhatsApp profile name is whoever is "
+                    "writing, which may be a relative."
+                ),
+            },
+            "answered_by": {
+                "type": "string",
+                "description": (
+                    "Who will answer the check-ins when it is not the patient, "
+                    "with their relation, e.g. \"Ana, daughter\". Omit when "
+                    "the patient answers."
+                ),
+            },
             "consent": {
                 "type": "boolean",
                 "description": (
@@ -103,7 +119,8 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
     name="followup_update",
     description=(
         "Change the enrolment of the person you are talking to: correct the "
-        "start date, move to another phase, or pause or end it (for example "
+        "start date or the patient's name, record who answers for them, move "
+        "to another phase, or pause or end it (for example "
         "while they are in hospital). Pausing or ending tells the care team, "
         "with your reason. Only change what the person or the practice has "
         "told you; never move a phase on your own judgement."
@@ -117,6 +134,17 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
                 "description": "The corrected day 0, as YYYY-MM-DD.",
             },
             "phase": {"type": "string", "description": "The new phase."},
+            "patient_name": {
+                "type": "string",
+                "description": "The corrected patient's full name.",
+            },
+            "answered_by": {
+                "type": "string",
+                "description": (
+                    "Who now answers the check-ins for the patient, with their "
+                    "relation, e.g. \"Ana, daughter\"."
+                ),
+            },
             "status": {
                 "type": "string",
                 "enum": list(followup_store.ENROLLMENT_STATUSES),
@@ -138,8 +166,8 @@ FOLLOWUP_STATUS_SCHEMA = ToolSchema(
     name="followup_status",
     description=(
         "Show the protocols this practice offers and the enrolments of the "
-        "person you are talking to: start date, the day they are on today, "
-        "phase and status."
+        "person you are talking to: patient, who answers for them, start date, "
+        "the day they are on today, phase and status."
     ),
     parameters={"type": "object", "properties": {}},
 )
@@ -191,10 +219,13 @@ class _Context:
             config.get(f"{self.channel}_channel_id") or ""
         )
         self.display_name: str = (user.display_name if user else "") or ""
+        #: The enrollment that names the patient, when there is one.
+        self.enrollment: Any = None
 
     def person_label(self) -> str:
         """How the care team recognises who an alert is about."""
-        parts = [self.display_name.strip()] if self.display_name.strip() else []
+        name = followup_store.patient_label(self.display_name, self.enrollment)
+        parts = [name] if name else []
         if self.channel == "whatsapp" and self.platform_user_id:
             parts.append(f"+{self.platform_user_id}")
         return " · ".join(parts) or f"user {self.user_id}"
@@ -212,6 +243,12 @@ async def _context(kwargs: dict) -> tuple[_Context | None, Any]:
     settings = await followup_store.get_settings(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
     )
+    if ctx.user_id is not None:
+        ctx.enrollment = followup_store.labelling_enrollment(
+            await followup_store.enrollments(
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
+            )
+        )
     return ctx, settings
 
 
@@ -320,6 +357,8 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     except ValueError as exc:
         return f"Not enrolled: {exc}."
     phase = str(arguments.get("phase") or "").strip() or None
+    patient_name = str(arguments.get("patient_name") or "").strip() or None
+    answered_by = str(arguments.get("answered_by") or "").strip() or None
 
     granted = await followup_store.grant_contact_permission(
         sf, org_id=ctx.org_id, platform="whatsapp",
@@ -330,10 +369,16 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     enrollment = await followup_store.upsert_enrollment(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
         protocol=protocol, start_date=start, phase=phase, enrolled_by="agent",
+        patient_name=patient_name, answered_by=answered_by,
     )
+    ctx.enrollment = enrollment
     queued, why_not = await _tell_care_team(sf, ctx, settings, kind="enrolment", text=summary)
 
     parts = [f"Enrolled in {protocol}"]
+    if enrollment.patient_name:
+        parts.append(f"for {enrollment.patient_name}")
+    if enrollment.answered_by:
+        parts.append(f"(answered by {enrollment.answered_by})")
     if enrollment.start_date:
         parts.append(f"from {enrollment.start_date.isoformat()}")
     if enrollment.phase:
@@ -356,8 +401,9 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
             changes["start_date"] = _parse_date(arguments.get("start_date"))
         except ValueError as exc:
             return f"Not updated: {exc}."
-    if str(arguments.get("phase") or "").strip():
-        changes["phase"] = str(arguments["phase"]).strip()
+    for field in ("phase", "patient_name", "answered_by"):
+        if str(arguments.get(field) or "").strip():
+            changes[field] = str(arguments[field]).strip()
     status = arguments.get("status")
     reason = str(arguments.get("reason") or "").strip()
     if status is not None:
@@ -379,8 +425,13 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     )
     if row is None:
         return f"Not updated: this person is not enrolled in '{protocol}'."
+    ctx.enrollment = row
 
     result = f"Updated {protocol}: status {row.status}"
+    if row.patient_name:
+        result += f", patient {row.patient_name}"
+    if row.answered_by:
+        result += f", answered by {row.answered_by}"
     if row.start_date:
         result += f", start {row.start_date.isoformat()}"
     if row.phase:
@@ -428,6 +479,12 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         today = datetime.now(ZoneInfo(zones.get(row.protocol, "UTC"))).date()
         index = day_index(row.start_date, today)
         detail = [f"{row.protocol}: {row.status}"]
+        detail.append(
+            f"patient {row.patient_name}" if row.patient_name
+            else "patient's name not recorded"
+        )
+        if row.answered_by:
+            detail.append(f"answered by {row.answered_by}")
         detail.append(
             f"start {row.start_date.isoformat()} (day {index} today)"
             if row.start_date else "no start date"

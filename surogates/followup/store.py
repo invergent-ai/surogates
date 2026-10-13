@@ -39,9 +39,11 @@ __all__ = [
     "get_settings",
     "grant_contact_permission",
     "is_care_team",
+    "labelling_enrollment",
     "last_inbound",
     "last_inbound_by_user",
     "notify_care_team",
+    "patient_label",
     "permission_status",
     "protocol_timezones",
     "queue_outreach",
@@ -152,13 +154,17 @@ async def upsert_enrollment(
     enrolled_by: str,
     payer_user_id: uuid.UUID | None = None,
     source_ref: str | None = None,
+    patient_name: str | None = None,
+    answered_by: str | None = None,
+    start_date_approximate: bool | None = None,
 ) -> FollowupEnrollmentRow:
     """Enrol a person, or refresh and reactivate their existing enrollment.
 
     Enrolling again is how a person comes back after an ended programme, so
     an existing row is reactivated rather than refused.  A ``None`` start
     date or phase leaves what is recorded untouched: re-enrolling someone
-    without restating the date must not erase it.
+    without restating the date must not erase it; the same goes for the
+    patient's name and who answers.
 
     Raises :class:`CareTeamMember` for an alert recipient of this agent —
     whichever path tries it: the agent in conversation, Studio, or a checkout
@@ -170,6 +176,10 @@ async def upsert_enrollment(
     if is_care_team(settings, user_id):
         raise CareTeamMember("this person is on the care team, not a patient")
     protocol = protocol.strip()
+    patient_name = (patient_name or "").strip() or None
+    answered_by = (answered_by or "").strip() or None
+    if start_date_approximate is None and start_date is not None:
+        start_date_approximate = False
     for attempt in (1, 2):
         async with session_factory() as db:
             row = (
@@ -181,6 +191,8 @@ async def upsert_enrollment(
                     protocol=protocol, start_date=start_date, phase=phase,
                     status="active", enrolled_by=enrolled_by,
                     payer_user_id=payer_user_id, source_ref=source_ref,
+                    patient_name=patient_name, answered_by=answered_by,
+                    start_date_approximate=bool(start_date_approximate),
                 )
                 db.add(row)
             else:
@@ -192,6 +204,12 @@ async def upsert_enrollment(
                     row.payer_user_id = payer_user_id
                 if source_ref is not None:
                     row.source_ref = source_ref
+                if patient_name is not None:
+                    row.patient_name = patient_name
+                if answered_by is not None:
+                    row.answered_by = answered_by
+                if start_date_approximate is not None:
+                    row.start_date_approximate = start_date_approximate
                 row.status = "active"
                 row.status_reason = None
                 row.updated_at = _utcnow()
@@ -223,6 +241,9 @@ async def update_enrollment(
     phase: Any = _UNSET,
     status: Any = _UNSET,
     status_reason: Any = _UNSET,
+    patient_name: Any = _UNSET,
+    answered_by: Any = _UNSET,
+    start_date_approximate: Any = _UNSET,
 ) -> FollowupEnrollmentRow | None:
     """Change an enrollment's fields; only the arguments passed are touched.
 
@@ -240,6 +261,15 @@ async def update_enrollment(
             return None
         if start_date is not _UNSET:
             row.start_date = start_date
+            # A restated date is exact unless the caller says otherwise.
+            if start_date_approximate is _UNSET:
+                row.start_date_approximate = False
+        if start_date_approximate is not _UNSET:
+            row.start_date_approximate = bool(start_date_approximate)
+        if patient_name is not _UNSET:
+            row.patient_name = (patient_name or "").strip() or None
+        if answered_by is not _UNSET:
+            row.answered_by = (answered_by or "").strip() or None
         if phase is not _UNSET:
             row.phase = phase or None
         if status is not _UNSET:
@@ -252,6 +282,28 @@ async def update_enrollment(
         await db.commit()
         await db.refresh(row)
         return row
+
+
+def patient_label(display_name: str | None, enrollment: Any = None) -> str:
+    """Who an enrollment is about, as the care team knows them.
+
+    The enrollment's patient name wins over *display_name*: that is the
+    WhatsApp profile of whoever is writing, often a relative.
+    """
+    name = (getattr(enrollment, "patient_name", None) or display_name or "").strip()
+    parts = [name] if name else []
+    answered_by = getattr(enrollment, "answered_by", None)
+    if answered_by:
+        parts.append(f"via {answered_by}")
+    return " · ".join(parts)
+
+
+def labelling_enrollment(rows: Iterable[FollowupEnrollmentRow]) -> FollowupEnrollmentRow | None:
+    """The enrollment that best names a person: active, then one with a name."""
+    return min(
+        rows, default=None,
+        key=lambda r: (r.status != "active", r.patient_name is None),
+    )
 
 
 async def protocol_timezones(

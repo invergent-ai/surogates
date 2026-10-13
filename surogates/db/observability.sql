@@ -1047,3 +1047,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_username
 -- Without this every one of those reads scans the Program's whole history.
 CREATE INDEX IF NOT EXISTS idx_program_invitations_program_user
     ON program_invitations (program_id, user_id, created_at);
+
+-- ── followup_enrollments: who the patient is, and how sure the start is ──
+-- The user's display name is their WhatsApp profile, which is a relative's
+-- when a relative enrolled them; these name the patient and who answers.
+ALTER TABLE followup_enrollments
+    ADD COLUMN IF NOT EXISTS patient_name text,
+    ADD COLUMN IF NOT EXISTS answered_by text,
+    ADD COLUMN IF NOT EXISTS start_date_approximate boolean NOT NULL DEFAULT false;
