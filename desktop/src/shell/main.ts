@@ -33,6 +33,7 @@ import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
+import { hostPathOf } from "../session-path.js";
 import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
@@ -1479,7 +1480,7 @@ function bridge(contents: WebContents, agent: Agent): void {
       return binding && { ...binding, takenOver: stack.tools.takenOver?.(sessionId) ?? false };
     },
     // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
-    revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
+    revealFolder: async (sessionId) => shell.showItemInFolder(hostPathOf(await (await registered()).binder.folderToShow(sessionId))),
     showBrowser: async (sessionId) => {
       const stack = await browsing(sessionId);
       if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");

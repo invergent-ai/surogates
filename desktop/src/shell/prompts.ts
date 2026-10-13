@@ -7,6 +7,7 @@ import { type BrowserWindow, dialog } from "electron";
 
 import type { ApprovalAnswer, ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
+import { guestPathOf, hostPathOf } from "../session-path.js";
 import { approval, folderSheet, freeMode, handBack, type HandBackRequest, type PromptContent } from "./prompt-content.js";
 import { PromptQueue, TIMEOUT } from "./prompt-queue.js";
 import { openPrompt, type PromptAnswer } from "./prompt-window.js";
@@ -24,15 +25,32 @@ export interface DesktopPromptsOptions {
   unseen(): void; // a prompt waits for the hidden window to be shown
 }
 
+// The dialog opens at, and answers, this computer's own path of a folder; the binder names each by the session's path
+// (session-path.ts). A folder the session has no path for, as one on no drive, is answered as the dialog gave it,
+// which the binder's check refuses; the dialog opens where that one was.
+const ownPath = (folder: string): string => {
+  try {
+    return hostPathOf(folder);
+  } catch {
+    return folder;
+  }
+};
+
 async function pick(parent: BrowserWindow | undefined, startIn: string): Promise<string | null> {
   const options = {
     title: "Choose a folder",
     buttonLabel: "Choose",
-    defaultPath: startIn,
+    defaultPath: ownPath(startIn),
     properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">,
   };
   const { canceled, filePaths } = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
-  return canceled ? null : (filePaths[0] ?? null);
+  const picked = canceled ? null : (filePaths[0] ?? null);
+  if (picked === null) return null;
+  try {
+    return guestPathOf(picked);
+  } catch {
+    return picked;
+  }
 }
 
 // ponytail: one line for the app's one window; one per window once there is a second.

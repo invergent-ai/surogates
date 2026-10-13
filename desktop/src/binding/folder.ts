@@ -1,13 +1,15 @@
 // Which folders a chat may work on (spec, Section 4): checked when the user
 // confirms one, and again by its tool host before anything runs there.
 
-import { realpathSync, type Stats, statSync } from "node:fs";
+import { realpathSync, type Stats } from "node:fs";
 
 import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
-import { join, resolve } from "../host-path.js";
+import * as host from "../host-path.js";
+import { hostStat } from "../host-stat.js";
 import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
 import { forThisOs, notBuilt } from "../platform.js";
+import { guestPathOf, hostPathOf, join, resolve } from "../session-path.js";
 import { bootId } from "./boot-id.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
@@ -45,16 +47,63 @@ export type FolderCheck =
   // missing: the folder is not there, or is not a folder; otherwise it may never be a chat's.
   | { ok: false; missing: boolean; message: string };
 
-// A path as spelled, and as the file system resolves it. Where it does not exist yet, or cannot be
-// read, the part that exists is still resolved: a guard that is not there yet is still where its links lead.
-// *links* gets each link the way to it goes through, by where that link is.
-function spellings(path: string, links: string[] = []): string[] {
-  const plain = resolve(path);
-  const through = new Map<string, string | null>();
-  const { path: real } = realpath(plain, through);
-  links.push(...through.keys());
-  return real === plain ? [plain] : [plain, real];
+// How each OS names a folder as it resolves (FolderPaths): a chat's folder is named by its session's path, the guest's
+// (session-path.ts), and opened by this computer's own. On Linux and macOS the two are one, resolved as the file host
+// resolves a path, through each link on the way, which is noted. On Windows a folder is resolved as Windows resolves it,
+// its final path (realpathSync.native, GetFinalPathNameByHandleW), its names in their case on disk; a folder on no
+// drive, as a network share, has no session's path.
+interface FolderPaths {
+  /** This computer's own path of the folder at the session's path *folder*, as it resolves. */
+  real(folder: string): string;
+  /** A folder's resolved path *at*, this computer's own, as the session names it. */
+  session(at: string): string;
+  /**
+   * The session's path *path* as spelled, and as the file system resolves it. Where it does not exist yet, or cannot be
+   * read, the part that exists is still resolved: a guard that is not there yet is still where its links lead. *links*
+   * gets each link the way to it goes through, by where that link is.
+   */
+  spellings(path: string, links: string[]): string[];
 }
+
+const POSIX_FOLDERS: FolderPaths = {
+  real: (folder) => realpathSync(folder),
+  session: (at) => at,
+  spellings(path, links) {
+    const plain = resolve(path);
+    const through = new Map<string, string | null>();
+    const { path: real } = realpath(plain, through);
+    links.push(...through.keys());
+    return real === plain ? [plain] : [plain, real];
+  },
+};
+
+// The final path of this computer's *path*, or of the deepest folder of it that is there, with the rest as spelled.
+function finalOf(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    const parent = host.dirname(path);
+    return parent === path ? path : host.join(finalOf(parent), host.basename(path));
+  }
+}
+
+const WIN32_FOLDERS: FolderPaths = {
+  real: (folder) => realpathSync.native(hostPathOf(folder)),
+  session: (at) => guestPathOf(at),
+  spellings(path) {
+    const plain = resolve(path);
+    let real: string;
+    try {
+      real = guestPathOf(finalOf(hostPathOf(plain)));
+    } catch {
+      return [plain]; // on no drive: no folder of this computer's is there
+    }
+    return real === plain ? [plain] : [plain, real];
+  },
+};
+
+const FOLDERS = forThisOs<FolderPaths>({ linux: POSIX_FOLDERS, darwin: POSIX_FOLDERS, win32: WIN32_FOLDERS });
+const spellings = (path: string, links: string[] = []): string[] => (FOLDERS ?? notBuilt("A chat's folder")).spellings(path, links);
 
 // Whether *path* lies on a network volume, which a chat's folder may not be on Windows: a drive letter is mapped per
 // logon session (Microsoft Learn, "Mapped drives are not available from an elevated command"), and on SMB every
@@ -72,25 +121,33 @@ export function onNetworkVolume(path: string): boolean {
   return (ON_NETWORK ?? (() => notBuilt("A chat's folder")))(path);
 }
 
-// The folder as it resolves, and its identity; or why no chat may work on it.
+// The folder, named by its session's path *folder*, as it resolves, and its identity; or why no chat may work on it.
+// Each guard is compared by the session's paths too, as the folder's own.
 export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
-  let path: string;
+  const paths = FOLDERS ?? notBuilt("A chat's folder");
+  let at: string;
   let stats: Stats;
   // A name that is not valid UTF-8 reads back with U+FFFD, which opens nothing: such a folder is not there.
   try {
-    path = realpathSync(folder);
-    stats = statSync(path);
+    at = paths.real(folder);
+    stats = hostStat(at);
   } catch {
     return { ok: false, missing: true, message: `the folder ${folder} is not there` };
   }
   if (!stats.isDirectory()) return { ok: false, missing: true, message: `the folder ${folder} is not a folder` };
   const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message });
-  if (onNetworkVolume(path)) return refused(`the folder ${path} is on a network volume, which Surogate cannot work in on this computer`);
+  if (onNetworkVolume(at)) return refused(`the folder ${at} is on a network volume, which Surogate cannot work in on this computer`);
+  let path: string;
+  try {
+    path = paths.session(at);
+  } catch {
+    return refused(`the folder ${at} is on no drive of this computer, which Surogate cannot work in`);
+  }
   if (GLOB.test(path)) return refused(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${path}`);
   if (FOLDER_BYTES !== null && Buffer.byteLength(path) > FOLDER_BYTES) {
     return refused(`this computer cannot sandbox a folder whose path is longer than ${FOLDER_BYTES} bytes: ${path}`);
   }
-  if (isReserved(path)) return refused(`the folder ${path} is inside one of this computer's system folders`);
+  if (isReserved(at)) return refused(`the folder ${path} is inside one of this computer's system folders`);
   // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
   const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));
   if (tools) return refused(`the sandbox keeps its own tools in ${tools}, so the folder ${path} cannot be a chat's`);
@@ -100,8 +157,9 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   // And every link on the way to one of them is guarded where it is: a folder that held such a
   // link would let a command point it elsewhere, and the app would follow it there.
   const links: string[] = [];
-  const homes = spellings(guards.home, links);
-  const guarded = [guards.dataDir, guards.cacheDir, ...guards.appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
+  const homes = spellings(guestPathOf(guards.home), links);
+  const guarded = [guards.dataDir, guards.cacheDir, ...guards.appDirs].map(guestPathOf)
+    .concat(homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name))))
     .flatMap((dir) => spellings(dir, links));
   const held = [...new Set([resolve(folder), path])].some(
     (candidate) => candidate === "/" || homes.some((dir) => inside(dir, candidate)) ||

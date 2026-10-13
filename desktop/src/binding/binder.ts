@@ -11,6 +11,7 @@ import { mkdirSync, rmdirSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 
 import { join } from "../host-path.js";
+import { guestPathOf, hostPathOf } from "../session-path.js";
 import { type NoCopyAt, noCopyAt } from "../hosts/start.js";
 import { NOT_BOUND } from "../hosts/tool-hosts.js";
 import type { Binding, Bindings, Mode } from "../journal/bindings.js";
@@ -162,10 +163,10 @@ function threadOf(history: unknown): string | null {
 const day = (now: Date) =>
   `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
-// A folder made for a chat that did not take it goes, unless something was put in it meanwhile.
+// A folder made for a chat that did not take it goes, unless something was put in it meanwhile. By the session's path.
 function removeEmpty(folder: string): void {
   try {
-    rmdirSync(folder);
+    rmdirSync(hostPathOf(folder));
   } catch {
     // Not empty, or gone: it stays as it is.
   }
@@ -191,9 +192,9 @@ function newFolder(guards: FolderGuards, agent: string): string | null {
         throw error;
       }
       // One no chat may have (a link up its path into a guarded folder, say) is not offered.
-      const checked = checkFolder(folder, guards);
+      const checked = checkFolder(guestPathOf(folder), guards);
       if (checked.ok) return checked.path;
-      removeEmpty(folder);
+      removeEmpty(guestPathOf(folder));
       return null;
     }
   } catch {
@@ -233,7 +234,7 @@ export class Binder implements Executor {
     const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     let prepared: Prepared | null = null;
     try {
-      prepared = await this.confirm(usable ?? made, last ?? guards.home, window, signal, thread, null);
+      prepared = await this.confirm(usable ?? made, last ?? guestPathOf(guards.home), window, signal, thread, null);
       return prepared;
     } finally {
       // Taken: it goes still if its chat is never bound.
@@ -255,7 +256,7 @@ export class Binder implements Executor {
   ): Promise<Prepared | null> {
     const last = this.options.bindings.last()?.folder;
     const offered = again?.folder ?? null;
-    return this.confirm(offered, last ?? this.options.guards.home, window, signal, null, project.trim(), { project: true, ...(again ? { master: again.master } : {}) });
+    return this.confirm(offered, last ?? guestPathOf(this.options.guards.home), window, signal, null, project.trim(), { project: true, ...(again ? { master: again.master } : {}) });
   }
 
   /**

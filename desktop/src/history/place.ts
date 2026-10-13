@@ -32,7 +32,9 @@
 // named, so that every turn's open of a thread on the folder says it is gone (history/copies.ts).
 
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, type Stats, unlinkSync, writeFileSync,
+} from "node:fs";
 import { chmod, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
 
 import { confirmedFolder } from "../binding/folder.js";
@@ -40,7 +42,9 @@ import { strerror } from "../files/answers.js";
 import { identityOf } from "../files/identity.js";
 import { PLACE_KEY } from "../guest/protocol.js";
 import { basename, dirname, join, sep } from "../host-path.js";
+import { hostLooked, hostLstat } from "../host-stat.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
+import { guestPathOf, hostPathOf } from "../session-path.js";
 import { THREAD } from "../vm/history.js";
 import type { Folder, Place } from "../vm/manager.js";
 
@@ -159,6 +163,16 @@ function own(path: string): boolean {
   }
 }
 
+// What is at *path* in the app's data, its identity read as this OS reads one (host-stat.ts); undefined for nothing.
+function lstatOrNone(path: string): Stats | undefined {
+  try {
+    return hostLstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 // A record as it lies, or null where there is none.
 function textOf(record: string): string | null {
   try {
@@ -228,13 +242,14 @@ const looking = new Map<string, Promise<Looked>>();
 // A look's errors that say nothing is at the path that could be the folder: no name, a file on its way, or links that lead nowhere.
 const NOTHING_THERE = new Set(["ENOENT", "ENOTDIR", "ELOOP"]);
 
-// What is at *path*. Rejects, in words for a person, where it could not be read: a network folder that is down, or
-// one whose way is shut to this user, may be the folder that was bound or not.
+// What is at *path*, a folder by the session's path, and its real path, the session's too. Rejects, in words for a
+// person, where it could not be read: a network folder that is down, or one whose way is shut to this user, may be the
+// folder that was bound or not.
 async function seen(path: string): Promise<Looked> {
   try {
     // lstat: a link at its path is never the folder.
-    const found = await lstat(path);
-    return { found: { directory: found.isDirectory(), ...identityOf(found) }, real: await realpath(path) };
+    const found = await hostLooked(hostPathOf(path));
+    return { found: { directory: found.isDirectory(), ...identityOf(found) }, real: guestPathOf(await realpath(hostPathOf(path))) };
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     if (code !== undefined && NOTHING_THERE.has(code)) return { found: null, real: null };
@@ -434,7 +449,7 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
   const place: Place = { key, history, real };
   // The place as it lies: its folder, its record as text, which folder that names, and whether it is this one.
   const read = () => {
-    const there = own(histories) && own(history) ? identityOf(lstatSync(history)).ino : null;
+    const there = own(histories) && own(history) ? identityOf(hostLstat(history)).ino : null;
     const text = textOf(record);
     const recorded = recordedIn(text);
     // One folder's, whichever of the two was read in an earlier boot: only an identity read in this one says which device it is on.
@@ -450,7 +465,7 @@ export async function placeOf(dataDir: string, bound: BoundFolder, options: Plac
     if (there !== null) await options.letGo(was, there);
     // Looked at again: while the folder was looked at and the sandbox let the place go, another thread of the
     // folder may have done all of this. From here to the place's making nothing waits.
-    const now = lstatSync(history, { throwIfNoEntry: false });
+    const now = lstatOrNone(history);
     if ((now === undefined ? null : identityOf(now).ino) !== there || textOf(record) !== text) continue;
     const stamp = stamped([history, kept], latestAside(data, key) + 1);
     let aside: Placed["aside"];

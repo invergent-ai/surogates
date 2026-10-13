@@ -15,7 +15,9 @@ import { stat } from "node:fs/promises";
 
 import { cleanly } from "../clean-child.js";
 import { identityOf } from "../files/identity.js";
+import { hostStat } from "../host-stat.js";
 import { forThisOs, notBuilt } from "../platform.js";
+import { hostPathOf } from "../session-path.js";
 import * as darwin from "./folders-held-darwin.js";
 import * as linux from "./folders-held-linux.js";
 import * as win32 from "./folders-held-win32.js";
@@ -32,6 +34,13 @@ const lookCommand: (folder: string) => [string, string[]] = forThisOs({
 // A PATH's entries, by this OS: apart by ":", each a whole path from "/", as POSIX writes one; Windows's its own.
 const POSIX_PATHS = { delimiter: ":", whole: (entry: string): boolean => entry.startsWith("/") };
 const PATHS = forThisOs({ linux: POSIX_PATHS, darwin: POSIX_PATHS, win32: win32.PATHS }) ?? POSIX_PATHS;
+
+// A bound folder's look, by the session's path: fs.promises' stat on Linux and macOS; on Windows its stats through ntat
+// (host-stat.ts), as Node's numbers there do not hold a file's ID. That one runs on the main thread: Windows's file host
+// works in no folder on a network volume (binding/folder.ts), whose look alone would not answer.
+const LOOK = forThisOs<(folder: string) => Promise<Stats>>({
+  linux: stat, darwin: stat, win32: (folder) => new Promise((resolve) => resolve(hostStat(hostPathOf(folder)))),
+});
 
 /** Whether *folder* is an entry of the PATH *path*, as this OS writes one. */
 export const onPath = (path: string | undefined, folder: string): boolean => (path ?? "").split(PATHS.delimiter).includes(folder);
@@ -72,7 +81,7 @@ export class FolderLooks {
    * answer ("busy"); and of each PATH entry that did not answer.
    */
   constructor(
-    private readonly look: (folder: string) => Promise<Stats> = stat, private readonly ms = LOOK_MS,
+    private readonly look: (folder: string) => Promise<Stats> = LOOK ?? (() => notBuilt("Surogate Desktop's look at a folder")), private readonly ms = LOOK_MS,
     private readonly said: (folder: string, why: "silent" | "busy") => void = () => {},
   ) {}
 
@@ -93,7 +102,7 @@ export class FolderLooks {
    * it waiting: a new chat's folder is checked on the main thread only once it has.
    */
   async answers(folder: string): Promise<boolean> {
-    return (await lookApart(folder, this.ms)) === "there";
+    return (await lookApart(hostPathOf(folder), this.ms)) === "there";
   }
 
   /**

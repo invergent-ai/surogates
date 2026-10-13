@@ -6,7 +6,7 @@
 // proxy on the guest's net port, the way into a root on its inbound port, and what a
 // lost guest was running.
 
-import { readFileSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
@@ -15,9 +15,12 @@ import { confirmedFolder } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
 import { type FromAgent, HELD, type HostUser, PLACE_KEY, type Share } from "../guest/protocol.js";
+import { identityOf } from "../files/identity.js";
 import { join, sep } from "../host-path.js";
+import { hostLstat } from "../host-stat.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { backendFor, backendHere } from "./backends.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
@@ -264,16 +267,33 @@ parentPort.postMessage({ found, real });
 `;
 const looking = new Map<string, Promise<Looked>>();
 
+// A look at *path*, this computer's own, by this OS: in a Worker on Linux and macOS; on Windows by ntat, whose calls
+// are synchronous, its identity read as Windows's is (host-stat.ts), as Node's numbers there do not hold a file's ID.
+// Windows's file host works in no folder on a network volume (binding/folder.ts), the one kind whose look would not answer.
+const inWorker = (path: string): Promise<Looked> => new Promise<Looked>((resolve) => {
+  const worker = new Worker(LOOK, { eval: true, workerData: path });
+  // A look that never returns keeps no process alive.
+  worker.unref();
+  worker.once("message", (found: Looked) => resolve(found));
+  worker.once("error", () => resolve({ found: null, real: null }));
+});
+const LOOKS = forThisOs<(path: string) => Promise<Looked>>({
+  linux: inWorker,
+  darwin: inWorker,
+  win32: (path) => new Promise<Looked>((resolve) => {
+    try {
+      const stats = hostLstat(path);
+      resolve({ found: { directory: stats.isDirectory(), ...identityOf(stats) }, real: realpathSync.native(path) });
+    } catch {
+      resolve({ found: null, real: null });
+    }
+  }),
+});
+
 function look(path: string): Promise<Looked> {
   const known = looking.get(path);
   if (known) return known;
-  const looked = new Promise<Looked>((resolve) => {
-    const worker = new Worker(LOOK, { eval: true, workerData: path });
-    // A look that never returns keeps no process alive.
-    worker.unref();
-    worker.once("message", (found: Looked) => resolve(found));
-    worker.once("error", () => resolve({ found: null, real: null }));
-  });
+  const looked = (LOOKS ?? notBuilt("The VM's look at a folder"))(path);
   looking.set(path, looked);
   void looked.then(() => looking.delete(path));
   return looked;

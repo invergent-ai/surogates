@@ -24,13 +24,14 @@
 // the folder holds other files or a person asks again (history/too-large.ts). A thread whose copy
 // is there works on in it.
 
-import { lstat, realpath, rm } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { strerror } from "../files/answers.js";
 import { identityOf } from "../files/identity.js";
 import { CANCELLED } from "../guest/command.js";
 import { basename, join } from "../host-path.js";
+import { hostLooked } from "../host-stat.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { BoundFolder } from "../hosts/tool-hosts.js";
 import type { Outcome } from "../link/protocol.js";
@@ -175,7 +176,7 @@ const same = (a: Identity, b: Identity) => a.dev === b.dev && a.ino === b.ino;
 async function look(path: string): Promise<Identity | "other" | null> {
   const looked = (async (): Promise<Identity | "other" | null> => {
     try {
-      const found = await lstat(path);
+      const found = await hostLooked(path);
       if (!found.isDirectory() || (await realpath(path)) !== path) return "other";
       return identityOf(found);
     } catch (error) {
