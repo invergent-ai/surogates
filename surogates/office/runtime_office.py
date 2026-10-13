@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # Opening loads the whole editor in a browser.
 OPEN_TIMEOUT_S = 90.0
 CALL_TIMEOUT_S = 60.0
+# runtime-office's slowest edit: the group's start, the command, the group's end and the check, 20 s each, then the
+# flush wait of 10 s.
+EDIT_TIMEOUT_S = 120.0
 
 
 class RuntimeOfficeError(Exception):
@@ -54,7 +57,9 @@ class RuntimeOffice:
         return await self._call(f"/pages/{quote(page, safe='')}/read", request)
 
     async def edit(self, page: str, ops: list[Any]) -> dict[str, Any]:
-        return await self._call(f"/pages/{quote(page, safe='')}/edit", {"ops": ops})
+        return await self._call(f"/pages/{quote(page, safe='')}/edit", {"ops": ops}, timeout=EDIT_TIMEOUT_S, timed_out=(
+            "runtime-office did not answer in time; the edit may have applied: read the document again before editing"
+        ))
 
     async def flush(self, page: str) -> bool:
         return bool((await self._call(f"/pages/{quote(page, safe='')}/flush", {}))["flushed"])
@@ -68,11 +73,16 @@ class RuntimeOffice:
         if response.status_code not in (204, 404, 410):
             raise RuntimeOfficeError(response.text[:300] or response.reason_phrase, response.status_code)
 
-    async def _call(self, path: str, body: dict[str, Any], *, timeout: float = CALL_TIMEOUT_S) -> dict[str, Any]:
+    async def _call(
+        self, path: str, body: dict[str, Any], *, timeout: float = CALL_TIMEOUT_S, timed_out: str | None = None,
+    ) -> dict[str, Any]:
+        """*timed_out* is the error a timeout raises, where it says more than that runtime-office was not reached."""
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(f"{self._base}{path}", json=body, headers=self._headers)
         except httpx.HTTPError as exc:
+            if timed_out and isinstance(exc, httpx.TimeoutException):
+                raise RuntimeOfficeError(timed_out) from exc
             raise RuntimeOfficeError(f"runtime-office could not be reached: {exc}") from exc
         try:
             answer = response.json()

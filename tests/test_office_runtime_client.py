@@ -93,3 +93,24 @@ async def test_an_unreachable_service_is_an_error(monkeypatch):
     monkeypatch.setattr(runtime_office.httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(refuse), **kwargs))
     with pytest.raises(RuntimeOfficeError, match="could not be reached"):
         await RuntimeOffice(OFFICE).flush("abc.s-1")
+
+
+async def test_an_edit_waits_longer_and_its_timeout_says_it_may_have_applied(monkeypatch):
+    real_client = httpx.AsyncClient
+    timeouts: list[float] = []
+
+    def too_slow(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    def client(**kwargs):
+        timeouts.append(kwargs["timeout"])
+        return real_client(transport=httpx.MockTransport(too_slow), **kwargs)
+
+    monkeypatch.setattr(runtime_office.httpx, "AsyncClient", client)
+    with pytest.raises(RuntimeOfficeError, match="did not answer in time; the edit may have applied") as raised:
+        await RuntimeOffice(OFFICE).edit("abc.s-1", [{"op": "delete"}])
+    assert raised.value.status == 0 and not isinstance(raised.value, PageGone)
+    with pytest.raises(RuntimeOfficeError, match="could not be reached"):
+        await RuntimeOffice(OFFICE).read("abc.s-1", {"view": "outline"})
+    # runtime-office's slowest edit (the group's start and end, the command, the check, the flush) is past 60 s.
+    assert timeouts == [120.0, 60.0]
