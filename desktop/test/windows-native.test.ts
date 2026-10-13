@@ -36,12 +36,14 @@ describe("the Windows native programs", () => {
     const { scripts } = JSON.parse(read(DESKTOP, "package.json")) as { scripts: Record<string, string> };
     const steps = scripts["build:win32"]!.split(" && ");
     // The app's code first, which ntat is built beside (dist/native); then the app's rg, the node its hosts run on, the
-    // one first on the PATH, as a development build's on a Mac (scripts/mac-build.sh); ntat; and last the workspace,
-    // from its own folder, whose rust-toolchain.toml picks the toolchain.
+    // one first on the PATH, as a development build's on a Mac (scripts/mac-build.sh); ntat, by Windows PowerShell with
+    // its own modules, not those of a PowerShell 7 the build may have been started from (Windows PowerShell reads
+    // PSModulePath as it finds it); and last the workspace, from its own folder, whose rust-toolchain.toml picks the
+    // toolchain.
     expect(steps.slice(-5)).toEqual([
       "scripts/rg.sh",
       'cp "$(command -v node)" bin/node.exe',
-      "powershell -NoProfile -ExecutionPolicy Bypass -File native/ntat/build.ps1",
+      "env -u PSModulePath powershell -NoProfile -ExecutionPolicy Bypass -File native/ntat/build.ps1",
       "cd native/windows",
       "cargo build --release --locked --workspace",
     ]);
