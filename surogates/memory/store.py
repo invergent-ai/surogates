@@ -162,6 +162,15 @@ def _file_lock(path: Path):
 _TITLE_MAX = 60
 
 
+def merge_entry(entries: list[str], content: str) -> tuple[list[str], bool]:
+    """*entries* with *content* added, or put in place of the entry with its
+    title; and whether it replaced one."""
+    titled = titled_entry_index(content, entries)
+    if titled is None:
+        return [*entries, content], False
+    return [*entries[:titled], content, *entries[titled + 1:]], True
+
+
 def titled_entry_index(content: str, entries: list[str]) -> int | None:
     """Index of the existing entry with the same short first line as *content*.
 
@@ -250,12 +259,7 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
-            titled = titled_entry_index(content, entries)
-            new_entries = entries.copy()
-            if titled is None:
-                new_entries.append(content)
-            else:
-                new_entries[titled] = content
+            new_entries, replaced = merge_entry(entries, content)
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
             if new_total > limit:
@@ -274,7 +278,7 @@ class MemoryStore:
             self._set_entries(target, new_entries)
             self._save_to_disk(target)
 
-        return self._success_response(target, "Entry added." if titled is None else "Entry replaced.")
+        return self._success_response(target, "Entry replaced." if replaced else "Entry added.")
 
     def replace(self, target: str, old_text: str, new_content: str) -> dict[str, Any]:
         """Find entry containing *old_text* substring, replace it with *new_content*."""

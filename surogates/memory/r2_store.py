@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from surogates.memory.store import titled_entry_index
+from surogates.memory.store import merge_entry
 from surogates.runtime.memory_io import (
     read_user_memory, write_user_memory,
 )
@@ -128,12 +128,7 @@ class R2MemoryStore:
         """Append ``content`` to ``target``'s working set, or replace the
         entry with its title, and persist."""
         self._check_target(target)
-        entries = self.get_entries(target)
-        titled = titled_entry_index(content, entries)
-        if titled is None:
-            entries.append(content)
-        else:
-            entries[titled] = content
+        entries, _ = merge_entry(self.get_entries(target), content)
         self._content[target] = _ENTRY_DELIMITER.join(entries)
         await self._persist(target=target, action="add")
         return {"target": target, "action": "add"}

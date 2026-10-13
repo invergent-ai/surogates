@@ -25,7 +25,7 @@ from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.memory.r2_store import (
     MEMORY_TARGETS, R2MemoryStore,
 )
-from surogates.memory.store import scan_memory_content, titled_entry_index
+from surogates.memory.store import merge_entry, scan_memory_content
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -252,12 +252,8 @@ async def mutate_memory(
         scan_err = scan_memory_content(body.content)
         if scan_err:
             return MemoryMutateResponse(success=False, error=scan_err)
-        titled = titled_entry_index(body.content, current_entries)
-        used = (
-            sum(len(e) for e in current_entries)
-            - (len(current_entries[titled]) if titled is not None else 0)
-            + len(body.content)
-        )
+        merged, _ = merge_entry(current_entries, body.content)
+        used = sum(len(e) for e in merged)
         if used > limit:
             return MemoryMutateResponse(
                 success=False,
