@@ -2,7 +2,7 @@
 // one its Info.plist names; refused on a disk image, in a temporary copy of macOS's, outside an app, or
 // where its signature does not check out, which is checked once, apart, until the app changes.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -244,23 +244,24 @@ it("keep no browser picked in Custom… that a Mac refuses", async () => {
 
 // codesign and plutil started as the app starts them (clean-child.ts).
 describe.runIf(process.platform === "darwin")("the browsers the app knows on a Mac", () => {
-  it("find this Mac's Chrome in /Applications, its signature checking out", async () => {
-    const known = darwinBrowsers(SYSTEM);
-    const chrome = known.candidates(home).find(({ id }) => id === "chrome")!;
-    expect(chrome.paths[0]).toBe("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
-    known.refused(chrome.paths[0]!, DISK);
-    await known.checked(chrome.paths[0]!);
-    expect(known.refused(chrome.paths[0]!, DISK)).toBeNull();
-  }, 180_000);
+  // What codesign says of *app*: whose its signature is, its own check, and the check against the vendor's requirement
+  // alone, for a failure to name which of them refused it.
+  const signatureOf = (app: string) => [["-dv", "--verbose=2", app], ["--verify", "--strict", app], ["--verify", "-R", `=${requirementOf(app)}`, app]]
+    .map((args) => {
+      const done = spawnSync("/usr/bin/codesign", args, { encoding: "utf8" });
+      return `codesign ${args.join(" ")}: ${done.status}\n${done.stderr.trim()}`;
+    }).join("\n");
 
-  it("find this Mac's Edge in /Applications, its signature its vendor's", async () => {
-    const known = darwinBrowsers(SYSTEM);
-    const edge = known.candidates(home).find(({ id }) => id === "edge")!;
-    expect(edge.paths[0]).toBe("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge");
-    known.refused(edge.paths[0]!, DISK);
-    await known.checked(edge.paths[0]!);
-    expect(known.refused(edge.paths[0]!, DISK)).toBeNull();
-  }, 180_000);
+  for (const [id, program] of [["chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"], ["edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]] as const) {
+    it(`find this Mac's ${id} in /Applications, its signature its vendor's`, async () => {
+      const known = darwinBrowsers(SYSTEM);
+      expect(known.candidates(home).find((browser) => browser.id === id)!.paths[0]).toBe(program);
+      known.refused(program, DISK);
+      await known.checked(program);
+      const refused = known.refused(program, DISK);
+      expect(refused, refused === null ? "" : signatureOf(appOf(program)!)).toBeNull();
+    }, 180_000);
+  }
 
   // A chat's commands can write ~/Applications where a chat is bound to it, and sign what they make there ad hoc: the
   // signature checks out, and is no one's.
