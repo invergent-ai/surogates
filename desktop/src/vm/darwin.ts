@@ -1,20 +1,19 @@
 // The VM layer's macOS backend (spec, Section 11): the guest on Apple's Virtualization framework,
 // through surogate-vm (native/macos), the one program of the app's with the framework's
-// entitlement. It speaks surogate-vm's line protocol on its stdin and stdout, and connects to the
-// guest's control, net and inbound ports as Unix sockets surogate-vm makes in the runtime folder,
-// as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server,
+// entitlement. It speaks surogate-vm's line protocol (vm-helper.ts) on its stdin and stdout, and
+// connects to the guest's control, net and inbound ports as Unix sockets surogate-vm makes in the
+// runtime folder, as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server,
 // which maps no owner: every root runs as the host user's uid, which the kernel's command line
 // names for the protected-names rule (vm/init, guest/root.ts). surogate-vm stops the VM when its
 // stdin ends, so the VM ends with the manager however it ends; it writes its pid in the runtime
 // folder, and the next boot's sweep ends one that outlived its manager.
 
-import { type ChildProcess, execFile, type SpawnOptions } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { cleanly, spawnClean } from "../clean-child.js";
@@ -23,6 +22,7 @@ import { MAX_SHARES } from "../guest/protocol.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
 import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
 import { ended, reach, socketsIn } from "./sockets.js";
+import { Helper, late, type Said, type Start } from "./vm-helper.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const MEMORY_MIB = 2048;
@@ -48,9 +48,6 @@ const PACKAGED = basename(dirname(PACKAGE)) === "Resources" && basename(dirname(
 export const APP_FILES = PACKAGED ? dirname(dirname(dirname(PACKAGE))) : PACKAGE;
 /** surogate-vm: beside the app's main executable in a packaged app, native/build.sh's signed copy in development. */
 export const VM_PROGRAM = PACKAGED ? join(APP_FILES, "Contents", "MacOS", "surogate-vm") : join(PACKAGE, "native", "out", "surogate-vm");
-
-/** How surogate-vm is started: through spawnClean, so it holds nothing of this process's but its stdio. */
-export type Start = (program: string, args: string[], options: SpawnOptions & { env: NodeJS.ProcessEnv }) => ChildProcess;
 
 // surogate-vm is given the PATH alone, as QEMU is on Linux: it reads none of the user's environment.
 const ENV = { PATH: "/usr/bin:/bin" };
@@ -81,88 +78,6 @@ export function fitting(run: string): string | null {
 /** The guest kernel's command line on macOS: every OS's, with the uid every root runs as, which the protected-names rule judges. */
 export const commandLine = (user: HostUser): string => `${KERNEL_COMMAND_LINE} surogate.uid=${user.uid}`;
 
-// What surogate-vm says, one JSON object a line.
-type Said =
-  | { type: "listening" | "started" }
-  | { type: "failed"; why: string }
-  | { type: "shared"; id: number; tag: string; name?: string }
-  | { type: "unshared"; id: number }
-  | { type: "refused"; id?: number; why: string }
-  | { type: "stopped"; reason: string; why?: string };
-
-// Settles with "late" at *deadline* (performance.now()), its timer not holding the process.
-const late = (deadline: number) => new Promise<"late">((resolve) => {
-  setTimeout(() => resolve("late"), Math.max(0, deadline - performance.now())).unref();
-});
-
-const exited = (child: ChildProcess) => new Promise<void>((resolve) => {
-  if (ended(child)) resolve();
-  else child.once("exit", () => resolve());
-  child.once("error", () => resolve());
-});
-
-/** surogate-vm, its lines heard, its stderr's end kept. */
-class Helper {
-  readonly child: ChildProcess;
-  readonly gone: Promise<void>;
-  private said = "";
-  // The last words of its stopped or failed line.
-  last = "";
-  private readonly listeners = new Set<(said: Said) => void>();
-
-  constructor(start: Start, program: string, args: string[]) {
-    this.child = start(program, args, { stdio: ["pipe", "pipe", "pipe"], env: ENV });
-    this.child.on("error", () => {});
-    this.child.stdin?.on("error", () => {});
-    this.child.stderr?.on("data", (chunk: Buffer) => {
-      this.said = (this.said + chunk.toString()).slice(-4000);
-    });
-    if (this.child.stdout) {
-      createInterface({ input: this.child.stdout, crlfDelay: Infinity }).on("line", (line) => {
-        let said: Said;
-        try {
-          said = JSON.parse(line) as Said;
-        } catch {
-          return;
-        }
-        if (said.type === "failed") this.last = said.why;
-        if (said.type === "stopped") this.last = said.why ?? "";
-        for (const listener of this.listeners) listener(said);
-      });
-    }
-    this.gone = exited(this.child);
-  }
-
-  send(line: object): void {
-    if (!ended(this.child)) this.child.stdin?.write(`${JSON.stringify(line)}\n`);
-  }
-
-  on(listener: (said: Said) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  /** The first line *wanted* takes, by *deadline*, or what ended the wait: the helper's exit, or the deadline. */
-  async first(wanted: (said: Said) => boolean, deadline: number): Promise<Said | "exited" | "late"> {
-    let stop = () => {};
-    const heard = new Promise<Said>((resolve) => {
-      stop = this.on((said) => {
-        if (wanted(said)) resolve(said);
-      });
-    });
-    try {
-      return await Promise.race([heard, this.gone.then(() => "exited" as const), late(deadline)]);
-    } finally {
-      stop();
-    }
-  }
-
-  /** Its last words: its stopped or failed line's, else the end of what it said on stderr. */
-  words(): string {
-    return this.last || this.said.trim();
-  }
-}
-
 /**
  * A boot on macOS, as *start* starts surogate-vm: spawnClean in the app; the measurements on a Mac
  * give Node's own until the app's clean spawn on macOS is built.
@@ -185,7 +100,7 @@ export function darwinBoot(start: Start): BootVm {
     }
     mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
     const data = options.data ?? dirname(dirname(options.sessions));
-    const helper = new Helper(start, program, ["run", options.run, "--data", data, "--image", dirname(options.kernel), "--bundle", options.bundle ?? dirname(options.agentDisk)]);
+    const helper = new Helper(start, program, ["run", options.run, "--data", data, "--image", dirname(options.kernel), "--bundle", options.bundle ?? dirname(options.agentDisk)], ENV);
     const halt = () => helper.child.kill("SIGKILL");
     signal?.addEventListener("abort", halt, { once: true });
     const connected: Socket[] = [];
@@ -225,7 +140,7 @@ export const bootDarwin: BootVm = darwinBoot(spawnClean);
 // What a manager that died left: surogate-vm's sweep, which ends the surogate-vm its pidfile names
 // while it is still one run for this folder, and empties the folder.
 async function sweep(start: Start, program: string, run: string, deadline: number): Promise<void> {
-  const swept = new Helper(start, program, ["sweep", run]);
+  const swept = new Helper(start, program, ["sweep", run], ENV);
   if ((await Promise.race([swept.gone, late(deadline)])) === "late") {
     swept.child.kill("SIGKILL");
     throw new Error("surogate-vm did not sweep its folder in time");
