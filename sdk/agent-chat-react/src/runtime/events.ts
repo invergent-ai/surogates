@@ -6,6 +6,7 @@ export const WORKSPACE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "patch",
   "execute_code",
   "browser_screenshot",
+  "office_edit",
 ]);
 
 export const AGENT_CHAT_LISTENED_EVENTS = [
@@ -57,6 +58,7 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "thread.proposed",
   "office.conflict",
   "office.save_failed",
+  "stream.live",
 ] as const satisfies readonly AgentChatEventType[];
 
 /** Membership set for the listened events above.  The reconciliation poll

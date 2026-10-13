@@ -49,6 +49,8 @@ export function createInitialAgentChatState(
     researchSources: [],
     deviceWait: null,
     officeEvents: {},
+    live: false,
+    officeAutoOpen: null,
   };
 }
 
@@ -297,8 +299,15 @@ export function applyAgentChatEvent(
     case "llm.thinking":
       return applyLlmThinking(nextState, event);
 
-    case "tool.call":
-      return applyToolCall(nextState, event);
+    case "stream.live":
+      return { ...nextState, live: true };
+
+    case "tool.call": {
+      const withCall = applyToolCall(nextState, event);
+      const path = officeEditPath(event.data);
+      // Replayed history opens nothing: only an edit happening now opens its document.
+      return path && withCall.live ? { ...withCall, officeAutoOpen: { path, eventId: event.eventId } } : withCall;
+    }
 
     case "tool.result": {
       const toolCallId = stringValue(event.data.tool_call_id);
@@ -604,6 +613,13 @@ function parseUserMessageAttachments(
     out.push({ path, filename, mimeType, size });
   }
   return out.length > 0 ? out : undefined;
+}
+
+function officeEditPath(data: Record<string, unknown>): string | null {
+  if (data.name !== "office_edit") return null;
+  const args = data.arguments as Record<string, unknown> | undefined;
+  const path = typeof args?.path === "string" ? args.path.replace(/^__WORKSPACE__\//, "") : "";
+  return path || null;
 }
 
 // A browser event of a local-folder chat, whose browser is on the user's computer.

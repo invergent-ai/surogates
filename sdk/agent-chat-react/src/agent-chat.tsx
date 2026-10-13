@@ -12,6 +12,7 @@ import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspaceFileDrawer } from "./components/workspace/workspace-file-drawer";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
+import { isOfficeDocument } from "./lib/office";
 import { cn } from "./lib/utils";
 import {
   isSubAgentSession,
@@ -389,6 +390,19 @@ export function AgentChat({
     setOpenPane("file");
     setMobileView("file");
   }, []);
+
+  // A live office_edit opens its document beside the chat, unless the user is looking at another file;
+  // the phone's chat stays in view.
+  const officeAutoOpen = runtime.state.officeAutoOpen;
+  useEffect(() => {
+    if (!officeAutoOpen || !isOfficeDocument(officeAutoOpen.path)) return;
+    if (openPane === "file" && previewPath !== null && previewPath !== officeAutoOpen.path) return;
+    setWorkspacePath(officeAutoOpen.path);
+    setPreviewPath(officeAutoOpen.path);
+    setOpenPane("file");
+    // Only a new edit opens the pane: closing it is not undone until the agent edits again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officeAutoOpen?.eventId]);
 
   // The panel clears the selection when the selected file is deleted or the
   // session goes away — moments when the preview must not linger either.

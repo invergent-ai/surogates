@@ -999,6 +999,65 @@ describe("AgentChat", () => {
     expect(container.textContent).toContain("content of src/b.py");
   });
 
+  it("opens a document the agent starts editing live, and leaves replayed edits alone", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    const editPlan = (eventId: number) =>
+      stream.emit("tool.call", eventId, {
+        tool_call_id: `tc${eventId}`,
+        name: "office_edit",
+        arguments: { path: "docs/Plan.docx", ops: [] },
+      });
+
+    await act(async () => {
+      editPlan(3);
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="file-preview-panel"]')).toBeNull();
+
+    await act(async () => {
+      stream.emit("stream.live", 0, {});
+      editPlan(4);
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="file-preview-panel"]')?.textContent).toContain("Plan.docx");
+  });
+
+  it("keeps the file the user is looking at when the agent edits another", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    await openPane(container, "files");
+    const fileButton = Array.from(container.querySelectorAll<HTMLElement>('[role="treeitem"]'))
+      .reverse()
+      .find((element) => element.textContent?.includes("main.py"));
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stream.emit("stream.live", 0, {});
+      stream.emit("tool.call", 4, { tool_call_id: "tc4", name: "office_edit", arguments: { path: "docs/Plan.docx", ops: [] } });
+      await Promise.resolve();
+    });
+    const panel = container.querySelector('[data-testid="file-preview-panel"]');
+    expect(panel?.textContent).toContain("main.py");
+    expect(panel?.textContent).not.toContain("Plan.docx");
+  });
+
   it("reinitializes the files accordion when the session changes", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);

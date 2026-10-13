@@ -406,6 +406,7 @@ async def test_watch_follows_a_chat_from_its_newest_event_across_its_turns(
     # Then it ends at its longest, as every stream does, for the watcher to take up after the last id.
     assert events == [
         ("stream.start", "{}"),
+        ("stream.live", "{}"),
         ("user.message", '{"content": "the next turn"}'),
         ("session.complete", "{}"),
         ("stream.timeout", '{"reason": "max_duration_exceeded"}'),
@@ -438,7 +439,7 @@ async def test_without_watch_a_completed_chat_still_ends_its_stream(session_fact
     ) as response:
         events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=3.0)
 
-    assert events == [("session.done", '{"reason": "completed", "status": "completed"}')]
+    assert events == [("stream.live", "{}"), ("session.done", '{"reason": "completed", "status": "completed"}')]
 
 
 def _counting_reads(monkeypatch, store: SessionStore, session_id) -> list[tuple[float, str, list[int]]]:
@@ -667,3 +668,19 @@ async def test_a_watch_whose_channel_fails_reads_the_chat_no_more_often_than_a_p
     assert events[-1] == ("stream.timeout", '{"reason": "max_duration_exceeded"}')
     # Over its first second: the access check, then the chat's events and status about every 0.5 s.
     assert len([kind for at, kind, _ids in reads if at - started < 1.0]) <= 8
+
+
+async def test_the_stream_says_when_its_backlog_is_sent(session_factory, session_store, client):
+    """stream.live comes once, after the replayed events and before the stream ends."""
+    session, token = await _create_completed_session(session_factory, session_store)
+
+    async with client.stream(
+        "GET",
+        f"/v1/sessions/{session.id}/events?after=0",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=2.0)
+
+    types = [event_type for event_type, _ in events]
+    assert types.count("stream.live") == 1
+    assert types.index("stream.live") < types.index("session.done")
