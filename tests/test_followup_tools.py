@@ -128,6 +128,34 @@ async def test_enrol_refuses_a_protocol_no_program_offers(sf, patient):
     assert "post-op" in result
 
 
+async def _deactivate_programs(sf):
+    async with sf() as db:
+        await db.execute(sa.update(ProgramScheduleRow).values(active=False))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_no_active_program_is_named_a_practice_configuration_problem(sf, patient):
+    # "Offered: none" read to the model as the patient's fault, so it told
+    # them something inaccurate and escalated with the wrong reason.
+    _, session_id = patient
+    await _deactivate_programs(sf)
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x"},
+        **_kw(sf, session_id),
+    )
+    assert result.startswith("Not enrolled")
+    assert "no active Program" in result
+    assert "configuration problem at the practice" in result
+    assert "escalate" in result
+    assert "post-op" in result
+
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert status.startswith("Protocols offered: none.")
+    assert "configuration problem at the practice" in status
+    assert "escalate" in status
+
+
 @pytest.mark.parametrize("raw", ["05/10/2026", "2026-13-01", "1900-01-01"])
 @pytest.mark.asyncio
 async def test_enrol_refuses_a_bad_date(sf, patient, raw):

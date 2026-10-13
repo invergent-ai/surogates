@@ -267,9 +267,22 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     offered = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
     )
+    if not offered:
+        return (
+            f"Not enrolled: the practice has no active Program, so nobody can "
+            f"be enrolled in '{protocol}' or any other protocol. This is a "
+            f"configuration problem at the practice, not something the person "
+            f"did: tell them follow-up is not set up yet and the care team will "
+            f"be told, then call escalate with the reason \"No active follow-up "
+            f"Program for protocol '{protocol}'\"."
+        )
     if protocol not in offered:
-        listing = ", ".join(sorted(offered)) or "none"
-        return f"Not enrolled: '{protocol}' is not offered here. Offered: {listing}."
+        return (
+            f"Not enrolled: '{protocol}' is not offered here. Offered: "
+            f"{', '.join(sorted(offered))}. If the practice told you to use "
+            f"'{protocol}', it has no active Program for it: that is a "
+            f"configuration problem at the practice, so escalate saying so."
+        )
     summary = str(arguments.get("summary") or "").strip()
     if not summary:
         return "Not enrolled: write a short summary for the care team."
@@ -361,7 +374,13 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
     )
     lines = [
-        "Protocols offered: " + (", ".join(sorted(zones)) or "none") + "."
+        "Protocols offered: " + ", ".join(sorted(zones)) + "."
+        if zones else
+        "Protocols offered: none. The practice has no active Program, so "
+        "nobody can be enrolled. This is a configuration problem at the "
+        "practice, not something the person did: if they want follow-up, tell "
+        "them it is not set up yet and call escalate with the reason \"No "
+        "active follow-up Program\"."
     ]
     if ctx.user_id is None:
         return lines[0]
