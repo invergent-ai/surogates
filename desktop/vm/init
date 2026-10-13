@@ -32,11 +32,18 @@ named() {
   echo "$value"
 }
 
+# Words that stop the boot, then the stop: through the kernel's log, which the console prints before the guest
+# panics, where what is written to the console itself may be lost then on a UART (Hyper-V's COM1); else on stderr.
+stop() {
+  { echo "<3>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2
+  exit 1
+}
+
 # How the agent's ports reach the host (guest/port.ts): virtio-serial's ports, or vsock's streams, Hyper-V's.
-transport=$(named "$(cat /proc/cmdline)" transport) || { echo "surogate: $transport, so the guest stops" >&2; exit 1; }
+transport=$(named "$(cat /proc/cmdline)" transport) || stop "$transport, so the guest stops"
 case "$transport" in
   virtio-serial | vsock) ;;
-  *) echo "surogate: surogate.transport=$transport is not a transport this guest knows, so the guest stops" >&2; exit 1 ;;
+  *) stop "surogate.transport=$transport is not a transport this guest knows, so the guest stops" ;;
 esac
 
 # The guest-kernel rule on protected names (rule.bpf.c), loaded beside the rest of the
@@ -176,7 +183,7 @@ disk() {
 # failure, such as a feature this e2fsck does not know, stops the boot and
 # leaves the homes on the disk as they are: the app keeps that disk aside, by
 # this line on the console, and boots again on a new one (vm/manager.ts).
-sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || { echo "surogate: $sessions, so the guest stops" >&2; exit 1; }
+sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || stop "$sessions, so the guest stops"
 if [ "$(od -An -tx2 -j1080 -N2 "$sessions")" != " ef53" ]; then
   mke2fs -q -F -t ext4 -E nodiscard -L sessions "$sessions"
 else
@@ -187,8 +194,7 @@ else
     e2fsck -y "$sessions" || checked=$?
   fi
   if [ "$checked" -ge 8 ]; then
-    echo "surogate: e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one" >&2
-    exit 1
+    stop "e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one"
   fi
   [ "$checked" -lt 4 ] || mke2fs -q -F -t ext4 -E nodiscard -L sessions "$sessions"
 fi

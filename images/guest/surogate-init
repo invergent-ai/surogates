@@ -54,10 +54,17 @@ disk() {
   esac
 }
 
+# Words that stop the boot, then the stop: through the kernel's log, which the console prints before the guest
+# panics, where what is written to the console itself may be lost then on a UART (Hyper-V's COM1); else on stderr.
+stop() {
+  { echo "<3>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2
+  exit 1
+}
+
 mount -t proc -o nosuid,nodev,noexec proc /proc
 mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
 mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
 mkdir -p /run/surogate/agent
-agent=$(disk "$(cat /proc/cmdline)" 1 /sys) || { echo "surogate: $agent, so the guest stops" >&2; exit 1; }
+agent=$(disk "$(cat /proc/cmdline)" 1 /sys) || stop "$agent, so the guest stops"
 mount -t ext4 -o ro,nodev,nosuid "$agent" /run/surogate/agent
 exec /run/surogate/agent/init

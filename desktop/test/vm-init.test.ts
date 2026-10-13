@@ -64,8 +64,8 @@ describe("the guest's disks, found by the bus the kernel's line names", () => {
     expect(fnOf(vm("init"), "disk")).not.toBe("");
     expect(fnOf(STUB, "disk")).toBe(fnOf(vm("init"), "disk"));
     // Each init takes its own disk by it: the stub the agent disk, the agent disk's init the sessions disk.
-    expect(STUB).toContain('agent=$(disk "$(cat /proc/cmdline)" 1 /sys) || { echo "surogate: $agent, so the guest stops" >&2; exit 1; }');
-    expect(vm("init")).toContain('sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || { echo "surogate: $sessions, so the guest stops" >&2; exit 1; }');
+    expect(STUB).toContain('agent=$(disk "$(cat /proc/cmdline)" 1 /sys) || stop "$agent, so the guest stops"');
+    expect(vm("init")).toContain('sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || stop "$sessions, so the guest stops"');
     expect(`${STUB}${vm("init")}`).not.toMatch(/\/dev\/vd[bc](?! ;;)/);
   });
 
@@ -120,8 +120,8 @@ describe("the words of the kernel's line the guest's init reads", () => {
   });
 
   it("stops the boot on a transport it does not know, and loads the folders' filesystem the transport's shares need", () => {
-    expect(vm("init")).toContain('transport=$(named "$(cat /proc/cmdline)" transport) || { echo "surogate: $transport, so the guest stops" >&2; exit 1; }');
-    expect(vm("init")).toMatch(/case "\$transport" in\n {2}virtio-serial \| vsock\) ;;\n {2}\*\) echo "surogate: surogate\.transport=\$transport is not a transport this guest knows, so the guest stops" >&2; exit 1 ;;\nesac/);
+    expect(vm("init")).toContain('transport=$(named "$(cat /proc/cmdline)" transport) || stop "$transport, so the guest stops"');
+    expect(vm("init")).toMatch(/case "\$transport" in\n {2}virtio-serial \| vsock\) ;;\n {2}\*\) stop "surogate\.transport=\$transport is not a transport this guest knows, so the guest stops" ;;\nesac/);
     expect(vm("init")).toContain('if [ "$transport" = vsock ]; then\n  modprobe 9p\n  modprobe 9pnet_fd\nelse\n  modprobe virtiofs\nfi\nmodprobe overlay\n');
   });
 });
@@ -147,5 +147,23 @@ describe("the rule's names, by the set the kernel's line names", () => {
     expect(vm("init")).toContain('/usr/sbin/bpftool map update pinned /sys/fs/bpf/surogate-maps/names key 0 0 0 0 value "$names" 0 0 0 \\\n'
       + '      && /usr/sbin/bpftool map freeze pinned /sys/fs/bpf/surogate-maps/names; } >&2; then\n    echo "failed: could not set the protected-names rule\'s names"');
     expect(vm("rule.bpf.c")).toMatch(/^#define NAMES_POSIX 0\n#define NAMES_WINDOWS 1\n/m);
+  });
+});
+
+describe("the words that stop the guest's boot", () => {
+  // What *text*'s stop() says, run alone where no /dev/kmsg takes it from this user: its words on stderr, and its exit.
+  const stopped = (text: string) => spawnSync("/bin/sh", ["-uc", `${fnOf(text, "stop")}\nstop "the disk did not come, so the guest stops"`], { encoding: "utf8" });
+
+  it("goes through the kernel's log, which a UART's console prints before the panic, and else on stderr, then ends the boot", () => {
+    for (const text of [vm("init"), STUB]) {
+      expect(fnOf(text, "stop")).toContain('{ echo "<3>surogate: $*" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*" >&2');
+      if (spawnSync("/bin/sh", ["-c", "true > /dev/kmsg"]).status === 0) continue;
+      expect(stopped(text)).toMatchObject({ status: 1, stdout: "", stderr: "surogate: the disk did not come, so the guest stops\n" });
+    }
+    // Every word of a stop is a stop's: no other way out of either init says why on the console itself.
+    for (const text of [vm("init"), STUB]) expect(text).not.toMatch(/echo "surogate: [^"]*" >&2; exit 1/);
+    expect(vm("init")).toContain('stop "e2fsck could not check the sessions disk (exit code $checked), so the guest stops; the app keeps the disk aside and makes a new one"');
+    const initrd = readFileSync(new URL("../../images/guest/initrd/init", import.meta.url), "utf8");
+    expect(fnOf(initrd, "fail")).toContain('{ echo "<3>surogate: $*, so the guest stops" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*, so the guest stops"');
   });
 });

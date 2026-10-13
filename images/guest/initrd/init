@@ -11,8 +11,10 @@ export PATH=/bin
 # How long the disks have to come, in tenths of a second: the drivers find them after they load.
 WAIT=50
 
+# Words that stop the boot, then the stop: through the kernel's log, which the console prints before the guest
+# panics, where what is written to the console itself may be lost then on a UART (Hyper-V's COM1).
 fail() {
-  echo "surogate: $*, so the guest stops"
+  { echo "<3>surogate: $*, so the guest stops" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*, so the guest stops"
   exit 1
 }
 
