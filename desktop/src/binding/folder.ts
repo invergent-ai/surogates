@@ -7,6 +7,7 @@ import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
 import { join, resolve } from "../host-path.js";
 import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { bootId } from "./boot-id.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
@@ -55,6 +56,22 @@ function spellings(path: string, links: string[] = []): string[] {
   return real === plain ? [plain] : [plain, real];
 }
 
+// Whether *path* lies on a network volume, which a chat's folder may not be on Windows: a drive letter is mapped per
+// logon session (Microsoft Learn, "Mapped drives are not available from an elevated command"), and on SMB every
+// reparse tag but a symlink's is "processed on the server" (MS-FSCC, "Reparse Tags"), out of the walk's sight. Its
+// path as Windows resolves it (libuv's realpath, GetFinalPathNameByHandleW) is a UNC path, \\server\share\..., for a
+// share and for a mapped drive alike; a subst drive's is its real folder's. Linux and macOS bind any folder.
+const ON_NETWORK = forThisOs<(path: string) => boolean>({
+  linux: () => false,
+  darwin: () => false,
+  win32: (path) => realpathSync.native(path).startsWith("\\\\"),
+});
+
+/** Whether the folder at *path* is on a network volume, which this OS's file host cannot work in. */
+export function onNetworkVolume(path: string): boolean {
+  return (ON_NETWORK ?? (() => notBuilt("A chat's folder")))(path);
+}
+
 // The folder as it resolves, and its identity; or why no chat may work on it.
 export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   let path: string;
@@ -68,6 +85,7 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   }
   if (!stats.isDirectory()) return { ok: false, missing: true, message: `the folder ${folder} is not a folder` };
   const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message });
+  if (onNetworkVolume(path)) return refused(`the folder ${path} is on a network volume, which Surogate cannot work in on this computer`);
   if (GLOB.test(path)) return refused(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${path}`);
   if (FOLDER_BYTES !== null && Buffer.byteLength(path) > FOLDER_BYTES) {
     return refused(`this computer cannot sandbox a folder whose path is longer than ${FOLDER_BYTES} bytes: ${path}`);

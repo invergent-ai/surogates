@@ -1,5 +1,5 @@
 // Every open flag the file host spells by its number, for each OS, and nowhere else: Node's fs.constants names each
-// OS's own common flags, and not these. A flag's number on one OS can be another flag on the next: Linux's O_PATH is
+// OS's own common flags, and not these, and on Windows not O_DIRECTORY either. A flag's number on one OS can be another flag on the next: Linux's O_PATH is
 // Darwin's O_SYMLINK, which opens a link itself where Linux's O_PATH with O_NOFOLLOW refuses one. Each OS's are a row
 // of their own; files/ is on the agent disk, which holds no platform.js, so the row is picked here.
 
@@ -17,13 +17,20 @@ export const LINUX_FLAGS = { O_PATH: 0o10000000, O_CLOEXEC: 0o2000000 } as const
 let darwin: FsatConstants | null | undefined;
 const darwinFlags = (): FsatConstants | null => (darwin === undefined ? (darwin = process.platform === "darwin" ? fsat().constants : null) : darwin);
 
+// Windows's: no open of the file host's goes through Node there, and the walk follows no link at any name
+// (fd-paths-win32.ts), so no flag says so. A folder is asked for by the C runtime's own _O_OBTAIN_DIR (<fcntl.h>), a
+// number no other flag Node takes there has.
+export const WIN32_FLAGS = { O_DIRECTORY: 0x2000 } as const;
+
 interface Flags {
   NOFOLLOW: number;
+  DIRECTORY: number;
 }
 
 const ROWS: Partial<Record<NodeJS.Platform, () => Flags>> = {
-  linux: () => ({ NOFOLLOW: constants.O_NOFOLLOW }),
-  darwin: () => ({ NOFOLLOW: darwinFlags()!.O_NOFOLLOW_ANY }),
+  linux: () => ({ NOFOLLOW: constants.O_NOFOLLOW, DIRECTORY: constants.O_DIRECTORY }),
+  darwin: () => ({ NOFOLLOW: darwinFlags()!.O_NOFOLLOW_ANY, DIRECTORY: constants.O_DIRECTORY }),
+  win32: () => ({ NOFOLLOW: 0, DIRECTORY: WIN32_FLAGS.O_DIRECTORY }),
 };
 // On an OS the file host is not built for yet, in notBuilt's words (os-names.ts).
 const NOT_BUILT = notBuiltWords("The file host");
@@ -40,5 +47,9 @@ export const FLAGS = {
    */
   get NOFOLLOW(): number {
     return row().NOFOLLOW;
+  },
+  /** That what is opened must be a folder, as O_DIRECTORY. */
+  get DIRECTORY(): number {
+    return row().DIRECTORY;
   },
 };

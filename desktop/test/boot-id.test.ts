@@ -25,7 +25,7 @@ describe("this boot's identity", () => {
   });
 
   it("is nothing on a system whose boot it does not read yet, which counts as this boot", async () => {
-    const { bootId: elsewhere } = await importedOn("win32", () => import("../src/binding/boot-id.js"));
+    const { bootId: elsewhere } = await importedOn("freebsd", () => import("../src/binding/boot-id.js"));
     expect(elsewhere()).toBe("");
   });
 });

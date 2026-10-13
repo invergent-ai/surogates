@@ -2,7 +2,7 @@
 // very folder the descriptor holds, wherever that is now and whatever is at its path.
 
 import {
-  accessSync, chmodSync, constants, copyFileSync, linkSync, lstatSync, mkdirSync, opendirSync, openSync, readdirSync, readFileSync,
+  accessSync, chmodSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, opendirSync, openSync, readdirSync, readFileSync,
   readlinkSync, renameSync, rmdirSync, statSync, unlinkSync,
 } from "node:fs";
 
@@ -15,10 +15,14 @@ const path = (where: Where): string =>
   typeof where === "string" ? where : `/proc/self/fd/${where.dir}${where.name === undefined ? "" : `/${where.name}`}`;
 
 export const linuxFdPaths: FdPaths = {
+  // The sandbox binds them.
+  bind: () => {},
   hold: (where) => openSync(path(where), HOLD),
   open: (where, flags, mode) => (mode === undefined ? openSync(path(where), flags) : openSync(path(where), flags, mode)),
   lstat: (where) => lstatSync(path(where), { bigint: true }),
-  stat: (where) => statSync(path(where)),
+  stat: ((where: Where, options?: { bigint: true }) => (options ? statSync(path(where), options) : statSync(path(where)))) as FdPaths["stat"],
+  exists: (where) => existsSync(path(where)),
+  readdir: (where) => readdirSync(path(where)),
   access: (where, mode) => accessSync(path(where), mode),
   mkdir: (where) => void mkdirSync(path(where)),
   rmdir: (where) => rmdirSync(path(where)),
@@ -50,4 +54,10 @@ export const linuxFdPaths: FdPaths = {
     return handed;
   },
   shown: path,
+  // In the sandbox, which binds the folder for the helper's life.
+  outside: (path) => ({ path, empty: false, release: () => {} }),
+  // rg walks the folder here, inside the sandbox.
+  searchFiles: () => {
+    throw new Error("the file host lists the tree itself only where no sandbox binds the folder");
+  },
 };

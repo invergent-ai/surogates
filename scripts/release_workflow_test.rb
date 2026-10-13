@@ -536,7 +536,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit vm-probe vm-native vm-backend vm-boot], jobs.keys
+    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-boot], jobs.keys
     jobs.each do |name, job|
       assert_equal "windows-2025", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -557,6 +557,15 @@ class ReleaseWorkflowTest < Minitest::Test
     unit = jobs.fetch("unit")
     refute unit.key?("continue-on-error")
     assert_equal "npx vitest run --project windows", unit.fetch("steps").last.fetch("run").strip
+    # The file host's suites on the runner's own NTFS gate, each step bounded, after ntat and rg are built.
+    host = jobs.fetch("file-host")
+    refute host.key?("continue-on-error")
+    host_runs = host.fetch("steps").map { |step| step["run"].to_s }
+    assert(host_runs.any? { |run| run.include?("native/ntat/build.ps1") })
+    assert(host_runs.any? { |run| run.include?("scripts/rg.sh") })
+    suites = host.fetch("steps").select { |step| step["run"].to_s.include?("npx vitest run") }
+    assert_equal 3, suites.size
+    suites.each { |step| assert step.key?("timeout-minutes"), step["name"] }
     # What the runner offers the VM, recorded and never gating: its Rust probe built as its lock file has it.
     probe = jobs.fetch("vm-probe")
     assert_equal true, probe.fetch("continue-on-error")
@@ -721,6 +730,7 @@ class ReleaseWorkflowTest < Minitest::Test
       },
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
+        "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 987851a1dbf1a172 0e5aca50928ffe67 f4bd44c606874e67 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f]],
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],

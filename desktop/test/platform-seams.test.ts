@@ -27,6 +27,7 @@ const OWN = new Map([
   ["files/helper.ts", "the agent's disk"],
   ["files/identity.ts", "the agent's disk"],
   ["files/os-names.ts", "the agent's disk"],
+  ["files/os.ts", "the agent's disk"],
   // The pages' preload runs sandboxed, where it can import none of the app's modules.
   ["shell/pages-preload.cts", "a sandboxed preload"],
 ]);

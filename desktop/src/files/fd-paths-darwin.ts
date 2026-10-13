@@ -4,8 +4,8 @@
 // counterpart, so a folder this user may pass through but not list cannot be held here.
 
 import {
-  accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, type Dirent, fchmodSync, fstatSync, linkSync, lstatSync,
-  mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, chmodSync, closeSync, constants, copyFileSync, type Dirent, existsSync, fchmodSync, fstatSync, linkSync,
+  lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, renameSync, rmdirSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 
 import type { FdPaths, Listing, Where } from "./fd-paths.js";
@@ -97,6 +97,8 @@ const open = (where: Where, flags: number, mode = 0o666): number => {
 };
 
 export const darwinFdPaths: FdPaths = {
+  // The sandbox gives the helper them, and the helper looks at each before each request (helper.ts).
+  bind: () => {},
   hold: (where) => open(where, HOLD()),
   open: (where, flags, mode) => open(where, flags, mode),
   lstat(where) {
@@ -104,10 +106,37 @@ export const darwinFdPaths: FdPaths = {
     const [dir, name] = split(where);
     return bigintStats(fsat().fstatat(dir, name, at().AT_SYMLINK_NOFOLLOW));
   },
-  stat(where) {
-    if (typeof where === "string") return statSync(where);
+  stat: ((where: Where, options?: { bigint: true }) => {
+    if (typeof where === "string") return options ? statSync(where, options) : statSync(where);
     const [dir, name] = split(where);
-    return numberStats(fsat().fstatat(dir, name, 0));
+    const raw = fsat().fstatat(dir, name, 0);
+    return options?.bigint ? bigintStats(raw) : numberStats(raw);
+  }) as FdPaths["stat"],
+  exists(where) {
+    if (typeof where === "string") return existsSync(where);
+    try {
+      darwinFdPaths.stat(where);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  readdir(where) {
+    if (typeof where === "string") return readdirSync(where);
+    const held = darwinFdPaths.hold(where);
+    let listing: Listing;
+    try {
+      listing = darwinFdPaths.listing(held);
+    } finally {
+      closeSync(held);
+    }
+    const names: string[] = [];
+    try {
+      for (let entry = listing.readSync(); entry !== null; entry = listing.readSync()) names.push(entry.name.toString("utf8"));
+    } finally {
+      listing.closeSync();
+    }
+    return names;
   },
   access(where, mode) {
     if (typeof where === "string") return accessSync(where, mode);
@@ -210,5 +239,11 @@ export const darwinFdPaths: FdPaths = {
       folder = `/dev/fd/${where.dir}`;
     }
     return where.name === undefined ? folder : `${folder}/${where.name}`;
+  },
+  // In the sandbox, which judges each access by its path.
+  outside: (path) => ({ path, empty: false, release: () => {} }),
+  // rg walks the folder here, inside the sandbox.
+  searchFiles: () => {
+    throw new Error("the file host lists the tree itself only where no sandbox binds the folder");
   },
 };

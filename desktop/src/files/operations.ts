@@ -10,8 +10,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, type BigIntStats, closeSync, constants, type Dirent, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync,
-  openSync, readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, readSync, type Stats, statSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { posix } from "node:path";
@@ -27,8 +26,9 @@ import { fdPaths, type Listing, type Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
 import { identityOf } from "./identity.js";
 import { land } from "./land.js";
+import { fileOs } from "./os.js";
 import { type Edge, edgeOf, keyInFolder, resolveInFolder } from "./paths.js";
-import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
+import { checkWrite, writeRefusal } from "./protect.js";
 
 // A session's paths, POSIX on every OS (session-path.ts): files/ is on the agent disk, which holds no module of the
 // app's but its own.
@@ -156,7 +156,7 @@ export const revisionOf = (st: BigIntStats): string => {
 // The file's revision now, or null when it cannot be stat'ed.
 function revisionAt(key: string): string | null {
   try {
-    return revisionOf(statSync(key, { bigint: true }));
+    return revisionOf(fdPaths.stat(key, { bigint: true }));
   } catch {
     return null;
   }
@@ -164,7 +164,7 @@ function revisionAt(key: string): string | null {
 
 function stat(args: Record<string, unknown>, { folder, at }: Context): unknown {
   try {
-    const st = statSync(keyInFolder(folder, text(args, "key"), at), { bigint: true });
+    const st = fdPaths.stat(keyInFolder(folder, text(args, "key"), at), { bigint: true });
     // st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus
     // nanoseconds * 1e-9, with tv_nsec never negative.
     let seconds = st.mtimeNs / 1_000_000_000n;
@@ -194,7 +194,7 @@ function read(args: Record<string, unknown>, { folder, at }: Context): string {
   const key = keyInFolder(folder, text(args, "key"), at);
   const wanted = wholeOrNull(args, "max_bytes");
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
-  const fd = io(key, () => openSync(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // Asked for whole, a file over the cap is refused from its size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
@@ -232,7 +232,7 @@ function readLines(args: Record<string, unknown>, { folder, at }: Context): { da
   ) {
     throw valueError(BAD_PAGE);
   }
-  const fd = io(key, () => openSync(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // From the file's size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES) throw READ_EFBIG;
@@ -344,7 +344,8 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
   // Only the in-folder protected names are re-checked here. A key is proven to be inside the folder; a folder that
   // holds the home folder's credentials is refused at host start, and the system paths on the cloud's list are
   // left to the operating system's own permissions.
-  if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
+  const refusal = writeRefusal(folder, key);
+  if (refusal !== null) throw sandboxError(refusal);
   // Whether it may only make a file: said as true or false, or not at all. Any other word is refused, not
   // taken for a write that may replace what is there.
   if (args.create !== undefined && typeof args.create !== "boolean") throw valueError("'create' must be true or false");
@@ -366,9 +367,9 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
   makeDirs(parent);
   // The rename replaces the name and never opens the file, so a file this user
   // cannot read is still replaced, as in the cloud.
-  let existing: Stats | undefined;
+  let existing: BigIntStats | undefined;
   try {
-    existing = lstatSync(key);
+    existing = fdPaths.lstat(key);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") io(key, () => { throw error; });
   }
@@ -376,12 +377,12 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
   if (existing) {
     if (existing.isDirectory()) throw osError("EISDIR", key);
     if (!existing.isFile()) throw osError("EINVAL", key, "Not a regular file");
-    if (existing.nlink > 1) throw osError("EMLINK", key, "File has more than one hard link, so it is not changed");
-    mode = existing.mode & 0o7777;
+    if (existing.nlink > 1n) throw osError("EMLINK", key, "File has more than one hard link, so it is not changed");
+    mode = Number(existing.mode) & 0o7777;
   }
   const temporary = join(parent, ownFile());
   const fd = io(key, () =>
-    openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
+    fdPaths.open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
   try {
     try {
       for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
@@ -397,10 +398,10 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
     }
     // Again, now that the temp file is whole: another writer may have changed the file while it was written.
     check();
-    io(key, () => renameSync(temporary, key));
+    io(key, () => fdPaths.rename(temporary, key));
   } catch (error) {
     try {
-      unlinkSync(temporary);
+      fdPaths.unlink(temporary);
     } catch {
       // Already gone.
     }
@@ -414,7 +415,7 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
 // another writer made meanwhile. What it made goes when the data cannot be written whole.
 function create(key: string, data: Buffer): null {
   makeDirs(dirname(key));
-  const fd = io(key, () => openSync(key, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
+  const fd = io(key, () => fdPaths.open(key, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666));
   try {
     try {
       for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
@@ -423,7 +424,7 @@ function create(key: string, data: Buffer): null {
     }
   } catch (error) {
     try {
-      unlinkSync(key);
+      fdPaths.unlink(key);
     } catch {
       // Already gone.
     }
@@ -434,11 +435,12 @@ function create(key: string, data: Buffer): null {
 
 function remove(args: Record<string, unknown>, { folder, at }: Context): null {
   const key = keyInFolder(folder, text(args, "key"), at);
-  if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
+  const refusal = writeRefusal(folder, key);
+  if (refusal !== null) throw sandboxError(refusal);
   if (key === folder) throw osError("EISDIR", key);
   io(key, () => {
     try {
-      unlinkSync(key);
+      fdPaths.unlink(key);
     } catch (error) {
       // Darwin's unlink(2) refuses a folder with EPERM, where Linux's, and the cloud's, says EISDIR.
       if ((error as NodeJS.ErrnoException).code === "EPERM" && isFolder(key)) throw osError("EISDIR", key);
@@ -451,7 +453,7 @@ function remove(args: Record<string, unknown>, { folder, at }: Context): null {
 // Whether *path* is a folder now, a link to one being none; false where it cannot be told.
 function isFolder(path: string): boolean {
   try {
-    return lstatSync(path).isDirectory();
+    return fdPaths.lstat(path).isDirectory();
   } catch {
     return false;
   }
@@ -461,7 +463,7 @@ function isFolder(path: string): boolean {
 // the first folder that could not be made, as Python's does.
 function makeDirs(dir: string): void {
   const parent = dirname(dir);
-  if (parent !== dir && !existsSync(parent)) {
+  if (parent !== dir && !fdPaths.exists(parent)) {
     try {
       makeDirs(parent);
     } catch (error) {
@@ -469,11 +471,11 @@ function makeDirs(dir: string): void {
     }
   }
   try {
-    mkdirSync(dir);
+    fdPaths.mkdir(dir);
   } catch (error) {
     let folderAlready = false;
     try {
-      folderAlready = statSync(dir).isDirectory();
+      folderAlready = fdPaths.stat(dir).isDirectory();
     } catch {
       // Not a folder.
     }
@@ -483,7 +485,7 @@ function makeDirs(dir: string): void {
 
 function listDir(args: Record<string, unknown>, { folder, at }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"), at);
-  return io(key, () => readdirSync(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
+  return io(key, () => fdPaths.readdir(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
 }
 
 // walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
@@ -520,7 +522,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
   let looks = 0;
   let truncated = false;
   // The key's own failure is the answer.
-  const keyFd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_DIRECTORY | FLAGS.NOFOLLOW));
+  const keyFd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW));
   let keyDir: Listing;
   try {
     keyDir = io(key, () => fdPaths.listing(keyFd));
@@ -563,7 +565,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
         }
         let fd: number;
         try {
-          fd = fdPaths.open(at, constants.O_RDONLY | constants.O_DIRECTORY | FLAGS.NOFOLLOW);
+          fd = fdPaths.open(at, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW);
         } catch (error) {
           if (outOfHandles(error)) {
             truncated = true;
@@ -652,7 +654,10 @@ function runnable(path: string): boolean {
 // begins and ends like it is theirs.
 const NOT_OWN = "!.surogate-????????-????-????-????-????????????.tmp";
 
-// The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-"; and no file of the helper's own.
+// The cloud's command line: --no-ignore, -e so a pattern may start with "-", and no file of the helper's own. Where rg
+// walks the folder (Linux, macOS, in the sandbox) it is given the folder and its own -g globs; where it does not
+// (Windows), the helper lists the tree itself and gives rg only files, never a folder, with the glob already applied
+// (fd-paths-win32.ts, searchFiles; fileOs.rgWalks).
 async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Context, signal: AbortSignal): Promise<string> {
   const key = keyInFolder(folder, text(args, "key"), at);
   const mode = text(args, "mode");
@@ -661,24 +666,62 @@ async function ripgrep(args: Record<string, unknown>, { env, folder, at }: Conte
   const glob = textOrNull(args, "glob");
   const lines = whole(args, "context");
   if (pattern.includes("\0") || glob?.includes("\0")) throw valueError(NUL_REFUSED);
-  const rg = findOnPath("rg", env.PATH, folder);
+  const rg = fileOs.rg(env.PATH, folder, findOnPath);
   if (!rg) throw new Failure({ type: "ripgrep", message: RG_MISSING });
-  const argv = ["--no-ignore"];
-  if (mode === "files") {
-    argv.push("--files", "-g", pattern, "-g", NOT_OWN);
-  } else {
-    if (glob) argv.push("-g", glob);
-    argv.push("-g", NOT_OWN);
-    if (mode === "count") argv.push("-c");
-    else argv.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
-    argv.push("-e", pattern);
-  }
-  argv.push(key);
   // A user's rg config could change the results or add --pre, which runs a program.
   const { RIPGREP_CONFIG_PATH: _config, ...clean } = env;
-  // rg is given the key where it lies, and names what it finds from there: on a copy, by the copy's path.
-  const edge = edgeOf(folder, at ?? folder);
-  return searchWith(rg, argv, clean, signal, edge && { mode, edge });
+
+  if (fileOs.rgWalks) {
+    const argv = ["--no-ignore"];
+    if (mode === "files") {
+      argv.push("--files", "-g", pattern, "-g", NOT_OWN);
+    } else {
+      if (glob) argv.push("-g", glob);
+      argv.push("-g", NOT_OWN);
+      if (mode === "count") argv.push("-c");
+      else argv.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
+      argv.push("-e", pattern);
+    }
+    // rg opens the key by its path, so it is given the path this computer has for it, held there until rg ends: the key
+    // itself, in the sandbox that binds the folder. A folder that held nothing has nothing to find.
+    const outside = io(key, () => fdPaths.outside(key));
+    if (outside.empty) {
+      outside.release();
+      return "";
+    }
+    argv.push(...fileOs.rgArgs, outside.path);
+    // rg names what it finds from the path it is given: on a copy, by the copy's path.
+    const named = edgeOf(outside.path.slice(0, outside.path.length - (key.length - folder.length)), at ?? folder);
+    const edge = named && fileOs.rgPrinted ? { ...named, printed: fileOs.rgPrinted } : named;
+    let used = false;
+    const nextBatch = () => (used ? null : ((used = true), { argv, release: () => {} }));
+    return runSearch(rg, nextBatch, clean, signal, edge && { mode, edge }).finally(outside.release);
+  }
+
+  // Windows: rg is given explicit files, never a folder (it would walk one and follow a link swapped in behind it).
+  const base = [...fileOs.rgArgs, "--no-ignore"];
+  if (mode === "files") base.push("--files");
+  else {
+    // --with-filename: rg names the file in every line, as it does walking a folder; given one explicit file it would
+    // otherwise print the count or the match with no path, and the answer is keyed by path (--json always names it).
+    if (mode === "count") base.push("-c", "--with-filename");
+    else base.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
+    base.push("-e", pattern);
+  }
+  const search = io(key, () => fdPaths.searchFiles(key, { filesMode: mode === "files", glob: mode === "files" ? pattern : glob, own: OWN_FILE }));
+  // rg names each file by this computer's path for it; the folder's own path maps those back to its key space.
+  const named = edgeOf(search.root, at ?? folder);
+  const edge = named && fileOs.rgPrinted ? { ...named, printed: fileOs.rgPrinted } : named;
+  // Each batch's files are given to rg after --, so no path is taken for an option, and are held while rg runs on them.
+  const nextBatch = () => {
+    const batch = search.next();
+    return batch && { argv: [...base, "--", ...batch.paths], release: batch.release };
+  };
+  try {
+    return await runSearch(rg, nextBatch, clean, signal, edge && { mode, edge });
+  } finally {
+    search.close();
+  }
 }
 
 // ENOENT is no rg to run (or no interpreter for it); any other spawn error
@@ -689,27 +732,25 @@ function spawnFailure(error: unknown, rg: string): unknown {
     : fromNode(error, rg);
 }
 
-// *copy*: a search of a thread's copy, in its mode. What rg says of it is answered by the folder's path (edge.ts).
-function searchWith(
-  rg: string, argv: string[], env: Record<string, string | undefined>, signal: AbortSignal, copy?: { mode: string; edge: Edge },
+// A batch of a search: rg's whole command line for it, and what to let go of once rg has run on it. A search is one
+// batch where rg walks the folder (Linux, macOS), or a batch of pinned files at a time where the helper lists the tree
+// (Windows); *nextBatch* gives the next, or null at the end. The batches' outputs join, as rg's one walk's lines would.
+interface Batch {
+  argv: string[];
+  release(): void;
+}
+
+// *copy*: a search of a thread's copy, or on Windows of the folder by its own path, answered by the folder's path
+// (edge.ts). rg runs on each batch in turn; its output, its errors and the cap carry across them, and the edge maps the
+// whole once it is done.
+function runSearch(
+  rg: string, nextBatch: () => Batch | null, env: Record<string, string | undefined>, signal: AbortSignal, copy?: { mode: string; edge: Edge },
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(CANCELLED);
       return;
     }
-    let child: ChildProcess;
-    try {
-      child = spawn(rg, argv, { env, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      reject(spawnFailure(error, rg));
-      return;
-    }
-    // At once: an error event nobody listens for crashes the helper.
-    child.on("error", (error) => {
-      signal.removeEventListener("abort", onAbort);
-      reject(spawnFailure(error, rg));
-    });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let size = 0;
@@ -718,57 +759,92 @@ function searchWith(
     // What each line of a copy's search loses of its length as it is answered, and the lines so far, the one being written too.
     const spare = copy ? spared(copy.mode, copy.edge) : 0;
     let lines = 1;
+    let child: ChildProcess | null = null;
+    let done = false;
     const kill = () => {
       try {
-        child.kill("SIGKILL");
+        child?.kill("SIGKILL");
       } catch {
         // Already gone.
       }
     };
+    const settle = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      signal.removeEventListener("abort", onAbort);
+      fn();
+    };
     function onAbort() {
       kill();
-      reject(CANCELLED);
+      settle(() => reject(CANCELLED));
     }
-    signal.addEventListener("abort", onAbort, { once: true });
-    // A child that could not start (EMFILE) has no streams.
-    child.stdout?.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (spare > 0) for (const byte of chunk) if (byte === 10) lines += 1;
-      // Every byte costs at least one character on the wire, so past the cap in
-      // bytes the answer is already known.
-      if (size - lines * spare > OUTPUT_CAP_CHARS) {
-        over = true;
-        kill();
-      } else {
-        out.push(chunk);
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (errSize < STDERR_BYTES) err.push(chunk.subarray(0, STDERR_BYTES - errSize));
-      errSize += chunk.length;
-    });
-    child.on("close", (code, killedBy) => {
-      signal.removeEventListener("abort", onAbort);
-      if (signal.aborted) {
-        reject(CANCELLED);
-        return;
-      }
-      if (over) {
-        reject(NARROW);
-        return;
-      }
-      const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
-      if (status !== 0 && status !== 1) {
-        const wrote = copy
-          ? saidInFailing(Buffer.concat(err), errSize > STDERR_BYTES, (bytes) => UTF8.decode(bytes), copy.edge)
-          : UTF8.decode(Buffer.concat(err));
-        const refusal = { type: "ripgrep", message: `rg exited ${status}: ${[...wrote].slice(0, 200).join("")}` };
-        reject(new Failure(refusal, copy && (() => refusal)));
-        return;
-      }
+    signal.addEventListener("abort", onAbort);
+    const finish = () => {
       const found = copy ? searched(copy.mode, UTF8.decode(Buffer.concat(out)), copy.edge) : UTF8.decode(Buffer.concat(out));
-      if (pyJsonLength(found) > OUTPUT_CAP_CHARS) reject(NARROW);
-      else resolve(found);
-    });
+      if (pyJsonLength(found) > OUTPUT_CAP_CHARS) settle(() => reject(NARROW));
+      else settle(() => resolve(found));
+    };
+    const pull = () => {
+      const batch = nextBatch();
+      if (!batch) {
+        finish();
+        return;
+      }
+      run(batch);
+    };
+    function run(batch: Batch) {
+      try {
+        child = spawn(rg, batch.argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+      } catch (error) {
+        batch.release();
+        settle(() => reject(spawnFailure(error, rg)));
+        return;
+      }
+      // At once: an error event nobody listens for crashes the helper.
+      child.on("error", (error) => {
+        batch.release();
+        settle(() => reject(spawnFailure(error, rg)));
+      });
+      // A child that could not start (EMFILE) has no streams.
+      child.stdout?.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (spare > 0) for (const byte of chunk) if (byte === 10) lines += 1;
+        // Every byte costs at least one character on the wire, so past the cap in
+        // bytes the answer is already known.
+        if (size - lines * spare > OUTPUT_CAP_CHARS) {
+          over = true;
+          kill();
+        } else {
+          out.push(chunk);
+        }
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (errSize < STDERR_BYTES) err.push(chunk.subarray(0, STDERR_BYTES - errSize));
+        errSize += chunk.length;
+      });
+      child.on("close", (code, killedBy) => {
+        batch.release();
+        if (done) return;
+        if (signal.aborted) {
+          settle(() => reject(CANCELLED));
+          return;
+        }
+        if (over) {
+          settle(() => reject(NARROW));
+          return;
+        }
+        const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
+        if (status !== 0 && status !== 1) {
+          const wrote = copy
+            ? saidInFailing(Buffer.concat(err), errSize > STDERR_BYTES, (bytes) => UTF8.decode(bytes), copy.edge)
+            : UTF8.decode(Buffer.concat(err));
+          const refusal = { type: "ripgrep", message: `rg exited ${status}: ${[...wrote].slice(0, 200).join("")}` };
+          settle(() => reject(new Failure(refusal, copy && (() => refusal))));
+          return;
+        }
+        pull();
+      });
+    }
+    pull();
   });
 }

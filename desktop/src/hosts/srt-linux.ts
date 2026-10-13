@@ -42,6 +42,7 @@ const SOCKET_MAX = 107;
 const LONGEST_SOCKET = `claude-socks-${"0".repeat(16)}.sock`;
 
 export const LINUX_SRT: SrtOs = {
+  wraps: true,
   system: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve"],
   // The kernel's and the devices' folders; /run, which holds the user's sockets (the session bus, the agents), but
   // not /run/media, where drives are mounted.

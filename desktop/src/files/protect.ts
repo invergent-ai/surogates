@@ -8,6 +8,7 @@
 import { posix } from "node:path";
 
 import { NUL_REFUSED, valueError } from "./answers.js";
+import { fileOs } from "./os.js";
 import { edgeOn, expandUser, inside, ledTo, realpath } from "./paths.js";
 
 // A session's paths, POSIX on every OS (session-path.ts): files/ is on the agent disk, which holds no module of the
@@ -78,7 +79,16 @@ export function checkWrite(folder: string, home: string, path: string, at = fold
   if (SENSITIVE_PREFIXES.some((prefix) => resolved.startsWith(prefix)) || SENSITIVE_PATHS.includes(resolved)) {
     return `Refusing to write to sensitive system path: ${path}\nUse the terminal tool with sudo if you need to modify system files.`;
   }
-  return protectedInFolder(at, resolved) ? inFolderRefusal(path) : null;
+  return writeRefusal(at, resolved, path);
+}
+
+/**
+ * Why a write of *key* in the folder is refused, in the words for *path*, as the request named it: one of its protected
+ * names; or on Windows a name Explorer acts on when it shows the folder (os.ts). Null where neither refuses it.
+ */
+export function writeRefusal(folder: string, key: string, path = key): string | null {
+  if (protectedInFolder(folder, key)) return inFolderRefusal(path);
+  return key !== folder && inside(key, folder) && fileOs.explorer(key) ? explorerRefusal(path) : null;
 }
 
 // Whether a key in the folder names, or lies under, one of srt's protected names.
@@ -150,6 +160,12 @@ export function dependencyFolder(folder: string, key: string): string | null {
   const parts = key.slice(folder.length + 1).split("/");
   const at = parts.findIndex((part) => DEPENDENCY_FOLDERS.has(folded(part)));
   return at < 0 ? null : join(folder, ...parts.slice(0, at + 1));
+}
+
+// A name Explorer acts on: a file the agent leaves in the folder can make Explorer fetch an icon or a library from a path
+// the file names, and a UNC path sends the user's NTLM hash to that server (CVE-2025-24054, through .library-ms).
+export function explorerRefusal(path: string): string {
+  return `Write denied: '${path}' is a name Windows's Explorer acts on when it shows this folder.`;
 }
 
 export function inFolderRefusal(path: string): string {

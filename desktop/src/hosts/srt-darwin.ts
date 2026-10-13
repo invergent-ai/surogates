@@ -51,6 +51,7 @@ const toolsMissing = (lacking: string[]): string => {
 const TEMP = ["/private/tmp", "/private/var/folders"];
 
 export const DARWIN_SRT: SrtOs = {
+  wraps: true,
   // What node, rg and the shell srt starts them through read: their programs, the system's libraries and
   // frameworks, the dyld shared cache in the OS's cryptex, the system's configuration and the time zones, and the
   // devices, as Linux's list is its programs, libraries and configuration. Never /System whole: /System/Volumes/Data
