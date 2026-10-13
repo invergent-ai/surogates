@@ -772,13 +772,13 @@ describe("a helper on a thread's copy, in the file helper's sandbox", () => {
     const host = `
       import { spawn, spawnSync } from "node:child_process";
       import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-      const { hideSrtTmp, pathOutside, quote, sandboxPolicy } = await import(${JSON.stringify(dist("hosts/policy.js"))});
+      const { hideSrtTmp, pathOutside, quote, sandboxPolicy, SHELL } = await import(${JSON.stringify(dist("hosts/policy.js"))});
       const [copy, at, work, node, home, helper, reach, ...reached] = process.argv.slice(1);
       const path = pathOutside(process.env.PATH, []);
       await SandboxManager.initialize(sandboxPolicy({ folder: copy, tmp: work, appDirs: ${JSON.stringify([...["../dist", "../node_modules"].map((dir) => fileURLToPath(new URL(dir, import.meta.url))), dirname(dirname(process.execPath))])} }), () => Promise.resolve(false));
       process.chdir(work);
       const wrapped = async (words) => {
-        const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words.map(quote).join(" "))).argv;
+        const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words.map(quote).join(" "), SHELL)).argv;
         return [file, ["--norc", "--noprofile", flag, hideSrtTmp(line)]];
       };
       const [shell, looks] = await wrapped([node, "--input-type=module", "-e", reach, ...reached]);
