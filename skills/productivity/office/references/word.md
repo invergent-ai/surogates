@@ -10,11 +10,12 @@
 ```
 
 The outline lists blocks as `{"id", "hash", "kind", "text"}`, where `text` is the first words only; a long document
-comes in pages, continue with `start` = its `next`. Kinds are `heading1`–`heading3`, `paragraph`, `bullet`,
+comes in pages, continue with `start` = its `next`. Kinds include `heading1`–`heading9`, `paragraph`, `bullet`,
 `numbered`, `table`, `image`, `pending` (with `key` and `intent`). Comment threads come with their `id`, a string.
 
 The `block` view gives one block's exact text, tabs and spaces kept (a table's cells): copy the words for a
-`{"find": …}` target from it. `find` matches case and spacing exactly.
+`{"find": …}` target from it. `find` searches the whole document and `nth` counts its exact matches (case and spacing
+kept) from the top, from 1: quote enough words to be unique (the `search` view ignores case, so its count can differ).
 
 ## Plant a new document's outline
 
@@ -43,13 +44,13 @@ A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "w
 
 ```json
 {"op": "replace", "target": {"find": "revenue target", "nth": 1}, "content": {"text": "sales goal"}}
-{"op": "insert", "target": {"block": "853", "hash": "a1b2c3d4"}, "side": "after", "content": {"markdown": "- One more point"}}
+{"op": "insert", "target": {"block": "853", "hash": "a1b2c3d4"}, "side": "after", "content": {"markdown": "One more paragraph."}}
 {"op": "replace", "target": {"block": "861", "hash": "0f9e8d7c"}, "content": {"markdown": "A rewritten paragraph."}}
 {"op": "delete", "target": {"block": "870", "hash": "11aa22bb"}}
 {"op": "move", "target": {"block": "880", "hash": "33cc44dd"}, "to": {"block": "853", "hash": "a1b2c3d4"}, "side": "before"}
 ```
 
-A moved block loses the comments anchored in it.
+A list you insert starts its own numbering. A moved block loses the comments anchored in it.
 
 ## Comments
 
