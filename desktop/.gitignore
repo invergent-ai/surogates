@@ -2,3 +2,8 @@ node_modules/
 dist/
 bin/
 dictionaries/
+native/*/build/
+native/out/
+native/macos/.build/
+test/vm/darwin/measure/out/
+test/vm/darwin/measure/probing/

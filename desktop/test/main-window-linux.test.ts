@@ -15,3 +15,9 @@ it("draws the system's controls over a frameless window, in the theme's colours,
   windowControls.paint(window, chrome(false).overlay);
   expect(painted).toEqual([chrome(false).overlay]);
 });
+
+it("drops the menu Linux gives each of the app's other windows", () => {
+  const dropped: string[] = [];
+  windowControls.dropMenu({ removeMenu: () => dropped.push("menu") } as unknown as BrowserWindow);
+  expect(dropped).toEqual(["menu"]);
+});

@@ -9,6 +9,17 @@ const MOUNTING = ["test/vm-stalled-folder.test.ts", "test/vm/guest-places.test.t
 export const MACOS = [
   "test/platform.test.ts", "test/backoff.test.ts", "test/egress.test.ts", "test/flags.test.ts", "test/guest-control.test.ts", "test/output.test.ts",
   "test/protocol.test.ts", "test/vm-manifest.test.ts",
+  // The file host under Seatbelt: clean spawns, and what needs nothing built. Its other suites need fsat, rg and a
+  // node at bin/node, and take long: the workflow's file-host job runs them, each on its own.
+  "test/clean-child.test.ts", "test/agent-disk-imports.test.ts", "test/policy-darwin.test.ts",
+  // The VM backend: what starts no program, and surogate-vm's stand-in started as the app starts it, on the app's built code.
+  "test/vm-darwin.test.ts", "test/vm-darwin-boot.test.ts",
+  // The shell and the browser on macOS.
+  "test/shell-places-darwin.test.ts", "test/computer-name-darwin.test.ts", "test/backups-darwin.test.ts", "test/folders-held-darwin.test.ts", "test/mac-helper.test.ts",
+  "test/login-item-darwin.test.ts", "test/deep-link-darwin.test.ts", "test/credentials-darwin.test.ts",
+  "test/menus-darwin.test.ts", "test/main-window-darwin.test.ts", "test/quick-entry-darwin.test.ts",
+  "test/ca-source-darwin.test.ts",
+  "test/browser-known-darwin.test.ts", "test/browser-processes-darwin.test.ts", "test/browser-host-darwin.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

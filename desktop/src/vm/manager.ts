@@ -70,6 +70,13 @@ export interface VmOptions extends Disks {
   kvm?: string; // the device KVM is opened from: /dev/kvm
   virtiofsd?: string; // each folder's daemon: Ubuntu's (qemu.ts, VIRTIOFSD) unless a test says
   bwrap?: string; // what a folder the guest reads alone is shared through (linux.ts): the version's own copy, else the PATH's
+  // macOS's (darwin.ts): surogate-vm, unless a test says; the app's data folder and its own files, the only
+  // folders surogate-vm takes the guest's files from, unless they are where the sessions disk and the agent
+  // disk say; and how the folders are laid out in the guest.
+  program?: string;
+  data?: string;
+  bundle?: string;
+  layout?: "multiple" | "single";
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
@@ -109,6 +116,13 @@ export interface VmBackend {
   readonly exited: Promise<string>;
   /** Null with the OS's hardware virtualization, else why the VM runs emulated. */
   readonly emulated: Emulated | null;
+  /**
+   * Whether the backend's share server may open a shared folder by its path for as long as the share lasts, not once
+   * as it shares it: Apple's does not say when it opens one (darwin.ts). Then a chat's folder that lies in another
+   * running root's folder, or holds it, is refused (FOLDER_NESTED): the other's commands could put another folder at
+   * its path, which its root would then be served.
+   */
+  readonly opensByPath: boolean;
   /**
    * *folder* shared into the running guest for the root whose guest uid is *uid*.
    * Resolves with how the agent mounts it, whose kind also says who maps the
@@ -181,6 +195,10 @@ export interface VmOperation {
 }
 
 export const unavailable = (why: string): Outcome => ({ error: { type: "unavailable", message: `This computer's sandbox ${why}` } });
+// A chat's folder that lies in another running root's folder, or holds it, where the backend opens folders by path.
+export const FOLDER_NESTED: Outcome = {
+  error: { type: "busy", message: "Another chat on this computer is working in a folder that holds this chat's folder, or lies in it; this one can run commands once that one is done" },
+};
 // What the agent is told once a chat, at the end of its first run's output, while the guest runs emulated.
 export const EMULATED_NOTICE = "This computer runs commands in an emulated sandbox, about 5 to 20 times slower than usual. Give long commands more time.";
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -220,6 +238,8 @@ interface Placed {
 
 // Whether the folder at *path* is *other*, or lies in it: both real paths.
 const within = (path: string, other: string) => path === other || path.startsWith(other.endsWith(sep) ? other : other + sep);
+// Whether one of two folders lies in the other: both real paths. The same folder is neither.
+const nested = (a: string, b: string) => a !== b && (within(a, b) || within(b, a));
 
 // Whether two places are one folder's, with one history. The folder's device is left out: a
 // restart of this computer between two threads' binds may have renumbered it.
@@ -416,6 +436,8 @@ export class Guest {
         if (this.left) return SANDBOX_STOPPED;
         continue;
       }
+      // Looked at in the tick that adds the root, so no other root's folder is added between.
+      if (!known && this.vm.opensByPath && [...this.roots.values()].some((other) => nested(folder.path, other.folder.path))) return FOLDER_NESTED;
       return this.setUp(root, folder, ended, at, known);
     }
     return unavailable("could not set up this chat: another folder was shared for it each time the one it names was to be");

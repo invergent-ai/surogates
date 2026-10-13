@@ -44,5 +44,183 @@ jobs:
       - name: Install Electron
         run: npm run electron:install
 
+      # The app's code, which a file of the project runs as the app does; the app's own way of starting a program
+      # cleanly on macOS, beside its node; and surogate-helper, which reads this Mac's Computer Name, its processes and
+      # its admin trust domain for the project's files that look at them on a Mac.
+      - name: Build the app's code, surogate-spawn and surogate-helper
+        run: |
+          npx tsc -p tsconfig.build.json
+          native/spawn/build.sh
+          native/helper/build.sh
+
       - name: Run the suites that pass on macOS
         run: npx vitest run --project macos
+
+  # The file host's suites, with the helper in srt's real Seatbelt: the file host's calls, the walk, the landing, the
+  # hook guard and the race of a process of this computer's. A job of their own, each suite a step of its own with a
+  # bound of its own, so that one that hangs leaves the others' results, and the log, to read.
+  file-host:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      # What the file host runs on: the app's code, fsat beside it, surogate-spawn, a node at bin/node as the app's
+      # own (this runner's, until the release pins macOS's), and the app's rg beside it, on the PATH as the app's
+      # tools are.
+      - name: Build the file host
+        run: |
+          npx tsc -p tsconfig.build.json
+          native/fsat/build.sh
+          native/spawn/build.sh
+          mkdir -p bin
+          cp "$(command -v node)" bin/node
+          scripts/rg.sh
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: The file host's calls, its lock, and srt's Seatbelt
+        timeout-minutes: 10
+        run: >-
+          npx vitest run --project unit --reporter=verbose test/clean-child.test.ts test/fd-paths-darwin.test.ts
+          test/srt-darwin.test.ts test/folder-lock.test.ts test/boot-id.test.ts test/hosts-handed.test.ts
+          test/policy-darwin.test.ts test/agent-disk-imports.test.ts test/flags.test.ts
+
+      - name: The walk and the hook guard
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/operations.test.ts test/hooks.test.ts test/hooks-chmod.test.ts
+
+      - name: The landing
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: npx vitest run --project unit --reporter=verbose test/land.test.ts
+
+      - name: The race
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/file-tools-race.test.ts
+
+  # surogate-vm (desktop/native/macos): its Swift tests, which make the Virtualization framework's
+  # configuration and never start it, since the runner, a VM itself, has no nested virtualization; then
+  # the program built for Apple silicon and signed ad hoc with its one entitlement, and its own answer
+  # to whether this Mac can run the guest, which the run records.
+  vm-native:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Name the toolchain
+        run: xcodebuild -version && swift --version
+
+      - name: Run surogate-vm's tests
+        run: swift test --package-path native/macos
+
+      - name: Build surogate-vm and sign it ad hoc
+        run: native/build.sh
+
+      - name: Check its signature and its one entitlement
+        run: |
+          codesign --verify --strict --verbose=2 native/out/surogate-vm
+          codesign -d --entitlements - --xml native/out/surogate-vm > entitlements.plist
+          grep -q "com.apple.security.virtualization" entitlements.plist
+          [ "$(grep -o '<key>[^<]*</key>' entitlements.plist | sort -u)" = "<key>com.apple.security.virtualization</key>" ]
+
+      - name: Ask it whether this Mac can run the guest
+        run: |
+          native/out/surogate-vm version
+          native/out/surogate-vm check | tee check.json
+          grep -q '"supported"' check.json
+
+  # The shell and the browser on a Mac: surogate-helper and surogate-spawn built, the helper with its own tests; the
+  # shell's and the browser's files of the macos project with the helper there to run; the app end to end, with no
+  # VM; and the browser host headed on the runner's own Chrome and Edge. Each step runs whatever came of the one
+  # before it. A change to the admin trust domain waits for an administrator to confirm it, which nobody can on a
+  # runner, and the runner's authorization database refuses to let it go unasked (errAuthorizationDenied):
+  # test/darwin/admin-trust.sh runs by hand on a Mac.
+  shell:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      # npm ci leaves no Electron binary; its fuses flipped, it is signed ad hoc again.
+      - name: Install Electron
+        run: npm run electron:install
+
+      # The app's own programs with it: surogate-helper, and surogate-spawn, through which the app starts every program;
+      # and the app's rg, where the app looks for the file helper's tools.
+      - name: Build the app for a Mac, surogate-helper and surogate-spawn with it, and fetch its rg
+        run: |
+          npm run build:darwin
+          scripts/rg.sh
+
+      - name: Run surogate-helper's own tests
+        if: ${{ !cancelled() }}
+        working-directory: desktop/native/helper
+        run: swift test
+
+      - name: Run the shell's and the browser's files of the macos project
+        if: ${{ !cancelled() }}
+        run: >-
+          npx vitest run --project macos
+          test/shell-places-darwin.test.ts test/computer-name-darwin.test.ts test/backups-darwin.test.ts test/folders-held-darwin.test.ts
+          test/mac-helper.test.ts test/login-item-darwin.test.ts test/deep-link-darwin.test.ts test/credentials-darwin.test.ts
+          test/menus-darwin.test.ts test/main-window-darwin.test.ts test/quick-entry-darwin.test.ts test/ca-source-darwin.test.ts
+          test/browser-known-darwin.test.ts test/browser-processes-darwin.test.ts
+
+      - name: Run the app end to end on a Mac
+        if: ${{ !cancelled() }}
+        run: npx vitest run -c vitest.e2e.config.ts test/e2e/macos.e2e.ts
+
+      - name: Run the browser host on the runner's Chrome
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_MAC: "1"
+          SUROGATE_TEST_BROWSER: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+        run: npx vitest run --project macos test/browser-host-darwin.test.ts
+
+      - name: Run the browser host on the runner's Edge
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_MAC: "1"
+          SUROGATE_TEST_BROWSER: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+        run: npx vitest run --project macos test/browser-host-darwin.test.ts

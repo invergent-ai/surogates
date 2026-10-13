@@ -1,8 +1,9 @@
 // A surogate:// link (spec, Section 7), as the system hands one to the app: on Linux, in the
 // arguments it starts with, or in a second launch's, which the running app's second-instance
-// hands to its link handler. Only surogate://open?url=<agent address> is one: it opens that
-// agent, at a page of its web client when the address names one. A link names no local path,
-// and grants nothing.
+// hands to its link handler; on macOS, in an event of the running app's, which Launch Services
+// sends it, starting it first where it is not running. Only surogate://open?url=<agent address> is
+// one: it opens that agent, at a page of its web client when the address names one. A link names no
+// local path, and grants nothing.
 
 import { notBuilt } from "../platform.js";
 import { canonicalOrigin } from "./agents.js";
@@ -34,4 +35,31 @@ export function linkIn(argv: readonly string[]): OpenLink | null {
 }
 
 /** The link a launch with *argv* hands the app, the first launch or a second, by this OS's way of handing one. */
-export const linkOfLaunch: (argv: readonly string[]) => OpenLink | null = process.platform === "linux" ? linkIn : () => notBuilt("The arrival of surogate:// links");
+export const linkOfLaunch: (argv: readonly string[]) => OpenLink | null = process.platform === "linux"
+  ? linkIn
+  // macOS hands no link in a launch's arguments: each comes as an event (listenForLinks).
+  : process.platform === "darwin" ? () => null : () => notBuilt("The arrival of surogate:// links");
+
+/** What of Electron's app a link comes by on macOS: its open-url event. */
+export interface LinkEvents {
+  on(event: "open-url", listener: (event: { preventDefault(): void }, url: string) => void): unknown;
+}
+
+// macOS's: each surogate:// address the app is asked to open, the app's own to open. Electron emits it
+// for Launch Services' Get URL Apple event (Apple, NSAppleEventManager, kInternetEventClass and
+// kAEGetURL), from before the app is ready on, once it has a listener (Electron, app's open-url).
+function openUrls(app: LinkEvents, open: (link: OpenLink) => void): void {
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    const link = linkIn([url]);
+    if (link) open(link);
+  });
+}
+
+/**
+ * Each link the system hands the running app as an event, from now on, given to *open*: on macOS, by
+ * *app*'s open-url, a listener set before the app is ready; Linux hands none so (linkOfLaunch).
+ */
+export const listenForLinks: (app: LinkEvents, open: (link: OpenLink) => void) => void = process.platform === "linux"
+  ? () => {}
+  : process.platform === "darwin" ? openUrls : () => notBuilt("The arrival of surogate:// links");

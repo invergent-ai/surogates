@@ -189,6 +189,21 @@ describe("the user menu", () => {
 });
 
 describe("Settings", () => {
+  it("closes from its close button: while it is open, nothing of the window beneath it drags the window", async () => {
+    const { shell, page } = await signedIn();
+    // The window's own page, its strips the window is dragged by: one beneath the dialog would take its clicks.
+    const dragging = () => page.evaluate(() => [...document.querySelectorAll("*")]
+      .filter((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region") === "drag").length);
+    expect(await dragging()).toBeGreaterThan(0);
+    await page.click("#open-settings");
+    const settings = await settingsPage(shell);
+    await expect.poll(dragging).toBe(0);
+    await settings.click("#close");
+    await expect.poll(() => settingsOpen(shell)).toBe(false);
+    // Closed, the window is dragged by its strips again.
+    await expect.poll(dragging).toBeGreaterThan(0);
+  });
+
   it("opens over the window with Ctrl+Shift+, and from the menu, and closes on Escape", async () => {
     const { shell, page } = await signedIn();
     // Asked from the conversation, which has the keyboard.

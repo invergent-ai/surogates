@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 
 import { backendFor } from "../src/vm/backends.js";
+import { bootDarwin } from "../src/vm/darwin.js";
 import { bootLinux, missingTools } from "../src/vm/linux.js";
 
 let dir: string;
@@ -22,9 +23,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-it("is Linux's on Linux, and none yet on macOS or Windows", () => {
+it("is Linux's on Linux, macOS's on macOS (vm-darwin-boot.test.ts), and none yet on Windows", () => {
   expect(backendFor("linux")?.boot).toBe(bootLinux);
-  expect([backendFor("darwin"), backendFor("win32")]).toEqual([null, null]);
+  expect(backendFor("darwin")?.boot).toBe(bootDarwin);
+  expect(backendFor("win32")).toBeNull();
 });
 
 it("on Linux, needs what the VM has always needed of this computer, looked for by the same rule", async () => {

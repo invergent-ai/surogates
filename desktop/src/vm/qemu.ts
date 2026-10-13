@@ -28,6 +28,10 @@ export interface Disks {
 // QEMU reads a comma as the start of the next option: a path's own is doubled.
 const option = (path: string) => path.replaceAll(",", ",,");
 
+// The guest kernel's command line, every OS's: the image's disk, the stub init, the console on hvc0, and
+// lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
+export const KERNEL_COMMAND_LINE = "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf";
+
 // Half this computer's threads, at most 4.
 export function guestCpus(threads = availableParallelism()): number {
   return Math.min(4, Math.max(1, Math.floor(threads / 2)));
@@ -47,8 +51,7 @@ export function qemuArgs(disks: Disks, run: string, console: string, cpus = gues
     // vhost-user-fs needs the guest's memory shared with virtiofsd.
     "-object", `memory-backend-memfd,id=mem,size=${MEMORY},share=on`,
     "-kernel", disks.kernel,
-    // lsm=: the kernel's own list, and bpf, which it lacks, for the rule vm/init loads.
-    "-append", `root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet lsm=landlock,lockdown,yama,integrity,apparmor,bpf${emulated ? " surogate.emulated=1" : ""}`,
+    "-append", `${KERNEL_COMMAND_LINE}${emulated ? " surogate.emulated=1" : ""}`,
     "-drive", `if=none,id=root,file=${option(disks.rootfs)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=root",
     "-drive", `if=none,id=agent,file=${option(disks.agentDisk)},format=raw,readonly=on`, "-device", "virtio-blk-pci,drive=agent",
     "-drive", `if=none,id=sessions,file=${option(disks.sessions)},format=raw,discard=unmap`, "-device", "virtio-blk-pci,drive=sessions",

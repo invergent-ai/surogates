@@ -10,7 +10,9 @@ import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
-import { admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor, UNMOUNTABLE } from "../src/guest/root.js";
+import {
+  admit, boundsFor, checkOwner, enter, NOT_SET_UP, rootEnvironment, Roots, sharePath, slowerFor,
+} from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
 
@@ -764,13 +766,42 @@ describe("a root's inputs", () => {
     await expect(enter(root, at, { kind: "virtiofs", tag }, user)).rejects.toThrow(message);
   });
 
-  it.each([{ kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "s1" }] as const)(
-    "refuses Apple's share %j, which it cannot mount yet, before anything is given",
-    async (share) => {
-      await expect(enter("root-1", place, share, ana)).rejects.toThrow(new Error(UNMOUNTABLE));
-      expect(UNMOUNTABLE).toBe("This computer's sandbox cannot mount this kind of share yet");
-    },
-  );
+  it.each([
+    [{ kind: "vz", tag: "surogate" }], [{ kind: "vz", tag: "surogate", name: "../r1" }], [{ kind: "vz", tag: "s1", name: "r1" }],
+    [{ kind: "vz", tag: "s9" }], [{ kind: "vz", tag: "r1" }], [{ kind: "other", tag: "r1" }],
+  ] as unknown as Array<[Share]>)("refuses %j, which is none of the shares it mounts, before anything is given", async (share) => {
+    await expect(enter("root-1", place, share, ana)).rejects.toThrow(/^not one of Apple's shares|^This computer's sandbox cannot mount this kind of share$/);
+  });
+});
+
+describe("a root on Apple's share, which shows each file as the asking uid's", () => {
+  it("runs only where its folder, asked as the root's own uid, shows that uid, and never where it shows root's or another's", () => {
+    expect(() => checkOwner(10_000, 10_000)).not.toThrow();
+    expect(() => checkOwner(10_007, 10_007)).not.toThrow();
+    expect(() => checkOwner(0, 10_000)).toThrow(new Error("This chat's folder shows as root's in the sandbox, so no command runs in it"));
+    expect(() => checkOwner(501, 10_000)).toThrow(new Error("This chat's folder shows as another user's in the sandbox, so no command runs in it"));
+    expect(() => checkOwner(10_001, 10_000)).toThrow(new Error("This chat's folder shows as another user's in the sandbox, so no command runs in it"));
+    // A root is never given uid 0, and a folder that shows it is refused even then.
+    expect(() => checkOwner(0, 0)).toThrow("shows as root's");
+  });
+
+  // Here, where no share mounts, the setup's order is read from its source: the root's own uid given, its share
+  // mounted, then its owner asked as that uid and checked, before anything of the root is made or run.
+  it("asks Apple's share its folder's owner as the root's own uid, and checks it, before anything of the root is made", () => {
+    const source = readFileSync(new URL("../src/guest/root.ts", import.meta.url), "utf8");
+    const body = /^export async function enter\([\s\S]*?\n\}\n/m.exec(source)?.[0] ?? "";
+    const at = (text: string) => body.indexOf(text);
+    const steps = ["const uid = uidOf(root);", "const mount = await mountShare(share);", 'if (share.kind === "vz") {',
+      "const shown = await shownTo(mount, uid, MOUNT_MS);", "checkOwner(shown, uid);", "const cgroup = join(CGROUPS, root);"];
+    for (const step of steps) expect(at(step), step).toBeGreaterThan(0);
+    expect(steps.map(at)).toEqual(steps.map(at).sort((a, b) => a - b));
+  });
+
+  it("finds a folder of the one device for every folder by its name, and one of the eight by its tag", () => {
+    expect(sharePath({ kind: "vz", tag: "surogate", name: "r3" })).toBe("/run/surogate/shares/surogate/r3");
+    expect(sharePath({ kind: "vz", tag: "s2" })).toBe("/run/surogate/shares/s2");
+    expect(sharePath({ kind: "virtiofs", tag: "r2" })).toBe("/run/surogate/shares/r2");
+  });
 });
 
 describe("a command's shell, moved into its cgroup by the agent", () => {

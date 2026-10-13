@@ -20,7 +20,40 @@ const SYSTEM_FOLDERS = ["/etc/sudoers.d", "/etc/systemd"];
 const SENSITIVE_PREFIXES = ["/etc/", "/boot/", "/usr/lib/systemd/"];
 const SENSITIVE_PATHS = ["/var/run/docker.sock", "/run/docker.sock"];
 
-// Matched at any depth and in any case: stricter than srt's three levels.
+// The characters a volume that compares names without case may take as ASCII letters, and the letters.
+// Unicode's full case folding, as an ext4 casefold folder folds names, takes ſ (U+017F) to s, the Kelvin
+// sign (U+212A) to k, ß and ẞ to ss and the ligatures U+FB00 to U+FB06 to the letters they join; exFAT's and
+// NTFS's upper-casing takes ſ to S and ı (U+0131) to I; Turkic folding takes İ (U+0130) to i. APFS's folding
+// is Apple's own and not documented: each is taken as one, and a Mac measures it (test/vm/darwin/measure).
+// The guest's rule folds the same (vm/rule-match.h, sg_fold).
+const FOLDS: ReadonlyMap<string, string> = new Map([
+  ["\u017f", "s"], ["\u0131", "i"], ["\u0130", "i"], ["\u00df", "ss"], ["\u212a", "k"], ["\u1e9e", "ss"],
+  ["\ufb00", "ff"], ["\ufb01", "fi"], ["\ufb02", "fl"], ["\ufb03", "ffi"], ["\ufb04", "ffl"], ["\ufb05", "st"], ["\ufb06", "st"],
+]);
+const FOLDING = /[\u017f\u0131\u0130\u00df\u212a\u1e9e\ufb00-\ufb06]/g;
+// The code points HFS+'s comparison of names ignores (Apple's Technical Note TN1150, "HFS Plus Volume Format", its
+// case-insensitive string comparison): there a name that holds them is the name without them.
+const IGNORED = /[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g;
+
+// *name* without the dots and spaces it ends with, which FAT's and exFAT's volumes drop from a name. A scan from the
+// end, so a name of many dots takes time that grows with its length.
+function untrailed(name: string): string {
+  let end = name.length;
+  while (end > 0 && (name[end - 1] === "." || name[end - 1] === " ")) end -= 1;
+  return name.slice(0, end);
+}
+
+/**
+ * One component, *name*, as the volume a folder lies on may take it: without the code points HFS+ ignores, then
+ * without the dots and spaces it ends with, then folded as a volume that compares names without case compares it.
+ * Each name a volume takes as a protected one is that one, on every volume and every OS.
+ */
+export const folded = (name: string): string => untrailed(name.replace(IGNORED, "")).replace(FOLDING, (found) => FOLDS.get(found)!).toLowerCase();
+
+/** A folder-relative key's components, each folded. */
+export const foldedParts = (key: string): string[] => key.split("/").map(folded);
+
+// Matched at any depth, in any case, and as folded: stricter than srt's three levels.
 export const PROTECTED_NAMES: ReadonlySet<string> = new Set([
   ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile",
   ".ripgreprc", ".mcp.json", ".vscode", ".idea",
@@ -75,7 +108,7 @@ export function checkWrite(folder: string, home: string, path: string, at = fold
 // (vm/history.ts), as deep as a path may be, and many in one answer.
 export function protectedInFolder(folder: string, key: string): boolean {
   if (key === folder || !inside(key, folder)) return false;
-  const parts = key.slice(folder.length + 1).toLowerCase().split("/");
+  const parts = foldedParts(key.slice(folder.length + 1));
   if (parts.at(-1) === ".git") return true;
   // Whether a dependency folder lies above the part looked at.
   let unpacked = false;
@@ -129,7 +162,7 @@ export function movesOutOfDependency(folder: string, from: string, to: string, e
 export function dependencyFolder(folder: string, key: string): string | null {
   if (key === folder || !inside(key, folder)) return null;
   const parts = key.slice(folder.length + 1).split("/");
-  const at = parts.findIndex((part) => DEPENDENCY_FOLDERS.has(part.toLowerCase()));
+  const at = parts.findIndex((part) => DEPENDENCY_FOLDERS.has(folded(part)));
   return at < 0 ? null : join(folder, ...parts.slice(0, at + 1));
 }
 

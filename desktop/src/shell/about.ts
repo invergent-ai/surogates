@@ -6,7 +6,7 @@
 import { BrowserWindow, clipboard } from "electron";
 
 import { chrome } from "./appearance.js";
-import { lockPage } from "./main-window.js";
+import { dropMenu, lockPage } from "./main-window.js";
 import { ownPage } from "./window-policy.js";
 
 export interface AboutOptions {
@@ -40,7 +40,7 @@ export function openAbout(options: AboutOptions): void {
     webPreferences: { preload: options.preload, sandbox: true, contextIsolation: true, nodeIntegration: false },
   });
   // Linux gives every window the app's menu: its keys would act on the agent's page behind this one.
-  window.removeMenu();
+  dropMenu(window);
   shown = window;
   window.once("closed", () => {
     shown = null;

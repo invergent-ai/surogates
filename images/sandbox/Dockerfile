@@ -222,7 +222,7 @@ COPY --chmod=0755 images/guest/kernel-config.sh /usr/local/bin/kernel-config.sh
 RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel \
     && dpkg-deb -x /tmp/tools.deb /tools && dpkg-deb -x /tmp/hwe-tools.deb /tools \
     && kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL" \
-    && find /kernel/lib/modules/*/kernel -type f ! -name virtiofs.ko.zst ! -name overlay.ko.zst -delete
+    && find /kernel/lib/modules/*/kernel -type f ! -name virtio-rng.ko.zst ! -name virtiofs.ko.zst ! -name overlay.ko.zst -delete
 
 # ── The guest-kernel rule (BPF-LSM), compiled against the pinned kernel's BTF ──
 # The BTF is the pinned kernel's own, /btf as bpftool reads it. amd64's vmlinuz is a bzImage

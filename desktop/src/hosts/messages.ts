@@ -69,6 +69,5 @@ export type FromHost =
   | { type: "failed"; message: string; folder?: true; busy?: true }
   | { type: "result"; id: string; outcome: Outcome };
 
-export const FOLDER_UNAVAILABLE: Outcome = {
-  error: { type: "folder_unavailable", message: "The folder for this chat is no longer available on this computer" },
-};
+// The file helper says it too, where its folder is another than its host checked (files/helper.ts).
+export { FOLDER_UNAVAILABLE } from "../files/answers.js";

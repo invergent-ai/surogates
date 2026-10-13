@@ -22,4 +22,9 @@ if (!electron || (flag !== undefined && flag !== "--inspect") || rest.length > 0
   process.stderr.write("usage: node scripts/fuses.mjs <electron> [--inspect]\n");
   process.exit(2);
 }
-await flipFuses(electron, { ...FUSES, ...(flag ? { [FuseV1Options.EnableNodeCliInspectArguments]: true } : {}) });
+// On a Mac, a fuse flipped is a change to Electron's framework, which breaks its ad hoc signature, and an
+// Apple silicon Mac runs no code whose signature does not check out: it is signed ad hoc again
+// (@electron/fuses' resetAdHocDarwinSignature, codesign --sign -). A release signs it with its own.
+await flipFuses(electron, {
+  ...FUSES, ...(flag ? { [FuseV1Options.EnableNodeCliInspectArguments]: true } : {}), resetAdHocDarwinSignature: process.platform === "darwin",
+});

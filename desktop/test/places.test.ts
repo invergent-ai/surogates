@@ -69,7 +69,7 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
   control.hello();
   let made = 0;
   return {
-    control: host, net, inbound, exited, emulated: null, kill,
+    control: host, net, inbound, exited, emulated: null, opensByPath: false, kill,
     share: async (folder, uid, _deadline, as) => {
       made += 1;
       asked.push(["share", folder, uid, as?.readonly === true]);
@@ -152,6 +152,10 @@ describe("the agent's places", () => {
       folder: join(dir, "places"),
       mount: async (args) => void ran.push(["mount", ...args]),
       unmount: async (args) => void ran.push(["umount", ...args]),
+      device: async () => {
+        ran.push(["device"]);
+        return "/device";
+      },
     });
     return { ran, places };
   };
@@ -188,10 +192,31 @@ describe("the agent's places", () => {
     expect(ran).toHaveLength(2);
   });
 
-  it("refuses Apple's shares, which it cannot mount yet, and makes nothing for them", async () => {
+  it("mounts Apple's shares as the host shared them: folders of its one device for every folder, bound from it, or two of its eight by their tags", async () => {
     const { ran, places } = recorded();
-    await expect(places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, R2)).rejects.toThrow(new Error(UNMOUNTABLE));
-    await expect(places.mount(KEY, R1, { kind: "vz", tag: "s2" })).rejects.toThrow(new Error(UNMOUNTABLE));
+    await places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r2" });
+    await places.mount("fedcba9876543210", { kind: "vz", tag: "s1" }, { kind: "vz", tag: "s2" });
+    expect(ran).toEqual([
+      ["device"],
+      ["mount", "--bind", "-o", "nosuid,nodev,noexec", "/device/r1", join(dir, "places", KEY, "history")],
+      ["device"],
+      ["mount", "--bind", "-o", "ro,nosuid,nodev,noexec", "/device/r2", join(dir, "places", KEY, "real")],
+      ["mount", "-t", "virtiofs", "-o", "nosuid,nodev,noexec", "s1", join(dir, "places", "fedcba9876543210", "history")],
+      ["mount", "-t", "virtiofs", "-o", "ro,nosuid,nodev,noexec", "s2", join(dir, "places", "fedcba9876543210", "real")],
+    ]);
+    // The one device's folders are told apart by their names: other names are other shares.
+    await expect(places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r3" })).rejects.toThrow("already mounted from other shares");
+    await places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r2" });
+    expect(ran).toHaveLength(6);
+  });
+
+  it("refuses what is none of Apple's shares, and makes nothing for it", async () => {
+    const { ran, places } = recorded();
+    for (const share of [{ kind: "vz", tag: "surogate" }, { kind: "vz", tag: "surogate", name: "../x" }, { kind: "vz", tag: "s1", name: "r1" }, { kind: "vz", tag: "s9" }] as Share[]) {
+      await expect(places.mount(KEY, share, R2), JSON.stringify(share)).rejects.toThrow("not one of Apple's shares");
+      await expect(places.mount(KEY, R1, share), JSON.stringify(share)).rejects.toThrow("not one of Apple's shares");
+    }
+    await expect(places.mount(KEY, { kind: "other", tag: "r1" } as unknown as Share, R2)).rejects.toThrow(new Error(UNMOUNTABLE));
     expect(existsSync(join(dir, "places"))).toBe(false);
     expect(ran).toEqual([]);
   });

@@ -17,9 +17,10 @@ import { Control, type ControlRoots } from "../src/guest/control.js";
 import { Inbound } from "../src/guest/inbound.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { Carrier, DOOR, Door, Forwarded } from "../src/vm/inbound.js";
+import { bootDarwin } from "../src/vm/darwin.js";
 import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import {
-  type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
+  type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, FOLDER_NESTED, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
 } from "../src/vm/manager.js";
 import { hostArch } from "../src/vm/qemu-arch.js";
 import { readOnlyDaemon, VIRTIOFSD } from "../src/vm/qemu.js";
@@ -75,8 +76,8 @@ let trusted: string[][] = [];
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
 // *powers*: its agent powers the fake VM off at a shutdown, as the guest's ends QEMU.
-// *emulated*: why it runs emulated, or null with KVM.
-const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null = null): BootVm => async () => {
+// *emulated*: why it runs emulated, or null with KVM. *opensByPath*: as Apple's share server, which opens a folder by its path.
+const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null = null, opensByPath = false): BootVm => async () => {
   const [host, guest] = duplexPair();
   agent = guest;
   const [net, guestNet] = duplexPair();
@@ -100,7 +101,7 @@ const fakeVm = (roots?: ControlRoots, powers = true, emulated: Emulated | null =
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
     control.hello();
   }
-  return { control: host, net, inbound, exited, emulated, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
+  return { control: host, net, inbound, exited, emulated, opensByPath, share: async () => ({ kind: "virtiofs", tag: "r1" }), unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
@@ -1285,6 +1286,37 @@ describe("a chat's folder, checked again before it is shared", () => {
     for (const [n, folder] of cases.entries()) expect(await which(manager, `root-${n}`, folder)).toEqual(FOLDER_UNAVAILABLE);
     await manager.stop();
   });
+
+  const made = (path: string): Folder => {
+    mkdirSync(path, { recursive: true });
+    const { dev, ino } = statSync(path);
+    return { path, dev, ino, boot: BOOT_ID };
+  };
+
+  // Apple's share server opens a folder by its path, and does not say when: a chat working in a folder that holds another
+  // chat's, or lies in it, could put another folder at that path, which the other's root would then be served.
+  it("is refused while it lies in, or holds, a folder a running root has, where the backend opens folders by path, and taken once that root is let go", async () => {
+    const manager = new VmManager(options(), fakeVm(roots, true, null, true));
+    const outer = made(join(dir, "work"));
+    const inner = made(join(dir, "work", "app"));
+    expect(await which(manager, "outer", outer)).toEqual({ ok: true });
+    expect(await which(manager, "inner", inner)).toEqual(FOLDER_NESTED);
+    // Beside it, though its name begins with the other's; and the same folder, whose path no command there can change.
+    expect(await which(manager, "beside", made(join(dir, "work-2")))).toEqual({ ok: true });
+    expect(await which(manager, "same", outer)).toEqual({ ok: true });
+    await manager.teardown("outer");
+    await manager.teardown("same");
+    expect(await which(manager, "inner", inner)).toEqual({ ok: true });
+    expect(await which(manager, "outer", outer)).toEqual(FOLDER_NESTED);
+    await manager.stop();
+  });
+
+  it("is taken while it lies in a folder a running root has, where the backend opens each folder once, as it shares it", async () => {
+    const manager = new VmManager(options(), fakeVm(roots));
+    expect(await which(manager, "outer", made(join(dir, "work")))).toEqual({ ok: true });
+    expect(await which(manager, "inner", made(join(dir, "work", "app")))).toEqual({ ok: true });
+    await manager.stop();
+  });
 });
 
 describe("a guest's stop", () => {
@@ -1344,9 +1376,10 @@ describe("a guest's boot", () => {
 });
 
 describe("the VM's backend", () => {
-  it("is Linux's on Linux, and none yet elsewhere, where an operation answers so", async () => {
+  it("is Linux's on Linux, macOS's on macOS, and none yet elsewhere, where an operation answers so", async () => {
     expect(bootFor("linux")).toBe(bootLinux);
-    expect([bootFor("win32"), bootFor("darwin")]).toEqual([null, null]);
+    expect(bootFor("darwin")).toBe(bootDarwin);
+    expect(bootFor("win32")).toBeNull();
     const manager = new VmManager(options(), null);
     const folder = { path: dir, ...statSync(dir) };
     expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "run", args: {} }, new AbortController().signal)).toEqual({

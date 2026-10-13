@@ -6,6 +6,7 @@
 import { lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
 
+import { FOLDER_UNAVAILABLE } from "./answers.js";
 import { edgeRefused } from "./edge.js";
 import { ONLY_RECOVERS } from "./land.js";
 import { type Context, perform } from "./operations.js";
@@ -55,6 +56,11 @@ for (const [is, path, what] of checked) {
     process.exit(2);
   }
 }
+// On macOS the sandbox binds nothing: Seatbelt judges each access by its path, so a folder moved away and another
+// made at its path would be served. There the helper looks again before each request, and answers one in a folder
+// that is another now as its host does, with the folder unavailable.
+const LOOKS_EACH_REQUEST = process.platform === "darwin";
+const stillChecked = (): boolean => checked.every(([is, path]) => is === undefined || found(path) === is);
 // A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing. A
 // recovery's is given where they are kept and no copy: it puts back what a landing in the folder cut short, and does
 // nothing else. Either puts that back by the first thing it is asked, not before it says it is ready (files/land.ts).
@@ -87,6 +93,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   // A recovery's helper is in the user's folder for its put-back alone.
   if (recovers && (kind !== "land" || (args as { action?: unknown }).action !== "recover")) {
     say({ id, outcome: { error: { type: "unsupported", message: ONLY_RECOVERS } } });
+    return;
+  }
+  if (LOOKS_EACH_REQUEST && !stillChecked()) {
+    say({ id, outcome: FOLDER_UNAVAILABLE });
     return;
   }
   const controller = new AbortController();

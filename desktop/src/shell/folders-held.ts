@@ -15,16 +15,17 @@ import { stat } from "node:fs/promises";
 
 import { cleanly } from "../clean-child.js";
 import { notBuilt } from "../platform.js";
+import * as darwin from "./folders-held-darwin.js";
 import * as linux from "./folders-held-linux.js";
 
 /** How long a folder has to answer. */
 export const LOOK_MS = 5_000;
 const LOOKS_AT_ONCE = 2;
 
-// The look in a child process of its own, by this OS (folders-held-linux.ts).
+// The look in a child process of its own, by this OS (folders-held-linux.ts, folders-held-darwin.ts).
 const lookCommand: (folder: string) => [string, string[]] = process.platform === "linux"
   ? linux.lookCommand
-  : () => notBuilt("Surogate Desktop's look at a folder");
+  : process.platform === "darwin" ? darwin.lookCommand : () => notBuilt("Surogate Desktop's look at a folder");
 
 /**
  * What a look at *folder* in a child process of its own found within *ms*, following links as the

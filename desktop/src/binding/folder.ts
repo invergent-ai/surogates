@@ -4,8 +4,9 @@
 import { realpathSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { browserFolders } from "../browser/choose.js";
 import { inside, realpath } from "../files/paths.js";
-import { GLOB, isReserved } from "../hosts/policy.js";
+import { FOLDER_BYTES, GLOB, isReserved } from "../hosts/policy.js";
 import { bootId } from "./boot-id.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
@@ -68,6 +69,9 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
   if (!stats.isDirectory()) return { ok: false, missing: true, message: `the folder ${folder} is not a folder` };
   const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message });
   if (GLOB.test(path)) return refused(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${path}`);
+  if (FOLDER_BYTES !== null && Buffer.byteLength(path) > FOLDER_BYTES) {
+    return refused(`this computer cannot sandbox a folder whose path is longer than ${FOLDER_BYTES} bytes: ${path}`);
+  }
   if (isReserved(path)) return refused(`the folder ${path} is inside one of this computer's system folders`);
   // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
   const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));
@@ -86,5 +90,10 @@ export function checkFolder(folder: string, guards: FolderGuards): FolderCheck {
       guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)) || links.some((link) => inside(link, candidate)),
   );
   if (held) return refused(`the folder ${path} holds this computer's home folder or the app's own data`);
+  // The app runs the browser it drives outside every sandbox: a folder that is, holds or lies in one, or a place the
+  // app looks for one at, would let a command put a program of its own there.
+  const browsers = browserFolders(guards.home, guards.dataDir).flatMap((dir) => spellings(dir));
+  const browser = browsers.find((dir) => [...new Set([resolve(folder), path])].some((candidate) => inside(dir, candidate) || inside(candidate, dir)));
+  if (browser) return refused(`the app runs a browser at ${browser} outside the sandbox, so the folder ${path} cannot be a chat's`);
   return { ok: true, path, dev: stats.dev, ino: stats.ino };
 }

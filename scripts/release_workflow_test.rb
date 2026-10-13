@@ -502,7 +502,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], macos.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, macos.fetch("permissions"))
     jobs = macos.fetch("jobs")
-    assert_equal %w[unit], jobs.keys
+    assert_equal %w[unit file-host vm-native shell], jobs.keys
     jobs.each do |name, job|
       assert_equal "macos-15", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -512,9 +512,9 @@ class ReleaseWorkflowTest < Minitest::Test
       refute job.key?("environment"), "#{name} runs in an Environment"
       refute job.key?("permissions"), "#{name} asks for permissions of its own"
     end
+    # The ref it is given, checked out with no token kept for that ref's code to use, by every job.
+    jobs.each { |name, job| assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, job.fetch("steps").first.fetch("with"), name) }
     steps = jobs.fetch("unit").fetch("steps")
-    # The ref it is given, checked out with no token kept for that ref's code to use.
-    assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, steps.first.fetch("with"))
     # The files of the desktop's vitest project for macOS, which each part built for macOS joins.
     assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
   end
@@ -690,7 +690,10 @@ class ReleaseWorkflowTest < Minitest::Test
         "guest" => ["eca5e065813cef05", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 bd6e6df4eb2ca928 8c986439d5d86488 9443e3fdb92fa905 6301448be0b1760c 53a6f85d9c3376f6 8a9f74820350edf8 d20f5f9b98bf4212]],
       },
       "desktop-macos.yml" => {
-        "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed a2447334158f4627]],
+        "unit" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed 144d905c43662944 a2447334158f4627]],
+        "file-host" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 af11daf312d88a9c cef9c04da9316c5d b6677173b7a766d9 65c59a548203f2a3 4aaeb9cc7e06d889]],
+        "vm-native" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 5f09c6834194b464 52c04af5d542ff2d aa9be0ef548ec62e 196c921f1237fc02 fb5acba9341bb560]],
+        "shell" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed d57a229d162b158b 82ea49c2e002c4eb bb26d389f9d8b55f 2734cf3c0643d000 512eb34e3e8c1e1d bea3be8dc0d7d250]],
       },
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 db6273944f5b635b]],

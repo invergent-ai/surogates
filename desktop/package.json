@@ -19,7 +19,9 @@
     "test": "vitest run",
     "test:browser": "npm run build && sh test/isolated.sh vitest run --no-file-parallelism",
     "test:e2e": "npm run build && npm run agent-disk && xvfb-run -a vitest run -c vitest.e2e.config.ts",
-    "agent-disk": "vm/agent-disk.sh dist/agent.img"
+    "agent-disk": "vm/agent-disk.sh dist/agent.img",
+    "native": "native/build.sh",
+    "build:darwin": "scripts/dictionary.sh && tsc -p tsconfig.build.json && tsc -p tsconfig.pages.json && mkdir -p dist/shell/pages dist/browser/observe && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/ && cp ../surogates/browser/observe/*.js dist/browser/observe/ && native/helper/build.sh && native/spawn/build.sh"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.77",
