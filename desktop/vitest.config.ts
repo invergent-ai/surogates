@@ -31,7 +31,7 @@ export const WINDOWS = [
   "test/platform-seams.test.ts", "test/session-paths.test.ts", "test/native-helper.test.ts", "test/windows-project.test.ts",
   // The file host on Windows: what needs nothing built. Its other suites need ntat, rg and dist/: the workflow's
   // file-host job runs them, each on its own.
-  "test/names-win32.test.ts", "test/srt-win32.test.ts",
+  "test/names-win32.test.ts", "test/srt-win32.test.ts", "test/glob-win32.test.ts",
 ];
 
 // Every git the tests run themselves reads none of the user's or the system's config, so it

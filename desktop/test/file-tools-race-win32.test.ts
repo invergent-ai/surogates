@@ -56,13 +56,18 @@ for (;;) {
   step(() => fs.symlinkSync(outside, sub, "junction"));
 }`;
 
-// 1 250 rounds of a write, a read, a listing and a delete through the flipped folder, and a search of it every tenth:
-// what of the folder beside it each reached (its file gone counts), how many writes were answered, what was written
-// beside it, and what its file holds after.
+// 1 250 rounds, each racing the flipper two ways:
+//  - the write, read, listing and delete tools act through the flipped folder ${folder}/sub itself, as before;
+//  - the search is of the whole folder ${folder}, so ripgrep's own descent below it is raced: with the old pin, rg
+//    walked the folder and opened sub after it was swapped for a junction (C1); the walk gives rg only files.
+// A stable file aaa-keep, which sorts before sub, keeps the search and the one-entry pin off the flipped folder, and
+// gives the folder a file to find. Counts what of the folder beside it each reached (its file gone counts), how many
+// writes were answered, what was written beside it, and what its file holds after.
 async function race(answer: Answer, folder: string) {
   rmSync(outside, { recursive: true, force: true });
   mkdirSync(outside);
   writeFileSync(join(outside, "only-outside"), "OUTSIDE\n");
+  writeFileSync(join(host, "aaa-keep"), "a search of the whole folder has this to find\n");
   const flipper = spawn(process.execPath, ["-e", FLIPPER, join(host, "sub"), outside, String(process.pid)], { stdio: "ignore" });
   let reached = 0;
   let wrote = 0;
@@ -74,9 +79,12 @@ async function race(answer: Answer, folder: string) {
       const listed = await answer("list_dir", { key: `${folder}/sub` });
       if ("ok" in listed && Array.isArray(listed.ok) && listed.ok.includes("only-outside")) reached += 1;
       await answer("delete", { key: `${folder}/sub/only-outside` });
-      if (i % 10 === 0) {
-        const found = await answer("ripgrep", { key: `${folder}/sub`, mode: "count", pattern: "OUTSIDE", glob: null, context: 0 });
-        if ("ok" in found && typeof found.ok === "string" && found.ok.includes("only-outside")) reached += 1;
+      if (i % 5 === 0) {
+        // A search of the whole folder, which descends into sub as the flipper swaps it: rg must not read the file beside it.
+        for (const mode of ["count", "files"] as const) {
+          const found = await answer("ripgrep", { key: folder, mode, pattern: mode === "files" ? "only-outside" : "OUTSIDE", glob: null, context: 0 });
+          if ("ok" in found && typeof found.ok === "string" && found.ok.includes("only-outside")) reached += 1;
+        }
       }
     }
   } finally {

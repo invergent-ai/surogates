@@ -129,25 +129,44 @@ describe.runIf(WINDOWS)("the file kinds on Windows", { timeout: 60_000 }, () => 
     expect(await answer("read", { key: `${root}/desktop.ini`, max_bytes: null })).toEqual({ ok: b64("[.ShellClassInfo]\n") });
   });
 
-  it("holds each folder on a search's way while it runs, so none of them can be renamed or removed, and lets go after", async () => {
+  it("gives a search only files, never a folder, and holds each file and the folders on its way while rg runs on it", async () => {
     const { fdPaths, guestPathOf } = await fresh();
     mkdirSync(join(host, "a", "b"), { recursive: true });
-    writeFileSync(join(host, "a", "b", "x"), "x");
+    writeFileSync(join(host, "a", "b", "x.txt"), "one\n");
+    writeFileSync(join(host, "a", "y.txt"), "two\n");
     const root = guestPathOf(host)!;
     fdPaths.bind([root]);
-    const held = fdPaths.outside(`${root}/a/b`);
-    expect([held.path, held.empty]).toEqual([`${host.replaceAll("\\", "/")}/a/b`, false]);
-    for (const [from, to] of [[join(host, "a"), join(host, "a2")], [join(host, "a", "b"), join(host, "b2")], [join(host, "a", "b", "x"), join(host, "x2")]]) {
-      expect(() => renameSync(from!, to!), from).toThrow();
+    const search = fdPaths.searchFiles(root, { filesMode: false, glob: null, own: /^\.surogate-/ });
+    expect(search.root).toBe(host.replaceAll("\\", "/"));
+    const batch = search.next()!;
+    // Every path handed over is a file of this computer's, under the bound folder; no folder is among them.
+    expect(batch.paths.map((p) => p.slice(host.length + 1).replaceAll("\\", "/")).sort()).toEqual(["a/b/x.txt", "a/y.txt"]);
+    // While the batch is held, none of its files nor the folders on their way can be renamed or removed.
+    for (const at of [["a"], ["a", "b"], ["a", "b", "x.txt"], ["a", "y.txt"]]) {
+      expect(() => renameSync(join(host, ...at), join(host, `${at.join("-")}-moved`)), at.join("/")).toThrow();
     }
     expect(() => rmSync(join(host, "a"), { recursive: true })).toThrow();
-    held.release();
+    expect(search.next()).toBeNull();
+    batch.release();
+    search.close();
     renameSync(join(host, "a"), join(host, "a2"));
-    // A folder with nothing in it holds nothing to find, and is searched for nothing.
+  });
+
+  it("searches an empty folder, and a single file, for just that", async () => {
+    const { fdPaths, guestPathOf } = await fresh();
     mkdirSync(join(host, "empty"));
-    const empty = fdPaths.outside(`${root}/empty`);
-    expect(empty.empty).toBe(true);
-    empty.release();
+    writeFileSync(join(host, "only.txt"), "x\n");
+    const root = guestPathOf(host)!;
+    fdPaths.bind([root]);
+    const empty = fdPaths.searchFiles(`${root}/empty`, { filesMode: false, glob: null, own: /^\.surogate-/ });
+    expect(empty.next()).toBeNull();
+    empty.close();
+    const one = fdPaths.searchFiles(`${root}/only.txt`, { filesMode: false, glob: null, own: /^\.surogate-/ });
+    const batch = one.next()!;
+    expect(batch.paths).toEqual([`${host.replaceAll("\\", "/")}/only.txt`]);
+    expect(one.next()).toBeNull();
+    batch.release();
+    one.close();
   });
 });
 
