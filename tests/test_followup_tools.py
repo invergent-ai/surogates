@@ -353,9 +353,21 @@ async def test_escalate_marks_red_when_an_emergency_script_was_sent(sf, patient,
     assert red.severity == "red" and red.text.startswith("🔴 Durere în piept")
     assert red.dedupe_key.startswith("escalation:-:")
     assert yellow.dedupe_key.rsplit(":", 1)[0] != red.dedupe_key.rsplit(":", 1)[0]
-    assert (await followup.handle_escalate(
-        {"reason": "x", "severity": "orange"}, **_kw(sf, session_id),
-    )) == "severity must be red or yellow."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("given, expected", [
+    (" RED ", "red"), ("Rosu", "red"), ("urgent", "red"), ("Critical", "red"),
+    ("orange", "yellow"), ("", "yellow"), (None, "yellow"),
+])
+async def test_escalate_never_refuses_over_its_severity(sf, patient, care_team, given, expected):
+    _, session_id = patient
+    result = await followup.handle_escalate(
+        {"reason": "Durere", "severity": given}, **_kw(sf, session_id),
+    )
+    assert result.startswith("Escalated")
+    [alert] = await _outreach(sf)
+    assert alert.severity == expected
 
 
 @pytest.mark.asyncio

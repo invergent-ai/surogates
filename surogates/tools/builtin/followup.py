@@ -234,7 +234,6 @@ ESCALATE_SCHEMA = ToolSchema(
             },
             "severity": {
                 "type": "string",
-                "enum": ["red", "yellow"],
                 "description": (
                     "red when you gave the person an emergency script (urgent "
                     "instructions to get help now); yellow otherwise. "
@@ -710,13 +709,20 @@ def _uuid_or_none(value: Any) -> uuid.UUID | None:
         return None
 
 
+_RED = frozenset({"red", "rosu", "roșu", "urgent", "critical"})
+
+
+def _severity(raw: Any) -> str:
+    """red or yellow, whatever the model wrote: an escalation is never
+    refused over its colour, and anything unclear is the milder one."""
+    return "red" if str(raw or "").strip().lower() in _RED else "yellow"
+
+
 async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     reason = str(arguments.get("reason") or "").strip()
     if not reason:
         return "reason is required — say what needs the team's attention."
-    severity = arguments.get("severity") or "yellow"
-    if severity not in followup_store.ALERT_SEVERITIES:
-        return "severity must be red or yellow."
+    severity = _severity(arguments.get("severity"))
 
     sf = kwargs["session_factory"]
     ctx, settings = await _context(kwargs)
