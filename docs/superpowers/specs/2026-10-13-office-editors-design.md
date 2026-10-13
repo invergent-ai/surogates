@@ -136,8 +136,11 @@ web client, which embeds the SDK.
   API takes the user from their own token.
 - **Users through ops:** ops calls the runtime API with its service account, so
   every ops user would look the same. Ops therefore sends the acting user's id
-  and display name in an `X-Surogate-Acting-User` header, and the runtime API
-  trusts that header only on service-account tokens.
+  and display name in `X-Surogate-Acting-User-Id` and
+  `X-Surogate-Acting-User-Name` (percent-encoded), and the runtime API trusts
+  them only on service-account tokens. Editor user ids are `user:<id>` for
+  runtime users and `sa:<service account id>:<acting id>` for people acting
+  through a service account.
 - **The agent:** the worker builds and signs the agent's config itself
   (`user: {id: "agent:<agent_id>", name: <agent display name>}`) through the
   shared module. No route accepts an `agent:` identity, so a user cannot mint an
@@ -222,11 +225,13 @@ document server's JWT.
 **Taking a save.** The document server retries a callback only 3 times, 1, 2
 and 4 seconds apart, while a computer can be offline or waiting for approval
 much longer. So the callback route downloads the edited file at once (host
-rewritten), stores it in the office cache bucket under
-`pending/<doc_key>/<lastsave>`, records it in `pending_save`, and answers
-`{"error":0}`. A writer in the runtime API then lands it, retrying until it
-lands, with `<doc_key>:<lastsave>` as the request id so a retry never writes
-twice. The pane shows "Saved" once it lands, and "Saving to <computer>…" while it
+rewritten), stores it in the chat's workspace bucket under
+`_office/pending/<doc_key>` (outside every chat's prefix; R2 tokens are scoped to
+one bucket, so the runtime keeps to the bucket it already has), records it in
+`pending_save`, and answers `{"error":0}`. A newer save of the same document
+replaces a pending one. A worker job (beside the other job loops in
+`orchestrator/worker.py`) lands it, claiming rows with `FOR UPDATE SKIP LOCKED`
+so worker replicas never land one save twice, and retries until it lands. The pane shows "Saved" once it lands, and "Saving to <computer>…" while it
 waits.
 
 **Landing a save**, through a new guarded write on the workspace layer,
@@ -480,8 +485,8 @@ A bundled skill with:
   for document-key routing.
 - **`runtime-office-converter`:** a Deployment with two replicas. Autoscaling
   waits until load shows the need.
-- **Schema:** a Job runs Euro-Office's Postgres schema against a `docs`
-  database.
+- **Schema:** Euro-Office's `createdb.sql`, copied out of the image, applied once
+  with `psql` to the `docs` database.
 - **RabbitMQ:** one single-node StatefulSet per environment on an `emptyDir`
   volume (its contents are queued messages only), never on the `nfs` storage
   class.
@@ -489,10 +494,11 @@ A bundled skill with:
   in PROD, DEV and enterprise), created idempotently with `psql` through
   `kubectl exec` on the primary, like the Hub's database. Connect through
   `surogate-pg-rw`, not the PgBouncer pooler.
-- **Cache bucket:** Euro-Office's `storage-s3` backend and the runtime API's
-  pending saves share a new bucket (`surogate-office-cache` in PROD,
-  `surogate-office-cache-dev` in DEV) with a bucket-scoped R2 token, path-style
-  addressing; keys in a Secret. On enterprise, a Garage bucket added to the
+- **Cache bucket:** Euro-Office's `storage-s3` backend uses a new bucket
+  (`surogate-office-cache` in PROD, `surogate-office-cache-dev` in DEV) with a
+  bucket-scoped R2 token, path-style addressing and
+  `useDirectStorageUrls: false` (browsers never fetch from the bucket); the
+  `local.json` holding its keys is a Secret. On enterprise, a Garage bucket added to the
   kit's bucket loops.
 - **Settings in a mounted `local.json`:** `autoAssembly` on (5 min interval),
   JWT on everything (browser configs, `/converter`, Command Service,
@@ -575,18 +581,19 @@ Metrics wait until a dashboard needs them.
   viewer and the `pdfjs-dist` dependency (SDK and web) are deleted.
 - The pane stays open while the user chats; it can expand to a large dialog for
   editing room. It shows the save state ("Saved", "Saving to <computer>…").
-- New adapter methods `getWorkspaceEditorConfig` and
-  `notifyWorkspaceEditorMention`, implemented in the surogates web adapter, the
-  ops frontend adapter (with proxy routes copying the `/workspace/tree` pattern
-  and adding `X-Surogate-Acting-User`) and the example app. ops picks them up
-  with the next SDK release.
+- New optional adapter methods `getWorkspaceEditorConfig` (with the app's
+  `theme`, which is signed into the config) and `notifyWorkspaceEditorMention`,
+  implemented in the surogates web adapter and the ops frontend adapter (with
+  proxy routes copying the `/workspace/tree` pattern and adding the acting-user
+  headers). A host without a document server, like the example app, leaves them
+  out and office files show "Preview not available" with a Download link. ops
+  picks them up with the next SDK release.
 - Auto-open, the refresh hook and track-changes behaviour as described under
   "Watching the agent work". `office.conflict` reopens the original and links the
   copy; `office.save_failed` shows a notice.
-- Surogate Desktop gets all of this through the web client. The first plan
-  checks that its window policy (`desktop/src/shell/window-policy.ts`, the
-  same-origin navigation rules in `main-window.ts`) lets the editor's iframe
-  load.
+- Surogate Desktop gets all of this through the web client. Its window policy
+  confines only main-frame navigation, so the editor's iframe loads; the frame
+  gets no permission grants (see Known gaps).
 
 ## Testing
 
@@ -613,9 +620,10 @@ Metrics wait until a dashboard needs them.
 
 | # | Plan | Delivers | Needs |
 |---|---|---|---|
-| 1 | Platform and editing for users | Chart templates, RabbitMQ, database, bucket and NetworkPolicies in DEV; `OfficeSettings`; `surogates/office/`; the editor, file and callback routes; `office_sessions`; pending saves and `write_if` in all workspace kinds, including project history and the coordinator's binding; the reaper; the acting-user header; desktop approvals for editor saves; the drawer's editor branch; pdf.js removed. Starts with verify items 1–3 and 11. | none |
-| 2 | Rollout | PROD per-template applies, DNS, bucket, database; the enterprise kit stage. | 1 |
-| 3 | Live agent editing for documents | `runtime-office`; agent configs signed by the worker; `office_read` and `office_edit` (docx); the turn-end save; refused sandbox writes to open documents; `office_edits`; auto-open; the `office` skill (word); the `read_file` note. Starts with verify items 4–10. | 1 |
+| 1a | Editing for users in the cloud | DEV document server (chart templates, RabbitMQ, database, bucket); `OfficeSettings`; `surogates/office/`; the editor, file and callback routes; `office_sessions`; pending saves and `write_if` for cloud chats and cloud projects (users' saves to a project's real files are picked up as "you" at the next landing); the reaper; the acting-user headers; the drawer's editor branch; pdf.js removed. Starts with verify item 1. | none |
+| 1b | Computer folders | Device `write_if` with `expected_revision`, request ids, the coordinator binding for computer projects, desktop approvals for editor saves. Starts with verify item 3. | 1a |
+| 2 | Rollout | PROD per-template applies, DNS, bucket, database, NetworkPolicies; the enterprise kit stage. | 1a, 1b |
+| 3 | Live agent editing for documents | `runtime-office`; agent configs signed by the worker; `office_read` and `office_edit` (docx); the turn-end save; `BucketHistory` landing editor saves with their author; refused sandbox writes to open documents; `office_edits`; auto-open; the `office` skill (word); the `read_file` note. Starts with verify items 2 and 4–10. | 1a |
 | 4 | Sheets, slides and PDF | xlsx ops; HTML slides measured into native shapes; PDF ops; the skill's cell, slide and pdf references. Starts with verify item 12. | 3 |
 | 5 | Comments that call the agent | Mentions, the notify route, the acknowledgement, reply and resolve. Starts with verify item 13. | 3 |
 
@@ -636,7 +644,8 @@ Metrics wait until a dashboard needs them.
    open (stable targets).
 9. Content controls show their placeholder text (pending blocks).
 10. The connector works with third-party plugins disabled.
-11. Surogate Desktop's window policy lets the editor iframe load.
+11. Surogate Desktop's window policy lets the editor iframe load. Confirmed
+    2026-10-13: only main-frame navigation is confined.
 12. PDF text edited through `RecognizeContent` keeps the original embedded fonts
     (decides the PDF `replace` op).
 13. `onRequestSendNotify` carries the comment id in `actionLink`.
@@ -663,6 +672,9 @@ Metrics wait until a dashboard needs them.
   edit.
 - **Computer folders need the computer online** to open a document, and files
   over 50 MiB cannot be opened there.
+- **In Surogate Desktop the editor frame gets no permission grants**
+  (`desktop/src/shell/window-policy.ts`), so copy and paste that needs the
+  async Clipboard API fails there; keyboard copy and paste still work.
 
 ## Deferred
 
