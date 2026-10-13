@@ -91,10 +91,10 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     }
   });
 
-  it("activates the bpf LSM and attaches all fifteen rule hooks before sessions run", () => {
+  it("activates the bpf LSM and attaches all sixteen rule hooks before sessions run", () => {
     // No command runs as the guest's root: its agent says on the console what the init's load of the rule found, before its hello.
     const said = /surogate: the protected-names rule attached (\d+) of \d+ hooks, under the LSMs (\S+)/.exec(readFileSync(options.console, "utf8"));
-    expect(said?.slice(1)).toEqual(["15", expect.stringMatching(/\bbpf\b/)]);
+    expect(said?.slice(1)).toEqual(["16", expect.stringMatching(/\bbpf\b/)]);
   });
 
   it("runs a root's background process in its runner, where the next command reaches it, and answers for it", async () => {
@@ -1223,6 +1223,6 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1" || KVM !== undefined)("the
     expect(emulated).toMatchObject({ emulated: "no-kvm", flagged: true });
     expect(kvm).toMatchObject({ emulated: null, flagged: false });
     expect(emulated.helloMs).toBeLessThan(120_000);
-    expect(readFileSync(join(dir, "tcg-console.log"), "utf8")).toMatch(/surogate: the protected-names rule attached 15 of 15 hooks/);
+    expect(readFileSync(join(dir, "tcg-console.log"), "utf8")).toMatch(/surogate: the protected-names rule attached 16 of 16 hooks/);
   });
 });

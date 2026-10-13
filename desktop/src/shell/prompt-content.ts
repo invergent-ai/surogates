@@ -2,11 +2,12 @@
 // every word; what the agent sent, and the names of the user's folders and files, go
 // in their own fields, which the page sets as text and never as markup.
 
-import { basename, posix } from "node:path";
+import { posix } from "node:path";
 
 import { type ApprovalRequest, type BrowserAction, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
 import type { LinkSummary } from "../binding/links.js";
+import { shownName, shownPath, shownWithin } from "../session-path.js";
 
 export interface PromptButton {
   id: string; // what the answer names
@@ -46,7 +47,8 @@ export interface PromptContent {
 
 const button = (id: string, label: string, allows = false): PromptButton => ({ id, label, allows });
 const code = (label: string, value: string, keep = ""): PromptDetail => ({ label, value, code: true, keep });
-const named = (path: string) => basename(path) || path;
+// A folder or a file by its last name, as the person reads it (session-path.ts, shownName); each whole by shownPath.
+const named = shownName;
 // A command's label, with how many lines it has once it has more than one: what follows its first line can be out of view.
 const lined = (label: string, text: string) => {
   const lines = text.split("\n").length;
@@ -80,7 +82,7 @@ const tall = (value: string) => 26 + Math.ceil(value.length / 45) * 19;
 export function folderSheet(sheet: FolderSheet): PromptContent {
   const name = named(sheet.folder);
   // A project's thread is named under its folder: the page's words, set as text.
-  const details = [code("Folder", sheet.folder)];
+  const details = [code("Folder", shownPath(sheet.folder))];
   let room = 0;
   if (sheet.thread !== null) {
     details.push(plain("Project", sheet.thread.project), plain("Thread", sheet.thread.thread));
@@ -129,8 +131,8 @@ const asker = (chat: ChatLabel) => (chat.calling === chat.root ? chat.agent : `A
 const inside = (folder: string, path: string) =>
   path.startsWith(`${folder}/`) && path.length > folder.length + 1 && posix.normalize(path) === path;
 
-// A path in the chat's folder, as sent, from the folder; any other whole.
-const inFolder = (folder: string, path: string) => (inside(folder, path) ? path.slice(folder.length + 1) : path);
+// A path in the chat's folder, as sent, from the folder; any other whole: each as the person reads it.
+const inFolder = (folder: string, path: string) => (inside(folder, path) ? shownWithin(path.slice(folder.length + 1)) : shownPath(path));
 
 export function sizeOf(bytes: number): string {
   if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
@@ -163,7 +165,7 @@ export function approval(request: ApprovalRequest): PromptContent {
       ...OPERATION,
       title: request.background ? `Start a background command in ${folder}?` : `Run a command in ${folder}?`,
       lead: `${asker(chat)} wants to run this on this computer.`,
-      details: [code(lined("Command", request.command), request.command, "\n\t"), ...(request.workdir === null ? [] : [code("In", request.workdir)])],
+      details: [code(lined("Command", request.command), request.command, "\n\t"), ...(request.workdir === null ? [] : [code("In", shownPath(request.workdir))])],
       height: 380,
     };
   }
@@ -288,7 +290,8 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
     // Which chat is asked for, and which has the port now, each by the folder it works on. Another
     // folder's name is the user's, in a field of its own: none reads as part of the note's words.
     const folder = request.held?.folder ?? null;
-    const elsewhere = folder !== null && folder !== chat.folder ? folder : null;
+    const elsewhere = folder !== null && folder !== chat.folder ? shownPath(folder) : null;
+    const here = shownPath(chat.folder);
     const holder = folder === null ? "Another chat" : elsewhere === null ? "Another chat on this folder" : "A chat on another folder";
     const held = request.held === undefined ? [] : [`${holder} has port ${request.detail} in the browser now. Allowing this moves the port to this chat.`];
     const lines = (text: string) => Math.ceil(text.length / 60);
@@ -296,7 +299,7 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       title: `Let ${chat.agent}'s browser open port ${request.detail} of this chat's servers?`,
       lead: `${asker(chat)} wants to open a server it started for this chat, in the chat's sandbox, in its browser on this computer.`,
       details: [
-        code("Address", `http://localhost:${request.detail}/`), code("Folder", chat.folder),
+        code("Address", `http://localhost:${request.detail}/`), code("Folder", here),
         ...(elsewhere === null ? [] : [code("Folder of the chat that has it", elsewhere)]),
       ],
       notes: [
@@ -310,7 +313,7 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
       focus: "deny",
       cancel: "deny",
       // A field's label and its block's padding take some 52 px, and each of its lines 19.
-      height: Math.min(MAX_HEIGHT, 500 + lines(chat.folder) * 19 + held.reduce((sum, note) => sum + 30 + lines(note) * 19, 0)
+      height: Math.min(MAX_HEIGHT, 500 + lines(here) * 19 + held.reduce((sum, note) => sum + 30 + lines(note) * 19, 0)
         + (elsewhere === null ? 0 : 52 + lines(elsewhere) * 19)),
     };
   }
@@ -336,7 +339,7 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
   if (request.action === "upload") {
     // Each file is a field of its own, counted, with no special character of its path shown as itself, as a
     // download's File field: so a name cannot be made to read as two files, or as another's.
-    const files = request.files ?? [];
+    const files = (request.files ?? []).map(shownPath);
     const fields = files.map((path, at) => code(files.length === 1 ? act.label : `${act.label} ${at + 1} of ${files.length}`, path));
     return {
       ...OPERATION,
@@ -401,7 +404,7 @@ export function freeMode(chat: ChatLabel): PromptContent {
   return {
     title: `Let ${chat.agent} work freely in ${named(chat.folder)}?`,
     lead: "It will run commands, change files and type into its commands in this folder without asking you first. It still asks before it connects to an address off the package hosts.",
-    details: [code("Folder", chat.folder)],
+    details: [code("Folder", shownPath(chat.folder))],
     notes: [],
     choice: null,
     buttons: [button("keep", "Keep asking"), button("free", "Work freely", true)],

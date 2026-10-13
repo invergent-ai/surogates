@@ -5,9 +5,9 @@
 // would be no one's.
 
 import { closeSync, constants, mkdirSync, openSync } from "node:fs";
-import { join } from "node:path";
 
 import { fsat } from "../files/fsat.js";
+import { join } from "../host-path.js";
 import type { TakeLock } from "./folder-lock.js";
 
 export const takeDarwinLock: TakeLock = async (uid, dev, ino, dataDir) => {

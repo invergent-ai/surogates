@@ -8,9 +8,9 @@
 
 import { randomUUID } from "node:crypto";
 import { lstat, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 
 import { confirmedFolder } from "../binding/folder.js";
+import { dirname, join } from "../host-path.js";
 import type { Place } from "../vm/manager.js";
 import { digitsOf, keyOf, numberOf } from "./place.js";
 

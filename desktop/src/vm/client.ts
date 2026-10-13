@@ -5,19 +5,19 @@
 
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser } from "../guest/protocol.js";
+import { join } from "../host-path.js";
 import type { NetworkAnswer, NetworkAsk } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
-import { backendFor } from "./backends.js";
+import { backendHere } from "./backends.js";
 import { Backoff, MOST_MS } from "./backoff.js";
 import { type HistoryRequest, named, NOT_A_REQUEST, REFUSED } from "./history.js";
 import { imageArch, imageArchOf } from "./image.js";
-import { DOOR, REACH_MS } from "./inbound.js";
+import { REACH_MS } from "./inbound.js";
 import { aborted, type Boot, late, LET_GO, type Place, type ProcessesChange, unavailable, type VmOperation, type VmOptions, WAITS } from "./manager.js";
 import { GUEST_ARCH } from "./qemu-arch.js";
 
@@ -96,7 +96,7 @@ export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEn
     agentDisk: delivered.agentDisk ?? join(PACKAGE, "dist", "agent.img"),
     ...(env.SUROGATE_VM_KVM ? { kvm: env.SUROGATE_VM_KVM } : {}),
     sessions: join(dataDir, "vm", "sessions.img"),
-    run: (backendFor(process.platform) ?? backendFor("linux")!).runtimeFolder(user, env, dataDir),
+    run: backendHere().runtimeFolder(user, env, dataDir),
     console: join(dataDir, "logs", "vm-console.log"),
     user,
   };
@@ -151,6 +151,8 @@ export type FromManager =
   | { type: "boot"; boot: Boot }
   // A connection of a root's command waits for its user's word on a destination off the package hosts.
   | ({ type: "ask"; id: number; root: string } & NetworkAsk)
+  // Whether the browser's door took its listen (open), or could not and is closed; the browser is told only an open door.
+  | { type: "door"; open: boolean }
   // Its last word at a stop, after every answer, from a process that waits to be ended: a utility
   // process's postMessage has no callback, and an exit right after it can lose what it sent.
   | { type: "stopped" };
@@ -229,11 +231,29 @@ export class VmClient {
   // not answered: what is asked of the place next is sent after them, so the manager has a place's requests in
   // the order they were asked, which it keeps to itself (manager.ts, VmManager.unplace).
   private readonly turns = new Map<string, Set<Asked>>();
-  /** Where a browser's proxy knocks for a connection into a chat's sandbox: the manager's door, there while a guest runs. */
-  readonly door: string;
+  // The door's address for this start: a fresh unguessable pipe name where the door is a global pipe (Windows), else
+  // the backend's socket in this user's own folder. The manager listens on the same address, given it in its options.
+  private readonly doorAddress: string;
+  // Whether the door's listen took. A door on a private socket (Linux, macOS) is always reachable; a pipe door is
+  // closed until the manager says its listen took, and closed again if it says the listen failed, so the browser is
+  // never told a door it cannot knock at as ours.
+  private doorOpen: boolean;
+
+  // Whether the door is a global pipe (Windows), whose reach the manager confirms, rather than a private socket.
+  private readonly doorIsPipe: boolean;
 
   constructor(private readonly options: VmClientOptions) {
-    this.door = join(options.vm.run, DOOR);
+    const fresh = backendHere().freshDoor();
+    this.doorAddress = fresh ?? backendHere().addresses(options.vm.run, options.vm.user).door;
+    this.doorIsPipe = fresh !== null;
+    this.doorOpen = !this.doorIsPipe;
+    // The manager listens on this same door; the tests and measurements that boot a Guest directly take the backend's.
+    options.vm.door = this.doorAddress;
+  }
+
+  /** Where a browser's proxy knocks for a connection into a chat's sandbox while a guest runs, or "" where the door is closed. */
+  get door(): string {
+    return this.doorOpen ? this.doorAddress : "";
   }
 
   /**
@@ -563,10 +583,13 @@ export class VmClient {
       else if (message.type === "processes") this.tell(message.root, message.change);
       else if (message.type === "boot") this.booted(message.boot);
       else if (message.type === "ask") this.asked(manager, message);
+      else if (message.type === "door") this.doorOpen = message.open;
       else if (message.type === "stopped") manager.kill();
     });
     manager.onExit(() => {
       clearInterval(keepalive);
+      // The door's pipe went with the manager; it is closed until a new manager says its listen took.
+      if (this.doorIsPipe) this.doorOpen = false;
       if (this.manager === manager) this.manager = null;
       // One that went by itself, or hung: the next is started once its backoff has passed.
       if (!this.stopping) this.backoff.down();

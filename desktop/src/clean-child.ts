@@ -12,12 +12,18 @@
 // app's: perl reads PERL5OPT and PERL5LIB. That is Linux's way. macOS's is the app's own
 // surogate-spawn (native/spawn), beside the app's node, which does the same in one posix_spawn: perl
 // there would need /dev/fd for /proc/self/fd, and Apple calls its scripting runtimes deprecated.
+// Windows's is surogate-helper.exe's spawn (native/windows/helper): Windows hands a child every
+// inheritable handle of its parent's unless the parent names those it may have, and libuv names
+// none. The helper starts the program naming its stdio alone, waits for it as its parent, since
+// Windows has no exec, and takes it along when it is killed.
 // Another OS starts no child until it has its own.
 
 import { type ChildProcess, spawn, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { notBuilt } from "./platform.js";
+import { isAbsolute } from "./host-path.js";
+import { helperAt } from "./helper-path.js";
+import { forThisOs, notBuilt } from "./platform.js";
 
 const PERL = "/usr/bin/perl";
 // Its first argument: the last descriptor the program keeps. What follows: the program, by its whole
@@ -29,16 +35,17 @@ const LINE = 'use POSIX (); my $keep = shift; opendir(my $dir, "/proc/self/fd") 
 const SPAWN = fileURLToPath(new URL("../bin/surogate-spawn", import.meta.url));
 
 type Clean = (program: string, args: string[], keep: number) => [file: string, args: string[]];
-const CLEAN: Partial<Record<NodeJS.Platform, Clean>> = {
+const clean: Clean | null = forThisOs<Clean>({
   linux: (program, args, keep) => [PERL, ["-e", LINE, "--", String(keep), program, ...args]],
   // Its arguments: the last descriptor the program keeps, then the program and its arguments, as perl's.
   darwin: (program, args, keep) => [SPAWN, [String(keep), program, ...args]],
-};
-const clean: Clean | null = CLEAN[process.platform] ?? null;
+  // The same from src and from dist: the app's own helper, as native-helper.ts finds it beside this module.
+  win32: (program, args, keep) => [helperAt(import.meta.dirname), ["spawn", String(keep), program, ...args]],
+});
 
 /** What to run in place of *program* with *args*, so that it holds its first *keep* + 1 descriptors and no other. */
 export function cleanly(program: string, args: string[], keep = 2): [file: string, args: string[]] {
-  if (!program.startsWith("/")) throw new Error(`${program} is not named by its whole path`);
+  if (!isAbsolute(program)) throw new Error(`${program} is not named by its whole path`);
   if (!clean) notBuilt("Starting a program cleanly");
   return clean(program, args, keep);
 }

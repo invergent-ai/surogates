@@ -6,8 +6,7 @@
 // proxy on the guest's net port, the way into a root on its inbound port, and what a
 // lost guest was running.
 
-import { readFileSync, renameSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
+import { readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import type { Duplex } from "node:stream";
 import { setTimeout as wait } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
@@ -16,13 +15,18 @@ import { confirmedFolder } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED, timedOut } from "../guest/command.js";
 import type { ProcessHandle } from "../guest/processes.js";
 import { type FromAgent, HELD, type HostUser, PLACE_KEY, type Share } from "../guest/protocol.js";
+import { identityOf } from "../files/identity.js";
+import { join, sep } from "../host-path.js";
+import { hostLstat } from "../host-stat.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
-import { backendFor } from "./backends.js";
+import { forThisOs, notBuilt } from "../platform.js";
+import { hostPathOf } from "../session-path.js";
+import { backendFor, backendHere } from "./backends.js";
 import { Backoff } from "./backoff.js";
 import { ControlLink, type Request } from "./control.js";
 import { type HistoryRequest, named, NOT_A_REQUEST } from "./history.js";
-import { Carrier, DOOR, Door, Forwarded, letGo } from "./inbound.js";
+import { Carrier, Door, Forwarded, letGo } from "./inbound.js";
 import { type Egress, NetProxy, withNotice } from "./proxy.js";
 import type { Disks } from "./qemu.js";
 import type { GuestArch } from "./qemu-arch.js";
@@ -64,6 +68,10 @@ export interface VmOptions extends Disks {
   run: string; // the backend's runtime folder, this user's own: on Linux, the sockets and pidfiles
   console: string; // the guest's console log
   user: HostUser; // whom the roots run for: the name and home they see
+  // Where the browser's proxy knocks for a connection into a chat's sandbox: the fresh door address the app made for
+  // this start (client.ts), unguessable to other users where the door is a global pipe name (Windows). None in the
+  // tests and the measurements, which take the backend's own address.
+  door?: string;
   // The company's CA certificates, PEM, that the app's own connections trust from its start: each
   // boot's guest trusts them for its commands' TLS, given as data in hello's answer. None without.
   ca?: string[];
@@ -273,16 +281,33 @@ parentPort.postMessage({ found, real });
 `;
 const looking = new Map<string, Promise<Looked>>();
 
+// A look at *path*, this computer's own, by this OS: in a Worker on Linux and macOS; on Windows by ntat, whose calls
+// are synchronous, its identity read as Windows's is (host-stat.ts), as Node's numbers there do not hold a file's ID.
+// Windows's file host works in no folder on a network volume (binding/folder.ts), the one kind whose look would not answer.
+const inWorker = (path: string): Promise<Looked> => new Promise<Looked>((resolve) => {
+  const worker = new Worker(LOOK, { eval: true, workerData: path });
+  // A look that never returns keeps no process alive.
+  worker.unref();
+  worker.once("message", (found: Looked) => resolve(found));
+  worker.once("error", () => resolve({ found: null, real: null }));
+});
+const LOOKS = forThisOs<(path: string) => Promise<Looked>>({
+  linux: inWorker,
+  darwin: inWorker,
+  win32: (path) => new Promise<Looked>((resolve) => {
+    try {
+      const stats = hostLstat(path);
+      resolve({ found: { directory: stats.isDirectory(), ...identityOf(stats) }, real: realpathSync.native(path) });
+    } catch {
+      resolve({ found: null, real: null });
+    }
+  }),
+});
+
 function look(path: string): Promise<Looked> {
   const known = looking.get(path);
   if (known) return known;
-  const looked = new Promise<Looked>((resolve) => {
-    const worker = new Worker(LOOK, { eval: true, workerData: path });
-    // A look that never returns keeps no process alive.
-    worker.unref();
-    worker.once("message", (found: Looked) => resolve(found));
-    worker.once("error", () => resolve({ found: null, real: null }));
-  });
+  const looked = (LOOKS ?? notBuilt("The VM's look at a folder"))(path);
   looking.set(path, looked);
   void looked.then(() => looking.delete(path));
   return looked;
@@ -329,6 +354,7 @@ export class Guest {
     private readonly told: Told,
     egress: Egress,
     forwarded: Forwarded,
+    onDoor: (open: boolean) => void = () => {},
   ) {
     this.gone = new Promise((resolve) => {
       this.leave = resolve;
@@ -364,8 +390,11 @@ export class Guest {
     this.proxy = new NetProxy(vm.net, { egress });
     // Each connection made into a root from outside the guest.
     this.carrier = new Carrier(vm.inbound, options.reachMs);
-    // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to.
-    this.door = new Door(join(options.run, DOOR), forwarded, (root, port, first) => this.reach(root, port, first));
+    // Each connection the browser makes to a chat's own server, into the root the app forwarded its port to. Its door
+    // is the fresh random pipe name the app made (options.door), else the backend's address for the tests and the
+    // measurements. onDoor tells the app whether the door's listen took, so a door that could not listen is closed to
+    // the browser rather than left for it to knock at.
+    this.door = new Door(options.door ?? backendHere().addresses(options.run, options.user).door, forwarded, (root, port, first) => this.reach(root, port, first), {}, onDoor);
   }
 
   /**
@@ -373,7 +402,7 @@ export class Guest {
    * not start, its hypervisor's words included. *signal* stops a boot under way.
    */
   static async boot(
-    boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING, forwarded = new Forwarded(),
+    boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}, egress = REFUSING, forwarded = new Forwarded(), onDoor: (open: boolean) => void = () => {},
   ): Promise<Guest> {
     const launched = performance.now();
     // The backend's own part, QEMU's sockets and monitor, is as quick emulated: the guest has not begun.
@@ -385,7 +414,7 @@ export class Guest {
     try {
       const deadline = launched + WAITS[vm.emulated ? "emulated" : "kvm"].helloMs;
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited, options.ca);
-      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress, forwarded);
+      return new Guest(options, vm, control, launched, performance.now() - launched, told, egress, forwarded, onDoor);
     } catch (error) {
       await vm.kill();
       throw new Error([describe(error), await vm.exited].filter(Boolean).join(": "));
@@ -494,10 +523,11 @@ export class Guest {
     const deadline = performance.now() + this.shareMs;
     // On a mount that does not answer, as a dead network or FUSE one, the look never
     // returns, and Node cannot cancel it: it is given up on at the deadline, in a thread of its own.
-    const looked = await Promise.race([look(folder.path), late(deadline - performance.now())]);
+    const at = hostPathOf(folder.path);
+    const looked = await Promise.race([look(at), late(deadline - performance.now())]);
     if (looked === "late") throw new Error(`it did not answer within ${this.shareMs / 1000} s`);
     const { found, real } = looked;
-    if (!found?.directory || !confirmedFolder(folder, found) || real !== folder.path) throw new FolderGone();
+    if (!found?.directory || !confirmedFolder(folder, found) || real !== at) throw new FolderGone();
     const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
     if (!given) {
       this.lose();
@@ -508,7 +538,7 @@ export class Guest {
     if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
-    return this.vm.share(folder.path, uid, deadline, { copy });
+    return this.vm.share(at, uid, deadline, { copy });
   }
 
   /**
@@ -556,18 +586,20 @@ export class Guest {
     const deadline = performance.now() + this.shareMs;
     // Each looked at as a root's folder is, and given up on at the deadline: the one that did not answer is named.
     const looked = (path: string) => Promise.race([look(path), late(deadline - performance.now())]);
-    const [store, real] = await Promise.all([looked(place.history), looked(place.real.path)]);
+    // The folder by this computer's own path, as the history in the app's data is named: the two are compared so.
+    const at = hostPathOf(place.real.path);
+    const [store, real] = await Promise.all([looked(place.history), looked(at)]);
     if (store === "late") throw new Error(`its place in the app's data did not answer within ${this.shareMs / 1000} s`);
     if (real === "late") throw new Error(`the folder did not answer within ${this.shareMs / 1000} s`);
     // The app's own data: a link there would share whatever it leads to with the guest's root.
     if (!store.found?.directory || store.real !== place.history) throw new Error("it is not where the app keeps it");
-    if (!real.found?.directory || !confirmedFolder(place.real, real.found) || real.real !== place.real.path) throw new FolderGone();
+    if (!real.found?.directory || !confirmedFolder(place.real, real.found) || real.real !== at) throw new FolderGone();
     // Neither in the other: the agent's git would write the user's folder, or the history's share serve it for writing.
-    if (within(place.history, place.real.path) || within(place.real.path, place.history)) throw new Error("it is not kept apart from the folder");
+    if (within(place.history, at) || within(at, place.history)) throw new Error("it is not kept apart from the folder");
     const history = await this.vm.share(place.history, 0, deadline);
     const shares = [history];
     try {
-      const folder = await this.vm.share(place.real.path, 0, deadline, { readonly: true });
+      const folder = await this.vm.share(at, 0, deadline, { readonly: true });
       shares.push(folder);
       const answer = await this.request({ type: "place", key: place.key, history, real: folder }, this.setupMs);
       if (answer?.type === "done") return { history, real: folder, store: store.found };
@@ -775,6 +807,8 @@ export class VmManager {
     private readonly told: Told = () => {},
     private readonly egress: Egress = REFUSING,
     private readonly report: (boot: Boot) => void = () => {},
+    // Whether the browser's door took its listen (true) or could not and is closed (false); told at each boot.
+    private readonly onDoor: (open: boolean) => void = () => {},
   ) {}
 
   /**
@@ -981,11 +1015,11 @@ export class VmManager {
       // What the console says is then this boot's alone.
       rmSync(this.options.console, { force: true });
       try {
-        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded);
+        return await Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded, this.onDoor);
       } catch (error) {
         if (this.stopping || !this.unchecked()) throw error;
         renameSync(this.options.sessions, `${this.options.sessions}.unchecked`);
-        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded);
+        return Guest.boot(boot, this.options, this.halt.signal, this.told, this.egress, this.forwarded, this.onDoor);
       }
     })();
     booting.then(async (guest) => {

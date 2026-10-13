@@ -519,20 +519,24 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
   end
 
-  def test_the_windows_suites_run_by_hand_on_windows_on_the_ref_they_are_given_and_hold_nothing_to_leak
+  def test_the_windows_suites_run_by_hand_or_for_the_release_on_windows_on_the_ref_they_are_given_and_hold_nothing_to_leak
     windows = YAML.load_file(WINDOWS)
     on = triggers(windows)
-    # Each suite runs once a branch, on its final head: started by hand, never by a push or a pull
-    # request, whose code it would run.
-    assert_equal %w[workflow_dispatch], on.keys
-    inputs = on.fetch("workflow_dispatch").fetch("inputs")
-    assert_equal %w[ref], inputs.keys
-    assert_equal [true, "string"], inputs.fetch("ref").values_at("required", "type")
+    # Each suite runs once a branch, on its final head, started by hand; or for the release, which calls it on its
+    # tag. Never by a push or a pull request, whose code it would run.
+    assert_equal %w[workflow_dispatch workflow_call], on.keys
+    on.each do |trigger, given|
+      # The ref it is given, and nothing else: no secret is ever handed to it, and it hands nothing back.
+      assert_equal %w[inputs], given.keys, trigger
+      inputs = given.fetch("inputs")
+      assert_equal %w[ref], inputs.keys, trigger
+      assert_equal [true, "string"], inputs.fetch("ref").values_at("required", "type"), trigger
+    end
     # Its token reads the repository and nothing else, and nothing of the workflow's own is every job's.
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit], jobs.keys
+    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-boot shell], jobs.keys
     jobs.each do |name, job|
       assert_equal "windows-2025", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -542,13 +546,51 @@ class ReleaseWorkflowTest < Minitest::Test
       refute_match(/id-token/, job.to_s, "#{name} asks for a token to sign with")
       refute job.key?("environment"), "#{name} runs in an Environment"
       refute job.key?("permissions"), "#{name} asks for permissions of its own"
+      steps = job.fetch("steps")
+      # The ref it is given, checked out with no token kept for that ref's code to use, as its files are written.
+      checkouts = steps.select { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+      assert_equal [{ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }], checkouts.map { |step| step.fetch("with") }, name
+      assert_operator steps.index { |step| step["run"].to_s.include?("git config --global core.autocrlf false") }, :<, steps.index(checkouts.first), name
     end
     refute_match(/id-token/, windows.to_s)
-    steps = jobs.fetch("unit").fetch("steps")
-    # The ref it is given, checked out with no token kept for that ref's code to use.
-    assert_equal({ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }, steps.first.fetch("with"))
-    # The desktop's types, checked on Windows.
-    assert_equal "npm run typecheck", steps.last.fetch("run").strip
+    # The files of the desktop's vitest project for Windows, which each part built for Windows joins; they gate.
+    unit = jobs.fetch("unit")
+    refute unit.key?("continue-on-error")
+    assert_equal "npx vitest run --project windows", unit.fetch("steps").last.fetch("run").strip
+    # The file host's suites on the runner's own NTFS gate, each step bounded, after ntat and rg are built.
+    host = jobs.fetch("file-host")
+    refute host.key?("continue-on-error")
+    host_runs = host.fetch("steps").map { |step| step["run"].to_s }
+    assert_includes host_runs, "npm run build:win32"
+    suites = host.fetch("steps").select { |step| step["run"].to_s.include?("npx vitest run") }
+    assert_equal 4, suites.size
+    suites.each { |step| assert step.key?("timeout-minutes"), step["name"] }
+    # The shell's and the browser's suites, which gate: the helper's lints and its tests, those that fill the
+    # runner's stores among them, built as its lock file has it; the app end to end; the browser host on Chrome and Edge.
+    shell = jobs.fetch("shell")
+    refute shell.key?("continue-on-error")
+    shell_runs = shell.fetch("steps").map { |step| step["run"].to_s.strip }
+    assert_includes shell_runs, "cargo clippy --locked --all-targets -- -D warnings"
+    assert_includes shell_runs, "cargo test --locked -- --include-ignored"
+    assert_includes shell_runs, "npx vitest run -c vitest.e2e.config.ts test/e2e/windows.e2e.ts"
+    browsers = shell.fetch("steps").select { |step| step["run"].to_s.include?("browser-host-win32.test.ts") }.map { |step| step.fetch("env").fetch("SUROGATE_TEST_BROWSER") }
+    assert_equal ['C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'], browsers
+    # What the runner offers the VM, recorded and never gating: its Rust probe built as its lock file has it.
+    probe = jobs.fetch("vm-probe")
+    assert_equal true, probe.fetch("continue-on-error")
+    runs = probe.fetch("steps").map { |step| step["run"].to_s }
+    assert(runs.any? { |run| run.include?("Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform") })
+    assert(runs.any? { |run| run.include?("cargo build --release --locked") })
+    # The native programs gate; the real boot never does.
+    native = jobs.fetch("vm-native")
+    refute native.key?("continue-on-error")
+    assert(native.fetch("steps").map { |step| step["run"].to_s }.any? { |run| run.include?("cargo clippy --locked --workspace --all-targets -- -D warnings") })
+    assert(native.fetch("steps").map { |step| step["run"].to_s }.any? { |run| run.include?("cargo test --locked --workspace") })
+    # The TypeScript backend gates too; it builds the desktop the stand-in imports.
+    backend = jobs.fetch("vm-backend")
+    refute backend.key?("continue-on-error")
+    assert_equal "npx vitest run test/vm-win32.test.ts", backend.fetch("steps").last.fetch("run").strip
+    assert_equal true, jobs.fetch("vm-boot").fetch("continue-on-error")
   end
 
   def test_the_arm64_guest_is_built_and_tested_by_hand_on_an_arm64_runner_and_holds_nothing_to_leak
@@ -696,7 +738,13 @@ class ReleaseWorkflowTest < Minitest::Test
         "shell" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed d57a229d162b158b 82ea49c2e002c4eb bb26d389f9d8b55f 2734cf3c0643d000 512eb34e3e8c1e1d bea3be8dc0d7d250]],
       },
       "desktop-windows.yml" => {
-        "unit" => ["943604becd7dec07", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 db6273944f5b635b]],
+        "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
+        "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 987851a1dbf1a172 425e4aed22ec6aa0 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f df980f3cfa08ab88]],
+        "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
+        "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
+        "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
+        "vm-boot" => ["61fe7ddc5fb5c138", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 24591223ab9a9cbb d1980ca93217776e 1edc8d7d3216b9d8]],
+        "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
@@ -765,7 +813,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal %w[desktop-guest-arm64.yml desktop-macos.yml desktop-windows.yml release.yml update-images.yml], run.keys
     assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-guest-arm64.yml").uniq.sort
     assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
-    assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-windows.yml").uniq.sort
+    assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-windows.yml").uniq.sort
     assert_equal %w[
       actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action
       docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release

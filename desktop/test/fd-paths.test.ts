@@ -2,7 +2,7 @@
 // they had an OS of their own, each on the path through the folder's /proc/self/fd entry; on an OS the file host
 // is not built for yet, every one is refused.
 
-import { closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -17,8 +17,8 @@ const calls = vi.hoisted(() => ({ made: [] as unknown[][] }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<Record<string, unknown>>();
   const names = [
-    "accessSync", "chmodSync", "copyFileSync", "linkSync", "lstatSync", "mkdirSync", "opendirSync", "openSync", "readdirSync",
-    "readFileSync", "readlinkSync", "renameSync", "rmdirSync", "statSync", "unlinkSync",
+    "accessSync", "chmodSync", "copyFileSync", "existsSync", "fstatSync", "linkSync", "lstatSync", "mkdirSync", "opendirSync", "openSync", "readdirSync",
+    "readFileSync", "readlinkSync", "renameSync", "rmdirSync", "rmSync", "statSync", "unlinkSync",
   ];
   return {
     ...fs,
@@ -65,6 +65,11 @@ describe("Linux's FdPaths", () => {
     expect([calls, more]).toEqual([[["openSync", dir, HOLD]], [["openSync", at("sub"), HOLD]]]);
   });
 
+  it("reads a link by its path, as the file host's realpath always read one", () => {
+    symlinkSync("a", join(dir, "to-a"));
+    expect(made(() => linuxFdPaths.readlink(join(dir, "to-a")))).toEqual(["a", [["readlinkSync", join(dir, "to-a"), "utf8"]]]);
+  });
+
   it("reaches a name in a held folder through its descriptor's entry, and a path as it is", () => {
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
     const [fd, opened] = made(() => linuxFdPaths.open({ dir: held, name: "b" }, flags, 0o600));
@@ -75,6 +80,9 @@ describe("Linux's FdPaths", () => {
     const each: Array<[string, () => unknown, unknown[]]> = [
       ["lstatSync", () => linuxFdPaths.lstat({ dir: held, name: "a" }), [at("a"), { bigint: true }]],
       ["statSync", () => linuxFdPaths.stat({ dir: held, name: "a" }), [at("a")]],
+      ["statSync", () => linuxFdPaths.stat({ dir: held, name: "a" }, { bigint: true }), [at("a"), { bigint: true }]],
+      ["existsSync", () => linuxFdPaths.exists({ dir: held, name: "a" }), [at("a")]],
+      ["readdirSync", () => linuxFdPaths.readdir({ dir: held }), [at()]],
       ["accessSync", () => linuxFdPaths.access({ dir: held, name: "a" }, constants.R_OK | constants.W_OK), [at("a"), constants.R_OK | constants.W_OK]],
       ["linkSync", () => linuxFdPaths.link({ dir: held, name: "a" }, { dir: held, name: "c" }), [at("a"), at("c")]],
       ["renameSync", () => linuxFdPaths.rename({ dir: held, name: "c" }, join(dir, "d")), [at("c"), join(dir, "d")]],
@@ -83,6 +91,10 @@ describe("Linux's FdPaths", () => {
       ["unlinkSync", () => linuxFdPaths.unlink({ dir: held, name: "e" }), [at("e")]],
       ["mkdirSync", () => linuxFdPaths.mkdir({ dir: held, name: "f" }), [at("f")]],
       ["rmdirSync", () => linuxFdPaths.rmdir({ dir: held, name: "f" }), [at("f")]],
+      ["mkdirSync", () => linuxFdPaths.mkdir({ dir: held, name: "g" }, 0o700), [at("g"), 0o700]],
+      ["rmSync", () => linuxFdPaths.rmTree(join(dir, "g")), [join(dir, "g"), { recursive: true, force: true }]],
+      ["fstatSync", () => linuxFdPaths.fstat(held), [held]],
+      ["fstatSync", () => linuxFdPaths.fstat(held, { bigint: true }), [held, { bigint: true }]],
       // The held folder itself.
       ["chmodSync", () => linuxFdPaths.chmod({ dir: held }, 0o755), [at(), 0o755]],
     ];
@@ -137,17 +149,29 @@ describe("Linux's FdPaths", () => {
 });
 
 describe("the file host's FdPaths", () => {
-  it("are Linux's on Linux, and macOS's on macOS", async () => {
+  it("are Linux's on Linux, macOS's on macOS, and Windows's on Windows", async () => {
     expect((await import("../src/files/fd-paths.js")).fdPaths).toBe(linuxFdPaths);
     const [{ fdPaths }, { darwinFdPaths }] = await importedOn("darwin", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-darwin.js")]));
     expect(fdPaths).toBe(darwinFdPaths);
+    const [windows, { win32FdPaths }] = await importedOn("win32", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-win32.js")]));
+    expect(windows.fdPaths).toBe(win32FdPaths);
+  });
+
+  it("bind nothing on Linux, whose sandbox binds the folder, and give a program a path as it is", () => {
+    expect(linuxFdPaths.bind([dir])).toBeUndefined();
+    const outside = linuxFdPaths.outside(join(dir, "a"));
+    expect([outside.path, outside.empty]).toEqual([join(dir, "a"), false]);
+    expect(outside.release()).toBeUndefined();
   });
 
   it("refuse every call, in words, on a system the file host is not built for yet, and are shown there as any object is", async () => {
-    const { fdPaths } = await importedOn("win32", () => import("../src/files/fd-paths.js"));
-    const { notBuiltWords } = await importedOn("win32", () => import("../src/platform.js"));
-    const words = "The file host is not built for win32 yet";
+    const { fdPaths } = await importedOn("freebsd", () => import("../src/files/fd-paths.js"));
+    const { notBuiltWords } = await importedOn("freebsd", () => import("../src/platform.js"));
+    const words = "The file host is not built for freebsd yet";
     expect(words).toBe(notBuiltWords("The file host"));
+    // files/ keeps its own copy of the OSes' names, as the agent's disk holds no platform.js: the two name each OS alike.
+    const [own, app] = await Promise.all([import("../src/files/os-names.js"), import("../src/platform.js")]);
+    expect(own.OS_NAMES).toEqual(app.OS_NAMES);
     expect(() => fdPaths.hold(dir)).toThrow(new Error(words));
     expect(() => fdPaths.open({ dir: held, name: "a" }, constants.O_RDONLY)).toThrow(new Error(words));
     expect(() => fdPaths.handed()).toThrow(new Error(words));

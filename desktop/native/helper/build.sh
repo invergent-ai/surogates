@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # surogate-helper for this Mac (Sources/surogate-helper/main.swift), for a development build and the macOS
 # runner: built by Swift Package Manager for this Mac's arm64, release, signed ad hoc, at
-# .build/surogate-helper, where a development build runs it (src/mac-helper.ts). A release signs its
+# .build/surogate-helper, where a development build runs it (src/native-helper.ts). A release signs its
 # own build again, with the Developer ID.
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -2,9 +2,10 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Failure, NUL_REFUSED, type Refusal } from "../src/files/answers.js";
+import { fdPaths } from "../src/files/fd-paths.js";
 import { expandUser, inside, keyInFolder, realpath, resolveInFolder } from "../src/files/paths.js";
 
 let base: string;
@@ -78,6 +79,23 @@ describe("realpath, as CPython's non-strict os.path.realpath", () => {
 
   it("reuses what it learned of a link it crosses twice", () => {
     expect(realpath(`${base}/to-real/inner/../../to-real/inner`)).toEqual({ path: `${base}/real/inner`, loop: false });
+  });
+});
+
+describe("realpath's looks at links", () => {
+  it("go through the file host's FdPaths by their paths, each OS's own way of reading a link", () => {
+    const lstat = vi.spyOn(fdPaths, "lstat");
+    const readlink = vi.spyOn(fdPaths, "readlink");
+    try {
+      expect(realpath(`${base}/to-real/inner`).path).toBe(`${base}/real/inner`);
+      expect(lstat).toHaveBeenCalledWith(`${base}/to-real`);
+      expect(readlink).toHaveBeenCalledWith(`${base}/to-real`);
+      expect(readlink.mock.results.map(({ value }) => value)).toEqual([join(base, "real")]);
+      expect(inside(`${base}/to-real/inner`, base)).toBe(true);
+    } finally {
+      lstat.mockRestore();
+      readlink.mockRestore();
+    }
   });
 });
 

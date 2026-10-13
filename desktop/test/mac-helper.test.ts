@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { certificatesIn } from "../src/shell/company-ca.js";
-import { HELPER, helper, helperAt, helperSync } from "../src/mac-helper.js";
+import { HELPER, helper, helperAt, helperSync } from "../src/native-helper.js";
 
 describe("where the app finds surogate-helper", () => {
   it("is beside the app's own executable in its bundle, and its build's own in a development build", () => {

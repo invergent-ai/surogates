@@ -1,12 +1,17 @@
 // How the browser host looks at this computer's processes and temporary folder, by this OS:
-// Linux's (processes-linux.ts) and macOS's (processes-darwin.ts); an OS the app drives no browser
-// on yet has neither.
+// Linux's (processes-linux.ts), macOS's (processes-darwin.ts) and Windows's (processes-win32.ts);
+// an OS the app drives no browser on yet has neither.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import * as darwin from "./processes-darwin.js";
 import * as linux from "./processes-linux.js";
+import * as win32 from "./processes-win32.js";
 
-const OWN = process.platform === "linux" ? linux : process.platform === "darwin" ? darwin : {
+interface OwnProcesses {
+  holding(profile: string): Promise<number[]>;
+  browserTemp(env: NodeJS.ProcessEnv): string;
+}
+const OWN: OwnProcesses = forThisOs<OwnProcesses>({ linux, darwin, win32 }) ?? {
   holding: async (): Promise<number[]> => notBuilt("Driving a browser"),
   browserTemp: (): string => notBuilt("Driving a browser"),
 };

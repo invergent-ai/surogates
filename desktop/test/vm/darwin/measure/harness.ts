@@ -14,9 +14,10 @@ import { fileURLToPath } from "node:url";
 
 import type { HostUser } from "../../../../src/guest/protocol.js";
 import type { Outcome } from "../../../../src/link/protocol.js";
-import { darwinBoot, runtimeFolder, type Start } from "../../../../src/vm/darwin.js";
+import { darwinBoot, runtimeFolder } from "../../../../src/vm/darwin.js";
 import { type BootVm, type Folder, Guest, type VmBackend, type VmOptions } from "../../../../src/vm/manager.js";
 import type { Egress } from "../../../../src/vm/proxy.js";
+import type { Start } from "../../../../src/vm/vm-helper.js";
 
 export const DESKTOP = realpathSync(fileURLToPath(new URL("../../../../", import.meta.url)));
 /** The arm64 guest image (prepare.sh builds it): SUROGATE_VM_IMAGE, else the repository's images/guest/out. */

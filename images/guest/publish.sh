@@ -14,7 +14,7 @@
 #                                         # manifest in <out>/manifest.json and the bucket checked
 #                                         # against it, or "missing"
 #   images/guest/publish.sh [--arch amd64|arm64] send <out>    # after images/guest/build.sh <out>:
-#                                         # sends rootfs.img.zst and vmlinuz.zst, then manifest.json,
+#                                         # sends initrd.zst, rootfs.img.zst and vmlinuz.zst, then manifest.json,
 #                                         # so a manifest that is there names files that are
 #                                         # there; then checks what the bucket holds
 # Environment: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
@@ -74,9 +74,9 @@ imageOf() {
 # back, its size and sha256 as downloaded and unpacked.
 check() {
   local status files name size sha256 download downloadSize downloadSha256
-  # The image's two files, or nothing of the bucket's would be checked.
-  jq -e '[.files[]?.download] | sort == ["rootfs.img.zst", "vmlinuz.zst"]' "$OUT/manifest.json" > /dev/null \
-    || fail "desktop/vm/$key's manifest does not name rootfs.img.zst and vmlinuz.zst"
+  # The image's three files, or nothing of the bucket's would be checked.
+  jq -e '[.files[]?.download] | sort == ["initrd.zst", "rootfs.img.zst", "vmlinuz.zst"]' "$OUT/manifest.json" > /dev/null \
+    || fail "desktop/vm/$key's manifest does not name initrd.zst, rootfs.img.zst and vmlinuz.zst"
   files="$(jq -r '.files[] | "\(.name) \(.size) \(.sha256) \(.download) \(.downloadSize) \(.downloadSha256)"' "$OUT/manifest.json")"
   # No more of the bucket's than its manifest, or each file, can be: nothing fills the runner's disk.
   status="$(manifest --max-filesize 65536 -o "$OUT/bucket.json")"
@@ -143,6 +143,7 @@ case "$VERB" in
     [ "$(imageOf "$OUT/manifest.json")" = "$key $ARCH" ] || fail "$OUT/manifest.json is not the build of desktop/vm/$key"
     status="$(manifest -o /dev/null -I)"
     [ "$status" = 404 ] || fail "desktop/vm/$key is published already, and is not sent again"
+    put initrd.zst application/zstd
     put rootfs.img.zst application/zstd
     put vmlinuz.zst application/zstd
     put manifest.json application/json

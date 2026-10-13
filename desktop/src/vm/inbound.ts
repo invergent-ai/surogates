@@ -13,11 +13,11 @@ import { timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { type ClientHttp2Session, type ClientHttp2Stream, connect as connectH2, constants } from "node:http2";
 import { createServer, type Server, type Socket } from "node:net";
-import { dirname } from "node:path";
 import type { Duplex } from "node:stream";
 
 import { SANDBOX_PORTS } from "../guest/listeners.js";
 import { MAX_INBOUND } from "../guest/protocol.js";
+import { dirname } from "../host-path.js";
 
 // The door's name in the VM's runtime folder, this user's own.
 export const DOOR = "browser.sock";
@@ -145,28 +145,48 @@ export class Door {
   private readonly perKey: number;
   private readonly knockMs: number;
 
-  // *reach*: a connection to a port of a root's own loopback, the family *first* names tried before the other, or why none (Guest.reach).
+  // Whether the door is a named pipe (Windows) rather than a Unix socket in this user's own folder (Linux, macOS).
+  private readonly pipe: boolean;
+
+  // *reach*: a connection to a port of a root's own loopback, the family *first* names tried before the other, or why
+  // none (Guest.reach). *onReady*: on a pipe door alone, whether its listen took (true) or failed (false); a failed
+  // listen is fatal to the door, with no fallback, so the browser is told the door is closed and never knocks at a
+  // name nobody listens on as ours. (The app's pipe name is 128 random bits, so no other user can create it first;
+  // libuv's listen makes the first instance with FILE_FLAG_FIRST_PIPE_INSTANCE, so a name taken already fails here.)
   constructor(
     private readonly path: string, private readonly forwarded: Forwarded,
     private readonly reach: (root: string, port: number, first: 4 | 6) => Promise<Duplex | string>,
     bounds: DoorBounds = {},
+    onReady: (open: boolean) => void = () => {},
   ) {
     this.perRoot = bounds.perRoot ?? MAX_INBOUND;
     this.perKey = bounds.perKey ?? MAX_PER_KEY;
     this.knockMs = bounds.knockMs ?? KNOCK_MS;
+    this.pipe = path.startsWith("\\\\");
     this.server = createServer({ allowHalfOpen: true }, (socket) => this.knocked(socket));
     this.server.maxConnections = bounds.open ?? MAX_OPEN;
-    this.server.on("error", () => {});
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    rmSync(path, { force: true });
-    // Its folder is this user's alone already; so is the door.
-    this.server.listen(path, () => chmodSync(path, 0o600));
+    if (this.pipe) {
+      // A named pipe needs no folder and no mode, and a listen that fails is fatal: the browser is told the door is
+      // closed, and the server is closed with no fallback.
+      this.server.once("error", () => {
+        this.server.close();
+        onReady(false);
+      });
+      this.server.listen(path, () => onReady(true));
+    } else {
+      // A socket in this user's own 0700 folder: as on Linux and macOS, unchanged.
+      this.server.on("error", () => {});
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      rmSync(path, { force: true });
+      this.server.listen(path, () => chmodSync(path, 0o600));
+    }
   }
 
   close(): void {
     this.server.close();
     for (const socket of this.open) socket.destroy();
-    rmSync(this.path, { force: true });
+    // A named pipe goes when its server closes; only a socket leaves a file to remove.
+    if (!this.pipe) rmSync(this.path, { force: true });
   }
 
   // A connection of the browser's proxy: its knock, then the door's answer, "200" and the connection's

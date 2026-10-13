@@ -1,12 +1,16 @@
 // What of the file helper's sandbox is each OS's own (spec, Section 11, "The file host, still in srt"): srt wraps
-// the helper in bubblewrap on Linux (srt-linux.ts) and in Apple's sandbox-exec on macOS (srt-darwin.ts). The
-// policy (policy.ts) and the host (host.ts) take each from here, picked once, as this module is imported.
+// the helper in bubblewrap on Linux (srt-linux.ts) and in Apple's sandbox-exec on macOS (srt-darwin.ts); Windows has
+// no srt, and its helper's containment is its walk (srt-win32.ts). The policy (policy.ts) and the host (host.ts) take
+// each from here, picked once, as this module is imported.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { DARWIN_SRT } from "./srt-darwin.js";
 import { LINUX_SRT } from "./srt-linux.js";
+import { WIN32_SRT } from "./srt-win32.js";
 
 export interface SrtOs {
+  /** Whether srt wraps the helper: on Windows nothing does, and the walk is the helper's containment. */
+  readonly wraps: boolean;
   /** What the helper reads of the system, beside the app: its programs, their libraries, and what they read as they start. */
   readonly system: readonly string[];
   /** Whether *path*, as it resolves, is one of this OS's own folders, which no sandbox may be given. */
@@ -35,8 +39,8 @@ export interface SrtOs {
 const refused = (): never => notBuilt("The file host");
 // On an OS the file host is not built for, nothing of its sandbox is, and each part says so.
 const UNBUILT: SrtOs = {
-  system: [], reserved: refused, toolsMissing: refused, fileToolsMissing: refused, toolsPath: refused, line: refused,
+  wraps: false, system: [], reserved: refused, toolsMissing: refused, fileToolsMissing: refused, toolsPath: refused, line: refused,
   tempFolder: refused, socketsFit: refused, sweep: refused, folderBytes: null,
 };
 
-export const srtOs: SrtOs = ({ linux: LINUX_SRT, darwin: DARWIN_SRT } as Partial<Record<NodeJS.Platform, SrtOs>>)[process.platform] ?? UNBUILT;
+export const srtOs: SrtOs = forThisOs<SrtOs>({ linux: LINUX_SRT, darwin: DARWIN_SRT, win32: WIN32_SRT }) ?? UNBUILT;

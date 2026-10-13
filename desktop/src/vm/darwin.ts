@@ -1,28 +1,28 @@
 // The VM layer's macOS backend (spec, Section 11): the guest on Apple's Virtualization framework,
 // through surogate-vm (native/macos), the one program of the app's with the framework's
-// entitlement. It speaks surogate-vm's line protocol on its stdin and stdout, and connects to the
-// guest's control, net and inbound ports as Unix sockets surogate-vm makes in the runtime folder,
-// as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server,
+// entitlement. It speaks surogate-vm's line protocol (vm-helper.ts) on its stdin and stdout, and
+// connects to the guest's control, net and inbound ports as Unix sockets surogate-vm makes in the
+// runtime folder, as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server,
 // which maps no owner and shows each file as the asking uid's: every root runs on its own uid, as
 // on Linux, where its folder shows it that uid (guest/root.ts, checkOwner). surogate-vm stops the VM when its
 // stdin ends, so the VM ends with the manager however it ends; it writes its pid in the runtime
 // folder, and the next boot's sweep ends one that outlived its manager.
 
-import { type ChildProcess, execFile, type SpawnOptions } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { cleanly, spawnClean } from "../clean-child.js";
 import type { Share } from "../guest/protocol.js";
 import { MAX_SHARES } from "../guest/protocol.js";
+import { basename, dirname, join } from "../host-path.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
-import { guestCpus, KERNEL_COMMAND_LINE } from "./qemu.js";
-import { ended, reach } from "./sockets.js";
+import { guestCpus, kernelLine } from "./qemu.js";
+import { ended, reach, socketsIn } from "./sockets.js";
+import { Helper, late, type Said, type Start } from "./vm-helper.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const MEMORY_MIB = 2048;
@@ -35,7 +35,11 @@ export const LAYOUT: Layout = "multiple";
 const KILL_MS = 1_000;
 // The longest Unix socket path Darwin takes, its sockaddr_un's sun_path without the NUL.
 export const SOCKET_MAX = 103;
-const SOCKETS = ["control.sock", "net.sock", "inbound.sock"];
+// The sockets surogate-vm makes in the runtime folder *run*, in the order they are connected to.
+const sockets = (run: string): string[] => {
+  const { control, net, inbound } = socketsIn(run);
+  return [control, net, inbound];
+};
 
 // The same from src/vm and from dist/vm: desktop/, or a packaged app's Contents/Resources/app.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -44,9 +48,6 @@ const PACKAGED = basename(dirname(PACKAGE)) === "Resources" && basename(dirname(
 export const APP_FILES = PACKAGED ? dirname(dirname(dirname(PACKAGE))) : PACKAGE;
 /** surogate-vm: beside the app's main executable in a packaged app, native/build.sh's signed copy in development. */
 export const VM_PROGRAM = PACKAGED ? join(APP_FILES, "Contents", "MacOS", "surogate-vm") : join(PACKAGE, "native", "out", "surogate-vm");
-
-/** How surogate-vm is started: through spawnClean, so it holds nothing of this process's but its stdio. */
-export type Start = (program: string, args: string[], options: SpawnOptions & { env: NodeJS.ProcessEnv }) => ChildProcess;
 
 // surogate-vm is given the PATH alone, as QEMU is on Linux: it reads none of the user's environment.
 const ENV = { PATH: "/usr/bin:/bin" };
@@ -69,92 +70,13 @@ export function runtimeFolder(dataDir: string, temp = tmpdir()): string {
 
 /** Why the VM's sockets cannot be made in *run*, its longest path over Darwin's SOCKET_MAX bytes, or null. */
 export function fitting(run: string): string | null {
-  const longest = join(run, SOCKETS.reduce((a, b) => (b.length > a.length ? b : a)));
+  const longest = sockets(run).reduce((a, b) => (b.length > a.length ? b : a));
   const bytes = Buffer.byteLength(longest);
   return bytes > SOCKET_MAX ? `this Mac's temp folder's path is too long for the sandbox's sockets: ${longest} is ${bytes} bytes, over ${SOCKET_MAX}` : null;
 }
 
-// What surogate-vm says, one JSON object a line.
-type Said =
-  | { type: "listening" | "started" }
-  | { type: "failed"; why: string }
-  | { type: "shared"; id: number; tag: string; name?: string }
-  | { type: "unshared"; id: number }
-  | { type: "refused"; id?: number; why: string }
-  | { type: "stopped"; reason: string; why?: string };
-
-// Settles with "late" at *deadline* (performance.now()), its timer not holding the process.
-const late = (deadline: number) => new Promise<"late">((resolve) => {
-  setTimeout(() => resolve("late"), Math.max(0, deadline - performance.now())).unref();
-});
-
-const exited = (child: ChildProcess) => new Promise<void>((resolve) => {
-  if (ended(child)) resolve();
-  else child.once("exit", () => resolve());
-  child.once("error", () => resolve());
-});
-
-/** surogate-vm, its lines heard, its stderr's end kept. */
-class Helper {
-  readonly child: ChildProcess;
-  readonly gone: Promise<void>;
-  private said = "";
-  // The last words of its stopped or failed line.
-  last = "";
-  private readonly listeners = new Set<(said: Said) => void>();
-
-  constructor(start: Start, program: string, args: string[]) {
-    this.child = start(program, args, { stdio: ["pipe", "pipe", "pipe"], env: ENV });
-    this.child.on("error", () => {});
-    this.child.stdin?.on("error", () => {});
-    this.child.stderr?.on("data", (chunk: Buffer) => {
-      this.said = (this.said + chunk.toString()).slice(-4000);
-    });
-    if (this.child.stdout) {
-      createInterface({ input: this.child.stdout, crlfDelay: Infinity }).on("line", (line) => {
-        let said: Said;
-        try {
-          said = JSON.parse(line) as Said;
-        } catch {
-          return;
-        }
-        if (said.type === "failed") this.last = said.why;
-        if (said.type === "stopped") this.last = said.why ?? "";
-        for (const listener of this.listeners) listener(said);
-      });
-    }
-    this.gone = exited(this.child);
-  }
-
-  send(line: object): void {
-    if (!ended(this.child)) this.child.stdin?.write(`${JSON.stringify(line)}\n`);
-  }
-
-  on(listener: (said: Said) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  /** The first line *wanted* takes, by *deadline*, or what ended the wait: the helper's exit, or the deadline. */
-  async first(wanted: (said: Said) => boolean, deadline: number): Promise<Said | "exited" | "late"> {
-    let stop = () => {};
-    const heard = new Promise<Said>((resolve) => {
-      stop = this.on((said) => {
-        if (wanted(said)) resolve(said);
-      });
-    });
-    try {
-      return await Promise.race([heard, this.gone.then(() => "exited" as const), late(deadline)]);
-    } finally {
-      stop();
-    }
-  }
-
-  /** Its last words: its stopped or failed line's, else the end of what it said on stderr. */
-  words(): string {
-    return this.last || this.said.trim();
-  }
-}
+/** The guest kernel's command line on macOS: every OS's for the framework's devices, virtio's disks and ports, and no names refused but the protected ones. */
+export const COMMAND_LINE = kernelLine({ disks: "virtio", transport: "virtio-serial", names: "posix" });
 
 /**
  * A boot on macOS, as *start* starts surogate-vm: spawnClean in the app; the measurements on a Mac
@@ -178,30 +100,30 @@ export function darwinBoot(start: Start): BootVm {
     }
     mkdirSync(dirname(options.console), { recursive: true, mode: 0o700 });
     const data = options.data ?? dirname(dirname(options.sessions));
-    const helper = new Helper(start, program, ["run", options.run, "--data", data, "--image", dirname(options.kernel), "--bundle", options.bundle ?? dirname(options.agentDisk)]);
+    const helper = new Helper(start, program, ["run", options.run, "--data", data, "--image", dirname(options.kernel), "--bundle", options.bundle ?? dirname(options.agentDisk)], ENV);
     const halt = () => helper.child.kill("SIGKILL");
     signal?.addEventListener("abort", halt, { once: true });
-    const sockets: Socket[] = [];
+    const connected: Socket[] = [];
     try {
       const listening = await helper.first((said) => said.type === "listening" || said.type === "failed", deadline);
       if (listening === "late") throw new Error("surogate-vm did not open its sockets");
       if (listening === "exited" || listening.type !== "listening") throw new Error(helper.words() || "surogate-vm exited");
-      for (const name of SOCKETS) {
-        const socket = await reach(join(options.run, name), helper.child, deadline);
+      for (const path of sockets(options.run)) {
+        const socket = await reach(path, helper.child, deadline);
         if (!socket) throw new Error(ended(helper.child) ? "surogate-vm exited" : "surogate-vm did not take a connection to its sockets");
-        sockets.push(socket);
+        connected.push(socket);
       }
       helper.send({
         type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
-        cpus: options.cpus ?? guestCpus(), memoryMiB: MEMORY_MIB, commandLine: KERNEL_COMMAND_LINE, layout: options.layout ?? LAYOUT,
+        cpus: options.cpus ?? guestCpus(), memoryMiB: MEMORY_MIB, commandLine: COMMAND_LINE, layout: options.layout ?? LAYOUT,
       });
       const started = await helper.first((said) => said.type === "started" || said.type === "failed", deadline);
       if (started === "late") throw new Error("the VM did not start in time");
       if (started === "exited" || started.type !== "started") throw new Error(helper.words() || "surogate-vm exited");
-      const [control, net, inbound] = sockets as [Socket, Socket, Socket];
+      const [control, net, inbound] = connected as [Socket, Socket, Socket];
       return new DarwinVm(options, helper, control, net, inbound);
     } catch (error) {
-      for (const socket of sockets) socket.destroy();
+      for (const socket of connected) socket.destroy();
       helper.child.kill("SIGKILL");
       await helper.gone;
       const said = helper.words();
@@ -218,7 +140,7 @@ export const bootDarwin: BootVm = darwinBoot(spawnClean);
 // What a manager that died left: surogate-vm's sweep, which ends the surogate-vm its pidfile names
 // while it is still one run for this folder, and empties the folder.
 async function sweep(start: Start, program: string, run: string, deadline: number): Promise<void> {
-  const swept = new Helper(start, program, ["sweep", run]);
+  const swept = new Helper(start, program, ["sweep", run], ENV);
   if ((await Promise.race([swept.gone, late(deadline)])) === "late") {
     swept.child.kill("SIGKILL");
     throw new Error("surogate-vm did not sweep its folder in time");

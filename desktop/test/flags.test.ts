@@ -2,13 +2,14 @@
 // number in files/flags.ts alone, anywhere in the app, since a flag's number on one OS can be another flag on the next
 // (Linux's O_PATH is Darwin's O_SYMLINK); and a path through a descriptor's /proc entry in Linux's FdPaths alone.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { constants, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
 import { LINUX_FLAGS } from "../src/files/flags.js";
+import { importedOn } from "./platforms.js";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 // What the file host runs: the helper's operations and the host around it.
@@ -110,6 +111,16 @@ describe("the file host's open flags", () => {
 
   it("are Linux's own numbers for the two Node does not name", () => {
     expect(LINUX_FLAGS).toEqual({ O_PATH: 0o10000000, O_CLOEXEC: 0o2000000 });
+  });
+
+  it("are each OS's row: no link followed at a path's last name on Linux, none on Windows, whose walk follows none, and none on an OS the file host is not built for yet", async () => {
+    const { FLAGS: linux } = await importedOn("linux", () => import("../src/files/flags.js"));
+    expect([linux.NOFOLLOW, linux.DIRECTORY]).toEqual([constants.O_NOFOLLOW, constants.O_DIRECTORY]);
+    const { FLAGS: windows, WIN32_FLAGS } = await importedOn("win32", () => import("../src/files/flags.js"));
+    // The C runtime's _O_OBTAIN_DIR, which no flag Node takes on Windows has (O_RDONLY 0 to O_EXCL 0x400, UV_FS_O_FILEMAP 0x20000000).
+    expect([windows.NOFOLLOW, windows.DIRECTORY, WIN32_FLAGS.O_DIRECTORY]).toEqual([0, 0x2000, 0x2000]);
+    const { FLAGS: other } = await importedOn("freebsd", () => import("../src/files/flags.js"));
+    expect(() => other.NOFOLLOW).toThrow(new Error("The file host is not built for freebsd yet"));
   });
 });
 

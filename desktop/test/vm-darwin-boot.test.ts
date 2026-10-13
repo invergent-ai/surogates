@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { bootDarwin, requirementsDarwin, runtimeFolder } from "../src/vm/darwin.js";
 import { Guest, type VmBackend, type VmOptions } from "../src/vm/manager.js";
-import { KERNEL_COMMAND_LINE } from "../src/vm/qemu.js";
 import { built } from "./built.js";
 
 const FAKE = fileURLToPath(new URL("./vm/darwin/fake-vm.mjs", import.meta.url));
@@ -83,7 +82,7 @@ describe("the macOS VM backend", () => {
     const [line] = readFileSync(log, "utf8").trim().split("\n").map((text) => JSON.parse(text) as Record<string, unknown>);
     expect(line).toEqual({
       type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
-      cpus: expect.any(Number), memoryMiB: 2048, commandLine: KERNEL_COMMAND_LINE, layout: "multiple",
+      cpus: expect.any(Number), memoryMiB: 2048, commandLine: `root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf`, layout: "multiple",
     });
     // The sessions disk made, sparse and the user's alone; the runtime folder theirs alone too.
     expect([statSync(options.sessions).size, statSync(options.sessions).mode & 0o777, statSync(options.run).mode & 0o777]).toEqual([32 * 1024 ** 3, 0o600, 0o700]);

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { browserTemp, holding, listedIn } from "../src/browser/processes-darwin.js";
-import { HELPER } from "../src/mac-helper.js";
+import { HELPER } from "../src/native-helper.js";
 import { importedOn } from "./platforms.js";
 
 const PROFILE = "/Users/ana/Library/Application Support/Surogate/browser-profiles/0123/chrome";

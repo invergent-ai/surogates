@@ -19,6 +19,7 @@ import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { Carrier, DOOR, Door, Forwarded } from "../src/vm/inbound.js";
 import { bootDarwin } from "../src/vm/darwin.js";
 import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
+import { bootWin32 } from "../src/vm/win32.js";
 import {
   type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, FOLDER_NESTED, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
 } from "../src/vm/manager.js";
@@ -1376,10 +1377,11 @@ describe("a guest's boot", () => {
 });
 
 describe("the VM's backend", () => {
-  it("is Linux's on Linux, macOS's on macOS, and none yet elsewhere, where an operation answers so", async () => {
+  it("is Linux's on Linux, macOS's on macOS, Windows's on Windows, and none yet elsewhere, where an operation answers so", async () => {
     expect(bootFor("linux")).toBe(bootLinux);
     expect(bootFor("darwin")).toBe(bootDarwin);
-    expect(bootFor("win32")).toBeNull();
+    expect(bootFor("win32")).toBe(bootWin32);
+    expect(bootFor("freebsd")).toBeNull();
     const manager = new VmManager(options(), null);
     const folder = { path: dir, ...statSync(dir) };
     expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "run", args: {} }, new AbortController().signal)).toEqual({

@@ -5,7 +5,7 @@
 
 import { hostname } from "node:os";
 
-import { helperSync } from "../mac-helper.js";
+import { helperSync } from "../native-helper.js";
 
 // How long a name read is said again before it is read anew: Settings asks at each of its changes.
 const KEPT_MS = 30_000;

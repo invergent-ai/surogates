@@ -5,7 +5,7 @@
 // awaits app.whenReady() deadlocks.
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -19,19 +19,21 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  BROWSER_SETTING, type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf,
+  BROWSER_SETTING, type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, pickFilters, profileOf, profilesOf,
   unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
+import { hostUser } from "../host-user.js";
 import { fileToolsMissing, hostToolsPath, toolsMissing } from "../hosts/policy.js";
 import { NODE } from "../hosts/tool-hosts.js";
-import { FolderLooks, LOOK_MS } from "./folders-held.js";
+import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
+import { hostPathOf, shownPath } from "../session-path.js";
 import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
@@ -40,6 +42,7 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
+import { nameTheApp, quitAsked } from "./app-identity.js";
 import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
@@ -96,6 +99,8 @@ const places = placesFor(process.env, app.getPath("home"));
 const { root } = places;
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
+// Before the first window: the OS groups the app's windows, and names its notifications and login item, by it (app-identity.ts).
+nameTheApp(app, app.isPackaged);
 app.setPath("userData", join(root, "electron"));
 // Before ready too: the default session is made then, and spell-checks with the app's own dictionary.
 ownSpelling(app, DICTIONARIES, console.error);
@@ -326,10 +331,6 @@ const fromBase = (url: string, init: { headers: Record<string, string>; signal?:
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
-const vmUser = () => {
-  const { uid, gid, username } = userInfo();
-  return { uid, gid, name: username, home: env.HOME };
-};
 
 // The guest's image: a packaged app downloads it from where it was installed from (the install
 // script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
@@ -420,7 +421,7 @@ function lookForTools(): void {
 // with it. One that does not answer in time is not held (FolderLooks).
 const folderLooks = new FolderLooks(undefined, undefined, (folder, why) => report(new Error(why === "busy"
   ? `${folder}, a folder a chat is bound to, was not looked at, the app's looks all waiting on folders that do not answer: its tools are not looked for until one does`
-  : (process.env.PATH ?? "").split(":").includes(folder)
+  : onPath(process.env.PATH, folder)
     ? `${folder}, on the app's PATH, did not answer in ${LOOK_MS / 1000} s: no tool is looked for there until it answers`
     : `${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
 function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
@@ -488,7 +489,7 @@ const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = appVm({
     vm: {
-      ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+      ...vmOptions(root, hostUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
       ca: companyCertificates,
     },
     ready: vmReady,
@@ -512,7 +513,7 @@ const vmFor = (): VmClient => {
 // image did not start, its check by its hashes, and the next boot's line is the next boot's.
 function sandboxAction(action: unknown): void {
   if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
-  if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
+  if (action === "log") return void shell.openPath(vmOptions(root, hostUser(), VM_ENV).console);
   if (action === "check") return lookForTools();
   // The manager forgets that boot too, so the line never says Ready while it still refuses.
   boot = null;
@@ -1277,7 +1278,7 @@ async function restore(agent: Agent): Promise<void> {
       type: "question",
       message: `Restore local access on ${credential.name}?`,
       detail: folders.length > 0
-        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${folder}`).join("\n")}\nWork that was cancelled stays cancelled.`
+        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${shownPath(folder)}`).join("\n")}\nWork that was cancelled stays cancelled.`
         : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
       buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
     });
@@ -1479,7 +1480,7 @@ function bridge(contents: WebContents, agent: Agent): void {
       return binding && { ...binding, takenOver: stack.tools.takenOver?.(sessionId) ?? false };
     },
     // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
-    revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
+    revealFolder: async (sessionId) => shell.showItemInFolder(hostPathOf(await (await registered()).binder.folderToShow(sessionId))),
     showBrowser: async (sessionId) => {
       const stack = await browsing(sessionId);
       if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");
@@ -1737,7 +1738,7 @@ function state() {
 let tray: Tray | null = null;
 let trayDrawn = "";
 
-const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP));
+const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP, nativeTheme.shouldUseDarkColorsForSystemIntegratedUI));
 
 function updateTray(): void {
   if (!tray) return;
@@ -2024,7 +2025,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserSetting.set({ choice: value } as BrowserChoice);
       return;
     }
-    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const] };
+    const filters = pickFilters();
+    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const], ...(filters.length > 0 ? { filters } : {}) };
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;
@@ -2282,13 +2284,14 @@ function showProject(editing: Opened | null): void {
         letGo(chosen);
         chosen = picked;
         mayHaveMade = false;
-        return { folder: picked.folder };
+        // Shown by the path its person reads it by (session-path.ts): the binding keeps the session's.
+        return { folder: shownPath(picked.folder) };
       } catch (error) {
         return { refused: refused(error) };
       }
     });
     // The folder the dialog shows: the one confirmed for the new project now, or none, as after a refusal that let it go.
-    handle("project:chosen", () => chosen?.folder ?? null);
+    handle("project:chosen", () => (chosen ? shownPath(chosen.folder) : null));
     // A new project, made with the folder its user confirmed: the agent binds its coordinator there, and the
     // dialog closes once this computer has recorded it. For an agent that takes no folders of this computer, in the cloud.
     const make = async (fields: ProjectFields): Promise<Project | string> => {
@@ -2751,7 +2754,8 @@ async function quit(): Promise<void> {
   }
 }
 
-if (!app.requestSingleInstanceLock()) {
+// A launch that asks the app to quit, where this OS's launches can, hands that to the running app, or quits at once.
+if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
   app.quit();
 } else {
   // The company's CA, as an administrator gave it for every user of this computer (ca-source.ts), or a
@@ -2764,6 +2768,8 @@ if (!app.requestSingleInstanceLock()) {
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
+    // As the menu's Quit asks: through the quit's questions.
+    if (quitAsked(argv)) return void app.quit();
     if (!loginItem.startedHidden(argv)) main?.show();
     const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);

@@ -12,6 +12,7 @@ import { realpathSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { cleanly } from "../clean-child.js";
+import { identityOf } from "../files/identity.js";
 import type { BrowserId, Disk } from "./choose.js";
 import type { KnownBrowser, KnownBrowsers } from "./known.js";
 
@@ -94,8 +95,9 @@ export function appOf(real: string): string | null {
 // What a file is now, as far as a change of it shows: an app's update replaces its files.
 function stamp(path: string): string {
   try {
-    const { dev, ino, size, mtimeMs } = statSync(path);
-    return `${dev}:${ino}:${size}:${mtimeMs}`;
+    const stats = statSync(path);
+    const { dev, ino } = identityOf(stats);
+    return `${dev}:${ino}:${stats.size}:${stats.mtimeMs}`;
   } catch {
     return "none";
   }

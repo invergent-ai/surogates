@@ -146,6 +146,92 @@ SG_NOINLINE int sg_fold(sg_text name, int len, struct sg_name *nm SG_ARG_NONNULL
 	return (int)kept;
 }
 
+// The names Windows's Explorer acts on when it shows a folder (files/explorer-names.ts), which the rule refuses
+// besides the protected ones where the kernel's line names surogate.names=windows: desktop.ini, autorun.inf, and
+// a name ending .lnk, .url, .scf, .library-ms or .searchconnector-ms. Each judged as a protected name is, by what is
+// left of the name once a volume drops what it holds (sg_fold), read whole: by that name's last SG_ENDLEN letters,
+// more than the longest of them, .searchconnector-ms, takes.
+#define SG_ENDLEN 24
+struct sg_end { char b[SG_ENDLEN]; };
+
+// The component *name*, *len* bytes, folded as sg_fold folds it to its *kept* letters (sg_fold's answer), its last
+// SG_ENDLEN letters into *end* right-aligned: its last letter at end->b[SG_ENDLEN - 1]. sg_fold's loop again, so
+// each write is at a fixed place as sg_fold's are: each letter lands where it lies from the folded name's end, and
+// one past *kept*, which a volume drops, or more than SG_ENDLEN before it, lands at none of them.
+SG_NOINLINE int sg_fold_end(sg_text name, int len, int kept, struct sg_end *end SG_ARG_NONNULL)
+{
+	unsigned o = SG_ENDLEN - (unsigned)kept, skip = 0, b1 = 0, b2 = 0;
+	int j;
+	for (int k = 0; k < SG_ENDLEN; k++)
+		end->b[k] = 0;
+	if (len > 0)
+		b1 = sg_byte(name, 0);
+	if (len > 1)
+		b2 = sg_byte(name, 1);
+	SG_EACH(j, SG_RAWLEN) {
+		if (j >= len)
+			break;
+		unsigned b0 = b1;
+		b1 = b2;
+		b2 = j + 2 < len ? sg_byte(name, j + 2) : 0;
+		struct sg_char c = sg_char(b0, b1, b2);
+		unsigned active = sg_zero(skip);
+		for (int k = 0; k < SG_ENDLEN; k++)
+			end->b[k] = (char)(end->b[k] + active * (sg_zero(o ^ k) * c.at0 + sg_zero((o + 1) ^ k) * c.at1 + sg_zero((o + 2) ^ k) * c.at2));
+		o += active * c.count;
+		skip = active * (c.span - 1) + (1 - active) * (skip - 1);
+	}
+	return kept;
+}
+
+// 1 when the folded end *end*, of a name of *total* letters, ends with *lit*, its *n* bytes; branch-free.
+SG_INLINE unsigned sg_ends(const struct sg_end *end, unsigned total, const char *lit, int n)
+{
+	unsigned same = 1 - sg_below(total, (unsigned)n);
+	for (int k = 0; k < n; k++)
+		same &= sg_zero((unsigned)(unsigned char)end->b[SG_ENDLEN - n + k] ^ (unsigned)(unsigned char)lit[k]);
+	return same;
+}
+#define SG_ENDS(end, total, lit) sg_ends((end), (total), lit, sizeof(lit) - 1)
+
+// Whether the component *name*, its *len* bytes, is one Windows's Explorer acts on, as folded and once a volume
+// drops what it holds. Out-of-line on BPF, as sg_classify is.
+SG_NOINLINE int sg_explorer(sg_text name, int len)
+{
+	struct sg_name nm = {};
+	struct sg_end end = {};
+	unsigned total = (unsigned)sg_fold_end(name, len, sg_fold(name, len, &nm), &end);
+	unsigned named = sg_zero(total ^ 11) & (SG_ENDS(&end, total, "desktop.ini") | SG_ENDS(&end, total, "autorun.inf"));
+	return (int)(named | SG_ENDS(&end, total, ".lnk") | SG_ENDS(&end, total, ".url") | SG_ENDS(&end, total, ".scf")
+		| SG_ENDS(&end, total, ".library-ms") | SG_ENDS(&end, total, ".searchconnector-ms"));
+}
+
+// Whether the component *name*, its *len* bytes, is a spelling NTFS may resolve to another name, which the rule
+// refuses under surogate.names=windows so HCS's Plan 9 server is not the only wall holding a session's write out
+// of a protected or an Explorer name (the file tools refuse the same, files/names-win32.ts): a stream or a path
+// separator (':' or '\\'), an 8.3 short name's tail ('~' then a digit), or a trailing dot or space. Read whole, a
+// byte at a time, as sg_fold reads a name: what a volume drops can make any name long. Out-of-line on BPF, as
+// sg_classify is.
+SG_NOINLINE int sg_windows_alias(sg_text name, int len)
+{
+	unsigned alias = 0, next = 0, c;
+	int j;
+	if (len > 0)
+		next = sg_byte(name, 0);
+	SG_EACH(j, SG_RAWLEN) {
+		if (j >= len)
+			break;
+		c = next;
+		next = j + 1 < len ? sg_byte(name, j + 1) : 0;
+		alias |= sg_zero(c ^ ':') | sg_zero(c ^ '\\') | (sg_zero(c ^ '~') & sg_below((next - '0') & 0xffu, 10));
+	}
+	if (len > 0) {
+		c = sg_byte(name, len - 1);
+		alias |= sg_zero(c ^ '.') | sg_zero(c ^ ' ');
+	}
+	return (int)alias;
+}
+
 #define SB_PROTECTED (1 << 0) // a shell's, editor's or agent's name: not below a dependency folder
 #define SB_DOTGIT    (1 << 1)
 #define SB_HOOKS     (1 << 2)

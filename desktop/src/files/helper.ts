@@ -3,11 +3,12 @@
 // {id, kind, args} or {cancel: id}; one {id, outcome} per line on stdout, after a
 // first {ready: true}.
 
-import { lstatSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 import { FOLDER_UNAVAILABLE } from "./answers.js";
 import { edgeRefused } from "./edge.js";
+import { fdPaths } from "./fd-paths.js";
+import { identityOf } from "./identity.js";
 import { ONLY_RECOVERS } from "./land.js";
 import { type Context, perform } from "./operations.js";
 
@@ -31,6 +32,13 @@ if (at !== undefined) {
     process.exit(2);
   }
 }
+// The folders it works in, each held from here on where nothing else binds them (fd-paths.ts).
+try {
+  fdPaths.bind([folder, ...(copy === undefined ? [] : [copy]), ...(kept === undefined ? [] : [kept])]);
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(2);
+}
 // Its host checked each folder it is given, and then had the sandbox bind them by their paths: a path can come to
 // lead to another folder between the two, by a link put there or a folder moved in. In here the binds are up, and
 // what lies at each path is what was bound, for this helper's life: nothing in the sandbox can mount another, and
@@ -39,8 +47,12 @@ if (at !== undefined) {
 // record or moves a file, and before it says it is ready. It says so by the folder's name, never by a copy's path.
 const found = (path: string | undefined): string | null => {
   try {
-    const is = lstatSync(path ?? "");
-    return is.isDirectory() ? `${is.dev}:${is.ino}` : null;
+    const is = fdPaths.lstat(path ?? "");
+    if (!is.isDirectory()) return null;
+    // As numbers, as its host wrote them (hosts/start.ts, isOf): Node fills a bigint stat from a signed array, so a
+    // device or an inode at or above 2^63 is read back to the number its host's number stat gives (as revisionOf does).
+    const { dev, ino } = identityOf(is);
+    return `${Number(BigInt.asUintN(64, dev))}:${Number(BigInt.asUintN(64, ino))}`;
   } catch {
     return null;
   }
@@ -56,10 +68,13 @@ for (const [is, path, what] of checked) {
     process.exit(2);
   }
 }
-// On macOS the sandbox binds nothing: Seatbelt judges each access by its path, so a folder moved away and another
-// made at its path would be served. There the helper looks again before each request, and answers one in a folder
-// that is another now as its host does, with the folder unavailable.
-const LOOKS_EACH_REQUEST = process.platform === "darwin";
+// Whether this OS's sandbox binds the folders it is given, so what was found at each path stays there for the helper's
+// life: Linux's bwrap does. On macOS the sandbox binds nothing: Seatbelt judges each access by its path, so a folder
+// moved away and another made at its path would be served. Where it binds nothing, the helper looks again before each
+// request, and answers one in a folder that is another now as its host does, with the folder unavailable. files/ is on
+// the agent disk, which holds no platform.js, so the row is picked here.
+const BINDS: Partial<Record<NodeJS.Platform, boolean>> = { linux: true, darwin: false };
+const LOOKS_EACH_REQUEST = BINDS[process.platform] !== true;
 const stillChecked = (): boolean => checked.every(([is, path]) => is === undefined || found(path) === is);
 // A landing's helper is given the thread's copy and where it keeps the files it replaces: both, or it lands nothing. A
 // recovery's is given where they are kept and no copy: it puts back what a landing in the folder cut short, and does

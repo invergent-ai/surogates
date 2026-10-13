@@ -83,9 +83,16 @@ describe("a child the app starts", () => {
     expect(onMac("/usr/bin/env", [])).toEqual([spawn, ["2", "/usr/bin/env"]]);
   });
 
+  it("is started on Windows by the app's own surogate-helper.exe spawn, told the last descriptor to keep", async () => {
+    const [{ cleanly: onWindows }, { HELPER }] = await importedOn("win32", () => Promise.all([import("../src/clean-child.js"), import("../src/native-helper.js")]));
+    expect(HELPER).toMatch(/\\native\\windows\\target\\release\\surogate-helper\.exe$/);
+    expect(onWindows("/usr/bin/env", ["a b"], 3)).toEqual([HELPER, ["spawn", "3", "/usr/bin/env", "a b"]]);
+    expect(onWindows("/usr/bin/env", [])).toEqual([HELPER, ["spawn", "2", "/usr/bin/env"]]);
+  });
+
   it("is refused, in words, on a system the app cannot start one cleanly on yet", async () => {
-    const { cleanly: elsewhere } = await importedOn("win32", () => import("../src/clean-child.js"));
-    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for win32 yet"));
+    const { cleanly: elsewhere } = await importedOn("freebsd", () => import("../src/clean-child.js"));
+    expect(() => elsewhere("/usr/bin/env", [])).toThrow(new Error("Starting a program cleanly is not built for freebsd yet"));
     expect(() => elsewhere("env", [])).toThrow("env is not named by its whole path");
   });
 });

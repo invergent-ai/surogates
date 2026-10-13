@@ -18,7 +18,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { type Launch, PAUSED } from "../src/browser/client.js";
 import type { StagedDownload } from "../src/browser/downloads.js";
 import { BrowserHost, type BrowserHostOptions, FILE_ASKED, NOT_ASKED, WEAKENING } from "../src/browser/host.js";
-import { HELPER } from "../src/mac-helper.js";
+import { HELPER } from "../src/native-helper.js";
 
 const EXECUTABLE = process.env.SUROGATE_TEST_BROWSER || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const run = process.platform === "darwin" && process.env.SUROGATE_BROWSER_TESTS_MAC === "1";

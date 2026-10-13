@@ -3,6 +3,7 @@
 // once it has run a moment, so a copy the guest only looks at, which is soon done, says nothing. Electron-free.
 
 import type { Making } from "../history/copies.js";
+import { shownPath } from "../session-path.js";
 
 // How long a making runs before the sidebar says it.
 export const SAID_AFTER_MS = 1_000;
@@ -46,7 +47,8 @@ export class Copying {
   /** What the sidebar says, or null while no making has run a moment. */
   line(): string | null {
     const said = [...this.making.values()].filter((under) => under.said);
-    const folders = [...new Set(said.map((under) => under.folder))];
+    // Each by its path as the person reads it (session-path.ts): this computer's own.
+    const folders = [...new Set(said.map((under) => shownPath(under.folder)))];
     if (folders.length === 0) return null;
     if (folders.length > 1) return `Making copies of ${folders.length} folders for threads to work in`;
     return said.length === 1 ? `Making a copy of ${folders[0]} for a thread to work in` : `Making copies of ${folders[0]} for ${said.length} threads to work in`;

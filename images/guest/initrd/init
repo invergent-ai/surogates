@@ -1,0 +1,82 @@
+#!/bin/busybox sh
+# The guest's first init where its VM boots the kernel with this initrd: Hyper-V, whose disks, sockets and
+# memory the kernel reaches only through drivers it builds as modules. It loads them, in /modules's order
+# (images/guest/initrd/modules); waits for the guest's three disks at their SCSI LUNs, the image at 0, the
+# agent disk at 1 and the sessions disk at 2; mounts the image read-only, as the kernel's root= does on
+# virtio; and runs the image's stub init on it, as init= does there. Anything that fails is said on the
+# console and ends PID 1: the kernel panics, and the VM stops (panic=-1).
+/bin/busybox mkdir -p /bin
+/bin/busybox --install -s /bin
+export PATH=/bin
+# How long the disks have to come, in tenths of a second: the drivers find them after they load.
+WAIT=50
+
+# Words that stop the boot, then the stop: through the kernel's log, at a level a quiet kernel prints (KERN_CRIT),
+# which the console prints before the guest panics, where what is written to the console itself may be lost then on a
+# UART (Hyper-V's COM1).
+fail() {
+  { echo "<2>surogate: $*, so the guest stops" > /dev/kmsg; } 2> /dev/null || echo "surogate: $*, so the guest stops"
+  exit 1
+}
+
+mount -t devtmpfs -o nosuid,noexec devtmpfs /dev || fail "devtmpfs did not mount"
+mount -t proc -o nosuid,nodev,noexec proc /proc || fail "proc did not mount"
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys || fail "sysfs did not mount"
+
+# Only SCSI's disks are found here: on virtio the kernel boots without an initrd.
+disks=
+set -f
+# shellcheck disable=SC2046 # split into words, never into files
+for word in $(cat /proc/cmdline); do
+  case "$word" in
+    surogate.disks=*)
+      [ -z "$disks" ] || fail "the kernel's command line names surogate.disks= twice"
+      disks=${word#surogate.disks=}
+      ;;
+  esac
+done
+set +f
+[ "$disks" = scsi ] || fail "this initrd finds SCSI's disks, and the kernel's command line names surogate.disks=${disks:-nothing}"
+
+while read -r module; do
+  insmod "/lib/modules/$module.ko" || fail "the kernel did not load $module"
+done < /modules
+
+# The block device of the one disk at LUN $1, as sysfs at $2 and devtmpfs at $3 show it: status 1 while
+# there is none yet, 2 for two disks there.
+at() {
+  found=
+  for address in "$2"/class/scsi_disk/*:0:0:"$1"; do
+    [ -e "$address" ] || continue
+    [ -z "$found" ] || return 2
+    found=$address
+  done
+  [ -n "$found" ] || return 1
+  for block in "$found"/device/block/*; do
+    [ -e "$3/${block##*/}" ] || return 1
+    echo "$3/${block##*/}"
+    return 0
+  done
+  return 1
+}
+# The image's disk, once the three disks have come, by WAIT tenths of a second; or why not.
+disks() {
+  waited=0
+  for lun in 0 1 2; do
+    while :; do
+      found=$(at "$lun" "$1" "$2") && break
+      [ $? -ne 2 ] || { echo "two SCSI disks are at LUN $lun"; return 1; }
+      [ "$waited" -lt "$WAIT" ] || { echo "no disk came at LUN $lun within $((WAIT / 10)) s"; return 1; }
+      waited=$((waited + 1))
+      usleep 100000
+    done
+    [ "$lun" != 0 ] || root=$found
+  done
+  echo "$root"
+}
+root=$(disks /sys /dev) || fail "$root"
+
+mount -t ext4 -o ro "$root" /root || fail "the image at $root did not mount"
+umount /proc /sys
+mount --move /dev /root/dev || fail "devtmpfs did not move to the image"
+exec switch_root /root /usr/sbin/surogate-init
