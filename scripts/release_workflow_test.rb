@@ -536,7 +536,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-guest vm-boot shell], jobs.keys
+    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-guest vm-boot msi shell], jobs.keys
     jobs.each do |name, job|
       # On Windows, x64; but for the guest that vm-boot boots, which Docker builds on Linux, as the release builds it.
       assert_equal name == "vm-guest" ? "blacksmith-4vcpu-ubuntu-2404" : "windows-2025", job.fetch("runs-on"), name
@@ -594,6 +594,21 @@ class ReleaseWorkflowTest < Minitest::Test
     backend = jobs.fetch("vm-backend")
     refute backend.key?("continue-on-error")
     assert_equal "npx vitest run test/vm-win32.test.ts", backend.fetch("steps").last.fetch("run").strip
+    # The Windows app as the release makes it gates: laid out and checked, every program signed with the run's own
+    # certificate and checked as the release checks its own, the MSI and a later one made, signed and checked, and
+    # installed, checked and removed, in that order; and the run's roots trusted no more at the job's end, however it ends.
+    msi = jobs.fetch("msi")
+    refute msi.key?("continue-on-error")
+    msi_runs = msi.fetch("steps").map { |step| step["run"].to_s }
+    order = [
+      "npm run build:win32", "scripts/package-win.sh 0.1.0", "test/package-win.test.ts", "./scripts/sign-win.ps1 trial ..\\out\\programs.txt",
+      "./scripts/sign-win.ps1 verify ..\\out\\win $root", "./scripts/msi-win.ps1 0.1.1", "./scripts/sign-win.ps1 verify ..\\out\\msi $root",
+      "./test/msi.test.ps1",
+    ].map { |part| msi_runs.index { |run| run.include?(part) } }
+    refute_includes order, nil
+    assert_equal order.sort, order
+    assert_equal "always()", msi.fetch("steps").last.fetch("if")
+    assert_includes msi.fetch("steps").last.fetch("run"), "./scripts/sign-win.ps1 untrust $root"
     # The real boot never gates, nor does the build of what it boots: the x64 guest's image, unpacked as the
     # measurements boot it, and the agent disk, each built on Linux and kept a day, for this run's boot alone.
     guest = jobs.fetch("vm-guest")
@@ -795,6 +810,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
         "vm-guest" => ["ab2559772a48cb7e", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 0671721aededeb3b 18d2126a5450e6bd 06af0ce2143d3c1f 8c986439d5d86488 a6aeb1f05887979b 09d5e59cd91883c6 e65248e95c654f75 35697d500667a260 7553a543a3fb9bdd]],
         "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 535e74b2af1d7815 ee88c8a9aa9b67f9 83c3999eb9a772b5 7e59534427c2acc1 24591223ab9a9cbb 427c1c30444870b3 85c6bbf8d6ef4ca0 1edc8d7d3216b9d8]],
+        "msi" => ["825bfae6263325c0", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 d9093d282ffd91e6 7121de72b936c1d1 73242831d2df0b86 8bcfc143f7f6cbf6 453072c07ebf9e3d 1a145085cbf2e2fd ebe3d78cd1a50eb1]],
         "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {

@@ -441,6 +441,99 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The Windows app as the release makes it, signed with this run's own certificate in the release's signing account's
+  # place: laid out (scripts/package-win.sh), with a stand-in for the agent disk and the guest image's manifest, which the
+  # release builds on Linux, and the layout checked (test/package-win.test.ts); every program signed and checked as the
+  # release checks its own (scripts/sign-win.ps1); the MSI made with the WiX Toolset (scripts/msi-win.ps1), and one of a
+  # later version from the same layout, both signed and checked; then installed, checked, upgraded, downgraded and
+  # removed (test/msi.test.ps1). The roots the run made are trusted by the runner while the job runs, and by nothing
+  # else; what they signed goes nowhere. It gates: this is what the release builds, signs and installs.
+  msi:
+    runs-on: windows-2025
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
+      - name: Build the app for Windows, with every native part of it
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
+
+      # A disk of zeros in the agent disk's place, and a manifest of the image's form: the MSI installs them as it
+      # installs the release's.
+      - name: Lay out the app
+        shell: bash
+        run: |
+          mkdir -p ../out/stand-in
+          head -c 16777216 /dev/zero > ../out/stand-in/agent.img
+          printf '{"key":"%s","arch":"amd64","files":[]}\n' "$(printf '0%.0s' $(seq 64))" > ../out/stand-in/manifest.json
+          scripts/package-win.sh 0.1.0 ../out/stand-in/manifest.json ../out/stand-in/agent.img ../out/win
+
+      - name: Check the layout
+        env:
+          SUROGATE_WIN_LAYOUT: ${{ github.workspace }}\out\win\Surogate
+          SUROGATE_WIN_VERSION: "0.1.0"
+          SUROGATE_WIN_AGENT_DISK: ${{ github.workspace }}\out\stand-in\agent.img
+          SUROGATE_WIN_VM_MANIFEST: ${{ github.workspace }}\out\stand-in\manifest.json
+        run: npx vitest run --project unit --reporter=verbose test/package-win.test.ts
+
+      - name: Sign every program with this run's certificate, and check each as the release checks its own
+        id: programs
+        run: |
+          ./scripts/sign-win.ps1 list ..\out\win ..\out\programs.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\programs.txt
+          "root=$root" >> $env:GITHUB_OUTPUT
+          ./scripts/sign-win.ps1 verify ..\out\win $root
+
+      - name: Make the MSI, and one of a later version
+        run: |
+          ./scripts/msi-win.ps1 0.1.0 ..\out\win\Surogate ..\out\win\msi ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi
+          ./scripts/msi-win.ps1 0.1.1 ..\out\win\Surogate ..\out\win\msi ..\out\msi\surogate-desktop-0.1.1-win32-x64.msi
+
+      - name: Sign the MSIs with this run's certificate, and check them
+        id: msis
+        run: |
+          ./scripts/sign-win.ps1 list ..\out\msi ..\out\msis.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\msis.txt
+          "root=$root" >> $env:GITHUB_OUTPUT
+          ./scripts/sign-win.ps1 verify ..\out\msi $root
+
+      - name: Install, check and remove the MSI
+        timeout-minutes: 30
+        run: ./test/msi.test.ps1 -Msi ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi -Version 0.1.0 -Layout ..\out\win\Surogate -Newer ..\out\msi\surogate-desktop-0.1.1-win32-x64.msi -NewerVersion 0.1.1
+
+      - name: Trust this run's roots no more
+        if: always()
+        env:
+          PROGRAMS_ROOT: ${{ steps.programs.outputs.root }}
+          MSIS_ROOT: ${{ steps.msis.outputs.root }}
+        run: foreach ($root in $env:PROGRAMS_ROOT, $env:MSIS_ROOT) { if ($root) { ./scripts/sign-win.ps1 untrust $root } }
+
   # The shell and the browser on Windows: surogate-helper.exe's own lints and tests, those that fill the runner's
   # certificate stores among them; the app end to end with no VM; and the browser host on the runner's own Chrome and
   # Edge, headed.
