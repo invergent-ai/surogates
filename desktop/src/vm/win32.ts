@@ -13,12 +13,12 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
-import { fileURLToPath } from "node:url";
 
 import { execFile } from "node:child_process";
 import { mkdirSync } from "node:fs";
 
 import { spawnClean } from "../clean-child.js";
+import { windowsProgramAt } from "../helper-path.js";
 import type { HostUser, Share } from "../guest/protocol.js";
 import { MAX_SHARES, PLAN9_PORT } from "../guest/protocol.js";
 import { basename, dirname, join } from "../host-path.js";
@@ -34,10 +34,8 @@ const KILL_MS = 1_000;
 // surogate-vm.exe is given the environment the system needs and nothing of the user's, as QEMU is on Linux.
 const ENV = { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" };
 
-// The same from src/vm and from dist/vm: desktop/, or a packaged app's resources\app.
-const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
-/** surogate-vm.exe: beside the app's binaries in a packaged app, the Cargo build's in development. */
-export const VM_PROGRAM = join(PACKAGE, "native", "windows", "target", "release", "surogate-vm.exe");
+/** surogate-vm.exe: beside the app's helper in the installed app's bin folder, the Cargo build's in development. */
+export const VM_PROGRAM = windowsProgramAt(dirname(import.meta.dirname), "surogate-vm.exe");
 
 // The guest's runtime folder's own 8 hex, by which this boot's pipes are named apart (places-win32, decision 20).
 const mark = (run: string): string => {

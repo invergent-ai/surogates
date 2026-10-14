@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, createPublicKey, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,6 +135,23 @@ describe("a script's list of release keys, read by the install script, by the re
     const notRead = "publish.sh: install.sh's list of release keys is not in the one form that an install reads (see the list in install.sh): a computer that installed this release would take no later one";
     expect(KEY_LISTS.map(([name, written]) => [name, releaseJob(written(SCRIPT), name)]))
       .toEqual(KEY_LISTS.map(([name]) => [name, name === "as it is" ? { describe: "does", sign: "does" } : { describe: notRead, sign: notRead }]));
+  });
+
+  it("is copied for the Windows app as the app reads it, key for key, and a list the app reads no key of is not copied", () => {
+    // scripts/release-keys.mjs, which the Windows app's layout is given its resources\release-keys by (scripts/package-win.sh).
+    const copy = fileURLToPath(new URL("../scripts/release-keys.mjs", import.meta.url));
+    for (const [name, written, read] of KEY_LISTS) {
+      const [script, out] = [join(dir, "copied.sh"), join(dir, "release-keys")];
+      rmSync(out, { force: true });
+      writeFileSync(script, written(SCRIPT));
+      const ran = spawnSync(process.execPath, [copy, script, out], { encoding: "utf8" });
+      if (read === 0) {
+        expect([name, ran.status, ran.stderr, existsSync(out)]).toEqual([name, 1, `release-keys.mjs: ${script} lists no release key in the one form that an install reads\n`, false]);
+        continue;
+      }
+      expect([name, ran.status, ran.stderr]).toEqual([name, 0, ""]);
+      expect([name, listedKeys(readFileSync(out, "utf8")).map(pem)]).toEqual([name, listedKeys(written(SCRIPT)).map(pem)]);
+    }
   });
 
   it("holds the repository's own list to that form", () => {
