@@ -808,10 +808,12 @@ class SlackPlatform:
         from fastapi.responses import JSONResponse
         from surogates.channels.platforms.slack_interactive import (
             ANSWER_ACTION_ID,
+            CHOICE_ACTION_PREFIX,
             MODAL_CALLBACK_ID,
             ModalErrors,
             build_answered_blocks,
             build_question_modal,
+            parse_choice,
             parse_modal_submission,
         )
         from surogates.session import interactive_input
@@ -826,6 +828,39 @@ class SlackPlatform:
             return Response(status_code=200)
 
         payload_type = payload.get("type")
+        tapped = next(
+            (a for a in payload.get("actions", [])
+             if str(a.get("action_id") or "").startswith(CHOICE_ACTION_PREFIX)),
+            None,
+        ) if payload_type == "block_actions" else None
+        if tapped is not None:
+            # One tap answers it: no form, and the message turns into the answer.
+            try:
+                ref = json.loads(tapped.get("value") or "{}")
+                pending = await interactive_input.pending_input_for_session(
+                    deps.session_store,
+                    session_id=ref.get("session_id") or "",
+                    tool_call_id=ref.get("tool_call_id") or "",
+                )
+                parsed = parse_choice(tapped, pending["questions"]) if pending else None
+                if parsed is None:
+                    return Response(status_code=200)
+                session_id, tool_call_id, responses = parsed
+                resolved = await interactive_input.resolve_input_response(
+                    deps.session_store, session_id=session_id,
+                    tool_call_id=pending["tool_call_id"] or tool_call_id, responses=responses,
+                )
+                channel_id = (payload.get("channel") or {}).get("id") or ""
+                message_ts = ((payload.get("container") or {}).get("message_ts")
+                              or (payload.get("message") or {}).get("ts") or "")
+                if resolved and channel_id and message_ts:
+                    answered_text, answered_blocks = build_answered_blocks(responses)
+                    await self._get_client((creds or {}).get("bot_token") or "").chat_update(
+                        channel=channel_id, ts=message_ts, text=answered_text, blocks=answered_blocks,
+                    )
+            except Exception:
+                logger.warning("[SlackPlatform] /interact choice failed", exc_info=True)
+            return Response(status_code=200)
         if payload_type == "block_actions":
             action = next(
                 (

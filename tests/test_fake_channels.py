@@ -84,7 +84,16 @@ async def test_slack_button_and_modal_payloads_verify(captured):
     )
 
     questions = [{"prompt": "Cum vă simțiți?", "choices": [{"label": "Bine"}, {"label": "Rău"}]}]
+    # a few short choices are buttons in the message: tapping one is the answer
     text, blocks = build_input_prompt_blocks(session_id="s1", tool_call_id="t1", questions=questions)
+    fake.state["messages"].append({"platform": "slack", "dir": "out", "peer": "U0DRRADU01", "ts": time.time(),
+                                   "id": "1.000000", "channel": "D0DRRADU01", "text": text, "blocks": blocks})
+    assert (await _call("/api/slack/tap", {"member": "U0DRRADU01", "label": "Rău"}))["ok"]
+    tapped = json.loads(parse_qs(captured[-1].content.decode())["payload"][0])
+    assert tapped["actions"][0]["action_id"] == "surogates_input_choice_1"
+
+    many = [{"prompt": "Ce zi?", "choices": [{"label": d} for d in ("L", "Ma", "Mi", "J", "V", "S")]}]
+    text, blocks = build_input_prompt_blocks(session_id="s1", tool_call_id="t1", questions=many)
     fake.state["messages"].append({"platform": "slack", "dir": "out", "peer": "U0DRRADU01", "ts": time.time(),
                                    "id": "1.000001", "channel": "D0DRRADU01", "text": text, "blocks": blocks})
     assert (await _call("/api/slack/tap", {"member": "U0DRRADU01", "label": "Answer"}))["ok"]

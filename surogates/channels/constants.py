@@ -84,7 +84,7 @@ def outbound_dm(channel: str | None, config: dict | None) -> bool:
     ).startswith(f"agent:{channel}:dm:")
 
 #: Channels whose platform can render an ``ask_user_question`` prompt
-#: (Slack: Answer button + modal; Telegram: inline keyboard; WhatsApp:
+#: (Slack: buttons for a few short choices, else Answer button + modal; Telegram: inline keyboard; WhatsApp:
 #: reply buttons or a list, else bulleted text).  A channel OUTSIDE this set gets no
 #: ``input_prompt`` outbox row at all — ``_build_channel_payload`` returns
 #: an empty payload and ``store`` drops it — so the user sees nothing and
