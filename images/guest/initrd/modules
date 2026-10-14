@@ -1,0 +1,12 @@
+# The modules the initrd's init loads, in this order, each after those it needs (images/guest/modules.sh):
+# Hyper-V's own drivers, which the pinned kernel builds as modules. The bus every Hyper-V device is on;
+# the SCSI controller the guest's three disks are on, with the transport class it needs; the sockets the
+# agent's ports and the Plan 9 shares reach the host by, with the socket family they are a transport of;
+# and the balloon, whose free page reporting gives the memory the guest frees back to Windows. Never
+# hv_utils, whose time sync would set the guest's clock under the agent.
+hv_vmbus
+scsi_transport_fc
+hv_storvsc
+vsock
+hv_sock
+hv_balloon

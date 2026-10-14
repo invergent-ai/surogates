@@ -17,16 +17,22 @@ import { type Context, OWN_FILE, perform, revisionOf } from "../src/files/operat
 
 const SAGA = "0f6d1c5e-7a3b-4c2d-9e1f-0a1b2c3d4e5f";
 const HELPER = fileURLToPath(new URL("../dist/files/helper.js", import.meta.url));
+// Where a test keeps a landing's files on another filesystem than the folder, where this computer has one: the user's
+// runtime folder or /dev/shm, both tmpfs on Linux. A Mac has neither, and its temp folder is the folder's filesystem,
+// which each such test sees and leaves.
+const SECOND_FS = process.env.XDG_RUNTIME_DIR ?? (existsSync("/dev/shm") ? "/dev/shm" : tmpdir());
 // Loaded into a helper before its own code: it ends the process as a kill does, at the call of an fs function, by its
 // number among those whose argument matches. Nothing after that call runs, no handler and no cleanup. Given something
 // to do there instead, it does that before the call: what another program did meanwhile, or what the filesystem answers.
+// On macOS a name in a held folder is reached through fsat's calls instead (fd-paths-darwin.ts): each is cut as the
+// fs function it stands for, a name in a held folder as <descriptor>/<name>, counted with that function's own.
+const FSAT_LOADER = new URL("../dist/files/fsat.js", import.meta.url).href;
 const CUT = `data:text/javascript,${encodeURIComponent(`
   import fs from "node:fs";
   import { syncBuiltinESMExports } from "node:module";
   const [name, argument, pattern, nth, instead] = JSON.parse(process.env.LAND_CUT);
-  const real = fs[name];
   let seen = 0;
-  fs[name] = (...args) => {
+  const cut = (args) => {
     if (new RegExp(pattern).test(String(args[argument])) && (++seen === nth || nth === 0)) {
       if (instead) new Function("fs", "refuse", instead)(fs, (code) => { throw Object.assign(new Error(code), { code, errno: -1, syscall: name }); });
       else {
@@ -34,9 +40,38 @@ const CUT = `data:text/javascript,${encodeURIComponent(`
         for (;;);
       }
     }
+  };
+  const real = fs[name];
+  fs[name] = (...args) => {
+    cut(args);
     return real(...args);
   };
   syncBuiltinESMExports();
+  if (process.platform === "darwin") {
+    const { fsat } = await import(${JSON.stringify(FSAT_LOADER)});
+    const own = fsat();
+    const { AT_FDCWD, AT_REMOVEDIR } = own.constants;
+    const at = (dir, name) => (dir === AT_FDCWD ? name : dir + "/" + name);
+    // Each fs function by fsat's call, and that call's arguments as the function's: null where the call is another's.
+    const as = {
+      linkSync: ["linkat", (from, fromName, to, toName) => [at(from, fromName), at(to, toName)]],
+      renameSync: ["renameatx", (from, fromName, to, toName) => [at(from, fromName), at(to, toName)]],
+      unlinkSync: ["unlinkat", (dir, name, flags) => ((flags & AT_REMOVEDIR) === 0 ? [at(dir, name)] : null)],
+      rmdirSync: ["unlinkat", (dir, name, flags) => ((flags & AT_REMOVEDIR) !== 0 ? [at(dir, name)] : null)],
+      openSync: ["openat", (dir, name, flags, mode) => [at(dir, name), flags, mode]],
+      mkdirSync: ["mkdirat", (dir, name, mode) => [at(dir, name), mode]],
+      chmodSync: ["fchmodat", (dir, name, mode) => (name === null ? null : [at(dir, name), mode])],
+    }[name];
+    if (as) {
+      const [call, argsOf] = as;
+      const realCall = own[call];
+      own[call] = (...args) => {
+        const named = argsOf(...args);
+        if (named !== null) cut(named);
+        return realCall(...args);
+      };
+    }
+  }
 `)}`;
 // Where a helper is cut: before the call of this fs function, numbered from 1 among those whose argument at this place matches.
 // With *instead*, the helper lives, and runs that there: `refuse(code)` answers the call as the filesystem would. 0 is every such call.
@@ -438,7 +473,7 @@ describe("a landing's put-back", () => {
   });
 
   it("keeps and brings back the replaced file, with the time it was saved, when the app's data is on another filesystem than the folder", async () => {
-    const other = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    const other = mkdtempSync(join(SECOND_FS, "land-kept-"));
     try {
       // Only where this computer has a second filesystem to keep it on.
       if (statSync(other).dev === statSync(folder).dev) return;
@@ -751,7 +786,7 @@ describe("a landing cut short by a kill", () => {
 
   it("leaves no copy of a kept file in the folder when a put-back from another filesystem is killed", { timeout: 60_000 }, async () => {
     const here = kept;
-    kept = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    kept = mkdtempSync(join(SECOND_FS, "land-kept-"));
     try {
       if (statSync(kept).dev === statSync(folder).dev) return;
       context = { ...context, landing: { copy, kept } };
@@ -782,7 +817,7 @@ describe("a landing cut short by a kill", () => {
   // put-back then copies the file it brings back, once what was left beside its name is gone.
   const keptElsewhere = async (test: () => Promise<void>) => {
     const here = kept;
-    kept = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    kept = mkdtempSync(join(SECOND_FS, "land-kept-"));
     try {
       if (statSync(kept).dev === statSync(folder).dev) return;
       context = { ...context, landing: { copy, kept } };
@@ -1218,7 +1253,7 @@ describe("a landing cut short by a kill", () => {
     }],
   ])("takes no half-made copy for the user's file: killed while it keeps one on another filesystem, with the file's folder then %s, the file is said lost", { timeout: 60_000 }, async (_how, act) => {
     const here = kept;
-    kept = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    kept = mkdtempSync(join(SECOND_FS, "land-kept-"));
     try {
       if (statSync(kept).dev === statSync(folder).dev) return;
       context = { ...context, landing: { copy, kept } };
@@ -1320,7 +1355,8 @@ describe("a landing's step, when it fails or is asked again", () => {
     expect(readFileSync(join(folder, "old.txt"), "utf8")).toBe("yours");
   });
 
-  it("lands a file in a folder this user may pass through but not list", async () => {
+  // macOS holds a folder by an O_RDONLY descriptor (fd-paths-darwin.ts), which a folder it may not list refuses.
+  it.runIf(process.platform === "linux")("lands a file in a folder this user may pass through but not list", async () => {
     mkdirSync(join(folder, "closed"));
     writeFileSync(join(folder, "closed", "a.txt"), "v1");
     chmodSync(join(folder, "closed"), 0o311);
@@ -1802,7 +1838,7 @@ describe("what a landing's file is, and what its put-back gives back", () => {
   });
 
   it("gives back a copy of it from another filesystem with its bytes, its mode and the time it was saved to the microsecond, and none of its attributes", async () => {
-    const other = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/dev/shm", "land-kept-"));
+    const other = mkdtempSync(join(SECOND_FS, "land-kept-"));
     try {
       // Only where this computer has a second filesystem to keep it on.
       if (statSync(other).dev === statSync(folder).dev) return;
@@ -1847,12 +1883,18 @@ describe("a landing's helper in the file helper's sandbox", () => {
     const work = join(base, "work");
     // srt's own files go where its host points them, as the app's host does: never in the folder.
     for (const dir of [work, join(base, "srt")]) mkdirSync(dir);
+    // The kept folder is made before its sandbox starts, as the app's landing host makes it (hosts/start.ts): its sandbox
+    // may write in it, not in the folder above it where it would be made. Seatbelt refuses that (EPERM), and srt's bwrap
+    // gives it a folder of srt's own, which goes with the sandbox.
+    mkdirSync(kept, { recursive: true, mode: 0o700 });
     // A host of the test's own: the file helper's policy as a landing's host asks for it, the copy to read and the kept
-    // folder to write, around a helper that is asked a landing's steps. It says what it was answered.
+    // folder to write, around a helper that is asked a landing's steps after a look at the folder. It says what it was
+    // answered for the steps.
     const host = `
       import { spawnSync } from "node:child_process";
       import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-      const { hideSrtTmp, pathOutside, quote, sandboxPolicy } = await import(${JSON.stringify(dist("hosts/policy.js"))});
+      const { pathOutside, quote, sandboxPolicy, SHELL } = await import(${JSON.stringify(dist("hosts/policy.js"))});
+      const { srtOs } = await import(${JSON.stringify(dist("hosts/srt-os.js"))});
       const [folder, work, copy, kept, node, home] = process.argv.slice(1);
       const path = pathOutside(process.env.PATH, []);
       const policy = sandboxPolicy({ folder, tmp: work, reads: [copy], writes: [kept], appDirs: ${JSON.stringify([...["../dist", "../node_modules"].map((dir) => fileURLToPath(new URL(dir, import.meta.url))), dirname(dirname(process.execPath))])} });
@@ -1870,40 +1912,41 @@ describe("a landing's helper in the file helper's sandbox", () => {
       `)};
       process.chdir(work);
       const words = [node, "--input-type=module", "-e", asked, folder, copy, kept, process.env.STEPS].map(quote).join(" ");
-      const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words)).argv;
-      const ran = spawnSync(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], { cwd: folder, env: { HOME: home, PATH: path }, encoding: "utf8", timeout: 30000 });
+      const [file, flag, line] = (await SandboxManager.wrapWithSandboxArgv(words, SHELL)).argv;
+      const ran = spawnSync(file, ["--norc", "--noprofile", flag, srtOs.line(line)], { cwd: folder, env: { HOME: home, PATH: path }, encoding: "utf8", timeout: 30000 });
       await SandboxManager.reset().catch(() => {});
       process.stderr.write(ran.stderr);
       process.stdout.write(ran.stdout);
       process.exit(ran.status ?? 1);
     `;
-    const steps = [
-      { action: "revisions", paths: ["Report.docx"] },
-      { ...apply(1, "Report.docx", blob("the report, v1"), after, "seen") },
-      apply(2, "threads/A/new.md", null, fresh, "absent"),
-      unapply(2, "threads/A/new.md"),
-      unapply(1, "Report.docx"),
-    ];
-    // In a group of its own, as the app's hosts are: what srt started goes with it.
-    const child = spawn(process.execPath, ["--input-type=module", "-e", host, folder, work, copy, kept, process.execPath, base], {
-      cwd: fileURLToPath(new URL("..", import.meta.url)), detached: true, stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, TMPDIR: join(base, "srt"), STEPS: JSON.stringify(steps) },
-    });
-    let [said, failed] = ["", ""];
-    child.stdout.on("data", (chunk: Buffer) => { said += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { failed += chunk.toString(); });
-    const bound = setTimeout(() => child.kill("SIGKILL"), 45_000);
-    const status = await new Promise<number | null>((resolve) => child.once("exit", resolve));
-    clearTimeout(bound);
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {
-      // Nothing of it was left.
-    }
-    expect([status, failed]).toEqual([0, ""]);
-    expect(JSON.parse(said)).toEqual([
+    // *steps* asked of a helper in that sandbox, after its look at Report.docx: what it answered.
+    const asked = async (steps: Array<Record<string, unknown>>): Promise<unknown> => {
+      // In a group of its own, as the app's hosts are: what srt started goes with it.
+      const child = spawn(process.execPath, ["--input-type=module", "-e", host, folder, work, copy, kept, process.execPath, base], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)), detached: true, stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, TMPDIR: join(base, "srt"), STEPS: JSON.stringify([{ action: "revisions", paths: ["Report.docx"] }, ...steps]) },
+      });
+      let [said, failed] = ["", ""];
+      child.stdout.on("data", (chunk: Buffer) => { said += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { failed += chunk.toString(); });
+      const bound = setTimeout(() => child.kill("SIGKILL"), 45_000);
+      const status = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+      clearTimeout(bound);
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        // Nothing of it was left.
+      }
+      expect([status, failed]).toEqual([0, ""]);
+      return JSON.parse(said);
+    };
+    expect(await asked([apply(1, "Report.docx", blob("the report, v1"), after, "seen"), apply(2, "threads/A/new.md", null, fresh, "absent")])).toEqual([
       { ok: { path: "Report.docx", before: blob("the report, v1"), after, made: [] } },
       { ok: { path: "threads/A/new.md", before: null, after: fresh, made: ["threads/A", "threads"] } },
+    ]);
+    // What the landing replaced is kept in the app's data, where a put-back by a helper started later finds it.
+    expect(readFileSync(join(kept, SAGA, "1"), "utf8")).toBe("the report, v1");
+    expect(await asked([unapply(2, "threads/A/new.md"), unapply(1, "Report.docx")])).toEqual([
       { ok: { path: "threads/A/new.md", put_back: true } },
       { ok: { path: "Report.docx", put_back: true } },
     ]);

@@ -567,6 +567,19 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it("starts its helper through the system's bash, whatever bash comes first on the host's PATH", async () => {
+    // A bash a person installed, as Homebrew's or Nix's is, outside every folder the sandbox reads: its sandbox
+    // could not start it, and the host does not start it outside either.
+    const proof = join(base, "ran-installed-bash");
+    const installed = join(base, "installed", "bin");
+    mkdirSync(installed, { recursive: true });
+    writeFileSync(join(installed, "bash"), `#!/bin/sh\ntouch '${proof}'\nexec /bin/bash "$@"\n`, { mode: 0o755 });
+    const harness = host({}, undefined, { ...process.env, PATH: `${installed}:${process.env.PATH ?? ""}` });
+    expect(await refusal(harness)).toBe("it answered ready");
+    expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${folder}/a.txt` });
+    expect(existsSync(proof)).toBe(false);
+  });
+
   it("answers a second host for the same folder, however it is spelled, that another chat has it", async () => {
     await ready(host());
     symlinkSync(folder, join(base, "link"));

@@ -1,7 +1,7 @@
 # The desktop's suites on Windows: GitHub's windows-2025 runners, x64. Started by hand, once, on a
-# branch's final head: every suite runs once a branch. A run tests whatever code the ref names, so no
-# job here is given anything to leak: no secret, no Environment, and a token that reads the repository
-# alone.
+# branch's final head, or called by the release on the tag it releases: every suite runs once a
+# branch. A run tests whatever code the ref names, so no job here is given anything to leak: no
+# secret, no Environment, no token to sign with, and a token that reads the repository alone.
 name: Desktop on Windows
 
 on:
@@ -11,13 +11,19 @@ on:
         description: The branch, tag or commit whose desktop to test
         required: true
         type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: The tag or commit whose desktop to test
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  # The desktop's types, checked on Windows: the first of its suites there, which each part of the app
-  # built for Windows adds to.
+  # The files of desktop/vitest.config.ts's windows project: those that pass on Windows, which each
+  # part of the app built for Windows joins.
   unit:
     runs-on: windows-2025
     timeout-minutes: 30
@@ -25,6 +31,12 @@ jobs:
       run:
         working-directory: desktop
     steps:
+      # The repository's files as they are written: git for Windows would check each text file out
+      # with CRLF line ends, which no test reads as the app's own.
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.ref }}
@@ -41,5 +53,312 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
+      # npm ci leaves no Electron binary. The script is a POSIX shell's, which npm runs in cmd on
+      # Windows unless told otherwise: Git for Windows' bash, by its whole path, as no other bash on
+      # the runner's PATH is.
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
       - name: Check the desktop's types
         run: npm run typecheck
+
+      - name: Run the suites that pass on Windows
+        run: npx vitest run --project windows
+
+  # The file host on Windows, where no srt contains its helper and its walk does (desktop/native/ntat): what the
+  # runner's file system does recorded first, in the job's summary; then the app built for Windows, ntat with Visual
+  # Studio's C++ tools, the app's rg and its native programs among it; then the walk's, the file kinds' and the lock's
+  # suites on the runner's own NTFS, the race of a process of this computer's against the helper, and the app's own
+  # path to the file host: its clean spawns, a chat's folder bound and looked at, and the host itself. Each suite a step
+  # of its own with a bound of its own, so that one that hangs leaves the others' results, and the log, to read.
+  file-host:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Record what the runner's file system does
+        run: powershell -NoProfile -File test/win32/ntfs-facts.ps1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+
+      - name: Build the app for Windows, with every native part of it
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
+
+      # As a PC's system volume does by default: the walk's refusal of a short name is tested on one NTFS made.
+      - name: Let the runner's volumes make short names
+        run: fsutil 8dot3name set 0
+
+      - name: The walk, and the folder lock
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/ntat-win32.test.ts test/folder-lock-win32.test.ts test/fs-through-walk.test.ts
+
+      - name: The file kinds and the helper
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: npx vitest run --project unit --reporter=verbose test/file-host-win32.test.ts
+
+      - name: The race
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: npx vitest run --project unit --reporter=verbose test/file-tools-race-win32.test.ts
+
+      - name: The app's own path to the file host
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: npx vitest run --project unit --reporter=verbose test/clean-child-win32.test.ts test/binding-win32.test.ts test/host-win32.test.ts
+
+  # What a Windows runner offers the VM, recorded and never gating: GitHub calls nested
+  # virtualization on its runners experimental. Whether Virtual Machine Platform is on, and what the
+  # Host Compute Service says of itself (desktop/test/vm/win32/hcs-probe).
+  vm-probe:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Keep the repository's line ends
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Ask whether Virtual Machine Platform is on
+        run: |
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform | Format-List FeatureName, State, RestartNeeded | Out-String
+          $feature
+          "### Virtual Machine Platform`n``````n$feature``````" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Ask the Host Compute Service what it supports
+        working-directory: desktop/test/vm/win32/hcs-probe
+        run: |
+          cargo build --release --locked
+          $said = & .\target\release\hcs-probe.exe | Out-String
+          $code = $LASTEXITCODE
+          $said
+          "### HcsGetServiceProperties, exit $code`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+  # The Windows native programs: the HCS document and the service's protocol, checked and tested. It builds on
+  # windows-2025 with its Visual Studio Build Tools and the toolchain the repository pins (rust-toolchain.toml), with
+  # no secret. It gates: these are the service's parsing and the document that crosses into the guest.
+  vm-native:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop/native/windows
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check the native programs with clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test the native programs
+        run: cargo test --locked --workspace
+
+  # The TypeScript VM backend against a stand-in for surogate-vm.exe (test/vm/win32/fake-vm.mjs). It builds the
+  # desktop's code first, which the stand-in imports; no secret. It gates: this is win32.ts's driver of the VM.
+  vm-backend:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Build the desktop
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build
+
+      - name: Run the VM backend against the stand-in
+        run: npx vitest run test/vm-win32.test.ts
+
+  # One real boot through the development service, experimental and never gating: GitHub does not promise nested
+  # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
+  # fetches the guest build's image if a run of it is named, and runs the boot and requirements measurements. If the
+  # guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's own words. Either
+  # way the result is kept, and the job does not fail the branch.
+  vm-boot:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Build the native programs
+        working-directory: desktop/native/windows
+        run: cargo build --locked --release
+
+      - name: Install the desktop's packages
+        working-directory: desktop
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Build the desktop
+        working-directory: desktop
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build
+
+      - name: Install the development VM service
+        working-directory: desktop/native/windows
+        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
+
+      - name: Try one real boot, and record what happened
+        working-directory: desktop
+        continue-on-error: true
+        run: |
+          $said = npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot 2>&1 | Out-String
+          $said
+          "### A real boot on a GitHub runner`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep what the boot found
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-win-vm-boot
+          path: desktop/test/vm/win32/measure/out
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The shell and the browser on Windows: surogate-helper.exe's own lints and tests, those that fill the runner's
+  # certificate stores among them; the app end to end with no VM; and the browser host on the runner's own Chrome and
+  # Edge, headed.
+  shell:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
+      # The runner's own browsers, which the browser host's tests drive: each must be there, and its version is recorded.
+      - name: Find the runner's Chrome and Edge
+        run: |
+          $found = foreach ($browser in "C:\Program Files\Google\Chrome\Application\chrome.exe", "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe") {
+            if (-not (Test-Path $browser)) { throw "No browser at $browser" }
+            "$browser $((Get-Item $browser).VersionInfo.ProductVersion)"
+          }
+          $found
+          "### The runner's browsers`n``````n$($found -join "`n")`n``````" >> $env:GITHUB_STEP_SUMMARY
+
+      # A member of the native workspace (native/windows): its toolchain, as the workspace's rust-toolchain.toml pins
+      # it, and its crates as the workspace's Cargo.lock locks them.
+      - name: Lint surogate-helper.exe
+        working-directory: desktop/native/windows/helper
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run surogate-helper.exe's own tests, those that add roots to the runner's stores among them
+        if: ${{ !cancelled() }}
+        working-directory: desktop/native/windows/helper
+        run: cargo test --locked -- --include-ignored
+
+      - name: Build the app for Windows, with every native part of it
+        if: ${{ !cancelled() }}
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
+
+      - name: Run the app end to end on Windows
+        if: ${{ !cancelled() }}
+        run: npx vitest run -c vitest.e2e.config.ts test/e2e/windows.e2e.ts
+
+      - name: Run the browser host on the runner's Chrome
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_WIN: "1"
+          SUROGATE_TEST_BROWSER: C:\Program Files\Google\Chrome\Application\chrome.exe
+        run: npx vitest run --project windows test/browser-host-win32.test.ts
+
+      - name: Run the browser host on the runner's Edge
+        if: ${{ !cancelled() }}
+        env:
+          SUROGATE_BROWSER_TESTS_WIN: "1"
+          SUROGATE_TEST_BROWSER: C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+        run: npx vitest run --project windows test/browser-host-win32.test.ts

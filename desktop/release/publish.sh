@@ -7,12 +7,17 @@
 #   desktop/releases/<version>/surogate-desktop-<version>-linux-x64.tar.gz
 #
 # Each for the target DESKTOP_TARGET names, the platform and architecture the release is built for:
-# linux-x64, as above, where it names none; darwin-arm64's in folders of its own, with no install
-# script, which installs linux-x64's alone (see target_files):
+# linux-x64, as above, where it names none; darwin-arm64's and win32-x64's in folders of their own,
+# with no install script, which installs linux-x64's alone (see target_files):
 #
 #   desktop/darwin-arm64/latest.json
 #   desktop/releases/<version>/darwin-arm64/manifest.json, .sig
 #   desktop/releases/<version>/darwin-arm64/surogate-desktop-<version>-darwin-arm64.tar.gz
+#
+#   desktop/win32-x64/latest.json
+#   desktop/win32-x64/Surogate.msi                        the newest release's MSI, under a name that stays, for the website
+#   desktop/releases/<version>/win32-x64/manifest.json, .sig
+#   desktop/releases/<version>/win32-x64/surogate-desktop-<version>-win32-x64.msi
 #
 # Usage, after scripts/package.sh <version> <vm manifest> <out>:
 #   release/publish.sh describe <version> <out>   # <out>/manifest.json, of the tarball whose sha256
@@ -62,20 +67,24 @@ OUT="${3:-}"
 # A version is x.y.z with no zero before a part, as the install script takes one: dpkg reads
 # 1.2.03 as 1.2.3, and a release has one name.
 [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ -d "$OUT" ] || { echo "usage: publish.sh describe|sign|send <x.y.z> <out>" >&2; exit 2; }
-# The names of the release's files for target $1: its manifest's platform and arch; its tarball;
-# the folder under desktop/ that the release's own three are sent to and kept in; the manifest of
-# the newest release; and whether the install script goes with it. The app names them the same
-# (TARGETS, in src/platform.ts).
+# The names of the release's files for target $1: its manifest's platform and arch; its payload, a
+# tarball or Windows's MSI, and the payload's type; the folder under desktop/ that the release's own
+# three are sent to and kept in; the manifest of the newest release; and the object, if any, that
+# goes last, after latest.json, under a name that stays: linux-x64's install script, win32-x64's MSI
+# for the website. The app names them the same (TARGETS, in src/platform.ts).
 target_files() {
   case "$1" in
-    linux-x64) PLATFORM=linux ARCH=x64 RELEASE="releases/$VERSION" LATEST=latest.json SCRIPT=1 ;;
-    darwin-arm64) PLATFORM=darwin ARCH=arm64 RELEASE="releases/$VERSION/darwin-arm64" LATEST=darwin-arm64/latest.json SCRIPT= ;;
+    linux-x64) PLATFORM=linux ARCH=x64 RELEASE="releases/$VERSION" LATEST=latest.json ARCHIVE="surogate-desktop-$VERSION-$1.tar.gz" ARCHIVE_TYPE=application/gzip
+      LAST=install.sh LAST_FROM="$HERE/install.sh" LAST_TYPE=text/x-shellscript ;;
+    darwin-arm64) PLATFORM=darwin ARCH=arm64 RELEASE="releases/$VERSION/darwin-arm64" LATEST=darwin-arm64/latest.json ARCHIVE="surogate-desktop-$VERSION-$1.tar.gz" ARCHIVE_TYPE=application/gzip
+      LAST= LAST_FROM= LAST_TYPE= ;;
+    win32-x64) PLATFORM=win32 ARCH=x64 RELEASE="releases/$VERSION/win32-x64" LATEST=win32-x64/latest.json ARCHIVE="surogate-desktop-$VERSION-$1.msi" ARCHIVE_TYPE=application/x-msi
+      LAST=win32-x64/Surogate.msi LAST_FROM="$OUT/$ARCHIVE" LAST_TYPE=application/x-msi ;;
     *) return 1 ;;
   esac
-  TARBALL="surogate-desktop-$VERSION-$1.tar.gz"
 }
 DESKTOP_TARGET="${DESKTOP_TARGET:-linux-x64}"
-target_files "$DESKTOP_TARGET" || { echo "publish.sh: DESKTOP_TARGET is $DESKTOP_TARGET, and a release is made for linux-x64 or darwin-arm64" >&2; exit 2; }
+target_files "$DESKTOP_TARGET" || { echo "publish.sh: DESKTOP_TARGET is $DESKTOP_TARGET, and a release is made for linux-x64, darwin-arm64 or win32-x64" >&2; exit 2; }
 fail() {
   echo "publish.sh: $*" >&2
   exit 1
@@ -83,7 +92,7 @@ fail() {
 # The manifest of release $1, whose tarball has sha256 $2 and is $3 bytes, and whose app keeps
 # state of schema $4: one line, as every install takes one, and the bytes that are signed.
 manifest() {
-  jq -cn --arg version "$1" --arg sha256 "$2" --argjson size "$3" --argjson schema "$4" --arg platform "$PLATFORM" --arg arch "$ARCH" --arg url "$RELEASE/$TARBALL" \
+  jq -cn --arg version "$1" --arg sha256 "$2" --argjson size "$3" --argjson schema "$4" --arg platform "$PLATFORM" --arg arch "$ARCH" --arg url "$RELEASE/$ARCHIVE" \
     '{version: $version, channel: "stable", platform: $platform, arch: $arch, url: $url, sha256: $sha256, size: $size, stateSchema: $schema}'
 }
 
@@ -103,7 +112,7 @@ release_read() {
       and (.sha256 | type == "string" and test("\\A[0-9a-f]{64}\\z"))
       and (.size | type == "number" and . == floor and (floor | . >= 1 and . < 1e15))
       and (.stateSchema | type == "number" and . == floor and (floor | . >= 1 and . < 1e15)))
-    | "\(.version) \(.sha256) \(.size | floor)"'"'"'' _ "$HERE/install.sh" "$1" "$VERSION" "$PLATFORM" "$ARCH" "$RELEASE/$TARBALL"
+    | "\(.version) \(.sha256) \(.size | floor)"'"'"'' _ "$HERE/install.sh" "$1" "$VERSION" "$PLATFORM" "$ARCH" "$RELEASE/$ARCHIVE"
 }
 
 # Whether the install script beside this one lists its release keys in the one form that an
@@ -130,13 +139,13 @@ case "$VERB" in
     # What the tarball holds, and where in it the app's package is, is linux-x64's alone so far.
     [ "$DESKTOP_TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball, and not yet one for $DESKTOP_TARGET"
     : "${DESKTOP_TARBALL_SHA256:?}"
-    [ -f "$OUT/$TARBALL" ] || fail "$OUT/$TARBALL is not there: run scripts/package.sh first"
+    [ -f "$OUT/$ARCHIVE" ] || fail "$OUT/$ARCHIVE is not there: run scripts/package.sh first"
     # The tarball is the one the build made, by the hash the build's job gave for it: an artifact
     # is its run's, and any job of the run may put another file under its name. What is no sha256 is
     # never said back.
     [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the build's job gives its tarball's"
-    sha256="$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)"
-    [ "$sha256" = "$DESKTOP_TARBALL_SHA256" ] || fail "$OUT/$TARBALL is not the tarball the build made: its sha256 is $sha256, and the build's $DESKTOP_TARBALL_SHA256"
+    sha256="$(sha256sum <"$OUT/$ARCHIVE" | cut -d' ' -f1)"
+    [ "$sha256" = "$DESKTOP_TARBALL_SHA256" ] || fail "$OUT/$ARCHIVE is not the tarball the build made: its sha256 is $sha256, and the build's $DESKTOP_TARBALL_SHA256"
     # The app's package is read below with the install script's own reader, from its functions
     # alone: its last line, which runs it, is left out. Were its last line any other, the line
     # that runs it would be left in, and its refusal taken for a package that names no schema
@@ -164,7 +173,7 @@ case "$VERB" in
     # A removal that fails as this ends leaves its status as it was.
     trap 'cleanup || :' EXIT
     trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 141' PIPE; trap 'exit 143' TERM
-    tar -xzf "$OUT/$TARBALL" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$TARBALL could not be unpacked"
+    tar -xzf "$OUT/$ARCHIVE" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$ARCHIVE could not be unpacked"
     helper="surogate-desktop-$VERSION-linux-x64/bin/surogate-apply-update"
     # A file of the tree's own: no link, and under no folder that is one. Asked in two commands: a
     # signal that comes while the first of two $( ) of one command is answered ends Ubuntu 24.04's
@@ -203,7 +212,7 @@ case "$VERB" in
     rm -f "$OUT/manifest.json.sig"
     # The tarball by its hash and its size in bytes, a number: the root helper takes no manifest
     # without either, and copies no more of a tarball than the size its manifest names.
-    manifest "$VERSION" "$sha256" "$(stat -c %s "$OUT/$TARBALL")" "$schema" >"$OUT/manifest.json"
+    manifest "$VERSION" "$sha256" "$(stat -c %s "$OUT/$ARCHIVE")" "$schema" >"$OUT/manifest.json"
     echo "wrote $OUT/manifest.json"
     ;;
   sign)
@@ -266,8 +275,8 @@ case "$VERB" in
     # job's own download of the build's artifact, which is the run's: any job of the run may put
     # another file under its name.
     named="$(jq -r '.sha256 | strings' "$OUT/manifest.json" 2>/dev/null)" || named=
-    [ -n "$named" ] && [ -f "$OUT/$TARBALL" ] && [ "$(sha256sum <"$OUT/$TARBALL" | cut -d' ' -f1)" = "$named" ] \
-      || fail "$OUT/$TARBALL is not the tarball that $OUT/manifest.json names, by its sha256: nothing is sent"
+    [ -n "$named" ] && [ -f "$OUT/$ARCHIVE" ] && [ "$(sha256sum <"$OUT/$ARCHIVE" | cut -d' ' -f1)" = "$named" ] \
+      || fail "$OUT/$ARCHIVE is not the tarball that $OUT/manifest.json names, by its sha256: nothing is sent"
     # A request to the bucket, signed; its HTTP status on stdout. One that cannot connect in half a
     # minute, or that stalls for a minute, stops, and is said: the job's time limit would otherwise
     # be what ends it. The secret reaches curl through a pipe from printf, a builtin, never its
@@ -313,18 +322,18 @@ case "$VERB" in
     esac
     rm -f "$OUT/latest.json"
     # A release that is there, and older than the one latest.json names, is whole: no object of
-    # a release is sent a second time. So is one that latest.json names, once the bucket's
-    # install script is this one, for a target that has one. Else a send was cut short after the
-    # release's own three were there, and this one ends it.
+    # a release is sent a second time. So is one that latest.json names, once the bucket's last
+    # object (its install script, or Windows's MSI that stays) is this one's, for a target that has
+    # one. Else a send was cut short after the release's own three were there, and this one ends it.
     if [ -n "$there" ] && [ -n "$newest" ]; then
       if dpkg --compare-versions "$VERSION" lt "$newest"; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
-      if [ "$VERSION" = "$newest" ] && [ -z "$SCRIPT" ]; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
+      if [ "$VERSION" = "$newest" ] && [ -z "$LAST" ]; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
       if [ "$VERSION" = "$newest" ]; then
-        status="$(s3 -o "$OUT/sent" "$bucket/install.sh")" || fail "looking for desktop/install.sh stopped: curl exit $?"
+        status="$(s3 -o "$OUT/sent" "$bucket/$LAST")" || fail "looking for desktop/$LAST stopped: curl exit $?"
         case "$status" in
-          200) ! cmp -s "$HERE/install.sh" "$OUT/sent" || fail "desktop/$RELEASE is published already, and is not sent again" ;;
+          200) ! cmp -s "$LAST_FROM" "$OUT/sent" || fail "desktop/$RELEASE is published already, and is not sent again" ;;
           404 | 403) ;;
-          *) fail "looking for desktop/install.sh got $status" ;;
+          *) fail "looking for desktop/$LAST got $status" ;;
         esac
         rm -f "$OUT/sent"
       fi
@@ -337,7 +346,7 @@ case "$VERB" in
     #    the newest release from here, and --version reads all three. Cut before the mark, the
     #    next send sends the three again.
     if [ -z "$there" ]; then
-      put "$OUT/$TARBALL" "$RELEASE/$TARBALL" application/gzip
+      put "$OUT/$ARCHIVE" "$RELEASE/$ARCHIVE" "$ARCHIVE_TYPE"
       put "$OUT/manifest.json.sig" "$RELEASE/manifest.json.sig" application/octet-stream
       put "$OUT/manifest.json" "$RELEASE/manifest.json" application/json
     fi
@@ -356,10 +365,11 @@ case "$VERB" in
       #    one: a key signs only once a release that lists it is out. Sent before latest.json,
       #    a script that has dropped the key before's would refuse the release before, and
       #    every first install would end there until the send was run again. The next send of
-      #    this release finds the script owed, and sends it. A target with no install script
-      #    ends at 2.
+      #    this release finds the script owed, and sends it. Windows's MSI goes in the script's
+      #    place, under the name the website links to, after latest.json names its release, and
+      #    is owed the same way. A target with neither ends at 2.
       [ "$VERSION" = "$newest" ] || put "$OUT/manifest.json" "$LATEST" application/json no-cache --retry 3
-      [ -z "$SCRIPT" ] || put "$HERE/install.sh" install.sh text/x-shellscript no-cache
+      [ -z "$LAST" ] || put "$LAST_FROM" "$LAST" "$LAST_TYPE" no-cache
       published="published desktop/$RELEASE as desktop/$LATEST"
     fi
     echo "$published"

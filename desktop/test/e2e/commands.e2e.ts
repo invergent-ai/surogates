@@ -622,7 +622,7 @@ async function installedFrom(state: { held: boolean; missing: boolean }) {
   const server = createServer((request, response) => void (async () => {
     const name = request.url?.startsWith(`/desktop/vm/${key}/`) ? request.url.slice(`/desktop/vm/${key}/`.length) : "";
     heard.push({ name, range: request.headers.range, cookie: request.headers.cookie });
-    if (state.missing || !["rootfs.img.zst", "vmlinuz.zst"].includes(name)) return void response.writeHead(404).end();
+    if (state.missing || !["initrd.zst", "rootfs.img.zst", "vmlinuz.zst"].includes(name)) return void response.writeHead(404).end();
     const file = await open(join(REPO_IMAGE, name));
     const { size } = await file.stat();
     const from = Number(/^bytes=(\d+)-$/.exec(request.headers.range ?? "")?.[1] ?? 0);
@@ -706,12 +706,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     mkdirSync(folder);
     const client = await launched({ SUROGATE_VM_IMAGE: "", SUROGATE_INSTALL_JSON: served.record });
     const page = await shellPage(app!);
-    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${served.host} answered 404 for rootfs.img.zst`);
+    await expect.poll(() => page.textContent("#sandbox-text")).toBe(`Surogate could not download its sandbox: ${served.host} answered 404 for initrd.zst`);
     expect(await page.textContent("#sandbox-retry")).toBe("Retry");
     expect(await page.isHidden("#sandbox-log")).toBe(true);
     await bind(client, folder);
     expect(await operation("run", { command: "echo retried", workdir: null, timeout: 30 })).toEqual({
-      error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${served.host} answered 404 for rootfs.img.zst` },
+      error: { type: "unavailable", message: `This computer's sandbox could not be downloaded: ${served.host} answered 404 for initrd.zst` },
     });
     state.missing = false;
     await page.click("#sandbox-retry");
@@ -791,7 +791,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the sandbox's delivery a
     expect([await page.textContent("#sandbox-log"), await page.textContent("#sandbox-retry")]).toEqual(["Show log", "Retry"]);
     await page.click("#sandbox-retry");
     await expect.poll(() => page.isHidden("#sandbox"), { timeout: 90_000 }).toBe(true);
-    expect(served.heard.map(({ name }) => name).sort()).toEqual(["rootfs.img.zst", "vmlinuz.zst"]);
+    expect(served.heard.map(({ name }) => name).sort()).toEqual(["initrd.zst", "rootfs.img.zst", "vmlinuz.zst"]);
     expect(await operation("run", { command: "echo checked", workdir: null, timeout: 30 })).toEqual({ ok: { output: "checked\n", returncode: 0, timed_out: false } });
   });
 

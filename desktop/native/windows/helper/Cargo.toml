@@ -1,0 +1,35 @@
+# surogate-helper.exe: the app's own program for what only Windows's own libraries answer, as the user and never
+# elevated: the company's root certificates, this user's processes, a program's Authenticode signer, and where
+# Windows says a program is installed; and the one way the app starts a program that is not its own.
+[package]
+name = "surogate-helper"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license = "AGPL-3.0-only"
+
+[lib]
+name = "surogate_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "surogate-helper"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Wdk_System_Threading",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Win32_UI_Shell",
+] }

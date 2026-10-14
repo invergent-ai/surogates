@@ -1,0 +1,10 @@
+# What this computer's Host Compute Service says of itself, for the Windows workflow's vm-probe job. No dependencies:
+# the one call is made through the system's own DLL, loaded at run time.
+[package]
+name = "hcs-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+panic = "abort"

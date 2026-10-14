@@ -2,27 +2,31 @@
 // readable but the system, the app, the folder and the helper's working folder; nothing
 // writable but the folder and that working folder; no network. A landing's helper also reads the
 // thread's copy it lands from, and writes the folder its replaced files are kept in (Section 13).
+// What of it is each OS's own is in srt-os.ts.
 
-import { statSync } from "node:fs";
-import { dirname } from "node:path";
+import { realpathSync, type Stats, statSync } from "node:fs";
 
-import { findOnPath } from "../files/operations.js";
+import { identityOf } from "../files/identity.js";
 import { inside, realpath } from "../files/paths.js";
+import { dirname } from "../host-path.js";
+import { hostStat } from "../host-stat.js";
+import { forThisOs, notBuilt } from "../platform.js";
+import { srtOs } from "./srt-os.js";
 
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 
-const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve"];
+export { hideSrtTmp } from "./srt-linux.js";
+
 // Section 9's words for a computer that lacks what the sandbox runs on, and what it lacks.
-export const toolsMissing = (lacking: string[]) => `Surogate's sandbox tools are missing. Run the install script again. It lacks ${lacking.join(", ")}`;
+export const toolsMissing = (lacking: string[]) => srtOs.toolsMissing(lacking);
 
 /**
- * What the file helper's sandbox lacks of this computer, each named as the install script
- * installs it: bubblewrap, at *bwrap* (the installed version's own copy) or else on *path*;
- * socat, which srt runs; and ripgrep, which the helper searches with.
+ * What the file helper's sandbox lacks of this computer, each named as a person installs it. On
+ * Linux: bubblewrap, at *bwrap* (the installed version's own copy) or else on *path*; socat, which
+ * srt runs; and ripgrep, which the helper searches with. On macOS, ripgrep alone.
  */
 export function fileToolsMissing(bwrap: string | undefined, path: string): string[] {
-  return [["bubblewrap", bwrap ?? "bwrap"], ["socat", "socat"], ["ripgrep", "rg"]]
-    .filter(([, program]) => findOnPath(program!, path, "/") === null).map(([name]) => name!);
+  return srtOs.fileToolsMissing(bwrap, path);
 }
 
 /**
@@ -35,72 +39,100 @@ export function fileToolsMissing(bwrap: string | undefined, path: string): strin
  */
 export function pathOutside(path: string | undefined, held: Array<{ dev: number; ino: number }>): string {
   const ids = held.map(({ dev, ino }) => `${dev}:${ino}`);
+  const { delimiter, absolute, real, stat, none } = PATHS ?? notBuilt("A file host's PATH");
   const within = (dir: string): boolean => {
     for (let at = dir; ; at = dirname(at)) {
       let stats;
       try {
-        stats = statSync(at, { throwIfNoEntry: false });
+        stats = stat(at);
       } catch {
         return true; // a folder that cannot be judged (ENOTDIR, EACCES, ELOOP): its entry is dropped
       }
-      if (stats && ids.includes(`${stats.dev}:${stats.ino}`)) return true;
+      const id = stats && identityOf(stats);
+      if (id && ids.includes(`${id.dev}:${id.ino}`)) return true;
       if (at === dirname(at)) return false;
     }
   };
-  return (path ?? "").split(":")
-    .filter((entry) => entry.startsWith("/"))
-    .map((entry) => realpath(entry).path)
-    .filter((entry) => !within(entry))
-    .join(":") || "/usr/bin:/bin";
+  return (path ?? "").split(delimiter)
+    .filter(absolute)
+    .map(real)
+    .filter((entry): entry is string => entry !== null && !within(entry))
+    .join(delimiter) || none;
+}
+
+// A PATH as each OS reads it: its separator, the entries it keeps, each as the path it leads to now, a folder's stats
+// with its identity, and what stands in where none is left. Linux and macOS keep each entry from /, resolved as the
+// file host resolves a path, and the system's own where none is left. Windows keeps each on a drive (X:\…), as
+// Windows resolves it (an entry that leads nowhere has no tools to give), and nothing where none is left: the app's
+// own tools come first anyway (srt-win32.ts, toolsPath).
+interface PathRows {
+  delimiter: string;
+  absolute(entry: string): boolean;
+  real(entry: string): string | null;
+  stat(path: string): Stats | undefined;
+  none: string;
+}
+const POSIX_PATHS: PathRows = {
+  delimiter: ":", absolute: (entry) => entry.startsWith("/"), real: (entry) => realpath(entry).path,
+  stat: (path) => statSync(path, { throwIfNoEntry: false }), none: "/usr/bin:/bin",
+};
+const PATHS = forThisOs<PathRows>({
+  linux: POSIX_PATHS,
+  darwin: POSIX_PATHS,
+  win32: {
+    delimiter: ";",
+    absolute: (entry) => /^[A-Za-z]:\\/.test(entry),
+    real: (entry) => {
+      try {
+        return realpathSync.native(entry);
+      } catch {
+        return null;
+      }
+    },
+    stat: (path) => {
+      try {
+        return hostStat(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    },
+    none: "",
+  },
+});
+
+/**
+ * The PATH a file host on the app's node *node* looks for the file helper's tools on, and gives srt and its helper:
+ * the app's *path* as pathOutside keeps it, holding *held*, with what this OS puts before it (srt-os.ts, toolsPath).
+ * The app looks for the helper's tools on it too, by the node its hosts run on, so the sandbox's line and a file
+ * tool name the same tools.
+ */
+export function hostToolsPath(path: string | undefined, held: Array<{ dev: number; ino: number }>, node: string): string {
+  return srtOs.toolsPath(pathOutside(path, held), node);
 }
 
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
 
+// The most bytes of a folder's path this OS's sandbox takes, or null for no bound beside the system's own.
+export const FOLDER_BYTES = srtOs.folderBytes;
+
 // srt binds its own temp folder read-write into every sandbox, a channel shared with all the others.
 const SRT_TMP = ["/tmp/claude", "/private/tmp/claude"];
-
-// srt binds its own /tmp/claude into every sandbox whenever it exists, whatever
-// the policy says, and other srt users (Claude Code among them) keep files there.
-// A later mount wins, so an empty tmpfs goes over it, just after srt's last
-// mount (0.0.77). If srt's line ever lacks that anchor, no sandbox starts
-// rather than one that shows /tmp/claude.
-const MOUNTS_END = " --dev /dev --unshare-pid ";
-export function hideSrtTmp(line: string): string {
-  const at = unquotedIndex(line, MOUNTS_END);
-  if (at < 0) throw new Error("srt's sandbox command has changed: cannot hide /tmp/claude");
-  return `${line.slice(0, at)} --tmpfs /tmp/claude${line.slice(at)}`;
-}
 
 // One word on a bash line: in '...', an embedded quote written as '\''.
 export const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
-// Where *text* first appears among the line's words, never inside a quoted word:
-// srt's scan puts paths the agent named in the folder on the line, and one can hold
-// the anchor. srt quotes a word in '...' and writes an embedded quote as "'".
-function unquotedIndex(line: string, text: string): number {
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (ch === "'" || ch === '"') {
-      const end = line.indexOf(ch, i + 1);
-      if (end < 0) return -1;
-      i = end;
-    } else if (line.startsWith(text, i)) {
-      return i;
-    }
-  }
-  return -1;
-}
+// The shell srt starts the helper through, out here and in its sandbox: the system's own, given to srt by its path
+// (wrapWithSandboxArgv's binShell), where srt would take the first bash on the PATH. One a person installed, as
+// Homebrew's or Nix's, lies outside every folder the sandbox reads, so the sandbox could not start it: Seatbelt refuses
+// sandbox-exec's exec of it (EPERM), and bubblewrap finds nothing at its path (ENOENT).
+export const SHELL = "/bin/bash";
 
-// A folder the sandbox must never be given: the kernel's and the devices' folders; /run, which holds the
-// user's sockets (the session bus, the agents), but not /run/media, where drives are mounted; and srt's
-// temp folder, which the policy makes read-only.
+// A folder the sandbox must never be given: this OS's own (srt-os.ts), and srt's temp folder, which the policy
+// makes read-only.
 export function isReserved(path: string): boolean {
-  return (
-    ["/proc", "/sys", "/dev"].some((dir) => inside(path, dir)) ||
-    (inside(path, "/run") && !inside(path, "/run/media")) ||
-    SRT_TMP.some((dir) => inside(path, dir))
-  );
+  return srtOs.reserved(path) || SRT_TMP.some((dir) => inside(path, dir));
 }
 
 export interface PolicyInput {
@@ -121,10 +153,10 @@ export function sandboxPolicy({ folder, tmp, appDirs, bwrapPath, socatPath, read
     network: { allowedDomains: [], deniedDomains: [] },
     filesystem: {
       denyRead: ["/"],
-      allowRead: [...SYSTEM, ...appDirs, folder, tmp, ...reads, ...writes],
+      allowRead: [...srtOs.system, ...appDirs, folder, tmp, ...reads, ...writes],
       allowWrite: [folder, tmp, ...writes],
-      // hideSrtTmp hides /tmp/claude under an empty tmpfs; this keeps it read-only
-      // even where that tmpfs did not apply.
+      // On Linux hideSrtTmp hides /tmp/claude under an empty tmpfs; this keeps it read-only
+      // even where that tmpfs did not apply. On macOS the denied read of / hides it.
       denyWrite: SRT_TMP,
     },
   };

@@ -5,7 +5,7 @@
 // awaits app.whenReady() deadlocks.
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -19,17 +19,21 @@ import type {
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
-  type BrowserChoice, BrowserSetting, browserVersion, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, profileOf, profilesOf, unsupportedAt,
+  BROWSER_SETTING, type BrowserChoice, BrowserSetting, browserVersion, checkedBrowsers, choiceRows, chosenBrowser, findBrowsers, knownBrowsers, pickedProgram, pickFilters, profileOf, profilesOf,
+  unsupportedOnceChecked,
 } from "../browser/choose.js";
 import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
-import { fileToolsMissing, pathOutside, toolsMissing } from "../hosts/policy.js";
-import { FolderLooks, LOOK_MS } from "./folders-held.js";
+import { hostUser } from "../host-user.js";
+import { fileToolsMissing, hostToolsPath, toolsMissing } from "../hosts/policy.js";
+import { NODE } from "../hosts/tool-hosts.js";
+import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
+import { hostPathOf, shownPath } from "../session-path.js";
 import { backendFor } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
@@ -38,13 +42,15 @@ import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
+import { nameTheApp, quitAsked } from "./app-identity.js";
+import { keepOutOfBackups } from "./backups.js";
 import { bridgeHandlers } from "./bridge.js";
 import { companyTrust } from "./ca-source.js";
 import { reauthorize, rebind, register } from "./computer.js";
 import { computerName } from "./computer-name.js";
 import { type Credential, CredentialStore, type LiveCredential } from "./credentials.js";
 import { Copying } from "./copying.js";
-import { linkOfLaunch, type OpenLink } from "./deep-link.js";
+import { linkOfLaunch, listenForLinks, type OpenLink } from "./deep-link.js";
 import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { type FolderRow, listFolders, LiveProcesses, stopOperation } from "./folders.js";
 import { loginItemFor } from "./login-item.js";
@@ -57,7 +63,7 @@ import { PreferencesStore } from "./preferences.js";
 import { FileHistory } from "./file-history.js";
 import { ANSWER_TIMEOUT_MS, PageProjects, TimedOut } from "./projects.js";
 import { type BrowserPrompts, desktopPrompts } from "./prompts.js";
-import { QuickEntry, quickEntryKeys } from "./quick-entry.js";
+import { QuickEntry, quickEntryKeys, unheldWords } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
@@ -93,6 +99,8 @@ const places = placesFor(process.env, app.getPath("home"));
 const { root } = places;
 // Before ready: the OS keyring names its item after the app.
 app.setName("Surogate");
+// Before the first window: the OS groups the app's windows, and names its notifications and login item, by it (app-identity.ts).
+nameTheApp(app, app.isPackaged);
 app.setPath("userData", join(root, "electron"));
 // Before ready too: the default session is made then, and spell-checks with the app's own dictionary.
 ownSpelling(app, DICTIONARIES, console.error);
@@ -100,13 +108,13 @@ ownSpelling(app, DICTIONARIES, console.error);
 const states = new WindowStates(join(root, "window-state.json"));
 const appearance = new AppearanceStore(join(root, "settings.json"));
 const preferences = new PreferencesStore(join(root, "preferences.json"));
-// Start at login (login-item.ts); and what it starts: the installed app's launcher, or a
-// development build's Electron on this main.
-const loginItem = loginItemFor(places);
-const loginCommand = (): string[] => (app.isPackaged ? [places.launcher!] : [process.execPath, import.meta.filename]);
+// Start at login (login-item.ts); and what it starts: the installed app's launcher, or the app itself
+// where it has none, or a development build's Electron on this main.
+const loginItem = loginItemFor(places, app);
+const loginCommand = (): string[] => (app.isPackaged ? [places.launcher ?? process.execPath] : [process.execPath, import.meta.filename]);
 const agents = new AgentStore(join(root, "agent.json"));
 // Settings → Browser: the browser the agent drives on this computer, for every agent.
-const browserSetting = new BrowserSetting(join(root, "browser.json"));
+const browserSetting = new BrowserSetting(join(root, BROWSER_SETTING));
 let main: MainWindow | null = null;
 let theme: Theme;
 // After ready: safeStorage answers only then.
@@ -323,10 +331,6 @@ const fromBase = (url: string, init: { headers: Record<string, string>; signal?:
 let undeliverable: string | null = null;
 let boot: Boot | null = null;
 const deliveryState = (): Delivery | null => delivery?.state ?? (undeliverable === null ? null : { state: "failed", why: undeliverable });
-const vmUser = () => {
-  const { uid, gid, username } = userInfo();
-  return { uid, gid, name: username, home: env.HOME };
-};
 
 // The guest's image: a packaged app downloads it from where it was installed from (the install
 // script's record), and a development build boots the repository's, unless SUROGATE_INSTALL_JSON
@@ -417,7 +421,7 @@ function lookForTools(): void {
 // with it. One that does not answer in time is not held (FolderLooks).
 const folderLooks = new FolderLooks(undefined, undefined, (folder, why) => report(new Error(why === "busy"
   ? `${folder}, a folder a chat is bound to, was not looked at, the app's looks all waiting on folders that do not answer: its tools are not looked for until one does`
-  : (process.env.PATH ?? "").split(":").includes(folder)
+  : onPath(process.env.PATH, folder)
     ? `${folder}, on the app's PATH, did not answer in ${LOOK_MS / 1000} s: no tool is looked for there until it answers`
     : `${folder}, a folder a chat is bound to, did not answer in ${LOOK_MS / 1000} s: its tools are not looked for, and its chat's commands will fail until it answers`)));
 function boundFolders(): Promise<Array<{ dev: number; ino: number }>> {
@@ -436,15 +440,16 @@ const toolsPath = (): Promise<string> => folderLooks.path(process.env.PATH);
 
 // The file helper's tools, looked for again beside what the VM was last found to lack: with each
 // look, once the device's folders are known, and at each change of them. They are looked for where
-// the folders' file hosts look, by the hosts' own rule (pathOutside): on the app's PATH without its
+// the folders' file hosts look, by the hosts' own rule (hostToolsPath): on the app's PATH without its
 // relative entries, and without any entry in a folder a chat is bound to, where a command may have
-// written a program. So the line and a file tool's answer name the same tools. *said*: tell the
-// pages even when nothing changed, as Check again asks.
+// written a program, after the app's own tools beside the node the hosts run on, where this OS puts
+// them first. So the line and a file tool's answer name the same tools. *said*: tell the pages even
+// when nothing changed, as Check again asks.
 let toolsOwedSaid = false;
 function lookForFileTools(said = false, folders = boundFolders(), path = toolsPath()): void {
   toolsOwedSaid ||= said;
   const look: Promise<string[]> = Promise.all([vmLacking, folders, path]).then(([vm, held, on]) => {
-    const found = [...fileToolsMissing(BWRAP, pathOutside(on, held)), ...vm];
+    const found = [...fileToolsMissing(BWRAP, hostToolsPath(on, held, NODE)), ...vm];
     // A look that a later one has overtaken says nothing: the later one's folders are the newer,
     // and it tells the pages what this one owed them.
     if (lackingFound !== look) return lackingFound;
@@ -484,7 +489,7 @@ const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = appVm({
     vm: {
-      ...vmOptions(root, vmUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+      ...vmOptions(root, hostUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
       ca: companyCertificates,
     },
     ready: vmReady,
@@ -508,7 +513,7 @@ const vmFor = (): VmClient => {
 // image did not start, its check by its hashes, and the next boot's line is the next boot's.
 function sandboxAction(action: unknown): void {
   if (!sandboxLine(lacking, deliveryState(), boot).actions.includes(action as SandboxAction)) return;
-  if (action === "log") return void shell.openPath(vmOptions(root, vmUser(), VM_ENV).console);
+  if (action === "log") return void shell.openPath(vmOptions(root, hostUser(), VM_ENV).console);
   if (action === "check") return lookForTools();
   // The manager forgets that boot too, so the line never says Ready while it still refuses.
   boot = null;
@@ -1273,7 +1278,7 @@ async function restore(agent: Agent): Promise<void> {
       type: "question",
       message: `Restore local access on ${credential.name}?`,
       detail: folders.length > 0
-        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${folder}`).join("\n")}\nWork that was cancelled stays cancelled.`
+        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${shownPath(folder)}`).join("\n")}\nWork that was cancelled stays cancelled.`
         : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
       buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
     });
@@ -1475,7 +1480,7 @@ function bridge(contents: WebContents, agent: Agent): void {
       return binding && { ...binding, takenOver: stack.tools.takenOver?.(sessionId) ?? false };
     },
     // Shown selected in its parent, never opened: a file put at its path after the look is only selected, never run.
-    revealFolder: async (sessionId) => shell.showItemInFolder(await (await registered()).binder.folderToShow(sessionId)),
+    revealFolder: async (sessionId) => shell.showItemInFolder(hostPathOf(await (await registered()).binder.folderToShow(sessionId))),
     showBrowser: async (sessionId) => {
       const stack = await browsing(sessionId);
       if (!(await stack.tools.show?.(sessionId))) throw new Error("The agent's browser has no page open for this chat");
@@ -1733,7 +1738,7 @@ function state() {
 let tray: Tray | null = null;
 let trayDrawn = "";
 
-const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP));
+const trayImage = (): string => join(ASSETS, trayIcon(theme.dark, process.env.XDG_CURRENT_DESKTOP, nativeTheme.shouldUseDarkColorsForSystemIntegratedUI));
 
 function updateTray(): void {
   if (!tray) return;
@@ -1881,6 +1886,8 @@ function goWeb(path: string): Promise<boolean> {
 let quickEntry: QuickEntry | null = null;
 // The keys that open it from anywhere, once the app holds them: never in a Wayland session, nor while another app holds them.
 let shortcut: string | null = null;
+// What Settings says of the keys another app held at the start, where this OS's Settings says it.
+let shortcutUnheld: string | null = null;
 
 /** Quick entry shown, or hidden when it shows. With nobody signed in, the window shows instead: it asks them to sign in. */
 function toggleQuickEntry(): void {
@@ -1988,9 +1995,9 @@ const handedBack = (by: AbortController): void => {
   for (const other of handBacks) if (other !== by) other.abort();
 };
 
-// Settings → Browser's rows: what is found here, each named with the version it says.
+// Settings → Browser's rows: what is found here, each checked as this OS checks one, and named with the version it says.
 async function browserState() {
-  const found = findBrowsers();
+  const found = await checkedBrowsers();
   const choice = browserSetting.get();
   const versions = new Map<string, string>();
   await Promise.all(found.filter((browser) => browser.unsupported === null).map(async (browser) => {
@@ -2018,7 +2025,8 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserSetting.set({ choice: value } as BrowserChoice);
       return;
     }
-    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const] };
+    const filters = pickFilters();
+    const options = { title: "Choose the agent's browser", buttonLabel: "Choose", properties: ["openFile" as const], ...(filters.length > 0 ? { filters } : {}) };
     const picked = main ? await dialog.showOpenDialog(main.window, options) : await dialog.showOpenDialog(options);
     const path = picked.canceled ? undefined : picked.filePaths[0];
     if (!path) return;
@@ -2028,7 +2036,7 @@ async function chooseBrowser(value: unknown): Promise<void> {
       browserFailure = `Surogate cannot use ${path}: it cannot be read here.`;
       return;
     }
-    const why = unsupportedAt(real);
+    const why = await unsupportedOnceChecked(real);
     if (why) {
       browserFailure = `Surogate cannot use ${real}: ${why}.`;
       return;
@@ -2148,6 +2156,7 @@ async function settingsState() {
     preferences: { startAtLogin: onOff(loginItem.on()), keepRunning: onOff(keepRunning), developer: onOff(developer) },
     // Why this build cannot start at login, or null.
     startAtLoginRefused: loginItem.refusal(loginCommand()),
+    quickEntryUnheld: shortcutUnheld,
     account,
     computer: {
       name: computerName(),
@@ -2275,13 +2284,14 @@ function showProject(editing: Opened | null): void {
         letGo(chosen);
         chosen = picked;
         mayHaveMade = false;
-        return { folder: picked.folder };
+        // Shown by the path its person reads it by (session-path.ts): the binding keeps the session's.
+        return { folder: shownPath(picked.folder) };
       } catch (error) {
         return { refused: refused(error) };
       }
     });
     // The folder the dialog shows: the one confirmed for the new project now, or none, as after a refusal that let it go.
-    handle("project:chosen", () => chosen?.folder ?? null);
+    handle("project:chosen", () => (chosen ? shownPath(chosen.folder) : null));
     // A new project, made with the folder its user confirmed: the agent binds its coordinator there, and the
     // dialog closes once this computer has recorded it. For an agent that takes no folders of this computer, in the cloud.
     const make = async (fields: ProjectFields): Promise<Project | string> => {
@@ -2744,7 +2754,8 @@ async function quit(): Promise<void> {
   }
 }
 
-if (!app.requestSingleInstanceLock()) {
+// A launch that asks the app to quit, where this OS's launches can, hands that to the running app, or quits at once.
+if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
   app.quit();
 } else {
   // The company's CA, as an administrator gave it for every user of this computer (ca-source.ts), or a
@@ -2757,9 +2768,19 @@ if (!app.requestSingleInstanceLock()) {
   // with, if any; once the quit goes on, it does neither.
   app.on("second-instance", (_event, argv) => {
     if (leaving) return;
+    // As the menu's Quit asks: through the quit's questions.
+    if (quitAsked(argv)) return void app.quit();
     if (!loginItem.startedHidden(argv)) main?.show();
     const link = linkOfLaunch(argv);
     if (link) void openDeepLink(link).catch(report);
+  });
+  // A link the system hands the running app as an event, as macOS hands each (deep-link.ts): opened as a
+  // second launch's is, and one before the window is made once it is.
+  listenForLinks(app, (link) => void openDeepLink(link).catch(report));
+  // The app opened again while it runs, as by a click on its icon in the Dock (Electron's activate, macOS's
+  // alone), shows the window; once the quit goes on, nothing does.
+  app.on("activate", () => {
+    if (!leaving) main?.show();
   });
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
@@ -2796,6 +2817,10 @@ if (!app.requestSingleInstanceLock()) {
     prompts = desktopPrompts({ parent: () => main?.window, page: join(PAGES, "prompt.html"), preload: PAGES_PRELOAD, unseen: notifyAsking });
     // The VM slept with the computer: at its wake its clock is set, and its keepalive starts afresh.
     powerMonitor.on("resume", () => vm?.resume());
+    // The VM's disks, which the OS's backups leave out (backups.ts).
+    void keepOutOfBackups(join(root, "vm")).catch(report);
+    // The browsers found here, checked as this OS checks one before the agent's first launch asks for one.
+    void checkedBrowsers().catch(report);
     // Its image downloaded in the background, and what the VM needs of this computer looked for.
     startDelivery();
     lookForTools();
@@ -2819,8 +2844,12 @@ if (!app.requestSingleInstanceLock()) {
     // gives none, the tray opens quick entry.
     const keys = quickEntryKeys(process.env);
     if (keys !== null) {
-      if (globalShortcut.register(keys, toggleQuickEntry)) shortcut = keys;
-      else report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
+      if (globalShortcut.register(keys, toggleQuickEntry)) {
+        shortcut = keys;
+      } else {
+        report(new Error(`Another app holds ${keys}: quick entry opens from the tray only`));
+        shortcutUnheld = unheldWords(keys);
+      }
       updateTray();
     }
     main.window.on("focus", () => void refreshProjects());

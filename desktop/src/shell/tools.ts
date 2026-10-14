@@ -7,13 +7,15 @@ import { dirname, join } from "node:path";
 
 import { app } from "electron";
 
+import { forThisOs } from "../platform.js";
 import { VmClient, type VmClientOptions } from "../vm/client.js";
 import { VmExecutor, type VmExecutorOptions } from "../vm/executor.js";
 
 // The installed app gives srt its version's own copy of the system's bwrap, which the install script
 // makes beside it: the copy takes the app's AppArmor profile, never the one Ubuntu attaches to
-// /usr/bin/bwrap (spec, Section 4). A development build finds bwrap on its PATH.
-export const BWRAP = app.isPackaged ? join(dirname(process.execPath), "bin", "bwrap") : undefined;
+// /usr/bin/bwrap (spec, Section 4). A development build finds bwrap on its PATH. Linux's alone: srt
+// on macOS runs no bwrap.
+export const BWRAP = app.isPackaged ? forThisOs({ linux: join(dirname(process.execPath), "bin", "bwrap") }) ?? undefined : undefined;
 
 /** The file kinds in each root's file host, on this version's bwrap when installed, and the process kinds in the VM. */
 export function appTools(options: Omit<VmExecutorOptions, "bwrapPath">): VmExecutor {

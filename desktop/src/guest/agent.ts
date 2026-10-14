@@ -2,8 +2,9 @@
 // (control.ts) on the ai.surogate.control port, runs each root's commands in that
 // root's own namespaces (root.ts), carries their connections to the host proxy
 // on the ai.surogate.net port (network.ts), and the browser's connections to a
-// root's own servers from the ai.surogate.inbound port (inbound.ts). Anything it
-// does not catch ends it, and with it the guest.
+// root's own servers from the ai.surogate.inbound port (inbound.ts), each on the
+// transport the kernel's command line names (port.ts). Anything it does not catch
+// ends it, and with it the guest.
 
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -12,7 +13,7 @@ import { Control } from "./control.js";
 import { Inbound } from "./inbound.js";
 import { Network } from "./network.js";
 import { Places } from "./places.js";
-import { findPort, openPort } from "./port.js";
+import { openPortOn, transportOf } from "./port.js";
 import { type FromAgent, INBOUND_PORT } from "./protocol.js";
 import { admit, BOUNDS, CGROUPS, contain, enter, flushRoot, killRoot, powerOff, Roots, setClock, uidOf, unmountShare } from "./root.js";
 import { trust } from "./trust.js";
@@ -48,8 +49,11 @@ const loaded = await rule();
 if (!loaded.startsWith("attached: ")) die(`surogate: ${loaded.replace(/^failed: /, "")}`);
 console.log(`surogate: ${loaded.slice("attached: ".length)}`);
 
-const port = await openPort(await findPort("ai.surogate.control"));
-const network = new Network(await openPort(await findPort("ai.surogate.net")));
+const transport = transportOf(readFileSync("/proc/cmdline", "utf8"));
+const port = await openPortOn(transport, "ai.surogate.control");
+// A control port that ends is a host that has gone, as a vsock one's does: the guest goes with it.
+port.once("end", () => die("surogate: the host's control port closed"));
+const network = new Network(await openPortOn(transport, "ai.surogate.net"));
 const say = (message: FromAgent) => void port.write(`${JSON.stringify(message)}\n`);
 const roots = new Roots({
   start: enter, uid: uidOf, kill: killRoot, contain, admit, cgroups: CGROUPS, unmount: unmountShare, flush: flushRoot,
@@ -60,7 +64,7 @@ const roots = new Roots({
   // Past two of the host's pings unheard, it is asleep or gone (vm/manager.ts, PING_MS).
   hostSilenceMs: 25_000,
 });
-new Inbound(await openPort(await findPort(INBOUND_PORT)), (root, to, first) => roots.reach(root, to, first));
+new Inbound(await openPortOn(transport, INBOUND_PORT), (root, to, first) => roots.reach(root, to, first));
 const places = new Places();
 // A store that could not be made leaves each root the image's, with the public roots alone: the console says why.
 const trusted = (certificates: string[]) => trust(certificates).then(() => {}, (error: unknown) => {

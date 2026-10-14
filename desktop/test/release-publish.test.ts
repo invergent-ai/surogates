@@ -344,9 +344,26 @@ describe("the desktop's release manifest", () => {
     rmSync(join(out, "manifest.json"));
     rmSync(join(out, "manifest.json.sig"));
     for (const verb of ["describe", "sign", "send"]) {
-      expect(publish(verb, "1.2.3", verb === "describe" ? { DESKTOP_TARGET: "win32-x64", DESKTOP_TARBALL_SHA256: SHA } : { DESKTOP_TARGET: "win32-x64", ...words }), verb).toMatchObject({ status: 2, stdout: "", stderr: "publish.sh: DESKTOP_TARGET is win32-x64, and a release is made for linux-x64 or darwin-arm64\n" });
+      expect(publish(verb, "1.2.3", verb === "describe" ? { DESKTOP_TARGET: "win32-arm64", DESKTOP_TARBALL_SHA256: SHA } : { DESKTOP_TARGET: "win32-arm64", ...words }), verb).toMatchObject({ status: 2, stdout: "", stderr: "publish.sh: DESKTOP_TARGET is win32-arm64, and a release is made for linux-x64, darwin-arm64 or win32-x64\n" });
     }
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
+  });
+
+  it("signs Windows's manifest by its own target's names, its MSI the release's payload, which Windows's app takes and Linux's and macOS's readers refuse", () => {
+    const words = { DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_TARBALL_SHA256: SHA, DESKTOP_TARBALL_SIZE: "201326592", DESKTOP_STATE_SCHEMA: "2" };
+    expect(publish("sign", "1.2.3", { DESKTOP_TARGET: "win32-x64", ...words })).toMatchObject({ status: 0, stdout: `signed ${out}/manifest.json\n`, stderr: "" });
+    const manifest = readFileSync(join(out, "manifest.json"));
+    expect(manifest.toString()).toBe(`${JSON.stringify({
+      version: "1.2.3", channel: "stable", platform: "win32", arch: "x64", url: "releases/1.2.3/win32-x64/surogate-desktop-1.2.3-win32-x64.msi",
+      sha256: SHA, size: 201326592, stateSchema: 2,
+    })}\n`);
+    const signature = readFileSync(join(out, "manifest.json.sig"));
+    expect(signedRelease("URL", manifest, signature, [keys.publicKey], "stable", "win32-x64").version).toBe("1.2.3");
+    for (const other of ["linux-x64", "darwin-arm64"] as const) expect(() => signedRelease("URL", manifest, signature, [keys.publicKey], "stable", other), other).toThrow("URL is not a release of Surogate Desktop for this computer");
+    const applied = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
+    expect([applied.status === 0, applied.stdout]).toEqual([false, ""]);
+    // Its MSI is not described here yet.
+    expect(publish("describe", "1.2.3", { DESKTOP_TARGET: "win32-x64", DESKTOP_TARBALL_SHA256: SHA })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads a linux-x64 tarball, and not yet one for win32-x64\n" });
   });
 
   it("sends no manifest of macOS's but one its app takes for the release: each field by the root helper's own rules, for macOS's platform, arch and tarball", () => {
@@ -1362,6 +1379,61 @@ describe.skipIf(process.env.SUROGATE_S3_TESTS !== "1")("the desktop's release on
     // And Linux's release of the same version goes where it always has, beside it.
     expect(send("1.0.0", released("1.0.0"))).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0 as desktop/latest.json\n" });
     expect(object("darwin-arm64/latest.json")?.equals(manifest)).toBe(true);
+  });
+
+  // Windows's release of *version*, signed, in an out folder of its own: its MSI, which only a send opens, by its hash.
+  const windows = (version: string) => {
+    const out = mkdtempSync(join(dir, "out-"));
+    const msi = join(out, `surogate-desktop-${version}-win32-x64.msi`);
+    writeFileSync(msi, randomBytes(1024 * 1024));
+    const { DESKTOP_RELEASE_KEY: _held, ...own } = process.env;
+    const words = { DESKTOP_TARBALL_SHA256: sha256(readFileSync(msi)), DESKTOP_TARBALL_SIZE: String(statSync(msi).size), DESKTOP_STATE_SCHEMA: "1" };
+    expect(spawnSync(join(dir, "release", "publish.sh"), ["sign", version, out], { env: { ...own, DESKTOP_TARGET: "win32-x64", DESKTOP_RELEASE_KEY: PRIVATE, ...words } }).status).toBe(0);
+    return out;
+  };
+  // Each object a send sent, in order.
+  const sentOf = () => readFileSync(join(dir, "curl-argv"), "utf8").split(/^-q\n/m).filter((args) => args.includes("\n-T\n")).map((args) => args.trimEnd().split("\n").at(-1)?.replace(/^.*\/desktop\//, ""));
+
+  it("sends Windows's release in folders of its own: its own three, then its own latest.json, then the MSI under the name that stays, and neither Linux's latest.json nor the install script", () => {
+    const out = windows("1.0.0");
+    const msi = readFileSync(join(out, "surogate-desktop-1.0.0-win32-x64.msi"));
+    rmSync(join(dir, "curl-argv"), { force: true });
+    expect(send("1.0.0", out, { DESKTOP_TARGET: "win32-x64" })).toMatchObject({ status: 0, stdout: "published desktop/releases/1.0.0/win32-x64 as desktop/win32-x64/latest.json\n" });
+    expect(sentOf()).toEqual([
+      "releases/1.0.0/win32-x64/surogate-desktop-1.0.0-win32-x64.msi", "releases/1.0.0/win32-x64/manifest.json.sig", "releases/1.0.0/win32-x64/manifest.json", "win32-x64/latest.json",
+      "win32-x64/Surogate.msi",
+    ]);
+    const manifest = readFileSync(join(out, "manifest.json"));
+    expect(object("win32-x64/latest.json")?.equals(manifest)).toBe(true);
+    expect(object("releases/1.0.0/win32-x64/manifest.json.sig")?.equals(readFileSync(join(out, "manifest.json.sig")))).toBe(true);
+    expect(object("releases/1.0.0/win32-x64/surogate-desktop-1.0.0-win32-x64.msi")?.equals(msi)).toBe(true);
+    // The website's link to the newest MSI: that release's, never from a cache.
+    expect(object("win32-x64/Surogate.msi")?.equals(msi)).toBe(true);
+    expect(["win32-x64/latest.json", "win32-x64/Surogate.msi"].map(caching)).toEqual(["no-cache", "no-cache"]);
+    expect(caching("releases/1.0.0/win32-x64/surogate-desktop-1.0.0-win32-x64.msi")).toBeNull();
+    for (const path of ["latest.json", "install.sh", "releases/1.0.0/manifest.json", "darwin-arm64/latest.json"]) expect(object(path), path).toBeNull();
+    // Never again, once it is whole.
+    expect(send("1.0.0", out, { DESKTOP_TARGET: "win32-x64" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.0.0/win32-x64 is published already, and is not sent again\n" });
+    // Nor sent as Linux's, whose readers take no manifest of Windows's.
+    expect(send("1.0.0", out)).toMatchObject({ status: 1, stdout: "", stderr: `publish.sh: ${out}/manifest.json and ${out}/manifest.json.sig are not the manifest of 1.0.0 and its signature by a key that install.sh lists: nothing is sent\n` });
+    // An older line's release leaves both of the newest's where they are.
+    expect(send("0.9.0", windows("0.9.0"), { DESKTOP_TARGET: "win32-x64" })).toMatchObject({ status: 0, stdout: "published desktop/releases/0.9.0/win32-x64; desktop/win32-x64/latest.json stays 1.0.0\n" });
+    expect(object("win32-x64/latest.json")?.equals(manifest)).toBe(true);
+    expect(object("win32-x64/Surogate.msi")?.equals(msi)).toBe(true);
+  });
+
+  it("ends a Windows send that stopped once latest.json named its release and before the MSI that stays had it: that alone is sent again", () => {
+    const before = windows("1.0.0");
+    expect(send("1.0.0", before, { DESKTOP_TARGET: "win32-x64" }).status).toBe(0);
+    const out = windows("1.1.0");
+    expect(send("1.1.0", out, { DESKTOP_TARGET: "win32-x64", FAULT: "refused win32-x64/Surogate.msi" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: sending desktop/win32-x64/Surogate.msi got 503\n" });
+    expect(object("win32-x64/latest.json")?.equals(readFileSync(join(out, "manifest.json")))).toBe(true);
+    expect(object("win32-x64/Surogate.msi")?.equals(readFileSync(join(before, "surogate-desktop-1.0.0-win32-x64.msi")))).toBe(true);
+    rmSync(join(dir, "curl-argv"), { force: true });
+    expect(send("1.1.0", out, { DESKTOP_TARGET: "win32-x64" })).toMatchObject({ status: 0, stdout: "published desktop/releases/1.1.0/win32-x64 as desktop/win32-x64/latest.json\n" });
+    expect(sentOf()).toEqual(["win32-x64/Surogate.msi"]);
+    expect(object("win32-x64/Surogate.msi")?.equals(readFileSync(join(out, "surogate-desktop-1.1.0-win32-x64.msi")))).toBe(true);
+    expect(send("1.1.0", out, { DESKTOP_TARGET: "win32-x64" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: desktop/releases/1.1.0/win32-x64 is published already, and is not sent again\n" });
   });
 
   it("stops at a bucket that refuses it, at the first object it would send: a 403 for a look is also what a bucket says of an object that is not there, and nothing is sent on the strength of it", () => {

@@ -6,8 +6,8 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, chownSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
-import { chmod, chown, mkdir, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
+import { chmodSync, chownSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { chmod, chown, mkdir, open, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
@@ -18,15 +18,19 @@ import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STO
 import { PROXY_URL } from "./listeners.js";
 import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
-import { type Answer, HELD, type HostUser, MAX_SHARES, type Question, ROOT_ID, type Share } from "./protocol.js";
+import {
+  type Answer, HELD, type HostUser, MAX_SHARES, P9_ANAME, PLAN9_PORT, type Question, ROOT_ID, type Share, VZ_NAME, VZ_TAG,
+} from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 import { STORE } from "./trust.js";
 
 // The sessions disk (vm/init), and its folder of roots, each named by its root session id.
 const SESSIONS_DISK = "/run/surogate/sessions";
 export const SESSIONS = `${SESSIONS_DISK}/roots`;
-// Each share's virtiofs mount, readable by root only.
+// Each share's mount, readable by root only.
 const SHARES = "/run/surogate/shares";
+// The image's: a stream to a port of the host's on vsock, given to the program it runs at a descriptor (images/guest).
+export const SUROGATE_VSOCK = "/usr/sbin/surogate-vsock";
 // Each root's cgroup, under the one vm/init bounds below the guest's memory.
 export const CGROUPS = "/sys/fs/cgroup/roots";
 /** 6 in a guest whose kernel's command line, *cmdline*, has surogate.emulated=1 (vm/qemu.ts), and 1 otherwise. */
@@ -176,38 +180,141 @@ const execute = promisify(execFile);
 // looked at from here again: a stat on a stalled one would stall every root.
 const mounted = new Set<string>();
 
-// What a share of a kind this guest does not mount yet is answered: Apple's, from a macOS VM.
-export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share yet";
+// Apple's share (macOS's Virtualization framework) is a virtio-fs device too, in one of two layouts
+// (src/vm/darwin.ts): one device, DEVICE, that holds every folder, each a directory in it by its name,
+// mounted once and kept for the boot; or one of eight fixed devices, s1 to s8, a folder each, mounted
+// as Linux's tags are and let go at its teardown, as its tag is given again.
+export const DEVICE = "surogate";
 
-// *share*'s inputs, by its kind, checked before anything of its root is made or mounted.
-function checkShare(share: Share): void {
+// What a share of a kind this guest does not mount is answered.
+export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share";
+
+/** *share*'s inputs, by its kind, checked before anything is made or mounted for it. */
+export function checkShare(share: Share): void {
   switch (share.kind) {
     case "virtiofs":
       if (!TAG.test(share.tag)) throw new Error(`not a share tag: ${share.tag}`);
       return;
     case "vz":
+      if (!VZ_TAG.test(share.tag) || (share.tag === DEVICE ? !VZ_NAME.test(share.name ?? "") : share.name !== undefined)) {
+        throw new Error(`not one of Apple's shares: ${share.tag.slice(0, 64)} ${String(share.name ?? "").slice(0, 64)}`);
+      }
+      return;
+    case "p9":
+      if (!TAG.test(share.tag) || share.port !== PLAN9_PORT || (share.aname !== undefined && !P9_ANAME.test(share.aname))) {
+        throw new Error(`not one of the host's Plan 9 shares: ${share.tag.slice(0, 64)} ${String(share.port).slice(0, 16)} ${String(share.aname ?? "").slice(0, 64)}`);
+      }
+      return;
+    default:
       throw new Error(UNMOUNTABLE);
   }
 }
 
-// Where *share*'s folder is in this guest, mounted by its kind the first time.
+// The tag whose own mount is *share*'s, and goes with its teardown: none for a folder in DEVICE, whose mount stays.
+const ownMount = (share: Share) => (share.kind === "vz" && share.tag === DEVICE ? null : share.tag);
+
+/** Where *share*'s folder is in this guest, once mounted: under SHARES by its tag, or by its name in DEVICE's. */
+export function sharePath(share: Share): string {
+  return share.kind === "vz" && share.tag === DEVICE ? join(SHARES, DEVICE, share.name ?? "") : join(SHARES, share.tag);
+}
+
+// Where *share*'s folder is in this guest, its device mounted the first time.
 async function mountShare(share: Share): Promise<string> {
-  switch (share.kind) {
-    case "virtiofs":
-      return mountVirtiofs(share.tag);
-    case "vz":
-      throw new Error(UNMOUNTABLE);
-  }
+  if (share.kind === "p9") return mountOnce(share.tag, p9Mount(share, "nosuid,nodev", join(SHARES, share.tag)));
+  await mountVirtiofs(ownMount(share) ?? DEVICE);
+  return sharePath(share);
 }
 
-async function mountVirtiofs(tag: string): Promise<string> {
+// The largest 9P message a Plan 9 share's mount asks for, as hcsshim's guest asks.
+const P9_MSIZE = 64 * 1024;
+
+/**
+ * surogate-vsock's arguments that mount the Plan 9 share *share* at *at*, with mount(8)'s *options*: a stream to
+ * its port of the host's (CID 2), at descriptor 3, which the 9P client's fd transport takes and keeps once mounted
+ * (Linux's net/9p/trans_fd.c), as mount(8) makes the call in the process that holds it. Uncached, so a command
+ * sees each of the host's writes at once; the client checks each access by the owner the files show, the root's
+ * uid, which the server takes after the share's name (aname). A read-only share is mounted ro too.
+ */
+export function p9Mount(share: Extract<Share, { kind: "p9" }>, options: string, at: string): string[] {
+  const aname = share.aname === undefined ? share.tag : `${share.tag};${share.aname}`;
+  return [
+    `2:${share.port}:3`, "--", "/usr/bin/mount", "-t", "9p",
+    "-o", `trans=fd,rfdno=3,wfdno=3,msize=${P9_MSIZE},version=9p2000.L,cache=none,access=client,${options},aname=${aname}`, share.tag, at,
+  ];
+}
+
+/** DEVICE, mounted the first time it is asked for; where it is. */
+export const mountDevice = (): Promise<string> => mountVirtiofs(DEVICE);
+
+/**
+ * Whether a root whose uid is *uid* runs on Apple's share, whose folder showed *shown* as its owner when asked as
+ * *uid* (shownTo). Apple's server maps no owner: it shows each file as the asking uid's, so a root runs on its own
+ * uid, as on Linux, only where its folder shows exactly that uid. Throws for anything else, root's above all.
+ */
+export function checkOwner(shown: number, uid: number): void {
+  if (shown === 0) throw new Error("This chat's folder shows as root's in the sandbox, so no command runs in it");
+  if (shown !== uid) throw new Error("This chat's folder shows as another user's in the sandbox, so no command runs in it");
+}
+
+const STAT = "/usr/bin/stat";
+
+/**
+ * The owner *path*'s folder shows to *uid*, asked of its server and not of the guest's cache (coreutils'
+ * --cached=never: statx's AT_STATX_FORCE_SYNC), by a stat run as *uid* alone on a descriptor this agent opened,
+ * since a root's uid cannot reach SHARES, root's alone. Null when it has not answered within *ms*, as a share that
+ * stalled does not.
+ */
+export async function shownTo(path: string, uid: number, ms: number): Promise<number | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+    timer.unref();
+  });
+  const asked = (async () => {
+    const folder = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      const child = spawn(STAT, ["--cached=never", "--dereference", "--format=%u", "/proc/self/fd/3"], {
+        uid, gid: uid, env: {}, stdio: ["ignore", "pipe", "pipe", folder.fd],
+      });
+      void late.then(() => child.kill("SIGKILL"));
+      let said = "";
+      let why = "";
+      child.stdout?.on("data", (chunk: Buffer) => (said += chunk.toString()));
+      child.stderr?.on("data", (chunk: Buffer) => (why += chunk.toString()));
+      const code = await new Promise<number | null>((resolve) => {
+        child.once("error", () => resolve(null));
+        child.once("close", resolve);
+      });
+      if (code === 0 && /^[0-9]{1,10}\n$/.test(said)) return Number(said);
+      throw new Error(`This chat's folder could not be looked at in the sandbox: ${why.trim().slice(0, 200) || `stat ended ${code}`}`);
+    } finally {
+      await folder.close();
+    }
+  })();
+  try {
+    return await Promise.race([asked, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+// A Plan 9 share made for another uid than its root's.
+export const OTHER_UID = "This chat's folder was shared for another user of the sandbox than its own, so no command runs in it";
+/** Throws for a Plan 9 *share* whose files show as another uid than *uid*, its root's: the uid it was made for, in its aname. */
+export function ownedBy(share: Share, uid: number): void {
+  if (share.kind === "p9" && share.aname !== undefined && share.aname !== `uid=${uid};gid=${uid}`) throw new Error(OTHER_UID);
+}
+
+const mountVirtiofs = (tag: string): Promise<string> => mountOnce(tag, ["-t", "virtiofs", "-o", "nosuid,nodev", tag, join(SHARES, tag)], "/usr/bin/mount");
+
+// The mount of *tag* under SHARES, by *program* with *args*, made the first time, and tried again until its device is there.
+async function mountOnce(tag: string, args: string[], program = SUROGATE_VSOCK): Promise<string> {
   const share = join(SHARES, tag);
   if (mounted.has(tag)) return share;
   await mkdir(share, { recursive: true });
   await chmod(SHARES, 0o700);
   for (const deadline = performance.now() + MOUNT_MS; ;) {
     try {
-      await execute("/usr/bin/mount", ["-t", "virtiofs", "-o", "nosuid,nodev", tag, share]);
+      await execute(program, args);
       break;
     } catch (error) {
       if (performance.now() > deadline) throw error;
@@ -219,11 +326,18 @@ async function mountVirtiofs(tag: string): Promise<string> {
 }
 
 // A share's mount goes, lazily: a process of its root's stuck in a share that stalled
-// keeps it until it lets go. The host removes the share from the guest next.
+// keeps it until it lets go. The host removes the share from the guest next. A folder in
+// DEVICE has no mount of its own: its root's namespace, which bound it, has gone.
 export async function unmountShare(share: Share): Promise<void> {
-  if (!TAG.test(share.tag)) return;
-  mounted.delete(share.tag);
-  const path = join(SHARES, share.tag);
+  try {
+    checkShare(share);
+  } catch {
+    return;
+  }
+  const tag = ownMount(share);
+  if (tag === null) return;
+  mounted.delete(tag);
+  const path = join(SHARES, tag);
   await execute("/usr/bin/umount", ["-l", path]).catch(() => {});
   await rmdir(path).catch(() => {});
 }
@@ -247,8 +361,14 @@ function flush(path: string, ms = Infinity): Promise<boolean> {
  * when the share did not answer within FLUSH_MS: it stalled, and is held.
  */
 export async function flushRoot(share: Share, stalled: boolean): Promise<boolean> {
-  const shared = !stalled && TAG.test(share.tag) && mounted.has(share.tag);
-  const [, answered] = await Promise.all([flush(SESSIONS_DISK), shared ? flush(join(SHARES, share.tag), FLUSH_MS) : true]);
+  let shared = false;
+  try {
+    checkShare(share);
+    shared = !stalled && mounted.has(ownMount(share) ?? DEVICE);
+  } catch {
+    // Not a share of this guest's.
+  }
+  const [, answered] = await Promise.all([flush(SESSIONS_DISK), shared ? flush(sharePath(share), FLUSH_MS) : true]);
   return answered;
 }
 
@@ -290,9 +410,17 @@ export async function enter(root: string, place: Place, share: Share, user: Host
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root);
+  ownedBy(share, uid);
   // Made, if at all, before the host's answer to hello let any root be set up (Control), and kept for the boot.
   const companyCa = existsSync(STORE);
   const mount = await mountShare(share);
+  // Apple's share's owner, asked as the root's uid, once, at its setup, within the mount's bound: one whose share
+  // stalled answers none. Linux's server maps the host user to the root's uid itself (virtiofsd's --uid-map).
+  if (share.kind === "vz") {
+    const shown = await shownTo(mount, uid, MOUNT_MS);
+    if (shown === null) throw new Error("This chat's folder did not answer in the sandbox");
+    checkOwner(shown, uid);
+  }
   const cgroup = join(CGROUPS, root);
   // Made at the root's first setup in this guest, and kept until the guest stops: the root's
   // own memory cgroup, the only one it has. Removed while pages it charged remain, as a

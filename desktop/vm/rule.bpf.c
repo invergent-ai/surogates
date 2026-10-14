@@ -1,6 +1,7 @@
 // The guest-kernel rule on protected names. Refuses a session's writes to
 // the paths files/protect.ts protects, in a folder a chat shares into the guest, by
-// walking the dentry up and feeding each component to rule-match.h's stepper. Loaded
+// walking the dentry up and feeding each component to rule-match.h's stepper; and,
+// where the kernel's line names that set, of the names Windows's Explorer acts on. Loaded
 // once at boot (vm/init); a session (uid >= FIRST_UID) cannot unload it.
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -11,8 +12,11 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define FIRST_UID 10000u            // sessions' guest uids start here (root.ts)
+#define RDONLY_PROG (1U << 7)       // BPF_F_RDONLY_PROG: the programs read the map and never write it
 #define EPERM 1
-#define FUSE_SUPER_MAGIC 0x65735546 // virtiofs; the only share fs on Linux
+#define FUSE_SUPER_MAGIC 0x65735546 // virtiofs: Linux's and macOS's shares
+#define V9FS_MAGIC 0x01021997       // 9p: Hyper-V's Plan 9 shares (guest/root.ts)
+#define AF_VSOCK 40
 #define FMODE_WRITE 0x2
 #define O_TRUNC 01000
 #define ATTR_MODE (1 << 0)
@@ -27,10 +31,13 @@ char LICENSE[] SEC("license") = "GPL";
 #define IN_DEP 2
 
 // Walk from the target up to the mount root (leaf-first, the order sg_step wants),
-// judging each component (dir: as a directory being moved). One bounded pass, no array:
-// sg_classify is out-of-line and sg_step branch-free, so the walk stays within the
-// verifier's budget at SG_WALK=12.
-static __noinline int judge(struct dentry *dentry, int dir)
+// judging each component (dir: as a directory being moved) as folded (sg_fold), read whole; and,
+// where the kernel's line names *windows*, as a spelling NTFS may resolve to another name
+// (sg_windows_alias), read whole too. One bounded pass: sg_fold, sg_classify and sg_windows_alias
+// are out-of-line, each verified once, sg_fold's and sg_windows_alias's loops over a name's bytes
+// until their state stops changing, and sg_fold and sg_step branch-free, so the walk stays within
+// the verifier's budget at SG_WALK=12.
+static __noinline int judge(struct dentry *dentry, int dir, int windows)
 {
 	struct sg_name nm;
 	struct sg_state st;
@@ -38,15 +45,9 @@ static __noinline int judge(struct dentry *dentry, int dir)
 	for (int i = 0; i < SG_WALK; i++) {
 		const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
 		int len = BPF_CORE_READ(dentry, d_name.len);
-		long got = bpf_core_read_str(nm.b, SG_NAMELEN, name);
-		// Branch-free ASCII lower-case: unknown name bytes must not fork the verifier.
-		for (int j = 0; j < SG_NAMELEN; j++) {
-			unsigned char uc = nm.b[j];
-			unsigned char ge = (unsigned char)('A' - 1 - uc) >> 7; // 1 iff uc >= 'A'
-			unsigned char le = (unsigned char)(uc - ('Z' + 1)) >> 7; // 1 iff uc <= 'Z'
-			nm.b[j] = uc + ((ge & le) << 5);
-		}
-		if (sg_step(&st, sg_classify(&nm, got < 0 ? 0 : len)))
+		if (windows && sg_windows_alias((sg_text)name, len))
+			return REFUSED;
+		if (sg_step(&st, sg_classify(&nm, sg_fold((sg_text)name, len, &nm))))
 			return REFUSED;
 		struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
 		if (parent == dentry)
@@ -56,11 +57,42 @@ static __noinline int judge(struct dentry *dentry, int dir)
 	return sg_end(&st) | (sg_in_dep(&st) << 1);
 }
 
+// The names refused besides the protected ones, a set the kernel's command line names (surogate.names=), which
+// vm/init writes, then freezes before it says the rule is attached, so nothing writes it after: NAMES_POSIX, Linux's
+// and macOS's, none more; NAMES_WINDOWS, those Windows's Explorer acts on (rule-match.h, sg_explorer). A load whose
+// line names neither fails the boot.
+#define NAMES_POSIX 0
+#define NAMES_WINDOWS 1
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(map_flags, RDONLY_PROG);
+} names SEC(".maps");
+
+static __always_inline int windows_names(void)
+{
+	__u32 key = 0;
+	__u32 *set = bpf_map_lookup_elem(&names, &key);
+	return set && *set == NAMES_WINDOWS;
+}
+
+// Whether *dentry*'s own name is one Windows's Explorer acts on, read whole, as judge reads each name (sg_explorer).
+static __noinline int explorer_name(struct dentry *dentry)
+{
+	const unsigned char *name = BPF_CORE_READ(dentry, d_name.name);
+	int len = BPF_CORE_READ(dentry, d_name.len);
+	return sg_explorer((sg_text)name, len);
+}
+
+// A share's filesystem: a guest mounts its shares as one kind, virtio-fs or 9p, and nothing else as either.
 static __noinline int share_sb(struct super_block *sb)
 {
 	if (!sb)
 		return 0;
-	return BPF_CORE_READ(sb, s_magic) == FUSE_SUPER_MAGIC;
+	unsigned long magic = BPF_CORE_READ(sb, s_magic);
+	return magic == FUSE_SUPER_MAGIC || magic == V9FS_MAGIC;
 }
 
 static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry, int dir)
@@ -68,7 +100,10 @@ static __noinline int judge_dentry(struct super_block *sb, struct dentry *dentry
 	__u32 uid = bpf_get_current_uid_gid();
 	if (uid < FIRST_UID || !dentry || !share_sb(sb))
 		return 0;
-	return judge(dentry, dir);
+	int windows = windows_names();
+	if (windows && explorer_name(dentry))
+		return REFUSED;
+	return judge(dentry, dir, windows);
 }
 
 static __always_inline int refused(struct super_block *sb, struct dentry *dentry, int dir)
@@ -161,7 +196,7 @@ int BPF_PROG(on_truncate, const struct path *path)
 	return DENY(refused(BPF_CORE_READ(path, dentry, d_sb), BPF_CORE_READ(path, dentry), 0));
 }
 
-// A read-only open with O_TRUNC is a write: virtiofsd truncates at the open, before setattr is asked.
+// A read-only open with O_TRUNC is a write: virtiofsd and a 9P server truncate at the open, before setattr is asked.
 SEC("lsm/file_open")
 int BPF_PROG(on_open, struct file *file)
 {
@@ -209,4 +244,17 @@ SEC("lsm/inode_remove_acl")
 int BPF_PROG(on_remove_acl, struct mnt_idmap *idmap, struct dentry *dentry, const char *acl_name)
 {
 	return DENY(refused(BPF_CORE_READ(dentry, d_sb), dentry, 0));
+}
+
+// A session's socket of vsock's family. Where the guest's ports are on vsock (Hyper-V's sockets), its vsock reaches
+// the host's ports, the agent's and the Plan 9 server's, which the agent alone dials, with the mounts it makes
+// (guest/port.ts, root.ts): a session's connection to one would be the agent's, or another root's share's. Where
+// they are not, the guest never loads vsock (vm/init), and the socket fails either way.
+SEC("lsm/socket_create")
+int BPF_PROG(on_socket, int family, int type, int protocol, int kern)
+{
+	if (kern || family != AF_VSOCK)
+		return 0;
+	__u32 uid = bpf_get_current_uid_gid();
+	return DENY(uid >= FIRST_UID);
 }

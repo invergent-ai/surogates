@@ -10,6 +10,15 @@ const listen = (channel: string) => (listener: () => void) => {
   return () => ipcRenderer.off(channel, relay);
 };
 
+// On macOS the window's own buttons sit over its top left corner (main-window-darwin.ts): the pages keep
+// that much of their top strip clear, by a variable of their own, and name each key as a Mac's keyboard does.
+if (location.protocol === "file:" && process.platform === "darwin") {
+  addEventListener("DOMContentLoaded", () => {
+    document.documentElement.style.setProperty("--window-buttons", "72px");
+    for (const keys of document.querySelectorAll<HTMLElement>("[data-mac-keys]")) keys.textContent = keys.dataset.macKeys ?? "";
+  });
+}
+
 if (location.protocol === "file:") {
   contextBridge.exposeInMainWorld("surogateShell", {
     state: () => ipcRenderer.invoke("shell:state"),

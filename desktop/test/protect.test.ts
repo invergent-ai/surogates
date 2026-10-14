@@ -134,6 +134,27 @@ describe("checkWrite, in the folder", () => {
     });
   });
 
+  // HFS+ compares names without the code points it ignores (Apple's TN1150), and FAT's and exFAT's volumes drop the
+  // dots and spaces a name ends with: on such a volume each of these is a protected name.
+  describe("as a volume that drops what a name holds takes it", () => {
+    it.each([
+      ".git./hooks/x", ".git/ho‌oks/x", ".vscode /settings.json", ".mcp.json.", "﻿.idea/x", ".git/config. .",
+      ".claude/commands‍/x", ".git‪/config", "sub/.git.", ".bashrc⁯", ".Git ‎./HOOKS./x", ".gıt./conﬁg",
+      `.git/hooks${".".repeat(300)}/x`, `.git/ho${"‌".repeat(300)}oks/x`,
+    ])("refuses %s", (path) => {
+      expect(checkWrite(folder, home, path)).toBe(inFolderRefusal(path));
+    });
+
+    // U+200B, U+2010, U+2029, U+202F, U+2069, U+2070 and U+FEFE lie beside what HFS+ ignores, and it keeps them; a dot
+    // or a space a name holds before its end is kept too.
+    it.each([
+      "notes.", "a b /c", ".gi.t/hooks/x", ".git/ho​oks/x", ".git/‐hooks/x", ".git/hooks /x", ".git/ hooks/x",
+      ".git/hooks⁩/x", ".git/⁰hooks/x", "﻾.vscode/x", ".git/refs/heads/x.", "src‌/main.c", ".vscodex.", ". .vscode/x",
+    ])("allows %s", (path) => {
+      expect(checkWrite(folder, home, path)).toBeNull();
+    });
+  });
+
   it.each(["a.txt", ".gitignore", ".git/HEAD", ".env", ".claude/settings.json", "sub/bashrc"])("allows %s", (path) => {
     expect(checkWrite(folder, home, path)).toBeNull();
   });
@@ -203,7 +224,7 @@ describe("protectedInFolder", () => {
   it.each([
     "node_modules/iconv-lite/.idea/codeStyles/Project.xml", "a/node_modules/b/.vscode/settings.json", "NODE_MODULES/b/.mcp.json",
     ".venv/lib/python3.12/site-packages/pkg/.vscode/settings.json", "usr/lib/python3/dist-packages/pkg/.bashrc",
-    "node_modules/pkg/.claude/commands/x.md", "node_modules/pkg/.claude/agents/y.md",
+    "node_modules/pkg/.claude/commands/x.md", "node_modules/pkg/.claude/agents/y.md", "node_modules./pkg/.vscode/settings.json",
   ])("leaves a shell's, editor's or agent's name below a dependency folder open: %s", (path) => {
     expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(false);
   });
@@ -221,6 +242,8 @@ describe("protectedInFolder", () => {
     ["x/dist-packages", "x/y", false, true], ["Node_Modules/p", "p", false, true], ["plain", "node_modules/p", true, true],
     ["node_modules/p", "node_modules/.p-retired", false, false], ["plain", "node_modules/p", false, false], ["a", "b", true, false],
     ["node_modules/a/node_modules/b", "node_modules/b", false, false], ["site-packages/r", "dist-packages/r", true, false],
+    // As a volume that drops a name's trailing dots and the code points HFS+ ignores takes it, a dependency folder.
+    ["node_modules./p", "planted", false, true], ["node_‌modules/p", "planted", false, true], ["plain", "site-packages /p", true, true],
   ])("judges a directory moved from %s to %s (exchange: %s): out of a dependency folder %s", (from, to, exchange, out) => {
     expect(movesOutOfDependency(folder, `${folder}/${from}`, `${folder}/${to}`, exchange)).toBe(out);
   });

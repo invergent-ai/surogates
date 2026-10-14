@@ -50,7 +50,7 @@ function answer(id: string, work: Promise<Outcome>): void {
 
 function received(message: ToManager): void {
   if (message.type === "start") {
-    manager ??= new VmManager(message.options, undefined, (root, change) => void send({ type: "processes", root, change }), egress, (boot) => void send({ type: "boot", boot }));
+    manager ??= new VmManager(message.options, undefined, (root, change) => void send({ type: "processes", root, change }), egress, (boot) => void send({ type: "boot", boot }), (open) => void send({ type: "door", open }));
     void send({ type: "ready" });
   } else if (message.type === "op") {
     const { id } = message.operation;

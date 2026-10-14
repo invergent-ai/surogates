@@ -9,27 +9,34 @@
 // Section 13): the copy's lock, so threads on one folder work at once, and the copy's hooks. A
 // landing's host holds the folder itself, for as long as the landing runs: its helper writes the
 // folder from the thread's copy. It runs no command, so it keeps no record and guards no hook.
-// What each is started on is checked in start.ts.
+// What each is started on is checked in start.ts. Where no srt wraps the helper (Windows), its walk
+// alone contains it (files/fd-paths-win32.ts): the host starts it on its own node, from its working
+// folder, every folder it is given named by the session's path, and looks through the walk itself.
 
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { type ChildProcess, type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { mkdirSync, rmdirSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 import { confirmedFolder } from "../binding/folder.js";
+import { fdPaths } from "../files/fd-paths.js";
+import { identityOf } from "../files/identity.js";
 import { findOnPath } from "../files/operations.js";
+import { isAbsolute, join, resolve } from "../host-path.js";
+import { hostStat } from "../host-stat.js";
 import type { Outcome } from "../link/protocol.js";
+import { guestPathOf, hostPathOf } from "../session-path.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, lostWith } from "../guest/processes.js";
 import type { FolderLock } from "./folder-lock.js";
 import { FolderBusy, type FolderRecord, lockFolder, readRecord, writeRecord } from "./folder-record.js";
 import { HookGuard } from "./hooks.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { closeHanded } from "./handed.js";
-import { fileToolsMissing, GLOB, hideSrtTmp, pathOutside, quote, sandboxPolicy, toolsMissing } from "./policy.js";
-import { isOf, startOn } from "./start.js";
+import { fileToolsMissing, GLOB, hostToolsPath, quote, sandboxPolicy, SHELL, toolsMissing } from "./policy.js";
+import { srtOs } from "./srt-os.js";
+import { isOf, type Start, startOn } from "./start.js";
 
 // Before anything else: nothing this process starts, the helper in its sandbox least of all, holds
 // a descriptor of the app's.
@@ -154,21 +161,6 @@ process.on("message", (raw) => {
 process.on("disconnect", () => void stop());
 process.on("SIGTERM", () => void stop());
 
-// What a host killed together with the app left of srt: its bridges (socat, whose
-// command line names their socket), then its files.
-function sweep(dir: string): void {
-  for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
-    try {
-      // The user's own only: reading a command line waits on that process's memory, which one stuck in the kernel holds.
-      if (statSync(`/proc/${pid}`).uid !== process.getuid?.()) continue;
-      if (readFileSync(`/proc/${pid}/cmdline`, "latin1").includes(`${dir}/`)) process.kill(Number(pid), "SIGKILL");
-    } catch {
-      // Gone, or not ours to read.
-    }
-  }
-  rmSync(dir, { recursive: true, force: true });
-}
-
 // What a host whose start takes one kind answers anything else with, and any question about a command.
 const unsupported = (what: string): Outcome => ({ error: { type: "unsupported", message: `This computer cannot ${what} here` } });
 
@@ -191,6 +183,9 @@ async function start(message: HostStart): Promise<void> {
   named = checked.named;
   if (!confirmedFolder(message.expect, checked)) throw new FolderUnavailable(checked.replaced);
   folder = { path, dev, ino };
+  // The folder, held from here on where nothing else binds it: on Windows the walk the hook guard looks through reaches
+  // no folder but this one (fd-paths.ts). What its helper is given beside it, the helper holds itself.
+  fdPaths.bind([path]);
   only = checked.only ?? null;
   commands = checked.commands;
   // One host per folder.
@@ -198,15 +193,13 @@ async function start(message: HostStart): Promise<void> {
   // srt's own temp files (its bridges' sockets, the empty folders it mounts) go
   // through os.tmpdir(), read at each call: here, in a folder only this folder's
   // host uses, so whatever a killed host left there is provably its own.
-  const srtTmp = join(message.dataDir, "srt", key);
-  // A unix socket's path holds at most 107 bytes; srt's longest name here is claude-socks-<16 hex>.sock.
-  if (Buffer.byteLength(join(srtTmp, `claude-socks-${"0".repeat(16)}.sock`)) > 107) {
-    throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
-  }
-  lock = await lockFolder(dev, ino, message.lockWaitMs);
-  // Before anything in the folder is touched: the bridges (socat) a host killed with
-  // the app left running, and anything else whose command line names srt's folder.
-  sweep(srtTmp);
+  const srtTmp = srtOs.tempFolder(message.dataDir, key);
+  // srt's sockets there must have paths this OS takes.
+  if (!srtOs.socketsFit(srtTmp)) throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
+  lock = await lockFolder(dev, ino, message.lockWaitMs, message.dataDir);
+  // Before anything in the folder is touched: what a host killed with the app left of srt
+  // (on Linux its bridges, socat, and anything else whose command line names srt's folder).
+  srtOs.sweep(srtTmp);
   mkdirSync(srtTmp, { recursive: true, mode: 0o700 });
   process.env.TMPDIR = srtTmp;
   // A host that runs no command leaves the folder's record, and its hooks, to the chats that do.
@@ -235,54 +228,30 @@ async function start(message: HostStart): Promise<void> {
   const kept = checked.make();
   made = kept.made;
   const beside = [...checked.reads, ...checked.writes];
-  // srt and the shell it wraps the helper in run outside the sandbox, and look up which,
-  // rg and the shell through this process's PATH; the helper finds its rg through it in
+  // srt and the shell it wraps the helper in (SHELL, by its path) run outside the sandbox, and
+  // look up which and rg through this process's PATH; the helper finds its rg through it in
   // the sandbox. Each absolute entry is kept as the path it leads to now, so a link a command
   // swaps in later moves none, and is dropped when it is the folder or the working folder, or
   // lies in either, by what each is (dev:ino), however it is spelled: a link, a bind mount, a
   // .. through a folder in it. srt's own tools go by absolute path. So no program a command
-  // wrote runs, out here or in the helper. The rule is pathOutside's: the app looks for the
-  // helper's tools by it too. What a helper is given beside its folder is held as the folder is:
-  // a command wrote a landing's copy, and its helper writes what it keeps.
-  const hostPath = pathOutside(process.env.PATH, [{ dev, ino }, statSync(tmp), ...beside.map((dir) => statSync(dir))]);
+  // wrote runs, out here or in the helper. The rule is hostToolsPath's: the app looks for the
+  // helper's tools by it too, by the node its hosts run on. What a helper is given beside its folder
+  // is held as the folder is: a command wrote a landing's copy, and its helper writes what it keeps.
+  // On macOS the app's own rg, beside that node, comes first (srt-darwin.ts).
+  const hostPath = hostToolsPath(process.env.PATH, [
+    { dev, ino }, identityOf(hostStat(tmp)), ...beside.map((dir) => identityOf(hostStat(hostPathOf(dir)))),
+  ], process.execPath);
   process.env.PATH = hostPath;
   // What srt and the helper run, looked for first: a computer that lacks one is told in Section 9's words, not srt's.
   const lacking = fileToolsMissing(message.bwrapPath, hostPath);
   if (lacking.length > 0) throw new Error(toolsMissing(lacking));
-  const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
-  const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
-  const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath, reads: checked.reads, writes: checked.writes });
-  // The helper makes no connection: one that came would be refused.
-  await SandboxManager.initialize(policy, () => Promise.resolve(false));
-  // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
-  const { errors, warnings } = SandboxManager.checkDependencies();
-  if (errors.length || warnings.length) throw new Error([...errors, ...warnings].join("; "));
-  // srt's proxy bridges listen in its temp folder, which the policy hides.
-  const sockets = [SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()]
-    .filter((socket): socket is string => Boolean(socket));
-  SandboxManager.updateConfig({
-    ...policy, filesystem: { ...policy.filesystem, allowRead: [...(policy.filesystem.allowRead ?? []), ...sockets] },
-  });
-  // srt mounts placeholders over its protected names in the working directory at
-  // wrap time. The helper guards those names itself, so it is wrapped from the
-  // temp folder and the user's folder stays as it was.
-  process.chdir(tmp);
-  // The helper runs on this host's node, the app's own, as plain Node, with no inspector on SIGUSR1.
-  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`);
-  const [file, flag, line] = argv;
-  if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
-  // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.
-  // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
-  const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
-    cwd: path,
-    // With which folder each folder it is given was when it was checked: the sandbox binds paths, and the helper
-    // works only where it finds those very folders at them (files/helper.ts).
-    env: {
-      ...checked.env, ...kept.env, HOME: home, LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path,
-      SUROGATE_FOLDER_IS: isOf({ dev, ino }),
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  // With which folder each folder it is given was when it was checked: the sandbox binds paths, and the helper
+  // works only where it finds those very folders at them (files/helper.ts). Its HOME by the session's path.
+  const env = {
+    ...checked.env, ...kept.env, HOME: guestPathOf(home), LANG: message.env.LANG || "C.UTF-8", PATH: hostPath, SUROGATE_FOLDER: path,
+    SUROGATE_FOLDER_IS: isOf({ dev, ino }),
+  };
+  const child = srtOs.wraps ? await inSandbox(message, checked, path, tmp, appDirs, hostPath, env) : plainly(tmp, env);
   helper = child;
   // A write to a helper that has died is not an error of its own: its exit is the one way out.
   child.stdin.on("error", () => {});
@@ -323,9 +292,49 @@ async function start(message: HostStart): Promise<void> {
     });
   });
   // The helper's is the one wrap: srt clears the placeholders it made for it in the temp folder.
-  SandboxManager.cleanupAfterCommand();
+  if (srtOs.wraps) SandboxManager.cleanupAfterCommand();
   // Its helper is ready: what was made for it is its own now.
   made = [];
+}
+
+// The helper in srt's sandbox, on *path*, from the working folder *tmp*, with *env*: srt and the shell it wraps the
+// helper in (SHELL, by its path) are found on *hostPath*, and srt's own tools go by absolute path.
+async function inSandbox(
+  message: HostStart, checked: Start, path: string, tmp: string, appDirs: string[], hostPath: string, env: NodeJS.ProcessEnv,
+): Promise<ChildProcessWithoutNullStreams> {
+  const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
+  const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
+  const policy = sandboxPolicy({ folder: path, tmp, appDirs, bwrapPath, socatPath, reads: checked.reads, writes: checked.writes });
+  // The helper makes no connection: one that came would be refused.
+  await SandboxManager.initialize(policy, () => Promise.resolve(false));
+  // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
+  const { errors, warnings } = SandboxManager.checkDependencies();
+  if (errors.length || warnings.length) throw new Error([...errors, ...warnings].join("; "));
+  // srt's proxy bridges listen in its temp folder, which the policy hides.
+  const sockets = [SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()]
+    .filter((socket): socket is string => Boolean(socket));
+  SandboxManager.updateConfig({
+    ...policy, filesystem: { ...policy.filesystem, allowRead: [...(policy.filesystem.allowRead ?? []), ...sockets] },
+  });
+  // srt mounts placeholders over its protected names in the working directory at
+  // wrap time. The helper guards those names itself, so it is wrapped from the
+  // temp folder and the user's folder stays as it was.
+  process.chdir(tmp);
+  // The helper runs on this host's node, the app's own, as plain Node, with no inspector on SIGUSR1.
+  const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} --disable-sigusr1 ${quote(HELPER)}`, SHELL);
+  const [file, flag, line] = argv;
+  if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
+  // Named here only: srt's returned env is this process's own, and the app's may hold its credentials.
+  // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
+  return spawn(file, ["--norc", "--noprofile", flag, srtOs.line(line)], { cwd: path, env, stdio: ["pipe", "pipe", "pipe"] });
+}
+
+// The helper with no sandbox (Windows), its walk its containment: on this host's node, the app's own, as plain Node,
+// with no inspector on SIGUSR1, from the working folder *tmp*, which is the app's (a process's current folder there is
+// held open, and the user's folder is never held so). With no console window: the host has none to give it (Node,
+// child_process, windowsHide).
+function plainly(tmp: string, env: NodeJS.ProcessEnv): ChildProcessWithoutNullStreams {
+  return spawn(process.execPath, ["--disable-sigusr1", HELPER], { cwd: tmp, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 }
 
 // After a command of the root's in the guest, a look every WATCH_MS until the host stops:
@@ -351,7 +360,7 @@ function save(change: Partial<FolderRecord>): void {
 function sameFolder(): boolean {
   if (!folder) return false;
   try {
-    const { dev, ino } = statSync(folder.path);
+    const { dev, ino } = identityOf(hostStat(hostPathOf(folder.path)));
     return dev === folder.dev && ino === folder.ino;
   } catch {
     return false;
@@ -375,10 +384,10 @@ async function stop(code = 0): Promise<void> {
 // The way out: srt removes its sockets, then the record says the host stopped
 // cleanly, if it did, so the next one has nothing to clear.
 async function leave(code: number, clean: boolean): Promise<void> {
-  await SandboxManager.reset().catch(() => {});
+  if (srtOs.wraps) await SandboxManager.reset().catch(() => {});
   for (const dir of made) {
     try {
-      rmdirSync(dir);
+      rmdirSync(hostPathOf(dir));
     } catch {
       // Something is in it, or it has gone: left as it is.
     }

@@ -1,8 +1,10 @@
-// Where the app keeps what it keeps, by this computer's OS: Linux's (places-linux.ts).
-// Electron-free.
+// Where the app keeps what it keeps, by this computer's OS: Linux's (places-linux.ts), macOS's (places-darwin.ts) and
+// Windows's (places-win32.ts). Electron-free.
 
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
+import { DARWIN } from "./places-darwin.js";
 import { LINUX } from "./places-linux.js";
+import { WIN32 } from "./places-win32.js";
 
 export interface Places {
   // Everything the app keeps lives under one root, Electron's own data too: the folder guards
@@ -17,6 +19,7 @@ export interface Places {
 }
 
 /** The app's places for the user whose home is *home*, by *env*. */
-export const placesFor: (env: NodeJS.ProcessEnv, home: string) => Places = process.platform === "linux"
-  ? LINUX.placesFor
-  : () => notBuilt("Surogate Desktop's data folder");
+export const placesFor: (env: NodeJS.ProcessEnv, home: string) => Places = forThisOs({
+  linux: LINUX.placesFor, darwin: DARWIN.placesFor, win32: WIN32.placesFor,
+})
+  ?? (() => notBuilt("Surogate Desktop's data folder"));

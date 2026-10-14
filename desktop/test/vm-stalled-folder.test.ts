@@ -60,7 +60,7 @@ const fakeVm = (roots: ControlRoots, shared: string[] = []): BootVm => async () 
     shared.push(folder);
     return { kind: "virtiofs" as const, tag: "r1" };
   };
-  return { control: host, net, inbound, exited, emulated: null, share, unshare: async () => {}, kill };
+  return { control: host, net, inbound, exited, emulated: null, opensByPath: false, share, unshare: async () => {}, kill };
 };
 
 // *answer*, or "no answer" once *ms* pass.
