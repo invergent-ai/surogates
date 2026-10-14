@@ -501,6 +501,7 @@ async def notify_team(
     fallback_sender: str | None = None,
     only_user_id: uuid.UUID | None = None,
     severity: str | None = None,
+    reason: str | None = None,
 ) -> tuple[int, str | None]:
     """Queue *text* for every alert recipient.  Returns (queued, why none).
 
@@ -509,6 +510,8 @@ async def notify_team(
     *dedupe_prefix*, each recipient's message is keyed on it, so a retried
     cause never writes twice.  With *only_user_id*, the one person it
     concerns (the team member who asked for something) is told instead.
+    *reason* is what it is about when *text* dresses it up (a severity
+    mark, a footer naming the person); the team digest lists that.
     """
     recipients = list(settings.alert_recipient_user_ids or []) if settings else []
     if only_user_id is not None:
@@ -535,7 +538,7 @@ async def notify_team(
             template_language=settings.alert_template_language if settings else None,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=f"{dedupe_prefix}:{recipient_id}" if dedupe_prefix else None,
-            severity=severity,
+            severity=severity, alert_reason=(reason or text).strip(),
         )
         queued += 1
     return queued, None if queued else "the only configured recipient is this person"
@@ -640,6 +643,7 @@ async def queue_outreach(
     created_by: str | None = None,
     dedupe_key: str | None = None,
     severity: str | None = None,
+    alert_reason: str | None = None,
 ) -> OutreachMessageRow:
     """Queue one message.  With ``dedupe_key``, queuing the same cause twice
     returns the first row instead of writing to the person again.
@@ -663,7 +667,7 @@ async def queue_outreach(
             kind=kind, text=text, template_name=template_name or None,
             template_language=template_language or None, state="queued",
             subject_user_id=subject_user_id, created_by=created_by,
-            dedupe_key=dedupe_key, severity=severity,
+            dedupe_key=dedupe_key, severity=severity, alert_reason=alert_reason,
         )
         db.add(row)
         try:

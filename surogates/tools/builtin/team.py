@@ -403,18 +403,13 @@ async def _invitations(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list]:
     return out
 
 
-def _bare_reason(text: str) -> str:
-    """An alert's reason without its footer and its severity mark."""
-    return text.split("\n\n— ")[0].strip().removeprefix("🔴").removeprefix("🟡").strip()
-
-
 async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]]:
     """Each person's alerts and escalations of the last 72 hours, once each.
 
     An escalation is queued once per team phone, keyed
     ``<escalation>:<recipient>``, and recorded as an event carrying the same
     key, so the key, not the wording, says which rows are one escalation;
-    its reminder is a flag on it.  Text matches only what has no key.
+    its reminder is ``reminded_at`` on it.  Text matches only what has no key.
     Returns ``(at, reason, reminded)`` per person, oldest first.
     """
     since = now - ALERT_WINDOW
@@ -423,12 +418,15 @@ async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]
             await db.execute(
                 sa.select(
                     OutreachMessageRow.subject_user_id,
-                    OutreachMessageRow.created_at, OutreachMessageRow.text,
-                    OutreachMessageRow.dedupe_key,
+                    OutreachMessageRow.created_at,
+                    # Rows queued before the reason was stored have only their text.
+                    sa.func.coalesce(OutreachMessageRow.alert_reason, OutreachMessageRow.text),
+                    OutreachMessageRow.dedupe_key, OutreachMessageRow.reminded_at,
                 )
                 .where(OutreachMessageRow.org_id == org_id)
                 .where(OutreachMessageRow.agent_id == agent_id)
                 .where(OutreachMessageRow.kind == "alert")
+                .where(sa.func.coalesce(OutreachMessageRow.created_by, "") != "reminder")
                 .where(OutreachMessageRow.subject_user_id.in_(ids))
                 .where(OutreachMessageRow.created_at >= since)
             )
@@ -447,15 +445,14 @@ async def _alerts(sf, org_id, agent_id, ids, now) -> dict[uuid.UUID, list[tuple]
         ).all()
     found: dict[uuid.UUID, dict[str, list]] = {}
     reminded: set[tuple[uuid.UUID, str]] = set()
-    for user_id, at, text, dedupe_key in outreach:
+    for user_id, at, reason, dedupe_key, reminded_at in outreach:
         key = dedupe_key.rsplit(":", 1)[0] if dedupe_key else None
-        if key and key.startswith("reminder:"):
-            reminded.add((user_id, "escalation:" + key.removeprefix("reminder:")))
-            continue
-        reason = _bare_reason(text or "")
+        reason = (reason or "").strip()
+        if key and reminded_at is not None:
+            reminded.add((user_id, key))
         found.setdefault(user_id, {}).setdefault(key or f"text:{reason}", [at, reason])
     for user_id, at, data in escalations:
-        reason = _bare_reason(str((data or {}).get("reason") or ""))
+        reason = str((data or {}).get("reason") or "").strip()
         key = (data or {}).get("escalation") or f"text:{reason}"
         found.setdefault(user_id, {}).setdefault(key, [at, reason])
     out: dict[uuid.UUID, list[tuple]] = {}
@@ -1039,6 +1036,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
                 f"{row.protocol} {status} by {_member(ctx)}: {reason}"
                 f"\n\n— {label or person.label}"
             ),
+            reason=f"{row.protocol} {status} by {_member(ctx)}: {reason}",
             created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
             exclude_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
         )

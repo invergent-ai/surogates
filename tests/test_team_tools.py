@@ -180,6 +180,7 @@ async def test_overview_lists_this_agents_people_and_nobody_elses(sf, practice):
             channel_identifier="pn1", kind="alert",
             text="Durere în piept\n\n— Ion Popescu · +40 700 000 001",
             template_name=None, template_language=None, subject_user_id=ion,
+            alert_reason="Durere în piept",
         )
     await store.record_inbound(
         sf, org_id=ORG, platform="whatsapp", platform_user_id="40700000002",
@@ -214,17 +215,25 @@ async def test_overview_reads_each_escalation_once_by_its_key_and_flags_its_remi
             ))
         await db.commit()
     for recipient in (practice.doctor, uuid.uuid4()):
-        for prefix, text in (
-            (first, "🔴 Durere în piept\n\n— Ion Popescu"),
-            (second, "Durere în piept\n\n— Ion Popescu"),
-            ("reminder:-:aaa", "🔴 Reminder, not yet opened after 30 minutes:\n\n🔴 Durere în piept"),
+        for prefix, text, by in (
+            (first, "🔴 Durere în piept\n\n— Ion Popescu", "agent"),
+            (second, "Durere în piept\n\n— Ion Popescu", "agent"),
+            ("reminder:-:aaa", "🔴 Reminder, not yet opened after 30 minutes:\n\n🔴 Durere în piept", "reminder"),
         ):
             await store.queue_outreach(
                 sf, org_id=ORG, agent_id=AGENT, user_id=recipient, platform="whatsapp",
                 channel_identifier="pn1", kind="alert", text=text,
                 template_name=None, template_language=None, subject_user_id=ion,
-                dedupe_key=f"{prefix}:{recipient}",
+                dedupe_key=f"{prefix}:{recipient}", created_by=by,
+                alert_reason="Durere în piept" if by == "agent" else text,
             )
+    async with sf() as db:
+        await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.dedupe_key.like(f"{first}:%"))
+            .values(reminded_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
 
     out = await team.handle_team_overview({}, **_kw(sf, practice.doctor_session))
     alerts = [line for line in out.splitlines() if line.strip().startswith("alert ")]

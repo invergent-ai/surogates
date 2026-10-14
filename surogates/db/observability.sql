@@ -1096,3 +1096,7 @@ UPDATE outreach_messages
     SET created_by = 'team:' || substr(created_by, length('care-team:') + 1)
     WHERE created_by LIKE 'care-team:%';
 UPDATE followup_enrollments SET enrolled_by = 'team' WHERE enrolled_by = 'care_team';
+
+-- ── what an alert is about, apart from how its text presents it ──────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS alert_reason text;

@@ -252,6 +252,7 @@ async def _tell_team(
     sf: Any, ctx: Context, settings: Any, *, kind: str, text: str, **extra: Any,
 ):
     """The team's phones, with who it is about, never the person talking."""
+    extra.setdefault("reason", text)
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
         text=f"{text.strip()}\n\n— {await ctx.person_label(sf)}", created_by="agent",
@@ -668,7 +669,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     )
     queued, why_not = await _tell_team(
         sf, ctx, settings, kind="alert",
-        text=f"🔴 {reason}" if severity == "red" else reason,
+        text=f"🔴 {reason}" if severity == "red" else reason, reason=reason,
         severity=severity, dedupe_prefix=escalation,
     )
 

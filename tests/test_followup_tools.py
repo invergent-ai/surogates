@@ -351,6 +351,7 @@ async def test_escalate_marks_red_when_an_emergency_script_was_sent(sf, patient,
     yellow, red = sorted(await _outreach(sf), key=lambda r: r.severity == "red")
     assert yellow.severity == "yellow" and not yellow.text.startswith("🔴")
     assert red.severity == "red" and red.text.startswith("🔴 Durere în piept")
+    assert red.alert_reason == "Durere în piept, i-am spus să sune la 112"
     assert red.dedupe_key.startswith("escalation:-:")
     assert yellow.dedupe_key.rsplit(":", 1)[0] != red.dedupe_key.rsplit(":", 1)[0]
 

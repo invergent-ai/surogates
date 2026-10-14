@@ -1358,6 +1358,9 @@ class OutreachMessageRow(Base):
     #: On an alert: ``red`` when an emergency script went to the person,
     #: else ``yellow``.  A red one left unopened is sent again once.
     severity: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: What an alert is about, without the severity mark and the footer
+    #: naming the person that its text carries.
+    alert_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: When the one reminder for this alert's escalation went out.
     reminded_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
