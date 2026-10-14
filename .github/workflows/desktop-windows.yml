@@ -424,8 +424,10 @@ jobs:
           $since = (Get-Date).AddMinutes(-45)
           $logs = Get-WinEvent -ListLog 'Microsoft-Windows-Hyper-V*' -ErrorAction SilentlyContinue | Where-Object { $_.RecordCount -gt 0 } | ForEach-Object LogName
           $events = foreach ($log in $logs) { Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -ErrorAction SilentlyContinue }
+          # The worker's performance summaries (3086) carry what their message leaves out, in their properties.
           $events = $events | Sort-Object TimeCreated | ForEach-Object {
-            "{0} {1} {2} {3}: {4}" -f $_.TimeCreated.ToUniversalTime().ToString('HH:mm:ss.fff'), $_.LogName.Replace('Microsoft-Windows-', ''), $_.Id, $_.LevelDisplayName, ($_.Message -replace '\s+', ' ')
+            $more = if ($_.Id -eq 3086) { " | " + (($_.Properties | ForEach-Object { "$($_.Value)" }) -join '; ') -replace '\s+', ' ' } else { "" }
+            "{0} {1} {2} {3}: {4}{5}" -f $_.TimeCreated.ToUniversalTime().ToString('HH:mm:ss.fff'), $_.LogName.Replace('Microsoft-Windows-', ''), $_.Id, $_.LevelDisplayName, ($_.Message -replace '\s+', ' '), $more
           } | Out-String
           $events
           "### Hyper-V's own events, UTC`n``````n$events``````" >> $env:GITHUB_STEP_SUMMARY
