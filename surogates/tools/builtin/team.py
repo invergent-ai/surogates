@@ -1342,7 +1342,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         "slack": "; record their permission to be messaged on your say-so",
     }.get(platform or "", "")
     if telegram:
-        how = "; give you a one-use link for them to open and press Start, which links and asks them"
+        how = "; give you a one-use link for them to open and press Start, which asks whether they are the person and links only on yes"
     refused = await _unconfirmed(
         kwargs, "team_enroll_person", arguments,
         f"Will enrol {name} ({shown}) in {protocol} {when}"
@@ -1390,9 +1390,10 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     if telegram:
         code = await person_link.mint(kwargs["redis"], org_id=ctx.org_id, user_id=user_id)
         result += (
-            f" Their link: https://t.me/{bot}?start={code} (one use, 7 days). Give "
-            "it to the team member to pass on; opening it and pressing Start links "
-            "the person and records their agreement."
+            f" Their link: https://t.me/{bot}?start={code} (one use, 48 hours). Give "
+            "it to the team member to pass on; whoever opens it is asked whether "
+            "they are the person and linked only on yes, and the person and the "
+            "team are told."
         )
     if welcome_on:
         windowed = bool(capabilities_for(welcome_on).window_hours)

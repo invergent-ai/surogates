@@ -735,8 +735,10 @@ class TelegramPlatform:
         chat_id: str,
         is_dm: bool,
         text: str,
+        buttons: list[str] | None = None,
     ) -> bool:
-        """Privately deliver *text* to *sender_id*.
+        """Privately deliver *text* to *sender_id*, with *buttons* as one-tap
+        replies when given (each sends its label as an ordinary message).
 
         On Telegram a user's id is their private chat id, so this is a plain
         ``sendMessage`` to the sender.  Returns ``True`` on delivery, ``False``
@@ -744,9 +746,13 @@ class TelegramPlatform:
         private delivery fails.
         """
         bot_token: str = creds.get("bot_token") or ""
-        result, _ = await self._api(
-            bot_token, "sendMessage", {"chat_id": sender_id, "text": text}
-        )
+        payload: dict[str, Any] = {"chat_id": sender_id, "text": text}
+        if buttons:
+            payload["reply_markup"] = {
+                "keyboard": [[{"text": b} for b in buttons]],
+                "one_time_keyboard": True, "resize_keyboard": True,
+            }
+        result, _ = await self._api(bot_token, "sendMessage", payload)
         return result is not None
 
     # ------------------------------------------------------------------

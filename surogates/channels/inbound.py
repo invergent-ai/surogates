@@ -310,6 +310,9 @@ class PipelineDeps:
     # mode, so Mate constructs neither.
     pairing: Any = None
     pairing_sender: Any = None
+    # Privately asks the sender something with one-tap answers:
+    # ``async (msg, text, buttons) -> bool``.  A start link asks "Are you …?".
+    private_sender: Any = None
     backfill: _Backfill | None = None
     progress: _Progress | None = None
     attachments: _Attachments | None = None
@@ -543,22 +546,38 @@ class ChannelInboundPipeline:
             await deps.state.mark_mentioned_thread(msg.thread_key)
 
         # ------------------------------------------------------------------
-        # Gate 4b: a start link made for a known person binds this sender to
-        # them before identity resolution, so the turn below is already theirs.
-        # The code never reaches the agent or the transcript.
+        # Gate 4b: a start link made for a known person.  Its opener is first
+        # asked whether they are that person, and linked only on yes, before
+        # identity resolution, so the turn after is already theirs.  Neither
+        # the code nor the answer reaches the agent or the transcript.
         # ------------------------------------------------------------------
         code = person_link.start_code(msg.text) if msg.is_dm else None
         if code is not None:
             try:
-                await person_link.consume(
+                asked = await person_link.start(
                     deps.redis, deps.session_factory, code=code,
-                    org_id=routing.org_id, platform=routing.platform,
-                    platform_user_id=msg.platform_user_id,
-                    display_name=msg.user_name,
+                    org_id=routing.org_id, agent_id=routing.agent_id,
+                    platform=routing.platform, platform_user_id=msg.platform_user_id,
                 )
+                if asked is not None and deps.private_sender is not None:
+                    await deps.private_sender(msg, *asked)
+                    return InboundOutcome.PAIRING_PROMPTED
             except Exception:  # noqa: BLE001 — a failed link must not drop the message
                 logger.warning("[inbound] start link failed", exc_info=True)
             msg = replace(msg, text="/start")
+        elif msg.is_dm and routing.platform == "telegram" and deps.redis is not None:
+            try:
+                reply = await person_link.answer(
+                    deps.redis, deps.session_factory, org_id=routing.org_id,
+                    agent_id=routing.agent_id, platform=routing.platform,
+                    platform_user_id=msg.platform_user_id, display_name=msg.user_name,
+                    text=msg.text,
+                )
+                if reply is not None and deps.private_sender is not None:
+                    await deps.private_sender(msg, reply, [])
+                    return InboundOutcome.PAIRING_PROMPTED
+            except Exception:  # noqa: BLE001 — a failed link must not drop the message
+                logger.warning("[inbound] start link answer failed", exc_info=True)
 
         # ------------------------------------------------------------------
         # Gate 5: Identity resolution.

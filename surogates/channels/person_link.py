@@ -135,7 +135,7 @@ async def consume(
 
 
 #: How long a start link stays usable; ops mints its own with the same life.
-LINK_TTL_SECONDS = 7 * 24 * 3600
+LINK_TTL_SECONDS = 48 * 3600
 
 
 async def mint(redis: Any, *, org_id: Any, user_id: Any, platform: str = "telegram") -> str:
@@ -150,3 +150,165 @@ async def mint(redis: Any, *, org_id: Any, user_id: Any, platform: str = "telegr
         ex=LINK_TTL_SECONDS,
     )
     return code
+
+
+#: Who opened a start link and has yet to say whether they are its person.
+PENDING_PREFIX = "surogates:person_link_pending:"
+PENDING_TTL_SECONDS = 24 * 3600
+
+#: The platform's own wording; ``followup_settings.texts`` overrides each key
+#: in the business's language.
+DEFAULT_TEXTS = {
+    "link_question": "Are you {name}?",
+    "link_yes": "Yes",
+    "link_no": "No",
+    "link_done": "Thank you, {name}: you are linked and will get your messages here.",
+    "link_refused": "Thank you. This link was not meant for you, so nothing was linked.",
+    "link_notice_person": (
+        "Your follow-up was just linked to a Telegram account ({account}). If "
+        "this was not you, please tell us."
+    ),
+    "link_notice_team": "Telegram was linked for {name} ({account}).",
+    "link_refused_team": (
+        "Someone opened {name}'s Telegram link ({account}) and said they are "
+        "not {name}: nothing was linked."
+    ),
+}
+_YES = {"yes", "da", "y", "ja", "oui", "si", "sí", "igen"}
+_NO = {"no", "nu", "n", "nein", "non", "nem"}
+
+
+def _pending_key(org_id: Any, platform: str, platform_user_id: str) -> str:
+    return f"{PENDING_PREFIX}{org_id}:{platform}:{platform_user_id}"
+
+
+async def _texts(session_factory: Any, org_id: Any, agent_id: str) -> tuple[Any, dict]:
+    from surogates.followup import store as followup_store
+
+    settings = await followup_store.get_settings(
+        session_factory, org_id=uuid.UUID(str(org_id)), agent_id=agent_id,
+    )
+    return settings, (getattr(settings, "texts", None) or {})
+
+
+def wording(texts: dict, key: str, **values: Any) -> str:
+    from surogates.followup.store import render_text
+
+    return render_text(texts.get(key), DEFAULT_TEXTS[key], **values)
+
+
+async def start(
+    redis: Any, session_factory: Any, *, code: str, org_id: Any, agent_id: str,
+    platform: str, platform_user_id: str,
+) -> tuple[str, list[str]] | None:
+    """Someone opened a start link: the question to ask them first
+    ("Are you …?") and its two answers, or ``None`` for a code that is not
+    live for this org and platform.  Nothing is linked until they say yes.
+    """
+    key = f"{PREFIX}{code}"
+    raw = await redis.get(key)
+    if raw is None:
+        return None
+    entry = json.loads(raw)
+    if str(entry.get("org_id")) != str(org_id) or entry.get("platform") != platform:
+        return None
+    if await redis.getdel(key) is None:
+        return None
+    from surogates.followup import store as followup_store
+
+    name = await followup_store.person_name(
+        session_factory, org_id=uuid.UUID(str(org_id)), agent_id=agent_id,
+        user_id=uuid.UUID(entry["user_id"]),
+    ) or "?"
+    await redis.set(
+        _pending_key(org_id, platform, platform_user_id),
+        json.dumps({"user_id": entry["user_id"], "name": name}), ex=PENDING_TTL_SECONDS,
+    )
+    _settings, texts = await _texts(session_factory, org_id, agent_id)
+    return (
+        wording(texts, "link_question", name=name),
+        [wording(texts, "link_yes"), wording(texts, "link_no")],
+    )
+
+
+async def answer(
+    redis: Any, session_factory: Any, *, org_id: Any, agent_id: str, platform: str,
+    platform_user_id: str, display_name: str, text: str | None,
+) -> str | None:
+    """The reply to the start link's question, when one is waiting and this
+    is a yes or a no: what to say back.  Yes links the account and tells the
+    person on their other channels and the team; no links nothing and tells
+    the team, so a forwarded link that was misused gets noticed.  ``None``
+    when nothing is waiting or the message is neither.
+    """
+    pending_key = _pending_key(org_id, platform, platform_user_id)
+    raw = await redis.get(pending_key)
+    if raw is None:
+        return None
+    settings, texts = await _texts(session_factory, org_id, agent_id)
+    said = (text or "").strip().rstrip(".!").casefold()
+    yes = said in _YES | {wording(texts, "link_yes").casefold()}
+    no = said in _NO | {wording(texts, "link_no").casefold()}
+    if not (yes or no) or await redis.getdel(pending_key) is None:
+        return None
+    entry = json.loads(raw)
+    name, user_id = entry.get("name") or "?", uuid.UUID(entry["user_id"])
+    account = display_name or platform_user_id
+    org = uuid.UUID(str(org_id))
+    from surogates.followup import store as followup_store
+
+    if no:
+        await followup_store.notify_team(
+            session_factory, settings, org_id=org, agent_id=agent_id, kind="alert",
+            text=wording(texts, "link_refused_team", name=name, account=account),
+            created_by="start-link", subject_user_id=user_id, topic="attention",
+        )
+        return wording(texts, "link_refused")
+    bound = await bind(
+        session_factory, org_id=org, user_id=user_id, platform=platform,
+        platform_user_id=platform_user_id, display_name=display_name,
+    )
+    if not bound:
+        return wording(texts, "link_refused")
+    try:
+        await redis.publish(
+            f"channel_identity_changed:{platform}\x00{platform_user_id}\x00{org_id}", b"",
+        )
+    except Exception:  # noqa: BLE001 — the cache entry ages out on its own
+        logger.warning("channel_identity_changed publish failed", exc_info=True)
+    await _tell_person_elsewhere(
+        session_factory, settings, org=org, agent_id=agent_id, user_id=user_id,
+        platform=platform, text=wording(texts, "link_notice_person", name=name, account=account),
+    )
+    await followup_store.notify_team(
+        session_factory, settings, org_id=org, agent_id=agent_id, kind="notice",
+        text=wording(texts, "link_notice_team", name=name, account=account),
+        created_by="start-link", subject_user_id=user_id, topic="attention",
+    )
+    return wording(texts, "link_done", name=name)
+
+
+async def _tell_person_elsewhere(
+    session_factory: Any, settings: Any, *, org: uuid.UUID, agent_id: str,
+    user_id: uuid.UUID, platform: str, text: str,
+) -> None:
+    """The person hears of the link on another channel they can be reached on."""
+    from surogates.followup import people
+    from surogates.followup import store as followup_store
+
+    template = getattr(settings, "message_template_name", None)
+    found, _why = await people.reachable(
+        session_factory, org_id=org, user_id=user_id,
+        senders=followup_store.senders_of(settings), template=bool(template),
+        now=datetime.now(timezone.utc),
+    )
+    other = next((r for r in found if r.platform != platform), None)
+    if other is None:
+        return
+    await followup_store.queue_outreach(
+        session_factory, org_id=org, agent_id=agent_id, user_id=user_id,
+        platform=other.platform, channel_identifier=other.sender, kind="notice", text=text,
+        template_name=template if other.needs_template else None,
+        template_language=settings.message_template_language if other.needs_template else None,
+        subject_user_id=user_id, created_by="start-link",
+    )

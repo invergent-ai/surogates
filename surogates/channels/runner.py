@@ -209,6 +209,16 @@ def _make_deps_factory(
                 )
             return bool(delivered)
 
+        async def _private_sender(msg: Any, text: str, buttons: list[str]) -> bool:
+            """Privately ask the sender something, with one-tap answers."""
+            send_private = getattr(platform, "send_private", None)
+            if send_private is None:
+                return False
+            return bool(await send_private(
+                creds, sender_id=msg.platform_user_id, chat_id=msg.identifier,
+                is_dm=msg.is_dm, text=text, buttons=buttons,
+            ))
+
         async def _progress(session_id: Any, channel_id: str, thread_ts: Any) -> None:
             post = getattr(platform, "post_thinking_placeholder", None)
             if post is None:  # non-Slack platforms: no placeholder in v1
@@ -350,6 +360,7 @@ def _make_deps_factory(
             follow_enabled=_resolve_follow,
             pairing=pairing,
             pairing_sender=_pairing_sender,
+            private_sender=_private_sender,
             backfill=_backfill,
             progress=_progress,
             attachments=_attachments,

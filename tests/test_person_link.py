@@ -14,6 +14,7 @@ from surogates.channels.inbound import ChannelInboundPipeline
 from surogates.db.models import ChannelIdentity, User
 from surogates.session.events import EventType
 from tests.test_channel_pipeline import (
+    AGENT_ID,
     AGENT_ORG_ID,
     _FakeRedis,
     _make_config,
@@ -67,22 +68,91 @@ def test_start_code_reads_only_a_start_with_a_code():
     assert person_link.start_code("hello") is None
 
 
+def _asking(deps):
+    asked = []
+
+    async def private_sender(msg, text, buttons):
+        asked.append((text, buttons))
+        return True
+
+    return dataclasses.replace(deps, private_sender=private_sender), asked
+
+
+async def _team(sf):
+    """A team member reachable on WhatsApp, and the person's own WhatsApp."""
+    from surogates.followup import store
+
+    doctor = await _user(sf, "doctor")
+    async with sf() as db:
+        db.add(ChannelIdentity(org_id=ORG, user_id=doctor, platform="whatsapp",
+                               platform_user_id="40700000099",
+                               platform_meta={"contact_permission": {"status": "granted"}}))
+        await db.commit()
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT_ID, channel_identifier="pn1",
+                                alert_recipient_user_ids=[doctor], message_template_name="msg",
+                                message_template_language="ro",
+                                texts={"link_question": "Sunteți {name}?", "link_yes": "Da",
+                                       "link_no": "Nu"})
+    return doctor
+
+
+async def _outreach(sf):
+    from surogates.db.models import OutreachMessageRow
+
+    async with sf() as db:
+        return (await db.execute(sa.select(OutreachMessageRow))).scalars().all()
+
+
 @pytest.mark.asyncio
-async def test_start_binds_the_sender_records_their_permission_and_hides_the_code(sf):
-    ana = await _user(sf, "ana")
-    deps = _deps(sf, ana)
+async def test_start_asks_first_and_links_only_on_yes(sf):
+    ana = await _user(sf, "Ana Pop")
+    doctor = await _team(sf)
+    async with sf() as db:
+        db.add(ChannelIdentity(org_id=ORG, user_id=ana, platform="whatsapp",
+                               platform_user_id="40711111111",
+                               platform_meta={"contact_permission": {"status": "granted"}}))
+        await db.commit()
+    deps, asked = _asking(_deps(sf, ana))
 
     await _start(deps)
 
-    [row] = await _identities(sf)
-    assert (row.user_id, row.platform, row.platform_user_id) == (ana, "telegram", "777")
+    assert asked == [("Sunteți Ana Pop?", ["Da", "Nu"])]
+    assert [r.platform for r in await _identities(sf)] == ["whatsapp", "whatsapp"]
+    assert person_link.PREFIX + CODE not in deps.redis.kv  # single use
+    assert not [t for _, t, _d in deps.session_store.events if t == EventType.USER_MESSAGE]
+
+    await _start(deps, text="Da")
+
+    [row] = [r for r in await _identities(sf) if r.platform == "telegram"]
+    assert (row.user_id, row.platform_user_id) == (ana, "777")
     perm = row.platform_meta["contact_permission"]
     assert (perm["status"], perm["method"], perm["recorded_by"]) == ("granted", "start_link", "person")
-    assert person_link.PREFIX + CODE not in deps.redis.kv  # single use
     assert any(c.startswith("channel_identity_changed:telegram") for c, _ in deps.redis.published)
+    told = {o.user_id: o for o in await _outreach(sf)}
+    assert "Telegram was linked for Ana Pop" in told[doctor].text
+    assert told[ana].platform == "whatsapp" and "If this was not you" in told[ana].text
+    assert len(asked) == 2  # the confirmation
     texts = [d.get("content") or d.get("text") for _, t, d in deps.session_store.events
              if t == EventType.USER_MESSAGE]
-    assert texts and all(CODE not in str(t) for t in texts)
+    assert all(CODE not in str(t) for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_no_links_nothing_and_tells_the_team(sf):
+    ana = await _user(sf, "Ana Pop")
+    doctor = await _team(sf)
+    deps, asked = _asking(_deps(sf, ana))
+
+    await _start(deps)
+    await _start(deps, text="nu")
+
+    assert not [r for r in await _identities(sf) if r.platform == "telegram"]
+    [notice] = await _outreach(sf)
+    assert notice.user_id == doctor and "said they are not Ana Pop" in notice.text
+
+
+def test_a_link_lives_two_days():
+    assert person_link.LINK_TTL_SECONDS == 48 * 3600
 
 
 @pytest.mark.asyncio
