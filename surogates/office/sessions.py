@@ -274,6 +274,33 @@ def mark_attempt(row: OfficeSession) -> int:
     return pending["attempts"]
 
 
+def mark_waiting(row: OfficeSession, reason: str) -> bool:
+    """Record that the pending save waits on its computer for *reason*; whether that is news to its chats."""
+    pending = dict(row.pending_save or {})
+    if pending.get("waiting") == reason:
+        return False
+    pending["waiting"] = reason
+    row.pending_save = pending
+    return True
+
+
+def next_try(row: OfficeSession) -> None:
+    """Let the next try ask the computer anew: a request joined again only repeats what it got."""
+    pending = dict(row.pending_save or {})
+    pending["try"] = int(pending.get("try", 0)) + 1
+    row.pending_save = pending
+
+
+def drop_pending(row: OfficeSession) -> tuple[str, str]:
+    """Give up the pending save; the (bucket, key) of its blob, to delete. A closing save's row closes."""
+    pending = row.pending_save or {}
+    blob = (str(pending["bucket"]), str(pending["key"]))
+    if pending.get("close"):
+        _close(row)
+    row.pending_save = None
+    return blob
+
+
 async def close_never_opened(session_factory: Any, *, older_than: timedelta, now: datetime | None = None) -> int:
     """Close rows whose editor never connected (a config fetched, never opened), untouched for *older_than*."""
     cutoff = (now or datetime.now(timezone.utc)) - older_than

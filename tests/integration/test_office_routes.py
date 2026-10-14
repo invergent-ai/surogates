@@ -407,6 +407,42 @@ async def test_newer_save_removes_the_older_pending_object(client, app, session_
     assert keys == [pending["key"]]
 
 
+async def test_a_newer_save_cancels_the_write_its_replaced_save_left_waiting(client, app, session_factory, monkeypatch):
+    from surogates.api.routes import office as office_route
+    from surogates.office.files import editor_invocation
+    cancelled: list = []
+
+    class FakeOperations:
+        def __init__(self, *_args):
+            pass
+
+        async def cancel_invocation(self, calling_session_id, invocation_id):
+            cancelled.append((calling_session_id, invocation_id))
+            return 1
+
+    async def fake_download(url: str) -> bytes:
+        return b"saved"
+
+    monkeypatch.setattr(office_route, "_download", fake_download)
+    monkeypatch.setattr(office_route, "DeviceOperations", FakeOperations)
+    session_id, _, _, config, row_id = await _opened(client, app, session_factory)
+    _, callback_token = _tokens(config)
+    body = {"key": config["document"]["key"], "status": 6, "url": "https://office.example/cache/files/x/output.docx"}
+
+    async def save():
+        await client.post(f"/v1/office/callback/{callback_token}", json={"token": sign(JWT_SECRET, body)})
+        return (await office_sessions.get_open(session_factory, row_id)).pending_save
+
+    await save()
+    first = await save()
+    assert cancelled == []  # the replaced save was not waiting on a computer
+    async with session_factory() as db, db.begin():
+        row = await db.get(OfficeSession, row_id)
+        row.pending_save = {**row.pending_save, "waiting": "waiting"}
+    await save()
+    assert cancelled == [(UUID(session_id), editor_invocation(config["document"]["key"], first))]
+
+
 async def test_closed_document_refuses_callbacks(client, app, session_factory):
     _, _, _, config, row_id = await _opened(client, app, session_factory)
     _, callback_token = _tokens(config)

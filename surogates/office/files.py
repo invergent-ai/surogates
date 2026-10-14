@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import PurePosixPath
 from typing import Any
 from uuid import UUID
 
 from surogates.db.models import Workstream
 from surogates.devices.binding import binding_of, copy_of, device_of
+from surogates.devices.operations import REQUEST_PREFIX
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.files import DeviceAccess, session_files
@@ -22,6 +24,16 @@ DOCUMENT_FILES = (StorageWorkspaceIO, DeviceWorkspaceIO)
 # The request ids of the editor's writes to a computer. No route's request id holds a dot, so none is taken for one,
 # and the desktop knows them (desktop/src/binding/approvals.ts).
 EDITOR_REQUEST = "editor."
+
+
+def editor_request_id(doc_key: str, pending: dict[str, Any]) -> str:
+    """The request id of a pending save's write to a computer: its blob, and the try that asks anew."""
+    return f"{doc_key}.{PurePosixPath(str(pending['key'])).name}.{int(pending.get('try', 0))}"
+
+
+def editor_invocation(doc_key: str, pending: dict[str, Any]) -> str:
+    """The device invocation of that write, as ``session_files`` names it."""
+    return f"{REQUEST_PREFIX}{EDITOR_REQUEST}{editor_request_id(doc_key, pending)}"
 
 
 class FolderNotReady(Exception):
