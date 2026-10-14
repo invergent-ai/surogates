@@ -5,6 +5,7 @@
 import type { Fetch } from "../download.js";
 import { forThisOs, notBuilt } from "../platform.js";
 import * as linux from "./installer-linux.js";
+import { machineRecord } from "./installer-win32.js";
 import type { Applied, Staged, UpdatesOptions } from "./updates.js";
 
 export interface Installer {
@@ -16,5 +17,7 @@ export interface Installer {
   helper(command: string[]): (files: Staged) => Promise<Applied>;
 }
 
-export const INSTALLER: Installer = forThisOs<Installer>({ linux: { record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun } })
-  ?? { record: () => notBuilt("Surogate Desktop's install"), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") };
+export const INSTALLER: Installer = forThisOs<Installer>({
+  linux: { record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun },
+  win32: { record: () => machineRecord(), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") },
+}) ?? { record: () => notBuilt("Surogate Desktop's install"), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") };

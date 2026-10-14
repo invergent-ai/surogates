@@ -21,6 +21,7 @@ export interface NtatConstants {
   readonly FILE_GENERIC_READ: number;
   readonly FILE_GENERIC_WRITE: number;
   readonly DELETE: number;
+  readonly READ_CONTROL: number;
   readonly SYNCHRONIZE: number;
   readonly FILE_SHARE_READ: number;
   readonly FILE_SHARE_WRITE: number;
@@ -101,6 +102,18 @@ export interface Ntat {
   bootId(): number;
   /** This process's user's SID. */
   userSid(): string;
+  /**
+   * Who owns the file or folder open as *fd*, a descriptor that holds READ_CONTROL, and the trustee of each allow entry
+   * of its access list that lets it be changed, each a SID's string; "?" for a trustee ntat does not read, and Everyone,
+   * S-1-1-0, where it has no access list at all.
+   */
+  owners(fd: number): NtatOwners;
+}
+
+/** Who owns a file and who may change it, as SIDs' strings (ntat's owners). */
+export interface NtatOwners {
+  owner: string;
+  writers: string[];
 }
 
 // The same from src/files and from dist/files.
@@ -153,6 +166,7 @@ export function ntat(): Ntat {
     handles: named(raw.handles, () => undefined),
     bootId: named(raw.bootId, () => undefined),
     userSid: named(raw.userSid, () => undefined),
+    owners: named(raw.owners, () => undefined),
   };
   return loaded;
 }

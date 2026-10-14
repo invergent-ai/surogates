@@ -116,9 +116,9 @@ jobs:
       - name: Let the runner's volumes make short names
         run: fsutil 8dot3name set 0
 
-      - name: The walk, and the folder lock
+      - name: The walk, the folder lock, and an administrator's word
         timeout-minutes: 10
-        run: npx vitest run --project unit --reporter=verbose test/ntat-win32.test.ts test/folder-lock-win32.test.ts test/fs-through-walk.test.ts
+        run: npx vitest run --project unit --reporter=verbose test/ntat-win32.test.ts test/folder-lock-win32.test.ts test/fs-through-walk.test.ts test/admins-own-win32.test.ts
 
       - name: The file kinds and the helper
         if: ${{ !cancelled() }}

@@ -32,6 +32,7 @@
 #include <winternl.h>
 #include <delayimp.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -854,6 +855,94 @@ static napi_value user_sid(napi_env env, napi_callback_info info) {
   return result;
 }
 
+// What an allow entry grants that changes a file or a folder, its name or its descriptor: its data, its extended
+// attributes and attributes, a folder's entries (FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY are FILE_WRITE_DATA's and
+// FILE_APPEND_DATA's bits), its removal, its access list and its owner, and the generic rights that hold any of these.
+#define CHANGES                                                                                                          \
+  (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD | DELETE | WRITE_DAC | \
+   WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED)
+
+// A SID as its string, set at index *at* of the array *list*, or "?" where Windows cannot write it.
+static void push_sid(napi_env env, napi_value list, uint32_t at, PSID sid) {
+  LPWSTR text = NULL;
+  napi_value made;
+  if (sid != NULL && IsValidSid(sid) && ConvertSidToStringSidW(sid, &text)) {
+    napi_create_string_utf16(env, (const char16_t *)text, wcslen(text), &made);
+    LocalFree(text);
+  } else {
+    napi_create_string_utf8(env, "?", NAPI_AUTO_LENGTH, &made);
+  }
+  napi_set_element(env, list, at, made);
+}
+
+// owners(fd): who the file or folder open as *fd* is owned by, and who its access list lets change it, from its handle,
+// which must hold READ_CONTROL (GetSecurityInfo, SE_FILE_OBJECT, with OWNER_ and DACL_SECURITY_INFORMATION): {owner,
+// writers}, each a SID's string. A writer is the trustee of an allow entry that grants any of CHANGES and applies to
+// the object itself (an INHERIT_ONLY_ACE entry is its children's alone). Deny entries are not read: they take rights
+// away, and a list without them grants no less. An allow entry of a kind whose trustee is not read here (an object
+// entry, a compound one) is a writer "?", which no caller takes as known. With no access list at all, which grants
+// everyone everything, the one writer is Everyone, S-1-1-0.
+static napi_value owners(napi_env env, napi_callback_info info) {
+  napi_value argv[MOST_ARGS];
+  if (!args(env, info, 1, argv)) return NULL;
+  HANDLE handle;
+  if (!handle_of(env, argv[0], &handle, "owners")) return NULL;
+  PSID owner = NULL;
+  PACL dacl = NULL;
+  PSECURITY_DESCRIPTOR descriptor_of = NULL;
+  DWORD error = GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
+                                &dacl, NULL, &descriptor_of);
+  if (error != ERROR_SUCCESS) return thrown(env, error, "owners", 0, 0, NOT_REFUSED);
+  napi_value result, writers;
+  napi_create_object(env, &result);
+  napi_create_array(env, &writers);
+  uint32_t count = 0;
+  if (dacl == NULL) {
+    SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
+    PSID everyone = NULL;
+    if (AllocateAndInitializeSid(&world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyone)) {
+      push_sid(env, writers, count++, everyone);
+      FreeSid(everyone);
+    } else {
+      push_sid(env, writers, count++, NULL);
+    }
+  } else {
+    for (DWORD i = 0; i < dacl->AceCount; i++) {
+      ACE_HEADER *header = NULL;
+      if (!GetAce(dacl, i, (LPVOID *)&header)) {
+        push_sid(env, writers, count++, NULL);
+        continue;
+      }
+      if ((header->AceFlags & INHERIT_ONLY_ACE) != 0) continue;
+      switch (header->AceType) {
+        case ACCESS_ALLOWED_ACE_TYPE:
+        case ACCESS_ALLOWED_CALLBACK_ACE_TYPE: {
+          // The two share ACCESS_ALLOWED_ACE's layout: the mask, then the trustee's SID.
+          ACCESS_ALLOWED_ACE *allowed = (ACCESS_ALLOWED_ACE *)header;
+          if ((allowed->Mask & CHANGES) != 0) push_sid(env, writers, count++, (PSID)&allowed->SidStart);
+          break;
+        }
+        case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+        case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+        case ACCESS_ALLOWED_COMPOUND_ACE_TYPE:
+          push_sid(env, writers, count++, NULL);
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  napi_value said;
+  napi_create_array(env, &said);
+  push_sid(env, said, 0, owner);
+  napi_value owner_text;
+  napi_get_element(env, said, 0, &owner_text);
+  napi_set_named_property(env, result, "owner", owner_text);
+  napi_set_named_property(env, result, "writers", writers);
+  LocalFree(descriptor_of);
+  return result;
+}
+
 static void constant(napi_env env, napi_value object, const char *key, uint32_t value) {
   set_uint(env, object, key, value);
 }
@@ -878,7 +967,7 @@ NAPI_MODULE_INIT() {
       {"openRoot", open_root}, {"openAt", open_at_call}, {"reopen", reopen},       {"mkdirAt", mkdir_at},
       {"unlinkAt", unlink_at}, {"renameAt", rename_at},  {"linkAt", link_at_call}, {"query", query},
       {"list", list},          {"pathOf", path_of},      {"inheritable", inheritable}, {"handles", handles},
-      {"bootId", boot_id},     {"userSid", user_sid},
+      {"bootId", boot_id},     {"userSid", user_sid},  {"owners", owners},
   };
   for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++) {
     napi_value fn;
@@ -898,6 +987,7 @@ NAPI_MODULE_INIT() {
   constant(env, constants, "FILE_GENERIC_READ", FILE_GENERIC_READ);
   constant(env, constants, "FILE_GENERIC_WRITE", FILE_GENERIC_WRITE);
   constant(env, constants, "DELETE", DELETE);
+  constant(env, constants, "READ_CONTROL", READ_CONTROL);
   constant(env, constants, "SYNCHRONIZE", SYNCHRONIZE);
   constant(env, constants, "FILE_SHARE_READ", FILE_SHARE_READ);
   constant(env, constants, "FILE_SHARE_WRITE", FILE_SHARE_WRITE);

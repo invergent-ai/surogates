@@ -17,6 +17,7 @@ import * as zlib from "node:zlib";
 
 import { spawnClean } from "../clean-child.js";
 import { download, type DownloadOptions, hashOf, sizeOf } from "../download.js";
+import { adminsOwn } from "../files/admins-own-win32.js";
 import { dirname, join } from "../host-path.js";
 import { forThisOs, notBuiltWords } from "../platform.js";
 import { addFooter, endsInFooter, FOOTER_SIZE } from "./vhd.js";
@@ -110,16 +111,20 @@ export function rootsOwn(path: string, run = false, found: Stats = lstatSync(pat
   if (run && (found.mode & 0o004) === 0) throw new Error(`${path} is not the install script's: its user cannot read it`);
 }
 
+// Whose word an installed app's record must be: an administrator's on Windows, root's elsewhere.
+const installersOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn }) ?? rootsOwn;
+
 /**
  * The base URL in the install record at *path*, which the install script writes:
  * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
  * installed app's /etc/surogate/install.json is: a record that is not root's own word
  * (rootsOwn) is not taken, as it would say where each of this computer's users downloads from.
+ * On Windows the MSI writes it, and it must be an administrator's word (adminsOwn).
  */
 export function installBase(path: string, rootOwned = false): string {
   let text: string;
   try {
-    if (rootOwned) rootsOwn(path);
+    if (rootOwned) installersOwn(path);
     text = readFileSync(path, "utf8");
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;

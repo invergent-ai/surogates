@@ -39,7 +39,7 @@ export const WINDOWS = [
   "test/credentials-win32.test.ts", "test/backups.test.ts",
   "test/login-item-win32.test.ts", "test/deep-link-win32.test.ts", "test/app-identity-win32.test.ts", "test/notifications-win32.test.ts",
   "test/menus-win32.test.ts", "test/main-window-win32.test.ts", "test/quick-entry-win32.test.ts",
-  "test/ca-source-win32.test.ts", "test/tools-look.test.ts",
+  "test/ca-source-win32.test.ts", "test/tools-look.test.ts", "test/installer-win32.test.ts", "test/installer.test.ts",
   "test/browser-known-win32.test.ts", "test/browser-processes-win32.test.ts", "test/browser-host-win32.test.ts",
   "test/folders-held-win32.test.ts",
   // The native programs' one workspace, and the one script that builds the Windows app.
