@@ -17,9 +17,9 @@
     that contains them (src/hosts/srt-win32.ts), for the network alone;
   - the install record, %ProgramData%\Surogate\install.json, of the base and channel the command line gives
     (SUROGATE_BASE, SUROGATE_CHANNEL), in a folder SYSTEM owns and only administrators and SYSTEM write, beside apply\,
-    which only they read or write, for the copies an update is checked from. A folder of either name that was there
-    before, which any user of %ProgramData% may make, is taken back by the MSI's own custom action first: SYSTEM made its
-    owner, its access list replaced, what it held removed, and a link in its place removed, never followed;
+    which only they read or write, for the copies an update is checked from. A Surogate folder that was there before,
+    which any user of %ProgramData% may make, is removed whole by the MSI's own custom action first, a link in its place
+    as a link, never followed, and the install makes its own, which Windows Installer removes again at the uninstall;
   - the base, the channel and SUROGATE_VMP remembered under HKLM\Software\Surogate: each later install, an upgrade or
     a repair, keeps them, unless its own command line gives another;
   - and, by its own custom action (native/windows/msi), Windows's Virtual Machine Platform turned on, with the restart
@@ -166,11 +166,12 @@
     <Binary Id="InstallRecord" SourceFile="install.json.in" />
     <Binary Id="SurogateMsi" SourceFile="!(bindpath.Msi)\surogate_msi.dll" />
     <CustomAction Id="EnableVirtualMachinePlatform" BinaryRef="SurogateMsi" DllEntry="EnableVirtualMachinePlatform" Execute="deferred" Impersonate="no" Return="check" />
-    <!-- The install's folders of %ProgramData% taken back, where they were there before it, before it makes them. -->
+    <!-- %ProgramData%\Surogate removed whole, where it was there before this version's first install, before the install
+         makes its own: never at a repair or another run of an installed version, whose folders are the install's own. -->
     <SetProperty Id="TakeBackDataFolders" Value="[DataFolder]" Before="TakeBackDataFolders" Sequence="execute" />
     <CustomAction Id="TakeBackDataFolders" BinaryRef="SurogateMsi" DllEntry="TakeBackDataFolders" Execute="deferred" Impersonate="no" Return="check" />
     <InstallExecuteSequence>
-      <Custom Action="TakeBackDataFolders" Before="CreateFolders" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="TakeBackDataFolders" Before="CreateFolders" Condition="NOT Installed" />
       <Custom Action="EnableVirtualMachinePlatform" Before="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot; AND SUROGATE_VMP &lt;&gt; &quot;0&quot;" />
     </InstallExecuteSequence>
     <!-- The restart the custom action asks for, asked of Windows at the install's end. -->

@@ -107,7 +107,7 @@ function Get-ShortcutFacts {
 # Nothing of the app's left on the computer: its folders, its service, its scheme, its shortcut, its rules, its record.
 function Check-Gone([string] $When) {
   Check "$When, no install folder" (-not (Test-Path $Installed))
-  Check "$When, no %ProgramData%\Surogate" (-not (Test-Path $Data))
+  Check "$When, no %ProgramData%\Surogate" (-not (Test-Path $Data)) "it holds: $(@(Get-ChildItem -Force -Recurse $Data -ErrorAction SilentlyContinue | ForEach-Object FullName) -join '; ')"
   Check "$When, no Surogate VM service" (-not (Get-Service -Name SurogateVM -ErrorAction SilentlyContinue))
   Check "$When, no surogate:// scheme" (-not (Test-Path $Scheme))
   Check "$When, no Start menu shortcut" (-not (Test-Path $Shortcut))
@@ -279,12 +279,13 @@ foreach ($pair in @(@($Rules[0], 'resources\app\bin\node.exe'), @($Rules[1], 're
 }
 
 # The install record, of the public base and channel where the command line gave none, where only administrators and
-# SYSTEM write; and apply\, which only they reach. Both folders the squatter made are the install's, and what they put
-# in them is gone, but the record, which is SYSTEM's and the install's own.
+# SYSTEM write; and apply\, which only they reach. The folders the squatter made are gone with all they held, and the
+# install made its own in their place.
 $record = Join-Path $Data 'install.json'
 Check 'with no base or channel given, the record holds the public ones' ((Get-Record) -eq '{"base":"https://surogate.ai","channel":"stable"}') (Get-Record)
-Check-Taken '%ProgramData%\Surogate, which the squatter made,' $Data $DataRules
-Check-Taken '%ProgramData%\Surogate\apply, which the squatter made,' (Join-Path $Data 'apply') $ApplyRules
+Check 'the take-back removed the squatter''s folder whole, before the install made its own' ($install.Log -match "Surogate: $([regex]::Escape($Data)) was there before the install, and is removed: ")
+Check-Taken '%ProgramData%\Surogate, made where the squatter''s was,' $Data $DataRules
+Check-Taken '%ProgramData%\Surogate\apply, made where the squatter''s was,' (Join-Path $Data 'apply') $ApplyRules
 Check 'what the squatter put in either folder is gone' (-not (Test-Path (Join-Path $Data 'planted.txt')) -and -not (Test-Path (Join-Path $Data 'apply\wintrust.dll'))) "$(Get-ChildItem -Force -Recurse $Data -ErrorAction SilentlyContinue | ForEach-Object FullName)"
 $recordOwner = if (Test-Path $record) { (Get-Acl $record).Owner } else { 'missing' }
 Check 'the record is SYSTEM''s or administrators'', with no access rule of its own' ($recordOwner -in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators' -and @(Get-Rules $record | Where-Object { $_ -ne 'inherited' }).Count -eq 0) "$recordOwner; $((Get-Rules $record) -join '; ')"
@@ -319,14 +320,16 @@ foreach ($given in "INSTALLFOLDER=`"$Elsewhere\`"", "TARGETDIR=`"$Elsewhere\`"")
 New-Item -ItemType Directory -Force $Victim | Out-Null
 icacls $Victim /setowner $Squatter | Out-Null
 $victimSddl = (Get-Acl $Victim).Sddl
-As-Squatter { $ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $Data -Target $Victim | Out-Null }.GetNewClosure()
-Check 'the squatter put a link in the data folder''s place' ((Get-Item $Data -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -and (Get-Acl $Data).Owner -like "*\$Squatter") "$((Get-Acl $Data).Owner)"
+$linked = try { As-Squatter { $ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $Data -Target $Victim | Out-Null }.GetNewClosure(); '' } catch { "$_" }
+$link = Get-Item $Data -Force -ErrorAction SilentlyContinue
+Check 'the squatter put a link in the data folder''s place' ($link -and ($link.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Get-Acl $Data).Owner -like "*\$Squatter") "$linked"
 $again = Msiexec 'install-given' "/i `"$Msi`" SUROGATE_VMP=0 SUROGATE_BASE=https://mirror.example.test SUROGATE_CHANNEL=beta"
+$again.Log -split "\r?\n" | Where-Object { $_ -match 'Surogate: ' } | ForEach-Object { "      log: $($_.Trim())" }
 Check 'it installs with SUROGATE_VMP=0 and a base and channel of its own' ($again.Code -eq 0) "msiexec exited $($again.Code)"
 Check 'with SUROGATE_VMP=0 the custom action does not run' ($again.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $again.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
 Check 'the install record holds the base and channel given' ((Get-Record) -eq '{"base":"https://mirror.example.test","channel":"beta"}') (Get-Record)
 $made = Get-Item $Data -Force -ErrorAction SilentlyContinue
-Check 'a link in the data folder''s place is removed, and the folder is one' ($made -and $made.PSIsContainer -and -not ($made.Attributes -band [IO.FileAttributes]::ReparsePoint)) "$(if ($made) { $made.Attributes } else { 'missing' })"
+Check 'a link in the data folder''s place is removed, as a link, and the folder is one' ($again.Log -match "Surogate: $([regex]::Escape($Data)) was there before the install, and is removed: $([regex]::Escape($Data)) \(a link\)" -and $made -and $made.PSIsContainer -and -not ($made.Attributes -band [IO.FileAttributes]::ReparsePoint)) "$(if ($made) { $made.Attributes } else { 'missing' })"
 Check 'the folder the link named is as it was, and holds nothing of the install''s' ((Get-Acl $Victim).Sddl -eq $victimSddl -and @(Get-ChildItem -Force $Victim).Count -eq 0) "$(Get-ChildItem -Force $Victim | ForEach-Object Name)"
 Check-Taken '%ProgramData%\Surogate, made where the link was,' $Data $DataRules
 $kept = Get-ItemProperty $Remembered -ErrorAction SilentlyContinue

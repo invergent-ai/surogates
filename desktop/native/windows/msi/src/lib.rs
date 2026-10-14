@@ -1,9 +1,9 @@
 //! The MSI's own custom actions (windows/msi/Surogate.wxs), in the MSI's Binary table and never installed, each deferred
 //! and run as LocalSystem:
 //!
-//! - `TakeBackDataFolders`, before the MSI makes its folders of `%ProgramData%`: a `Surogate` or `apply` folder that is
-//!   there already, which any user may have made, as `%ProgramData%` lets its users make folders, is the install's again
-//!   (folders.rs).
+//! - `TakeBackDataFolders`, before a first install of this version makes its folders of `%ProgramData%`: a `Surogate`
+//!   that is there already, which any user may have made, as `%ProgramData%` lets its users make folders, is removed
+//!   whole, so that the install makes its own (folders.rs).
 //! - `EnableVirtualMachinePlatform`, once the files are in place. It turns on Windows's Virtual Machine Platform, which
 //!   the Host Compute Service that the Surogate VM service calls needs, with DISM, as WSL's installer turns it on (WSL's
 //!   `WslInstall.cpp`): `dism.exe /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /NoRestart`, and `/Quiet`,
