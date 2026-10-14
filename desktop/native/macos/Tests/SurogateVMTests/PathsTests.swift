@@ -79,7 +79,7 @@ final class PathsTests: XCTestCase {
     let laid = try Laid(self)
     let root = (laid.places.run as NSString).deletingLastPathComponent
     let key = "\(laid.places.data)/history/0123456789abcdef"
-    let thread = "7e5bf562-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
+    let thread = "3c9d2a71-5e4b-4f60-9a8b-1c2d3e4f5a6b"
     let copy = "\(key)/threads/\(thread)"
     dir(copy)
     // The place, and a thread's copy in it, as history/place.ts lays them out.
