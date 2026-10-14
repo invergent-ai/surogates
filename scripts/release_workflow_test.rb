@@ -606,16 +606,18 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal [
       { "name" => "desktop-guest-amd64", "path" => "images/guest/out/initrd\nimages/guest/out/rootfs.img\nimages/guest/out/vmlinuz\nimages/guest/out/manifest.json\n", "retention-days" => 1, "if-no-files-found" => "error" },
       { "name" => "desktop-agent-disk", "path" => "desktop/dist/agent.img", "retention-days" => 1, "if-no-files-found" => "error" },
+      # The measurements' own agent disk, with the probe that writes the kernel's log, never the app's.
+      { "name" => "desktop-agent-measure-disk", "path" => "desktop/test/vm/win32/measure/probing/agent.img", "retention-days" => 1, "if-no-files-found" => "error" },
     ], kept.fetch("vm-guest")
     boot = jobs.fetch("vm-boot")
     assert_equal true, boot.fetch("continue-on-error")
     assert_equal "vm-guest", boot.fetch("needs")
     assert_equal %w[desktop-win-vm-boot], kept.fetch("vm-boot").map { |with| with.fetch("name") }
-    assert_equal({ "vm-guest" => 2, "vm-boot" => 1 }, kept.reject { |_, withs| withs.empty? }.transform_values(&:length))
+    assert_equal({ "vm-guest" => 3, "vm-boot" => 1 }, kept.reject { |_, withs| withs.empty? }.transform_values(&:length))
     # Taken from this run alone, by no token, before the measurement that boots them.
     steps = boot.fetch("steps")
     taken = steps.select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
-    assert_equal [{ "name" => "desktop-guest-amd64", "path" => "images/guest/out" }, { "name" => "desktop-agent-disk", "path" => "desktop/dist" }], taken.map { |step| step.fetch("with") }
+    assert_equal [{ "name" => "desktop-guest-amd64", "path" => "images/guest/out" }, { "name" => "desktop-agent-disk", "path" => "desktop/dist" }, { "name" => "desktop-agent-measure-disk", "path" => "desktop/test/vm/win32/measure/probing" }], taken.map { |step| step.fetch("with") }
     measured = steps.index { |step| step["run"].to_s.include?("npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot") }
     refute_nil measured
     taken.each { |step| assert_operator steps.index(step), :<, measured }
@@ -791,8 +793,8 @@ class ReleaseWorkflowTest < Minitest::Test
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
-        "vm-guest" => ["ab2559772a48cb7e", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 0671721aededeb3b 18d2126a5450e6bd 06af0ce2143d3c1f 8c986439d5d86488 a6aeb1f05887979b 09d5e59cd91883c6 e65248e95c654f75]],
-        "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 535e74b2af1d7815 ee88c8a9aa9b67f9 7e59534427c2acc1 24591223ab9a9cbb dc267d2ae84ae219 1edc8d7d3216b9d8]],
+        "vm-guest" => ["ab2559772a48cb7e", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 0671721aededeb3b 18d2126a5450e6bd 06af0ce2143d3c1f 8c986439d5d86488 a6aeb1f05887979b 09d5e59cd91883c6 e65248e95c654f75 35697d500667a260 7553a543a3fb9bdd]],
+        "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 535e74b2af1d7815 ee88c8a9aa9b67f9 83c3999eb9a772b5 7e59534427c2acc1 24591223ab9a9cbb 427c1c30444870b3 85c6bbf8d6ef4ca0 1edc8d7d3216b9d8]],
         "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {
