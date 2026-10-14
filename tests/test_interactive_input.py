@@ -52,6 +52,7 @@ def _pending_row(questions):
     return SimpleNamespace(
         action_ref={"tool_call_id": "tc1"},
         payload={"questions": questions, "context": ""},
+        user_id=None,
         created_at=None,
     )
 
