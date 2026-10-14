@@ -10,7 +10,7 @@ vi.mock("../src/lib/office", async (importOriginal) => ({
   loadDocsApi: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { loadDocsApi } from "../src/lib/office";
+import { loadDocsApi, officeEventFor } from "../src/lib/office";
 
 const { loadDocsApi: realLoadDocsApi } = await vi.importActual<typeof import("../src/lib/office")>("../src/lib/office");
 
@@ -187,6 +187,27 @@ describe("save notices in the editor pane", () => {
     await rerender(pane({ type: "office.saved", eventId: 14 }));
     expect(view.querySelector('[role="status"]')).toBeNull();
     expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("officeEventFor", () => {
+  it("finds a document's notice under the spelling its saves are named by", () => {
+    const waiting: AgentChatOfficeEvent = { type: "office.save_waiting", eventId: 13, computer: "Mac", reason: "offline" };
+    const events = { "Plan.docx": waiting };
+    expect(officeEventFor(events, "Plan.docx")).toBe(waiting);
+    expect(officeEventFor(events, "plan.docx")).toBe(waiting);
+    expect(officeEventFor(events, "other.docx")).toBeUndefined();
+  });
+
+  it("prefers the notice named exactly as the pane names its document", () => {
+    const exact: AgentChatOfficeEvent = { type: "office.saved", eventId: 14 };
+    const other: AgentChatOfficeEvent = { type: "office.save_failed", eventId: 15, reason: "declined" };
+    expect(officeEventFor({ "PLAN.docx": other, "plan.docx": exact }, "plan.docx")).toBe(exact);
+  });
+
+  it("ignores the Unicode form a name is written in", () => {
+    const waiting: AgentChatOfficeEvent = { type: "office.save_waiting", eventId: 16, computer: "Mac", reason: "waiting" };
+    expect(officeEventFor({ "R\u00e9sum\u00e9.docx": waiting }, "re\u0301sume\u0301.docx")).toBe(waiting);
   });
 });
 
