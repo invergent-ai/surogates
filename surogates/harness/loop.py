@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.history import (
@@ -102,8 +102,11 @@ from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
+from surogates.channels.capabilities import capabilities_for
+from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
+    describe_for_conversation,
     describe_for_device,
     drop_unusable_tools,
     filter_schemas_for_tenant,
@@ -114,6 +117,7 @@ from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
 from surogates.session.store import RERUN_WINDOW
 from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
 
@@ -208,6 +212,7 @@ from surogates.harness.loop_pending import (
     _first_unread,
     _goal_turn_waits,
     _left_behind,
+    _nothing_to_answer,
     _plain_message_unread,
     _read_as_words,
     _shown_before_its_answer,
@@ -632,6 +637,7 @@ class AgentHarness(
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
         runtime_config_cache: Any | None = None,
+        whatsapp_forms: tuple[dict[str, Any], ...] = (),
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
     ) -> None:
@@ -694,6 +700,7 @@ class AgentHarness(
         # The agent's runtime config, for the planes a project's turn is
         # held on at its wake (``admit_turn``).
         self._runtime_config_cache = runtime_config_cache
+        self._whatsapp_forms = tuple(whatsapp_forms or ())
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -1618,7 +1625,7 @@ class AgentHarness(
         return session.model_copy(update={"config": {**config, "history_off": await over_history_cap(self._storage, session)}})
 
     def _overlay_repos(self, session: Session) -> Session:
-        """Overlay the agent's configured repos + ssh targets onto a wake-local session.
+        """Overlay the agent's configured repos, ssh targets and WhatsApp forms onto a wake-local session.
 
         ``wake`` re-fetches the session from the store, so the runtime-projected
         repos/ssh_targets are applied here so ``/code``, the coding tool, and the
@@ -1626,9 +1633,11 @@ class AgentHarness(
         ``session.config['ssh_targets']``.  Never written back to the persisted
         row; with nothing configured the session is returned unchanged.
         """
-        if not self._coding_repos and not self._ssh_targets:
+        if not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms:
             return session
         config = dict(session.config or {})
+        if self._whatsapp_forms:
+            config["whatsapp_forms"] = [dict(form) for form in self._whatsapp_forms]
         if self._coding_repos:
             config["repos"] = [dict(repo) for repo in self._coding_repos]
         if self._ssh_targets:
@@ -1966,6 +1975,20 @@ class AgentHarness(
                     session_id,
                     cursor,
                 )
+                return
+            # A conversation revived for a message that never arrived (a
+            # plan gate dropped it) has nothing to answer: the model would
+            # write from its instructions alone, and a channel would send
+            # that to the person.  Put it back to rest instead.
+            if (
+                _nothing_to_answer(pending) and not unanswered_calls(all_events)
+                and not command_waits and not _hand_back_unread(all_events)
+            ):
+                logger.info(
+                    "Session %s: revived for a message that never came; nothing to answer",
+                    session_id,
+                )
+                await self._store.update_session_status(session_id, "completed")
                 return
 
             # 4'. A project's turn no route admitted (a thread's, a helper's,
@@ -2797,6 +2820,7 @@ class AgentHarness(
         # Drop tools whose backing resource this agent does not have.
         # Schemas ship on every request, so an unusable one is paid for
         # on every turn of every session.
+        whatsapp_forms = getattr(self, "_whatsapp_forms", ())
         tool_schemas = drop_unusable_tools(
             tool_schemas,
             # Default to "has it" when the attribute is absent: an
@@ -2817,9 +2841,13 @@ class AgentHarness(
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+            has_forms=capabilities_for(session.channel).forms and bool(whatsapp_forms),
             has_file_pane=has_file_pane(session),
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
+        tool_schemas = describe_for_conversation(
+            tool_schemas, channel=session.channel, forms=whatsapp_forms,
+        )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
         offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)
@@ -3871,6 +3899,18 @@ class AgentHarness(
                             "Session %s: aborting after %d consecutive invalid tool calls",
                             session.id, consecutive_invalid_tool_calls,
                         )
+                        if session.channel in ADAPTER_CHANNELS:
+                            messages.append(assistant_message)
+                            messages.extend(
+                                {"role": "tool", "tool_call_id": tc.get("id", ""), "content": error_msg}
+                                for tc, error_msg in invalid_calls
+                            )
+                            await self._request_final_summary(
+                                session, messages, system_prompt, lease,
+                                request=request, cost_tracker=cost_tracker, turn_id=turn_id,
+                                iteration_index=turn_iteration_index, reason="invalid_tool_calls",
+                            )
+                            return
                         await self._complete_session(
                             session, messages, lease, reason="invalid_tool_calls",
                             through_event_id=event_id,
@@ -4028,6 +4068,13 @@ class AgentHarness(
                     "ending turn",
                     session.id, halt.code, halt.count,
                 )
+                if session.channel in ADAPTER_CHANNELS:
+                    await self._request_final_summary(
+                        session, messages, system_prompt, lease,
+                        request=request, cost_tracker=cost_tracker, turn_id=turn_id,
+                        iteration_index=turn_iteration_index, reason="tool_loop_halt",
+                    )
+                    return
                 await self._complete_session(
                     session, messages, lease,
                     reason="tool_loop_halt",
@@ -4053,6 +4100,19 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="whiteboard_sketch_drawn",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A form's answers come back as the person's next message, so the
+            # turn has nothing left to do once it is sent; going on would put
+            # more text under the form.
+            if _form_sent(tool_calls_raw, tool_results) and not await self._said_to_the_model(session, steer_cursor):
+                logger.info("Session %s: a form was sent; ending turn", session.id)
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="form_sent",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -4758,9 +4818,12 @@ class AgentHarness(
         question = str(decision.get("question") or "").strip()
         if not question:
             return None
-        context = str(decision.get("context") or content).strip()
+        # The context is the reply being converted, word for word: channels
+        # deliver it as the agent talking to the person, and the judge's own
+        # summary of it reached a person as "Asistentul" in place of the reply.
+        context = (content or "").strip()
 
-        tool_call_id = f"call_ask_user_question_rescue_{uuid4().hex[:24]}"
+        tool_call_id = f"{ASK_USER_QUESTION_RESCUE_PREFIX}{uuid4().hex[:24]}"
         assistant_message["content"] = None
         assistant_message["tool_calls"] = [
             {
@@ -5549,8 +5612,14 @@ class AgentHarness(
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
         iteration_index: int | None = None,
+        reason: str = "budget_exhausted",
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
+
+        Also ends a messaging-channel turn a guard stopped (*reason*): the
+        person on WhatsApp sees only what is delivered, and a turn halted
+        between tool calls left a person who had just tapped a button with
+        no reply at all.
 
         *request* is what the user asked for.  Nothing reads it today: a
         ``budget_exhausted`` end writes no turn summary (``wants_turn_summary``),
@@ -5566,11 +5635,18 @@ class AgentHarness(
             session.id,
         )
 
-        summary_request = (
-            "You've reached the maximum number of tool-calling iterations allowed. "
-            "Please provide a final response summarizing what you've found and accomplished so far, "
-            "without calling any more tools."
-        )
+        if session.channel in ADAPTER_CHANNELS:
+            summary_request = (
+                "Your tool calls cannot run any more this turn. Without calling any tools, "
+                "reply now to the person you are talking with, in their language: answer "
+                "what they last said as far as you can, or tell them briefly what happens next."
+            )
+        else:
+            summary_request = (
+                "You've reached the maximum number of tool-calling iterations allowed. "
+                "Please provide a final response summarizing what you've found and accomplished so far, "
+                "without calling any more tools."
+            )
         messages.append({"role": "user", "content": summary_request})
 
         model_id = self._current_model or session.model or self._default_model
@@ -5631,7 +5707,7 @@ class AgentHarness(
                 assistant_message, usage_data,
                 model_id=model_id, cost_tracker=cost_tracker,
             )
-            final_payload["finish_reason"] = "budget_exhausted"
+            final_payload["finish_reason"] = reason
             if turn_id is not None:
                 final_payload["turn_id"] = turn_id
                 final_payload["iteration_index"] = (
@@ -5655,7 +5731,7 @@ class AgentHarness(
             )
 
         await self._complete_session(
-            session, messages, lease, reason="budget_exhausted",
+            session, messages, lease, reason=reason,
             cost_tracker=cost_tracker,
             turn_id=turn_id,
             user_message=request,
@@ -6379,6 +6455,14 @@ def _whiteboard_sketch_turn_done(
         if not str(result.get("content") or "").startswith("Error:"):
             return True
     return False
+
+
+def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
+    sent = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") == "send_form"}
+    return any(
+        r.get("tool_call_id") in sent and str(r.get("content") or "").startswith(FORM_SENT)
+        for r in tool_results
+    )
 
 
 def _whiteboard_sketch_filter(

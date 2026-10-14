@@ -14,6 +14,7 @@ from surogates.session.events import EventType
 
 from tests.test_channel_pipeline import (
     SESSION_ID,
+    USER_ID,
     _make_config,
     _make_deps,
     _make_msg,
@@ -92,6 +93,7 @@ async def test_telegram_plain_reply_resolves_pending_input(monkeypatch):
             "tool_call_id": "tc9",
             "questions": [{"prompt": "Deploy?", "choices": [{"label": "Yes"}, {"label": "No"}]}],
             "context": "",
+            "user_id": USER_ID,
         }
 
     async def input_nudge(session_id, msg, text):
@@ -189,7 +191,7 @@ async def test_telegram_plain_reply_falls_through_when_resolution_races(monkeypa
     deps = _make_deps()
 
     async def pending_input(session_id):
-        return {"tool_call_id": "tc9", "questions": [{"prompt": "Deploy?"}], "context": ""}
+        return {"tool_call_id": "tc9", "questions": [{"prompt": "Deploy?"}], "context": "", "user_id": USER_ID}
 
     deps.pending_input = pending_input
     monkeypatch.setattr(

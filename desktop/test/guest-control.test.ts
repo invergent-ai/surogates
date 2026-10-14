@@ -24,8 +24,10 @@ function fakeRoots() {
       calls.push(["setup", root, folder, share, user, ended]);
       if (root === "broken") throw new Error("the session runner exited: no namespaces");
     },
+    // Says it released the share's device for a root of that name alone.
     teardown: async (root, share) => {
       calls.push(["teardown", root, share]);
+      return root === "released";
     },
     perform: (root, kind, args, signal, id) => {
       calls.push(["perform", root, kind, args, id]);
@@ -140,33 +142,29 @@ describe("the agent's control port", () => {
     agent.hello();
   });
 
-  it("takes Apple's share by one of its devices' tags, with a folder's name in it, and refuses any other", async () => {
+  it("takes Apple's share by one of its eight devices' tags, and refuses any other", async () => {
     const { sent, calls, tell, settle } = control();
     tell({ type: "done", id: 0, user: USER });
     const setup = (id: number, share: unknown) => tell({ type: "setup", id, root: `root-${id}`, folder: "/Users/someone/project", share, ended: [] });
-    setup(1, { kind: "vz", tag: "surogate", name: "r1" });
+    setup(1, { kind: "vz", tag: "s1" });
     setup(2, { kind: "vz", tag: "s8" });
-    setup(3, { kind: "vz", tag: "surogate", name: "r123456789" });
     for (const [id, share] of [
-      [4, { kind: "vz", tag: "s9" }], [5, { kind: "vz", tag: "s0" }], [6, { kind: "vz", tag: "r1" }], [7, { kind: "vz", tag: "surogate2" }],
-      [8, { kind: "vz", tag: "surogate", name: "r0" }], [9, { kind: "vz", tag: "surogate", name: "r1/../r2" }],
-      [10, { kind: "vz", tag: "surogate", name: "r1234567890" }], [11, { kind: "vz", tag: "surogate", name: 1 }],
-      [12, { kind: "vz", tag: "surogate", name: null }], [13, { kind: "vz", name: "r1" }],
+      [3, { kind: "vz", tag: "s9" }], [4, { kind: "vz", tag: "s0" }], [5, { kind: "vz", tag: "r1" }], [6, { kind: "vz", tag: "surogate" }],
+      [7, { kind: "vz", tag: "s1", name: "r1" }], [8, { kind: "vz", tag: "s1 " }], [9, { kind: "vz", tag: 1 }], [10, { kind: "vz" }],
     ] as const) setup(id, share);
-    tell({ type: "teardown", id: 14, root: "root-1", share: { kind: "vz", tag: "s1" } });
-    tell({ type: "teardown", id: 15, root: "root-1", share: { kind: "vz", tag: "s1", name: "-o" } });
+    tell({ type: "teardown", id: 11, root: "root-1", share: { kind: "vz", tag: "s1" } });
+    tell({ type: "teardown", id: 12, root: "root-1", share: { kind: "vz", tag: "s1", name: "-o" } });
     await settle();
     expect(sent.filter(({ type }) => type === "failed")).toEqual([
-      ...[4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map((id) => ({ type: "failed", id, message: "The agent cannot take this setup request" })),
-      { type: "failed", id: 15, message: "The agent cannot take this teardown request" },
+      ...[3, 4, 5, 6, 7, 8, 9, 10].map((id) => ({ type: "failed", id, message: "The agent cannot take this setup request" })),
+      { type: "failed", id: 12, message: "The agent cannot take this teardown request" },
     ]);
     const done = sent.filter((message): message is Extract<FromAgent, { type: "done" }> => message.type === "done");
-    expect(done.map(({ id }) => id).sort((a, b) => a - b)).toEqual([1, 2, 3, 14]);
+    expect(done.map(({ id }) => id).sort((a, b) => a - b)).toEqual([1, 2, 11]);
     expect(calls).toEqual([
       ["teardown", "root-1", { kind: "vz", tag: "s1" }],
-      ["setup", "root-1", "/Users/someone/project", { kind: "vz", tag: "surogate", name: "r1" }, USER, []],
+      ["setup", "root-1", "/Users/someone/project", { kind: "vz", tag: "s1" }, USER, []],
       ["setup", "root-2", "/Users/someone/project", { kind: "vz", tag: "s8" }, USER, []],
-      ["setup", "root-3", "/Users/someone/project", { kind: "vz", tag: "surogate", name: "r123456789" }, USER, []],
     ]);
   });
 
@@ -274,6 +272,14 @@ describe("the agent's control port", () => {
       { type: "done", id: 1 },
     ]);
     expect(calls).toEqual([["teardown", "root-1", share]]);
+  });
+
+  it("says a teardown released its share's device only where the roots say nothing of it is left in the guest", async () => {
+    const { sent, tell, settle } = control();
+    tell({ type: "teardown", id: 1, root: "released", share: { kind: "vz", tag: "s2" } });
+    tell({ type: "teardown", id: 2, root: "held", share: { kind: "vz", tag: "s3" } });
+    await settle();
+    expect(sent).toEqual([{ type: "done", id: 1, released: true }, { type: "done", id: 2 }]);
   });
 
   it("powers the guest off at the host's shutdown, and answers nothing: the VM's exit is the answer", async () => {

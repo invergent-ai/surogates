@@ -7,6 +7,10 @@ from dataclasses import dataclass
 
 
 ANSWER_ACTION_ID = "surogates_input_answer"
+#: A choice tapped right in the message: ``surogates_input_choice_<index>``.
+CHOICE_ACTION_PREFIX = "surogates_input_choice_"
+#: At most this many choices, each this short, are buttons in the message; more, or longer, open the form.
+INLINE_CHOICES, INLINE_LABEL_CHARS = 5, 40
 MODAL_CALLBACK_ID = "surogates_input_modal"
 OTHER_VALUE = "__other__"
 
@@ -34,6 +38,19 @@ def _mrkdwn(text: str, *, limit: int = 2900) -> dict:
     return {"type": "mrkdwn", "text": (text or "")[:limit]}
 
 
+def inline_choices(questions: list[dict]) -> list[str] | None:
+    """The labels to show as buttons in the message itself: one question with a few short choices
+    (a confirmation, yes/no), so one tap answers it, as WhatsApp's reply buttons and Telegram's inline
+    keyboard do; a typed reply instead reaches the agent as the person's message. ``None``: the question
+    needs the form."""
+    if len(questions) != 1:
+        return None
+    labels = [str(c.get("label") or "").strip() for c in questions[0].get("choices") or []]
+    if not 1 <= len(labels) <= INLINE_CHOICES or not all(0 < len(x) <= INLINE_LABEL_CHARS for x in labels):
+        return None
+    return labels
+
+
 def build_input_prompt_blocks(
     *,
     session_id: str,
@@ -41,6 +58,21 @@ def build_input_prompt_blocks(
     questions: list[dict],
     context: str = "",
 ) -> tuple[str, list[dict]]:
+    ref = {"session_id": str(session_id), "tool_call_id": str(tool_call_id)}
+    labels = inline_choices(questions)
+    if labels is not None:
+        prompt = str(questions[0].get("prompt") or "").strip()
+        body = "\n".join(p for p in ((context or "").strip(), prompt) if p) or "Choose one"
+        buttons = [
+            {"type": "button", "text": _plain(label), "action_id": f"{CHOICE_ACTION_PREFIX}{i}",
+             "value": json.dumps({**ref, "choice": i}, separators=(",", ":")),
+             **({"style": "primary"} if i == 0 else {})}
+            for i, label in enumerate(labels)
+        ]
+        return prompt or body, [
+            {"type": "section", "text": _mrkdwn(body)},
+            {"type": "actions", "elements": buttons},
+        ]
     first_prompt = (questions[0].get("prompt") if questions else "") or "I need your input"
     summary = (context or "").strip() or first_prompt
     text = "I need your input to continue."
@@ -57,10 +89,7 @@ def build_input_prompt_blocks(
                     "text": _plain("Answer"),
                     "style": "primary",
                     "action_id": ANSWER_ACTION_ID,
-                    "value": json.dumps(
-                        {"session_id": str(session_id), "tool_call_id": str(tool_call_id)},
-                        separators=(",", ":"),
-                    ),
+                    "value": json.dumps(ref, separators=(",", ":")),
                 },
             ],
         },
@@ -167,6 +196,21 @@ def build_question_modal(
         "close": _plain("Cancel", limit=24),
         "blocks": blocks,
     }
+
+
+def parse_choice(action: dict, questions: list[dict]) -> tuple[str, str, list[dict]] | None:
+    """A tapped choice button as ``(session_id, tool_call_id, responses)``; ``None`` when it names no choice
+    of this question."""
+    if not str(action.get("action_id") or "").startswith(CHOICE_ACTION_PREFIX):
+        return None
+    try:
+        ref = json.loads(action.get("value") or "{}")
+        choice = (questions[0].get("choices") or [])[int(ref["choice"])]
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+    prompt = questions[0].get("prompt") or "Question 1"
+    return (str(ref.get("session_id") or ""), str(ref.get("tool_call_id") or ""),
+            [{"question": prompt, "answer": choice.get("label") or "", "is_other": False}])
 
 
 def _value(values: dict, block_id: str) -> dict:

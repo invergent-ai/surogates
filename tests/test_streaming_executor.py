@@ -1040,3 +1040,26 @@ class TestNoEarlyStart:
         assert dispatched == []
         await executor.get_all_results()
         assert dispatched == ["office_edit"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["ask_user_question", "send_form"])
+async def test_a_question_or_form_waits_for_the_response_to_be_saved(tool_name) -> None:
+    """Started mid-stream, the question's channel prompt (or the form's) overtook
+    the text the model wrote beside it: patients got it before the introduction."""
+    started: list[str] = []
+
+    async def dispatch(name, args, **kwargs):
+        started.append(name)
+        return json.dumps({"ok": True})
+
+    tools = _make_registry(tool_name)
+    tools.dispatch = dispatch
+    executor = _make_executor(tools=tools)
+
+    executor.add_tool(_make_tool_call(tool_name, call_id="tc_q"))
+    await asyncio.sleep(0)
+    assert started == []
+
+    await executor.get_all_results()
+    assert started == [tool_name]

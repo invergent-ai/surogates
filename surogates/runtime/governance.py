@@ -164,9 +164,27 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
 
 #: Tools that were renamed: a policy written with the old name keeps meaning
 #: the same tool.  ``checkin_escalate`` became ``escalate`` when escalation
-#: stopped being limited to check-ins.  Applied here, where ops' blobs are
-#: parsed, so the allow, deny and approval lists all honour it.
-_RENAMED_TOOLS = {"checkin_escalate": "escalate"}
+#: stopped being limited to check-ins; the ``care_team_*`` tools became
+#: ``team_*`` when follow-up stopped being only for clinics, and
+#: ``checkin_outcome`` became ``step_outcome`` with journeys.  Applied here,
+#: where ops' blobs are parsed, so the allow, deny and approval lists all
+#: honour it, and to a model's calls by :func:`rename_tool_calls`.
+RENAMED_TOOLS = {
+    "checkin_escalate": "escalate",
+    "care_team_overview": "team_overview",
+    "care_team_message_patient": "team_message_person",
+    "care_team_update_patient": "team_update_person",
+    "care_team_enroll_patient": "team_enroll_person",
+    "checkin_outcome": "step_outcome",
+}
+
+
+def rename_tool_calls(tool_calls: Any) -> None:
+    """Give a model's call of a renamed tool the tool's new name, in place."""
+    for tc in tool_calls or ():
+        fn = tc.get("function") or {}
+        if fn.get("name") in RENAMED_TOOLS:
+            fn["name"] = RENAMED_TOOLS[fn["name"]]
 
 
 def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
@@ -186,7 +204,7 @@ def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
             t.strip() for t in value if isinstance(t, str) and t.strip()
         }
         return names | {
-            new for old, new in _RENAMED_TOOLS.items() if old in names
+            new for old, new in RENAMED_TOOLS.items() if old in names
         }
     if value not in (None, []):
         logger.warning(
@@ -229,7 +247,9 @@ def disclosure_config(
     deployment default like an unconfigured agent.
 
     Otherwise returns ``{"enabled", "level", "text"}`` with the level
-    clamped to the harness vocabulary.  Unknown levels degrade to
+    clamped to the harness vocabulary.  The text is the block's own
+    ``text`` when set, else the level's copy in the block's ``language``,
+    else English; level ``none`` is silent whatever ``text`` says.  Unknown levels degrade to
     ``basic`` (disclosure still shown) rather than ``none`` so a
     vocabulary drift upstream can never silently switch disclosure off.
     An explicitly disabled block returns
@@ -246,14 +266,18 @@ def disclosure_config(
     if not raw.get("enabled", False):
         return {"enabled": False, "level": "none", "text": ""}
     level = str(raw.get("level", "basic")).strip().lower()
+    text = disclosure_text(level, str(raw.get("language") or ""))
+    custom = raw.get("text")
+    if text and isinstance(custom, str) and custom.strip():
+        text = custom.strip()
     return {
         "enabled": True,
         "level": level if level in _LEVEL_VALUES else "basic",
-        "text": disclosure_text(level),
+        "text": text,
     }
 
 
-def disclosure_text(level: str) -> str:
+def disclosure_text(level: str, language: str = "") -> str:
     """The disclosure copy for a level string, empty for ``none``.
 
     Adds string normalisation and the ``none`` case on top of
@@ -265,6 +289,6 @@ def disclosure_text(level: str) -> str:
     if normalized == "none":
         return ""
     try:
-        return disclosure_text_for(TransparencyLevel(normalized))
+        return disclosure_text_for(TransparencyLevel(normalized), language)
     except ValueError:
-        return disclosure_text_for(TransparencyLevel.BASIC)
+        return disclosure_text_for(TransparencyLevel.BASIC, language)

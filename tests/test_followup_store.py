@@ -6,6 +6,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+import sqlalchemy as sa
 
 from surogates.db.models import ProgramScheduleRow
 from surogates.followup import store
@@ -155,6 +156,11 @@ async def test_queue_outreach_validates(sf):
     row = await store.queue_outreach(sf, **base, kind="alert", text=" fever ")
     assert row.state == "queued"
     assert row.text == "fever"
+    # Any channel we may write first on; never one that cannot.
+    slack = await store.queue_outreach(sf, **{**base, "platform": "slack"}, kind="alert", text="hi")
+    assert slack.platform == "slack"
+    with pytest.raises(ValueError):
+        await store.queue_outreach(sf, **{**base, "platform": "website"}, kind="alert", text="hi")
 
 
 @pytest.mark.asyncio
@@ -255,3 +261,92 @@ async def test_settings_change_only_the_fields_given(sf):
     assert saved.alert_template_name == "alerta"
     with pytest.raises(ValueError):
         await store.update_settings(sf, org_id=ORG, agent_id=AGENT, colour="red")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field, bad, good", [
+    ("operator_unanswered_hours", [0, 73, "x", 1.5, True], [1, 72, "24", None]),
+    ("red_alert_reminder_minutes", [4, 721, "soon"], [5, 720, None]),
+])
+async def test_outreach_timing_settings_are_bounded(sf, field, bad, good):
+    from surogates.followup import store as followup_store
+
+    for value in bad:
+        with pytest.raises(ValueError, match=f"{field} must be a whole number"):
+            await followup_store.update_settings(sf, org_id=ORG, agent_id="a1", **{field: value})
+    for value in good:
+        row = await followup_store.update_settings(sf, org_id=ORG, agent_id="a1", **{field: value})
+        assert getattr(row, field) == (int(value) if value is not None else None)
+
+
+def test_the_passes_look_back_past_the_longest_setting():
+    from datetime import timedelta
+
+    from surogates.followup import outreach
+    from surogates.followup.store import SETTINGS_RANGES
+
+    assert outreach.OUTCOME_LOOKBACK > timedelta(hours=SETTINGS_RANGES["operator_unanswered_hours"][1])
+    assert outreach.OUTCOME_LOOKBACK > outreach.UNANSWERED_AFTER
+    assert outreach.REMINDER_LOOKBACK > timedelta(minutes=SETTINGS_RANGES["red_alert_reminder_minutes"][1])
+
+
+@pytest.mark.asyncio
+async def test_a_team_enrolment_is_recorded_as_team(sf):
+    row = await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id="a1", user_id=uuid.uuid4(), protocol="p",
+        start_date=None, phase=None, enrolled_by="team",
+    )
+    assert row.enrolled_by == "team"
+
+
+@pytest.mark.asyncio
+async def test_a_persons_zone_and_channel_are_validated_and_kept(sf):
+    user = uuid.uuid4()
+    row = await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", start_date=None,
+        phase=None, enrolled_by="agent", timezone="America/New_York", preferred_channel="telegram",
+    )
+    assert (row.timezone, row.preferred_channel) == ("America/New_York", "telegram")
+    with pytest.raises(ValueError):
+        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", timezone="Mars/Base")
+    with pytest.raises(ValueError):
+        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", preferred_channel="website")
+    row = await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", timezone=None,
+    )
+    assert (row.timezone, row.preferred_channel) == (None, "telegram")
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_is_claimed_and_resolved(sf):
+    org, person = uuid.uuid4(), uuid.uuid4()
+    esc = await store.record_escalation(
+        sf, org_id=org, agent_id="a1", user_id=person, kind="alert", reason="fever",
+    )
+    assert await store.claim_escalation(
+        sf, org_id=org, agent_id="a1", escalation_id=uuid.uuid4(), owner="ana",
+    ) is None
+    assert await store.claim_escalation(
+        sf, org_id=uuid.uuid4(), agent_id="a1", escalation_id=esc, owner="ana",
+    ) is None
+    row = await store.claim_escalation(sf, org_id=org, agent_id="a1", escalation_id=esc, owner="ana")
+    assert row.owner == "ana" and row.resolved_at is None
+    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", escalation_id=esc)
+    assert row.resolved_at is not None
+    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", escalation_id=esc, resolved=False)
+    assert row.resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_recording_an_escalation_again_keeps_one_record(sf):
+    from surogates.db.models import EscalationRow
+
+    org, person, key = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    for state in ("failed", "raised"):
+        await store.record_escalation(
+            sf, escalation_id=key, org_id=org, agent_id="a1", user_id=person,
+            kind="missed_replies", reason="silent", state=state,
+        )
+    async with sf() as db:
+        [row] = (await db.execute(sa.select(EscalationRow))).scalars().all()
+    assert row.state == "raised"

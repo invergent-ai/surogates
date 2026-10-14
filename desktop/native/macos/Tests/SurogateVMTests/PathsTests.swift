@@ -74,4 +74,39 @@ final class PathsTests: XCTestCase {
       XCTAssertEqual(refusal { try checkShared(path, in: laid.places) }, "the folder to share is the app's own, or holds it: \(path)", path)
     }
   }
+
+  func testSharesAThreadsCopyInAFoldersHistoryByItsShapeAndNothingElseOfTheAppsData() throws {
+    let laid = try Laid(self)
+    let root = (laid.places.run as NSString).deletingLastPathComponent
+    let key = "\(laid.places.data)/history/0123456789abcdef"
+    let thread = "3c9d2a71-5e4b-4f60-9a8b-1c2d3e4f5a6b"
+    let copy = "\(key)/threads/\(thread)"
+    dir(copy)
+    // The place, and a thread's copy in it, as history/place.ts lays them out.
+    for path in [key, copy] {
+      XCTAssertNil(refusal { try checkShared(path, in: laid.places) }, path)
+    }
+    // A sibling of the app's data, whose name starts as the data's does, is no folder of it.
+    let sibling = "\(laid.places.data)-sibling"
+    dir(sibling)
+    XCTAssertNil(refusal { try checkShared(sibling, in: laid.places) })
+    // Whatever else the place holds, and what lies in a copy, is the app's own: the history, the threads' folder, a
+    // thread's repository, a name in threads that is no thread's, a key of another length.
+    let other = "\(laid.places.data)/history/0123456789abcdef0/threads/\(thread)"
+    for path in ["\(key)/history.git", "\(key)/threads", "\(key)/clones/\(thread)", "\(key)/threads/not-a-thread", "\(copy)/sub", other] {
+      dir(path)
+      XCTAssertEqual(refusal { try checkShared(path, in: laid.places) }, "the folder to share is the app's own, or holds it: \(path)", path)
+    }
+    // A copy named through "..", ".", or a link on its way, or a link in threads, is not named as it is.
+    let work = "\(root)/work"
+    dir(work)
+    let linked = "\(key)/threads/1f2e3d4c-5b6a-4978-8a9b-0c1d2e3f4a5b"
+    symlink(work, linked)
+    symlink(key, "\(laid.places.data)/history/fedcba9876543210")
+    symlink(copy, "\(root)/to-copy")
+    for path in ["\(copy)/sub/..", "\(key)/threads/../threads/\(thread)", "\(key)/./threads/\(thread)", linked,
+                 "\(laid.places.data)/history/fedcba9876543210/threads/\(thread)", "\(root)/to-copy"] {
+      XCTAssertEqual(refusal { try checkShared(path, in: laid.places) }, "the folder to share is not a folder named as it is: \(path)", path)
+    }
+  }
 }

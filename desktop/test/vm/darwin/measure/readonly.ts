@@ -1,16 +1,14 @@
 // The read-only share: a folder's place (src/vm/manager.ts, Guest.place) shares the folder itself to the
-// guest's root readOnly (VZSharedDirectory(url:readOnly: true)), in place of the bwrap Linux serves it from.
-// The guest's root, as the measurements' agent disk runs it (prepare.sh), tries everything that writes:
-// a remount read-write, a write, an overwrite, chmod, a change of times, setxattr, truncate, fallocate, hard
-// and symbolic links, a rename, an unlink and a mkdir, on the place's mount and on the device's own directory.
-// Then, on the device's own mount, where every folder shared is a directory of one server's (darwin.ts, LAYOUT
-// multiple), what one request of the guest's names across two of them: a rename and a hard link into the
-// read-only folder from a read-write one, and out of it, a write through a link out, and an exchange
-// (renameat2's RENAME_EXCHANGE) with the read-only side named first and second. Whether Apple's server holds
-// readOnly for both of a request's folders it does not say. Decides that a place's folder stays safe from the
-// guest's root on the one device; if any of these lands, the place's folder needs a device of its own.
+// guest's root readOnly (VZSharedDirectory(url:readOnly: true)), in place of the bwrap Linux serves it from,
+// on a device of its own of the eight (darwin.ts). The guest's root, as the measurements' agent disk runs it
+// (prepare.sh), remounts the place's mount read-write, so each write reaches Apple's server, then tries
+// everything that writes: a write, an overwrite, chmod, a change of times, setxattr, truncate, fallocate, hard
+// and symbolic links, a rename, an unlink and a mkdir. Then what one request names across the read-only folder
+// and a root's read-write one, each on its own device: a rename and a hard link into the read-only folder and
+// out of it, a write through a link out, and an exchange (renameat2's RENAME_EXCHANGE) with the read-only side
+// named first and second. Decides that a place's folder stays safe from the guest's root.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts readonly
-// PASS or FAIL: every write refused, and the folder on the host as it was.
+// PASS or FAIL: every write refused, and the folder on the host as it was. Each try's words are one line.
 
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,8 +25,8 @@ const ATTEMPTS = [
   ["hard link", "ln $at/real.txt $at/linked"], ["symbolic link", "ln -s /etc/passwd $at/planted"], ["rename", "mv $at/real.txt $at/moved"],
   ["unlink", "rm $at/real.txt"], ["mkdir", "mkdir $at/made-dir"],
 ];
-// One request across two of the device's folders, as the guest's root: os.rename, os.link, or renameat2 with
-// RENAME_EXCHANGE through libc. Says nothing when it is done, and the error's name when it is refused.
+// One request across two folders, as the guest's root: os.rename, os.link, or renameat2 with RENAME_EXCHANGE through
+// libc. Says nothing when it is done, and the error's name when it is refused.
 const ACROSS = `import ctypes, errno, os, sys
 what, a, b = sys.argv[1:4]
 try:
@@ -43,9 +41,14 @@ except OSError as error:
     print(errno.errorcode.get(error.errno, error.errno), end=" ")
     sys.exit(1)
 `;
-// The device's own mount, its read-only folder (the place's, shared second: its history is first), and the read-write
-// one the root's folder is, found by a file the Mac left in it.
-const DEVICE = "/run/surogate/shares/surogate";
+// The place's read-only folder, and the root's read-write one, found among the shares by a file the Mac left in it.
+const PLACE = `/run/surogate/places/${KEY}/real`;
+// Where the guest's root may write the across script: the image's /run, a tmpfs (images/guest/surogate-init), and
+// not /tmp, which the image keeps read-only.
+const SCRIPT = "/run/surogate/measure-across.py";
+// One try, *what*, by *command*, as one line: its words, then allowed or refused.
+const tried = (what: string, command: string) =>
+  `out=$( (${command}) 2>&1) && verdict=allowed || verdict=refused; echo "${what}: $(printf '%s' "$out" | tr '\\n' ' ') $verdict"`;
 const ACROSS_ATTEMPTS = [
   ["rename into the read-only folder", 'across rename "$rw/in.txt" "$ro/in.txt"'],
   ["rename out of the read-only folder", 'across rename "$ro/real.txt" "$rw/out.txt"'],
@@ -63,7 +66,7 @@ const seen = (real: string) => {
   };
 };
 
-it("keeps a place's folder read-only to the guest's root, however it remounts, and across the device's folders", async () => {
+it("keeps a place's folder read-only to the guest's root, however it remounts, and from a root's folder on another device", async () => {
   const real = scratch("readonly");
   writeFileSync(join(real, "real.txt"), "real\n", { mode: 0o644 });
   const before = seen(real);
@@ -77,22 +80,23 @@ it("keeps a place's folder read-only to the guest's root, however it remounts, a
     expect(record("readonly", { "the place": placed }, { "the place was mounted": false })).toEqual([]);
     return;
   }
-  // A root of its own, so the guest has a share the probe's watcher looks in: the history's, where the probe is left.
-  // Set up, or refused for the owner its folder shows: the agent mounts the share before it reads that.
+  // A root of its own, whose read-write folder the tries across reach from. Set up, or refused for the owner its folder
+  // shows: the agent mounts the share before it reads that. The probe is left in the place's history.
   const writable = scratch("readonly-root");
   writeFileSync(join(writable, ".writable-side"), "");
   await booted.guest.ready(ROOTS[0]!, folderOf(writable));
   const script = [
-    `for at in /run/surogate/places/${KEY}/real ${DEVICE}/r2; do`,
-    '  echo "at $at"; echo "remount: $(mount -o remount,rw "$at" 2>&1 && echo allowed || echo refused)"',
-    ...ATTEMPTS.map(([what, command]) => `  echo "${what}: $(${command} 2>&1 && echo allowed || echo refused)"`),
-    "done",
-    `cat > /tmp/across.py <<'EOF'\n${ACROSS}EOF`,
-    'across() { python3 /tmp/across.py "$@"; }',
-    `ro=${DEVICE}/r2; rw=$(for d in ${DEVICE}/r*; do [ -e "$d/.writable-side" ] && echo "$d"; done | head -n 1)`,
+    `at=${PLACE}`,
+    'echo "at $at"',
+    // Recorded, not judged: the guest's root may remount it read-write, which sends each write on to Apple's server.
+    tried("a remount read-write, recorded", 'mount -o remount,rw "$at"'),
+    ...ATTEMPTS.map(([what, command]) => tried(what!, command!)),
+    `cat > ${SCRIPT} <<'EOF'\n${ACROSS}EOF`,
+    `across() { python3 ${SCRIPT} "$@"; }`,
+    `ro=${PLACE}; rw=$(for d in /run/surogate/shares/s*; do [ -e "$d/.writable-side" ] && echo "$d"; done | head -n 1)`,
     'echo "at $ro, from $rw"',
     'echo x > "$rw/in.txt"; echo x > "$rw/swap.txt"',
-    ...ACROSS_ATTEMPTS.map(([what, command]) => `echo "${what}: $(${command} 2>&1 && echo allowed || echo refused)"`),
+    ...ACROSS_ATTEMPTS.map(([what, command]) => tried(what!, command!)),
   ].join("\n");
   writeFileSync(join(history, ".measure-probe"), `${script}\n`);
   let said = "";
@@ -106,10 +110,12 @@ it("keeps a place's folder read-only to the guest's root, however it remounts, a
   await booted.stop();
   const after = seen(real);
   const lines = said.trim().split("\n");
+  // Each try's line names it: the lines of the probe's own words, which no try said, are none of them.
+  const tries = [...ATTEMPTS, ...ACROSS_ATTEMPTS].map(([what]) => lines.find((line) => line.startsWith(`${what}: `)));
   const failed = record("readonly", { "what the guest's root tried": lines, "the folder after": after }, {
     "the probe ran": lines.some((line) => line.startsWith("at ")),
-    "the probe found the root's read-write folder on the device": lines.some((line) => /^at \S+, from \/run\/surogate\/shares\/surogate\/r\d+$/.test(line)),
-    "every write refused": lines.filter((line) => !line.startsWith("at ") && !line.startsWith("remount")).every((line) => line.endsWith("refused")),
+    "the probe found the root's read-write folder": lines.some((line) => /^at \S+, from \/run\/surogate\/shares\/s[1-8]$/.test(line)),
+    "every write refused": tries.every((line) => line?.endsWith(" refused") === true),
     "the folder on the host as it was": JSON.stringify(after) === JSON.stringify(before),
   });
   expect(failed).toEqual([]);

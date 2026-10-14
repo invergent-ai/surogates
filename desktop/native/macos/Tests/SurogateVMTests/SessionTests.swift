@@ -111,17 +111,35 @@ final class SessionTests: XCTestCase {
     run.receive(.success(.share(id: 2, name: "r1", path: work, readOnly: false)))
     run.receive(.success(.share(id: 3, name: "r2", path: laid.places.data, readOnly: true)))
     run.receive(.success(.share(id: 4, name: "r1", path: work, readOnly: true)))
-    run.receive(.success(.unshare(id: 5, name: "r1")))
-    run.receive(.success(.unshare(id: 6, name: "r7")))
+    run.receive(.success(.unshare(id: 5, name: "r1", released: true)))
+    run.receive(.success(.unshare(id: 6, name: "r7", released: true)))
     stand.refuse = "the device took no new share"
     run.receive(.success(.share(id: 7, name: "r3", path: work, readOnly: false)))
     XCTAssertEqual(said, [
-      STARTED, .shared(id: 2, tag: "surogate", name: "r1"),
+      STARTED, .shared(id: 2, tag: "s1"),
       .refused(id: 3, why: "the folder to share is the app's own, or holds it: \(laid.places.data)"),
       .refused(id: 4, why: "the name r1 was given before in this boot"),
       .unshared(id: 5), .unshared(id: 6), .refused(id: 7, why: "the device took no new share"),
     ])
-    XCTAssertEqual(stand.applied, [.directories(["r1": SharedFolder(path: work, readOnly: false)]), .directories([:])])
+    XCTAssertEqual(stand.applied, [ShareChange(slot: 0, folder: SharedFolder(path: work, readOnly: false)), ShareChange(slot: 0, folder: nil)])
+  }
+
+  func testGivesADeviceAFolderOnlyOnceTheGuestReleasedItAndKeepsOneItDidNotEmptyUntilTheVMStops() throws {
+    let laid = try Laid(self)
+    let work = (laid.places.run as NSString).deletingLastPathComponent + "/work"
+    dir(work)
+    let run = running(laid)
+    run.receive(.success(.share(id: 1, name: "r1", path: work, readOnly: false)))
+    run.receive(.success(.share(id: 2, name: "r2", path: work, readOnly: false)))
+    // r1's root may still hold its mount: its device is emptied, and given no other folder.
+    run.receive(.success(.unshare(id: 3, name: "r1", released: false)))
+    run.receive(.success(.share(id: 4, name: "r3", path: work, readOnly: false)))
+    // r2's root is gone, every mount of it with it: its device may take a folder, once none never used is left.
+    run.receive(.success(.unshare(id: 5, name: "r2", released: true)))
+    run.receive(.success(.share(id: 6, name: "r4", path: work, readOnly: false)))
+    XCTAssertEqual(said, [STARTED, .shared(id: 1, tag: "s1"), .shared(id: 2, tag: "s2"), .unshared(id: 3), .shared(id: 4, tag: "s3"), .unshared(id: 5), .shared(id: 6, tag: "s4")])
+    XCTAssertEqual(stand.applied.map(\.slot), [0, 1, 0, 2, 1, 3])
+    XCTAssertNil(stand.applied[2].folder)
   }
 
   func testStopsTheVMAndExitsAtAKillAndWhenTheManagerGoesAndAtTheGuestsOwnPowerOff() throws {

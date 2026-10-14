@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PROMPT_MS, PromptQueue, TIMEOUT } from "../src/shell/prompt-queue.js";
+import { CLOSING_MS, PROMPT_MS, PromptQueue, TIMEOUT } from "../src/shell/prompt-queue.js";
 
 // A prompt as the window shows it: open until the test answers it, or closed once its signal aborts.
 class Prompt {
@@ -130,7 +130,7 @@ describe("the desktop's prompts", () => {
     expect(await next).toBe("allow");
   });
 
-  it("keep the next waiting until the one closed has gone, however late it closes", async () => {
+  it("keep the next waiting while the one closed is going, and open it once that has gone", async () => {
     let closed = (): void => {};
     const slow = queue.ask((signal) => new Promise<string>((resolve) => {
       signal.addEventListener("abort", () => {
@@ -141,11 +141,31 @@ describe("the desktop's prompts", () => {
     void queue.ask(prompt.show("next"), never());
     await vi.advanceTimersByTimeAsync(PROMPT_MS / 2);
     expect(await slow).toBe(TIMEOUT);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(CLOSING_MS - 1);
     expect(prompt.opened).toEqual([]);
     closed();
     await vi.advanceTimersByTimeAsync(0);
     expect(prompt.opened).toEqual(["next"]);
+  });
+
+  // The system's folder dialog cannot be closed from here, and one the system never showed never settles.
+  it("never wait for good on one that cannot be closed: the next opens once it has had its time to close", async () => {
+    const stuck = queue.ask(() => new Promise<string>(() => {}), never());
+    await vi.advanceTimersByTimeAsync(PROMPT_MS / 2);
+    const going = new AbortController();
+    const gone = queue.ask(() => new Promise<string>(() => {}), going.signal);
+    void queue.ask(prompt.show("next"), never());
+    await vi.advanceTimersByTimeAsync(PROMPT_MS / 2);
+    expect(await stuck).toBe(TIMEOUT);
+    await vi.advanceTimersByTimeAsync(CLOSING_MS - 1);
+    expect(prompt.opened).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    // The second's turn, which its asker leaves: it is closed, and has its time to close too.
+    going.abort();
+    expect(await gone).toBeNull();
+    await vi.advanceTimersByTimeAsync(CLOSING_MS);
+    expect(prompt.opened).toEqual(["next"]);
+    prompt.answer("next", "allow");
   });
 
   it("show nothing for an asker gone before its prompt could open", async () => {

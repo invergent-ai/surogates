@@ -8,16 +8,24 @@ in Bucharest to their next phase at 03:00 local time on the wrong date.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from surogates.programs.cadence import iter_occurrences
 
 __all__ = [
-    "Audience", "as_utc", "day_index", "ineligibility", "start_date_problem",
+    "MAX_DAY", "MIN_DAY", "Audience", "as_utc", "day_index", "ineligibility",
+    "next_contact", "start_date_problem",
 ]
 
 #: The longest a protocol can run, in days.  Bounds the window fields so a
 #: typo like 3650000 is refused rather than silently meaning "forever".
 MAX_DAY = 3650
+
+#: How far before its start date a journey may reach someone: day -1 is the
+#: day before the date it counts from (a reminder before an appointment).
+MIN_DAY = -365
 
 
 @dataclass(frozen=True)
@@ -25,7 +33,7 @@ class Audience:
     """Which enrolled people a Program speaks to.
 
     ``day_from``/``day_to`` are inclusive and count from the enrollment's
-    ``start_date`` (day 0).  ``phases`` restricts to people whose enrollment
+    ``start_date`` (day 0); negative days fall before it.  ``phases`` restricts to people whose enrollment
     carries one of these phases.  ``silent_days`` keeps only people who have
     not written for at least that many days.
     """
@@ -63,8 +71,8 @@ class Audience:
                 return None
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"audience.{key} must be a whole number")
-            if not 0 <= value <= MAX_DAY:
-                raise ValueError(f"audience.{key} must be between 0 and {MAX_DAY}")
+            if not MIN_DAY <= value <= MAX_DAY:
+                raise ValueError(f"audience.{key} must be between {MIN_DAY} and {MAX_DAY}")
             return value
 
         day_from, day_to = _day("day_from"), _day("day_to")
@@ -116,10 +124,18 @@ def start_date_problem(start: date, today: date) -> str | None:
 
 
 def day_index(start_date: date | None, today: date) -> int | None:
-    """Days since ``start_date``, with the start itself being day 0."""
+    """Days since ``start_date``, with the start itself being day 0 and
+    the days before it negative."""
     if start_date is None:
         return None
     return (today - start_date).days
+
+
+def day_today(enrollment: Any, zones: dict[str, str]) -> int | None:
+    """*enrollment*'s day today, in the person's zone, else their journey's
+    (*zones*: ``{protocol: zone}``)."""
+    zone = enrollment.timezone or zones.get(enrollment.protocol, "UTC")
+    return day_index(enrollment.start_date, datetime.now(ZoneInfo(zone)).date())
 
 
 def as_utc(value: datetime) -> datetime:
@@ -162,3 +178,57 @@ def ineligibility(
             return f"Wrote within the last {audience.silent_days} days"
 
     return None
+
+
+def next_contact(
+    configs: list[dict],
+    *,
+    protocol: str,
+    start_date: date | None,
+    phase: str | None,
+    enrolled_at: datetime,
+    last_inbound_at: datetime | None,
+    now: datetime,
+) -> tuple[datetime, dict] | None:
+    """The first instant after *now* an active Program's opener is due to
+    this person, with that Program's config; ``None`` when none ever is.
+
+    Walks each audience Program's own cadence and asks :func:`ineligibility`
+    of every slot, so it answers exactly what materialize will decide,
+    assuming the person stays silent until then.
+    """
+    best: tuple[datetime, dict] | None = None
+    for config in configs:
+        try:
+            audience = Audience.from_config(config.get("audience"))
+        except ValueError:
+            continue
+        if audience is None or audience.protocol != protocol:
+            continue
+        zone = str(config.get("timezone") or "UTC")
+        after = as_utc(now)
+        if audience.day_from is not None and start_date is not None:
+            # Jump to the window: a cadence is scanned a bounded number of
+            # days, and day 90 of a later-phase Program is past that bound.
+            opens = datetime.combine(
+                start_date + timedelta(days=audience.day_from), time(0),
+                tzinfo=ZoneInfo(zone),
+            ) - timedelta(seconds=1)
+            after = max(after, opens)
+        for at in iter_occurrences(
+            after, weekdays=config.get("weekdays") or [],
+            times_local=config.get("times_local") or [], timezone=zone,
+        ):
+            today = at.astimezone(ZoneInfo(zone)).date()
+            if ineligibility(
+                audience, start_date=start_date, phase=phase,
+                enrolled_at=enrolled_at, last_inbound_at=last_inbound_at,
+                today=today, now=at,
+            ) is None:
+                if best is None or at < best[0]:
+                    best = (at, config)
+                break
+            index = day_index(start_date, today)
+            if audience.day_to is not None and index is not None and index > audience.day_to:
+                break
+    return best

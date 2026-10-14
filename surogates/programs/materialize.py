@@ -32,8 +32,17 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import Audience, as_utc, ineligibility
-from surogates.followup.missed import paused_by_silence, threshold
-from surogates.programs.opener import OpenerUndeliverable
+from surogates.followup.missed import DEADLINE_WAKE_WINDOW, paused_by_silence, threshold
+from surogates.programs.journey import (
+    choose_channel,
+    fires_in,
+    in_quiet_hours,
+    journey_of,
+    own_channel,
+    person_zone,
+    protocol_of,
+)
+from surogates.programs.opener import OpenerUndeliverable, Woken
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +62,6 @@ _OPEN_RESPONSE_STATES = ("awaiting_reply", "replied", "in_progress")
 _DEFAULT_DEADLINE_HOURS = 24
 
 
-def platform_of(identity: Any, schedule: Any) -> str:
-    """The channel this invitation is on — the identity's if it says, else the Program's."""
-    return (
-        getattr(identity, "platform", None)
-        or (schedule.config or {}).get("channel")
-        or "whatsapp"
-    )
-
-
 async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
     """The occurrence a racing tick already created for this instant."""
     return (
@@ -73,33 +73,71 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
     ).scalar_one()
 
 
-async def _has_open_invitation(db, schedule, identity) -> bool:
-    """Is this user already mid-check-in with this agent?
+async def _has_open_invitation(db, schedule, user_id, configs: dict) -> bool:
+    """Is this person already in the middle of a step of this journey, on any
+    channel, through any of the copies their contacts got?
+
+    One open question per journey, not per agent: a person following two
+    journeys may have a step of each open at once, and a reply goes to the
+    most recently opened one (see :func:`surogates.programs.inbound.open_invitation_for`).
+    Steps outside any journey count as one journey of their own, and a step
+    whose Program is gone counts as this one's: unknown is never a reason to
+    ask twice.  *configs* caches Program configs across one occurrence.
 
     Counts an unanswered opener too.  The sweep runs first in the tick, so an
     ``awaiting_reply`` row still here is one whose deadline has not passed —
     a live question the user has yet to answer, and not something to talk
     over with a second one.
     """
-    return (
-        await db.execute(
-            sa.select(sa.func.count())
-            .select_from(ProgramInvitationRow)
-            # org_id leads the open-invitations index; without it this is a
-            # sequential scan of an append-only table, once per user per
-            # occurrence, inside the claim lease.
-            .where(ProgramInvitationRow.org_id == schedule.org_id)
-            .where(ProgramInvitationRow.agent_id == schedule.agent_id)
-            .where(ProgramInvitationRow.platform == platform_of(identity, schedule))
-            .where(
-                ProgramInvitationRow.platform_user_id
-                == identity.platform_user_id
+    open_programs = set(
+        (
+            await db.execute(
+                sa.select(ProgramInvitationRow.program_id)
+                # The person, not one of their channels: a question still open
+                # on WhatsApp must not be asked again on Telegram.  Served by
+                # idx_program_invitations_person_open.
+                .where(ProgramInvitationRow.org_id == schedule.org_id)
+                .where(ProgramInvitationRow.agent_id == schedule.agent_id)
+                # The followed person's own copies and their contacts';
+                # one answer closes them all (programs.inbound.attach_reply).
+                .where(sa.or_(
+                    ProgramInvitationRow.person_user_id == user_id,
+                    sa.and_(
+                        ProgramInvitationRow.person_user_id.is_(None),
+                        ProgramInvitationRow.user_id == user_id,
+                    ),
+                ))
+                # A queued opener not yet sent (held through quiet hours, or
+                # from a step that fired in the same tick) is a question too.
+                .where(sa.or_(
+                    ProgramInvitationRow.response_state.in_(_OPEN_RESPONSE_STATES),
+                    sa.and_(
+                        ProgramInvitationRow.delivery_state == "queued",
+                        ProgramInvitationRow.response_state == "not_started",
+                    ),
+                ))
             )
-            .where(
-                ProgramInvitationRow.response_state.in_(_OPEN_RESPONSE_STATES)
-            )
-        )
-    ).scalar_one() > 0
+        ).scalars()
+    )
+    if schedule.program_id in open_programs:
+        return True
+    unknown = open_programs - set(configs)
+    if unknown:
+        configs.update(dict.fromkeys(unknown))
+        configs.update(await _configs_by_program(db, unknown))
+    mine = protocol_of(schedule.config or {})
+    return any(
+        configs[pid] is None or protocol_of(configs[pid]) == mine for pid in open_programs
+    )
+
+
+async def _is_open(db, schedule, person, configs: dict, seen: dict) -> bool:
+    """:func:`_has_open_invitation` for *person*, judged once per occurrence:
+    rows this occurrence adds for them must not make their contacts' copies
+    look like a second question."""
+    if person not in seen:
+        seen[person] = await _has_open_invitation(db, schedule, person, configs)
+    return seen[person]
 
 
 async def materialize_occurrence(
@@ -114,28 +152,59 @@ async def materialize_occurrence(
     Idempotent at both levels — ``(program_id, scheduled_for)`` and
     ``(occurrence_id, user_id)`` — so a crashed or retried tick is harmless
     rather than a second message to every user.
+
+    Inside a journey each person is reached on their own channel (see
+    :func:`choose_channel`) and asked only in the zone the slot is for.
     """
     config = schedule.config or {}
-    platform = config.get("channel", "whatsapp")
+    platform = own_channel(config)
+    per_person = bool(journey_of(config))
     pause = threshold(config, "pause_after_missed")
     # Resolved before the occurrence's transaction opens: an audience is one
     # read per enrolled person, the pause one per reachable person, and none
     # of it needs the row lock.
-    roster, last_by_phone = await _roster(
+    roster, last_by_user = await _roster(
         schedule, config, platform=platform, now=now,
         session_factory=session_factory, identity_lookup=identity_lookup,
         with_last_inbound=pause is not None,
     )
+    # Each followed person's step also goes to every confirmed contact: one
+    # row per recipient, all carrying the person.  The person's own rows come
+    # first, so a recipient who is also someone else's contact keeps their own.
+    copies: list[tuple[uuid.UUID, Any, Any, uuid.UUID | None]] = [
+        (user_id, identity, enrollment, user_id if enrollment is not None else None)
+        for user_id, identity, enrollment in roster
+    ]
+    for _person, _identity, enrollment in roster:
+        if enrollment is None:
+            continue
+        for recipient in (await followup_store.recipients_for(session_factory, enrollment))[1:]:
+            copies.append((
+                recipient.user_id,
+                await identity_lookup(schedule.org_id, platform, recipient.user_id),
+                None, enrollment.user_id,
+            ))
+    chosen: dict[uuid.UUID, Any] = {}
+    if per_person:
+        for user_id, _identity, enrollment, _person in copies:
+            if user_id not in chosen:
+                chosen[user_id] = await choose_channel(
+                    config, org_id=schedule.org_id, user_id=user_id,
+                    enrollment=enrollment, identity_lookup=identity_lookup,
+                    session_factory=session_factory, agent_id=schedule.agent_id,
+                )
     paused: set[uuid.UUID] = set()
     if pause:
-        for user_id, identity in roster:
+        for user_id, identity, _enrollment, _person in copies:
+            if per_person and chosen[user_id] is not None:
+                identity = chosen[user_id][1]
             if (
                 identity is not None
                 and followup_store.permission_status(identity) == "granted"
                 and await paused_by_silence(
                     session_factory, program_id=schedule.program_id,
                     user_id=user_id, count=pause,
-                    last_inbound_at=last_by_phone.get(identity.platform_user_id),
+                    last_inbound_at=last_by_user.get(user_id),
                 )
             ):
                 paused.add(user_id)
@@ -157,23 +226,34 @@ async def materialize_occurrence(
             await db.rollback()
             return await _existing_occurrence(db, schedule.program_id, now)
 
-        for user_id, identity in roster:
+        open_configs: dict = {}
+        open_people: dict[uuid.UUID, bool] = {}
+        written: set[uuid.UUID] = set()
+        for user_id, identity, _enrollment, person in copies:
+            if user_id in written:
+                continue  # one row per recipient per occurrence
+            written.add(user_id)
             reason: str | None = None
             state = "queued"
-            if identity is None:
+            row_platform, sender, fallbacks = platform, config.get("channel_identifier"), []
+            if per_person and chosen[user_id] is not None:
+                row_platform, identity, sender, fallbacks = chosen[user_id]
+            elif identity is None:
                 reason = f"No {platform} identity"
-                state = "skipped"
             elif followup_store.permission_status(identity) != "granted":
                 reason = "No permission to message"
-                state = "skipped"
-            elif await _has_open_invitation(db, schedule, identity):
-                reason = "Previous check-in still open"
-                state = "skipped"
+            elif per_person:
+                reason = "No reachable channel"  # reachable, but no sender for it
+            if reason is not None:
+                pass
+            elif await _is_open(db, schedule, person or user_id, open_configs, open_people):
+                reason = "An earlier step is still waiting for an answer"
             elif user_id in paused:
                 reason = (
                     f"Paused: the last {pause} openers went unanswered; "
                     "resumes when they write"
                 )
+            if reason is not None:
                 state = "skipped"
 
             db.add(
@@ -183,10 +263,13 @@ async def materialize_occurrence(
                     org_id=schedule.org_id,
                     agent_id=schedule.agent_id,
                     user_id=user_id,
-                    platform=platform,
+                    person_user_id=person,
+                    platform=row_platform,
                     platform_user_id=(
                         identity.platform_user_id if identity else ""
                     ),
+                    channel_identifier=sender or None,
+                    fallback_platforms=fallbacks or None,
                     delivery_state=state,
                     response_state="not_started",
                     escalation_state="none",
@@ -206,34 +289,46 @@ async def _roster(
     session_factory: Any,
     identity_lookup: Any,
     with_last_inbound: bool = False,
-) -> tuple[list[tuple[uuid.UUID, Any]], dict[str, datetime]]:
-    """The people this occurrence is for, each with their channel identity.
+) -> tuple[list[tuple[uuid.UUID, Any, Any]], dict[uuid.UUID, datetime]]:
+    """The people this occurrence is for, each with their channel identity
+    and enrollment (``None`` on a fixed roster).
 
     A fixed roster is returned whole.  An audience is resolved against the
-    enrollments as they stand right now, filtered to who is due today in the
-    Program's own timezone.
+    enrollments as they stand right now, filtered to who is due today in
+    their own zone.  When people have zones of their own, only those whose
+    zone produced this slot are asked: the same cadence fires once per zone.
 
-    Also returns when each person last wrote to the Program's sender, keyed
-    by phone: read in one query when the audience's silence filter or the
-    caller (*with_last_inbound*, for the pause) needs it, else empty.
+    Also returns when each person last wrote, by user: to the Program's
+    sender, or inside a journey to any of the business's channels (a person
+    may be reached on another).  Read in one query when the audience's
+    silence filter or the caller (*with_last_inbound*, for the pause) needs
+    it, else empty.
     """
     sender = str(config.get("channel_identifier") or "")
 
-    async def _last_inbound(identities) -> dict[str, datetime]:
-        return await followup_store.last_inbound_by_user(
+    async def _last_inbound(identities: dict) -> dict[uuid.UUID, datetime]:
+        if journey_of(config):
+            return await followup_store.last_inbound_by_person(
+                session_factory, org_id=schedule.org_id, user_ids=list(identities),
+            )
+        by_phone = await followup_store.last_inbound_by_user(
             session_factory, org_id=schedule.org_id, platform=platform,
             channel_identifier=sender,
-            platform_user_ids=[i.platform_user_id for i in identities if i is not None],
+            platform_user_ids=[i.platform_user_id for i in identities.values() if i is not None],
         )
+        return {
+            uid: by_phone[i.platform_user_id]
+            for uid, i in identities.items() if i is not None and i.platform_user_id in by_phone
+        }
 
     if config.get("audience") is None:
         roster = []
         for user_id in config.get("users", []):
             uid = uuid.UUID(user_id)
             roster.append(
-                (uid, await identity_lookup(schedule.org_id, platform, uid)),
+                (uid, await identity_lookup(schedule.org_id, platform, uid), None),
             )
-        last = await _last_inbound(i for _, i in roster) if with_last_inbound else {}
+        last = await _last_inbound({u: i for u, i, _ in roster}) if with_last_inbound else {}
         return roster, last
 
     try:
@@ -248,33 +343,34 @@ async def _roster(
         )
         return [], {}
 
-    today = now.astimezone(ZoneInfo(str(config.get("timezone") or "UTC"))).date()
     enrollments = await followup_store.enrollments(
         session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
         protocol=audience.protocol, status="active",
     )
+    zones = {e.user_id: person_zone(e, config) for e in enrollments}
+    if set(zones.values()) - {str(config.get("timezone") or "UTC")}:
+        enrollments = [e for e in enrollments if fires_in(config, zones[e.user_id], now)]
     identities = {
         e.user_id: await identity_lookup(schedule.org_id, platform, e.user_id)
         for e in enrollments
     }
-    last_by_phone: dict[str, datetime] = {}
+    last_by_user: dict[uuid.UUID, datetime] = {}
     if audience.silent_days is not None or with_last_inbound:
-        last_by_phone = await _last_inbound(identities.values())
+        last_by_user = await _last_inbound(identities)
     roster = []
     for enrollment in enrollments:
-        identity = identities[enrollment.user_id]
-        last = last_by_phone.get(identity.platform_user_id) if identity is not None else None
+        last = last_by_user.get(enrollment.user_id)
         if ineligibility(
             audience,
             start_date=enrollment.start_date,
             phase=enrollment.phase,
             enrolled_at=enrollment.created_at,
             last_inbound_at=last,
-            today=today,
+            today=now.astimezone(ZoneInfo(zones[enrollment.user_id])).date(),
             now=now,
         ) is None:
-            roster.append((enrollment.user_id, identity))
-    return roster, last_by_phone
+            roster.append((enrollment.user_id, identities[enrollment.user_id], enrollment))
+    return roster, last_by_user
 
 
 async def send_queued_openers(
@@ -291,8 +387,9 @@ async def send_queued_openers(
     calls into the runtime to cancel anything — and it closes the race where
     permission is withdrawn between materialising the occurrence and sending.
 
-    *enqueue* is ``async (invitation) -> int | None`` returning the **outbox
-    row id** — never a provider message id, which does not exist until the
+    *enqueue* is ``async (invitation) -> int | Woken | None`` returning the
+    **outbox row id**, or :class:`Woken` when the agent was woken to write
+    the step itself — never a provider message id, which does not exist until the
     dispatcher has posted.  The invitation is keyed on that row and the
     dispatcher reports the provider id back through it.  It is optional so
     the cancellation pass can be exercised alone; production always passes
@@ -330,14 +427,17 @@ async def send_queued_openers(
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).all()
-        deadlines = await _deadline_hours_by_program(
-            db, {row.program_id for row, _ in rows},
-        )
+        configs = await _configs_by_program(db, {row.program_id for row, _ in rows})
 
     for pending, scheduled_for in rows:
+        config = configs.get(pending.program_id) or {}
         window = timedelta(
-            hours=deadlines.get(pending.program_id, _DEFAULT_DEADLINE_HOURS),
+            hours=int(config.get("response_deadline_hours") or _DEFAULT_DEADLINE_HOURS),
         )
+        if journey_of(config).get("quiet_hours") and in_quiet_hours(
+            config, await _zone_of(session_factory, pending, config), now,
+        ):
+            continue  # held until the person's quiet hours are over
         async with session_factory() as db:
             if scheduled_for is not None and as_utc(scheduled_for) + window <= now:
                 # The slot's own response window has already closed.  A
@@ -374,7 +474,7 @@ async def send_queued_openers(
                 continue
 
             claimed = await db.execute(_unsent(pending.id).values(
-                response_state="awaiting_reply", deadline_at=now + window,
+                response_state="awaiting_reply", deadline_at=now + window, opened_at=now,
             ))
             await db.commit()
             if int(claimed.rowcount or 0) != 1:
@@ -390,6 +490,10 @@ async def send_queued_openers(
             except Exception:
                 await _release(db, pending.id)
                 raise
+            if isinstance(outbox_id, Woken):
+                # The agent writes the step; the waker already recorded the
+                # conversation its message will be matched back through.
+                continue
             if outbox_id is None:
                 # Nothing was handed over; give it back so the next tick
                 # retries rather than starting a deadline nobody was asked
@@ -404,6 +508,71 @@ async def send_queued_openers(
             await db.commit()
 
     return cancelled
+
+
+
+
+async def wake_at_deadlines(session_factory: Any, *, now: datetime, wake: Any) -> int:
+    """Wake the agent once for every step whose deadline passed unanswered.
+
+    *wake* is ``async (invitation, *, event, config) -> session id`` (see
+    :func:`surogates.programs.opener.make_step_waker`).  The agent decides
+    what to do; nothing reaches the person unless it writes.  The platform's
+    own missed-reply alert and pause still apply when it does nothing.
+
+    Each row is **claimed before** the wake (``deadline_woken_at``), like an
+    opener in :func:`send_queued_openers`: a worker that dies after the
+    claim costs one wake, never two, and two replicas racing over the same
+    rows wake the agent once.  Held while the person is in their quiet hours;
+    skipped (and claimed) when their journey is no longer active.
+    """
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(ProgramInvitationRow)
+                .where(ProgramInvitationRow.response_state == "no_reply_by_deadline")
+                .where(ProgramInvitationRow.deadline_woken_at.is_(None))
+                .where(ProgramInvitationRow.deadline_at.isnot(None))
+                .where(ProgramInvitationRow.deadline_at >= now - DEADLINE_WAKE_WINDOW)
+                .where(ProgramInvitationRow.deadline_at <= now)
+                .order_by(ProgramInvitationRow.deadline_at)
+                .limit(200)
+            )
+        ).scalars().all()
+        configs = await _configs_by_program(db, {row.program_id for row in rows})
+
+    woken = 0
+    for row in rows:
+        if row.program_id not in configs:
+            continue  # the step is gone; nobody to decide for it
+        config = configs[row.program_id]
+        enrollment = await _enrollment_of(session_factory, row, config)
+        active = enrollment is None or enrollment.status == "active"
+        if active and journey_of(config).get("quiet_hours") and in_quiet_hours(
+            config, person_zone(enrollment, config), now,
+        ):
+            continue
+        async with session_factory() as db:
+            claimed = await db.execute(
+                sa.update(ProgramInvitationRow)
+                .where(ProgramInvitationRow.id == row.id)
+                .where(ProgramInvitationRow.deadline_woken_at.is_(None))
+                .where(ProgramInvitationRow.response_state == "no_reply_by_deadline")
+                .values(deadline_woken_at=now)
+            )
+            await db.commit()
+        if int(claimed.rowcount or 0) != 1 or not active:
+            continue
+        try:
+            await wake(row, event="deadline", config=config)
+        except Exception:  # noqa: BLE001 — one person, not the pass
+            logger.exception(
+                "[programs] could not wake the agent at the deadline of invitation %s",
+                row.id,
+            )
+            continue
+        woken += 1
+    return woken
 
 
 def _unsent(invitation_id: Any):
@@ -439,13 +608,13 @@ async def _release(db: Any, invitation_id: Any) -> None:
         sa.update(ProgramInvitationRow)
         .where(ProgramInvitationRow.id == invitation_id)
         .where(ProgramInvitationRow.outbox_id.is_(None))
-        .values(response_state="not_started", deadline_at=None)
+        .values(response_state="not_started", deadline_at=None, opened_at=None)
     )
     await db.commit()
 
 
-async def _deadline_hours_by_program(db, program_ids: set) -> dict:
-    """Each Program's response deadline, read from its projected config."""
+async def _configs_by_program(db, program_ids: set) -> dict:
+    """Each Program's projected config."""
     if not program_ids:
         return {}
     rows = (
@@ -454,13 +623,25 @@ async def _deadline_hours_by_program(db, program_ids: set) -> dict:
             .where(ProgramScheduleRow.program_id.in_(program_ids))
         )
     ).all()
-    return {
-        program_id: int(
-            (config or {}).get("response_deadline_hours")
-            or _DEFAULT_DEADLINE_HOURS
-        )
-        for program_id, config in rows
-    }
+    return {program_id: config or {} for program_id, config in rows}
+
+
+async def _enrollment_of(session_factory: Any, invitation: Any, config: dict) -> Any:
+    """*invitation*'s person's enrollment in this Program's journey, if any."""
+    protocol = protocol_of(config)
+    if not protocol:
+        return None
+    found = await followup_store.enrollments(
+        session_factory, org_id=invitation.org_id, agent_id=invitation.agent_id,
+        user_id=invitation.person_user_id or invitation.user_id,
+        protocol=protocol,
+    )
+    return found[0] if found else None
+
+
+async def _zone_of(session_factory: Any, invitation: Any, config: dict) -> str:
+    """The zone *invitation*'s person lives by in this Program's journey."""
+    return person_zone(await _enrollment_of(session_factory, invitation, config), config)
 
 
 def identity_lookup_from(session_factory: Any):

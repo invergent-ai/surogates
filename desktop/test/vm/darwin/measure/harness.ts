@@ -18,6 +18,9 @@ import { darwinBoot, runtimeFolder } from "../../../../src/vm/darwin.js";
 import { type BootVm, type Folder, Guest, type VmBackend, type VmOptions } from "../../../../src/vm/manager.js";
 import type { Egress } from "../../../../src/vm/proxy.js";
 import type { Start } from "../../../../src/vm/vm-helper.js";
+import { failures, type Ran, ranInRoot, type Verdict, verdictWord } from "./verdicts.js";
+
+export { judged, type Ran, UNTESTED, type Verdict } from "./verdicts.js";
 
 export const DESKTOP = realpathSync(fileURLToPath(new URL("../../../../", import.meta.url)));
 /** The arm64 guest image (prepare.sh builds it): SUROGATE_VM_IMAGE, else the repository's images/guest/out. */
@@ -158,8 +161,8 @@ export interface Lab {
   data: string;
   /** Where the boot's time went, its console read until the guest is stopped. */
   timeline: Timeline;
-  /** *command* in *root*, set up on *folder* first if it is not. */
-  run(root: string, command: string, timeout?: number): Promise<{ output: string; returncode: number; outcome: Outcome }>;
+  /** *command* in *root*, which is set up. */
+  run(root: string, command: string, timeout?: number): Promise<Ran>;
   stop(): Promise<void>;
 }
 
@@ -201,7 +204,7 @@ export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?:
     async run(root, command, timeout = 60) {
       const outcome = await guest.op(root, "run", { command, workdir: null, timeout }, signal());
       const ok = "ok" in outcome ? (outcome.ok as { output: string; returncode: number }) : { output: JSON.stringify(outcome), returncode: -1 };
-      return { output: ok.output, returncode: ok.returncode, outcome };
+      return { output: ok.output, returncode: ok.returncode, outcome, ran: ranInRoot(outcome) };
     },
     async stop() {
       try {
@@ -236,14 +239,15 @@ function mac(): Record<string, string> {
 
 /**
  * What measurement *name* found, written to out/<name>.json with this Mac's model, chip and macOS, and
- * said: each finding, then each check as PASS or FAIL. Returns the checks that failed.
+ * said: each finding, then each check as PASS, FAIL or UNTESTED. Returns each check that did not pass, by
+ * its word and its name: an UNTESTED one fails the measurement too.
  */
-export function record(name: string, found: Record<string, unknown>, checks: Record<string, boolean> = {}): string[] {
+export function record(name: string, found: Record<string, unknown>, checks: Record<string, Verdict> = {}): string[] {
   mkdirSync(OUT, { recursive: true });
   const at = new Date().toISOString();
   writeFileSync(join(OUT, `${name}.json`), `${JSON.stringify({ name, at, mac: mac(), found, checks }, null, 2)}\n`);
   for (const [key, value] of Object.entries(found)) console.log(`MEASURE ${name}: ${key} = ${typeof value === "string" ? value : JSON.stringify(value)}`);
-  for (const [check, held] of Object.entries(checks)) console.log(`MEASURE ${name}: ${held ? "PASS" : "FAIL"} ${check}`);
+  for (const [check, verdict] of Object.entries(checks)) console.log(`MEASURE ${name}: ${verdictWord(verdict)} ${check}`);
   console.log(`MEASURE ${name}: written to ${join(OUT, `${name}.json`)}`);
-  return Object.entries(checks).filter(([, held]) => !held).map(([check]) => check);
+  return failures(checks);
 }

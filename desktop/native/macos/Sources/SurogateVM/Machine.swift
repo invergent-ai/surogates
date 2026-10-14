@@ -43,19 +43,14 @@ public final class VirtualMachine: NSObject, Machine, VZVirtualMachineDelegate {
   }
 
   // VZVirtioFileSystemDevice.share, which Apple documents as settable ("the directory share the host
-  // exposes to the guest VM"). Unsure: whether a running guest takes a new share, and how a mounted one
-  // sees it, Apple does not say; a Mac measures both layouts (test/vm/darwin/measure/shares.ts).
+  // exposes to the guest VM"). A running guest takes the new share, and a mount of the device made before
+  // is served it too, as a Mac measured (test/vm/darwin/measure/shares.ts): so a device takes another
+  // folder only once the guest has let every mount of it go (Shares.swift).
   public func apply(_ change: ShareChange) throws {
     let devices = vm.directorySharingDevices.compactMap { $0 as? VZVirtioFileSystemDevice }
-    switch change {
-    case let .directories(folders):
-      guard let device = devices.first(where: { $0.tag == DEVICE_TAG }) else { throw Refusal("the VM has no device for every folder") }
-      for name in folders.keys { try VZMultipleDirectoryShare.validateName(name) }
-      device.share = multipleShare(folders)
-    case let .slot(index, folder):
-      guard let device = devices.first(where: { $0.tag == SLOT_TAGS[index] }) else { throw Refusal("the VM has no device \(SLOT_TAGS[index])") }
-      device.share = singleShare(folder ?? SharedFolder(path: empty, readOnly: true))
-    }
+    let tag = SLOT_TAGS[change.slot]
+    guard let device = devices.first(where: { $0.tag == tag }) else { throw Refusal("the VM has no device \(tag)") }
+    device.share = singleShare(change.folder ?? SharedFolder(path: empty, readOnly: true))
   }
 
   // VZVirtualMachineDelegate.guestDidStop(_:): the guest's own power-off (vm/init's sysrq), the end of every boot.

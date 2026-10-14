@@ -37,7 +37,7 @@ def _prompt_item(update_ts=None):
         payload={
             "input_prompt": True,
             "tool_call_id": "tc1",
-            "questions": [{"prompt": "Which color?", "choices": [{"label": "blue"}]}],
+            "questions": [{"prompt": "Which color?"}],  # free text: the form
             "context": "need a choice",
         },
     )

@@ -2,9 +2,14 @@
 // window, in the order asked. Each has 10 minutes from the moment it is asked,
 // whether it waits its turn or is open: one still waiting then is never shown, and
 // one open then is closed. A prompt whose asker goes leaves the line, or is closed.
+// One asked to close has CLOSING_MS to, before the next opens all the same.
 
 // Each prompt's time, from the moment it is asked.
 export const PROMPT_MS = 10 * 60_000;
+// How long a prompt asked to close, its time up or its asker gone, has to close before the next opens: the system's
+// folder dialog cannot be closed from here, and one the system never showed never settles (prompts.ts). As long as a
+// prompt's window has to close before it is destroyed (prompt-window.ts).
+export const CLOSING_MS = 5_000;
 
 // What a prompt settles with when nobody answered it within its time.
 export const TIMEOUT = "timeout";
@@ -17,7 +22,7 @@ export class PromptQueue {
   private open = false;
   private readonly listeners = new Set<() => void>();
 
-  constructor(private readonly ms = PROMPT_MS) {}
+  constructor(private readonly ms = PROMPT_MS, private readonly closingMs = CLOSING_MS) {}
 
   /** How many prompts wait behind the one open. */
   waiting(): number {
@@ -34,7 +39,8 @@ export class PromptQueue {
    * Show a prompt at its turn: *show* opens it, closes it once its signal aborts, and
    * settles once it has closed. Settles with *show*'s answer; with TIMEOUT once its
    * time is up; with null once *signal* aborts. The next prompt opens only once this
-   * one has closed. A *show* that throws or rejects is this prompt's rejection.
+   * one has closed, or CLOSING_MS after it was asked to. A *show* that throws or rejects
+   * is this prompt's rejection.
    */
   ask<T>(show: (signal: AbortSignal) => Promise<T>, signal: AbortSignal): Promise<T | typeof TIMEOUT | null> {
     const { promise, resolve, reject } = Promise.withResolvers<T | typeof TIMEOUT | null>();
@@ -71,14 +77,24 @@ export class PromptQueue {
         return false;
       }
       state = "open";
+      // The line moves on once it has closed, or once it has had its time to.
+      let closing: NodeJS.Timeout | undefined;
+      let moved = false;
+      const moveOn = () => {
+        if (moved) return;
+        moved = true;
+        clearTimeout(closing);
+        this.open = false;
+        this.next();
+      };
+      shown.signal.addEventListener("abort", () => {
+        closing = setTimeout(moveOn, this.closingMs);
+      }, { once: true });
       // One that ended before it could open is not opened.
       Promise.resolve().then(() => (shown.signal.aborted ? null : show(shown.signal))).then(
         (answer) => settle(() => resolve(answer)),
         (error: unknown) => settle(() => reject(error)),
-      ).finally(() => {
-        this.open = false;
-        this.next();
-      });
+      ).finally(moveOn);
       return true;
     };
     this.line.push(turn);

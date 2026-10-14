@@ -223,16 +223,15 @@ def _questions(raw: list[dict]) -> list[dict]:
 class TestWhatsAppInputPrompt:
 
     @pytest.mark.asyncio
-    async def test_renders_the_question_and_its_choices(self):
+    async def test_short_choices_go_out_as_reply_buttons(self):
         p = WhatsAppPlatform()
         item = _item(
             "",
             input_prompt=True,
             tool_call_id="tc1",
-            context="Need a decision.",
             questions=_questions([{
-                "prompt": "Which environment?",
-                "choices": [{"label": "staging"}, {"label": "production"}],
+                "prompt": "Cum vă simțiți azi?",
+                "choices": [{"label": "Bine"}, {"label": "Obosit"}, {"label": "Rău"}],
             }]),
         )
         with respx.mock(assert_all_called=True) as router:
@@ -242,12 +241,123 @@ class TestWhatsAppInputPrompt:
                 )
             )
             result = await p.send(item, creds=_creds())
-        sent = _json.loads(route.calls[0].request.content)["text"]["body"]
-        assert "Which environment?" in sent
-        assert "Need a decision." in sent
-        assert "staging" in sent
-        assert "production" in sent
-        assert result.success is True
+        sent = _json.loads(route.calls[0].request.content)
+        assert sent["type"] == "interactive"
+        assert sent["interactive"] == {
+            "type": "button",
+            "body": {"text": "Cum vă simțiți azi?"},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": "choice:0", "title": "Bine"}},
+                {"type": "reply", "reply": {"id": "choice:1", "title": "Obosit"}},
+                {"type": "reply", "reply": {"id": "choice:2", "title": "Rău"}},
+            ]},
+        }
+        assert result.success is True and result.message_id == "wamid.Q1"
+
+    @pytest.mark.asyncio
+    async def test_four_choices_go_out_as_a_list(self):
+        p = WhatsAppPlatform()
+        item = _item(
+            "",
+            input_prompt=True,
+            tool_call_id="tc1",
+            questions=_questions([{
+                "prompt": "Ce simptom aveți?",
+                "button_label": "Alegeți",
+                "choices": [
+                    {"label": "Durere în piept", "description": "La efort sau în repaus"},
+                    {"label": "Dispnee"},
+                    {"label": "Palpitații"},
+                    {"label": "Niciunul"},
+                ],
+            }]),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(200, json={"messages": [{"id": "wamid.L"}]}),
+            )
+            await p.send(item, creds=_creds())
+        interactive = _json.loads(route.calls[0].request.content)["interactive"]
+        assert interactive["type"] == "list"
+        assert interactive["action"]["button"] == "Alegeți"
+        [section] = interactive["action"]["sections"]
+        assert section["rows"][0] == {
+            "id": "choice:0", "title": "Durere în piept",
+            "description": "La efort sau în repaus",
+        }
+        assert [r["title"] for r in section["rows"]] == [
+            "Durere în piept", "Dispnee", "Palpitații", "Niciunul",
+        ]
+
+    def test_list_button_defaults_to_a_glyph_not_english(self):
+        from surogates.channels.platforms.whatsapp import _interactive_prompt
+
+        interactive = _interactive_prompt({"questions": [{
+            "prompt": "?",
+            "choices": [{"label": str(n)} for n in range(4)],
+        }]})
+        assert interactive["action"]["button"] == "☰"
+
+    @pytest.mark.parametrize("payload", [
+        # several questions
+        {"questions": [
+            {"prompt": "a", "choices": [{"label": "x"}]},
+            {"prompt": "b", "choices": [{"label": "y"}]},
+        ]},
+        # open-ended
+        {"questions": [{"prompt": "Când a avut loc procedura?"}]},
+        # a label too long for a list row
+        {"questions": [{"prompt": "a", "choices": [{"label": "x" * 25}]}]},
+        # a description too long for a list row
+        {"questions": [{"prompt": "a", "choices": [{"label": "x", "description": "d" * 73}]}]},
+        # a body over the interactive cap
+        {"questions": [{"prompt": "p" * 1025, "choices": [{"label": "x"}]}]},
+        # repeated titles, which Meta refuses and a tap could not tell apart
+        {"questions": [{"prompt": "a", "choices": [{"label": "Da"}, {"label": "da "}]}]},
+        {"questions": [{"prompt": "a", "choices": [{"label": str(n % 3)} for n in range(5)]}]},
+    ])
+    def test_prompts_beyond_meta_limits_stay_text(self, payload):
+        from surogates.channels.platforms.whatsapp import _interactive_prompt
+
+        assert _interactive_prompt(payload) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [131009, 100])
+    async def test_a_refused_interactive_question_goes_out_once_as_text(self, code):
+        p = WhatsAppPlatform()
+        item = _item(
+            "", input_prompt=True, tool_call_id="tc1",
+            questions=_questions([{
+                "prompt": "Cum vă simțiți azi?",
+                "choices": [{"label": "Bine"}, {"label": "Rău"}],
+            }]),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(side_effect=[
+                httpx.Response(400, json={"error": {
+                    "code": code, "message": "(#%d) Invalid parameter" % code,
+                }}),
+                httpx.Response(200, json={"messages": [{"id": "wamid.T"}]}),
+            ])
+            result = await p.send(item, creds=_creds())
+        assert [_json.loads(c.request.content)["type"] for c in route.calls] == ["interactive", "text"]
+        assert "Cum vă simțiți azi?" in _json.loads(route.calls[1].request.content)["text"]["body"]
+        assert result.success is True and result.message_id == "wamid.T"
+
+    @pytest.mark.asyncio
+    async def test_other_interactive_errors_are_not_retried_as_text(self):
+        p = WhatsAppPlatform()
+        item = _item(
+            "", input_prompt=True, tool_call_id="tc1",
+            questions=_questions([{"prompt": "?", "choices": [{"label": "Bine"}]}]),
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(return_value=httpx.Response(
+                400, json={"error": {"code": 131047, "message": "Re-engagement message"}},
+            ))
+            result = await p.send(item, creds=_creds())
+        assert len(route.calls) == 1
+        assert result.success is False and "131047" in result.error
 
     @pytest.mark.asyncio
     async def test_choices_are_answerable_by_label(self):
@@ -258,12 +368,12 @@ class TestWhatsAppInputPrompt:
         )
 
         p = WhatsAppPlatform()
-        questions = _questions([{
-            "prompt": "Which environment?",
-            "choices": [{"label": "staging"}, {"label": "production"}],
-        }])
-        item = _item("", input_prompt=True, tool_call_id="tc1", context="",
-                     questions=questions)
+        questions = _questions([
+            {"prompt": "Which environment?",
+             "choices": [{"label": "staging"}, {"label": "production"}]},
+            {"prompt": "Which region?"},
+        ])
+        item = _item("", input_prompt=True, tool_call_id="tc1", questions=questions)
         with respx.mock(assert_all_called=True) as router:
             route = router.post(MESSAGES_URL).mock(
                 return_value=httpx.Response(
@@ -276,7 +386,7 @@ class TestWhatsAppInputPrompt:
         # Every label the user can read back is one the resolver accepts.
         for label in ("staging", "production"):
             assert label in sent
-            [answer] = resolve_text_answer(questions, label)
+            [answer] = resolve_text_answer(questions[:1], label)
             assert answer.get("is_other") is not True
 
     @pytest.mark.asyncio
@@ -297,42 +407,119 @@ class TestWhatsAppInputPrompt:
         assert "What is the deploy tag?" in sent
 
 
-class TestAckReceived:
+class TestKeepTyping:
+    """Meta drops the pip after 25 s or on any outbound message; the turn
+    can run for minutes."""
+
+    @pytest.fixture
+    def calls(self, monkeypatch):
+        import surogates.channels.platforms.whatsapp as wa
+
+        sent: list[dict] = []
+
+        async def fake_send(_http, *, payload, **_kw):
+            sent.append(payload)
+            if payload.get("status") == "read":
+                return None, None
+            return "wamid.OUT", None
+
+        monkeypatch.setattr(wa, "send_message", fake_send)
+        monkeypatch.setattr(wa, "_TYPING_EVERY_S", 0.01)
+        return sent
+
+    @staticmethod
+    def _typing(calls):
+        return [c for c in calls if c.get("status") == "read"]
+
+    @staticmethod
+    def _active(flag):
+        async def turn_active():
+            return flag["on"]
+        return turn_active
+
     @pytest.mark.asyncio
-    async def test_marks_read_and_sets_typing(self):
+    async def test_resends_until_the_turn_ends(self, calls):
+        import asyncio
+
         p = WhatsAppPlatform()
         msg = parse(_text_message(), creds=_creds(), identifier=PNID)
-        with respx.mock(assert_all_called=True) as router:
-            route = router.post(MESSAGES_URL).mock(
-                return_value=httpx.Response(200, json={"success": True})
-            )
-            await p.ack_received(msg, creds=_creds(), config={})
-        body = _json.loads(route.calls[0].request.content)
-        assert body == {
+        flag = {"on": True}
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active(flag))
+        await asyncio.sleep(0.05)
+        assert self._typing(calls)[0] == {
             "messaging_product": "whatsapp",
             "status": "read",
             "message_id": msg.source["wamid"],
             "typing_indicator": {"type": "text"},
         }
+        assert len(self._typing(calls)) >= 3
+        flag["on"] = False
+        await asyncio.sleep(0.03)
+        assert p._typing == {}
+        n = len(self._typing(calls))
+        await asyncio.sleep(0.03)
+        assert len(self._typing(calls)) == n
 
     @pytest.mark.asyncio
-    async def test_no_call_without_wamid(self):
-        p = WhatsAppPlatform()
-        msg = SimpleNamespace(identifier=WA_ID, source={"phone_number_id": PNID})
-        with respx.mock(assert_all_called=False) as router:
-            route = router.post(MESSAGES_URL).mock(
-                return_value=httpx.Response(200, json={})
-            )
-            await p.ack_received(msg, creds=_creds(), config={})
-        assert len(route.calls) == 0
+    async def test_reply_or_question_stops_it_mid_turn_text_rearms_it(self, calls):
+        import asyncio
 
-    @pytest.mark.asyncio
-    async def test_never_raises_on_transport_error(self):
         p = WhatsAppPlatform()
         msg = parse(_text_message(), creds=_creds(), identifier=PNID)
-        with respx.mock(assert_all_called=True) as router:
-            router.post(MESSAGES_URL).mock(side_effect=httpx.ConnectError("down"))
-            await p.ack_received(msg, creds=_creds(), config={})
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await asyncio.sleep(0)
+        for mid_turn in (_item("still running", code_run="r1"),
+                         _item("Sunați la 112.", intermediate=True)):
+            await p.send(mid_turn, creds=_creds())
+            await asyncio.sleep(0)
+            assert calls[-1].get("status") == "read"
+        await p.send(_item("Gata."), creds=_creds())
+        assert p._typing == {}
+        n = len(calls)
+        await asyncio.sleep(0.03)
+        assert len(calls) == n
+
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await p.send(
+            _item("", input_prompt=True, questions=[{"prompt": "Da?"}]), creds=_creds(),
+        )
+        assert p._typing == {}
+
+    @pytest.mark.asyncio
+    async def test_stops_at_the_cap(self, calls, monkeypatch):
+        import asyncio
+
+        import surogates.channels.platforms.whatsapp as wa
+
+        monkeypatch.setattr(wa, "_TYPING_CAP_S", 0.02)
+        p = WhatsAppPlatform()
+        msg = parse(_text_message(), creds=_creds(), identifier=PNID)
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await asyncio.sleep(0.08)
+        assert p._typing == {}
+
+    @pytest.mark.asyncio
+    async def test_no_call_without_wamid(self, calls):
+        import asyncio
+
+        p = WhatsAppPlatform()
+        msg = SimpleNamespace(identifier=WA_ID, source={"phone_number_id": PNID})
+        p.keep_typing(msg, creds=_creds(), turn_active=self._active({"on": True}))
+        await asyncio.sleep(0.02)
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_never_raises_when_the_turn_check_fails(self, calls):
+        import asyncio
+
+        async def broken():
+            raise RuntimeError("db down")
+
+        p = WhatsAppPlatform()
+        msg = parse(_text_message(), creds=_creds(), identifier=PNID)
+        p.keep_typing(msg, creds=_creds(), turn_active=broken)
+        await asyncio.sleep(0.05)
+        assert p._typing == {}
 
 
 class TestDownloadFile:
@@ -593,3 +780,257 @@ def test_input_prompt_carries_no_english_chrome() -> None:
         "questions": [{"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}]}],
     })
     assert text == "Am notat data procedurii.\nSunteți de acord?\n  • Da"
+
+
+def test_channel_prompt_drops_the_models_own_context() -> None:
+    """The model's ``context`` is its reasoning for the operator inbox: it
+    reached patients as "Pasul 4 din skill-ul de înrolare: ..."."""
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    payload = _build_channel_payload(
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "call_abc",
+            "questions": [{"prompt": "Când a avut loc procedura?"}],
+            "context": "Pasul 4 din skill-ul de înrolare: aflu data.",
+        },
+        "whatsapp",
+    )
+    assert payload["input_prompt"] is True
+    assert "context" not in payload
+
+    from surogates.channels.platforms.whatsapp import _render_input_prompt
+    assert "Pasul 4" not in _render_input_prompt(payload)
+
+
+def test_channel_prompt_keeps_the_rescued_reply() -> None:
+    """A rescued final reply is the agent talking to the person; dropping it
+    would leave only the bare question."""
+    from surogates.session.events import EventType
+    from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
+    from surogates.session.store import _build_channel_payload
+
+    payload = _build_channel_payload(
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": f"{ASK_USER_QUESTION_RESCUE_PREFIX}x",
+            "questions": [{"prompt": "Sunteți de acord?"}],
+            "context": "Am notat data procedurii.",
+        },
+        "telegram",
+    )
+    assert payload["context"] == "Am notat data procedurii."
+
+
+class TestInboundTaps:
+    """Taps reach the agent as the text of what was tapped.  Shapes are
+    Meta's webhook samples for each message type."""
+
+    def _parse(self, **message):
+        return parse(_text_message(**message), identifier=PNID)
+
+    def test_reply_button_tap_is_its_title(self):
+        msg = self._parse(
+            type="interactive",
+            context={"from": "15551797781", "id": "wamid.prompt"},
+            interactive={
+                "type": "button_reply",
+                "button_reply": {"id": "choice:1", "title": "Obosit"},
+            },
+        )
+        assert msg is not None
+        assert msg.text == "Obosit"
+        assert msg.kind == "text"
+
+    def test_list_row_tap_is_its_title_without_the_description(self):
+        from surogates.channels.platforms.telegram_interactive import resolve_text_answer
+
+        msg = self._parse(
+            type="interactive",
+            interactive={
+                "type": "list_reply",
+                "list_reply": {
+                    "id": "choice:0",
+                    "title": "Durere în piept",
+                    "description": "La efort sau în repaus",
+                },
+            },
+        )
+        assert msg.text == "Durere în piept"
+        questions = _questions([{
+            "prompt": "Ce simptom aveți?",
+            "choices": [{"label": "Durere în piept"}, {"label": "Niciunul"}],
+        }])
+        [answer] = resolve_text_answer(questions, msg.text)
+        assert answer.get("is_other") is not True
+
+    def test_template_quick_reply_is_its_text(self):
+        # The check-in opener's "Încep acum": dropping it let the check-in
+        # expire as missed.
+        msg = self._parse(
+            type="button",
+            context={"from": "15551797781", "id": "wamid.opener"},
+            button={"payload": "Încep acum", "text": "Încep acum"},
+        )
+        assert msg is not None
+        assert msg.text == "Încep acum"
+
+    def test_flow_completion_is_rendered_as_key_value_lines(self):
+        msg = self._parse(
+            type="interactive",
+            interactive={
+                "type": "nfm_reply",
+                "nfm_reply": {
+                    "name": "flow",
+                    "body": "Sent",
+                    "response_json": _json.dumps({
+                        "flow_token": "tok-123",
+                        "tensiune": "130/85",
+                        "simptome": ["oboseală", "amețeli"],
+                    }),
+                },
+            },
+        )
+        assert msg.text == "tensiune: 130/85\nsimptome: oboseală, amețeli"
+        assert msg.source["flow_reply"] is True
+        assert msg.source["flow_token"] == "tok-123"
+        assert msg.source["flow_fields"] == {"tensiune": "130/85", "simptome": ["oboseală", "amețeli"]}
+
+    def test_tap_without_text_is_ignored(self):
+        assert self._parse(
+            type="interactive", interactive={"type": "button_reply", "button_reply": {}},
+        ) is None
+
+
+class TestQuestionNotRepeated:
+    """The reply ended in "Cum vă numiți? (numele și prenumele)" and the
+    ask_user_question beside it asked exactly that: the patient saw it twice."""
+
+    @staticmethod
+    def _payload(content, *questions, channel="whatsapp"):
+        from surogates.session.events import EventType
+        from surogates.session.store import _build_channel_payload
+
+        return _build_channel_payload(
+            EventType.LLM_RESPONSE,
+            {"message": {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {
+                    "name": "ask_user_question",
+                    "arguments": _json.dumps({"questions": list(questions)}),
+                }}],
+            }},
+            channel,
+        )
+
+    def test_a_rescued_reply_does_not_end_with_its_own_prompt(self):
+        from surogates.session.events import EventType
+        from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
+        from surogates.session.store import _build_channel_payload
+
+        question = {"prompt": "Cum vă numiți? (numele și prenumele)"}
+        payload = _build_channel_payload(
+            EventType.INBOX_INPUT_REQUIRED,
+            {
+                "tool_call_id": ASK_USER_QUESTION_RESCUE_PREFIX + "x",
+                "context": "Am notat: TAVI acum 4 zile.\n\nCum vă numiți? (numele și prenumele)",
+                "questions": [question],
+            },
+            "whatsapp",
+        )
+        assert payload["context"] == "Am notat: TAVI acum 4 zile."
+        assert payload["questions"] == [question]
+
+    def test_the_message_field_reaches_the_person_and_an_invented_context_does_not(self):
+        from surogates.session.events import EventType
+        from surogates.session.store import _build_channel_payload
+
+        question = {"prompt": "Îmi răspundeți dumneavoastră?", "choices": [{"label": "Da"}, {"label": "Nu"}]}
+        payload = _build_channel_payload(
+            EventType.INBOX_INPUT_REQUIRED,
+            {"tool_call_id": "call_1", "context": "Step 4 of the skill",
+             "message": "Am notat biletul de externare.", "questions": [question]},
+            "whatsapp",
+        )
+        assert payload["context"] == "Am notat biletul de externare."
+        no_message = _build_channel_payload(
+            EventType.INBOX_INPUT_REQUIRED,
+            {"tool_call_id": "call_1", "context": "Step 4 of the skill", "questions": [question]},
+            "whatsapp",
+        )
+        assert "context" not in no_message
+
+    def test_the_closing_repeat_is_cut(self):
+        payload = self._payload(
+            "Mulțumesc.\n\nCum  vă numiți?\n(numele și prenumele)\n",
+            {"prompt": "Cum vă numiți? (numele și prenumele)"},
+        )
+        assert payload["content"] == "Mulțumesc."
+
+    def test_a_reply_that_is_only_the_question_sends_nothing(self):
+        assert self._payload(
+            "Sunteți de acord?",
+            {"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}, {"label": "Nu"}]},
+        ) == {}
+
+    @pytest.mark.parametrize("content, questions, channel", [
+        # A paraphrase is not provably a repeat.
+        ("Mulțumesc. Sunteți de acord?", [{"prompt": "Sunteți de acord să vă scriu?"}], "whatsapp"),
+        # Only a whole closing sentence, never the tail of a word.
+        ("Mulțumesc. NuSunteți de acord?", [{"prompt": "Sunteți de acord?"}], "whatsapp"),
+        ("Mulțumesc. A? B?", [{"prompt": "A?"}, {"prompt": "B?"}], "whatsapp"),
+        # The web chat shows no separate prompt text.
+        ("Mulțumesc. Sunteți de acord?", [{"prompt": "Sunteți de acord?"}], "web"),
+        # A call the tool refuses asks nothing, so nothing repeats the text.
+        ("Mulțumesc. Sunteți de acord?",
+         [{"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}, {"no_label": "Nu"}]}],
+         "whatsapp"),
+        ("Mulțumesc. Sunteți de acord?",
+         [{"prompt": "Sunteți de acord?", "choices": [{"label": str(n)} for n in range(11)]}],
+         "whatsapp"),
+    ])
+    def test_anything_else_is_kept(self, content, questions, channel):
+        assert self._payload(content, *questions, channel=channel)["content"] == content
+
+
+class TestBatchedWebhook:
+    """Meta batched "Bună ziua" / "am făcut TAVI" / "de azi am febră 38" into one
+    webhook and only the first reached the agent: the fever was lost."""
+
+    @staticmethod
+    def _batch(*messages):
+        body = _text_message()
+        body["entry"][0]["changes"][0]["value"]["messages"] = list(messages)
+        return body
+
+    @staticmethod
+    def _text(wamid, text, sender=WA_ID):
+        return {"from": sender, "id": wamid, "timestamp": "1758254144", "type": "text", "text": {"body": text}}
+
+    def test_every_message_from_the_person_reaches_the_agent_in_order(self):
+        msg = parse(self._batch(
+            self._text("w1", "Bună ziua"),
+            self._text("w2", "am făcut TAVI acum 8 zile"),
+            self._text("w3", "și de azi am febră 38"),
+        ), identifier=PNID)
+        assert msg.text == "Bună ziua\nam făcut TAVI acum 8 zile\nși de azi am febră 38"
+        assert msg.ts == "w1"
+        assert msg.source["wamid"] == "w3"
+
+    def test_a_photo_in_the_batch_keeps_its_file(self):
+        photo = {"from": WA_ID, "id": "w2", "timestamp": "1", "type": "image",
+                 "image": {"id": "media-1", "mime_type": "image/jpeg", "caption": "biletul"}}
+        msg = parse(self._batch(self._text("w1", "uitați"), photo), identifier=PNID)
+        assert msg.text == "uitați\nbiletul"
+        assert msg.kind == "image"
+        assert len(msg.files) == 1
+
+    def test_one_message_is_unchanged(self):
+        assert parse(_text_message(), identifier=PNID).text == "Hi!"
+
+    def test_another_sender_in_the_same_batch_is_not_merged_into_this_one(self):
+        msg = parse(self._batch(self._text("w1", "eu"), self._text("w2", "altcineva", sender="40700000000")),
+                    identifier=PNID)
+        assert msg.text == "eu"

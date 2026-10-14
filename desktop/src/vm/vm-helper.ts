@@ -14,7 +14,7 @@ export type Start = (program: string, args: string[], options: SpawnOptions & { 
 export type Said =
   | { type: "listening" | "started" }
   | { type: "failed"; why: string }
-  | { type: "shared"; id: number; tag: string; name?: string }
+  | { type: "shared"; id: number; tag: string }
   | { type: "unshared"; id: number }
   | { type: "refused"; id?: number; why: string }
   | { type: "stopped"; reason: string; why?: string };

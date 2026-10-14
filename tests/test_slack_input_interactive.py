@@ -1,4 +1,5 @@
 import json
+import pytest
 from types import SimpleNamespace
 
 from surogates.channels.platforms.slack import SlackPlatform
@@ -227,3 +228,93 @@ async def test_view_submission_validation_errors_return_slack_error_response(mon
     assert result.status_code == 200
     assert b"response_action" in result.body
     assert b"q0_other" in result.body
+
+
+# ---------------------------------------------------------------------------
+# A few short choices: buttons in the message, one tap answers
+# ---------------------------------------------------------------------------
+
+CONFIRM = [{"prompt": "Trimit mesajul?", "choices": [{"label": "Trimit"}, {"label": "Nu trimit"}]}]
+
+
+def test_a_few_short_choices_are_buttons_in_the_message():
+    from surogates.channels.platforms.slack_interactive import build_input_prompt_blocks
+
+    text, blocks = build_input_prompt_blocks(session_id="s1", tool_call_id="tc1", questions=CONFIRM,
+                                             context="Mesaj pentru Ion: «Vă așteptăm mâine la 10.»")
+    assert text == "Trimit mesajul?"
+    assert "Vă așteptăm" in blocks[0]["text"]["text"] and "Trimit mesajul?" in blocks[0]["text"]["text"]
+    buttons = blocks[1]["elements"]
+    assert [b["text"]["text"] for b in buttons] == ["Trimit", "Nu trimit"]
+    assert [b["action_id"] for b in buttons] == ["surogates_input_choice_0", "surogates_input_choice_1"]
+    assert json.loads(buttons[1]["value"]) == {"session_id": "s1", "tool_call_id": "tc1", "choice": 1}
+    assert "I need your input" not in json.dumps(blocks)
+
+
+@pytest.mark.parametrize("questions", [
+    [{"prompt": "Pick", "choices": [{"label": f"o{i}"} for i in range(6)]}],  # too many
+    [{"prompt": "Pick", "choices": [{"label": "x" * 41}, {"label": "y"}]}],  # too long
+    [{"prompt": "Name?"}],  # free text
+    CONFIRM + CONFIRM,  # several questions
+])
+def test_anything_else_keeps_the_form(questions):
+    from surogates.channels.platforms.slack_interactive import ANSWER_ACTION_ID, build_input_prompt_blocks
+
+    _, blocks = build_input_prompt_blocks(session_id="s1", tool_call_id="tc1", questions=questions)
+    assert [e["action_id"] for e in blocks[1]["elements"]] == [ANSWER_ACTION_ID]
+
+
+def _tap_form(choice, session_id="s1", tool_call_id="tc1"):
+    payload = {
+        "type": "block_actions", "trigger_id": "trig1", "channel": {"id": "C1"},
+        "container": {"message_ts": "100.0"}, "message": {"ts": "100.0"},
+        "actions": [{"action_id": f"surogates_input_choice_{choice}",
+                     "value": json.dumps({"session_id": session_id, "tool_call_id": tool_call_id,
+                                          "choice": choice})}],
+    }
+    return {"payload": json.dumps(payload)}
+
+
+async def test_one_tap_answers_and_the_message_shows_the_choice(monkeypatch):
+    from surogates.session import interactive_input
+
+    resolved = []
+
+    async def pending(store, *, session_id, tool_call_id):
+        return {"tool_call_id": tool_call_id, "questions": CONFIRM}
+
+    async def resolve(store, **kw):
+        resolved.append(kw)
+        return True
+
+    monkeypatch.setattr(interactive_input, "pending_input_for_session", pending)
+    monkeypatch.setattr(interactive_input, "resolve_input_response", resolve)
+    client = _Client()
+    response = await _platform_with(client)._handle_interact(_tap_form(1), creds={"bot_token": "x"}, deps=_Deps())
+    assert response.status_code == 200 and client.views == []  # no form
+    assert resolved == [{"session_id": "s1", "tool_call_id": "tc1",
+                         "responses": [{"question": "Trimit mesajul?", "answer": "Nu trimit", "is_other": False}]}]
+    [update] = client.updates
+    assert update["ts"] == "100.0" and "Nu trimit" in update["text"]
+
+
+async def test_a_stale_or_forged_tap_changes_nothing(monkeypatch):
+    from surogates.session import interactive_input
+
+    async def nothing(store, **kw):
+        return None
+
+    async def resolve(store, **kw):
+        raise AssertionError("must not resolve")
+
+    monkeypatch.setattr(interactive_input, "pending_input_for_session", nothing)
+    monkeypatch.setattr(interactive_input, "resolve_input_response", resolve)
+    client = _Client()
+    await _platform_with(client)._handle_interact(_tap_form(0), creds={"bot_token": "x"}, deps=_Deps())
+
+    async def pending(store, *, session_id, tool_call_id):
+        return {"tool_call_id": tool_call_id, "questions": CONFIRM}
+
+    monkeypatch.setattr(interactive_input, "pending_input_for_session", pending)
+    await _platform_with(client)._handle_interact(_tap_form(7), creds={"bot_token": "x"}, deps=_Deps())
+    assert client.updates == []
