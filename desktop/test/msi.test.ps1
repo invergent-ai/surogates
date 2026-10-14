@@ -15,6 +15,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# By their whole paths: Windows Installer's service opens a package from its own folder, not the caller's.
+$Msi = (Resolve-Path $Msi).Path
+$Layout = (Resolve-Path $Layout).Path
+if ($Newer) { $Newer = (Resolve-Path $Newer).Path }
 
 $Installed = Join-Path $env:ProgramFiles 'Surogate'
 $Data = Join-Path $env:ProgramData 'Surogate'
@@ -37,6 +41,14 @@ function Msiexec([string] $Name, [string] $Arguments) {
   [pscustomobject]@{ Code = $run.ExitCode; Log = $(if (Test-Path $log) { Get-Content -Raw $log } else { '' }) }
 }
 
+# The installed app's version, as its package names it; none where it is not there.
+function Get-AppVersion {
+  $package = Join-Path $Installed 'resources\app\package.json'
+  if (Test-Path $package) { (Get-Content -Raw $package | ConvertFrom-Json).version } else { '' }
+}
+
+function Get-ServiceState { $service = Get-Service -Name SurogateVM -ErrorAction SilentlyContinue; if ($service) { $service.Status.ToString() } else { 'missing' } }
+
 function Get-Product { @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Surogate' }) }
 function Get-Vmp { (Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform).State.ToString() }
 function Get-Rule([string] $Name) { Get-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue }
@@ -49,6 +61,7 @@ function Get-Granted([string] $Sddl, [string] $Sid) {
 
 # Who, but SYSTEM, administrators and the trusted installer, may write or change *path* by its access rules.
 function Get-Writers([string] $Path) {
+  if (-not (Test-Path $Path)) { return "$Path is missing" }
   $writing = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
   $trusted = 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators', 'NT SERVICE\TrustedInstaller', 'CREATOR OWNER'
   (Get-Acl $Path).Access | Where-Object {
@@ -110,7 +123,7 @@ $unlike = @(Get-Unlike $theirs $ours)
 Check 'every file of the layout is installed, and nothing else' ($theirs.Count -gt 0 -and $unlike.Count -eq 0) "$($unlike.Count): $(($unlike | Select-Object -First 5) -join '; ')"
 $differ = @($theirs | Where-Object { (Test-Path (Join-Path $Installed $_)) -and (Get-FileHash (Join-Path $Layout $_)).Hash -ne (Get-FileHash (Join-Path $Installed $_)).Hash })
 Check 'each installed file is the layout''s' ($differ.Count -eq 0) "$(($differ | Select-Object -First 5) -join '; ')"
-Check 'the app is the version installed' ((Get-Content -Raw (Join-Path $Installed 'resources\app\package.json') | ConvertFrom-Json).version -eq $Version)
+Check 'the app is the version installed' ((Get-AppVersion) -eq $Version) (Get-AppVersion)
 foreach ($folder in $Installed, (Join-Path $Installed 'service'), (Join-Path $Installed 'bin'), (Join-Path $Installed 'resources\app\bin')) {
   $writers = @(Get-Writers $folder)
   Check "only administrators write $folder" ($writers.Count -eq 0) ($writers -join '; ')
@@ -129,7 +142,7 @@ Check 'interactive users may not stop, change or remove the service' (-not ($int
 foreach ($sid in 'WD', 'AU', 'BU', 'S-1-5-83-0') { Check "the service gives $sid no right" (@(Get-Granted $sddl $sid).Count -eq 0) $sddl }
 $failure = sc.exe qfailure SurogateVM | Out-String
 Check 'the service is started again once after it fails' ($failure -match 'RESTART -- Delay = 5000' -and $failure -match 'RESET_PERIOD \(in seconds\)\s*:\s*86400') $failure
-Check 'the service is not running' ((Get-Service SurogateVM).Status -eq 'Stopped') (Get-Service SurogateVM).Status
+Check 'the service is not running' ((Get-ServiceState) -eq 'Stopped') (Get-ServiceState)
 
 # The surogate:// scheme, machine-wide, starting the installed app with the link after the end of its switches.
 $key = Get-ItemProperty -Path $Scheme -ErrorAction SilentlyContinue
@@ -156,8 +169,8 @@ foreach ($pair in @(@($Rules[0], 'resources\app\bin\node.exe'), @($Rules[1], 're
 $record = Join-Path $Data 'install.json'
 $said = if (Test-Path $record) { Get-Content -Raw $record } else { '' }
 Check 'the install record holds the base and channel given' ($said -and ($said | ConvertFrom-Json | ConvertTo-Json -Compress) -eq '{"base":"https://updates.example.test","channel":"beta"}') $said
-$dataAcl = Get-Acl $Data
-Check '%ProgramData%\Surogate inherits nothing, and only administrators and SYSTEM write it' ($dataAcl.AreAccessRulesProtected -and @(Get-Writers $Data).Count -eq 0 -and @(Get-Writers $record).Count -eq 0) ($dataAcl.Access | Out-String)
+$dataAcl = if (Test-Path $Data) { Get-Acl $Data } else { $null }
+Check '%ProgramData%\Surogate inherits nothing, and only administrators and SYSTEM write it' ($dataAcl -and $dataAcl.AreAccessRulesProtected -and @(Get-Writers $Data).Count -eq 0 -and @(Get-Writers $record).Count -eq 0) "$(if ($dataAcl) { $dataAcl.Access | Out-String } else { 'missing' })"
 $apply = Join-Path $Data 'apply'
 $applyAcl = if (Test-Path $apply) { Get-Acl $apply } else { $null }
 $others = if ($applyAcl) { @($applyAcl.Access | Where-Object { 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators' -notcontains $_.IdentityReference.Value }) } else { @('missing') }
@@ -166,8 +179,8 @@ $product = @(Get-Product)
 Check 'Installed apps lists Surogate of this version, by Surogate' ($product.Count -eq 1 -and $product[0].DisplayVersion -eq $Version -and $product[0].Publisher -eq 'Surogate') "$($product | Format-List DisplayName, DisplayVersion, Publisher | Out-String)"
 
 # Started, as an interactive user's surogate-vm.exe starts it; the uninstall stops it, then removes everything.
-Start-Service SurogateVM
-Check 'the service starts' ((Get-Service SurogateVM).Status -eq 'Running') (Get-Service SurogateVM).Status
+if ((Get-ServiceState) -ne 'missing') { Start-Service SurogateVM }
+Check 'the service starts' ((Get-ServiceState) -eq 'Running') (Get-ServiceState)
 $remove = Msiexec 'remove' "/x `"$Msi`""
 Check 'it uninstalls, the service running, and asks for no restart' ($remove.Code -eq 0) "msiexec exited $($remove.Code)"
 Check 'its custom action does not run at the uninstall' ($remove.Log -notmatch "Surogate: Windows's Virtual Machine Platform")
