@@ -198,6 +198,15 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     expect(((await office.read(agent, { view: "outline" })) as Any).blocks[0].kind).toBe("heading1");
   });
 
+  it("refuses to edit a protected document, and says so", async () => {
+    const key = newKey();
+    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT, "protected.docx"), documentServerUrl: IT.dsUrl });
+    opened.push(agent);
+    const result = await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "More." } }]);
+    expect(result).toMatchObject({ applied: false, refused: { op: 0 } });
+    expect(result.refused.reason).toMatch(/protected: it is read-only/);
+  });
+
   it("flushes the agent's editor", async () => {
     const { agent } = await pair();
     await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "One more." } }]);

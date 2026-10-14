@@ -425,7 +425,21 @@
     return reply;
   }
 
+  // A document protected in Word (Restrict Editing) or in the editor: the editor runs no edit in it. Keyed by
+  // c_oAscEDocProtect; tracked changes allow edits. ponytail: a comments-only document refuses comment ops too.
+  var PROTECTED = { 0: "only comments are allowed", 1: "only filling in forms is allowed", 3: "it is read-only" };
+
+  function protection() {
+    var p = doc.Document.Settings && doc.Document.Settings.DocumentProtection;
+    return p && p.getEnforcement() ? PROTECTED[p.edit] : undefined;
+  }
+
   function edit(ops, agent) {
+    var locked = protection();
+    if (locked) {
+      return { refused: { op: 0, reason: "The document is protected: " + locked + ". Nothing applied. Its protection " +
+        "was set in Word (Restrict Editing) or in the editor, usually with a password: only the user can lift it." } };
+    }
     var results = [];
     for (var i = 0; i < ops.length; i++) {
       try {
