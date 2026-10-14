@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from surogates.programs.cadence import next_occurrences
+from surogates.programs.cadence import iter_occurrences
 
 __all__ = [
     "Audience", "as_utc", "day_index", "ineligibility", "next_contact",
@@ -203,10 +203,9 @@ def next_contact(
                 tzinfo=ZoneInfo(zone),
             ) - timedelta(seconds=1)
             after = max(after, opens)
-        for at in next_occurrences(
+        for at in iter_occurrences(
             after, weekdays=config.get("weekdays") or [],
             times_local=config.get("times_local") or [], timezone=zone,
-            count=10_000,
         ):
             today = at.astimezone(ZoneInfo(zone)).date()
             if ineligibility(
