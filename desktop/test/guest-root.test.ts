@@ -11,8 +11,8 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import { type HostUser, PLAN9_PORT, type Share } from "../src/guest/protocol.js";
 import {
-  admit, boundsFor, checkOwner, checkShare, connectionOf, Connections, enter, NOT_SET_UP, OTHER_UID, ownedBy, p9Mount, rootEnvironment, Roots, sharePath,
-  slowerFor,
+  admit, boundsFor, checkOwner, checkShare, enter, NOT_SET_UP, OTHER_UID, ownedBy, p9Mount, rootEnvironment, Roots, sharePath, slowerFor, superblockOf,
+  Superblocks,
 } from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
@@ -299,6 +299,19 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     const unmounted = new Roots({ start: bare, uid: () => 10_000, kill: () => void children.at(-1)?.kill("SIGKILL") });
     await unmounted.setup("root-9", base, VZ, user);
     expect(await unmounted.teardown("root-9", VZ)).toBe(false);
+  });
+
+  it("says no share released whose root has a setup waiting behind its teardown, which would mount it again", async () => {
+    const VZ: Share = { kind: "vz", tag: "s4" };
+    const releasing = new Roots({ start: bare, uid: () => 10_000, kill: () => void children.at(-1)?.kill("SIGKILL"), unmount: async () => true });
+    await releasing.setup("root-11", base, VZ, user);
+    // The host's setup of the same root and share, read once the teardown is under way: it waits for the teardown's end.
+    const tearing = releasing.teardown("root-11", VZ);
+    await new Promise((resolve) => setImmediate(resolve));
+    const again = releasing.setup("root-11", base, VZ, user);
+    expect(await tearing).toBe(false);
+    await again;
+    expect(await releasing.teardown("root-11", VZ)).toBe(true);
   });
 
   it("says a root torn down still holds its share while what it ran cannot end, and lets the share's mount go all the same", async () => {
@@ -852,7 +865,7 @@ describe("a root on Apple's share, which shows each file as the asking uid's", (
   });
 });
 
-describe("the connections the agent made on Apple's devices", () => {
+describe("the superblocks the agent's mounts made on Apple's devices", () => {
   const MOUNTINFO = [
     "22 1 252:0 / / ro,relatime - ext4 /dev/vda ro",
     "40 22 0:41 / /run/surogate/shares/s1 rw,nosuid,nodev,relatime - virtiofs s1 rw",
@@ -861,52 +874,58 @@ describe("the connections the agent made on Apple's devices", () => {
     "43 22 0:44 / /run/surogate/shares/r1 rw,nosuid,nodev,relatime shared:5 - virtiofs r1 rw",
   ].join("\n");
 
-  it("reads a mount's connection as the minor of its device, the last mount of the device's tag at its path", () => {
-    expect(connectionOf(MOUNTINFO, "/run/surogate/shares/s2", "s2")).toBe(42);
-    expect(connectionOf(MOUNTINFO, "/run/surogate/places/0123456789abcdef/real", "s3")).toBe(43);
+  it("reads a mount's superblock as its device's numbers, the last mount of the device's tag at its path", () => {
+    expect(superblockOf(MOUNTINFO, "/run/surogate/shares/s2", "s2")).toBe("0:42");
+    expect(superblockOf(MOUNTINFO, "/run/surogate/places/0123456789abcdef/real", "s3")).toBe("0:43");
     // After the optional fields too.
-    expect(connectionOf(MOUNTINFO, "/run/surogate/shares/r1", "r1")).toBe(44);
-    // Another tag at the path, another kind of mount, or none: no connection of that device.
-    expect(connectionOf(MOUNTINFO, "/run/surogate/shares/s2", "s1")).toBeNull();
-    expect(connectionOf(MOUNTINFO, "/", "/dev/vda")).toBeNull();
-    expect(connectionOf("", "/run/surogate/shares/s2", "s2")).toBeNull();
-    expect(connectionOf(`${MOUNTINFO}\n44 22 0:45 / /run/surogate/shares/s2 rw - virtiofs s2 rw`, "/run/surogate/shares/s2", "s2")).toBe(45);
+    expect(superblockOf(MOUNTINFO, "/run/surogate/shares/r1", "r1")).toBe("0:44");
+    // Another tag at the path, another kind of mount, or none: no superblock of that device.
+    expect(superblockOf(MOUNTINFO, "/run/surogate/shares/s2", "s1")).toBeNull();
+    expect(superblockOf(MOUNTINFO, "/", "/dev/vda")).toBeNull();
+    expect(superblockOf("", "/run/surogate/shares/s2", "s2")).toBeNull();
+    expect(superblockOf(`${MOUNTINFO}\n44 22 0:45 / /run/surogate/shares/s2 rw - virtiofs s2 rw`, "/run/surogate/shares/s2", "s2")).toBe("0:45");
   });
 
-  it("releases a device once every connection made on it has left fusectl's list within its bound, and never one whose connection it could not read", async () => {
-    const listed = join(base, "connections");
-    for (const minor of ["41", "42"]) mkdirSync(join(listed, minor), { recursive: true });
+  it("releases a device once every superblock made on it has left the backing devices within its bound, and never one whose device it could not read", async () => {
+    const devices = join(base, "bdi");
+    for (const device of ["0:41", "0:42"]) mkdirSync(join(devices, device), { recursive: true });
     let mountinfo = MOUNTINFO;
-    const made = new Connections({ folder: listed, mountinfo: async () => mountinfo, list: async () => {}, releaseMs: 300 });
+    // The guest's namespaces' mounts, once the agent's own of s1 and s2 have gone.
+    const mounts = async () => [MOUNTINFO.split("\n").filter((line) => !/ - virtiofs s[12] /.test(line)).join("\n")];
+    const made = new Superblocks({ folder: devices, mountinfo: async () => mountinfo, mounts, releaseMs: 300 });
     await made.remember("s1", "/run/surogate/shares/s1");
     await made.remember("s2", "/run/surogate/shares/s2");
-    // A device no mount of the agent's was made on: nothing of it is in the guest.
+    // A device no mount of the agent's was made on, and none of any namespace's: nothing of it is in the guest.
     expect(await made.released("s5")).toBe(true);
-    // s1's connection goes while it waits, as once the root's namespace has: released.
-    setTimeout(() => rmSync(join(listed, "41"), { recursive: true }), 50);
+    // s1's superblock goes while it waits, as once the root's namespace has: released.
+    setTimeout(() => rmSync(join(devices, "0:41"), { recursive: true }), 50);
     expect(await made.released("s1")).toBe(true);
-    // s2's stays, as while a root still holds a mount of it: not within the bound, and not while it stays.
+    // s2's stays, as while a file of it is open: not within the bound, and not while it stays.
     const begun = performance.now();
     expect(await made.released("s2")).toBe(false);
     expect(performance.now() - begun).toBeGreaterThanOrEqual(290);
     expect(await made.released("s2")).toBe(false);
-    rmSync(join(listed, "42"), { recursive: true });
+    rmSync(join(devices, "0:42"), { recursive: true });
     expect(await made.released("s2")).toBe(true);
-    // One whose connection could not be read is never released.
+    // One whose device could not be read is never released.
     mountinfo = "";
     await made.remember("s4", "/run/surogate/shares/s4");
     expect(await made.released("s4")).toBe(false);
   });
 
-  it("releases nothing where fusectl cannot list the guest's connections", async () => {
-    const made = new Connections({
-      folder: join(base, "none"), mountinfo: async () => MOUNTINFO, releaseMs: 50,
-      list: async () => {
-        throw new Error("mount: unknown filesystem type 'fusectl'");
-      },
-    });
+  it("releases no device a namespace of the guest still holds a mount of, though the agent remembered nothing of it or its superblock has gone", async () => {
+    const devices = join(base, "bdi");
+    mkdirSync(devices, { recursive: true });
+    // A root's namespace, its share bound at the folder's path: a mount of the device's tag, as a bind shows it.
+    let namespaces = ["40 22 0:41 / /Users/ana/work rw,nosuid,nodev,relatime - virtiofs s1 rw", "22 1 252:0 / / ro,relatime - ext4 /dev/vda ro"];
+    const made = new Superblocks({ folder: devices, mountinfo: async () => MOUNTINFO, mounts: async () => namespaces, releaseMs: 100 });
+    // Never remembered: the agent's own mount got ahead of what it knows.
+    expect(await made.released("s1")).toBe(false);
+    // Remembered, its backing device gone, and still mounted in the namespace.
     await made.remember("s1", "/run/surogate/shares/s1");
     expect(await made.released("s1")).toBe(false);
+    namespaces = namespaces.slice(1);
+    expect(await made.released("s1")).toBe(true);
   });
 });
 

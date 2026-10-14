@@ -7,7 +7,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, chownSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
-import { chmod, chown, mkdir, open, readdir, readFile, rmdir, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, open, readdir, readFile, readlink, rmdir, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
@@ -42,7 +42,7 @@ export const slowerFor = (cmdline: string) => (/(?:^|\s)surogate\.emulated=1(?:\
 export const boundsFor = (slower: number) => ({
   emptyMs: 3_000 * slower, killedMs: 1_000 * slower, flushMs: 3_000 * slower, mountMs: 5_000 * slower,
   runnerReadyMs: 5_000 * slower, questionMs: 10_000 * slower, backstopMs: 10_000 * slower, ruleMs: 12_000 * slower,
-  // How long a teardown waits for the last connection of one of Apple's devices to go, once the root's processes have ended.
+  // How long a teardown waits for the last superblock of one of Apple's devices to go, once the root's processes have ended.
   releaseMs: 2_000 * slower,
   // One request to a folder's history: past the history's own bound for opening a copy (local_history.py, _OPEN_TIMEOUT).
   historyMs: 600_000 * slower,
@@ -184,7 +184,7 @@ const mounted = new Set<string>();
 
 // Apple's share (macOS's Virtualization framework) is a virtio-fs device too: one of eight fixed devices, s1 to s8, a
 // folder each (src/vm/darwin.ts), mounted as Linux's tags are and let go at its teardown. Its tag is given again, so the
-// teardown says whether the device is released: nothing of it mounted in the guest any more (Connections).
+// teardown says whether the device is released: nothing of it mounted in the guest any more (Superblocks).
 
 // What a share of a kind this guest does not mount is answered.
 export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share";
@@ -215,7 +215,7 @@ export const sharePath = (share: Share): string => join(SHARES, share.tag);
 async function mountShare(share: Share): Promise<string> {
   if (share.kind === "p9") return mountOnce(share.tag, p9Mount(share, "nosuid,nodev", join(SHARES, share.tag)));
   const at = await mountVirtiofs(share.tag);
-  if (share.kind === "vz") await CONNECTIONS.remember(share.tag, at);
+  if (share.kind === "vz") await SUPERBLOCKS.remember(share.tag, at);
   return at;
 }
 
@@ -316,78 +316,95 @@ async function mountOnce(tag: string, args: string[], program = SUROGATE_VSOCK):
   return share;
 }
 
-// The guest's FUSE connections, each a folder by its number in fusectl's list, mounted here the first time it is
-// looked in: the kernel takes a connection's folder away once its superblock has gone, which is once no mount of it is
-// left in any namespace and no file of it is open (Linux's fs/fuse/control.c, fuse_ctl_remove_conn). A virtio-fs mount
-// of a device that already has a superblock takes that one, whatever namespace holds it.
-export const FUSE_CONNECTIONS = "/sys/fs/fuse/connections";
+// Each superblock's backing device in sysfs, by its device's numbers as mountinfo gives them (FUSE names a superblock's
+// by its device: fs/fuse/inode.c, fuse_bdi_init). The kernel takes one away once its superblock has gone (fs/super.c,
+// generic_shutdown_super), which is once no mount of it is left in any namespace and no file of it is open. A
+// virtio-fs mount of a device that already has a superblock takes that one, whatever namespace holds it. fusectl's
+// list of FUSE connections holds no virtio-fs one (fs/fuse/virtio_fs.c, no_control).
+export const BACKING_DEVICES = "/sys/class/bdi";
 const RELEASE_MS = BOUNDS.releaseMs;
 const RELEASE_RETRY_MS = 10;
 
 /**
- * The connection of the virtio-fs mount of *tag* at *at*, as *mountinfo* (proc_pid_mountinfo(5)) lists it last: the
- * minor of its superblock's device, which names it in fusectl's list. Null where there is none.
+ * The superblock of the virtio-fs mount of *tag* at *at*, as *mountinfo* (proc_pid_mountinfo(5)) lists it last: its
+ * device's numbers, major:minor, which name its backing device. Null where there is none.
  */
-export function connectionOf(mountinfo: string, at: string, tag: string): number | null {
-  let found: number | null = null;
+export function superblockOf(mountinfo: string, at: string, tag: string): string | null {
+  let found: string | null = null;
   for (const line of mountinfo.split("\n")) {
     const [mount = "", filesystem = ""] = line.split(" - ");
     const fields = mount.split(" ");
     const [type, source] = filesystem.split(" ");
-    const device = /^0:([0-9]{1,10})$/.exec(fields[2] ?? "");
-    if (fields[4] === at && type === "virtiofs" && source === tag && device) found = Number(device[1]);
+    const device = fields[2] ?? "";
+    if (fields[4] === at && type === "virtiofs" && source === tag && /^[0-9]{1,10}:[0-9]{1,10}$/.test(device)) found = device;
   }
   return found;
 }
 
-// fusectl, mounted at *folder* in the agent's namespace alone, unless it is there already.
-async function listConnections(folder: string): Promise<void> {
-  const mounts = await readFile("/proc/self/mountinfo", "utf8");
-  if (mounts.split("\n").some((line) => line.split(" ")[4] === folder && line.includes(" - fusectl "))) return;
-  await execute("/usr/bin/mount", ["-t", "fusectl", "-o", "nosuid,nodev,noexec", "fusectl", folder]);
+// Whether *mountinfo* holds a virtio-fs mount of *tag*: its own, or a bind of it, which shows the device's tag too.
+export const mountsTag = (mountinfo: string, tag: string): boolean => mountinfo.split("\n").some((line) => {
+  const [type, source] = (line.split(" - ")[1] ?? "").split(" ");
+  return type === "virtiofs" && source === tag;
+});
+
+// The mounts of each mount namespace a process of the guest is in, each namespace read once.
+async function everyNamespace(): Promise<string[]> {
+  const seen = new Set<string>();
+  const read: string[] = [];
+  for (const pid of await readdir("/proc").catch((): string[] => [])) {
+    if (!/^[0-9]+$/.test(pid)) continue;
+    const namespace = await readlink(`/proc/${pid}/ns/mnt`).catch(() => null);
+    if (namespace === null || seen.has(namespace)) continue;
+    const mounts = await readFile(`/proc/${pid}/mountinfo`, "utf8").catch(() => null);
+    if (mounts === null) continue;
+    seen.add(namespace);
+    read.push(mounts);
+  }
+  return read;
 }
 
-export interface ConnectionsOptions {
-  folder?: string; // fusectl's list: FUSE_CONNECTIONS
+export interface SuperblocksOptions {
+  folder?: string; // the backing devices: BACKING_DEVICES
   mountinfo?(): Promise<string>; // the agent's own mounts
-  list?(folder: string): Promise<void>; // makes fusectl list the guest's connections at *folder*
+  mounts?(): Promise<string[]>; // the mounts of each mount namespace a process of the guest is in
   releaseMs?: number;
 }
 
 /**
- * The connections the agent made on each of Apple's devices, by its tag: the agent alone mounts them, so these are all
- * the guest has of a device. A device is released once each has gone; darwin.ts gives it another folder only then, and
- * keeps one the guest has not released empty until the VM stops: a root that still held a mount of it would be served
- * the next folder. A connection whose number could not be read is never released.
+ * The superblocks the agent's mounts made on each of Apple's devices, by its tag: the agent alone mounts them, so these
+ * are all the guest has of a device. A device is released once each has gone; darwin.ts gives it another folder only
+ * then, and keeps one the guest has not released empty until the VM stops: a root that still held a mount of it would
+ * be served the next folder. A superblock whose device could not be read is never released, nor a device any namespace
+ * of the guest still holds a mount of, whatever the agent remembered of it.
  */
-export class Connections {
-  private readonly made = new Map<string, Set<number | null>>();
-  private listing: Promise<boolean> | null = null;
+export class Superblocks {
+  private readonly made = new Map<string, Set<string | null>>();
   private readonly folder: string;
   private readonly releaseMs: number;
 
-  constructor(private readonly options: ConnectionsOptions = {}) {
-    this.folder = options.folder ?? FUSE_CONNECTIONS;
+  constructor(private readonly options: SuperblocksOptions = {}) {
+    this.folder = options.folder ?? BACKING_DEVICES;
     this.releaseMs = options.releaseMs ?? RELEASE_MS;
   }
 
-  /** The connection of the agent's mount of *tag* at *at*, kept until the device is released. */
+  /** The superblock of the agent's mount of *tag* at *at*, kept until the device is released. */
   async remember(tag: string, at: string): Promise<void> {
     const mountinfo = await (this.options.mountinfo?.() ?? readFile("/proc/self/mountinfo", "utf8")).catch(() => "");
     const made = this.made.get(tag) ?? new Set();
-    this.made.set(tag, made.add(connectionOf(mountinfo, at, tag)));
+    this.made.set(tag, made.add(superblockOf(mountinfo, at, tag)));
   }
 
   /**
-   * Whether nothing of *tag*'s device is left in the guest, the agent's own mounts of it having gone: each connection
-   * made on it gone from fusectl's list within the bound. True for a device the agent mounted nothing of.
+   * Whether nothing of *tag*'s device is left in the guest, the agent's own mounts of it having gone, within the bound:
+   * no mount of it in any namespace a process is in, and each superblock made on it gone from the backing devices, which
+   * counts a namespace no process is in and a file still open too.
    */
   async released(tag: string): Promise<boolean> {
-    const made = this.made.get(tag);
-    if (!made) return true;
-    if (made.has(null) || !(await this.listed())) return false;
+    const made = this.made.get(tag) ?? new Set<string | null>();
+    if (made.has(null)) return false;
     for (const deadline = performance.now() + this.releaseMs; ;) {
-      if ([...made].every((minor) => !existsSync(join(this.folder, String(minor))))) {
+      const mounted = (await (this.options.mounts ?? everyNamespace)()).some((mounts) => mountsTag(mounts, tag));
+      if (!mounted && [...made].every((device) => !existsSync(join(this.folder, device!)))) {
         this.made.delete(tag);
         return true;
       }
@@ -395,23 +412,14 @@ export class Connections {
       await new Promise((resolve) => setTimeout(resolve, RELEASE_RETRY_MS));
     }
   }
-
-  // Whether fusectl lists the guest's connections, made to the first time it is asked: one that could not be is asked again.
-  private listed(): Promise<boolean> {
-    this.listing ??= (this.options.list ?? listConnections)(this.folder).then(() => true, () => {
-      this.listing = null;
-      return false;
-    });
-    return this.listing;
-  }
 }
 
 // This agent's.
-export const CONNECTIONS = new Connections();
+export const SUPERBLOCKS = new Superblocks();
 
 // A share's mount goes, lazily: a process of its root's stuck in a share that stalled
 // keeps it until it lets go. The host removes the share from the guest next. True where it
-// is one of Apple's devices and released: nothing of it is left in the guest (Connections).
+// is one of Apple's devices and released: nothing of it is left in the guest (Superblocks).
 export async function unmountShare(share: Share): Promise<boolean> {
   try {
     checkShare(share);
@@ -422,7 +430,7 @@ export async function unmountShare(share: Share): Promise<boolean> {
   const path = join(SHARES, share.tag);
   await execute("/usr/bin/umount", ["-l", path]).catch(() => {});
   await rmdir(path).catch(() => {});
-  return share.kind === "vz" && CONNECTIONS.released(share.tag);
+  return share.kind === "vz" && SUPERBLOCKS.released(share.tag);
 }
 
 // *path*'s filesystem written out, that one alone (syncfs, as sync -f does): never sync(2),
@@ -990,7 +998,8 @@ export class Roots {
   // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,
   // goes: the host is letting the folder go, and removes the share next. Its next
   // operation shares its folder and sets it up again. True where the share is released:
-  // nothing of it is left in the guest, so its device may take another folder.
+  // nothing of it is left in the guest, and no setup of the root waits to mount it again, so
+  // its device may take another folder.
   teardown(root: string, share: Share): Promise<boolean> {
     return this.ends(root, (async () => {
       // A setup under way lands first, and what it set up ends with the rest.
@@ -1008,7 +1017,8 @@ export class Roots {
       // What of it would not end, a process waiting on a share that stalled, still holds the
       // share: the host keeps it in the guest, which could not let it go.
       if (this.held.delete(root)) throw new Error(HELD);
-      return released;
+      // A setup of the root asked meanwhile waits for this end, then mounts its share again: none is released.
+      return released && !this.starting.has(root);
     })());
   }
 

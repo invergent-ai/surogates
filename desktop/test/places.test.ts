@@ -153,7 +153,7 @@ describe("the agent's places", () => {
       mount: async (args) => void ran.push(["mount", ...args]),
       vsock: async (args) => void ran.push(["surogate-vsock", ...args]),
       unmount: async (args) => void ran.push(["umount", ...args]),
-      connections: {
+      superblocks: {
         remember: async (tag, at) => void ran.push(["remember", tag, at]),
         released: async (tag) => {
           ran.push(["released", tag]);
