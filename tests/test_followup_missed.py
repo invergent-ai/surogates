@@ -283,7 +283,7 @@ async def test_each_team_member_is_told_on_their_own_channel(sf):
     assert (by_user[b].platform, by_user[b].channel_identifier) == ("slack", "T1")
     assert by_user[b].template_name is None
     with pytest.raises(ValueError):
-        await store.update_settings(sf, org_id=ORG, agent_id=AGENT, senders={"web": "x"})
+        await store.update_settings(sf, org_id=ORG, agent_id=AGENT, senders={"website": "x"})
 
 
 @pytest.mark.asyncio

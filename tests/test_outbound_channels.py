@@ -369,3 +369,38 @@ async def test_a_number_linked_to_a_real_account_stays_with_it(sf):
     maria = await _person(sf, org, ("voice", "40712000103"), provider="database")
     await _person(sf, org, ("whatsapp", "40712000103"))
     assert await same_person(sf, org, "40712000103") == maria
+
+
+# ---------------------------------------------------------------------------
+# The agent writes the step on voice, web and api too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("platform, pid, sender, key", [
+    ("voice", "40712000103", "+40300000001", "agent:voice:dm:40712000103"),
+    ("web", "u-1", "web", "agent:web:dm:u-1"),
+    ("api", "crm-42", "a1", "agent:api:dm:crm-42"),
+])
+async def test_a_due_step_wakes_the_agent_in_the_persons_own_conversation(sf, monkeypatch, platform, pid, sender,
+                                                                          key):
+    """What the agent then writes there is the call, the pending message and push, or the webhook post."""
+    pytest.importorskip("surogates.programs.step_context")
+    from tests import test_program_agent_steps as steps
+    from surogates.programs import opener as opener_mod
+
+    keys = []
+
+    async def dm_session(*args, session_key, **kw):
+        keys.append(session_key)
+        return steps.SESSION
+
+    w = steps._wiring(sf, monkeypatch)
+    monkeypatch.setattr(opener_mod, "dm_session", dm_session)
+    program = await steps._program(sf, channel=platform, channel_identifier=sender)
+    inv = await steps._invitation(sf, program, await steps._person(sf), platform=platform, platform_user_id=pid)
+    inv.channel_identifier = sender
+
+    result = await w.enqueue(inv)
+    assert isinstance(result, steps.Woken) and w.delivery.calls == []  # no word-for-word opener
+    assert keys == [key] and w.woke == [steps.SESSION]
+    assert w.store.emitted[0][1]["synthetic"] == "checkin"

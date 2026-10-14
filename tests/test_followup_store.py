@@ -160,7 +160,7 @@ async def test_queue_outreach_validates(sf):
     slack = await store.queue_outreach(sf, **{**base, "platform": "slack"}, kind="alert", text="hi")
     assert slack.platform == "slack"
     with pytest.raises(ValueError):
-        await store.queue_outreach(sf, **{**base, "platform": "web"}, kind="alert", text="hi")
+        await store.queue_outreach(sf, **{**base, "platform": "website"}, kind="alert", text="hi")
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_a_persons_zone_and_channel_are_validated_and_kept(sf):
     with pytest.raises(ValueError):
         await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", timezone="Mars/Base")
     with pytest.raises(ValueError):
-        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", preferred_channel="web")
+        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", preferred_channel="website")
     row = await store.update_enrollment(
         sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", timezone=None,
     )
