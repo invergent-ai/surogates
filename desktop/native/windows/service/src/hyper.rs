@@ -1,6 +1,9 @@
-// The Host Compute Service for one caller (hcs::api): the VM made from the service's document, the caller's files
-// granted to it as the caller, its console read from before it is made, its exit told, and every grant taken back as
-// the caller once the VM has gone, so no entry for a VM that is no more stays in a file's ACL.
+// The Host Compute Service for one caller (hcs::api): the VM made from the service's document, each file it opens
+// granted to it alone (HcsGrantVmAccess), the caller's own as the caller and the installed app's agent disk by the
+// service's own right, its console read from before it is made, its exit told, and every grant taken back by the right
+// that made it once the VM has gone, so no entry for a VM that is no more stays in a file's ACL. No file is given to a
+// group of VMs: Windows names the VM group (S-1-5-83-0) only where Hyper-V's own service is installed, and Virtual
+// Machine Platform alone, as most Windows 11 PCs have it, installs no such group.
 
 use std::sync::Arc;
 use std::thread;
@@ -13,7 +16,7 @@ use windows_sys::core::GUID;
 use windows_sys::Win32::System::Com::CoCreateGuid;
 
 use crate::caller::as_caller;
-use crate::core::{Hypervisor, Vm};
+use crate::core::{By, Grant, Hypervisor, Vm};
 
 /// What a VM tells its connection unasked.
 pub enum Notice {
@@ -77,7 +80,7 @@ pub fn console(name: &str, notify: Notify) -> Result<Console, Failure> {
 pub struct HcsVm {
     system: Option<System>,
     id: String,
-    granted: Vec<String>,
+    granted: Vec<Grant>,
     token: Handle,
 }
 
@@ -114,9 +117,20 @@ impl Drop for HcsVm {
     }
 }
 
-fn revoke(token: &Handle, id: &str, granted: &[String]) {
-    for path in granted {
-        let _ = as_caller(token, || api::revoke_vm_access(id, path));
+// *path* granted to the VM *id*, by the caller's right (as the caller of *token*) or by the service's own.
+fn grant(token: &Handle, id: &str, path: &str, by: By) -> Result<(), Failure> {
+    match by {
+        By::Caller => as_caller(token, || api::grant_vm_access(id, path)).map_err(|words| Failure { code: -1, words })?,
+        By::Service => api::grant_vm_access(id, path),
+    }
+}
+
+fn revoke(token: &Handle, id: &str, granted: &[Grant]) {
+    for Grant { path, by } in granted {
+        let _ = match by {
+            By::Caller => as_caller(token, || api::revoke_vm_access(id, path)).map(drop),
+            By::Service => api::revoke_vm_access(id, path).map_err(|failure| failure.words),
+        };
     }
 }
 
@@ -151,20 +165,19 @@ impl Hypervisor for Hcs<'_> {
         console(name, self.notify.clone())
     }
 
-    fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(HcsVm, String), Failure> {
+    fn create(&self, id: &str, document: &str, granted: &[Grant]) -> Result<(HcsVm, String), Failure> {
         let basic = api::service_properties(r#"{"PropertyTypes":["Basic"]}"#)?;
         if !supports(&basic, SCHEMA) {
             return Err(Failure { code: -1, words: format!("this Windows's Host Compute Service does not take schema {}.{}: {basic}", SCHEMA.0, SCHEMA.1) });
         }
         let token = duplicate(self.token)?;
         let mut given = Vec::new();
-        for path in granted {
-            let grant = as_caller(&token, || api::grant_vm_access(id, path)).map_err(|words| Failure { code: -1, words })?;
-            if let Err(failure) = grant {
+        for each in granted {
+            if let Err(failure) = grant(&token, id, &each.path, each.by) {
                 revoke(&token, id, &given);
-                return Err(Failure { code: failure.code, words: format!("{} for {path}", failure.words) });
+                return Err(Failure { code: failure.code, words: format!("{} for {}", failure.words, each.path) });
             }
-            given.push(path.clone());
+            given.push(each.clone());
         }
         let made = System::create(id, document).and_then(|system| {
             let notify = self.notify.clone();

@@ -6,9 +6,12 @@
 // A caller is anyone who can open the pipe, so nothing a request names is taken on trust:
 // - the caller is an interactive user, by its token (caller.rs), before a line of theirs is acted on;
 // - the helper the VM ends with is the caller's own process, by the pipe's own word for it;
-// - every file is of path.rs's form, in the caller's own data folder (the agent disk may also be the installed app's),
-//   and that data folder in the caller's own profile; and each is opened as the caller, so what the caller cannot
-//   reach is refused, with no reparse point on its way;
+// - every file is of path.rs's form, in the caller's own data folder (the agent disk may also be the installed app's
+//   own, and no other file of the installed app's), and that data folder in the caller's own profile; and each is
+//   opened as the caller, so what the caller cannot reach is refused, with no reparse point on its way;
+// - each file is granted to the VM alone (HcsGrantVmAccess) for its life, by the caller's own right to change its ACL;
+//   but the installed app's agent disk, whose ACL only administrators may change, by the service's, once the caller has
+//   reached it as itself;
 // - the document is built here, from those few fields, never taken from the caller;
 // - one VM for one data folder, eight shares at most, and a share's name never given twice in a VM.
 
@@ -48,6 +51,25 @@ impl Checked {
     }
 }
 
+/// The installed app's agent disk, in its folder (the installer's layout), which every user's VM boots.
+pub const AGENT_DISK: &str = r"resources\vm\agent.vhd";
+
+/// Whose right to change a file's ACL its grant to the VM is made with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum By {
+    /// The caller's, as it impersonates the caller: for the caller's own files.
+    Caller,
+    /// The service's own: for the installed app's agent disk, which only administrators may change.
+    Service,
+}
+
+/// A file the VM is given access to for its life (HcsGrantVmAccess), taken back as it ends, by the same right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    pub path: String,
+    pub by: By,
+}
+
 /// The disk as the caller reaches it.
 pub trait Files {
     /// The caller's own profile folder (GetUserProfileDirectoryW of its token).
@@ -78,9 +100,9 @@ pub trait Hypervisor {
     fn console(&self, id: &str) -> String;
     /// The console's pipe *console* made, and read from now on.
     fn listen(&self, console: &str) -> Result<Self::Console, Failure>;
-    /// The VM *id* made from *document*, not started, with the VM given access to each of *granted*, as the caller;
-    /// its runtime ID.
-    fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(Self::Vm, String), Failure>;
+    /// The VM *id* made from *document*, not started, with the VM given access to each of *granted*, by whose right
+    /// each says; its runtime ID.
+    fn create(&self, id: &str, document: &str, granted: &[Grant]) -> Result<(Self::Vm, String), Failure>;
 }
 
 /// The data folders a VM runs for, of every caller: one VM for each.
@@ -197,7 +219,17 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
                 return Err(refuse(&format!("{what} outside the caller's data folder")));
             }
         }
-        let installed = self.files.installed().is_some_and(|folder| within(agent_disk, folder));
+        let installed = match self.files.installed() {
+            Some(folder) if within(agent_disk, folder) => {
+                // The one file of the installed app's that a VM is given, as the service grants it by its own right.
+                let own = format!(r"{}\{AGENT_DISK}", folder.trim_end_matches('\\'));
+                if !agent_disk.eq_ignore_ascii_case(&own) {
+                    return Err(refuse("a file of the installed app's that is not its agent disk"));
+                }
+                true
+            }
+            _ => false,
+        };
         if !installed && (!within(agent_disk, data) || agent_disk.len() == data.len()) {
             return Err(refuse("the agent disk outside the caller's data folder and the installed app's"));
         }
@@ -225,8 +257,12 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
         let made = hcs::document(&machine).map_err(|why| refuse(&why)).and_then(|document| {
             // The console read before the VM is made, which HCS's worker connects COM1 to: the kernel's first lines are read.
             let console = self.hypervisor.listen(&machine.console).map_err(refused)?;
-            // The installed app's agent disk is the VM group's to read from its install; every other file is the caller's.
-            let granted: Vec<String> = [kernel, initrd, rootfs, sessions].into_iter().chain((!installed).then_some(agent_disk)).map(str::to_owned).collect();
+            // Every file the VM opens, granted to it alone: the caller's own by the caller's right, and the installed
+            // app's agent disk, which the caller has just reached as itself, by the service's.
+            let granted: Vec<Grant> = [(kernel, By::Caller), (initrd, By::Caller), (rootfs, By::Caller), (agent_disk, if installed { By::Service } else { By::Caller }), (sessions, By::Caller)]
+                .into_iter()
+                .map(|(path, by)| Grant { path: path.to_owned(), by })
+                .collect();
             let (vm, runtime_id) = self.hypervisor.create(&id, &document, &granted).map_err(refused)?;
             Ok((vm, console, runtime_id))
         });
@@ -407,8 +443,8 @@ mod tests {
             }
             Ok(FakeConsole { log: self.log.clone() })
         }
-        fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(FakeVm, String), Failure> {
-            self.log.said(format!("create {id} granting {}", granted.join(" ")));
+        fn create(&self, id: &str, document: &str, granted: &[Grant]) -> Result<(FakeVm, String), Failure> {
+            self.log.said(format!("create {id} granting {}", granted.iter().map(|grant| format!("{} by the {:?}", grant.path, grant.by)).collect::<Vec<_>>().join(", ")));
             self.log.said(document);
             if self.fail == Some("create") {
                 return Err(Failure::of("HcsCreateComputeSystem", hcs::failure::ACCESS_DENIED, None));
@@ -492,8 +528,14 @@ mod tests {
         );
         // The console is read before the VM is made, so the kernel's first lines are.
         assert_eq!(log[6], r"console \\.\pipe\surogate-console-00000000-0000-0000-0000-000000000001");
-        // The installed app's agent disk is not granted as the caller: it is the VM group's to read from its install.
-        assert_eq!(log[7], format!(r"create 00000000-0000-0000-0000-000000000001 granting {DATA}\vm\image\vmlinuz {DATA}\vm\image\initrd {DATA}\vm\image\rootfs.vhd {DATA}\vm\sessions.vhdx"));
+        // Each file granted to the VM alone: the caller's own by the caller's right; the installed app's agent disk, whose
+        // ACL only administrators may change, by the service's, once the caller has reached it as itself.
+        assert_eq!(
+            log[7],
+            format!(
+                r"create 00000000-0000-0000-0000-000000000001 granting {DATA}\vm\image\vmlinuz by the Caller, {DATA}\vm\image\initrd by the Caller, {DATA}\vm\image\rootfs.vhd by the Caller, C:\Program Files\Surogate\resources\vm\agent.vhd by the Service, {DATA}\vm\sessions.vhdx by the Caller"
+            )
+        );
         // The document is the service's own, with the caller's SID and the console's pipe.
         assert!(log[8].contains(r#""DefaultBindSecurityDescriptor":"D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-1-2-3-1001)""#), "{}", log[8]);
         assert!(log[8].contains(r#""NamedPipe":"\\\\.\\pipe\\surogate-console-00000000-0000-0000-0000-000000000001""#), "{}", log[8]);
@@ -518,7 +560,23 @@ mod tests {
         let Request::Boot { data, kernel, initrd, rootfs, sessions, cpus, command_line, helper_pid, .. } = boot(1) else { unreachable!() };
         let agent_disk = format!(r"{DATA}\vm\agent.vhd");
         assert!(matches!(session.handle(Request::Boot { id: 1, data, kernel, initrd, rootfs, agent_disk: agent_disk.clone(), sessions, cpus, command_line, helper_pid })[..], [Answer::Created { .. }]));
-        assert!(w.log.all().iter().any(|line| line.starts_with("create ") && line.ends_with(&agent_disk)));
+        assert!(w.log.all().iter().any(|line| line.starts_with("create ") && line.contains(&format!("{agent_disk} by the Caller,"))));
+    }
+
+    #[test]
+    fn takes_no_file_of_the_installed_app_s_but_its_agent_disk() {
+        let w = world(None, vec![]);
+        let with = |agent_disk: &str| {
+            let Request::Boot { data, kernel, initrd, rootfs, sessions, cpus, command_line, helper_pid, .. } = boot(1) else { unreachable!() };
+            Session::new(&w.hcs, &w.files, &w.roots, ANA()).handle(Request::Boot { id: 1, data, kernel, initrd, rootfs, agent_disk: agent_disk.into(), sessions, cpus, command_line, helper_pid })
+        };
+        for other in [r"C:\Program Files\Surogate\service\surogate-service.exe", r"C:\Program Files\Surogate\resources\vm\other.vhd", r"C:\Program Files\Surogate\agent.vhd"] {
+            assert_eq!(why(&with(other)), "a file of the installed app's that is not its agent disk", "{other}");
+        }
+        assert!(!w.log.all().iter().any(|line| line.starts_with("check") || line.starts_with("create")), "{:?}", w.log.all());
+        // Its own name, ASCII case aside, as NTFS takes it.
+        assert!(matches!(with(r"C:\Program Files\Surogate\Resources\VM\Agent.vhd")[..], [Answer::Created { .. }]));
+        assert!(w.log.all().iter().any(|line| line.contains(r"C:\Program Files\Surogate\Resources\VM\Agent.vhd by the Service,")), "{:?}", w.log.all());
     }
 
     #[test]
