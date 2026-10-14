@@ -355,7 +355,8 @@ function write(args: Record<string, unknown>, { folder, at }: Context): null {
   if (!isBase64(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
   if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
-  // The desktop's own, for what it saves by itself, as a page's download: the server's writes carry none.
+  // Make-only: the desktop's own downloads, and the server's document editor making a new document or a copy
+  // beside one that changed (surogates/office). Never over a file that is there.
   if (args.create === true) return create(key, data);
   // The revision this call's stat saw: anything else there, or nothing, is a conflict. Before anything is made.
   const expected = args.expected_revision;

@@ -35,6 +35,11 @@ export const UNASKED: ReadonlySet<string> = new Set([
 const UNASKED_FOLDERS = [".surogates-results"];
 const CANVAS = "_whiteboard/canvas.json";
 const REQUEST = "request:";
+// The document editor's saves (surogates/office/files.py): its request ids start "editor.", which no request of the
+// chat's page can name. In a chat that asks every time, a document's first is asked about; once allowed, that
+// document's later saves in the chat go through until the app quits. A denial is not remembered.
+const EDITOR = `${REQUEST}editor.`;
+const isEditorSave = (operation: Operation): boolean => operation.kind === "write" && operation.invocationId.startsWith(EDITOR);
 
 // The browser's kinds (surogates/devices/browser.py). A chat's first use of the browser on this
 // computer asks in either mode, and "Allow for this chat" lasts as long as the chat's binding;
@@ -69,9 +74,11 @@ export interface Preview {
 export type ApprovalRequest =
   | { kind: "command"; chat: ChatLabel; command: string; workdir: string | null; background: boolean }
   // preview: null for a delete, and for data that is not text. download: a write that saves one, and whose.
+  // editor: a write that is the document editor's save of a document.
   | {
     kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null; preview: Preview | null;
     download?: DownloadBy;
+    editor?: true;
   }
   // command: what the process runs, as its start named it; null for a process this run of the app did not start.
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
@@ -212,7 +219,10 @@ function requestFor(
   if (kind === "delete") return { kind: "change", chat, action: kind, path: text("key"), bytes: null, preview: null };
   if (kind === "write") {
     const bytes = Buffer.byteLength(text("data"), "base64");
-    return { kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes), ...(download ? { download } : {}) };
+    return {
+      kind: "change", chat, action: kind, path: text("key"), bytes, preview: previewOf(text("data"), bytes),
+      ...(download ? { download } : {}), ...(isEditorSave(operation) ? { editor: true as const } : {}),
+    };
   }
   if (kind === "write_stdin") {
     const process = text("session_id");
@@ -268,6 +278,8 @@ export class Approvals {
   // Each chat's browser operations waiting their turn or asking, by a controller each: every chat's dismissed
   // together when the browser is taken over, each gone once it settles.
   private readonly browsing = new Map<string, Set<AbortController>>();
+  // The documents whose editor saves its user allowed: a chat's root and the file's key.
+  private readonly editorSaves = new Set<string>();
 
   constructor(private readonly options: ApprovalsOptions) {}
 
@@ -317,6 +329,7 @@ export class Approvals {
           report(this.options.onError, error);
         }
       }
+      if (answer === "allow" && isEditorSave(operation)) this.editorSaves.add(`${root}\0${String(operation.args.key)}`);
       return answer === "allow" || answer === "stop_asking" ? null : denied(operation.kind);
     });
   }
@@ -639,8 +652,10 @@ export class Approvals {
         (key === `${binding.folder}/${CANVAS}` && operation.invocationId.startsWith(REQUEST))
         || UNASKED_FOLDERS.some((name) => key.startsWith(`${binding.folder}/${name}/`))
       );
+    const allowedSave = isEditorSave(operation) && typeof key === "string" && posix.normalize(key) === key
+      && this.editorSaves.has(`${operation.sessionId}\0${key}`);
     // A download is no write of the agent's own tools: wherever its Downloads leads, it asks.
-    if (operation.kind === "write" && unasked && download === undefined) {
+    if (operation.kind === "write" && (unasked || allowedSave) && download === undefined) {
       return { answer: null };
     }
     return { binding };

@@ -198,6 +198,15 @@ export function approval(request: ApprovalRequest): PromptContent {
         height: 420,
       };
     }
+    if (request.editor) {
+      return {
+        ...OPERATION,
+        title: `Save ${named(request.path)}?`,
+        lead: `The document editor wants to save this document${where}, ${sizeOf(bytes)}. Allowed, its later saves of it go through until you quit Surogate.`,
+        details: [file],
+        height: 320,
+      };
+    }
     return {
       ...OPERATION, title: `Write ${named(request.path)}?`, lead: `${asker(chat)} wants to write ${sizeOf(bytes)} to this file${where}.`, details: [file, content], height: 420,
     };
