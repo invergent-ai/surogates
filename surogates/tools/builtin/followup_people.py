@@ -15,6 +15,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from surogates.channels.capabilities import initiating_platforms
 from surogates.channels.identity import masked_phone, normalize_wa_id, readable_phone
 from surogates.db.models import ChannelIdentity
 from surogates.followup import people
@@ -119,11 +120,6 @@ async def _whatsapp_of(sf: Any, org_id: uuid.UUID, user_ids: list[uuid.UUID]) ->
             )
         ).all()
     return {uid: pid for uid, pid in rows}
-
-
-async def _linked(sf: Any, ctx: Context) -> Any:
-    """The writer as the person or a confirmed contact, else ``None``."""
-    return await ctx.speaker(sf)
 
 
 async def _list(sf: Any, ctx: Context, speaker: Any) -> str:
@@ -354,7 +350,7 @@ async def handle_followup_contacts(arguments: dict, **kwargs: Any) -> str:
     action = str(arguments.get("action") or "").strip()
     if action == "claim":
         return await _claim(sf, ctx, settings, arguments)
-    speaker = await _linked(sf, ctx)
+    speaker = await ctx.speaker(sf)
     if speaker is None:
         return (
             "Not done: the one writing is not followed or linked to anyone "
@@ -372,7 +368,7 @@ async def handle_followup_contacts(arguments: dict, **kwargs: Any) -> str:
         return await _confirm(sf, ctx, speaker, arguments)
     if action == "consent":
         if not ctx.can_write_first:
-            return f"Not done: consent is recorded in a chat on {channel_names(['whatsapp', 'telegram', 'slack'])}."
+            return f"Not done: consent is recorded in a chat on {channel_names(sorted(initiating_platforms()))}."
         await followup_store.grant_contact_permission(
             sf, org_id=ctx.org_id, platform=ctx.channel,
             platform_user_id=await ctx.person_id(sf), recorded_by="agent",
