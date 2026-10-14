@@ -223,7 +223,10 @@ ESCALATE_SCHEMA = ToolSchema(
         "person says needs a human: something the protocol lists, "
         "something the protocol does not cover, distress, or a request only "
         "the business can answer. It reaches the responsible operator's inbox "
-        "and the team. It does not end a scheduled step; record the "
+        "and the team. Escalate every new report of a sign, even when a "
+        "similar one was escalated before, in this conversation or an earlier "
+        "one: the team needs to know it is still happening, and the platform "
+        "groups repeats. It does not end a scheduled step; record the "
         "outcome separately."
     ),
     parameters={
@@ -620,6 +623,10 @@ def _uuid_or_none(value: Any) -> uuid.UUID | None:
 
 _RED = frozenset({"red", "rosu", "roșu", "urgent", "critical"})
 
+#: Severity marks a model may put before its reason, with their variation
+#: selector and spacing.
+_MARKS = "🔴🟠🟡🟢⚠\ufe0f \t"
+
 
 def _severity(raw: Any) -> str:
     """red or yellow, whatever the model wrote: an escalation is never
@@ -628,7 +635,9 @@ def _severity(raw: Any) -> str:
 
 
 async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
-    reason = str(arguments.get("reason") or "").strip()
+    # The severity mark is the platform's to add; a model that wrote its
+    # own sent the team "🔴 🔴".
+    reason = str(arguments.get("reason") or "").strip().lstrip(_MARKS).strip()
     if not reason:
         return "reason is required — say what needs the team's attention."
     severity = _severity(arguments.get("severity"))
@@ -719,7 +728,11 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         told.append("the responsible operator's inbox")
     if queued:
         told.append(f"{queued} team member(s)")
-    return "Escalated to " + " and ".join(told) + "."
+    return (
+        "Escalated to " + " and ".join(told) + ". This note is for you, not "
+        "the person: do not repeat it to them; tell them only what they need "
+        "to know, in your own words."
+    )
 
 
 def _retryable(name: str, handler: Any) -> Any:

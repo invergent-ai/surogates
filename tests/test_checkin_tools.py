@@ -137,7 +137,8 @@ async def test_checkin_outcome_records_the_label_apart_from_the_status(sf, await
     )
     saved = await _reload(sf, awaiting_invitation.id)
     assert (saved.response_state, saved.outcome) == ("completed", "hot")
-    assert result == "Step recorded as completed, label hot."
+    assert result.startswith("Step recorded as completed, label hot.")
+    assert "do not mention it to them" in result
 
 
 @pytest.mark.asyncio

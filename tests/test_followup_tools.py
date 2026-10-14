@@ -330,9 +330,10 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
     result = await followup.handle_escalate(
         {"reason": "Spune că a leșinat azi-dimineață."}, **_kw(sf, session_id),
     )
-    assert result == (
+    assert result.startswith(
         "Escalated to the responsible operator's inbox and 1 team member(s)."
     )
+    assert "do not repeat it to them" in result
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.service_account_id == inbox_sa
@@ -355,6 +356,20 @@ async def test_escalate_marks_red_when_an_emergency_script_was_sent(sf, patient,
     assert red.alert_reason == "Durere în piept, i-am spus să sune la 112"
     assert red.dedupe_key.startswith("escalation:-:")
     assert yellow.dedupe_key.rsplit(":", 1)[0] != red.dedupe_key.rsplit(":", 1)[0]
+
+
+@pytest.mark.asyncio
+async def test_the_models_own_severity_mark_is_not_doubled(sf, patient, care_team):
+    _, session_id = patient
+    await followup.handle_escalate(
+        {"reason": "🔴 Febră 39", "severity": "red"}, **_kw(sf, session_id),
+    )
+    [alert] = await _outreach(sf)
+    assert alert.text.startswith("🔴 Febră 39") and alert.alert_reason == "Febră 39"
+
+
+def test_escalate_asks_for_every_new_report_even_a_repeat():
+    assert "even when a similar one was escalated before" in followup.ESCALATE_SCHEMA.description
 
 
 @pytest.mark.asyncio
