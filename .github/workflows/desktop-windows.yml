@@ -64,6 +64,11 @@ jobs:
       - name: Check the desktop's types
         run: npm run typecheck
 
+      # The app's code, which a file of the project runs as the app does: the image's delivery, in this package's
+      # Electron.
+      - name: Build the app's code
+        run: npx tsc -p tsconfig.build.json
+
       - name: Run the suites that pass on Windows
         run: npx vitest run --project windows
 
@@ -215,10 +220,9 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
-      - name: Build the desktop
-        env:
-          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
-        run: npm run build
+      # The app's code alone, which the stand-in imports: npm run build is the Linux app's build, and refuses here.
+      - name: Build the app's code
+        run: npx tsc -p tsconfig.build.json
 
       - name: Run the VM backend against the stand-in
         run: npx vitest run test/vm-win32.test.ts
@@ -319,9 +323,9 @@ jobs:
           if-no-files-found: error
 
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
-  # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
-  # takes vm-guest's image and agent disks, gives the agent disk its VHD footer, and runs the boot and requirements
-  # measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
+  # virtualization on its runners. It builds the native programs and the desktop, takes vm-guest's image and agent
+  # disks, gives the agent disk its VHD footer, installs the development service laid out as the installed app is, the
+  # agent disk beside it in Program Files, and runs the boot and requirements measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
   # own words. Either way the result is kept with each boot's console and Hyper-V's own events, and the job does not
   # fail the branch.
   vm-boot:
@@ -354,11 +358,11 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
-      - name: Build the desktop
+      # The app's code alone, which gives the agent disk its footer below: npm run build is the Linux app's build, and
+      # refuses here.
+      - name: Build the app's code
         working-directory: desktop
-        env:
-          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
-        run: npm run build
+        run: npx tsc -p tsconfig.build.json
 
       - name: Take the guest image
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -386,17 +390,18 @@ jobs:
         working-directory: desktop
         run: node scripts/vhd-footer.mjs dist/agent.img
 
+      # The service, and the agent disk with its footer, in the development install's folder of Program Files, as the
+      # installed app has them: the service grants the agent disk from there to each VM it boots, by its own right.
       - name: Install the development VM service
         working-directory: desktop/native/windows
-        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
+        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1 -AgentDisk ..\..\dist\agent.img
 
-      # The agent disk with its footer. The measurements give the image's disk its own, as the app's delivery does, and
-      # the measurements' agent disk too.
+      # The app's agent disk where the development service laid it out. The measurements give the image's disk its own
+      # footer, as the app's delivery does, and the measurements' agent disk too, each in the data folder.
       - name: Try one real boot, and record what happened
         working-directory: desktop
         continue-on-error: true
         env:
-          SUROGATE_VM_AGENT_DISK: ${{ github.workspace }}\desktop\dist\agent.img
           SUROGATE_VM_PROBING_DISK: ${{ github.workspace }}\desktop\test\vm\win32\measure\probing\agent.img
         run: |
           $said = npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot 2>&1 | Out-String

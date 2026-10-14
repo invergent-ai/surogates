@@ -5,15 +5,13 @@
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts beside
 // PASS or FAIL: the guest boots and runs a command with whatever else is on.
 
-import { execFileSync } from "node:child_process";
-
 import { expect, it } from "vitest";
 
-import { lab, ready, record, ROOTS, scratch } from "./harness.js";
+import { lab, ready, record, ROOTS, scratch, windowsPowerShell } from "./harness.js";
 
 const ps = (command: string) => {
   try {
-    return execFileSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8" }).trim();
+    return windowsPowerShell(command);
   } catch (error) {
     return `?: ${(error as Error).message}`;
   }
