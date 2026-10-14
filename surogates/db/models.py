@@ -1104,6 +1104,32 @@ class ProgramInvitationRow(Base):
     )
     #: Why this row is in the state it is, in operator words.
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The business sender this opener goes out from on ``platform``.  Null on
+    #: rows from before a step could pick a channel: the Program's own sender.
+    channel_identifier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: What the agent recorded as the result, e.g. ``completed`` or a value a
+    #: branch reads (``red``).
+    outcome: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Channels still to try, in order, when this one does not arrive.
+    fallback_platforms: Mapped[Optional[list]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True,
+    )
+    #: When to move on to the next channel if nothing says it arrived.
+    fallback_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: Channels already tried: ``[{platform, state, error, at}]``.
+    attempts: Mapped[Optional[list]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True,
+    )
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: Who on the team took the escalation, and when it was dealt with.
+    escalation_owner: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
     )
@@ -1173,6 +1199,10 @@ class FollowupEnrollmentRow(Base):
     )
     #: What created the enrollment, e.g. ``checkout:cs_…``.
     source_ref: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The person's own zone, when it is not the journey's.
+    timezone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The channel the person asked to be reached on.
+    preferred_channel: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
     )
@@ -1201,6 +1231,17 @@ class FollowupSettingsRow(Base):
     #: End users on this agent who are told on their phone: the team.
     alert_recipient_user_ids: Mapped[list[str]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=list,
+    )
+    #: The agent's sender per channel, ``{platform: identifier}``.  WhatsApp
+    #: falls back to ``channel_identifier`` when absent.
+    senders: Mapped[dict[str, str]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+        server_default=text("'{}'"),
+    )
+    #: Where each team member is told, in order: ``{user_id: [platform, …]}``.
+    team_channels: Mapped[dict[str, list]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+        server_default=text("'{}'"),
     )
     #: The approved template that reopens a recipient's conversation when the
     #: provider's customer-service window has closed.  One for alerts to the

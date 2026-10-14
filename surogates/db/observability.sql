@@ -1100,3 +1100,20 @@ UPDATE followup_enrollments SET enrolled_by = 'team' WHERE enrolled_by = 'care_t
 -- ── what an alert is about, apart from how its text presents it ──────
 ALTER TABLE outreach_messages
     ADD COLUMN IF NOT EXISTS alert_reason text;
+
+-- ── journeys: a step picks a channel per person, and falls back ──────
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS channel_identifier text,
+    ADD COLUMN IF NOT EXISTS outcome text,
+    ADD COLUMN IF NOT EXISTS fallback_platforms jsonb,
+    ADD COLUMN IF NOT EXISTS fallback_at timestamptz,
+    ADD COLUMN IF NOT EXISTS attempts jsonb,
+    ADD COLUMN IF NOT EXISTS read_at timestamptz,
+    ADD COLUMN IF NOT EXISTS escalation_owner text,
+    ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
+ALTER TABLE followup_enrollments
+    ADD COLUMN IF NOT EXISTS timezone text,
+    ADD COLUMN IF NOT EXISTS preferred_channel text;
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS senders jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS team_channels jsonb NOT NULL DEFAULT '{}'::jsonb;
