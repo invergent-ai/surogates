@@ -33,6 +33,11 @@ pub struct Hcs<'a> {
 
 /// The most of the console one notice carries.
 const CONSOLE_CHUNK: usize = 4096;
+/// The console's pipe's descriptor: SYSTEM and administrators all access, as the service's default descriptor gives
+/// them and the only write it gives, which HCS's worker opens COM1's other end with; and no one else, not even to read,
+/// as the default lets everyone do: a user who took the pipe's one instance first would leave the guest's console with
+/// nowhere to go.
+pub const CONSOLE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
 /// The guest's console, as the service reads it: the server's end of COM1's pipe, read on a thread of its own until
 /// this goes, which ends the read.
@@ -45,12 +50,11 @@ impl Drop for Console {
 }
 
 /// The console's pipe *name*, made by the service before the VM, which HCS's worker connects to as COM1's other end,
-/// and what the guest prints there told to *notify*. Both ways, as WSL's service makes its own (WSL,
-/// src/windows/common/Dmesg.cpp, CreateConsolePipe: PIPE_ACCESS_DUPLEX, one instance, the service's default
-/// descriptor): the worker opens a serial port's other end to read and to write, which a pipe its server alone reads
-/// refuses.
+/// and what the guest prints there told to *notify*. Both ways and one instance, as WSL's service makes its own (WSL,
+/// src/windows/common/Dmesg.cpp, CreateConsolePipe: PIPE_ACCESS_DUPLEX): the worker opens a serial port's other end
+/// to read and to write, which a pipe its server alone reads refuses.
 pub fn console(name: &str, notify: Notify) -> Result<Console, Failure> {
-    let pipe = Arc::new(Pipe::server(name, None, Way::Duplex, true, true).map_err(|error| Failure { code: -1, words: format!("the console's pipe could not be made: {error}") })?);
+    let pipe = Arc::new(Pipe::server(name, Some(CONSOLE_SDDL), Way::Duplex, true, true).map_err(|error| Failure { code: -1, words: format!("the console's pipe could not be made: {error}") })?);
     let reading = pipe.clone();
     thread::spawn(move || {
         if reading.accept().is_err() {
