@@ -32,6 +32,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup.eligibility import Audience
+from surogates.followup.wording import wording
 
 logger = logging.getLogger(__name__)
 
@@ -401,14 +402,6 @@ TEAM_TEXTS = {
         "Confirm or refuse it."
     ),
 }
-
-
-def wording(texts: Any, key: str, **values: Any) -> str:
-    """The business's wording for one of :data:`TEAM_TEXTS`, else the
-    default.  *texts* is the settings row or its ``texts``."""
-    if texts is not None and not isinstance(texts, dict):
-        texts = getattr(texts, "texts", None)
-    return render_text((texts or {}).get(key), TEAM_TEXTS[key], **values)
 
 
 def person_label(display_name: str | None, enrollment: Any = None, texts: Any = None) -> str:

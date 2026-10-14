@@ -48,6 +48,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
+from surogates.followup.wording import wording
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
@@ -302,7 +303,7 @@ async def _answered_too_late(
         return
     settings = await agents.settings(row.org_id, row.agent_id)
     await _write_text(
-        session_store, session_id, row, _wording(settings, "expired_message_to_person"),
+        session_store, session_id, row, wording(settings, "expired_message_to_person"),
     )
     requester = _requester(row.created_by)
     if requester is None:
@@ -313,7 +314,7 @@ async def _answered_too_late(
     )
     await _tell_requester(
         session_factory, settings, row, requester,
-        text=_wording(settings, "late_answer_notice", name=name, phone=phone),
+        text=wording(settings, "late_answer_notice", name=name, phone=phone),
         dedupe_prefix=f"late:{row.id}",
     )
 
@@ -364,12 +365,6 @@ async def _described(session_factory: Any, found: Any) -> dict[tuple, Described]
         )).items():
             out[(org_id, agent_id, user_id)] = described
     return out
-
-
-def _wording(settings: Any, key: str, **values: Any) -> str:
-    """The agent's wording for *key*, else the platform's."""
-    texts = (settings.texts or {}) if settings else {}
-    return followup_store.render_text(texts.get(key), DEFAULT_TEXTS[key], **values)
 
 
 async def _tell_requester(
@@ -593,7 +588,7 @@ def plain_reason(reason: str | None, texts: dict | None = None) -> str:
         (k for fragments, k in _REASONS if any(f in lowered for f in fragments)),
         "why_undelivered",
     )
-    return followup_store.render_text((texts or {}).get(key), DEFAULT_TEXTS[key])
+    return wording(texts, key)
 
 
 async def _mark_reported(session_factory: Any, model: Any, ids: list, now: datetime) -> None:
@@ -651,9 +646,9 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
             )
             if row.state == "delivered":
                 at = as_utc(row.delivered_at or now).astimezone(ZoneInfo(zone))
-                text = _wording(settings, "delivered_notice", name=name, time=f"{at:%H:%M}", phone=phone)
+                text = wording(settings, "delivered_notice", name=name, time=f"{at:%H:%M}", phone=phone)
             else:
-                text = _wording(
+                text = wording(
                     settings, "undelivered_notice",
                     name=name, why=plain_reason(row.reason, settings.texts if settings else None), phone=phone,
                 )
@@ -734,7 +729,7 @@ async def _remind(
     queued, why_not = await followup_store.notify_team(
         session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
         kind="alert", severity="red", created_by="reminder", topic="urgent",
-        text=_wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
+        text=wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
         dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
         fallback_senders={row.platform: row.channel_identifier},
@@ -887,7 +882,7 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                 queued, _ = await followup_store.notify_team(
                     session_factory, settings, org_id=org_id, agent_id=agent_id,
                     kind="notice", created_by="outreach", subject_user_id=user_id,
-                    text=_wording(
+                    text=wording(
                         settings, "person_failure_notice",
                         name=name, why=plain_reason(failure["first"][1], settings.texts), phone=phone,
                     ),

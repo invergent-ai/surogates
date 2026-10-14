@@ -1585,10 +1585,7 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=escalation.id,
         )
     key = "escalation_taken" if action == "claim" else "escalation_resolved"
-    text = followup_store.render_text(
-        ((settings.texts or {}) if settings else {}).get(key), ESCALATION_TEXTS[key],
-        member=member, name=label, reason=escalation.reason[:300],
-    )
+    text = followup_store.wording(settings, key, member=member, name=label, reason=escalation.reason[:300])
     colleagues_told = 0
     for colleague in sorted(await _alerted_with(sf, escalation) - {ctx.user_id}, key=str):
         queued, _ = await _tell_team(

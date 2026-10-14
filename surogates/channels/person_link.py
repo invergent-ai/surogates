@@ -22,6 +22,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.db.models import ChannelIdentity, User
+from surogates.followup.wording import wording
 
 logger = logging.getLogger(__name__)
 
@@ -189,12 +190,6 @@ async def _texts(session_factory: Any, org_id: Any, agent_id: str) -> tuple[Any,
         session_factory, org_id=uuid.UUID(str(org_id)), agent_id=agent_id,
     )
     return settings, (getattr(settings, "texts", None) or {})
-
-
-def wording(texts: dict, key: str, **values: Any) -> str:
-    from surogates.followup.store import render_text
-
-    return render_text(texts.get(key), DEFAULT_TEXTS[key], **values)
 
 
 async def start(
