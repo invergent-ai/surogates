@@ -309,7 +309,7 @@ async def _answered_too_late(
         return
     name, phone, _zone = await describe_person(
         session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
-        zones=await agents.zones(row.org_id, row.agent_id),
+        zones=await agents.zones(row.org_id, row.agent_id), texts=settings,
     )
     await _tell_requester(
         session_factory, settings, row, requester,
@@ -348,6 +348,7 @@ class _Agents:
         return await describe_person(
             self._sf, org_id=org_id, agent_id=agent_id, user_id=user_id,
             zones=await self.zones(org_id, agent_id), described=described,
+            texts=await self.settings(org_id, agent_id),
         )
 
 
@@ -460,8 +461,12 @@ class Described:
 
     @property
     def name(self) -> str:
+        return self.label()
+
+    def label(self, texts: Any = None) -> str:
+        """Their name as the team knows them, worded by *texts*."""
         return followup_store.person_label(
-            self.display_name, followup_store.labelling_enrollment(self.rows),
+            self.display_name, followup_store.labelling_enrollment(self.rows), texts,
         )
 
     def zone(self, zones: dict[str, str]) -> str:
@@ -536,6 +541,7 @@ async def describe_person(
     user_id: uuid.UUID,
     zones: dict[str, str] | None = None,
     described: Described | None = None,
+    texts: Any = None,
 ) -> tuple[str, str, str]:
     """(name, readable phone, timezone) of a person, as the team knows them."""
     if described is None:
@@ -547,7 +553,7 @@ async def describe_person(
             session_factory, org_id=org_id, agent_id=agent_id,
         )
     return (
-        described.name or "?",
+        described.label(texts) or "?",
         readable_phone(described.wa_id) if described.wa_id else "?",
         described.zone(zones),
     )

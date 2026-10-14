@@ -1228,14 +1228,17 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
         result += f", start {start_text(updated)}"
     result += "."
     if status in ("paused", "ended"):
-        label = followup_store.person_label(person.display_name, updated)
+        label = followup_store.person_label(person.display_name, updated, settings)
+        notice = followup_store.wording(
+            settings, f"notice_{status}_by", journey=row.protocol, member=_member(ctx), reason=reason,
+        )
         queued, why_not = await followup_store.notify_team(
             sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="alert",
             text=(
-                f"{row.protocol} {status} by {_member(ctx)}: {reason}"
+                f"{notice}"
                 f"\n\n— {label or person.label}"
             ),
-            reason=f"{row.protocol} {status} by {_member(ctx)}: {reason}",
+            reason=notice,
             created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
             exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
             topic="attention",
@@ -1441,8 +1444,10 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     queued, why_not = await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="enrolment",
         text=(
-            f"{name} enrolled in {protocol} by {_member(ctx)}."
-            f"\n\n— {followup_store.person_label(name, row)}"
+            followup_store.wording(
+                settings, "notice_enrolled_by", name=name, journey=protocol, member=_member(ctx),
+            )
+            + f"\n\n— {followup_store.person_label(name, row, settings)}"
             + (f" · {readable_phone(handle)}" if platform == "whatsapp" else "")
         ),
         created_by=f"team:{ctx.user_id}", subject_user_id=user_id,

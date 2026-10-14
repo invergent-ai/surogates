@@ -257,13 +257,19 @@ async def withdraw_consent(
         return False, [], (0, None)
     settings = await followup_store.get_settings(sf, org_id=org_id, agent_id=agent_id)
     speaker = await followup_store.speaker_for(sf, org_id=org_id, agent_id=agent_id, user_id=user_id)
-    who = (
-        followup_store.writer_line(speaker).removeprefix("Writing: ")
-        if speaker is not None
-        else (await followup_store.display_names(sf, [user_id])).get(user_id) or "someone"
+    w = followup_store.wording
+    if speaker is not None and speaker.role == "contact":
+        who = w(settings, "label_contact_for", contact=speaker.name or w(settings, "label_contact"),
+                relation=speaker.relation or w(settings, "label_contact"), name=speaker.person_name)
+    elif speaker is not None:
+        who = speaker.person_name
+    else:
+        who = (await followup_store.display_names(sf, [user_id])).get(user_id) or "?"
+    what = (
+        w(settings, "stop_ended", journeys=", ".join(ended)) if ended
+        else w(settings, "stop_contact")
     )
-    what = f"ended {', '.join(ended)}" if ended else "stops receiving the follow-up messages there"
-    text = f"{who} asked to stop messages on {channel}: {what}. {reason}".strip()
+    text = w(settings, "notice_stopped", who=who, channel=channel, what=what, reason=reason).strip()
     told = await followup_store.notify_team(
         sf, settings, org_id=org_id, agent_id=agent_id, kind="alert", text=text,
         reason=text, created_by=by, subject_user_id=speaker.person_user_id if speaker else user_id,

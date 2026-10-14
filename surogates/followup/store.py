@@ -381,17 +381,55 @@ async def update_enrollment(
         return row
 
 
-def person_label(display_name: str | None, enrollment: Any = None) -> str:
+#: Every sentence the platform itself writes to the team or to a person
+#: outside the agent's own replies, keyed so ``followup_settings.texts`` words
+#: it in the business's language.  Placeholders are named in each default.
+TEAM_TEXTS = {
+    "label_answered_by": "via {answered_by}",
+    "label_reported_by": "reported by {contact} ({relation})",
+    "label_contact": "contact",
+    "label_contact_for": "{contact} ({relation}), for {name}",
+    "notice_paused": "{journey} paused: {reason}",
+    "notice_ended": "{journey} ended: {reason}",
+    "notice_paused_by": "{journey} paused by {member}: {reason}",
+    "notice_ended_by": "{journey} ended by {member}: {reason}",
+    "notice_resumed_by": "{journey} resumed by {member}: {reason}",
+    "notice_enrolled_by": "{name} enrolled in {journey} by {member}.",
+    "notice_stopped": "{who} asked to stop messages on {channel}: {what}. {reason}",
+    "stop_ended": "{journeys} ended",
+    "stop_contact": "they no longer get the follow-up messages there",
+    "link_claim_question": (
+        "{writer_name} ({writer}) says they are {relation} of {name} and asks to "
+        "receive {name}'s messages too. Is {writer} really their number? Please "
+        "answer yes or no."
+    ),
+    "link_request_team": (
+        "Link request: {writer_name} ({writer}) says they are {relation} of {name}. "
+        "Confirm or refuse it."
+    ),
+}
+
+
+def wording(texts: Any, key: str, **values: Any) -> str:
+    """The business's wording for one of :data:`TEAM_TEXTS`, else the
+    default.  *texts* is the settings row or its ``texts``."""
+    if texts is not None and not isinstance(texts, dict):
+        texts = getattr(texts, "texts", None)
+    return render_text((texts or {}).get(key), TEAM_TEXTS[key], **values)
+
+
+def person_label(display_name: str | None, enrollment: Any = None, texts: Any = None) -> str:
     """Who an enrollment is about, as the team knows them.
 
     The enrollment's person name wins over *display_name*: that is the
-    WhatsApp profile of whoever is writing, often a relative.
+    WhatsApp profile of whoever is writing, often a relative.  *texts* words
+    the "via" part in the business's language.
     """
     name = (getattr(enrollment, "patient_name", None) or display_name or "").strip()
     parts = [name] if name else []
     answered_by = getattr(enrollment, "answered_by", None)
     if answered_by:
-        parts.append(f"via {answered_by}")
+        parts.append(wording(texts, "label_answered_by", answered_by=answered_by))
     return " · ".join(parts)
 
 

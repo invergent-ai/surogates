@@ -135,8 +135,9 @@ class Context:
         speaker = await self.speaker(session_factory)
         return speaker.person_user_id if speaker is not None else self.user_id
 
-    async def person_label(self, session_factory: Any) -> str:
-        """How the team recognises who an alert is about, and who reported it."""
+    async def person_label(self, session_factory: Any, texts: Any = None) -> str:
+        """How the team recognises who an alert is about, and who reported it,
+        worded by *texts* (the settings row or its ``texts``)."""
         speaker = await self.speaker(session_factory)
         person = speaker.person_user_id if speaker is not None else self.user_id
         if not self._named and person is not None:
@@ -148,14 +149,15 @@ class Context:
             ))
         own = speaker is None or speaker.role == "person"
         name = followup_store.person_label(
-            self.display_name if own else speaker.person_name, self.enrollment,
+            self.display_name if own else speaker.person_name, self.enrollment, texts,
         )
         parts = [name] if name else []
         if not own:
-            parts.append(
-                f"reported by {speaker.name or 'a contact'}"
-                + (f" ({speaker.relation})" if speaker.relation else "")
-            )
+            parts.append(followup_store.wording(
+                texts, "label_reported_by",
+                contact=speaker.name or followup_store.wording(texts, "label_contact"),
+                relation=speaker.relation or followup_store.wording(texts, "label_contact"),
+            ))
         if self.channel == "whatsapp" and self.platform_user_id:
             parts.append(readable_phone(self.platform_user_id))
         return " · ".join(parts) or f"user {self.user_id}"

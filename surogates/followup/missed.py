@@ -307,7 +307,7 @@ async def _alert_if_streak(
     )
     text = render_missed_text(
         config.get("missed_alert_text"),
-        name=person.name or "?",
+        name=person.label(settings_cache[key]) or "?",
         phone=readable_phone(phone) if phone else "?",
         count=threshold,
         program=str(config.get("name") or "step"),

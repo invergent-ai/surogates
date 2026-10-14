@@ -572,3 +572,54 @@ async def test_resolving_from_chat_closes_the_inbox_item_too(sf, clinic):
     assert "resolved" in result, result
     [item] = await _all(sf, InboxItem)
     assert item.status == "acknowledged" and item.responded_at is not None
+
+
+# --- the platform's own sentences, in the business's words -----------------------
+
+
+ROMANIAN = {
+    "label_reported_by": "semnalat de {contact} ({relation})",
+    "notice_paused": "{journey} pus pe pauză: {reason}",
+    "notice_stopped": "{who} a cerut oprirea mesajelor pe {channel}: {what}. {reason}",
+    "stop_ended": "{journeys} încheiat",
+    "notice_enrolled_by": "{name} înscris în {journey} de {member}.",
+}
+
+
+@pytest.mark.asyncio
+async def test_team_notices_use_the_business_wording(sf, clinic):
+    _doctor, doctor_session, _ = clinic
+    # Everyone receives everything, so the nurse hears of the enrolment too.
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, texts=ROMANIAN, team_permissions={})
+    ana, ana_session = await _user(sf, "Ana", "40711111111")
+    await _enrol_father(sf, ana_session)
+    notes = [o for o in await _all(sf, OutreachMessageRow) if o.kind == "enrolment"]
+    assert notes and all("semnalat de Ana (fiica)" in o.text and "reported" not in o.text for o in notes)
+
+    await followup.handle_followup_update(
+        {"protocol": "post-op", "status": "paused", "reason": "internat"}, **_kw(sf, ana_session),
+    )
+    assert any(o.text.startswith("post-op pus pe pauză: internat") for o in await _all(sf, OutreachMessageRow))
+
+    ion, ion_session = await _user(sf, "Ion", "40722222222")
+    await store.upsert_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=ion, protocol="post-op",
+                                  start_date=date.today(), phase=None, enrolled_by="agent")
+    await followup_people.handle_followup_withdraw_consent({"reason": "STOP"}, **_kw(sf, ion_session))
+    assert any(o.text == "Ion a cerut oprirea mesajelor pe WhatsApp: post-op încheiat. STOP"
+               for o in await _all(sf, OutreachMessageRow))
+
+    result = await _confirmed(
+        team.handle_team_enroll_person,
+        {"phone": "+40 733 333 333", "person_name": "Elena", "days_ago": 1},
+        _kw(sf, doctor_session, redis=_Redis()),
+    )
+    assert result.startswith("Enrolled")
+    assert any(o.text.startswith("Elena înscris în post-op de Dr. Ionescu.")
+               for o in await _all(sf, OutreachMessageRow))
+
+
+def test_every_platform_sentence_has_a_key():
+    for key, default in store.TEAM_TEXTS.items():
+        assert store.wording(None, key, **{k: "x" for k in (
+            "answered_by", "contact", "relation", "name", "journey", "reason", "member", "who",
+            "channel", "what", "journeys", "writer_name", "writer")}) != default or "{" not in default

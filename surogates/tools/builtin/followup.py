@@ -342,7 +342,7 @@ async def _tell_team(
     extra.setdefault("reason", text)
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
-        text=f"{text.strip()}\n\n— {await ctx.person_label(sf)}", created_by="agent",
+        text=f"{text.strip()}\n\n— {await ctx.person_label(sf, settings)}", created_by="agent",
         subject_user_id=await ctx.person_user_id(sf), exclude_user_id=ctx.user_id,
         fallback_senders={ctx.channel: ctx.sender},
         **extra,
@@ -647,7 +647,8 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     result += "."
     if status in ("paused", "ended"):
         queued, why_not = await _tell_team(
-            sf, ctx, settings, kind="alert", text=f"{protocol} {status}: {reason}",
+            sf, ctx, settings, kind="alert",
+            text=followup_store.wording(settings, f"notice_{status}", journey=protocol, reason=reason),
             topic="attention",
         )
         result += " " + told(queued, why_not)

@@ -240,8 +240,7 @@ async def _claim(sf: Any, ctx: Context, settings: Any, arguments: dict) -> str:
     person = await _claimed_person(sf, ctx, settings, arguments)
     writer = readable_phone(ctx.platform_user_id) if ctx.channel == "whatsapp" else ctx.display_name
     if isinstance(person, str):
-        return await _to_team(sf, ctx, settings, f"{person}; claims to be {relation} of "
-                              f"{arguments.get('person_name') or '?'}", None)
+        return await _to_team(sf, ctx, settings, relation, str(arguments.get("person_name") or "?"), None)
     linked = await followup_store.contacts(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, person_user_id=person,
     )
@@ -268,10 +267,9 @@ async def _claim(sf: Any, ctx: Context, settings: Any, arguments: dict) -> str:
         await followup_store.queue_outreach(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=candidate,
             platform=reach.platform, channel_identifier=reach.sender, kind="notice",
-            text=(
-                f"{ctx.display_name or 'Someone'} ({writer}) says they are {relation} of "
-                f"{name} and asks to receive {name}'s messages too. Is {writer} really "
-                f"their number? Please answer yes or no."
+            text=followup_store.wording(
+                settings, "link_claim_question", writer_name=ctx.display_name or "?",
+                writer=writer, relation=relation, name=name,
             ),
             template_name=settings.message_template_name if reach.needs_template else None,
             template_language=settings.message_template_language if reach.needs_template else None,
@@ -283,13 +281,18 @@ async def _claim(sf: Any, ctx: Context, settings: Any, arguments: dict) -> str:
             "they say yes this person is not linked: tell them so, and share "
             "nothing about the person followed meanwhile."
         )
-    return await _to_team(sf, ctx, settings, f"claims to be {relation} of {name}", person)
+    return await _to_team(sf, ctx, settings, relation, name, person)
 
 
-async def _to_team(sf: Any, ctx: Context, settings: Any, what: str, person: Any) -> str:
+async def _to_team(
+    sf: Any, ctx: Context, settings: Any, relation: str, name: str, person: Any,
+) -> str:
     """Nobody can confirm in chat: the team decides."""
     writer = readable_phone(ctx.platform_user_id) if ctx.channel == "whatsapp" else ctx.display_name
-    text = f"Link request: {ctx.display_name or 'someone'} ({writer}) {what}. Confirm or refuse it."
+    text = followup_store.wording(
+        settings, "link_request_team", writer_name=ctx.display_name or "?", writer=writer,
+        relation=relation, name=name,
+    )
     await followup_store.record_escalation(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person or ctx.user_id,
         kind="link_request", reason=text, platform=ctx.channel or None, session_id=ctx.session_id,
