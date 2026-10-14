@@ -127,11 +127,63 @@ async def test_a_preferred_channel_nobody_can_send_on_is_passed_over(sf):
 
 
 @pytest.mark.asyncio
-async def test_nobody_reachable_is_skipped_visibly(sf):
+async def test_reachable_only_where_the_agent_has_no_sender_is_skipped_visibly(sf):
     a = uuid.uuid4()
-    rows = await _fire(sf, _schedule([a]), _lookup({}))
-    assert rows[a].delivery_state == "skipped"
-    assert rows[a].reason == "No reachable channel"
+    schedule = _schedule([a])
+    schedule.config["channel_identifier"] = None
+    schedule.config["journey"]["senders"] = {"slack": "T1"}
+    rows = await _fire(sf, schedule, _lookup({("whatsapp", a): "4070"}))
+    assert (rows[a].delivery_state, rows[a].reason) == ("skipped", "No reachable channel")
+
+
+def _key(row):
+    return (row.platform, row.platform_user_id, row.channel_identifier, row.delivery_state, row.reason)
+
+
+@pytest.mark.asyncio
+async def test_a_whatsapp_only_person_is_asked_exactly_as_before_journeys(sf):
+    ok, missing, withdrawn = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    async def lookup(org_id, platform, user_id):
+        if platform != "whatsapp" or user_id == missing:
+            return None
+        ident = _granted("4070" if user_id == ok else "4071")
+        if user_id == withdrawn:
+            ident.platform_meta = {"contact_permission": {"status": "withdrawn"}}
+        return ident
+
+    with_journey = _schedule([ok, missing, withdrawn])
+    without = _schedule([ok, missing, withdrawn])
+    del without.config["journey"]
+    after = await _fire(sf, with_journey, lookup)
+    before = await _fire(sf, without, lookup)
+    assert {u: _key(r) for u, r in after.items()} == {u: _key(r) for u, r in before.items()}
+    assert _key(after[ok]) == ("whatsapp", "4070", "pn1", "queued", None)
+    assert after[missing].reason == "No whatsapp identity"
+    assert after[withdrawn].reason == "No permission to message"
+
+
+@pytest.mark.asyncio
+async def test_an_open_question_on_one_channel_is_not_asked_again_on_another(sf):
+    a = uuid.uuid4()
+    lookup = _lookup({("whatsapp", a): "4070", ("telegram", a): "555"})
+    await _enrol(sf, a)
+    first = await _fire(sf, _schedule(audience=AUDIENCE), lookup)
+    async with sf() as db:
+        row = await db.get(ProgramInvitationRow, first[a].id)
+        row.response_state = "awaiting_reply"
+        await db.commit()
+    await _enrol_preference(sf, a, "telegram")
+    again = (await _fire(sf, _schedule(audience=AUDIENCE), lookup, now=SLOT + timedelta(days=1)))[a]
+    assert again.platform == "telegram"
+    assert (again.delivery_state, again.reason) == ("skipped", "Previous check-in still open")
+
+
+async def _enrol_preference(sf, user, channel):
+    await followup_store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="onboarding",
+        preferred_channel=channel,
+    )
 
 
 @pytest.mark.asyncio
@@ -279,6 +331,21 @@ async def test_each_person_is_asked_at_the_steps_time_in_their_own_zone(sf):
 
 
 @pytest.mark.asyncio
+async def test_a_journeys_own_zone_never_moves_a_steps_slots(sf):
+    # A journey defaulting to UTC over Bucharest steps: the steps keep their
+    # own zone, exactly as without a journey.
+    a = uuid.uuid4()
+    await _enrol(sf, a)
+    with_journey = _schedule(audience=AUDIENCE, timezone="UTC")
+    without = _schedule(audience=AUDIENCE)
+    del without.config["journey"]
+    lookup = _lookup({("whatsapp", a): "4070"})
+    assert await journey.next_run_at(sf, with_journey, SLOT) == await journey.next_run_at(sf, without, SLOT)
+    assert await journey.next_run_at(sf, with_journey, SLOT - timedelta(hours=1)) == SLOT
+    assert set(await _fire(sf, with_journey, lookup)) == set(await _fire(sf, without, lookup)) == {a}
+
+
+@pytest.mark.asyncio
 async def test_a_journey_ends_its_people_after_its_days(sf):
     done, ongoing = uuid.uuid4(), uuid.uuid4()
     schedule = _schedule(audience={"protocol": "onboarding"}, exit_after_days=180)
@@ -329,7 +396,7 @@ async def test_the_funnel_counts_each_step_from_invited_to_answered(sf):
     f = funnels[step.program_id]
     assert (f["invited"], f["skipped"], f["sent"], f["delivered"], f["read"]) == (3, 1, 1, 1, 1)
     assert (f["replied"], f["completed"], f["failed"], f["no_reply"]) == (1, 1, 1, 0)
-    assert f["skip_reasons"] == {"No reachable channel": 1}
+    assert f["skip_reasons"] == {"No whatsapp identity": 1}
     assert f["outcomes"] == {"red": 1} and f["channels"] == {"whatsapp": 2}
     assert funnels[other]["invited"] == 0
 

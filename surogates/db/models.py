@@ -1046,6 +1046,12 @@ class ProgramInvitationRow(Base):
             "idx_program_invitations_unreported",
             "created_at", postgresql_where=text("reported_at IS NULL"),
         ),
+        # Whether a person already has an open question, whichever channel
+        # it went out on.
+        Index(
+            "idx_program_invitations_person_open",
+            "org_id", "agent_id", "user_id", "response_state",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

@@ -2,7 +2,7 @@
 
 A journey groups a business's Programs (its steps) under one slug and adds
 the settings that span them: the agent's sender on each channel, quiet hours,
-a default zone, and when the journey is over.  Inside one, each person is
+and when the journey is over.  Inside one, each person is
 reached on their own channel and in their own zone.  All of it
 is optional in the projection; a Program without a journey behaves as it
 always did.
@@ -51,13 +51,13 @@ def protocol_of(config: dict) -> str | None:
 
 
 def person_zone(enrollment: Any, config: dict) -> str:
-    """The person's own zone, else the journey's, else the Program's."""
-    return str(
-        getattr(enrollment, "timezone", None)
-        or journey_of(config).get("timezone")
-        or (config or {}).get("timezone")
-        or "UTC"
-    )
+    """The person's own zone, else the Program's.
+
+    Never the journey's: that is only Studio's default for new steps, and a
+    step's slots are computed in its own zone everywhere else (reconcile,
+    the store), so reading the journey's here would match none of them.
+    """
+    return str(getattr(enrollment, "timezone", None) or (config or {}).get("timezone") or "UTC")
 
 
 def fires_in(config: dict, zone: str, at: datetime) -> bool:

@@ -1116,3 +1116,5 @@ ALTER TABLE followup_enrollments
 ALTER TABLE followup_settings
     ADD COLUMN IF NOT EXISTS senders jsonb NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS team_channels jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_person_open
+    ON program_invitations (org_id, agent_id, user_id, response_state);

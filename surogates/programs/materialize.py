@@ -72,8 +72,8 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
     ).scalar_one()
 
 
-async def _has_open_invitation(db, schedule, platform: str, platform_user_id: str) -> bool:
-    """Is this user already mid-check-in with this agent?
+async def _has_open_invitation(db, schedule, user_id) -> bool:
+    """Is this user already mid-check-in with this agent, on any channel?
 
     Counts an unanswered opener too.  The sweep runs first in the tick, so an
     ``awaiting_reply`` row still here is one whose deadline has not passed —
@@ -84,13 +84,12 @@ async def _has_open_invitation(db, schedule, platform: str, platform_user_id: st
         await db.execute(
             sa.select(sa.func.count())
             .select_from(ProgramInvitationRow)
-            # org_id leads the open-invitations index; without it this is a
-            # sequential scan of an append-only table, once per user per
-            # occurrence, inside the claim lease.
+            # The person, not one of their channels: a question still open
+            # on WhatsApp must not be asked again on Telegram.  Served by
+            # idx_program_invitations_person_open.
             .where(ProgramInvitationRow.org_id == schedule.org_id)
             .where(ProgramInvitationRow.agent_id == schedule.agent_id)
-            .where(ProgramInvitationRow.platform == platform)
-            .where(ProgramInvitationRow.platform_user_id == platform_user_id)
+            .where(ProgramInvitationRow.user_id == user_id)
             .where(
                 ProgramInvitationRow.response_state.in_(_OPEN_RESPONSE_STATES)
             )
@@ -169,18 +168,17 @@ async def materialize_occurrence(
             reason: str | None = None
             state = "queued"
             row_platform, sender, fallbacks = platform, config.get("channel_identifier"), []
-            if per_person:
-                if chosen[user_id] is None:
-                    reason = "No reachable channel"
-                else:
-                    row_platform, identity, sender, fallbacks = chosen[user_id]
+            if per_person and chosen[user_id] is not None:
+                row_platform, identity, sender, fallbacks = chosen[user_id]
             elif identity is None:
                 reason = f"No {platform} identity"
             elif followup_store.permission_status(identity) != "granted":
                 reason = "No permission to message"
+            elif per_person:
+                reason = "No reachable channel"  # reachable, but no sender for it
             if reason is not None:
                 pass
-            elif await _has_open_invitation(db, schedule, row_platform, identity.platform_user_id):
+            elif await _has_open_invitation(db, schedule, user_id):
                 reason = "Previous check-in still open"
             elif user_id in paused:
                 reason = (
