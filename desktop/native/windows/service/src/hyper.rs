@@ -1,9 +1,9 @@
 // The Host Compute Service for one caller (hcs::api): the VM made from the service's document, each file it opens
 // granted to it alone (HcsGrantVmAccess), the caller's own as the caller and the installed app's agent disk by the
 // service's own right, its console read from before it is made, its exit told, and every grant taken back by the right
-// that made it once the VM has gone, so no entry for a VM that is no more stays in a file's ACL. No file is given to a
-// group of VMs: Windows names the VM group (S-1-5-83-0) only where Hyper-V's own service is installed, and Virtual
-// Machine Platform alone, as most Windows 11 PCs have it, installs no such group.
+// that made it once the VM has gone, so no entry for a VM that is no more stays in a file's ACL. No file is given to the
+// group of all VMs (S-1-5-83-0): on a Windows 11 PC with Virtual Machine Platform alone, without Hyper-V's own
+// management, that SID maps to no account (icacls: "No mapping between account names and security IDs was done").
 
 use std::sync::Arc;
 use std::thread;
