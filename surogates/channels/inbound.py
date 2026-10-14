@@ -365,6 +365,77 @@ def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
     }
 
 
+async def gate_turn(
+    *,
+    platform_client: Any,
+    runtime_payload: dict,
+    session_store: Any,
+    session_factory: Any,
+    session_id: Any,
+    org_id: Any,
+    agent_id: str,
+    user_id: Any,
+    content: str,
+    channel: str,
+    source: dict,
+) -> tuple[str, str] | None:
+    """Gate 7.5 for any channel: reserve this turn against the sender's plan.
+
+    ``None`` when the turn may run.  On a refusal (no plan, plan spent,
+    channel not in the package, the operator's plan spent) the message is
+    kept, marked held, so the conversation reads on from it once they have
+    access, and ``(code, notice)`` comes back: the notice in the business's
+    wording, for the caller to give the sender.  Raises
+    ``AllowanceReserveError`` when the allowance plane is unreachable
+    (callers fail closed).  The people the business brought in are never
+    refused: ops covers them (``followup_store.covered_by_business``).
+    """
+    from surogates.api.routes._commerce_turn import (
+        limit_notice,
+        limit_texts,
+        reserve_allowance,
+    )
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+
+    try:
+        await reserve_allowance(
+            platform_client=platform_client,
+            runtime_payload=runtime_payload,
+            session_store=session_store,
+            session_id=session_id,
+            agent_id=agent_id,
+            content=content,
+            end_user_id=str(user_id),
+            channel=channel,
+        )
+        return None
+    except AllowanceExhaustedError as exc:
+        logger.info("[channels] allowance gate blocked session %s (%s)", session_id, exc.detail)
+        code = exc.detail or "allowance_exhausted"
+    notice = limit_notice(
+        code, runtime_payload.get("commerce_buy_url"),
+        await limit_texts(session_factory, org_id=org_id, agent_id=agent_id),
+    )
+    # Kept, not dropped: nothing is enqueued, so no turn answers it before
+    # they have access (see _nothing_to_answer).
+    try:
+        await session_store.emit_event(
+            session_id,
+            EventType.USER_MESSAGE,
+            {
+                "content": content,
+                "source": source,
+                "held": code,
+                **build_principal_stamp(user_id=user_id, service_account_id=None),
+            },
+        )
+    except Exception:  # noqa: BLE001 — the refusal still stands
+        logger.warning(
+            "[channels] could not keep a refused message for %s", session_id, exc_info=True,
+        )
+    return code, notice
+
+
 async def _form_reply(msg, *, deps, agent_id, session_id, runtime_payload) -> str | None:
     """A submitted WhatsApp Flow under its form's title and field labels.
 
@@ -829,82 +900,21 @@ class ChannelInboundPipeline:
             and deps.platform_client is not None
             and deps.runtime_config is not None
         ):
-            from surogates.api.routes._commerce_turn import (
-                AllowanceReserveError,
-                limit_notice,
-                limit_texts,
-                reserve_allowance,
-            )
-            from surogates.runtime.platform_client import (
-                AllowanceExhaustedError,
-            )
+            from surogates.api.routes._commerce_turn import AllowanceReserveError
 
-            # Resolved once above; an unresolvable config is ``{}``, which
-            # fails OPEN (do not gate) — only a fetched, capped payload
-            # should ever block a turn, and a cache blip must not drop
-            # every channel message.
             try:
-                await reserve_allowance(
+                refused = await gate_turn(
                     platform_client=deps.platform_client,
-                    runtime_payload=runtime_payload,
+                    runtime_payload=runtime_payload or {},
                     session_store=deps.session_store,
-                    session_id=session_id,
-                    agent_id=routing.agent_id,
-                    content=msg.text or "",
-                    end_user_id=str(identity.user_id),
-                    channel=routing.platform,
+                    session_factory=deps.session_factory,
+                    session_id=session_id, org_id=routing.org_id,
+                    agent_id=routing.agent_id, user_id=identity.user_id,
+                    content=msg.text or "", channel=routing.platform,
+                    source=build_message_source(
+                        msg, platform=routing.platform, chat_type=resolve_chat_type(msg),
+                    ),
                 )
-            except AllowanceExhaustedError as exc:
-                logger.info(
-                    "[channels] allowance gate blocked session %s (%s)",
-                    session_id,
-                    exc.detail,
-                )
-                if deps.input_nudge is not None:
-                    try:
-                        await deps.input_nudge(
-                            session_id,
-                            msg,
-                            limit_notice(
-                                exc.detail,
-                                runtime_payload.get("commerce_buy_url"),
-                                await limit_texts(
-                                    deps.session_factory,
-                                    org_id=routing.org_id,
-                                    agent_id=routing.agent_id,
-                                ),
-                            ),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "[channels] allowance-limit notice failed",
-                            exc_info=True,
-                        )
-                # Kept, not dropped: once they have access the conversation
-                # reads on from here. Marked held, and nothing is enqueued, so
-                # no turn answers it before then (see _nothing_to_answer).
-                try:
-                    await deps.session_store.emit_event(
-                        session_id,
-                        EventType.USER_MESSAGE,
-                        {
-                            "content": msg.text or "",
-                            "source": build_message_source(
-                                msg, platform=routing.platform,
-                                chat_type=resolve_chat_type(msg),
-                            ),
-                            "held": exc.detail or "allowance_exhausted",
-                            **build_principal_stamp(
-                                user_id=identity.user_id, service_account_id=None,
-                            ),
-                        },
-                    )
-                except Exception:  # noqa: BLE001 — the refusal still stands
-                    logger.warning(
-                        "[channels] could not keep a refused message for %s",
-                        session_id, exc_info=True,
-                    )
-                return InboundOutcome.DROPPED
             except AllowanceReserveError:
                 logger.warning(
                     "[channels] allowance plane unreachable — failing closed "
@@ -912,6 +922,16 @@ class ChannelInboundPipeline:
                     session_id,
                     exc_info=True,
                 )
+                return InboundOutcome.DROPPED
+            if refused is not None:
+                if deps.input_nudge is not None:
+                    try:
+                        await deps.input_nudge(session_id, msg, refused[1])
+                    except Exception:
+                        logger.warning(
+                            "[channels] allowance-limit notice failed",
+                            exc_info=True,
+                        )
                 return InboundOutcome.DROPPED
 
         # AI disclosure (EU AI Act Art. 50): on the first contact of a
