@@ -23,7 +23,7 @@ class ReleaseWorkflowTest < Minitest::Test
 
   # The release's two jobs that roll the cluster out, by calling update-images.yml, by their conditions: the one while
   # Windows publishes nothing, and the one once the repository names its signing account. Only one of the two runs.
-  ROLLOUTS = { "rollout" => "vars.ARTIFACT_SIGNING_ACCOUNT == ''", "rollout-with-windows" => "vars.ARTIFACT_SIGNING_ACCOUNT != ''" }.freeze
+  ROLLOUTS = { "rollout" => "needs.desktop-signing-mode.outputs.signing == 'trial'", "rollout-with-windows" => "needs.desktop-signing-mode.outputs.signing == 'account'" }.freeze
 
   def rollout_jobs
     names = @workflow.fetch("jobs").select { |_, job| job["uses"] == "./#{ROLLOUT}" }.keys
@@ -130,7 +130,7 @@ class ReleaseWorkflowTest < Minitest::Test
       assert_empty waits_for(name) & windows_jobs, "#{name} waits for a Windows job"
     end
     # Windows's publish runs only once the account is named, and every Windows job is reached by it.
-    assert_equal "vars.ARTIFACT_SIGNING_ACCOUNT != ''", jobs.fetch("desktop-win-publish").fetch("if")
+    assert_equal "#{MODE} == 'account'", jobs.fetch("desktop-win-publish").fetch("if")
     assert_equal (windows_jobs - ["desktop-win-publish"]).sort, (waits_for("desktop-win-publish") & windows_jobs).sort
   end
 
@@ -508,7 +508,34 @@ class ReleaseWorkflowTest < Minitest::Test
   # The Windows release's jobs, by name.
   WINDOWS_BUILDS = %w[desktop-win-build desktop-win-msi].freeze
   WINDOWS_SIGNINGS = %w[desktop-win-sign desktop-win-sign-msi].freeze
-  ACCOUNT = "vars.ARTIFACT_SIGNING_ACCOUNT"
+  # The run's one word for how it signs the Windows app, and the signer it names, from the job that decides them once.
+  MODE = "needs.desktop-signing-mode.outputs.signing"
+  SIGNER = "${{ needs.desktop-signing-mode.outputs.signer }}"
+  ROOT = "${{ #{MODE} == 'account' && 'account' || steps.trial.outputs.root }}"
+
+  def test_the_signing_is_decided_once_for_the_run_by_one_job_and_every_windows_job_and_rollout_takes_it_from_there
+    jobs = @workflow.fetch("jobs")
+    mode = jobs.fetch("desktop-signing-mode")
+    # One step that reads the two variables and says three words: it holds nothing, needs nothing and reads nothing.
+    assert_equal %w[outputs permissions runs-on steps timeout-minutes], mode.keys.sort
+    assert_equal({}, mode.fetch("permissions"))
+    assert_equal({ "signing" => "${{ steps.mode.outputs.signing }}", "account" => "${{ steps.mode.outputs.account }}", "signer" => "${{ steps.mode.outputs.signer }}" }, mode.fetch("outputs"))
+    assert_equal 1, mode.fetch("steps").length
+    step = mode.fetch("steps").first
+    assert_equal({ "ACCOUNT" => "${{ vars.ARTIFACT_SIGNING_ACCOUNT }}", "SUBJECT" => "${{ vars.ARTIFACT_SIGNING_SUBJECT }}" }, step.fetch("env"))
+    assert_includes step.fetch("run"), "printf 'signing=account\\naccount=%s\\nsigner=%s\\n' \"$ACCOUNT\" \"$SUBJECT\""
+    assert_includes step.fetch("run"), "printf 'signing=trial\\naccount=\\nsigner=CN=Surogate trial signer\\n'"
+    # No other job reads either variable: each that signs, makes the MSI, publishes Windows or rolls out needs the
+    # deciding job and reads its words, so a job re-run later does as the run began.
+    readers = jobs.select { |_, job| job.to_s.match?(/vars\.ARTIFACT_SIGNING_(ACCOUNT|SUBJECT)\b/) }.keys
+    assert_equal ["desktop-signing-mode"], readers
+    %w[desktop-win-sign desktop-win-msi desktop-win-sign-msi desktop-win-publish rollout rollout-with-windows].each do |name|
+      assert_includes Array(jobs.fetch(name).fetch("needs")), "desktop-signing-mode", name
+    end
+    (jobs.keys - ["desktop-signing-mode"]).each { |name| refute_match(/ARTIFACT_SIGNING_ACCOUNT|ARTIFACT_SIGNING_SUBJECT/, jobs.fetch(name).to_s, name) }
+    # The publish of Windows and the rollout that waits for it, by that word alone.
+    assert_equal "#{MODE} == 'account'", jobs.fetch("desktop-win-publish").fetch("if")
+  end
 
   def test_the_windows_app_is_built_and_its_msi_made_on_windows_by_jobs_that_hold_nothing_to_sign_with
     jobs = @workflow.fetch("jobs")
@@ -520,12 +547,13 @@ class ReleaseWorkflowTest < Minitest::Test
       assert_equal({ "contents" => "read" }, job.fetch("permissions"), name)
       refute job.key?("environment"), name
       refute_match(/secrets|id-token|vars\./, job.to_s, name)
+      refute_match(/ARTIFACT_SIGNING/, job.to_s, name)
       checkouts = job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/checkout@") }
       assert_equal [{ "persist-credentials" => false }], checkouts.map { |step| step.fetch("with") }, name
       assert_equal "git config --global core.autocrlf false", job.fetch("steps").first.fetch("run"), name
     end
     assert_equal ["desktop-build"], Array(jobs.fetch("desktop-win-build").fetch("needs"))
-    assert_equal ["desktop-win-sign"], Array(jobs.fetch("desktop-win-msi").fetch("needs"))
+    assert_equal %w[desktop-win-sign desktop-signing-mode], Array(jobs.fetch("desktop-win-msi").fetch("needs"))
     runs = jobs.fetch("desktop-win-build").fetch("steps").map { |step| step["run"].to_s.strip }
     # The layout of the tag's app, its agent disk the one desktop-build made, and its VM manifest the release's image's.
     assert_equal [
@@ -534,8 +562,13 @@ class ReleaseWorkflowTest < Minitest::Test
     ], runs.select { |run| run.start_with?("npm", "scripts/") }
     taken = jobs.fetch("desktop-win-build").fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
     assert_equal [{ "name" => "desktop-vm-manifest", "path" => "out/vm" }, { "name" => "desktop-agent-disk", "path" => "out/agent" }], taken.map { |step| step.fetch("with") }
-    # The MSI of the signed layout, by WiX as msi-win.ps1 pins it.
-    made = jobs.fetch("desktop-win-msi").fetch("steps").map { |step| step["run"].to_s }.join
+    # The MSI of the signed layout, by WiX as msi-win.ps1 pins it, once each program is found the run's signer's alone.
+    msi_steps = jobs.fetch("desktop-win-msi").fetch("steps")
+    signed_by = msi_steps.index { |step| step["run"].to_s.strip == "desktop/scripts/sign-win.ps1 signed-by out/win $env:SIGNER" }
+    refute_nil signed_by
+    assert_equal({ "SIGNER" => SIGNER }, msi_steps[signed_by].fetch("env"))
+    assert_operator signed_by, :<, msi_steps.index { |step| step["run"].to_s.include?("msi-win.ps1") }
+    made = msi_steps.map { |step| step["run"].to_s }.join
     assert_includes made, 'desktop/scripts/msi-win.ps1 $version out/win/Surogate out/win/msi "out/msi/surogate-desktop-$version-win32-x64.msi"'
   end
 
@@ -557,11 +590,11 @@ class ReleaseWorkflowTest < Minitest::Test
       # Artifact Signing's own action, after Azure's sign-in by the federated credential, only once the account is named.
       azure = steps.select { |step| step["uses"].to_s.start_with?("azure/") }
       assert_equal %w[azure/login azure/artifact-signing-action], azure.map { |step| step["uses"].split("@").first }, name
-      azure.each { |step| assert_equal "#{ACCOUNT} != ''", step.fetch("if"), "#{name}: #{step["name"]}" }
+      azure.each { |step| assert_equal "#{MODE} == 'account'", step.fetch("if"), "#{name}: #{step["name"]}" }
       assert_equal({ "client-id" => "${{ vars.AZURE_CLIENT_ID }}", "tenant-id" => "${{ vars.AZURE_TENANT_ID }}", "allow-no-subscriptions" => true }, azure.first.fetch("with"), name)
       signing = azure.last.fetch("with")
       assert_equal({
-        "endpoint" => "${{ vars.ARTIFACT_SIGNING_ENDPOINT }}", "signing-account-name" => "${{ #{ACCOUNT} }}",
+        "endpoint" => "${{ vars.ARTIFACT_SIGNING_ENDPOINT }}", "signing-account-name" => "${{ needs.desktop-signing-mode.outputs.account }}",
         "certificate-profile-name" => "${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}", "file-digest" => "SHA256",
         "timestamp-rfc3161" => "http://timestamp.acs.microsoft.com", "timestamp-digest" => "SHA256", "cache-dependencies" => false,
       }, signing.except("files-catalog", *signing.keys.grep(/^exclude-/)), name)
@@ -570,22 +603,36 @@ class ReleaseWorkflowTest < Minitest::Test
       # Else this run's own certificate, its root trusted for the job alone; every signature checked either way, by
       # Windows's own trust, a trial's against its run's root alone.
       trial = steps.find { |step| step["id"] == "trial" }
-      assert_equal "#{ACCOUNT} == ''", trial.fetch("if"), name
-      assert_match(%r{\$root = desktop/scripts/sign-win\.ps1 trial out/\w+\.txt}, trial.fetch("run"), name)
+      assert_equal "#{MODE} == 'trial'", trial.fetch("if"), name
+      assert_equal({ "SIGNER" => SIGNER }, trial.fetch("env"), name)
+      assert_match(%r{\$root = desktop/scripts/sign-win\.ps1 trial out/\w+\.txt \$env:SIGNER}, trial.fetch("run"), name)
+      # Checked by the run's signer and the root it was signed under: the account's public root, or the trial's.
       verify = steps.find { |step| step["run"].to_s.include?("sign-win.ps1 verify") }
       refute verify.key?("if"), name
-      assert_equal({ "TRIAL_ROOT" => "${{ steps.trial.outputs.root }}" }, verify.fetch("env"), name)
-      assert_match(/sign-win\.ps1 verify out\/\w+ \$env:TRIAL_ROOT/, verify.fetch("run"), name)
+      assert_equal({ "SIGNER" => SIGNER, "ROOT" => ROOT }, verify.fetch("env"), name)
+      assert_match(/sign-win\.ps1 verify out\/\w+ \$env:SIGNER \$env:ROOT/, verify.fetch("run"), name)
       untrust = steps.find { |step| step["run"].to_s.include?("sign-win.ps1 untrust") }
       assert_equal "always() && steps.trial.outputs.root != ''", untrust.fetch("if"), name
       [azure.last, trial].each { |step| assert_operator steps.index(step), :<, steps.index(verify), name }
       catalog = steps.find { |step| step["run"].to_s.include?("sign-win.ps1 list") }.fetch("run")
       assert_includes signing.fetch("files-catalog"), catalog.split.last.tr("/", "\\"), name
     end
-    assert_equal ["desktop-win-build"], Array(jobs.fetch("desktop-win-sign").fetch("needs"))
-    assert_equal ["desktop-win-msi"], Array(jobs.fetch("desktop-win-sign-msi").fetch("needs"))
+    assert_equal %w[desktop-win-build desktop-signing-mode], Array(jobs.fetch("desktop-win-sign").fetch("needs"))
+    assert_equal %w[desktop-win-msi desktop-signing-mode], Array(jobs.fetch("desktop-win-sign-msi").fetch("needs"))
+    # The MSI's signing checks what the MSI holds, after the MSI's own signature and before its words are said: the
+    # signed layout, which it takes, byte for byte, every program the run's signer's.
+    steps = jobs.fetch("desktop-win-sign-msi").fetch("steps")
+    contents = steps.index { |step| step["run"].to_s.include?("sign-win.ps1 contents") }
+    refute_nil contents
+    assert_equal({ "SIGNER" => SIGNER, "ROOT" => ROOT }, steps[contents].fetch("env"))
+    assert_equal %(desktop/scripts/sign-win.ps1 contents "out/msi/surogate-desktop-$($env:GITHUB_REF_NAME -replace '^v', '')-win32-x64.msi" out/win/Surogate $env:SIGNER $env:ROOT), steps[contents].fetch("run").strip
+    refute steps[contents].key?("if")
+    assert_operator steps.index { |step| step["run"].to_s.include?("sign-win.ps1 verify") }, :<, contents
+    assert_operator contents, :<, steps.index { |step| step["id"] == "msi" }
+    taken = steps.select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }.map { |step| step.fetch("with") }
+    assert_equal [{ "name" => "desktop-win-msi-unsigned", "path" => "out/msi" }, { "name" => "desktop-win-signed", "path" => "out/win" }], taken
     # Every variable the release reads, by its name: none is a secret, and none is given a value here.
-    assert_equal %w[ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_CERTIFICATE_PROFILE ARTIFACT_SIGNING_ENDPOINT AZURE_CLIENT_ID AZURE_TENANT_ID],
+    assert_equal %w[ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_CERTIFICATE_PROFILE ARTIFACT_SIGNING_ENDPOINT ARTIFACT_SIGNING_SUBJECT AZURE_CLIENT_ID AZURE_TENANT_ID],
                  File.read(".github/workflows/release.yml").gsub(/^\s*#.*$/, "").scan(/\bvars\.([A-Z_]+)/).flatten.uniq.sort
   end
 
@@ -593,7 +640,7 @@ class ReleaseWorkflowTest < Minitest::Test
     jobs = @workflow.fetch("jobs")
     # The signed MSI is handed on only by the step that runs where Artifact Signing signed it.
     kept = jobs.fetch("desktop-win-sign-msi").fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
-    assert_equal [["#{ACCOUNT} != ''", "desktop-win-msi"]], kept.map { |step| [step["if"], step.fetch("with").fetch("name")] }
+    assert_equal [["#{MODE} == 'account'", "desktop-win-msi"]], kept.map { |step| [step["if"], step.fetch("with").fetch("name")] }
     # Its hash and size are the signing job's own words, of the MSI it checked.
     assert_equal({ "sha256" => "${{ steps.msi.outputs.sha256 }}", "size" => "${{ steps.msi.outputs.size }}" }, jobs.fetch("desktop-win-sign-msi").fetch("outputs"))
     steps = jobs.fetch("desktop-win-sign-msi").fetch("steps")
@@ -602,7 +649,7 @@ class ReleaseWorkflowTest < Minitest::Test
     # And it is taken by Windows's publish alone, which runs only once the account is named.
     takers = jobs.select { |_, job| job.fetch("steps", []).any? { |step| step["uses"].to_s.start_with?("actions/download-artifact@") && step.dig("with", "name") == "desktop-win-msi" } }.keys
     assert_equal ["desktop-win-publish"], takers
-    assert_equal "#{ACCOUNT} != ''", jobs.fetch("desktop-win-publish").fetch("if")
+    assert_equal "#{MODE} == 'account'", jobs.fetch("desktop-win-publish").fetch("if")
   end
 
   def test_windows_s_publish_signs_and_sends_the_signed_msi_by_its_signing_job_s_words_in_the_release_s_environment
@@ -615,7 +662,7 @@ class ReleaseWorkflowTest < Minitest::Test
       "AWS_ACCESS_KEY_ID" => "${{ secrets.R2_ACCESS_KEY_ID }}",
       "AWS_SECRET_ACCESS_KEY" => "${{ secrets.R2_SECRET_ACCESS_KEY }}",
     }
-    assert_equal %w[desktop-win-sign-msi desktop-win-describe], Array(job.fetch("needs"))
+    assert_equal %w[desktop-win-sign-msi desktop-win-describe desktop-signing-mode], Array(job.fetch("needs"))
     assert_equal "desktop-release", job.fetch("environment")
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     assert_equal({ "group" => "desktop-release-win32-x64", "cancel-in-progress" => false }, job.fetch("concurrency"))
@@ -801,12 +848,18 @@ class ReleaseWorkflowTest < Minitest::Test
     refute msi.key?("continue-on-error")
     msi_runs = msi.fetch("steps").map { |step| step["run"].to_s }
     order = [
-      "npm run build:win32", "scripts/package-win.sh 0.1.0", "test/package-win.test.ts", "./scripts/sign-win.ps1 trial ..\\out\\programs.txt",
-      "./scripts/sign-win.ps1 verify ..\\out\\win $root", "./scripts/msi-win.ps1 0.1.1", "./scripts/sign-win.ps1 verify ..\\out\\msi $root",
-      "./test/msi.test.ps1",
+      "npm run build:win32", "scripts/package-win.sh 0.1.0", "test/package-win.test.ts", "./scripts/sign-win.ps1 trial ..\\out\\programs.txt 'CN=Surogate trial signer'",
+      "./scripts/sign-win.ps1 verify ..\\out\\win 'CN=Surogate trial signer' $root", "./scripts/sign-win.ps1 signed-by ..\\out\\win 'CN=Surogate trial signer'",
+      "./scripts/msi-win.ps1 0.1.1", "./scripts/sign-win.ps1 verify ..\\out\\msi 'CN=Surogate trial signer' $root",
+      "./scripts/sign-win.ps1 contents ..\\out\\msi\\surogate-desktop-0.1.0-win32-x64.msi ..\\out\\win\\Surogate 'CN=Surogate trial signer' $root",
+      "$root = ./scripts/sign-win.ps1 trial ..\\out\\mixed.txt 'CN=Surogate account stand-in'", "./test/msi.test.ps1",
     ].map { |part| msi_runs.index { |run| run.include?(part) } }
     refute_includes order, nil
     assert_equal order.sort, order
+    # An MSI signed around programs another signed is refused by the release's own check of what an MSI holds.
+    mixed = msi.fetch("steps").find { |step| step["id"] == "mixed" }.fetch("run")
+    assert_includes mixed, "./scripts/sign-win.ps1 contents ..\\out\\mixed\\surogate-desktop-0.1.0-win32-x64.msi ..\\out\\win\\Surogate 'CN=Surogate account stand-in' $root"
+    assert_includes mixed, "if (-not $refused) { throw 'The check of what an MSI holds took an MSI of programs another signed' }"
     assert_equal "always()", msi.fetch("steps").last.fetch("if")
     assert_includes msi.fetch("steps").last.fetch("run"), "./scripts/sign-win.ps1 untrust $root"
     # The real boot never gates, nor does the build of what it boots: the x64 guest's image, unpacked as the
@@ -1017,7 +1070,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 3a48c3294046bd31 e222861c9a8894a5]],
         "vm-guest" => ["ab2559772a48cb7e", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 0671721aededeb3b 18d2126a5450e6bd 06af0ce2143d3c1f 8c986439d5d86488 a6aeb1f05887979b 09d5e59cd91883c6 e65248e95c654f75 35697d500667a260 7553a543a3fb9bdd]],
         "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 0686e10d83c7fcc6 535e74b2af1d7815 ee88c8a9aa9b67f9 83c3999eb9a772b5 7e59534427c2acc1 72442731f8075eaa 6c5f0ebc85fc17d9 85c6bbf8d6ef4ca0 1edc8d7d3216b9d8]],
-        "msi" => ["825bfae6263325c0", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 d9093d282ffd91e6 7121de72b936c1d1 73242831d2df0b86 8bcfc143f7f6cbf6 453072c07ebf9e3d 1a145085cbf2e2fd ebe3d78cd1a50eb1]],
+        "msi" => ["825bfae6263325c0", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 d9093d282ffd91e6 7121de72b936c1d1 a67b86708c1ed4b3 cd146ae4278c5a3a b56f5703076c66e6 3e923a5e2780b700 1a145085cbf2e2fd 0456457ddf312d12]],
         "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {
@@ -1028,16 +1081,17 @@ class ReleaseWorkflowTest < Minitest::Test
         "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
         "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298 b76e38f5fbfb4713]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
+        "desktop-signing-mode" => ["058333d3d8a3f05f", %w[bc812f6801c0327b]],
         "desktop-win-build" => ["96928565e2086ccf", %w[fff07e32632a765a 2cbb6c778ee9cf1c d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 96ec46bd03bed893 2b49b547691c5152 3c1d40e7182b4f9e 0dbbd3120ac54992]],
-        "desktop-win-sign" => ["2b618be97503aa63", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 8e179919d8dba5d0 4b2cc6a57a6e9edd 5adab63de74848f4 bcd57ec8db9355ac 468e7454fa982e5b 8d39f0600fb0a5c9 14d765c09ebc5439]],
-        "desktop-win-msi" => ["b44a00043b41483c", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c f3dc7563940f8a17 bcbbe8f0cd626b61 481012fa557cec29]],
-        "desktop-win-sign-msi" => ["3190bf098e459921", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c a0051ea6afa86484 2393d71fab9f2fc9 4b2cc6a57a6e9edd 1225f25f1d9c0051 116258c4916084ba 152b7cf0831b0bf3 8d39f0600fb0a5c9 f87f5ad2f490be6b df67c9f01b7460be]],
+        "desktop-win-sign" => ["5331c2e7e01683ed", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 8e179919d8dba5d0 8956b5db4a5d9233 d45c1cf5db225c25 5e02861b5f4f1723 ef9eb69984b75079 8d39f0600fb0a5c9 14d765c09ebc5439]],
+        "desktop-win-msi" => ["340222aa30f1a523", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c f3dc7563940f8a17 01d5449a1b1abf81 bcbbe8f0cd626b61 481012fa557cec29]],
+        "desktop-win-sign-msi" => ["03bec184cbedddaa", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c a0051ea6afa86484 c8a2f46e9dd8850f 2393d71fab9f2fc9 8956b5db4a5d9233 87dc6abcdae90aa5 23a5585e4c8281f3 4c351d6393cf4dc0 59bd8c5a75ce6cdc 8d39f0600fb0a5c9 f87f5ad2f490be6b 49dfba79af0cbedc]],
         "desktop-win-describe" => ["5b0cc765a071d830", %w[87fcdec176307d16 f3dc7563940f8a17 1260aac792094cce]],
         "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
-        "desktop-win-publish" => ["5eba81c901216506", %w[87fcdec176307d16 3a3b2f3ed7fe05d1 267e964df473dfd2 c60cfc32944bedee]],
+        "desktop-win-publish" => ["d55475461df016fa", %w[87fcdec176307d16 3a3b2f3ed7fe05d1 267e964df473dfd2 c60cfc32944bedee]],
         "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
-        "rollout" => ["34cf5a63483a2ace", %w[]],
-        "rollout-with-windows" => ["ead45a6f691bb815", %w[]],
+        "rollout" => ["c9836d22960a4ba0", %w[]],
+        "rollout-with-windows" => ["4a92c695959893a8", %w[]],
       },
       "update-images.yml" => {
         "update-agent-images" => ["bce0913a43e4c4dc", %w[79f419cc70509398 17127a23ac6df9ec ee7d72f941971e8f 8ec0d2118169566d]],
@@ -1139,7 +1193,8 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal [
       %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-build desktop-vm-manifest], %w[desktop-describe desktop-tarball],
       %w[desktop-win-build desktop-vm-manifest], %w[desktop-win-build desktop-agent-disk], %w[desktop-win-sign desktop-win-unsigned],
-      %w[desktop-win-msi desktop-win-signed], %w[desktop-win-sign-msi desktop-win-msi-unsigned], %w[desktop-win-describe desktop-win-signed],
+      %w[desktop-win-msi desktop-win-signed], %w[desktop-win-sign-msi desktop-win-msi-unsigned], %w[desktop-win-sign-msi desktop-win-signed],
+      %w[desktop-win-describe desktop-win-signed],
       %w[desktop-publish desktop-tarball], %w[desktop-win-publish desktop-win-msi], %w[release dist],
     ], taken
   end

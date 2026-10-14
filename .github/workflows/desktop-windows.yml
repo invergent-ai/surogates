@@ -511,12 +511,13 @@ jobs:
         id: programs
         run: |
           ./scripts/sign-win.ps1 list ..\out\win ..\out\programs.txt
-          $root = ./scripts/sign-win.ps1 trial ..\out\programs.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\programs.txt 'CN=Surogate trial signer'
           "root=$root" >> $env:GITHUB_OUTPUT
-          ./scripts/sign-win.ps1 verify ..\out\win $root
+          ./scripts/sign-win.ps1 verify ..\out\win 'CN=Surogate trial signer' $root
 
       - name: Make the MSI, and one of a later version
         run: |
+          ./scripts/sign-win.ps1 signed-by ..\out\win 'CN=Surogate trial signer'
           ./scripts/msi-win.ps1 0.1.0 ..\out\win\Surogate ..\out\win\msi ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi
           ./scripts/msi-win.ps1 0.1.1 ..\out\win\Surogate ..\out\win\msi ..\out\msi\surogate-desktop-0.1.1-win32-x64.msi
 
@@ -524,9 +525,25 @@ jobs:
         id: msis
         run: |
           ./scripts/sign-win.ps1 list ..\out\msi ..\out\msis.txt
-          $root = ./scripts/sign-win.ps1 trial ..\out\msis.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\msis.txt 'CN=Surogate trial signer'
           "root=$root" >> $env:GITHUB_OUTPUT
-          ./scripts/sign-win.ps1 verify ..\out\msi $root
+          ./scripts/sign-win.ps1 verify ..\out\msi 'CN=Surogate trial signer' $root
+          ./scripts/sign-win.ps1 contents ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi ..\out\win\Surogate 'CN=Surogate trial signer' $root
+
+      # An MSI signed by another signer than its programs, as one the account signed around a trial's programs would be:
+      # the release's check of what an MSI holds refuses it.
+      - name: Refuse an MSI that holds programs another signed
+        id: mixed
+        run: |
+          New-Item -ItemType Directory -Force ..\out\mixed | Out-Null
+          Copy-Item ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi ..\out\mixed\
+          ./scripts/sign-win.ps1 list ..\out\mixed ..\out\mixed.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\mixed.txt 'CN=Surogate account stand-in'
+          "root=$root" >> $env:GITHUB_OUTPUT
+          ./scripts/sign-win.ps1 verify ..\out\mixed 'CN=Surogate account stand-in' $root
+          $refused = $false
+          try { ./scripts/sign-win.ps1 contents ..\out\mixed\surogate-desktop-0.1.0-win32-x64.msi ..\out\win\Surogate 'CN=Surogate account stand-in' $root } catch { $refused = "$_" -match 'not signed by CN=Surogate account stand-in alone'; "$_" }
+          if (-not $refused) { throw 'The check of what an MSI holds took an MSI of programs another signed' }
 
       - name: Install, check and remove the MSI
         timeout-minutes: 30
@@ -537,7 +554,8 @@ jobs:
         env:
           PROGRAMS_ROOT: ${{ steps.programs.outputs.root }}
           MSIS_ROOT: ${{ steps.msis.outputs.root }}
-        run: foreach ($root in $env:PROGRAMS_ROOT, $env:MSIS_ROOT) { if ($root) { ./scripts/sign-win.ps1 untrust $root } }
+          MIXED_ROOT: ${{ steps.mixed.outputs.root }}
+        run: foreach ($root in $env:PROGRAMS_ROOT, $env:MSIS_ROOT, $env:MIXED_ROOT) { if ($root) { ./scripts/sign-win.ps1 untrust $root } }
 
   # The shell and the browser on Windows: surogate-helper.exe's own lints and tests, those that fill the runner's
   # certificate stores among them; the app end to end with no VM; and the browser host on the runner's own Chrome and

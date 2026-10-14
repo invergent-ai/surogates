@@ -1,8 +1,9 @@
 """The release workflow's rollout to the cluster waits for every other job of the release it rolls out.
 
-While the repository names no Windows signing account, Windows publishes nothing, and the release is every job but
-Windows's: its rollout waits for none of them, and nothing of Linux's does. Once it names one, Windows's publish is the
-release's too, and the rollout that runs then waits for it as well.
+How the release signs Windows is decided once for the run, by desktop-signing-mode. In a trial, Windows publishes
+nothing, and the release is every job but Windows's: its rollout waits for none of them, and nothing of Linux's does.
+Where the account signs, Windows's publish is the release's too, and the rollout that runs then waits for it as well.
+Each reads that job's word, never the variable it was decided by.
 """
 
 from __future__ import annotations
@@ -12,9 +13,10 @@ from pathlib import Path
 import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
+MODE = "needs.desktop-signing-mode.outputs.signing"
 ROLLOUTS = {
-    "rollout": "vars.ARTIFACT_SIGNING_ACCOUNT == ''",
-    "rollout-with-windows": "vars.ARTIFACT_SIGNING_ACCOUNT != ''",
+    "rollout": f"{MODE} == 'trial'",
+    "rollout-with-windows": f"{MODE} == 'account'",
 }
 
 
@@ -49,6 +51,7 @@ def test_the_release_rolls_the_cluster_out_by_one_job_or_the_other_and_never_pas
     # hand, which would roll out a release that failed. And the two conditions never hold at once.
     for name, condition in ROLLOUTS.items():
         assert jobs[name]["if"] == condition
+        assert "desktop-signing-mode" in _needs(jobs[name])
 
 
 def test_while_windows_publishes_nothing_no_windows_job_holds_the_rollout_or_linux_s_release():
@@ -65,4 +68,13 @@ def test_once_windows_publishes_the_rollout_waits_for_its_publish_as_for_every_o
     jobs = _jobs()
     assert _reached(jobs, "rollout-with-windows") == set(jobs) - set(ROLLOUTS)
     assert "desktop-win-publish" in _needs(jobs["rollout-with-windows"])
-    assert jobs["desktop-win-publish"]["if"] == "vars.ARTIFACT_SIGNING_ACCOUNT != ''"
+    assert jobs["desktop-win-publish"]["if"] == f"{MODE} == 'account'"
+
+
+def test_only_the_deciding_job_reads_how_the_run_signs():
+    jobs = _jobs()
+    readers = {name for name, job in jobs.items() if "vars.ARTIFACT_SIGNING_ACCOUNT" in yaml.safe_dump(job)}
+    assert readers == {"desktop-signing-mode"}
+    # It needs nothing, holds nothing, and so cannot hold the release.
+    assert not _needs(jobs["desktop-signing-mode"])
+    assert jobs["desktop-signing-mode"]["permissions"] == {}
