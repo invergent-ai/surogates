@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -244,6 +245,28 @@ async def test_a_refused_path_saves_nothing_and_stops_no_other_save(session_fact
     after = await store.last_event_id(session.id)
     for path in ("../b.docx", "a.docx"):  # a traversal office_edit refused, then the document
         await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": path}})
+    saved: list[str] = []
+
+    async def recording_save(runtime, office, session_factory, opened, session_id):
+        saved.append(opened.location)
+
+    monkeypatch.setattr(turn_end, "_save", recording_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert saved == [document.location]
+
+
+async def test_a_path_holding_nul_stops_no_other_save(session_factory, storage, monkeypatch):
+    store, session, document, _ = await _turn(session_factory, storage)
+    after = await store.last_event_id(session.id)
+    await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": "a.docx"}})
+    events = store.get_events
+
+    async def with_nul(session_id, **kwargs):
+        # The events table refuses a NUL, so the call naming one is read back beside the stored one.
+        nul = SimpleNamespace(data={"name": "office_edit", "arguments": {"path": "a\x00.docx"}})
+        return [nul, *await events(session_id, **kwargs)]
+
+    monkeypatch.setattr(store, "get_events", with_nul)
     saved: list[str] = []
 
     async def recording_save(runtime, office, session_factory, opened, session_id):

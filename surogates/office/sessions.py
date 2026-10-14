@@ -11,10 +11,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from surogates.db.models import OfficeSession
+from surogates.office.files import _folded
 
 OPEN = "open"
 CLOSED = "closed"
@@ -140,16 +141,27 @@ async def open_locations(session_factory: Any, locations: list[str]) -> set[str]
 
 
 async def open_like(session_factory: Any, locations: list[str]) -> list[OpenDocument]:
-    """The open rows at *locations*, compared without case: a folder on a computer may ignore it. Each row once."""
+    """The open rows at *locations*, a computer's compared without case or Unicode form: its folder may ignore them.
+    Any other location is compared as written. Each row once."""
     if not locations:
         return []
-    # Lowered by the database on both sides: Python's lower() folds letters a C-locale database's does not.
-    keys = [func.lower(location) for location in sorted(set(locations))]
+    on_computer = {location for location in locations if location.startswith("device:")}
+    exact = set(locations) - on_computer
+    folded = {_folded(location) for location in on_computer}
+    # A computer's location is device:<id>:<path>, and the id holds no colon. Its open rows are fetched by that prefix
+    # and folded here: a C-locale database's lower() folds ASCII only.
+    prefixes = {location[:location.index(":", len("device:")) + 1] for location in on_computer}
     async with session_factory() as db:
         rows = await db.scalars(
-            select(OfficeSession).where(func.lower(OfficeSession.location).in_(keys), OfficeSession.status == OPEN)
+            select(OfficeSession).where(
+                OfficeSession.status == OPEN,
+                or_(
+                    OfficeSession.location.in_(exact),
+                    *(OfficeSession.location.startswith(prefix, autoescape=True) for prefix in prefixes),
+                ),
+            )
         )
-        return [_snapshot(row) for row in rows.all()]
+        return [_snapshot(row) for row in rows.all() if row.location in exact or _folded(row.location) in folded]
 
 
 async def open_documents(session_factory: Any) -> list[OpenDocument]:

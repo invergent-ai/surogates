@@ -65,6 +65,36 @@ async def test_a_name_not_there_stays_as_written_with_the_rest_of_its_path():
     assert await on_disk_spelling(io, "Docs/new/b.docx") == "docs/new/b.docx"
 
 
+async def test_a_dot_segment_is_skipped():
+    io = _io({"docs/Plan.docx": b"x"}, ignores_case=True)
+    assert await on_disk_spelling(io, "docs/./plan.docx") == "docs/Plan.docx"
+
+
+async def test_a_folder_the_computer_may_not_list_keeps_the_name_as_written():
+    io = _io({"Plan.docx": b"x"}, ignores_case=True)
+    run = io.runner.run
+
+    async def denied(kind, args, payload=None):
+        if kind == "list_dir":
+            return {"error": {"type": "os", "code": "EACCES", "message": "Permission denied"}}
+        return await run(kind, args, payload)
+
+    io.runner.run = denied
+    assert await on_disk_spelling(io, "plan.docx") == "plan.docx"
+
+
+async def test_a_listing_cut_at_the_cap_keeps_the_name_as_written(monkeypatch):
+    monkeypatch.setattr(office_files, "MAX_NAMES", 2)
+    io = _io({"Plan.docx": b"x", "other.docx": b"y"}, ignores_case=True)
+    # The cut listing may hide plan.docx itself.
+    assert await on_disk_spelling(io, "plan.docx") == "plan.docx"
+
+
+async def test_a_file_named_as_a_folder_keeps_the_rest_as_written():
+    io = _io({"a.docx": b"x"}, ignores_case=True)
+    assert await on_disk_spelling(io, "a.docx/b.docx") == "a.docx/b.docx"
+
+
 def test_a_thread_and_its_master_name_a_document_alike():
     master = on_computer(workspace_boundary="workstream:p1")
     thread = on_computer(workspace_boundary="workstream:p1", execution={

@@ -36,13 +36,33 @@ async def test_same_location_reuses_the_key(session_factory):
     assert set(two.session_ids) == {first, second}
 
 
+def _on_computer(name: str) -> str:
+    return f"device:{uuid4()}:/f/{name}"
+
+
 async def test_open_rows_are_found_without_case(session_factory):
-    document = await office_sessions.open_or_reuse(session_factory, location="device:d:/f/Plan.docx", path="Plan.docx", session_id=uuid4())
-    [found] = await office_sessions.open_like(session_factory, ["device:d:/f/plan.DOCX"])
+    location = _on_computer("Plan.docx")
+    document = await office_sessions.open_or_reuse(session_factory, location=location, path="Plan.docx", session_id=uuid4())
+    [found] = await office_sessions.open_like(session_factory, [location.replace("Plan.docx", "plan.DOCX")])
     assert found.id == document.id
-    assert await office_sessions.open_like(session_factory, ["device:d:/f/other.docx"]) == []
-    named = await office_sessions.open_or_reuse(session_factory, location="device:d:/f/Ședință.docx", path="Ședință.docx", session_id=uuid4())
-    assert [found.id for found in await office_sessions.open_like(session_factory, ["device:d:/f/Ședință.docx"])] == [named.id]
+    assert await office_sessions.open_like(session_factory, [location.replace("Plan.docx", "other.docx")]) == []
+    named_at = _on_computer("Ședință.docx")
+    named = await office_sessions.open_or_reuse(session_factory, location=named_at, path="Ședință.docx", session_id=uuid4())
+    assert [found.id for found in await office_sessions.open_like(session_factory, [named_at])] == [named.id]
+
+
+async def test_open_rows_on_a_computer_are_found_without_case_beyond_ascii(session_factory):
+    location = _on_computer("Été.docx")
+    document = await office_sessions.open_or_reuse(session_factory, location=location, path="Été.docx", session_id=uuid4())
+    [found] = await office_sessions.open_like(session_factory, [location.replace("Été", "été")])
+    assert found.id == document.id
+    # In another Unicode form too, and only on its own computer.
+    assert [found.id for found in await office_sessions.open_like(session_factory, [location.replace("Été", "e\u0301te\u0301")])] == [document.id]
+    assert await office_sessions.open_like(session_factory, [_on_computer("été.docx")]) == []
+    # A cloud location is compared as written.
+    cloud = await office_sessions.open_or_reuse(session_factory, location="bucket:test/x/A.docx", path="A.docx", session_id=uuid4())
+    assert await office_sessions.open_like(session_factory, ["bucket:test/x/a.docx"]) == []
+    assert [found.id for found in await office_sessions.open_like(session_factory, ["bucket:test/x/A.docx"])] == [cloud.id]
 
 
 async def test_concurrent_opens_get_one_key(session_factory):

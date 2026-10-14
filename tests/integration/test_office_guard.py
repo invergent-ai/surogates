@@ -149,3 +149,10 @@ async def test_in_the_cloud_another_spelling_is_another_file(session_factory):
                                              session_factory=session_factory) is None
     assert await guard.refused_open_document("write_file", {"path": "Plan.docx", "content": "x"}, session,
                                              session_factory=session_factory)
+
+
+async def test_a_path_holding_nul_is_left_to_the_sandbox(session_factory):
+    for session in (await _session_with_open(session_factory), await _computer_chat(session_factory)):
+        assert await guard.refused_open_document("write_file", {"path": "a\x00.docx", "content": "x"}, session,
+                                                 session_factory=session_factory) is None
+        assert await guard.open_document_note({"path": "a\x00.docx"}, session, session_factory=session_factory) is None

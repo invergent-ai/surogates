@@ -175,7 +175,8 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
             return _error(str(exc))
         logger.warning("runtime-office failed on %s", path, exc_info=True)
         return _error(f"The editor could not do that: {exc}")
-    answer: dict[str, Any] = {"document": path, "open_by": _open_by(document)}
+    # Named as its saves and notices name it, the computer's spelling of it: the next call finds it at once.
+    answer: dict[str, Any] = {"document": document.document.path, "open_by": _open_by(document)}
     if document.created:
         answer["created"] = True
     if result.get("flushed") is False:

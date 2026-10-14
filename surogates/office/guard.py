@@ -8,6 +8,7 @@ from surogates.config import load_settings
 from surogates.devices.binding import device_of
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of, relative_path, within_folder
+from surogates.office.files import _folded
 from surogates.office.kinds import office_kind
 from surogates.sandbox.history import YOU
 from surogates.tools.builtin.file_ops import patch_targets
@@ -21,11 +22,12 @@ def _applies(session: Any, session_factory: Any) -> bool:
 
 
 async def _open_locations(session_factory: Any, session: Any, locations: list[str]) -> set[str]:
-    """Those of *locations* whose file is open in the editor. On a computer without case: its folder may ignore it."""
+    """Those of *locations* whose file is open in the editor. On a computer without case or Unicode form: its folder
+    may ignore them."""
     if device_of(session.config) is None:
         return await office_sessions.open_locations(session_factory, locations)
-    found = {document.location.lower() for document in await office_sessions.open_like(session_factory, locations)}
-    return {location for location in locations if location.lower() in found}
+    found = {_folded(document.location) for document in await office_sessions.open_like(session_factory, locations)}
+    return {location for location in locations if _folded(location) in found}
 
 
 async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
@@ -33,7 +35,8 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
     if tool_name not in WRITING_TOOLS or not isinstance(tool_args, dict) or not _applies(session, session_factory):
         return None
     targets = [str(tool_args.get("path") or "")] if tool_name == "write_file" else patch_targets(tool_args)
-    targets = [p for p in targets if p and office_kind(p)]
+    # A path holding a NUL names no file: the sandbox refuses it, and the open rows cannot be looked up by it.
+    targets = [p for p in targets if p and office_kind(p) and "\0" not in p]
     if device_of(session.config) is not None:
         # The editor may have it open by its path in the folder, which this one cannot be matched to. The desktop
         # refuses a write outside the folder anyway, so nothing that could be written is lost.
@@ -55,7 +58,7 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
 async def open_document_note(tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
     """The note read_file adds when the document it read is open in the editor, or None."""
     raw = str(tool_args.get("path") or "") if isinstance(tool_args, dict) else ""
-    if not raw or not office_kind(raw) or not _applies(session, session_factory):
+    if not raw or not office_kind(raw) or "\0" in raw or not _applies(session, session_factory):
         return None
     path = relative_path(raw, session)
     if device_of(session.config) is not None and not within_folder(path):

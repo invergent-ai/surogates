@@ -13,7 +13,7 @@ from uuid import UUID
 from surogates.db.models import Workstream
 from surogates.devices.binding import binding_of, copy_of, device_of
 from surogates.devices.operations import REQUEST_PREFIX
-from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.devices.workspace import MAX_NAMES, DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.files import DeviceAccess, session_files
 from surogates.session.store import SessionStore
@@ -49,18 +49,20 @@ async def on_disk_spelling(files: DeviceWorkspaceIO, path: str) -> str:
     A folder that ignores case or Unicode form (macOS, Windows) finds ``plan.docx`` for ``Plan.docx``: each name not
     listed as written, but found all the same, takes the one listed spelling, so one file is one document however it
     is asked for. A name the computer does not find stays as written, with the rest of the path: a new file, or a
-    folder that tells case apart.
+    folder that tells case apart. So does one in a folder it may not list, or lists only the first MAX_NAMES names
+    of, which may leave out the name as written.
     """
-    parts = [part for part in path.split("/") if part]
+    parts = [part for part in path.split("/") if part not in ("", ".")]
     done: list[str] = []
     for index, part in enumerate(parts):
         try:
             names = await files.list_dir(await files.resolve("/".join(done)))
-        except (FileNotFoundError, NotADirectoryError):
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
             return "/".join([*done, *parts[index:]])
         if part not in names:
             matches = [name for name in names if _folded(name) == _folded(part)]
-            if len(matches) != 1 or await files.stat(await files.resolve("/".join([*done, part]))) is None:
+            if (len(names) >= MAX_NAMES or len(matches) != 1
+                    or await files.stat(await files.resolve("/".join([*done, part]))) is None):
                 return "/".join([*done, *parts[index:]])
             part = matches[0]
         done.append(part)

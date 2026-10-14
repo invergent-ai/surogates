@@ -34,7 +34,8 @@ async def edited_paths(store: Any, session_id: Any, after: int) -> list[str]:
         if data.get("name") != "office_edit" or not isinstance(arguments, dict):
             continue
         path = arguments.get("path")
-        if isinstance(path, str) and path and path not in paths:
+        # A path holding a NUL names no file, and the open rows cannot be looked up by it.
+        if isinstance(path, str) and path and "\0" not in path and path not in paths:
             paths.append(path)
     return paths
 

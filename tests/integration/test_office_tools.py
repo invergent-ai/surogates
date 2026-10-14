@@ -160,10 +160,10 @@ async def test_the_agents_name_comes_from_its_runtime_config(session_factory, st
 FOLDER = "/home/me/notes"
 
 
-async def _on_a_computer(session_factory, storage, redis_client, monkeypatch, files):
+async def _on_a_computer(session_factory, storage, redis_client, monkeypatch, files, *, ignores_case=False):
     """A chat on a folder of a fake computer: the computer, and the tools' kwargs."""
     device_id = str(uuid4())
-    computer = computer_io(FOLDER, files, device_id=device_id)
+    computer = computer_io(FOLDER, files, device_id=device_id, ignores_case=ignores_case)
 
     @asynccontextmanager
     async def on_it(session, **kwargs):
@@ -202,3 +202,9 @@ async def test_on_a_computer_a_picture_it_cannot_read_is_said(session_factory, s
             "content": {"markdown": "<?block p?>", "blocks": {"p": {"type": "image", "path": "chart.png"}}}}]
     answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": ops}, **kwargs))
     assert answer["error"] == "Could not read chart.png: The computer is busy"
+
+
+async def test_on_a_computer_the_answer_names_the_document_as_the_computer_spells_it(session_factory, storage, redis_client, monkeypatch):
+    _, kwargs = await _on_a_computer(session_factory, storage, redis_client, monkeypatch, {"Plan.docx": b"PK"}, ignores_case=True)
+    answer = json.loads(await office_tools._office_edit({"path": "plan.docx", "ops": [{"op": "delete"}]}, **kwargs))
+    assert answer["document"] == "Plan.docx"
