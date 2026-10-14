@@ -175,7 +175,8 @@ switch ($Command) {
     [IO.File]::WriteAllBytes($pfx, $leaf.Export('Pfx', $password))
     try {
       $from = Split-Path -Parent ([IO.Path]::GetFullPath($First))
-      $files = Get-Content $First | ForEach-Object { Join-Path $from $_ }
+      # A list, of one file too: a string alone is handed to signtool a character at a time.
+      $files = @(Get-Content $First | ForEach-Object { Join-Path $from $_ })
       & (Signtool) sign /q /fd SHA256 /tr $TrialTimestamps /td SHA256 /f $pfx /p $password @files | Out-Host
       if ($LASTEXITCODE -ne 0) { throw "sign-win.ps1: signtool sign exited $LASTEXITCODE" }
     } finally {
