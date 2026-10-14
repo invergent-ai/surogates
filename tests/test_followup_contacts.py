@@ -623,3 +623,44 @@ def test_every_platform_sentence_has_a_key():
         assert store.wording(None, key, **{k: "x" for k in (
             "answered_by", "contact", "relation", "name", "journey", "reason", "member", "who",
             "channel", "what", "journeys", "writer_name", "writer")}) != default or "{" not in default
+
+
+@pytest.mark.asyncio
+async def test_a_member_whose_channel_has_no_sender_is_told_elsewhere_or_recorded(sf, clinic):
+    doctor, _, nurse = clinic
+    # The doctor asked for Slack, which has no sender here: WhatsApp instead.
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT,
+                                team_channels={str(doctor): ["slack"]}, team_permissions={})
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    queued, why = await store.notify_team(sf, settings, org_id=ORG, agent_id=AGENT,
+                                          kind="alert", text="x", created_by="t")
+    assert (queued, why) == (2, None)
+    assert {r.platform for r in await _all(sf, OutreachMessageRow)} == {"whatsapp"}
+
+    # No sender at all for anyone: each member is recorded as not told, and
+    # the reply says so instead of counting them.
+    async with sf() as db:
+        from surogates.db.models import FollowupSettingsRow
+
+        row = await db.get(FollowupSettingsRow, (ORG, AGENT))
+        row.channel_identifier, row.senders = None, {}
+        await db.commit()
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    queued, why = await store.notify_team(sf, settings, org_id=ORG, agent_id=AGENT,
+                                          kind="alert", text="y", created_by="t")
+    assert queued == 0 and "2 team member(s) could not be reached" in why
+    failed = [r for r in await _all(sf, OutreachMessageRow) if r.text == "y"]
+    assert {r.user_id for r in failed} == {doctor, nurse}
+    assert {r.state for r in failed} == {"failed"}
+    from surogates.followup.outreach import DEFAULT_TEXTS, plain_reason
+
+    assert plain_reason(failed[0].reason) == DEFAULT_TEXTS["why_no_channel"]
+
+
+def test_the_reply_counts_honestly():
+    from surogates.followup.context import told
+
+    assert told(1, "1 team member(s) could not be reached: x") == (
+        "The team was notified (1); 1 team member(s) could not be reached: x."
+    )
+    assert told(2, None) == "The team was notified (2)."

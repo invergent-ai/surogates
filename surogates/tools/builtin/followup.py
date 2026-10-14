@@ -924,7 +924,9 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     if queued:
         told.append(f"{queued} team member(s)")
     return (
-        "Escalated to " + " and ".join(told) + ". This note is for you, not "
+        "Escalated to " + " and ".join(told) + "."
+        + (f" Not everyone: {why_not}; the team's queue shows who." if queued and why_not else "")
+        + " This note is for you, not "
         "the person: do not repeat it to them; tell them only what they need "
         "to know, in your own words."
     )

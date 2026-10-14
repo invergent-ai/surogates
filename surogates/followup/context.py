@@ -234,7 +234,8 @@ def local_time(at: datetime, config: dict) -> str:
 
 
 def told(queued: int, why_not: str | None) -> str:
-    return (
-        f"The team was notified ({queued})."
-        if queued else f"The team was not notified: {why_not}."
-    )
+    """What happened to a notice to the team, honestly: how many were told
+    and, when some could not be, why."""
+    if not queued:
+        return f"The team was not notified: {why_not}."
+    return f"The team was notified ({queued})" + (f"; {why_not}." if why_not else ".")

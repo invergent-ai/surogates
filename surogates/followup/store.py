@@ -773,8 +773,6 @@ async def notify_team(
         for platform, sender in {**(fallback_senders or {}), **senders_of(settings)}.items()
         if sender and capabilities_for(platform).can_initiate
     }
-    if not senders:
-        return 0, "no sender is configured for alerts"
     ids: list[uuid.UUID] = []
     for recipient in recipients:
         try:
@@ -785,9 +783,11 @@ async def notify_team(
     reachable = await _granted_platforms(session_factory, org_id=org_id, user_ids=ids)
     team_channels = (getattr(settings, "team_channels", None) or {}) if settings else {}
     default_order = ["whatsapp", *(p for p in initiating_platforms() if p != "whatsapp")]
-    queued = 0
+    queued, unreached = 0, 0
     for recipient_id in ids:
-        order = team_channels.get(str(recipient_id)) or default_order
+        # Their own order first, then every other channel: a member whose
+        # chosen channel has no sender is still told on another.
+        order = list(dict.fromkeys([*(team_channels.get(str(recipient_id)) or ()), *default_order]))
         # Unreachable everywhere still queues on the first channel with a
         # sender: the send pass fails it visibly instead of nobody knowing.
         platform = next(
@@ -795,6 +795,19 @@ async def notify_team(
             next((p for p in order if p in senders), None),
         )
         if platform is None:
+            # No channel of theirs has a sender: recorded as failed, so the
+            # history and Studio say which member was not told.
+            first = order[0]
+            await queue_outreach(
+                session_factory, org_id=org_id, agent_id=agent_id,
+                user_id=recipient_id, platform=first, channel_identifier="",
+                kind=kind, text=text, template_name=None, template_language=None,
+                subject_user_id=subject_user_id, created_by=created_by,
+                dedupe_key=f"{dedupe_prefix}:{recipient_id}" if dedupe_prefix else None,
+                severity=severity, alert_reason=(reason or text).strip(),
+                failed_reason=f"{first} is not switched on for this agent: no sender reaches this team member",
+            )
+            unreached += 1
             continue
         template = capabilities_for(platform).opener == "template" and settings is not None
         await queue_outreach(
@@ -821,10 +834,14 @@ async def notify_team(
             severity=severity, alert_reason=(reason or text).strip(),
         )
         queued += 1
+    missed = (
+        f"{unreached} team member(s) could not be reached: none of their channels has a "
+        "sender on this agent" if unreached else None
+    )
     if queued:
-        return queued, None
+        return queued, missed
     if ids:
-        return 0, "no team member can be reached on a channel this agent has a sender for"
+        return 0, missed or "no team member can be reached on a channel this agent has a sender for"
     return 0, "the only configured recipient is this person"
 
 
@@ -975,6 +992,7 @@ async def queue_outreach(
     alert_reason: str | None = None,
     destination: str | None = None,
     send_now: bool = False,
+    failed_reason: str | None = None,
 ) -> OutreachMessageRow:
     """Queue one message.  With ``dedupe_key``, queuing the same cause twice
     returns the first row instead of writing to the person again.
@@ -1010,7 +1028,9 @@ async def queue_outreach(
             org_id=org_id, agent_id=agent_id, user_id=user_id,
             platform=platform, channel_identifier=channel_identifier,
             kind=kind, text=text, template_name=template_name or None,
-            template_language=template_language or None, state="queued",
+            template_language=template_language or None,
+            # Recorded, not sent, when nothing could carry it (*failed_reason*).
+            state="failed" if failed_reason else "queued", reason=failed_reason,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=dedupe_key, severity=severity, alert_reason=alert_reason,
             destination=destination or None,
