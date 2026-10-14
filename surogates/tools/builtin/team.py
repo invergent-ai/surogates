@@ -32,7 +32,6 @@ from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.models import (
     AgentUser,
     EscalationRow,
-    ChannelContactRow,
     Event,
     OutreachMessageRow,
     ProgramInvitationRow,
@@ -50,7 +49,7 @@ from surogates.followup.context import (
     start_text,
     told,
 )
-from surogates.followup.eligibility import as_utc, day_index, next_contact
+from surogates.followup.eligibility import as_utc, day_today, next_contact
 from surogates.programs.journey import quiet_until
 from surogates.followup.outreach import (
     Described,
@@ -464,35 +463,6 @@ def _senders(ctx: Any, settings: Any) -> dict[str, str]:
     return {**own, **followup_store.senders_of(settings)}
 
 
-async def _last_wrote(sf: Any, ctx: Any, settings: Any, people: list) -> dict[uuid.UUID, datetime]:
-    """When each person last wrote to any of the agent's senders."""
-    owner = {
-        (platform, handle): p.user_id
-        for p in people for platform, found in p.handles.items() for handle in found
-    }
-    senders = set(_senders(ctx, settings).values())
-    if not owner or not senders:
-        return {}
-    async with sf() as db:
-        rows = (
-            await db.execute(
-                sa.select(
-                    ChannelContactRow.platform, ChannelContactRow.platform_user_id,
-                    ChannelContactRow.last_inbound_at,
-                )
-                .where(ChannelContactRow.org_id == ctx.org_id)
-                .where(ChannelContactRow.channel_identifier.in_(senders))
-                .where(ChannelContactRow.platform_user_id.in_({h for _, h in owner}))
-            )
-        ).all()
-    out: dict[uuid.UUID, datetime] = {}
-    for platform, handle, at in rows:
-        user_id = owner.get((platform, handle))
-        if user_id is not None and (user_id not in out or as_utc(at) > as_utc(out[user_id])):
-            out[user_id] = at
-    return out
-
-
 def _ago(at: datetime | None, now: datetime) -> str:
     if at is None:
         return "never"
@@ -843,7 +813,9 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
 
     configs, last_in, invitations, alerts, undelivered = await asyncio.gather(
         followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id),
-        _last_wrote(sf, ctx, settings, people),
+        followup_store.last_inbound_by_person(
+            sf, org_id=ctx.org_id, user_ids=ids, senders=_senders(ctx, settings).values(),
+        ),
         _invitations(sf, ctx.org_id, ctx.agent_id, ids, now),
         _alerts(sf, ctx.org_id, ctx.agent_id, ids, now),
         _undelivered(sf, ctx.org_id, ctx.agent_id, ids, now),
@@ -874,8 +846,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         head += f" · {person.contact}"
         lines = [f"• {head}"]
         for row in person.rows:
-            zone = row.timezone or zones.get(row.protocol, "UTC")
-            index = day_index(row.start_date, datetime.now(ZoneInfo(zone)).date())
+            index = day_today(row, zones)
             text = f"  {row.protocol}: " + (f"day {index}" if index is not None else "no start date")
             if row.phase:
                 text += f", phase {row.phase}"

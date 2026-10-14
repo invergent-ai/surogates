@@ -131,6 +131,13 @@ def day_index(start_date: date | None, today: date) -> int | None:
     return (today - start_date).days
 
 
+def day_today(enrollment: Any, zones: dict[str, str]) -> int | None:
+    """*enrollment*'s day today, in the person's zone, else their journey's
+    (*zones*: ``{protocol: zone}``)."""
+    zone = enrollment.timezone or zones.get(enrollment.protocol, "UTC")
+    return day_index(enrollment.start_date, datetime.now(ZoneInfo(zone)).date())
+
+
 def as_utc(value: datetime) -> datetime:
     """*value* as an aware UTC datetime; drivers hand back naive UTC stamps."""
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)

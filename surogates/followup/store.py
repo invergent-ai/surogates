@@ -972,10 +972,13 @@ async def last_inbound_by_user(
 
 async def last_inbound_by_person(
     session_factory: Any, *, org_id: uuid.UUID, user_ids: Iterable[uuid.UUID],
+    senders: Iterable[str] | None = None,
 ) -> dict[uuid.UUID, datetime]:
-    """When each person last wrote to the business, on any channel and sender."""
+    """When each person last wrote to the business, on any channel; to one
+    of *senders* when given, else to any sender."""
     ids = list(user_ids)
-    if not ids:
+    senders = None if senders is None else set(senders)
+    if not ids or senders == set():
         return {}
     async with session_factory() as db:
         rows = (
@@ -988,6 +991,7 @@ async def last_inbound_by_person(
                 .where(ChannelIdentity.org_id == org_id)
                 .where(ChannelContactRow.org_id == org_id)
                 .where(ChannelIdentity.user_id.in_(ids))
+                .where(sa.true() if senders is None else ChannelContactRow.channel_identifier.in_(senders))
                 .group_by(ChannelIdentity.user_id)
             )
         ).all()

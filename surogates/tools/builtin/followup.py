@@ -12,7 +12,6 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -38,7 +37,7 @@ from surogates.followup.context import (
     start_text,
     told,
 )
-from surogates.followup.eligibility import day_index, next_contact
+from surogates.followup.eligibility import day_today, next_contact
 from surogates.session.interactive_input import fold_label
 from surogates.tools.builtin.checkin import _open_invitation_for_session
 from surogates.tools.builtin.followup_people import (
@@ -708,8 +707,7 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         lines.append("This person is not enrolled in any protocol.")
     last = await _last_inbound(sf, ctx) if rows else None
     for row in rows:
-        today = datetime.now(ZoneInfo(row.timezone or zones.get(row.protocol, "UTC"))).date()
-        index = day_index(row.start_date, today)
+        index = day_today(row, zones)
         detail = [f"{row.protocol}: {row.status}"]
         detail.append(
             f"person_name {row.patient_name}" if row.patient_name
