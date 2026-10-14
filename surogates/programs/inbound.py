@@ -35,8 +35,6 @@ _OPEN_STATES = ("awaiting_reply", "replied", "in_progress")
 #: Another recipient of the same step (the person or a contact) answered it.
 ANSWERED_BY_OTHER = "answered_by_other"
 
-_PERSON_COLUMN = getattr(ProgramInvitationRow, "person_user_id", None)
-
 #: Which of several open steps a message belongs to.  Rows from before
 #: ``opened_at`` existed sort by when they were created.
 MOST_RECENTLY_OPENED = (
@@ -62,10 +60,10 @@ async def open_invitation_for(
     identity's.
     """
     if user_id is not None:
-        whose = [ProgramInvitationRow.user_id == user_id]
-        if _PERSON_COLUMN is not None:
-            whose.append(_PERSON_COLUMN == user_id)
-        sender = sa.or_(*whose)
+        sender = sa.or_(
+            ProgramInvitationRow.user_id == user_id,
+            ProgramInvitationRow.person_user_id == user_id,
+        )
     else:
         sender = sa.and_(
             ProgramInvitationRow.platform == platform,

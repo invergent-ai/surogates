@@ -632,7 +632,7 @@ async def _enrollment_of(session_factory: Any, invitation: Any, config: dict) ->
         return None
     found = await followup_store.enrollments(
         session_factory, org_id=invitation.org_id, agent_id=invitation.agent_id,
-        user_id=getattr(invitation, "person_user_id", None) or invitation.user_id,
+        user_id=invitation.person_user_id or invitation.user_id,
         protocol=protocol,
     )
     return found[0] if found else None

@@ -246,7 +246,7 @@ def make_step_waker(
         config = config if config is not None else await config_for_program(invitation.program_id) or {}
         platform = invitation.platform
         sender = str(
-            getattr(invitation, "channel_identifier", None)
+            invitation.channel_identifier
             or config.get("channel_identifier") or ""
         )
         now = datetime.now(timezone.utc)
@@ -422,7 +422,7 @@ def make_opener_enqueue(
         config = await config_for_program(invitation.program_id) or {}
         platform = invitation.platform
         sender = str(
-            getattr(invitation, "channel_identifier", None)
+            invitation.channel_identifier
             or config.get("channel_identifier") or ""
         )
         if await _agent_writes(invitation, config, sender):

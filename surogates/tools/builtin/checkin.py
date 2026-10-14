@@ -76,10 +76,6 @@ STEP_OUTCOME_SCHEMA = ToolSchema(
         "required": ["outcome"],
     },
 )
-#: The older name, kept for imports.
-CHECKIN_OUTCOME_SCHEMA = STEP_OUTCOME_SCHEMA
-
-_PERSON_COLUMN = getattr(ProgramInvitationRow, "person_user_id", None)
 
 
 async def _open_invitation_for_session(session_factory: Any, session_id: Any):
@@ -102,8 +98,7 @@ async def _open_invitation_for_session(session_factory: Any, session_id: Any):
         mine = [ProgramInvitationRow.session_id == session.id]
         if session.user_id is not None:
             mine.append(ProgramInvitationRow.user_id == session.user_id)
-            if _PERSON_COLUMN is not None:
-                mine.append(_PERSON_COLUMN == session.user_id)
+            mine.append(ProgramInvitationRow.person_user_id == session.user_id)
         since = datetime.now(timezone.utc) - _DECIDE_WITHIN
         return (
             await db.execute(

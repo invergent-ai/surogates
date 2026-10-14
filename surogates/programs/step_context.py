@@ -71,7 +71,7 @@ async def step_context(
                     .where(ProgramScheduleRow.program_id == invitation.program_id)
                 )
             ).scalar_one_or_none() or {}
-    person_id = getattr(invitation, "person_user_id", None) or invitation.user_id
+    person_id = invitation.person_user_id or invitation.user_id
     protocol = protocol_of(config)
     found = await followup_store.enrollments(
         session_factory, org_id=invitation.org_id, agent_id=invitation.agent_id,

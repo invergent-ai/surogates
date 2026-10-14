@@ -1028,7 +1028,7 @@ async def _send_one(
     slack_client_factory: Any = None,
 ) -> int:
     queued = row.state == "queued"
-    if getattr(row, "destination", None):
+    if row.destination:
         return await _send_to_destination(
             session_factory, row, session_store=session_store, redis=redis, now=now,
             storage=storage, settings=settings,
