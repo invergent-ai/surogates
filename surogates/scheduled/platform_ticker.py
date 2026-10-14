@@ -185,20 +185,6 @@ def _program_now():
     return datetime.now(timezone.utc)
 
 
-def _next_occurrences_for(row):
-    """The next fire instant for a claimed schedule, from its own config."""
-    from surogates.programs.cadence import next_occurrences
-
-    config = getattr(row, "config", None) or {}
-    return next_occurrences(
-        _program_now(),
-        weekdays=config.get("weekdays") or [],
-        times_local=config.get("times_local") or [],
-        timezone=config.get("timezone") or "UTC",
-        count=1,
-    )
-
-
 async def main(
     *,
     settings: Any,
@@ -370,6 +356,7 @@ async def main(
             materialize_occurrence,
             send_queued_openers,
         )
+        from surogates.programs.journey import next_run_at
         from surogates.programs.opener import make_opener_enqueue
         from surogates.programs.store import ProgramScheduleStore
         from surogates.programs.ticker import ProgramTicker
@@ -451,9 +438,8 @@ async def main(
             # burst of six openers after a three-day outage is worse than a
             # gap; if catch-up is ever wanted, compute from row.next_run_at
             # and cap the burst.
-            upcoming = _next_occurrences_for(row)
             await program_store.mark_fired(
-                row, next_run_at=upcoming[0] if upcoming else None,
+                row, next_run_at=await next_run_at(_session_factory(), row, _program_now()),
             )
 
         from surogates.followup.outreach import send_queued_outreach

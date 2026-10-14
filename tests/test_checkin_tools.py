@@ -112,7 +112,19 @@ async def test_checkin_outcome_records_completion(sf, awaiting_invitation):
     await handle_checkin_outcome(
         {"outcome": "completed"}, **_kwargs(sf, awaiting_invitation),
     )
-    assert (await _reload(sf, awaiting_invitation.id)).response_state == "completed"
+    saved = await _reload(sf, awaiting_invitation.id)
+    assert saved.response_state == "completed"
+    assert saved.outcome == "completed"
+
+
+@pytest.mark.asyncio
+async def test_checkin_outcome_keeps_the_result_a_branch_reads(sf, awaiting_invitation):
+    from surogates.tools.builtin.checkin import handle_checkin_outcome
+
+    await handle_checkin_outcome(
+        {"outcome": "completed", "result": " red "}, **_kwargs(sf, awaiting_invitation),
+    )
+    assert (await _reload(sf, awaiting_invitation.id)).outcome == "red"
 
 
 @pytest.mark.asyncio

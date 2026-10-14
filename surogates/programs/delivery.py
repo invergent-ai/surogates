@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import sqlalchemy as sa
 
+from surogates.channels.capabilities import capabilities_for
 from surogates.db.models import ProgramInvitationRow
 from surogates.followup.outreach import apply_outreach_status
+from surogates.programs.journey import fall_back
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +40,10 @@ logger = logging.getLogger(__name__)
 #: ``failed`` and must not resurrect a send that was already known lost.
 _ORDER = {"queued": 0, "accepted": 1, "delivered": 2, "failed": 3, "undelivered": 3}
 
-#: Meta status values worth recording on an invitation.  ``sent`` and
-#: ``read`` add nothing it does not already know; ``read`` still reaches
-#: outreach, where it says whether a team member opened an alert.
+#: Meta status values that move an invitation's delivery axis.  ``sent``
+#: adds nothing it does not already know; ``read`` is recorded apart, as
+#: ``read_at``, and still reaches outreach, where it says whether a team
+#: member opened an alert.
 _DELIVERY_STATES = frozenset({"delivered", "failed", "undelivered"})
 
 #: Set once at channels-process startup.  The webhook parser is synchronous
@@ -105,10 +109,14 @@ async def record_outbox_result(
                 # ``awaiting_reply`` the row counts as an open check-in and
                 # suppresses this user's next occurrence for good.
                 row.response_state = "not_started"
+            await fall_back(db, row, now=datetime.now(timezone.utc))
         else:
             if provider_message_id:
                 row.provider_message_id = provider_message_id
-            _advance(row, "accepted")
+            # A channel that never reports delivery has delivered once the
+            # post succeeded; waiting for a receipt would wait forever.
+            receipts = capabilities_for(row.platform).receipts
+            _advance(row, "accepted" if "delivered" in receipts else "delivered")
         await db.commit()
     return True
 
@@ -125,7 +133,7 @@ async def apply_status_callback(
     Returns ``True`` when an invitation matched.  Most statuses belong to
     ordinary replies with no invitation behind them.
     """
-    if not provider_message_id or status not in _DELIVERY_STATES:
+    if not provider_message_id or status not in (*_DELIVERY_STATES, "read"):
         return False
 
     async with session_factory() as db:
@@ -141,9 +149,15 @@ async def apply_status_callback(
         if row is None:
             return False
 
-        moved = _advance(row, status)
+        if status == "read":
+            # Read implies delivered; the receipt may well come first.
+            moved = _advance(row, "delivered")
+            row.read_at = row.read_at or datetime.now(timezone.utc)
+        else:
+            moved = _advance(row, status)
         if moved and reason and status in ("failed", "undelivered"):
             row.delivery_error = reason[:500]
+            await fall_back(db, row, now=datetime.now(timezone.utc))
         await db.commit()
 
     if moved:

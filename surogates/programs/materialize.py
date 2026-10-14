@@ -33,6 +33,15 @@ from surogates.db.models import (
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import Audience, as_utc, ineligibility
 from surogates.followup.missed import paused_by_silence, threshold
+from surogates.programs.journey import (
+    choose_channel,
+    fires_in,
+    in_quiet_hours,
+    journey_of,
+    person_zone,
+    protocol_of,
+    strategy_of,
+)
 from surogates.programs.opener import OpenerUndeliverable
 
 logger = logging.getLogger(__name__)
@@ -49,17 +58,11 @@ logger = logging.getLogger(__name__)
 #: check-in.
 _OPEN_RESPONSE_STATES = ("awaiting_reply", "replied", "in_progress")
 
+#: A branch on ``replied`` keeps whoever answered, however it ended.
+_REPLIED_STATES = ("replied", "in_progress", "completed", "incomplete")
+
 #: Used when a Program's projected config carries no deadline of its own.
 _DEFAULT_DEADLINE_HOURS = 24
-
-
-def platform_of(identity: Any, schedule: Any) -> str:
-    """The channel this invitation is on — the identity's if it says, else the Program's."""
-    return (
-        getattr(identity, "platform", None)
-        or (schedule.config or {}).get("channel")
-        or "whatsapp"
-    )
 
 
 async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
@@ -73,7 +76,7 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
     ).scalar_one()
 
 
-async def _has_open_invitation(db, schedule, identity) -> bool:
+async def _has_open_invitation(db, schedule, platform: str, platform_user_id: str) -> bool:
     """Is this user already mid-check-in with this agent?
 
     Counts an unanswered opener too.  The sweep runs first in the tick, so an
@@ -90,16 +93,39 @@ async def _has_open_invitation(db, schedule, identity) -> bool:
             # occurrence, inside the claim lease.
             .where(ProgramInvitationRow.org_id == schedule.org_id)
             .where(ProgramInvitationRow.agent_id == schedule.agent_id)
-            .where(ProgramInvitationRow.platform == platform_of(identity, schedule))
-            .where(
-                ProgramInvitationRow.platform_user_id
-                == identity.platform_user_id
-            )
+            .where(ProgramInvitationRow.platform == platform)
+            .where(ProgramInvitationRow.platform_user_id == platform_user_id)
             .where(
                 ProgramInvitationRow.response_state.in_(_OPEN_RESPONSE_STATES)
             )
         )
     ).scalar_one() > 0
+
+
+async def _on_branch(session_factory: Any, branch: dict, user_ids: list) -> set:
+    """Whose latest invitation of the branch's step matches its condition."""
+    step_id = uuid.UUID(str(branch["step_id"]))
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(
+                    ProgramInvitationRow.user_id, ProgramInvitationRow.response_state,
+                    ProgramInvitationRow.outcome,
+                )
+                .where(ProgramInvitationRow.program_id == step_id)
+                .where(ProgramInvitationRow.user_id.in_(user_ids))
+                .order_by(ProgramInvitationRow.created_at)
+            )
+        ).all()
+    latest = {user_id: (response, outcome) for user_id, response, outcome in rows}
+    when = branch.get("when")
+    outcomes = {str(o) for o in branch.get("outcomes") or ()}
+    return {
+        user_id for user_id, (response, outcome) in latest.items()
+        if (when == "replied" and response in _REPLIED_STATES)
+        or (when == "no_reply" and response == "no_reply_by_deadline")
+        or (when == "outcome" and outcome in outcomes)
+    }
 
 
 async def materialize_occurrence(
@@ -114,9 +140,14 @@ async def materialize_occurrence(
     Idempotent at both levels — ``(program_id, scheduled_for)`` and
     ``(occurrence_id, user_id)`` — so a crashed or retried tick is harmless
     rather than a second message to every user.
+
+    With a journey the channel is chosen per person (its strategy), and the
+    branch and each person's zone narrow who is asked.
     """
     config = schedule.config or {}
     platform = config.get("channel", "whatsapp")
+    strategy = strategy_of(config)
+    branch = config.get("branch") if isinstance(config.get("branch"), dict) else None
     pause = threshold(config, "pause_after_missed")
     # Resolved before the occurrence's transaction opens: an audience is one
     # read per enrolled person, the pause one per reachable person, and none
@@ -126,9 +157,21 @@ async def materialize_occurrence(
         session_factory=session_factory, identity_lookup=identity_lookup,
         with_last_inbound=pause is not None,
     )
+    chosen: dict[uuid.UUID, Any] = {}
+    if strategy:
+        for user_id, _identity, enrollment in roster:
+            chosen[user_id] = await choose_channel(
+                config, strategy, org_id=schedule.org_id, user_id=user_id,
+                enrollment=enrollment, identity_lookup=identity_lookup,
+                session_factory=session_factory,
+            )
+    on_branch = (
+        await _on_branch(session_factory, branch, [u for u, _, _ in roster])
+        if branch and roster else set()
+    )
     paused: set[uuid.UUID] = set()
     if pause:
-        for user_id, identity in roster:
+        for user_id, identity, _enrollment in roster:
             if (
                 identity is not None
                 and followup_store.permission_status(identity) == "granted"
@@ -157,23 +200,31 @@ async def materialize_occurrence(
             await db.rollback()
             return await _existing_occurrence(db, schedule.program_id, now)
 
-        for user_id, identity in roster:
+        for user_id, identity, _enrollment in roster:
             reason: str | None = None
             state = "queued"
-            if identity is None:
+            row_platform, sender, fallbacks = platform, config.get("channel_identifier"), []
+            if strategy:
+                if chosen[user_id] is None:
+                    reason = "No reachable channel"
+                else:
+                    row_platform, identity, sender, fallbacks = chosen[user_id]
+            elif identity is None:
                 reason = f"No {platform} identity"
-                state = "skipped"
             elif followup_store.permission_status(identity) != "granted":
                 reason = "No permission to message"
-                state = "skipped"
-            elif await _has_open_invitation(db, schedule, identity):
+            if reason is not None:
+                pass
+            elif branch and user_id not in on_branch:
+                reason = "Not on this branch"
+            elif await _has_open_invitation(db, schedule, row_platform, identity.platform_user_id):
                 reason = "Previous check-in still open"
-                state = "skipped"
             elif user_id in paused:
                 reason = (
                     f"Paused: the last {pause} openers went unanswered; "
                     "resumes when they write"
                 )
+            if reason is not None:
                 state = "skipped"
 
             db.add(
@@ -183,10 +234,12 @@ async def materialize_occurrence(
                     org_id=schedule.org_id,
                     agent_id=schedule.agent_id,
                     user_id=user_id,
-                    platform=platform,
+                    platform=row_platform,
                     platform_user_id=(
                         identity.platform_user_id if identity else ""
                     ),
+                    channel_identifier=sender or None,
+                    fallback_platforms=fallbacks or None,
                     delivery_state=state,
                     response_state="not_started",
                     escalation_state="none",
@@ -206,12 +259,14 @@ async def _roster(
     session_factory: Any,
     identity_lookup: Any,
     with_last_inbound: bool = False,
-) -> tuple[list[tuple[uuid.UUID, Any]], dict[str, datetime]]:
-    """The people this occurrence is for, each with their channel identity.
+) -> tuple[list[tuple[uuid.UUID, Any, Any]], dict[str, datetime]]:
+    """The people this occurrence is for, each with their channel identity
+    and enrollment (``None`` on a fixed roster).
 
     A fixed roster is returned whole.  An audience is resolved against the
-    enrollments as they stand right now, filtered to who is due today in the
-    Program's own timezone.
+    enrollments as they stand right now, filtered to who is due today in
+    their own zone.  When people have zones of their own, only those whose
+    zone produced this slot are asked: the same cadence fires once per zone.
 
     Also returns when each person last wrote to the Program's sender, keyed
     by phone: read in one query when the audience's silence filter or the
@@ -231,9 +286,9 @@ async def _roster(
         for user_id in config.get("users", []):
             uid = uuid.UUID(user_id)
             roster.append(
-                (uid, await identity_lookup(schedule.org_id, platform, uid)),
+                (uid, await identity_lookup(schedule.org_id, platform, uid), None),
             )
-        last = await _last_inbound(i for _, i in roster) if with_last_inbound else {}
+        last = await _last_inbound(i for _, i, _ in roster) if with_last_inbound else {}
         return roster, last
 
     try:
@@ -248,11 +303,13 @@ async def _roster(
         )
         return [], {}
 
-    today = now.astimezone(ZoneInfo(str(config.get("timezone") or "UTC"))).date()
     enrollments = await followup_store.enrollments(
         session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
         protocol=audience.protocol, status="active",
     )
+    zones = {e.user_id: person_zone(e, config) for e in enrollments}
+    if set(zones.values()) - {str(config.get("timezone") or "UTC")}:
+        enrollments = [e for e in enrollments if fires_in(config, zones[e.user_id], now)]
     identities = {
         e.user_id: await identity_lookup(schedule.org_id, platform, e.user_id)
         for e in enrollments
@@ -270,10 +327,10 @@ async def _roster(
             phase=enrollment.phase,
             enrolled_at=enrollment.created_at,
             last_inbound_at=last,
-            today=today,
+            today=now.astimezone(ZoneInfo(zones[enrollment.user_id])).date(),
             now=now,
         ) is None:
-            roster.append((enrollment.user_id, identity))
+            roster.append((enrollment.user_id, identity, enrollment))
     return roster, last_by_phone
 
 
@@ -330,14 +387,17 @@ async def send_queued_openers(
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).all()
-        deadlines = await _deadline_hours_by_program(
-            db, {row.program_id for row, _ in rows},
-        )
+        configs = await _configs_by_program(db, {row.program_id for row, _ in rows})
 
     for pending, scheduled_for in rows:
+        config = configs.get(pending.program_id) or {}
         window = timedelta(
-            hours=deadlines.get(pending.program_id, _DEFAULT_DEADLINE_HOURS),
+            hours=int(config.get("response_deadline_hours") or _DEFAULT_DEADLINE_HOURS),
         )
+        if journey_of(config).get("quiet_hours") and in_quiet_hours(
+            config, await _zone_of(session_factory, pending, config), now,
+        ):
+            continue  # held until the person's quiet hours are over
         async with session_factory() as db:
             if scheduled_for is not None and as_utc(scheduled_for) + window <= now:
                 # The slot's own response window has already closed.  A
@@ -373,8 +433,13 @@ async def send_queued_openers(
             if enqueue is None:
                 continue
 
+            minutes = (strategy_of(config) or {}).get("fallback_after_minutes")
             claimed = await db.execute(_unsent(pending.id).values(
                 response_state="awaiting_reply", deadline_at=now + window,
+                fallback_at=(
+                    now + timedelta(minutes=int(minutes))
+                    if minutes and pending.fallback_platforms else None
+                ),
             ))
             await db.commit()
             if int(claimed.rowcount or 0) != 1:
@@ -444,8 +509,8 @@ async def _release(db: Any, invitation_id: Any) -> None:
     await db.commit()
 
 
-async def _deadline_hours_by_program(db, program_ids: set) -> dict:
-    """Each Program's response deadline, read from its projected config."""
+async def _configs_by_program(db, program_ids: set) -> dict:
+    """Each Program's projected config."""
     if not program_ids:
         return {}
     rows = (
@@ -454,13 +519,16 @@ async def _deadline_hours_by_program(db, program_ids: set) -> dict:
             .where(ProgramScheduleRow.program_id.in_(program_ids))
         )
     ).all()
-    return {
-        program_id: int(
-            (config or {}).get("response_deadline_hours")
-            or _DEFAULT_DEADLINE_HOURS
-        )
-        for program_id, config in rows
-    }
+    return {program_id: config or {} for program_id, config in rows}
+
+
+async def _zone_of(session_factory: Any, invitation: Any, config: dict) -> str:
+    """The zone *invitation*'s person lives by in this Program's journey."""
+    found = await followup_store.enrollments(
+        session_factory, org_id=invitation.org_id, agent_id=invitation.agent_id,
+        user_id=invitation.user_id, protocol=protocol_of(config),
+    )
+    return person_zone(found[0] if found else None, config)
 
 
 def identity_lookup_from(session_factory: Any):

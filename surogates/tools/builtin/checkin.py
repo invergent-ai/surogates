@@ -43,6 +43,14 @@ CHECKIN_OUTCOME_SCHEMA = ToolSchema(
                     "Optional short note for the operator's run history."
                 ),
             },
+            "result": {
+                "type": "string",
+                "description": (
+                    "Optional value the step's instructions ask you to record, "
+                    "e.g. a level such as green, yellow or red; later steps "
+                    "can follow it. Omit when the instructions name none."
+                ),
+            },
         },
         "required": ["outcome"],
     },
@@ -74,6 +82,7 @@ async def handle_checkin_outcome(arguments: dict, **kwargs: Any) -> str:
     async with sf() as db:
         row = await db.get(ProgramInvitationRow, inv.id)
         row.response_state = outcome
+        row.outcome = str(arguments.get("result") or "").strip()[:100] or outcome
         if arguments.get("note"):
             row.reason = str(arguments["note"])[:500]
         await db.commit()
