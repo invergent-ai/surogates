@@ -34,7 +34,7 @@ from tests.test_steer_loop import _final_response, _make_loop_harness
 pytestmark = pytest.mark.asyncio
 
 #: The catalog's skills that make a document.
-DOCUMENT_SKILLS = ["docx", "xlsx", "pptx", "pdf", "doc-coauthoring"]
+DOCUMENT_SKILLS = ["docx", "xlsx", "pptx", "pdf", "doc-coauthoring", "office"]
 #: Skills that make none: reading a PDF, and a schedule.
 OTHER_SKILLS = ["pdf-reading", "schedule"]
 

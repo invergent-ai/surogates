@@ -202,7 +202,7 @@ async def test_a_computer_projects_prompt_has_it_work_in_its_folder_and_propose_
     said = " ".join(prompt.split())
     assert "# Running a project" in said
     assert (
-        "Do a simple thing yourself, here: a quick answer, creating a file whose whole content the user gave you, "
+        "Do a simple thing yourself, here: a quick answer, a plain text file whose whole content the user gave you, "
         "writing a few lines, a small edit, one quick command."
     ) in said
     assert "## The project's folder" in said
