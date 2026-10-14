@@ -229,6 +229,12 @@ def _noted(content: str, note: str) -> str:
     return f"{content}\n\n[{note}]"
 
 
+async def _refused_open_document(tool_name: str, tool_args: Any, session: Any, session_factory: Any) -> str | None:
+    from surogates.office.guard import refused_open_document
+
+    return await refused_open_document(tool_name, tool_args, session, session_factory=session_factory)
+
+
 async def _copy_lost_work(store: Any, session_id: Any, before: int, session_factory: Any = None) -> bool:
     """Whether the thread's copy, made again, lacks work it did before event *before*.
 
@@ -581,6 +587,10 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "propose_threads",
 })
 
+#: Tools whose call must not start before the response that makes it is saved: a stream discarded and retried
+#: would make it twice, and an edit a user watches land twice is worse than one that waits a moment.
+AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
+
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.
@@ -648,6 +658,10 @@ MAX_TOOL_WORKERS: int = 8
 SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "ask_user_question",
     "list_files",
+    # They write nothing in a thread's copy: the document's changes go through
+    # its editors, so a sandbox checkpoint could never undo them.
+    "office_edit",
+    "office_read",
     "read_file",
     "file_read",
     "search_files",
@@ -1893,6 +1907,8 @@ async def _run_single_tool(
             pass  # result_content already set by the image branch.
         elif (refused := thread_refuses(tool_name, tool_args, session.config)) is not None:
             result_content = json.dumps({"error": thread_refusal(refused)})
+        elif (open_refused := await _refused_open_document(tool_name, tool_args, session, session_factory)) is not None:
+            result_content = json.dumps({"error": open_refused})
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)
         elif replay_of is not None and location != ToolLocation.SANDBOX:
@@ -2084,6 +2100,14 @@ async def _run_single_tool(
         not_taken += await take_up(sandbox_pool, sandbox_session_key(session))
     if not_taken:
         result_content = _noted(result_content, f"{NOT_TAKEN_UP}: {', '.join(sorted(set(not_taken)))}")
+
+    # A read of a document open in the editor can lag it: the step's result says where its newest version is.
+    if tool_name == "read_file" and not tool_failed:
+        from surogates.office.guard import open_document_note
+
+        note = await open_document_note(tool_args, session, session_factory=session_factory)
+        if note:
+            result_content = _noted(result_content, note)
 
     # A thread on a copy just made is told, by that step's result whatever the
     # tool, when the log says work since its last landing was in a copy now

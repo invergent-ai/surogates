@@ -1,6 +1,6 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTheme } from "next-themes";
-import { AlertCircleIcon, DownloadIcon, FileTextIcon, XIcon } from "lucide-react";
+import { AlertCircleIcon, DownloadIcon, FileTextIcon, Maximize2Icon, Minimize2Icon, XIcon } from "lucide-react";
 import { type DocEditorInstance, loadDocsApi } from "../../lib/office";
 import type { AgentChatAdapter, AgentChatOfficeEvent } from "../../types";
 
@@ -27,6 +27,14 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 	// A conflict ended the editor's session: open the file again, with a fresh config.
 	const [reopenedFor, setReopenedFor] = useState(0);
 	if (notice?.type === "office.conflict" && notice.eventId !== reopenedFor) setReopenedFor(notice.eventId);
+	// The browser's full screen: Esc leaves it too, so the state follows the document's.
+	const paneRef = useRef<HTMLElement>(null);
+	const [fullScreen, setFullScreen] = useState(false);
+	useEffect(() => {
+		const follow = () => setFullScreen(document.fullscreenElement === paneRef.current);
+		document.addEventListener("fullscreenchange", follow);
+		return () => document.removeEventListener("fullscreenchange", follow);
+	}, []);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -56,6 +64,7 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 	const fileName = path.split("/").pop() ?? path;
 	return (
 		<aside
+			ref={paneRef}
 			data-testid="file-preview-panel"
 			className="flex h-full min-h-0 w-full flex-col overflow-hidden border-l border-line bg-card"
 		>
@@ -71,6 +80,15 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 				>
 					<DownloadIcon className="size-4" />
 				</a>
+				<button
+					type="button"
+					onClick={() => void (fullScreen ? document.exitFullscreen() : paneRef.current?.requestFullscreen())}
+					aria-label={fullScreen ? "Exit full screen" : "Full screen"}
+					title={fullScreen ? "Exit full screen" : "Full screen"}
+					className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+				>
+					{fullScreen ? <Minimize2Icon className="size-4" /> : <Maximize2Icon className="size-4" />}
+				</button>
 				<button
 					type="button"
 					onClick={onClose}

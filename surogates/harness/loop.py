@@ -107,6 +107,7 @@ from surogates.harness.tool_schemas import (
     describe_for_device,
     drop_unusable_tools,
     filter_schemas_for_tenant,
+    has_file_pane,
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
@@ -2816,6 +2817,7 @@ class AgentHarness(
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+            has_file_pane=has_file_pane(session),
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
         # The model may call only what it was sent.  The registry is the

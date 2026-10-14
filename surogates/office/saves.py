@@ -6,17 +6,23 @@ import logging
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
 from surogates.config import OfficeSettings
-from surogates.db.models import OfficeSession
+from surogates.db.models import OfficeSession, Workstream
 from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
+from surogates.office.runtime_office import close_pages
 from surogates.session.events import EventType
 from surogates.session.files import session_files
+from surogates.session.store import SessionNotFoundError
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
+from surogates.workstreams import is_project_thread
+from surogates.workstreams.stream import project_of
+from surogates.workstreams.undo import BUSY, Refused, land_editor_save
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +43,12 @@ def conflict_copy_paths(path: str, when: datetime) -> Iterator[str]:
         yield f"{parent}{stem} {number}{pure.suffix}"
 
 
-async def land_pending_saves(*, session_factory: Any, session_store: Any, storage: Any, redis: Any, office: OfficeSettings) -> int:
-    """Land up to :data:`CLAIMS_PER_PASS` pending saves; how many landed."""
+async def land_pending_saves(*, session_factory: Any, session_store: Any, storage: Any, redis: Any, office: OfficeSettings,
+                             settings: Any = None) -> int:
+    """Land up to :data:`CLAIMS_PER_PASS` pending saves; how many landed.
+
+    *settings* are the runtime's settings, whose history and saga sections land a project's saves.
+    """
     landed = 0
     tried: set[UUID] = set()
     for _ in range(CLAIMS_PER_PASS):
@@ -50,9 +60,14 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
             tried.add(row.id)
             try:
                 blob = await _land(row, session_factory=session_factory, session_store=session_store,
-                                   storage=storage, redis=redis, office=office)
+                                   storage=storage, redis=redis, office=office, settings=settings)
                 landed += 1
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, Refused) and str(exc) == BUSY:
+                    # The project is busy: not a failed try. Its new updated_at moves the row behind the others.
+                    row.updated_at = datetime.now(timezone.utc)
+                    logger.info("the project of %s is busy: its save waits", row.path)
+                    continue
                 # Commits with the row; its new updated_at moves it behind the others.
                 attempts = office_sessions.mark_attempt(row)
                 logger.exception("could not land the save of %s (attempt %d)", row.path, attempts)
@@ -67,8 +82,12 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
     return landed
 
 
-async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any, storage: Any, redis: Any, office: OfficeSettings) -> tuple[str, str]:
-    """Land *row*'s pending save; the (bucket, key) of the save, consumed, to delete once the row commits."""
+async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any, storage: Any, redis: Any, office: OfficeSettings,
+                settings: Any = None) -> tuple[str, str]:
+    """Land *row*'s pending save; the (bucket, key) of the save, consumed, to delete once the row commits.
+
+    *settings* are the runtime's settings, whose history and saga sections land a project's saves.
+    """
     pending = dict(row.pending_save or {})
     blob = (pending["bucket"], pending["key"])
     session = await live_session(session_store, row.session_ids)
@@ -80,8 +99,20 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
         if not isinstance(files, StorageWorkspaceIO):
             raise RuntimeError(f"{row.path}: saving into a folder on a computer is not supported")
         key = await files.resolve(row.path)
+        project = await _project_of(session_factory, session)
         try:
-            await files.write_if(key, data, expected=row.base_version)
+            if project is None:
+                await files.write_if(key, data, expected=row.base_version)
+            else:
+                if settings is None:
+                    raise RuntimeError("landing a project's save needs the runtime's settings")
+                state = SimpleNamespace(session_factory=session_factory, session_store=session_store, storage=storage,
+                                        settings=settings, redis=redis)
+                await land_editor_save(
+                    state, project, path=row.path,
+                    author=await editor_author(session_store, project, list(pending.get("authors") or [])),
+                    write=lambda: files.write_if(key, data, expected=row.base_version),
+                )
         except RevisionConflict:
             # An earlier landing may have written these bytes and stopped before its row
             # change committed. The etag comes first: a write between the two then shows
@@ -98,10 +129,37 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
             await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
                             {"path": row.path, "conflict_path": copy_path})
             await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
+            await close_pages(office, row.doc_key, row.session_ids)
             office_sessions.mark_closed(row)
         else:
             office_sessions.mark_landed(row, await files.etag(key))
     return blob
+
+
+async def _project_of(session_factory: Any, session: Any) -> Workstream | None:
+    """The project whose real files the session works in, or None for a plain chat."""
+    project_id = project_of(session.config.get("workspace_boundary"))
+    if project_id is None:
+        return None
+    async with session_factory() as db:
+        return await db.get(Workstream, UUID(project_id))
+
+
+async def editor_author(session_store: Any, project: Any, authors: list[str]) -> dict[str, str]:
+    """Who the history names for an editor save: the project's thread whose agent alone edited it; you whenever a
+    person edited too, several chats' agents did, or the agent's chat is not one of the project's threads."""
+    you = {"name": str(project.user_id), "email": f"user:{project.user_id}@surogate"}
+    agents = {author for author in authors if author.startswith("agent:")}
+    if len(agents) != 1 or len(agents) != len(set(authors)):
+        return you
+    try:
+        thread = await session_store.get_session(UUID(next(iter(agents)).rsplit(":", 1)[-1]))
+    except (ValueError, SessionNotFoundError):
+        return you
+    # Only this project's own thread is named: an id from anywhere else, or its master's, is not trusted to be one.
+    if not is_project_thread(thread.config) or str((thread.config or {}).get("workstream_id")) != str(project.id):
+        return you
+    return {"name": thread.title or "Thread", "email": f"thread:{thread.id}@surogate"}
 
 
 async def _write_copy(files: StorageWorkspaceIO, path: str, data: bytes) -> str:

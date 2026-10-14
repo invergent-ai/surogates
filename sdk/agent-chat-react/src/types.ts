@@ -649,7 +649,8 @@ export type AgentChatEventType =
   | "worker.failed"
   | "thread.proposed"
   | "office.conflict"
-  | "office.save_failed";
+  | "office.save_failed"
+  | "stream.live";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
@@ -745,6 +746,10 @@ export interface AgentChatState {
   deviceWait: AgentChatDeviceWaitState | null;
   /** The latest save trouble the document editor reported, by workspace path. */
   officeEvents: Record<string, AgentChatOfficeEvent>;
+  /** The stream has sent the session's backlog: what arrives from now on happens now. */
+  live: boolean;
+  /** The office document a live edit of the agent last changed, once the edit ran: the chat opens it in the file pane. */
+  officeAutoOpen: { path: string; eventId: number } | null;
 }
 
 /** A save from the document editor that met trouble: the file changed outside it, or it could not land yet. */

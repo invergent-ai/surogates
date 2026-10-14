@@ -49,6 +49,8 @@ export function createInitialAgentChatState(
     researchSources: [],
     deviceWait: null,
     officeEvents: {},
+    live: false,
+    officeAutoOpen: null,
   };
 }
 
@@ -297,21 +299,29 @@ export function applyAgentChatEvent(
     case "llm.thinking":
       return applyLlmThinking(nextState, event);
 
+    case "stream.live":
+      return { ...nextState, live: true };
+
     case "tool.call":
       return applyToolCall(nextState, event);
 
     case "tool.result": {
       const toolCallId = stringValue(event.data.tool_call_id);
-      const toolName = findToolNameById(nextState.messages, toolCallId);
       const messages = applyToolResult(nextState.messages, event.data);
+      const call = findToolCallById(messages, toolCallId);
+      const toolName = call?.toolName ?? null;
       const mutatesWorkspace =
         toolName !== null && WORKSPACE_MUTATING_TOOLS.has(toolName);
+      // Opened once the edit has run, for an edit that creates its document; a failed edit and replayed history open nothing.
+      const officePath =
+        nextState.live && call?.toolName === "office_edit" && !toolCallFailed(call) ? officeEditPath(call.args) : null;
       const withResult: AgentChatState = {
         ...nextState,
         messages,
         workspaceRefreshKey: mutatesWorkspace
           ? nextState.workspaceRefreshKey + 1
           : nextState.workspaceRefreshKey,
+        officeAutoOpen: officePath ? { path: officePath, eventId: event.eventId } : nextState.officeAutoOpen,
       };
       // research_memory(add) is the only event that surfaces a new
       // source for the citations/sources panel.  Other research tool
@@ -604,6 +614,26 @@ function parseUserMessageAttachments(
     out.push({ path, filename, mimeType, size });
   }
   return out.length > 0 ? out : undefined;
+}
+
+// The workspace path an office_edit call's arguments name.
+function officeEditPath(args: string): string | null {
+  try {
+    const path: unknown = JSON.parse(args)?.path;
+    return typeof path === "string" ? path.replace(/^__WORKSPACE__\//, "") || null : null;
+  } catch {
+    return null;
+  }
+}
+
+// A finished tool call that did nothing: cancelled, or its result an error.
+function toolCallFailed(call: AgentChatToolCallInfo): boolean {
+  if (call.status === "error") return true;
+  try {
+    return JSON.parse(call.result ?? "")?.error != null;
+  } catch {
+    return false;
+  }
 }
 
 // A browser event of a local-folder chat, whose browser is on the user's computer.
@@ -1835,14 +1865,14 @@ function hasUserAfterIndex(messages: AgentChatMessage[], idx: number): boolean {
   return false;
 }
 
-function findToolNameById(
+function findToolCallById(
   messages: AgentChatMessage[],
   toolCallId: string,
-): string | null {
+): AgentChatToolCallInfo | null {
   if (!toolCallId) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const tc = messages[i]?.toolCalls?.find((c) => c.id === toolCallId);
-    if (tc) return tc.toolName;
+    if (tc) return tc;
   }
   return null;
 }

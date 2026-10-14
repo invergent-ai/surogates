@@ -99,6 +99,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "browser_wait": ToolLocation.HARNESS,
     "browser_close": ToolLocation.HARNESS,
     "browser_upload_file": ToolLocation.HARNESS,
+    # Read and edit documents through runtime-office: the worker's DB, storage and runtime-office token.
+    "office_read": ToolLocation.HARNESS,
+    "office_edit": ToolLocation.HARNESS,
     # Knowledge base tools (ops DB + Hub reads, no isolation needed)
     "kb_list_pages": ToolLocation.HARNESS,
     "kb_read_page": ToolLocation.HARNESS,

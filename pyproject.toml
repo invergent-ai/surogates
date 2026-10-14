@@ -91,6 +91,7 @@ surogates = [
     # DDL scripts surogates.db.engine applies at migration time; the ops
     # server installs this package as a wheel and runs those migrations.
     "db/*.sql",
+    "office/templates/*.docx",
 ]
 
 [tool.setuptools_scm]

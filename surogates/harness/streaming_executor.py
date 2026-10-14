@@ -71,6 +71,7 @@ from surogates.harness.sanitize import (  # noqa: E402 — after TYPE_CHECKING b
     deduplicate_tool_calls,
 )
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
+    AFTER_THE_RESPONSE_TOOLS,
     SESSION_STARTING_TOOLS,
     SIBLING_ABORT_TOOLS,
     is_concurrency_safe,
@@ -223,8 +224,9 @@ class StreamingToolExecutor:
         from within a running event loop (which is guaranteed when called
         from an async streaming context).  An executor that does not start
         early only queues it: ``get_all_results`` starts it once the response
-        is saved.  Every executor holds a call that starts another session
-        that way (``SESSION_STARTING_TOOLS``).
+        is saved.  Every executor holds a call that starts another session,
+        or edits a document a user watches, that way (``SESSION_STARTING_TOOLS``,
+        ``AFTER_THE_RESPONSE_TOOLS``).
         """
         if self._discarded:
             return
@@ -356,7 +358,7 @@ class StreamingToolExecutor:
 
         Rules:
         - Aborted/discarded/interrupted → no.
-        - Starts another session and the response is not saved yet → no.
+        - Starts another session, or edits a watched document, and the response is not saved yet → no.
         - No tools currently executing → yes.
         - Tool is concurrent-safe AND all executing tools are concurrent-safe → yes.
         - Otherwise → no (must wait for executing tools to finish).
@@ -365,7 +367,7 @@ class StreamingToolExecutor:
             return False
         if self._interrupt_check() or turn_detached():
             return False
-        if not self._saved and tool.tool_call.get("function", {}).get("name", "") in SESSION_STARTING_TOOLS:
+        if not self._saved and tool.tool_call.get("function", {}).get("name", "") in (SESSION_STARTING_TOOLS | AFTER_THE_RESPONSE_TOOLS):
             return False
 
         executing = [t for t in self._tracked if t.status == ToolStatus.EXECUTING]

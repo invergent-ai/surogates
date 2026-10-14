@@ -10,6 +10,7 @@ from surogates.config import OfficeSettings
 from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
+from surogates.office.runtime_office import close_pages
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ async def reap(*, session_factory: Any, session_store: Any, office: OfficeSettin
             continue
         # A deleted chat's document must not save back into its removed workspace.
         await drop_editors(office, document.doc_key, list(document.editors))
+        await close_pages(office, document.doc_key, document.session_ids)
         dropped = await office_sessions.close(session_factory, document.id)
         closed += 1
         if dropped is not None:

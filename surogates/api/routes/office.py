@@ -3,9 +3,7 @@ fetches, and the saves it calls back with."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -40,10 +38,6 @@ from surogates.tools.workspace_io import StorageWorkspaceIO
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# How long an open waits for a closing document's last save to land, and how often it looks.
-CLOSING_WAIT_S = 10.0
-CLOSING_POLL_S = 0.5
 
 PENDING_PREFIX = "_office/pending/"
 
@@ -86,7 +80,7 @@ async def get_workspace_editor(
         if await files.stat(key) is None:
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
         location = files.location(key)
-    document = await _open_document(request, location=location, path=path, session_id=session.id)
+    document = await _open_document(request, location=location, path=path, session_id=session.id, user=(user_id, user_name))
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
         user_id=user_id, user_name=user_name, theme=theme,
@@ -96,21 +90,15 @@ async def get_workspace_editor(
 
 
 async def _open_document(
-    request: Request, *, location: str, path: str, session_id: UUID,
+    request: Request, *, location: str, path: str, session_id: UUID, user: tuple[str, str],
 ) -> office_sessions.OpenDocument:
-    """The document's open row, waiting up to CLOSING_WAIT_S for a closing one's last save to land."""
-    deadline = time.monotonic() + CLOSING_WAIT_S
-    while True:
-        try:
-            return await office_sessions.open_or_reuse(
-                request.app.state.session_factory, location=location, path=path, session_id=session_id,
-            )
-        except office_sessions.DocumentClosing:
-            if time.monotonic() >= deadline:
-                raise HTTPException(
-                    status_code=409, detail="The document is still being saved; try again in a moment.",
-                ) from None
-            await asyncio.sleep(CLOSING_POLL_S)
+    """The document's open row, once a closing one's last save has landed."""
+    try:
+        return await office_sessions.open_waiting(
+            request.app.state.session_factory, location=location, path=path, session_id=session_id, user=user,
+        )
+    except office_sessions.DocumentClosing:
+        raise HTTPException(status_code=409, detail="The document is still being saved; try again in a moment.") from None
 
 
 async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, str]:
@@ -213,9 +201,15 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     key = f"{PENDING_PREFIX}{document.doc_key}/{uuid4().hex}"
     storage = request.app.state.storage
     await storage.write(bucket, key, data)
+    changes = _changes(payload)
     discarded = await office_sessions.set_pending(
         request.app.state.session_factory, document.id, bucket=bucket, key=key, close=close,
         lastsave=_saved_at(payload, received),
+        marks=[str(payload["userdata"])] if payload.get("userdata") else [],
+        # Every change since the document opened is listed; this save's own start at the last one already
+        # landed (kept: its author may have gone on editing).
+        authors=_authors(changes[max(document.changes_seen - 1, 0):]),
+        changes=len(changes),
     )
     if discarded:
         try:
@@ -231,6 +225,24 @@ def _saved_at(payload: dict[str, Any], received: datetime) -> datetime:
     except (KeyError, ValueError):
         return received
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _changes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The document server's ``history.changes``: every change since the document opened, first first."""
+    history = payload.get("history")
+    changes = history.get("changes") if isinstance(history, dict) else None
+    return [change for change in changes if isinstance(change, dict)] if isinstance(changes, list) else []
+
+
+def _authors(changes: list[dict[str, Any]]) -> list[str]:
+    """The editor user ids that made *changes*, each once, first first."""
+    authors: list[str] = []
+    for change in changes:
+        user = change.get("user")
+        user_id = str(user.get("id") or "") if isinstance(user, dict) else ""
+        if user_id and user_id not in authors:
+            authors.append(user_id)
+    return authors
 
 
 async def _download(url: str) -> bytes:

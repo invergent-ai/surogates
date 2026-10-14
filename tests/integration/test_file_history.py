@@ -3117,3 +3117,79 @@ async def test_an_undo_asks_the_store_a_bounded_number_of_times_a_file_under_the
     planned = (undo_module.CALLS_AN_ACT + undo_module.CALLS_A_FILE * most) * undo_module.CALL_MS + undo_module.FILE_MS * most
     assert planned <= undo_module.LOCK_BUDGET_MS < (120 - undo_module.LOCK_PATIENCE) * 1000
     assert planned + (undo_module.CALLS_A_FILE * undo_module.CALL_MS + undo_module.FILE_MS) > undo_module.LOCK_BUDGET_MS
+
+
+async def test_an_editor_save_is_one_history_entry_by_the_thread_whose_agent_made_it(api, tmp_path):
+    from surogates.workstreams.undo import land_editor_save
+
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    edited = b"PK\x03\x04 report edited live by B's agent"
+
+    async def write() -> None:
+        (pods.project / "Report.docx").write_bytes(edited)
+
+    author = {"name": "Draft B", "email": f"thread:{second.id}@surogate"}
+    await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=author, write=write)
+    listed = await history_of(api, project, "Report.docx")
+    assert (listed[0]["by"], listed[0]["change"]) == ({"kind": "thread", "thread_id": str(second.id), "title": "Draft B"}, "changed")
+    assert (await opened(api, project, listed[0]["id"], "Report.docx")).content == edited
+    *_, row = await rows_of(api, project)
+    assert (row.kind, row.saga_state) == ("pickup", "completed")
+
+
+async def test_an_editor_save_someone_edited_too_is_yours(api, tmp_path):
+    from surogates.workstreams.undo import land_editor_save
+
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+
+    async def write() -> None:
+        (pods.project / "Report.docx").write_bytes(b"PK\x03\x04 edited together")
+
+    you = {"name": str(api.user_id), "email": f"user:{api.user_id}@surogate"}
+    await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=you, write=write)
+    assert (await history_of(api, project, "Report.docx"))[0]["by"] == {"kind": "you"}
+
+
+async def test_an_editor_save_records_your_unrecorded_edit_first(api, tmp_path):
+    from surogates.workstreams.undo import land_editor_save
+
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    before = await history_of(api, project, "Report.docx")
+    (pods.project / "Report.docx").write_bytes(YOURS)
+    edited = b"PK\x03\x04 report edited live by B's agent"
+
+    async def write() -> None:
+        (pods.project / "Report.docx").write_bytes(edited)
+
+    author = {"name": "Draft B", "email": f"thread:{second.id}@surogate"}
+    await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=author, write=write)
+    listed = await history_of(api, project, "Report.docx")
+    # Your edit is a version of its own, under the agent's: History can restore the file to before the agent's edit.
+    assert len(listed) == len(before) + 2
+    assert [(v["by"], v["change"]) for v in listed[:2]] == [
+        ({"kind": "thread", "thread_id": str(second.id), "title": "Draft B"}, "changed"), ({"kind": "you"}, "changed"),
+    ]
+    assert (await opened(api, project, listed[0]["id"], "Report.docx")).content == edited
+    assert (await opened(api, project, listed[1]["id"], "Report.docx")).content == YOURS
+    *_, yours, the_threads = await rows_of(api, project)
+    assert [(r.kind, r.saga_state) for r in (yours, the_threads)] == [("pickup", "completed"), ("pickup", "completed")]
+
+
+async def test_an_editor_save_in_a_busy_project_is_refused_without_waiting(api, tmp_path):
+    from surogates.workstreams.undo import BUSY, Refused, land_editor_save
+
+    project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
+    written: list[bool] = []
+
+    async def write() -> None:
+        written.append(True)
+
+    you = {"name": str(api.user_id), "email": f"user:{api.user_id}@surogate"}
+    async with rows_module.project_lock(api.app.state.session_factory, project["id"]):
+        began = time.monotonic()
+        with pytest.raises(Refused) as refused:
+            await land_editor_save(api.app.state, await the_project(api, project), path="Report.docx", author=you, write=write)
+        waited = time.monotonic() - began
+    # The save job holds the document's row meanwhile, and tries again in a moment.
+    assert str(refused.value) == BUSY and waited < 2
+    assert written == []

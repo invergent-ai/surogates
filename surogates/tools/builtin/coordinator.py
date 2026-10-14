@@ -87,6 +87,8 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "patch",
     "list_files",
     "search_files",
+    "office_read",
+    "office_edit",
     # Code execution
     "terminal",
     "process",
