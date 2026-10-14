@@ -23,7 +23,10 @@
 #   release/publish.sh describe <version> <out>   # <out>/manifest.json, of the tarball whose sha256
 #                                                 # is DESKTOP_TARBALL_SHA256 (the build's own word for
 #                                                 # what it made) and whose root helper is the
-#                                                 # install.sh beside this script. All that reads the
+#                                                 # install.sh beside this script; for win32-x64, of the
+#                                                 # MSI the release signed, by DESKTOP_TARBALL_SHA256 and
+#                                                 # DESKTOP_TARBALL_SIZE, and of the layout it is made of,
+#                                                 # <out>/Surogate (describe_layout). All that reads the
 #                                                 # build's bytes is here, and here is no release key:
 #                                                 # with DESKTOP_RELEASE_KEY in its environment, set or
 #                                                 # empty, it refuses
@@ -134,10 +137,45 @@ keys_listed() {
 }
 NOT_LISTED="install.sh's list of release keys is not in the one form that an install reads (see the list in install.sh): a computer that installed this release would take no later one"
 
+# Windows's describe: the layout the MSI is made from, <out>/Surogate as scripts/package-win.sh lays it out and the
+# release signs it, read as linux-x64's tarball is, with nothing unpacked: its app's state schema and version, by the
+# install script's own reader, and its release keys, which the app checks its updates by, install.sh's key for key; and
+# the MSI by the two words of the job that signed it, DESKTOP_TARBALL_SHA256 and DESKTOP_TARBALL_SIZE, as no MSI is
+# opened here. What it writes is this job's own check of the release, as linux-x64's is.
+describe_layout() {
+  : "${DESKTOP_TARBALL_SHA256:?}" "${DESKTOP_TARBALL_SIZE:?}"
+  [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the signing job gives its MSI's"
+  [[ "$DESKTOP_TARBALL_SIZE" =~ ^[1-9][0-9]{0,14}$ ]] || fail "DESKTOP_TARBALL_SIZE is not a size in bytes, as the signing job gives its MSI's"
+  [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): no package is read with it'
+  keys_listed || fail "$NOT_LISTED"
+  local tree package keys schema reader
+  tree="$(realpath "$OUT")"
+  # Each a file of the layout's own: no link, and under no folder that is one.
+  package=Surogate/resources/app/package.json
+  [ -f "$OUT/$package" ] && [ "$(realpath "$OUT/$package")" = "$tree/$package" ] || fail "the layout's resources/app/package.json names no stateSchema"
+  reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e ".stateSchema | select(type == \"number\" and . == floor and (floor | . >= 1 and . < 1e15)) | floor"'
+  schema="$(bash -c "$reader" _ "$HERE/install.sh" "$OUT/$package" 2>/dev/null)" || fail "the layout's resources/app/package.json names no stateSchema"
+  reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e --arg version "$3" ".version == \$version" >/dev/null'
+  bash -c "$reader" _ "$HERE/install.sh" "$OUT/$package" "$VERSION" 2>/dev/null || fail "the layout's app is not version $VERSION, by its resources/app/package.json"
+  keys=Surogate/resources/release-keys
+  [ -f "$OUT/$keys" ] && [ "$(realpath "$OUT/$keys")" = "$tree/$keys" ] \
+    && bash -c '. <(sed "\$d" "$1") && settings && listed read "$2" && [ "${#read[@]}" -gt 0 ] && [ "${#read[@]}" -eq "${#RELEASE_KEYS[@]}" ] || exit 1
+      for at in "${!read[@]}"; do [ "${read[at]}" = "${RELEASE_KEYS[at]}" ] || exit 1; done' _ "$HERE/install.sh" "$OUT/$keys" \
+    || fail "the layout's resources/release-keys is not install.sh's list of release keys, key for key: its app would check its updates by others"
+  # A signature that is here is of another manifest than the one written now.
+  rm -f "$OUT/manifest.json.sig"
+  manifest "$VERSION" "$DESKTOP_TARBALL_SHA256" "$DESKTOP_TARBALL_SIZE" "$schema" >"$OUT/manifest.json"
+  echo "wrote $OUT/manifest.json"
+}
+
 case "$VERB" in
   describe)
+    if [ "$DESKTOP_TARGET" = win32-x64 ]; then
+      describe_layout
+      exit 0
+    fi
     # What the tarball holds, and where in it the app's package is, is linux-x64's alone so far.
-    [ "$DESKTOP_TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball, and not yet one for $DESKTOP_TARGET"
+    [ "$DESKTOP_TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball or a win32-x64 layout, and not yet a release for $DESKTOP_TARGET"
     : "${DESKTOP_TARBALL_SHA256:?}"
     [ -f "$OUT/$ARCHIVE" ] || fail "$OUT/$ARCHIVE is not there: run scripts/package.sh first"
     # The tarball is the one the build made, by the hash the build's job gave for it: an artifact

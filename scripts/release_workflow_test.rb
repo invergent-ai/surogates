@@ -288,7 +288,8 @@ class ReleaseWorkflowTest < Minitest::Test
     # them: the tag's own checkout, with no other ref named; the app built from it; the VM image's
     # manifest; the one packaging, with no fourth argument, which would name the install script
     # packed as the root helper and which only a test names; the tarball's hash and size, said
-    # right after it is made; and the tarball kept. Each action by its commit.
+    # right after it is made; the tarball kept; and last the agent disk package.sh leaves beside it,
+    # for the Windows app's build, which has no mke2fs. Each action by its commit.
     assert_equal [
       { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
       { "name" => "Set up Node", "uses" => "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020", "with" => { "node-version" => "22" } },
@@ -310,6 +311,10 @@ class ReleaseWorkflowTest < Minitest::Test
       {
         "name" => "Keep the tarball for the publish job", "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
         "with" => { "name" => "desktop-tarball", "path" => "out/desktop/surogate-desktop-*-linux-x64.tar.gz", "if-no-files-found" => "error" },
+      },
+      {
+        "name" => "Keep the agent disk for the other targets' builds", "uses" => "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "with" => { "name" => "desktop-agent-disk", "path" => "out/desktop/agent.img", "if-no-files-found" => "error" },
       },
     ], job.fetch("steps")
     # The tarball's hash and its size are the job's own outputs, which no other job of the run can
@@ -356,21 +361,29 @@ class ReleaseWorkflowTest < Minitest::Test
     steps = job.fetch("steps")
     runs = steps.map { |step| step["run"].to_s }
 
-    # Both: the build, for its two words of the tarball, and the job that read it, for its one.
-    assert_equal %w[desktop-build desktop-describe], Array(job.fetch("needs"))
+    # Each target's two: the job that made its payload, for its two words of it, and the job that read it, for its one.
+    assert_equal %w[desktop-build desktop-describe desktop-win-sign-msi desktop-win-describe], Array(job.fetch("needs"))
     assert_equal "desktop-release", job.fetch("environment")
     assert_equal({ "contents" => "read" }, job.fetch("permissions"))
-    assert_equal({ "group" => "desktop-release", "cancel-in-progress" => false }, job.fetch("concurrency"))
-    taken = steps.each_index.select { |index| steps[index]["uses"].to_s.start_with?("actions/download-artifact@") }
-    # The tarball alone is taken, to be sent: the manifest is written here, and no other job's file is read for it.
-    assert_equal [{ "name" => "desktop-tarball", "path" => "out/desktop" }], taken.map { |index| steps[index].fetch("with") }
-    sign = runs.index { |run| run.include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
-    send = runs.index { |run| run.include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
-    refute_nil sign
-    refute_nil send
-    # The tarball is here before its manifest is signed, and that is signed before both are sent.
-    assert_operator taken.max, :<, sign
-    assert_operator sign, :<, send
+    # A leg per target, one release of each at a time, and each to its end whatever another's does.
+    assert_equal({ "group" => "desktop-release-${{ matrix.target }}", "cancel-in-progress" => false }, job.fetch("concurrency"))
+    assert_equal false, job.fetch("strategy").fetch("fail-fast")
+    { "linux-x64" => ["desktop-tarball", "Publish the release"], "win32-x64" => ["desktop-win-msi", "Publish the Windows release"] }.each do |target, (payload, published)|
+      own = steps.each_index.select { |index| steps[index]["if"] == "matrix.target == '#{target}'" }
+      taken = own.select { |index| steps[index]["uses"].to_s.start_with?("actions/download-artifact@") }
+      # Its payload alone is taken, to be sent: the manifest is written here, and no other job's file is read for it.
+      assert_equal [{ "name" => payload, "path" => "out/desktop" }], taken.map { |index| steps[index].fetch("with") }, target
+      sign = own.find { |index| runs[index].include?('desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop') }
+      send = own.find { |index| runs[index].include?('desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop') }
+      refute_nil sign, target
+      refute_nil send, target
+      assert_equal published, steps[send].fetch("name"), target
+      # Its payload is here before its manifest is signed, and that is signed before both are sent.
+      assert_operator taken.max, :<, sign, target
+      assert_operator sign, :<, send, target
+    end
+    # Every step but the checkout is one target's.
+    assert_equal [0], steps.each_index.reject { |index| steps[index].key?("if") }
     # The job that holds the key reads no tarball: it writes no manifest of one, and unpacks none.
     runs.each do |run|
       refute_match(/\bdescribe\b/, run, "the job that holds the release key writes a tarball's manifest")
@@ -392,8 +405,9 @@ class ReleaseWorkflowTest < Minitest::Test
 
     # npm ci runs the dependency tree's install scripts, and a job's steps share its runner: the
     # build holds no secret, and the job that holds them installs and runs nothing of npm's.
-    %w[desktop-build desktop-describe desktop-publish].each { |name| refute jobs.fetch(name).key?("env"), "#{name}'s env reaches every step" }
-    %w[desktop-build desktop-describe].each do |name|
+    built = %w[desktop-build desktop-describe desktop-win-build desktop-win-sign desktop-win-msi desktop-win-sign-msi desktop-win-describe]
+    [*built, "desktop-publish"].each { |name| refute jobs.fetch(name).key?("env"), "#{name}'s env reaches every step" }
+    built.each do |name|
       jobs.fetch(name).fetch("steps").each do |step|
         refute step.to_s.include?("secrets."), "#{name}'s #{step["name"] || step["uses"]} reads a secret"
       end
@@ -402,27 +416,32 @@ class ReleaseWorkflowTest < Minitest::Test
       run = step["run"].to_s
       refute_match(/\b(npm|npx|node)\b/, run, "#{step["name"] || step["uses"]} runs npm or node")
       refute_includes step["uses"].to_s, "setup-node"
+      windows = step["if"] == "matrix.target == 'win32-x64'"
       if run.include?("publish.sh sign")
         # With the key, three words that are each a job's own output: the build's for its tarball,
-        # its hash and its size, and the describe job's for the app's state schema. The signing
-        # opens no tarball, and reads no artifact.
+        # its hash and its size, and the describe job's for the app's state schema; Windows's, the
+        # job's that signed its MSI and the job's that read its layout. The signing opens no
+        # tarball, and reads no artifact.
+        made, read = windows ? %w[desktop-win-sign-msi desktop-win-describe] : %w[desktop-build desktop-describe]
         assert_equal({
+          **(windows ? { "DESKTOP_TARGET" => "win32-x64" } : {}),
           "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}",
-          "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-build.outputs.sha256 }}",
-          "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-build.outputs.size }}",
-          "DESKTOP_STATE_SCHEMA" => "${{ needs.desktop-describe.outputs.schema }}",
+          "DESKTOP_TARBALL_SHA256" => "${{ needs.#{made}.outputs.sha256 }}",
+          "DESKTOP_TARBALL_SIZE" => "${{ needs.#{made}.outputs.size }}",
+          "DESKTOP_STATE_SCHEMA" => "${{ needs.#{read}.outputs.schema }}",
         }, step.fetch("env"))
       elsif run.include?("publish.sh send")
-        assert_equal r2, step.fetch("env")
+        assert_equal(windows ? { "DESKTOP_TARGET" => "win32-x64", **r2 } : r2, step.fetch("env"))
       else
         refute step.to_s.include?("secrets."), "#{step["name"] || step["uses"]} reads a secret"
       end
     end
     jobs.except("desktop-publish").each { |name, job| refute job.to_s.include?("DESKTOP_RELEASE_KEY"), "#{name} reads the release key" }
-    # The release key is in one step's environment, the signing's, and nowhere wider: not the
-    # job's, which the check above refuses, and not the workflow's.
+    # The release key is in each target's one step's environment, the signing's, and nowhere wider:
+    # not the job's, which the check above refuses, and not the workflow's.
     keyed = jobs.fetch("desktop-publish").fetch("steps").select { |step| step.to_s.include?("DESKTOP_RELEASE_KEY") }
-    assert_equal ['desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop'], keyed.map { |step| step["run"].to_s.strip }
+    assert_equal ['desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop'] * 2, keyed.map { |step| step["run"].to_s.strip }
+    assert_equal ["matrix.target == 'linux-x64'", "matrix.target == 'win32-x64'"], keyed.map { |step| step["if"] }
     refute @workflow.except("jobs").to_s.include?("secrets."), "the workflow gives a secret to every job"
   end
 
@@ -439,9 +458,9 @@ class ReleaseWorkflowTest < Minitest::Test
   def test_desktop_jobs_are_bounded
     jobs = @workflow.fetch("jobs")
 
-    assert jobs.fetch("desktop-build").key?("timeout-minutes")
-    assert jobs.fetch("desktop-describe").key?("timeout-minutes")
-    assert jobs.fetch("desktop-publish").key?("timeout-minutes")
+    %w[desktop-build desktop-describe desktop-win-build desktop-win-sign desktop-win-msi desktop-win-sign-msi desktop-win-describe desktop-publish].each do |name|
+      assert jobs.fetch(name).key?("timeout-minutes"), "#{name} is not bounded"
+    end
   end
 
   def test_the_cloud_release_does_not_wait_for_the_desktop
@@ -458,19 +477,148 @@ class ReleaseWorkflowTest < Minitest::Test
 
     # A step need not name npm to run it: package.sh does, and so may an action, a container's
     # image, or a runner that kept what an earlier job's npm left on it. The job that holds the
-    # keys is these four steps, each with these keys alone, on a runner of its own.
-    # Its two actions are named by their commits (v4.4.0 and v4.3.0): a tag can be moved to other
-    # code, and the job that holds the release key would run it.
-    assert_equal [
-      { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
+    # keys is the checkout and each target's three steps, each with these keys alone, on a runner
+    # of its own. Its two actions are named by their commits (v4.4.0 and v4.3.0): a tag can be
+    # moved to other code, and the job that holds the release key would run it.
+    leg = [
       { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
       { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
       { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
-    ], steps.map { |step| step.slice("uses", "run") }
+    ]
+    assert_equal [{ "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }, *leg, *leg], steps.map { |step| step.slice("uses", "run") }
     # The checkout names no ref, repository or path: publish.sh and install.sh are the tag's.
-    assert_equal [%w[uses], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
-    assert_equal %w[concurrency environment needs permissions runs-on steps timeout-minutes], job.keys.sort
+    assert_equal [%w[uses], *([%w[if name uses with], %w[env if name run], %w[env if name run]] * 2)], steps.map { |step| step.keys.sort }
+    assert_equal %w[concurrency environment needs permissions runs-on steps strategy timeout-minutes], job.keys.sort
     assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+  end
+
+  # The Windows release's jobs, by name.
+  WINDOWS_BUILDS = %w[desktop-win-build desktop-win-msi].freeze
+  WINDOWS_SIGNINGS = %w[desktop-win-sign desktop-win-sign-msi].freeze
+  ACCOUNT = "vars.ARTIFACT_SIGNING_ACCOUNT"
+
+  def test_the_windows_app_is_built_and_its_msi_made_on_windows_by_jobs_that_hold_nothing_to_sign_with
+    jobs = @workflow.fetch("jobs")
+    # npm's and Cargo's install scripts, and WiX, run in these: no secret, no Environment, no token to sign with, and a
+    # token that reads the repository alone, kept nowhere their steps can read it.
+    WINDOWS_BUILDS.each do |name|
+      job = jobs.fetch(name)
+      assert_equal "windows-2025", job.fetch("runs-on"), name
+      assert_equal({ "contents" => "read" }, job.fetch("permissions"), name)
+      refute job.key?("environment"), name
+      refute_match(/secrets|id-token|vars\./, job.to_s, name)
+      checkouts = job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+      assert_equal [{ "persist-credentials" => false }], checkouts.map { |step| step.fetch("with") }, name
+      assert_equal "git config --global core.autocrlf false", job.fetch("steps").first.fetch("run"), name
+    end
+    assert_equal ["desktop-build"], Array(jobs.fetch("desktop-win-build").fetch("needs"))
+    assert_equal ["desktop-win-sign"], Array(jobs.fetch("desktop-win-msi").fetch("needs"))
+    runs = jobs.fetch("desktop-win-build").fetch("steps").map { |step| step["run"].to_s.strip }
+    # The layout of the tag's app, its agent disk the one desktop-build made, and its VM manifest the release's image's.
+    assert_equal [
+      "npm ci", "npm run electron:install", "npm run build:win32",
+      'scripts/package-win.sh "${GITHUB_REF_NAME#v}" ../out/vm/manifest.json ../out/agent/agent.img ../out/win',
+    ], runs.select { |run| run.start_with?("npm", "scripts/") }
+    taken = jobs.fetch("desktop-win-build").fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-vm-manifest", "path" => "out/vm" }, { "name" => "desktop-agent-disk", "path" => "out/agent" }], taken.map { |step| step.fetch("with") }
+    # The MSI of the signed layout, by WiX as msi-win.ps1 pins it.
+    made = jobs.fetch("desktop-win-msi").fetch("steps").map { |step| step["run"].to_s }.join
+    assert_includes made, 'desktop/scripts/msi-win.ps1 $version out/win/Surogate out/win/msi "out/msi/surogate-desktop-$version-win32-x64.msi"'
+  end
+
+  def test_the_windows_signing_signs_with_artifact_signing_through_oidc_once_the_repository_names_its_account_and_runs_no_build_tool
+    jobs = @workflow.fetch("jobs")
+    WINDOWS_SIGNINGS.each do |name|
+      job = jobs.fetch(name)
+      steps = job.fetch("steps")
+      assert_equal "windows-2025", job.fetch("runs-on"), name
+      assert_equal "desktop-windows-signing", job.fetch("environment"), name
+      # OpenID Connect's token to sign with, and the repository's to read the tag: no stored secret at all.
+      assert_equal({ "contents" => "read", "id-token" => "write" }, job.fetch("permissions"), name)
+      refute_match(/secrets/i, job.to_s, name)
+      # No step installs or runs a build tool, whose packages' scripts would run beside the token.
+      steps.each do |step|
+        refute_match(/\b(npm|npx|node|cargo|dotnet|wix|msi-win)\b/i, step["run"].to_s, "#{name}: #{step["name"]}")
+        refute_match(/setup-node|setup-dotnet|rust/, step["uses"].to_s, "#{name}: #{step["name"]}")
+      end
+      # Artifact Signing's own action, after Azure's sign-in by the federated credential, only once the account is named.
+      azure = steps.select { |step| step["uses"].to_s.start_with?("azure/") }
+      assert_equal %w[azure/login azure/artifact-signing-action], azure.map { |step| step["uses"].split("@").first }, name
+      azure.each { |step| assert_equal "#{ACCOUNT} != ''", step.fetch("if"), "#{name}: #{step["name"]}" }
+      assert_equal({ "client-id" => "${{ vars.AZURE_CLIENT_ID }}", "tenant-id" => "${{ vars.AZURE_TENANT_ID }}", "allow-no-subscriptions" => true }, azure.first.fetch("with"), name)
+      signing = azure.last.fetch("with")
+      assert_equal({
+        "endpoint" => "${{ vars.ARTIFACT_SIGNING_ENDPOINT }}", "signing-account-name" => "${{ #{ACCOUNT} }}",
+        "certificate-profile-name" => "${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}", "file-digest" => "SHA256",
+        "timestamp-rfc3161" => "http://timestamp.acs.microsoft.com", "timestamp-digest" => "SHA256", "cache-dependencies" => false,
+      }, signing.except("files-catalog", *signing.keys.grep(/^exclude-/)), name)
+      # Signed in by Azure's command line alone, as Azure's sign-in left it.
+      assert_equal ["exclude-azure-cli-credential"], signing.select { |key, value| key.start_with?("exclude-") && value == false }.keys, name
+      # Else this run's own certificate, its root trusted for the job alone; every signature checked either way, by
+      # Windows's own trust, a trial's against its run's root alone.
+      trial = steps.find { |step| step["id"] == "trial" }
+      assert_equal "#{ACCOUNT} == ''", trial.fetch("if"), name
+      assert_match(%r{\$root = desktop/scripts/sign-win\.ps1 trial out/\w+\.txt}, trial.fetch("run"), name)
+      verify = steps.find { |step| step["run"].to_s.include?("sign-win.ps1 verify") }
+      refute verify.key?("if"), name
+      assert_equal({ "TRIAL_ROOT" => "${{ steps.trial.outputs.root }}" }, verify.fetch("env"), name)
+      assert_match(/sign-win\.ps1 verify out\/\w+ \$env:TRIAL_ROOT/, verify.fetch("run"), name)
+      untrust = steps.find { |step| step["run"].to_s.include?("sign-win.ps1 untrust") }
+      assert_equal "always() && steps.trial.outputs.root != ''", untrust.fetch("if"), name
+      [azure.last, trial].each { |step| assert_operator steps.index(step), :<, steps.index(verify), name }
+      catalog = steps.find { |step| step["run"].to_s.include?("sign-win.ps1 list") }.fetch("run")
+      assert_includes signing.fetch("files-catalog"), catalog.split.last.tr("/", "\\"), name
+    end
+    assert_equal ["desktop-win-build"], Array(jobs.fetch("desktop-win-sign").fetch("needs"))
+    assert_equal ["desktop-win-msi"], Array(jobs.fetch("desktop-win-sign-msi").fetch("needs"))
+    # Every variable the release reads, by its name: none is a secret, and none is given a value here.
+    assert_equal %w[ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_CERTIFICATE_PROFILE ARTIFACT_SIGNING_ENDPOINT AZURE_CLIENT_ID AZURE_TENANT_ID],
+                 File.read(".github/workflows/release.yml").gsub(/^\s*#.*$/, "").scan(/\bvars\.([A-Z_]+)/).flatten.uniq.sort
+  end
+
+  def test_no_msi_a_trial_signed_is_kept_or_published_and_windows_has_a_leg_of_the_publish_only_once_its_account_is_named
+    jobs = @workflow.fetch("jobs")
+    # The signed MSI is handed on only by the step that runs where Artifact Signing signed it.
+    kept = jobs.fetch("desktop-win-sign-msi").fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    assert_equal [["#{ACCOUNT} != ''", "desktop-win-msi"]], kept.map { |step| [step["if"], step.fetch("with").fetch("name")] }
+    # Its hash and size are the signing job's own words, of the MSI it checked.
+    assert_equal({ "sha256" => "${{ steps.msi.outputs.sha256 }}", "size" => "${{ steps.msi.outputs.size }}" }, jobs.fetch("desktop-win-sign-msi").fetch("outputs"))
+    steps = jobs.fetch("desktop-win-sign-msi").fetch("steps")
+    said = steps.index { |step| step["id"] == "msi" }
+    assert_operator steps.index { |step| step["run"].to_s.include?("sign-win.ps1 verify") }, :<, said
+    # The publish's Windows leg, only where the repository names the account: a variable of the repository's, as the
+    # matrix of a job is read before its Environment's are.
+    publish = jobs.fetch("desktop-publish")
+    assert_equal "${{ fromJSON(#{ACCOUNT} != '' && '[\"linux-x64\", \"win32-x64\"]' || '[\"linux-x64\"]') }}", publish.fetch("strategy").fetch("matrix").fetch("target")
+    assert_equal %w[fail-fast matrix], publish.fetch("strategy").keys.sort
+    windows = publish.fetch("steps").select { |step| step["if"] == "matrix.target == 'win32-x64'" }
+    assert_equal ["Take the MSI", "Sign the Windows release's manifest", "Publish the Windows release"], windows.map { |step| step["name"] }
+    assert_equal({ "name" => "desktop-win-msi", "path" => "out/desktop" }, windows.first.fetch("with"))
+    # And no other job takes it.
+    takers = jobs.select { |_, job| job.fetch("steps", []).any? { |step| step["uses"].to_s.start_with?("actions/download-artifact@") && step.dig("with", "name") == "desktop-win-msi" } }.keys
+    assert_equal ["desktop-publish"], takers
+  end
+
+  def test_the_windows_layout_is_described_with_no_secret_and_its_schema_must_be_the_linux_app_s
+    job = @workflow.fetch("jobs").fetch("desktop-win-describe")
+    assert_equal %w[desktop-describe desktop-win-sign-msi], Array(job.fetch("needs"))
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal %w[needs outputs permissions runs-on steps timeout-minutes], job.keys.sort
+    refute_match(/secrets|DESKTOP_RELEASE_KEY|desktop-release|vars\./i, job.to_s)
+    taken = job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-win-signed", "path" => "out/win" }], taken.map { |step| step.fetch("with") }
+    step = job.fetch("steps").find { |each| each["id"] == "manifest" }
+    assert_equal({
+      "DESKTOP_TARGET" => "win32-x64",
+      "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-win-sign-msi.outputs.sha256 }}",
+      "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-win-sign-msi.outputs.size }}",
+      "LINUX_STATE_SCHEMA" => "${{ needs.desktop-describe.outputs.schema }}",
+    }, step.fetch("env"))
+    run = step.fetch("run")
+    assert_includes run, 'desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/win'
+    assert_includes run, '[ "$schema" = "$LINUX_STATE_SCHEMA" ] || {'
+    assert_equal({ "schema" => "${{ steps.manifest.outputs.schema }}" }, job.fetch("outputs"))
   end
 
   def test_the_desktop_s_secrets_reach_no_other_job_however_they_are_named
@@ -737,6 +885,8 @@ class ReleaseWorkflowTest < Minitest::Test
         ["desktop-vm-image", "Publish the image"] => r2,
         ["desktop-publish", "Sign its manifest"] => %w[DESKTOP_RELEASE_KEY],
         ["desktop-publish", "Publish the release"] => r2,
+        ["desktop-publish", "Sign the Windows release's manifest"] => %w[DESKTOP_RELEASE_KEY],
+        ["desktop-publish", "Publish the Windows release"] => r2,
         # The rollout hands the cluster's three to the workflow it calls, each by its name.
         ["rollout", nil] => %w[NODE_HOSTS MASTER_HOST SSH_KEY],
       },
@@ -819,9 +969,14 @@ class ReleaseWorkflowTest < Minitest::Test
         "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
         "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 4c034b1990bdc512 c7898d9ce9c764f9 04f76870922f0e0c b7eef4a1402a3c44 84bb50f2712c5cd6 b71b78b7115f448e]],
         "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
-        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298]],
+        "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298 b76e38f5fbfb4713]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
-        "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
+        "desktop-win-build" => ["96928565e2086ccf", %w[fff07e32632a765a 2cbb6c778ee9cf1c d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 96ec46bd03bed893 2b49b547691c5152 3c1d40e7182b4f9e 0dbbd3120ac54992]],
+        "desktop-win-sign" => ["2b618be97503aa63", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 8e179919d8dba5d0 4b2cc6a57a6e9edd 5adab63de74848f4 bcd57ec8db9355ac 468e7454fa982e5b 8d39f0600fb0a5c9 14d765c09ebc5439]],
+        "desktop-win-msi" => ["b44a00043b41483c", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c f3dc7563940f8a17 bcbbe8f0cd626b61 481012fa557cec29]],
+        "desktop-win-sign-msi" => ["3190bf098e459921", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c a0051ea6afa86484 2393d71fab9f2fc9 4b2cc6a57a6e9edd 1225f25f1d9c0051 116258c4916084ba 152b7cf0831b0bf3 8d39f0600fb0a5c9 f87f5ad2f490be6b df67c9f01b7460be]],
+        "desktop-win-describe" => ["5b0cc765a071d830", %w[87fcdec176307d16 f3dc7563940f8a17 1260aac792094cce]],
+        "desktop-publish" => ["202d0b6d1fdbd490", %w[87fcdec176307d16 7a22101886b51081 5081483e2f3888b4 519770a309727824 fec3a1bad91b9256 2c403b76fba9b6d8 76406e972e44f564]],
         "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
         "rollout" => ["fb379c3e9907d0a6", %w[]],
       },
@@ -845,12 +1000,17 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "blacksmith-4vcpu-ubuntu-2404", @workflow.fetch("jobs").fetch("desktop-build").fetch("runs-on")
   end
 
-  def test_one_job_alone_runs_in_the_desktop_s_environment_in_every_workflow_file
-    # An Environment's secrets reach every job that names it, whatever letters it is named with.
+  def test_each_of_the_desktop_s_environments_is_its_own_jobs_alone_in_every_workflow_file
+    # An Environment's secrets reach every job that names it, whatever letters it is named with, and
+    # its variables too: the release key's, one job alone; the Windows signing's, the two that sign.
     named = workflows.flat_map do |file, workflow|
       workflow.fetch("jobs").select { |_, job| job.key?("environment") }.map { |name, job| [file, name, job["environment"]] }
     end
-    assert_equal [["release.yml", "desktop-publish", "desktop-release"]], named
+    assert_equal [
+      ["release.yml", "desktop-win-sign", "desktop-windows-signing"],
+      ["release.yml", "desktop-win-sign-msi", "desktop-windows-signing"],
+      ["release.yml", "desktop-publish", "desktop-release"],
+    ], named
   end
 
   def test_every_action_is_named_by_its_commit_in_every_workflow_file
@@ -882,8 +1042,8 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
     assert_equal %w[actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact], run.fetch("desktop-windows.yml").uniq.sort
     assert_equal %w[
-      actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action
-      docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release
+      actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv azure/artifact-signing-action
+      azure/login docker/build-push-action docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release
     ], run.fetch("release.yml").uniq.sort
     assert_empty run.fetch("update-images.yml"), "update-images.yml runs an action: name it here, by its commit in the file"
   end
@@ -911,10 +1071,16 @@ class ReleaseWorkflowTest < Minitest::Test
         refute_match(/upload-artifact|download-artifact|gh run download|actions\/artifacts/, step["run"].to_s, "#{name} keeps or takes an artifact by hand")
       end
     end
-    assert_equal [%w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-build desktop-tarball]], kept
+    assert_equal [
+      %w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-build desktop-tarball], %w[desktop-build desktop-agent-disk],
+      %w[desktop-win-build desktop-win-unsigned], %w[desktop-win-sign desktop-win-signed], %w[desktop-win-msi desktop-win-msi-unsigned],
+      %w[desktop-win-sign-msi desktop-win-msi],
+    ], kept
     assert_equal [
       %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-build desktop-vm-manifest], %w[desktop-describe desktop-tarball],
-      %w[desktop-publish desktop-tarball], %w[release dist],
+      %w[desktop-win-build desktop-vm-manifest], %w[desktop-win-build desktop-agent-disk], %w[desktop-win-sign desktop-win-unsigned],
+      %w[desktop-win-msi desktop-win-signed], %w[desktop-win-sign-msi desktop-win-msi-unsigned], %w[desktop-win-describe desktop-win-signed],
+      %w[desktop-publish desktop-tarball], %w[desktop-publish desktop-win-msi], %w[release dist],
     ], taken
   end
 end

@@ -340,7 +340,7 @@ describe("the desktop's release manifest", () => {
     const applied = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
     expect([applied.status === 0, applied.stdout]).toEqual([false, ""]);
     // Its tarball, the app's bundle, is not described here yet; and a target that is none is no release.
-    expect(publish("describe", "1.2.3", { DESKTOP_TARGET: "darwin-arm64", DESKTOP_TARBALL_SHA256: SHA })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads a linux-x64 tarball, and not yet one for darwin-arm64\n" });
+    expect(publish("describe", "1.2.3", { DESKTOP_TARGET: "darwin-arm64", DESKTOP_TARBALL_SHA256: SHA })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads a linux-x64 tarball or a win32-x64 layout, and not yet a release for darwin-arm64\n" });
     rmSync(join(out, "manifest.json"));
     rmSync(join(out, "manifest.json.sig"));
     for (const verb of ["describe", "sign", "send"]) {
@@ -362,8 +362,82 @@ describe("the desktop's release manifest", () => {
     for (const other of ["linux-x64", "darwin-arm64"] as const) expect(() => signedRelease("URL", manifest, signature, [keys.publicKey], "stable", other), other).toThrow("URL is not a release of Surogate Desktop for this computer");
     const applied = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && release_of "$2"`, "_", join(dir, "release", "install.sh"), join(out, "manifest.json")], { encoding: "utf8" });
     expect([applied.status === 0, applied.stdout]).toEqual([false, ""]);
-    // Its MSI is not described here yet.
-    expect(publish("describe", "1.2.3", { DESKTOP_TARGET: "win32-x64", DESKTOP_TARBALL_SHA256: SHA })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads a linux-x64 tarball, and not yet one for win32-x64\n" });
+  });
+
+  describe("Windows's release, described from the layout its MSI is made of", () => {
+    const manifest = () => join(out, "manifest.json");
+    const words = { DESKTOP_TARGET: "win32-x64", DESKTOP_TARBALL_SHA256: SHA, DESKTOP_TARBALL_SIZE: "201326592" };
+    // <out>/Surogate as scripts/package-win.sh lays it out, of the app's package and its release keys alone, as
+    // *change* leaves it.
+    const laidOut = (change: (top: string) => void = () => {}) => {
+      rmSync(join(out, "Surogate"), { recursive: true, force: true });
+      rmSync(manifest(), { force: true });
+      const top = join(out, "Surogate");
+      mkdirSync(join(top, "resources", "app"), { recursive: true });
+      writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version: "1.2.3", stateSchema: 2 }));
+      writeFileSync(join(top, "resources", "release-keys"), `RELEASE_KEYS=(\n  '${PUBLIC}'\n)\n`);
+      change(top);
+    };
+
+    it("names the MSI by the signing job's two words, and the app's state schema as the layout's package names it", () => {
+      laidOut();
+      expect(publish("describe", "1.2.3", words)).toMatchObject({ status: 0, stdout: `wrote ${out}/manifest.json\n`, stderr: "" });
+      expect(readFileSync(manifest(), "utf8")).toBe(`${JSON.stringify({
+        version: "1.2.3", channel: "stable", platform: "win32", arch: "x64", url: "releases/1.2.3/win32-x64/surogate-desktop-1.2.3-win32-x64.msi",
+        sha256: SHA, size: 201326592, stateSchema: 2,
+      })}\n`);
+      // That manifest is the one the signing writes of the same words, byte for byte.
+      const described = readFileSync(manifest());
+      expect(publish("sign", "1.2.3", { ...words, DESKTOP_RELEASE_KEY: PRIVATE, DESKTOP_STATE_SCHEMA: "2" }).status).toBe(0);
+      expect(readFileSync(manifest()).equals(described)).toBe(true);
+    });
+
+    it("writes no manifest of a layout whose app is another version, names no state schema, or reaches its package through a link", () => {
+      const refusals: Array<[string, (top: string) => void, string]> = [
+        ["another version", (top) => writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version: "1.2.4", stateSchema: 2 })), "the layout's app is not version 1.2.3, by its resources/app/package.json"],
+        ["no schema", (top) => writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version: "1.2.3" })), "the layout's resources/app/package.json names no stateSchema"],
+        ["a schema of 0", (top) => writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version: "1.2.3", stateSchema: 0 })), "the layout's resources/app/package.json names no stateSchema"],
+        ["a schema as a string", (top) => writeFileSync(join(top, "resources", "app", "package.json"), JSON.stringify({ version: "1.2.3", stateSchema: "2" })), "the layout's resources/app/package.json names no stateSchema"],
+        ["no package", (top) => rmSync(join(top, "resources", "app", "package.json")), "the layout's resources/app/package.json names no stateSchema"],
+        ["a package that is a link", (top) => {
+          renameSync(join(top, "resources", "app", "package.json"), join(dir, "elsewhere.json"));
+          symlinkSync(join(dir, "elsewhere.json"), join(top, "resources", "app", "package.json"));
+        }, "the layout's resources/app/package.json names no stateSchema"],
+        ["an app folder that is a link", (top) => {
+          renameSync(join(top, "resources", "app"), join(dir, "app-elsewhere"));
+          symlinkSync(join(dir, "app-elsewhere"), join(top, "resources", "app"));
+        }, "the layout's resources/app/package.json names no stateSchema"],
+      ];
+      for (const [name, change, said] of refusals) {
+        laidOut(change);
+        expect([name, publish("describe", "1.2.3", words)]).toMatchObject([name, { status: 1, stdout: "", stderr: `publish.sh: ${said}\n` }]);
+        expect([name, existsSync(manifest())]).toEqual([name, false]);
+        rmSync(join(dir, "elsewhere.json"), { force: true });
+        rmSync(join(dir, "app-elsewhere"), { recursive: true, force: true });
+      }
+    });
+
+    it("writes no manifest of a layout whose release keys are not install.sh's, key for key", () => {
+      const other = pem(generateKeyPairSync("ed25519").publicKey);
+      const said = "the layout's resources/release-keys is not install.sh's list of release keys, key for key: its app would check its updates by others";
+      for (const [name, keys] of [["another key", `RELEASE_KEYS=(\n  '${other}'\n)\n`], ["a key more", `RELEASE_KEYS=(\n  '${PUBLIC}'\n  '${other}'\n)\n`], ["no key", "RELEASE_KEYS=(\n)\n"], ["none", null]] as const) {
+        laidOut((top) => (keys === null ? rmSync(join(top, "resources", "release-keys")) : writeFileSync(join(top, "resources", "release-keys"), keys)));
+        expect([name, publish("describe", "1.2.3", words)]).toMatchObject([name, { status: 1, stdout: "", stderr: `publish.sh: ${said}\n` }]);
+        expect([name, existsSync(manifest())]).toEqual([name, false]);
+      }
+    });
+
+    it("takes the signing job's words only as that job gives them, and runs nowhere a release key is", () => {
+      laidOut();
+      expect(publish("describe", "1.2.3", { ...words, DESKTOP_TARBALL_SHA256: "x".repeat(64) })).toMatchObject({ status: 1, stderr: "publish.sh: DESKTOP_TARBALL_SHA256 is not a sha256, as the signing job gives its MSI's\n" });
+      for (const size of ["0", "-1", "1e3", "1".repeat(16)]) {
+        expect(publish("describe", "1.2.3", { ...words, DESKTOP_TARBALL_SIZE: size }), size).toMatchObject({ status: 1, stderr: "publish.sh: DESKTOP_TARBALL_SIZE is not a size in bytes, as the signing job gives its MSI's\n" });
+      }
+      const { DESKTOP_TARBALL_SIZE: _size, ...unsized } = words;
+      expect(publish("describe", "1.2.3", unsized).status).not.toBe(0);
+      expect(publish("describe", "1.2.3", { ...words, DESKTOP_RELEASE_KEY: "" })).toMatchObject({ status: 1, stdout: "", stderr: "publish.sh: describe reads the build's tarball, and runs only where no release key is: DESKTOP_RELEASE_KEY is in its environment\n" });
+      expect(existsSync(manifest())).toBe(false);
+    });
   });
 
   it("sends no manifest of macOS's but one its app takes for the release: each field by the root helper's own rules, for macOS's platform, arch and tarball", () => {
