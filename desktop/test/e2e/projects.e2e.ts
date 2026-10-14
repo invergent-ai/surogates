@@ -248,11 +248,11 @@ describe("the sidebar's projects", () => {
 });
 
 describe("the sidebar's pages", () => {
-  it("open the web client's list of chats, a page of its own, and the user menu's Devices its Settings there", async () => {
+  it("open the web client's inbox, a page of its own, and the user menu's Devices its Settings there", async () => {
     const { page, client } = await signedIn();
     await opened(page, client, REPORT);
-    await page.click('[data-path="/chats"]');
-    await expect.poll(() => client.url()).toBe(`${origin}/chats`);
+    await page.click('[data-path="/inbox"]');
+    await expect.poll(() => client.url()).toBe(`${origin}/inbox`);
     await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
     await page.click("#user");
     await page.click('#user-menu [data-action="devices"]');

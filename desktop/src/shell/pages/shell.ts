@@ -7,6 +7,13 @@ import { ago, asShown, setAsideLines } from "../text.js";
 import { aged, byId, fillIcons, freshen, icon, keepFocus, markTheme, projectMark, showText } from "./ui.js";
 
 // A project, as Section 12's ProjectSummary has it.
+interface RecentChatRow {
+  id: string;
+  title: string | null; // null until the agent names it
+  updatedAt: string;
+  computer: string | null; // the computer whose folder it works on, by name; null for a chat in the cloud
+}
+
 interface ProjectRow {
   id: string;
   name: string;
@@ -52,6 +59,9 @@ interface State {
   agent: { name: string; desktopSessions: boolean } | null; // desktopSessions: its web client lists this computer in Settings → Devices
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // as the page listed them
+  // The agent's chats in no project, newest first, whether more come, and the one the centre shows; null where the
+  // agent's page serves none.
+  recents: { chats: RecentChatRow[]; more: boolean; shown: string | null } | null;
   failure: string | null; // why what the user last asked for, a project or a thread's resolve, did not happen
   overview: {
     threads: ThreadRow[]; // last active first
@@ -100,6 +110,8 @@ interface Shell {
   go(path: string): Promise<void>;
   projects(): Promise<void>;
   project(id: string): Promise<void>;
+  chat(id: string): Promise<void>;
+  moreChats(): Promise<void>;
   thread(id: string): Promise<void>;
   read(id: string | null): Promise<void>;
   resolve(id: string): Promise<void>;
@@ -169,6 +181,39 @@ function group(project: ProjectRow, selected: boolean): HTMLElement {
   return wrapper;
 }
 
+// A chat of Recents: its title, and a mark where it works on a folder of a computer, named in its tooltip.
+function recent(chat: RecentChatRow, selected: boolean): HTMLElement {
+  const open = button(selected ? "item recent selected" : "item recent", "", () => void shell.chat(chat.id));
+  open.dataset.chat = chat.id;
+  open.dataset.focus = `chat:${chat.id}`;
+  const title = chat.title ?? "New chat";
+  open.append(element("span", "name", title));
+  if (chat.computer !== null) {
+    const mark = icon("laptop");
+    mark.classList.add("on-computer");
+    open.append(mark);
+    open.title = `${title}, on ${chat.computer}`;
+  }
+  if (selected) open.setAttribute("aria-current", "page");
+  return open;
+}
+
+// Recents drawn, and the next page asked for once, where the lists are scrolled to their end.
+let askedMore = false;
+function renderRecents(state: State): void {
+  const recents = state.recents;
+  byId("recents").replaceChildren(...(recents?.chats ?? []).map((chat) => recent(chat, chat.id === recents?.shown)));
+  askedMore = false;
+  moreIfAtEnd();
+}
+
+function moreIfAtEnd(): void {
+  const lists = byId("lists");
+  if (askedMore || !last?.recents?.more || lists.scrollTop + lists.clientHeight < lists.scrollHeight - 80) return;
+  askedMore = true;
+  void shell.moreChats();
+}
+
 function card(project: ProjectRow): HTMLElement {
   const made = button("card", "", () => void shell.project(project.id));
   made.dataset.project = project.id;
@@ -180,12 +225,16 @@ function card(project: ProjectRow): HTMLElement {
 // The sidebar's projects that match its search; its heading only over some.
 function filterSidebar(): void {
   const query = byId<HTMLInputElement>("search").value.trim().toLowerCase();
-  let shown = 0;
-  for (const found of document.querySelectorAll<HTMLElement>("#projects .group")) {
-    found.hidden = query !== "" && !(found.querySelector(".name")?.textContent ?? "").toLowerCase().includes(query);
-    if (!found.hidden) shown++;
-  }
-  byId("projects-head").hidden = shown === 0;
+  const filtered = (selector: string): number => {
+    let shown = 0;
+    for (const found of document.querySelectorAll<HTMLElement>(selector)) {
+      found.hidden = query !== "" && !(found.querySelector(".name")?.textContent ?? "").toLowerCase().includes(query);
+      if (!found.hidden) shown++;
+    }
+    return shown;
+  };
+  byId("projects-head").hidden = filtered("#projects .group") === 0;
+  byId("recents-head").hidden = filtered("#recents .recent") === 0;
 }
 
 // Last active first: the sidebar's order, and the Projects page's Activity.
@@ -562,6 +611,7 @@ function draw(state: State): void {
   byId<HTMLButtonElement>("project-settings").disabled = !open;
   byId("overview-dot").hidden = !state.projects.some((project) => project.id === open?.id && project.waiting > 0);
   byId("projects").replaceChildren(...state.projects.map((project) => group(project, project.id === open?.id)));
+  renderRecents(state);
   filterSidebar();
   byId("failure").hidden = state.failure === null;
   byId("failure").textContent = state.failure ?? "";
@@ -679,6 +729,7 @@ byId("sandbox-retry").addEventListener("click", () => void shell.sandbox("retry"
 byId("sandbox-check").addEventListener("click", () => void shell.sandbox("check"));
 byId("update-button").addEventListener("click", () => void shell.update());
 byId("search").addEventListener("input", filterSidebar);
+byId("lists").addEventListener("scroll", moreIfAtEnd, { passive: true });
 byId("project-search").addEventListener("input", renderCards);
 byId("sort").addEventListener("change", renderCards);
 byId("new").addEventListener("click", () => void shell.go("/chat"));

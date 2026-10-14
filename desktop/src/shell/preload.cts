@@ -64,6 +64,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   // What a page of an agent older than this app does not serve yet, in words.
   const NOT_YET: Partial<Record<Extract<ToPage, { type: "call" }>["method"], string>> = {
     history: "This agent cannot show a file's History yet",
+    chats: "This agent cannot list its chats in the sidebar yet",
     openVersion: "This agent cannot open a version yet",
     restore: "This agent cannot restore a version yet",
     undo: "This agent cannot undo a change yet",

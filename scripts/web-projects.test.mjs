@@ -913,3 +913,41 @@ test("the files a project deleted are asked at their route, and whether there ar
     await assert.rejects(odd.routes.deleted("p-1"), { message: "Failed to fetch the project's deleted files" });
   }
 });
+
+test("the chats in no project are a page of the sessions route, newest first, with whether more come after it", async () => {
+  const session = (id, title, updated, config = {}) => ({
+    id, title, status: "active", channel: "web", agent_id: "a", parent_id: null, config, created_at: updated, updated_at: updated,
+  });
+  const sessions = [
+    session("c-1", "Notes on the trip", "2026-10-07T11:00:00Z", { execution: { kind: "device", device_id: "d-1", device_name: "Laptop" } }),
+    session("c-2", "", "2026-10-07T10:00:00.123456+00:00"),
+    // A time with no zone is the server's UTC, never read as this computer's local time.
+    session("c-3", null, "2026-10-07T09:00:00"),
+  ];
+  const { asked, routes } = routesOver(() => Response.json({ sessions, total: 3 }));
+  assert.deepEqual(await routes.chats({ offset: 0, limit: 2 }), {
+    chats: [
+      { id: "c-1", title: "Notes on the trip", updatedAt: "2026-10-07T11:00:00.000Z", computer: "Laptop" },
+      { id: "c-2", title: null, updatedAt: "2026-10-07T10:00:00.123Z", computer: null },
+    ],
+    more: true,
+  });
+  // One more than asked, from where the page starts: the one past it says whether more come.
+  assert.deepEqual(asked, [["GET", "/api/v1/sessions?limit=3&offset=0", undefined]]);
+  const last = routesOver(() => Response.json({ sessions: sessions.slice(2), total: 3 }));
+  assert.deepEqual(await last.routes.chats({ offset: 2, limit: 2 }), {
+    chats: [{ id: "c-3", title: null, updatedAt: "2026-10-07T09:00:00.000Z", computer: null }],
+    more: false,
+  });
+  assert.deepEqual(last.asked, [["GET", "/api/v1/sessions?limit=3&offset=2", undefined]]);
+  // A chat under another, as a page with descendants would list one, is no chat of its own.
+  const under = routesOver(() => Response.json({ sessions: [sessions[0], { ...sessions[1], parent_id: "c-1" }], total: 1 }));
+  assert.deepEqual((await under.routes.chats({ offset: 0, limit: 10 })).chats.map((chat) => chat.id), ["c-1"]);
+  // What is not the route's shape is its own failure, and a refusal says the agent's words.
+  for (const body of [[], { sessions: "none" }, { sessions: [{ ...sessions[0], updated_at: "yesterday" }] }, { sessions: [{ ...sessions[0], id: 7 }] }, null]) {
+    const odd = routesOver(() => Response.json(body));
+    await assert.rejects(odd.routes.chats({ offset: 0, limit: 10 }), { message: "Failed to fetch the chats" });
+  }
+  const refused = routesOver(() => Response.json({ detail: "Not authenticated" }, { status: 401 }));
+  await assert.rejects(refused.routes.chats({ offset: 0, limit: 10 }), { message: "Not authenticated" });
+});

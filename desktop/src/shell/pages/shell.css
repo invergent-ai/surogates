@@ -361,11 +361,16 @@ body.main.first {
   font-size: 13px;
 }
 
-/* Its top padding keeps the first row's focus ring inside what scrolls. */
-.projects {
+/* The projects and the chats in no project scroll as one. */
+.lists {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* Their top padding keeps the first row's focus ring inside what scrolls. */
+.projects,
+.recents {
   padding: 3px 8px 8px;
 }
 
@@ -376,10 +381,21 @@ body.main.first {
 }
 
 .projects .item .name,
+.recents .item .name,
 .card .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.recents .item .name {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A chat of Recents that works on a folder of a computer. */
+.recents .item .on-computer {
+  color: var(--dim);
 }
 
 /* A project's mark: its icon in its hue. */

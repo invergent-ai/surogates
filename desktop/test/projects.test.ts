@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FIXTURE_IDS, projectFixtures } from "../../web/src/lib/projects.js";
 import { ANSWER_TIMEOUT_MS, HISTORY_ANSWER_TIMEOUT_MS, LONG_ANSWER_TIMEOUT_MS, PageProjects, TimedOut, type ToPage } from "../src/shell/projects.js";
 
-const { projects, threads, history, deleted } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
+const { projects, threads, history, deleted, chats } = projectFixtures(Date.parse("2026-10-06T12:00:00Z"));
 const REPORT = FIXTURE_IDS.report;
 const REVENUE = "threads/revenue/revenue.xlsx";
 
@@ -31,6 +31,28 @@ describe("the projects the page serves", () => {
     expect(last()).toEqual({ type: "call", id: 2, method: "threads", args: [REPORT], deadline: expect.any(Number) });
     source.answered(2, { ok: threads[REPORT] });
     expect(await rows).toEqual(threads[REPORT]);
+  });
+
+  it("ask for a page of the chats in no project, and take only what the page asked for, each chat once", async () => {
+    const { source, last } = page();
+    const asked = source.chats({ offset: 30, limit: 3 });
+    expect(last()).toEqual({ type: "call", id: 1, method: "chats", args: [{ offset: 30, limit: 3 }], deadline: expect.any(Number) });
+    source.answered(1, { ok: { chats: chats.map((chat) => ({ ...chat, secret: "x" })), more: true, cursor: "x" } });
+    expect(await asked).toEqual({ chats, more: true });
+    // More than asked for, a chat twice, a time with no zone, a title or a computer that is no text, or no word on more: refused.
+    const twice = [chats[0]!, chats[0]!];
+    for (const [at, answer] of [
+      [2, { chats, more: false }], [3, { chats: twice, more: false }], [3, { chats: [{ ...chats[0], updatedAt: "2026-10-06T12:00:00" }], more: false }],
+      [3, { chats: [{ ...chats[0], title: 7 }], more: false }], [3, { chats: [{ ...chats[0], computer: "" }], more: false }], [3, { chats }],
+    ] as const) {
+      const wrong = source.chats({ offset: 0, limit: at });
+      source.answered((last() as { id: number }).id, { ok: answer });
+      await expect(wrong).rejects.toThrow("The agent's page answered chats with something Surogate cannot use");
+    }
+    // An older agent's page serves none, and says so.
+    const older = source.chats({ offset: 0, limit: 30 });
+    source.answered((last() as { id: number }).id, { error: "This agent cannot list its chats in the sidebar yet" });
+    await expect(older).rejects.toThrow("This agent cannot list its chats in the sidebar yet");
   });
 
   it("take a thread that waits on you over its files", async () => {

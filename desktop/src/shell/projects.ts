@@ -4,8 +4,8 @@
 // types and copied field by field before the shell uses it.
 
 import type {
-  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectFolder, ProjectsSource, ProjectSummary, Routine,
-  SetAside, SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
+  ChangedBy, DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, ProjectFolder, ProjectsSource, ProjectSummary, RecentChat,
+  RecentChats, Routine, SetAside, SetAsideWhole, ThreadPlace, ThreadRow, UndoResult,
 } from "../../../web/src/lib/projects-contract.js";
 
 // How long the page has to answer a call.
@@ -20,7 +20,7 @@ export const LONG_ANSWER_TIMEOUT_MS = 120_000;
 
 const METHODS = [
   "list", "get", "create", "update", "archive", "useComputer", "threads", "resolve", "reopen", "library", "routines", "history",
-  "openVersion", "deleted", "restore", "undo",
+  "openVersion", "deleted", "restore", "undo", "chats",
 ] as const;
 type Method = (typeof METHODS)[number];
 const LONG: readonly Method[] = ["openVersion", "restore", "undo"];
@@ -205,6 +205,21 @@ function theThread(row: ThreadRow, threadId: unknown): ThreadRow {
   return row;
 }
 
+// A chat in no project, as the sidebar's Recents lists it: a title the agent has not given yet is none.
+function chatOf(value: unknown): RecentChat {
+  const { id, title, updatedAt, computer } = fields(value);
+  need(named(id) && (title === null || text(title, 500)) && time(updatedAt) && (computer === null || named(computer)));
+  return { id, title, updatedAt, computer } as RecentChat;
+}
+
+// A page of them: no more than the page asked for, and each chat once.
+function chatsOf(value: unknown, [page]: unknown[]): RecentChats {
+  const { chats, more } = fields(value);
+  const rows = listOf(chats, Math.min(count(fields(page).limit) ? (fields(page).limit as number) : 0, 200), chatOf);
+  need(typeof more === "boolean" && new Set(rows.map((row) => row.id)).size === rows.length);
+  return { chats: rows, more: more as boolean };
+}
+
 // Each answer checked against what its call, with these *args*, returns.
 const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   list: (value) => listOf(value, 500, summaryOf),
@@ -230,6 +245,7 @@ const CHECKS: Record<Method, (value: unknown, args: unknown[]) => unknown> = {
   deleted: deletedOf,
   restore: resultOf,
   undo: resultOf,
+  chats: chatsOf,
 };
 
 interface Call {
@@ -269,6 +285,7 @@ export class PageProjects implements ProjectsSource {
   deleted = (projectId: string) => this.call<DeletedFiles>("deleted", projectId);
   restore = (projectId: string, input: { versionId: string; path: string }) => this.call<UndoResult>("restore", projectId, input);
   undo = (projectId: string, target: { landingId: string } | { threadId: string }) => this.call<UndoResult>("undo", projectId, target);
+  chats = (page: { offset: number; limit: number }) => this.call<RecentChats>("chats", page);
 
   subscribe(projectId: string, onChange: (threadId: string | null) => void): () => void {
     const id = this.next++;

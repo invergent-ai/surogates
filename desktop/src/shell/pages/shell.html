@@ -45,18 +45,21 @@
         <button class="icon device" id="device" type="button" data-icon="laptop"></button>
       </div>
       <label class="search" data-icon="search">
-        <input id="search" type="search" placeholder="Search" aria-label="Search projects and threads" autocomplete="off" spellcheck="false" />
+        <input id="search" type="search" placeholder="Search" aria-label="Search projects and chats" autocomplete="off" spellcheck="false" />
       </label>
       <ul class="nav">
         <li><button class="item" type="button" id="new" data-icon="square-pen">New</button></li>
         <li><button class="item" type="button" id="open-projects" data-icon="layout-grid">Projects</button></li>
-        <li><button class="item" type="button" data-path="/chats" data-icon="messages-square">Chats</button></li>
         <li><button class="item" type="button" data-path="/inbox" data-icon="inbox">Inbox</button></li>
         <li><button class="item" type="button" data-path="/missions" data-icon="target">Missions</button></li>
         <li><button class="item" type="button" data-path="/skills" data-icon="sparkles">Skills</button></li>
       </ul>
-      <div class="group-head" id="projects-head"><span>Projects</span></div>
-      <div class="projects" id="projects" data-focus-list="projects"></div>
+      <div class="lists" id="lists">
+        <div class="group-head" id="projects-head"><span>Projects</span></div>
+        <div class="projects" id="projects" data-focus-list="projects"></div>
+        <div class="group-head" id="recents-head" hidden><span>Recents</span></div>
+        <div class="recents" id="recents" data-focus-list="recents"></div>
+      </div>
       <div class="notices" id="notices">
         <p class="warn" id="failure" role="alert" hidden></p>
         <p class="warn" id="notice" hidden></p>
