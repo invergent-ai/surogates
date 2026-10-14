@@ -19,7 +19,9 @@ const SHA256 = /^[0-9a-f]{64}$/;
 // vhdfooter.go:10-17.
 const COOKIE = "conectix";
 const FEATURES = 0x2; // featureMask: the reserved bit, which the specification says is always set
-const FILE_FORMAT_VERSION = 0x0001_0000;
+// FileFormatVersion 1.0, its major and minor version each a 16-bit half (hcsshim's 0x00010000).
+const FILE_FORMAT_MAJOR = 1;
+const FILE_FORMAT_MINOR = 0;
 const FIXED_DATA_OFFSET = -1n; // a fixed disk has no dynamic disk header
 const CREATOR_VERSION = 0x000a_0000;
 const DISK_TYPE_FIXED = 2;
@@ -34,7 +36,8 @@ export function vhdFooter(size: number, sha256: string): Buffer {
   const footer = Buffer.alloc(FOOTER_SIZE);
   footer.write(COOKIE, 0, "latin1"); // Cookie
   footer.writeUInt32BE(FEATURES, 8); // Features
-  footer.writeUInt32BE(FILE_FORMAT_VERSION, 12); // FileFormatVersion
+  footer.writeUInt16BE(FILE_FORMAT_MAJOR, 12); // FileFormatVersion, its major half
+  footer.writeUInt16BE(FILE_FORMAT_MINOR, 14); // and its minor half
   footer.writeBigInt64BE(FIXED_DATA_OFFSET, 16); // DataOffset
   // TimeStamp (24) and CreatorApplication (28) stay zero.
   footer.writeUInt32BE(CREATOR_VERSION, 32); // CreatorVersion

@@ -8,7 +8,7 @@
 #                                   and the app's fuses (no inspector); Electron's DLLs and files beside it
 #     resources\app\                the app as a folder, never an asar: dist\ (no testing\), with ntat.node in
 #                                   dist\native\; assets\, dictionaries\, package.json at <version>, the production
-#                                   node_modules, and bin\: the app's node.exe (scripts/node.sh, as nodejs.org signed
+#                                   node_modules, and bin\: the app's node.exe (scripts/node.sh win32-x64, as nodejs.org signed
 #                                   it) and rg.exe, which the file host runs and the MSI's firewall rules block
 #     resources\vm\                 agent.vhd, the agent disk given its VHD footer, where the service lets a VM read it
 #                                   and the app names it (src/vm/backends.ts), and the guest image's manifest
@@ -51,7 +51,7 @@ cd "$(dirname "$0")/.."
 node -e 'const { arch } = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(arch === "amd64" ? 0 : 1)' "$VM_MANIFEST" 2>/dev/null \
   || { echo "package-win.sh: $VM_MANIFEST is not the manifest of an amd64 guest image, the one the Windows app boots" >&2; exit 1; }
 # The app's own node, by its pin, in place of the one a development build copies from the PATH.
-scripts/node.sh
+scripts/node.sh win32-x64
 BUILT=native/windows/target/release
 for part in dist/native/ntat.node bin/node.exe bin/rg.exe "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$BUILT/surogate-service.exe" "$BUILT/surogate_msi.dll"; do
   [ -f "$part" ] || { echo "package-win.sh: $part is missing: run npm run build:win32 first" >&2; exit 1; }

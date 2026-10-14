@@ -4,15 +4,13 @@
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts lifetime
 // PASS or FAIL: nothing of the VM is left after surogate-vm.exe is killed.
 
-import { execFileSync } from "node:child_process";
-
 import { expect, it } from "vitest";
 
-import { lab, ready, record, ROOTS, scratch } from "./harness.js";
+import { lab, ready, record, ROOTS, scratch, windowsPowerShell } from "./harness.js";
 
 const running = (name: string) => {
   try {
-    return execFileSync("powershell.exe", ["-NoProfile", "-Command", `@(Get-Process -Name '${name}' -ErrorAction SilentlyContinue).Count`], { encoding: "utf8" }).trim();
+    return windowsPowerShell(`@(Get-Process -Name '${name}' -ErrorAction SilentlyContinue).Count`);
   } catch {
     return "?";
   }

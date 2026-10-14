@@ -1,6 +1,13 @@
 // The Host Compute Service for one caller (hcs::api): the VM made from the service's document, the caller's files
 // granted to it as the caller, its console read from before it is made, its exit told, and every grant taken back as
 // the caller once the VM has gone, so no entry for a VM that is no more stays in a file's ACL.
+//
+// Nothing else is granted. Not the installed app's agent disk: HcsGrantVmAccess gives the VM's own account full control
+// of a file (FA, measured on a Windows runner), which no VM is given of the one file every user's VM boots; each VM reads
+// it as its folder lets every user of the computer, as WSL's own VM reads the disks WSL installs (WSL,
+// src/windows/service/exe/WslCoreVm.cpp, "VMWP may already have access via inherited ACLs"). And nothing to the group of
+// all VMs (S-1-5-83-0): on a Windows 11 PC with Virtual Machine Platform alone, without Hyper-V's own management, that
+// SID maps to no account (icacls: "No mapping between account names and security IDs was done").
 
 use std::sync::Arc;
 use std::thread;

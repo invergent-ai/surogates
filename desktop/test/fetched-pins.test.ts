@@ -29,9 +29,9 @@ afterEach(() => {
 /**
  * scripts/*script* run in a package of the test's own on a computer that uname calls *system* and *machine*, with
  * *failing* the fake that exits 1: its status, what it said, and each faked command it started, one a line, its
- * standard input after a "<" where it read one, and its temporary folder written $tmp.
+ * standard input after a "<" where it read one, and its temporary folder written $tmp. *args* are the script's own.
  */
-function run(script: string, [system, machine]: readonly [string, string], failing?: string): { status: number | null; stderr: string; ran: string[] } {
+function run(script: string, [system, machine]: readonly [string, string], failing?: string, args: string[] = []): { status: number | null; stderr: string; ran: string[] } {
   const at = mkdtempSync(join(dir, "run-"));
   const fakes = join(at, "fakes");
   const log = join(at, "ran");
@@ -46,7 +46,7 @@ function run(script: string, [system, machine]: readonly [string, string], faili
   for (const name of ["uname", ...FAKED]) chmodSync(join(fakes, name), 0o755);
   const temp = join(at, "temp");
   mkdirSync(temp);
-  const done = spawnSync("bash", [join(at, "package", "scripts", script)], {
+  const done = spawnSync("bash", [join(at, "package", "scripts", script), ...args], {
     encoding: "utf8", env: { PATH: `${fakes}:/usr/bin:/bin`, HOME: at, TMPDIR: temp },
   });
   const ran = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((line) => line.replace(new RegExp(`${temp}/tmp\\.[A-Za-z0-9]+`, "g"), "$tmp")) : [];
@@ -66,8 +66,8 @@ describe("scripts/node.sh", () => {
     });
   });
 
-  it("fetches on Windows on x64 the win-x64 node.exe by its pin, and leaves it as nodejs.org signed it", () => {
-    expect(run("node.sh", WINDOWS)).toEqual({
+  it("fetches for win32-x64, on Windows on x64, the win-x64 node.exe by its pin, and leaves it as nodejs.org signed it", () => {
+    expect(run("node.sh", WINDOWS, undefined, ["win32-x64"])).toEqual({
       status: 0, stderr: "", ran: [
         "curl -q -fsSL --proto =https -o $tmp/node.zip https://nodejs.org/dist/v22.23.3/node-v22.23.3-win-x64.zip",
         "sha256sum --check --quiet < 2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71  $tmp/node.zip",
@@ -75,21 +75,34 @@ describe("scripts/node.sh", () => {
         "mv $tmp/node-v22.23.3-win-x64/node.exe bin/node.exe",
       ],
     });
-    expect(run("node.sh", ["MSYS_NT-10.0-26100", "x86_64"]).ran[0]).toMatch(/node-v22\.23\.3-win-x64\.zip$/);
+    expect(run("node.sh", ["MSYS_NT-10.0-26100", "x86_64"], undefined, ["win32-x64"]).ran[0]).toMatch(/node-v22\.23\.3-win-x64\.zip$/);
   });
 
   it("puts no node in place whose archive is not the pinned one", () => {
-    for (const computer of [LINUX, WINDOWS]) {
-      const { status, ran } = run("node.sh", computer, "sha256sum");
+    for (const [computer, args] of [[LINUX, []], [WINDOWS, ["win32-x64"]]] as const) {
+      const { status, ran } = run("node.sh", computer, "sha256sum", [...args]);
       expect(status, computer[0]).not.toBe(0);
       expect(ran.map((line) => line.split(" ")[0]), computer[0]).toEqual(["curl", "sha256sum"]);
     }
   });
 
-  it("refuses every other computer before it fetches anything", () => {
-    for (const computer of [["Linux", "aarch64"], ["Darwin", "arm64"], ["Darwin", "x86_64"], ["MINGW64_NT-10.0-26100", "aarch64"]] as const) {
-      expect(run("node.sh", computer), computer.join(" ")).toEqual({ status: 1, stderr: "node.sh fetches the app's node for Linux and Windows on x64\n", ran: [] });
+  it("is the Linux app's build's first step alone on Windows, and refuses it there before it fetches anything", () => {
+    for (const computer of [WINDOWS, ["MSYS_NT-10.0-26100", "x86_64"], ["CYGWIN_NT-10.0-26100", "x86_64"]] as const) {
+      expect(run("node.sh", computer), computer.join(" ")).toEqual({
+        status: 1, stderr: "npm run build is the Linux app's build, with Linux's node: on Windows, build the app with npm run build:win32\n", ran: [],
+      });
     }
+  });
+
+  it("refuses every other computer, and Windows's node anywhere but on Windows on x64, before it fetches anything", () => {
+    const refused = "node.sh fetches the Linux app's node on Linux on x64, and with win32-x64 the Windows app's on Windows on x64\n";
+    for (const computer of [["Linux", "aarch64"], ["Darwin", "arm64"], ["Darwin", "x86_64"]] as const) {
+      expect(run("node.sh", computer), computer.join(" ")).toEqual({ status: 1, stderr: refused, ran: [] });
+    }
+    for (const computer of [LINUX, ["MINGW64_NT-10.0-26100", "aarch64"], ["Darwin", "arm64"]] as const) {
+      expect(run("node.sh", computer, undefined, ["win32-x64"]), computer.join(" ")).toEqual({ status: 1, stderr: refused, ran: [] });
+    }
+    expect(run("node.sh", LINUX, undefined, ["linux-x64"])).toEqual({ status: 1, stderr: refused, ran: [] });
   });
 
   it("is of the version whose headers and import library ntat is built against", () => {

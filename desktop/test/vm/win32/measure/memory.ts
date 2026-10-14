@@ -4,15 +4,13 @@
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts memory
 // Written down, no PASS or FAIL: the working sets, in MiB.
 
-import { execFileSync } from "node:child_process";
-
 import { expect, it } from "vitest";
 
-import { lab, ready, record, ROOTS, scratch } from "./harness.js";
+import { lab, ready, record, ROOTS, scratch, windowsPowerShell } from "./harness.js";
 
 const vmmemMiB = () => {
   try {
-    const bytes = execFileSync("powershell.exe", ["-NoProfile", "-Command", "(Get-Process -Name vmmem -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum"], { encoding: "utf8" }).trim();
+    const bytes = windowsPowerShell("(Get-Process -Name vmmem -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum");
     return Math.round(Number(bytes || 0) / 1024 / 1024);
   } catch {
     return 0;

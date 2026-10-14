@@ -706,6 +706,12 @@ class ReleaseWorkflowTest < Minitest::Test
     end
     refute_match(/id-token/, windows.to_s)
     # The files of the desktop's vitest project for Windows, which each part built for Windows joins; they gate.
+    # npm run build is the Linux app's build, which refuses on Windows: no job on a Windows runner runs it.
+    jobs.each do |name, job|
+      next if name == "vm-guest"
+
+      job.fetch("steps").each { |step| refute_match(/npm run build(?!:)/, step["run"].to_s, "#{name} runs the Linux app's build") }
+    end
     unit = jobs.fetch("unit")
     refute unit.key?("continue-on-error")
     assert_equal "npx vitest run --project windows", unit.fetch("steps").last.fetch("run").strip
@@ -784,15 +790,19 @@ class ReleaseWorkflowTest < Minitest::Test
     measured = steps.index { |step| step["run"].to_s.include?("npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot") }
     refute_nil measured
     taken.each { |step| assert_operator steps.index(step), :<, measured }
-    assert_equal '${{ github.workspace }}\desktop\dist\agent.img', steps[measured].fetch("env").fetch("SUROGATE_VM_AGENT_DISK")
+    # The app's agent disk where the development service lays it out, as the installed app has it, never named apart.
+    refute steps[measured].fetch("env").key?("SUROGATE_VM_AGENT_DISK")
+    installed = steps.index { |step| step["run"].to_s.strip == 'powershell -ExecutionPolicy Bypass -File dev-service.ps1 -AgentDisk ..\..\dist\agent.img' }
+    refute_nil installed
+    assert_operator installed, :<, measured
     # Booted as Hyper-V opens a disk, a fixed VHD: the agent disk given its footer in place by the app's own code, once
     # it is taken and the code is built, and before the boot.
     footer = steps.index { |step| step["run"].to_s.strip == "node scripts/vhd-footer.mjs dist/agent.img" }
     refute_nil footer
     assert_equal "desktop", steps[footer].fetch("working-directory")
     assert_operator steps.index(taken.last), :<, footer
-    assert_operator steps.index { |step| step["name"] == "Build the desktop" }, :<, footer
-    assert_operator footer, :<, measured
+    assert_operator steps.index { |step| step["name"] == "Build the app's code" }, :<, footer
+    assert_operator footer, :<, installed
     jobs.each do |name, job|
       next if name == "vm-boot"
 
@@ -953,13 +963,13 @@ class ReleaseWorkflowTest < Minitest::Test
         "shell" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed d57a229d162b158b 82ea49c2e002c4eb bb26d389f9d8b55f 2734cf3c0643d000 512eb34e3e8c1e1d bea3be8dc0d7d250]],
       },
       "desktop-windows.yml" => {
-        "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b a2a1334e455b966d]],
+        "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b 3a48c3294046bd31 a2a1334e455b966d]],
         "file-host" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 987851a1dbf1a172 425e4aed22ec6aa0 ecfd01e865dc13c5 48f913667e52c023 db0e0af78d804912 1204467084650a5f df980f3cfa08ab88]],
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
-        "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
+        "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 3a48c3294046bd31 e222861c9a8894a5]],
         "vm-guest" => ["ab2559772a48cb7e", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 0671721aededeb3b 18d2126a5450e6bd 06af0ce2143d3c1f 8c986439d5d86488 a6aeb1f05887979b 09d5e59cd91883c6 e65248e95c654f75 35697d500667a260 7553a543a3fb9bdd]],
-        "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 535e74b2af1d7815 ee88c8a9aa9b67f9 83c3999eb9a772b5 7e59534427c2acc1 24591223ab9a9cbb 427c1c30444870b3 85c6bbf8d6ef4ca0 1edc8d7d3216b9d8]],
+        "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 0686e10d83c7fcc6 535e74b2af1d7815 ee88c8a9aa9b67f9 83c3999eb9a772b5 7e59534427c2acc1 72442731f8075eaa 6c5f0ebc85fc17d9 85c6bbf8d6ef4ca0 1edc8d7d3216b9d8]],
         "msi" => ["825bfae6263325c0", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 d9093d282ffd91e6 7121de72b936c1d1 73242831d2df0b86 8bcfc143f7f6cbf6 453072c07ebf9e3d 1a145085cbf2e2fd ebe3d78cd1a50eb1]],
         "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
