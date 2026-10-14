@@ -1110,13 +1110,9 @@ class ProgramInvitationRow(Base):
     #: What the agent recorded as the result, e.g. ``completed`` or a value a
     #: branch reads (``red``).
     outcome: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    #: Channels still to try, in order, when this one does not arrive.
+    #: The person's other reachable channels, tried once each when a send fails.
     fallback_platforms: Mapped[Optional[list]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=True,
-    )
-    #: When to move on to the next channel if nothing says it arrived.
-    fallback_at: Mapped[Optional[datetime]] = mapped_column(
-        UTCDateTime(), nullable=True,
     )
     #: Channels already tried: ``[{platform, state, error, at}]``.
     attempts: Mapped[Optional[list]] = mapped_column(

@@ -1106,7 +1106,6 @@ ALTER TABLE program_invitations
     ADD COLUMN IF NOT EXISTS channel_identifier text,
     ADD COLUMN IF NOT EXISTS outcome text,
     ADD COLUMN IF NOT EXISTS fallback_platforms jsonb,
-    ADD COLUMN IF NOT EXISTS fallback_at timestamptz,
     ADD COLUMN IF NOT EXISTS attempts jsonb,
     ADD COLUMN IF NOT EXISTS read_at timestamptz,
     ADD COLUMN IF NOT EXISTS escalation_owner text,

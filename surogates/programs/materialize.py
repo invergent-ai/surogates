@@ -40,7 +40,6 @@ from surogates.programs.journey import (
     journey_of,
     person_zone,
     protocol_of,
-    strategy_of,
 )
 from surogates.programs.opener import OpenerUndeliverable
 
@@ -57,9 +56,6 @@ logger = logging.getLogger(__name__)
 #: first in the tick precisely so an expired opener does not suppress the next
 #: check-in.
 _OPEN_RESPONSE_STATES = ("awaiting_reply", "replied", "in_progress")
-
-#: A branch on ``replied`` keeps whoever answered, however it ended.
-_REPLIED_STATES = ("replied", "in_progress", "completed", "incomplete")
 
 #: Used when a Program's projected config carries no deadline of its own.
 _DEFAULT_DEADLINE_HOURS = 24
@@ -102,32 +98,6 @@ async def _has_open_invitation(db, schedule, platform: str, platform_user_id: st
     ).scalar_one() > 0
 
 
-async def _on_branch(session_factory: Any, branch: dict, user_ids: list) -> set:
-    """Whose latest invitation of the branch's step matches its condition."""
-    step_id = uuid.UUID(str(branch["step_id"]))
-    async with session_factory() as db:
-        rows = (
-            await db.execute(
-                sa.select(
-                    ProgramInvitationRow.user_id, ProgramInvitationRow.response_state,
-                    ProgramInvitationRow.outcome,
-                )
-                .where(ProgramInvitationRow.program_id == step_id)
-                .where(ProgramInvitationRow.user_id.in_(user_ids))
-                .order_by(ProgramInvitationRow.created_at)
-            )
-        ).all()
-    latest = {user_id: (response, outcome) for user_id, response, outcome in rows}
-    when = branch.get("when")
-    outcomes = {str(o) for o in branch.get("outcomes") or ()}
-    return {
-        user_id for user_id, (response, outcome) in latest.items()
-        if (when == "replied" and response in _REPLIED_STATES)
-        or (when == "no_reply" and response == "no_reply_by_deadline")
-        or (when == "outcome" and outcome in outcomes)
-    }
-
-
 async def materialize_occurrence(
     schedule: Any,
     *,
@@ -141,13 +111,12 @@ async def materialize_occurrence(
     ``(occurrence_id, user_id)`` — so a crashed or retried tick is harmless
     rather than a second message to every user.
 
-    With a journey the channel is chosen per person (its strategy), and the
-    branch and each person's zone narrow who is asked.
+    Inside a journey each person is reached on their own channel (see
+    :func:`choose_channel`) and asked only in the zone the slot is for.
     """
     config = schedule.config or {}
     platform = config.get("channel", "whatsapp")
-    strategy = strategy_of(config)
-    branch = config.get("branch") if isinstance(config.get("branch"), dict) else None
+    per_person = bool(journey_of(config))
     pause = threshold(config, "pause_after_missed")
     # Resolved before the occurrence's transaction opens: an audience is one
     # read per enrolled person, the pause one per reachable person, and none
@@ -158,17 +127,13 @@ async def materialize_occurrence(
         with_last_inbound=pause is not None,
     )
     chosen: dict[uuid.UUID, Any] = {}
-    if strategy:
+    if per_person:
         for user_id, _identity, enrollment in roster:
             chosen[user_id] = await choose_channel(
-                config, strategy, org_id=schedule.org_id, user_id=user_id,
+                config, org_id=schedule.org_id, user_id=user_id,
                 enrollment=enrollment, identity_lookup=identity_lookup,
                 session_factory=session_factory,
             )
-    on_branch = (
-        await _on_branch(session_factory, branch, [u for u, _, _ in roster])
-        if branch and roster else set()
-    )
     paused: set[uuid.UUID] = set()
     if pause:
         for user_id, identity, _enrollment in roster:
@@ -204,7 +169,7 @@ async def materialize_occurrence(
             reason: str | None = None
             state = "queued"
             row_platform, sender, fallbacks = platform, config.get("channel_identifier"), []
-            if strategy:
+            if per_person:
                 if chosen[user_id] is None:
                     reason = "No reachable channel"
                 else:
@@ -215,8 +180,6 @@ async def materialize_occurrence(
                 reason = "No permission to message"
             if reason is not None:
                 pass
-            elif branch and user_id not in on_branch:
-                reason = "Not on this branch"
             elif await _has_open_invitation(db, schedule, row_platform, identity.platform_user_id):
                 reason = "Previous check-in still open"
             elif user_id in paused:
@@ -433,13 +396,8 @@ async def send_queued_openers(
             if enqueue is None:
                 continue
 
-            minutes = (strategy_of(config) or {}).get("fallback_after_minutes")
             claimed = await db.execute(_unsent(pending.id).values(
                 response_state="awaiting_reply", deadline_at=now + window,
-                fallback_at=(
-                    now + timedelta(minutes=int(minutes))
-                    if minutes and pending.fallback_platforms else None
-                ),
             ))
             await db.commit()
             if int(claimed.rowcount or 0) != 1:

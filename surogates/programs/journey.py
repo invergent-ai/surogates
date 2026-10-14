@@ -1,8 +1,9 @@
 """What a Program's ``journey`` asks of the runtime beyond its own cadence.
 
 A journey groups a business's Programs (its steps) under one slug and adds
-the settings that span them: which channel reaches each person, quiet hours,
-each person's own zone, and when the journey is over.  All of it
+the settings that span them: the agent's sender on each channel, quiet hours,
+a default zone, and when the journey is over.  Inside one, each person is
+reached on their own channel and in their own zone.  All of it
 is optional in the projection; a Program without a journey behaves as it
 always did.
 """
@@ -29,17 +30,8 @@ from surogates.programs.cadence import next_occurrences
 
 logger = logging.getLogger(__name__)
 
-STRATEGIES = ("fixed", "preferred", "last_interacted", "fallback")
-
-
 def journey_of(config: dict) -> dict:
     return (config or {}).get("journey") or {}
-
-
-def strategy_of(config: dict) -> dict | None:
-    """The step's channel strategy, else its journey's; ``None`` is today's
-    single channel."""
-    return (config or {}).get("channel_strategy") or journey_of(config).get("channels") or None
 
 
 def senders_for(config: dict) -> dict[str, str]:
@@ -145,7 +137,6 @@ async def _identity(db: Any, org_id: Any, platform: str, user_id: Any) -> Any:
 
 async def choose_channel(
     config: dict,
-    strategy: dict,
     *,
     org_id: Any,
     user_id: Any,
@@ -153,36 +144,37 @@ async def choose_channel(
     identity_lookup: Any,
     session_factory: Any,
 ) -> tuple[str, Any, str, list[str]] | None:
-    """(platform, identity, sender, fallbacks) for one person, or ``None``
-    when no channel of the strategy reaches them."""
+    """(platform, identity, sender, the other reachable channels) for one
+    person, or ``None`` when no channel with a sender reaches them.
+
+    Reachable means a granted identity there and a sender of the agent's.
+    The person's preferred channel wins, then the one they last wrote on,
+    then the step's own channel.
+    """
     senders = senders_for(config)
-    order = list(dict.fromkeys(strategy.get("order") or [config.get("channel") or "whatsapp"]))
-    candidates: list[tuple[str, Any]] = []
-    for platform in order:
-        if platform not in senders or not capabilities_for(platform).can_initiate:
+    reachable: dict[str, Any] = {}
+    for platform in senders:
+        if not capabilities_for(platform).can_initiate:
             continue
         identity = await identity_lookup(org_id, platform, user_id)
         if identity is not None and followup_store.permission_status(identity) == "granted":
-            candidates.append((platform, identity))
-    if not candidates:
+            reachable[platform] = identity
+    if not reachable:
         return None
-    kind = strategy.get("strategy") or "fixed"
-    chosen = candidates[0]
-    if kind == "preferred":
-        preferred = getattr(enrollment, "preferred_channel", None)
-        chosen = next((c for c in candidates if c[0] == preferred), chosen)
-    elif kind == "last_interacted":
+    chosen = getattr(enrollment, "preferred_channel", None)
+    if chosen not in reachable:
         newest = None
-        for platform, identity in candidates:
+        for platform, identity in reachable.items():
             at = await followup_store.last_inbound(
                 session_factory, org_id=org_id, platform=platform,
                 platform_user_id=identity.platform_user_id, channel_identifier=senders[platform],
             )
             if at is not None and (newest is None or as_utc(at) > newest[0]):
-                newest = (as_utc(at), (platform, identity))
-        chosen = newest[1] if newest else chosen
-    rest = [p for p, _ in candidates if p != chosen[0]] if kind == "fallback" else []
-    return chosen[0], chosen[1], senders[chosen[0]], rest
+                newest = (as_utc(at), platform)
+        own = str(config.get("channel") or "whatsapp")
+        chosen = newest[1] if newest else own if own in reachable else next(iter(reachable))
+    rest = [p for p in reachable if p != chosen]
+    return chosen, reachable[chosen], senders[chosen], rest
 
 
 # ---------------------------------------------------------------------------
@@ -236,34 +228,24 @@ async def fall_back(db: Any, row: ProgramInvitationRow, *, now: datetime, config
     row.provider_message_id = None
     row.delivery_error = None
     row.deadline_at = None
-    row.fallback_at = None
     row.read_at = None
     return True
 
 
 async def advance_fallbacks(session_factory: Any, *, now: datetime) -> int:
-    """Move every invitation that failed, or was not seen in time, to its
-    next channel.  Returns how many moved."""
-    failed = sa.and_(
-        ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")),
-        ProgramInvitationRow.response_state.in_(("not_started", "awaiting_reply")),
-    )
-    # Sent but never confirmed: a queued row may still be in the outbox, and
-    # moving it would write to the person twice.
-    unseen = sa.and_(
-        ProgramInvitationRow.fallback_at.isnot(None),
-        ProgramInvitationRow.fallback_at <= now,
-        ProgramInvitationRow.delivery_state == "accepted",
-        ProgramInvitationRow.read_at.is_(None),
-        ProgramInvitationRow.response_state == "awaiting_reply",
-    )
+    """Move every invitation whose send failed to its next channel.
+
+    The dispatcher's failures move at once (see :mod:`surogates.programs.delivery`);
+    this catches the ones the send pass itself could not hand over.
+    """
     moved = 0
     async with session_factory() as db:
         rows = (
             await db.execute(
                 sa.select(ProgramInvitationRow)
                 .where(ProgramInvitationRow.fallback_platforms.isnot(None))
-                .where(sa.or_(failed, unseen))
+                .where(ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")))
+                .where(ProgramInvitationRow.response_state.in_(("not_started", "awaiting_reply")))
                 .limit(200)
             )
         ).scalars().all()

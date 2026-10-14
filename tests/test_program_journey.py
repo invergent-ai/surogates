@@ -1,5 +1,5 @@
 """A step inside a journey: its channel per person, fallback, quiet hours,
-each person's zone, branches and the journey's end."""
+each person's zone and the journey's end."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _lookup(reachable: dict):
     return lookup
 
 
-def _schedule(users=(), *, strategy=None, audience=None, **journey_settings):
+def _schedule(users=(), *, audience=None, **journey_settings):
     config = {
         "channel": "whatsapp", "channel_identifier": "pn1",
         "template_name": "t", "template_language": "ro",
@@ -52,8 +52,6 @@ def _schedule(users=(), *, strategy=None, audience=None, **journey_settings):
         "users": [str(u) for u in users], "audience": audience,
         "journey": {"slug": "onboarding", "senders": SENDERS, **journey_settings},
     }
-    if strategy:
-        config["channel_strategy"] = strategy
     return SimpleNamespace(program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, config=config)
 
 
@@ -78,62 +76,66 @@ async def _fire(sf, schedule, lookup, now=SLOT):
 # ---------------------------------------------------------------------------
 
 
+async def _enrol(sf, user, **extra):
+    async with sf() as db:
+        db.add(FollowupEnrollmentRow(
+            org_id=ORG, agent_id=AGENT, user_id=user, protocol="onboarding",
+            status="active", enrolled_by="agent", **extra,
+        ))
+        await db.commit()
+
+
+AUDIENCE = {"protocol": "onboarding"}
+
+
 @pytest.mark.asyncio
-async def test_a_fixed_order_takes_the_first_channel_that_reaches_the_person(sf):
-    a, b = uuid.uuid4(), uuid.uuid4()
-    lookup = _lookup({("whatsapp", a): "4070", ("telegram", b): "555", ("whatsapp", b): "4071"})
-    rows = await _fire(sf, _schedule(
-        [a, b], strategy={"strategy": "fixed", "order": ["telegram", "whatsapp"]},
-    ), lookup)
-    assert (rows[a].platform, rows[a].channel_identifier) == ("whatsapp", "pn1")
-    assert (rows[b].platform, rows[b].platform_user_id, rows[b].channel_identifier) == (
-        "telegram", "555", "bot1",
+async def test_preferred_then_last_written_then_the_steps_own_channel(sf):
+    pref, wrote, plain = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    everywhere = {}
+    for user, n in ((pref, 1), (wrote, 2), (plain, 3)):
+        everywhere.update({
+            ("whatsapp", user): f"407{n}", ("telegram", user): f"55{n}", ("slack", user): f"U{n}",
+        })
+    await _enrol(sf, pref, preferred_channel="slack")
+    await _enrol(sf, wrote)
+    await _enrol(sf, plain)
+    await followup_store.record_inbound(
+        sf, org_id=ORG, platform="telegram", platform_user_id="552",
+        channel_identifier="bot1", at=SLOT - timedelta(hours=1),
     )
-    assert rows[b].fallback_platforms is None
+    await followup_store.record_inbound(
+        sf, org_id=ORG, platform="whatsapp", platform_user_id="4072",
+        channel_identifier="pn1", at=SLOT - timedelta(days=2),
+    )
+    rows = await _fire(sf, _schedule(audience=AUDIENCE), _lookup(everywhere))
+
+    assert (rows[pref].platform, rows[pref].platform_user_id, rows[pref].channel_identifier) == (
+        "slack", "U1", "T1",
+    )
+    assert (rows[wrote].platform, rows[wrote].channel_identifier) == ("telegram", "bot1")
+    assert rows[plain].platform == "whatsapp"
+    # The rest are tried once each if the send fails.
+    assert sorted(rows[plain].fallback_platforms) == ["slack", "telegram"]
 
 
 @pytest.mark.asyncio
-async def test_nobody_reachable_on_the_strategy_is_skipped_visibly(sf):
+async def test_a_preferred_channel_nobody_can_send_on_is_passed_over(sf):
     a = uuid.uuid4()
-    rows = await _fire(sf, _schedule([a], strategy={"order": ["slack"]}), _lookup({}))
+    await _enrol(sf, a, preferred_channel="slack")
+    rows = await _fire(sf, _schedule(audience=AUDIENCE), _lookup({("telegram", a): "555"}))
+    assert (rows[a].platform, rows[a].fallback_platforms) == ("telegram", None)
+
+
+@pytest.mark.asyncio
+async def test_nobody_reachable_is_skipped_visibly(sf):
+    a = uuid.uuid4()
+    rows = await _fire(sf, _schedule([a]), _lookup({}))
     assert rows[a].delivery_state == "skipped"
     assert rows[a].reason == "No reachable channel"
 
 
 @pytest.mark.asyncio
-async def test_preferred_and_last_interacted_and_fallback(sf):
-    a = uuid.uuid4()
-    lookup = _lookup({("whatsapp", a): "4070", ("telegram", a): "555", ("slack", a): "U1"})
-    order = ["whatsapp", "telegram", "slack"]
-    async with sf() as db:
-        db.add(FollowupEnrollmentRow(
-            org_id=ORG, agent_id=AGENT, user_id=a, protocol="onboarding",
-            status="active", enrolled_by="agent", preferred_channel="slack",
-        ))
-        await db.commit()
-    audience = {"protocol": "onboarding"}
-
-    rows = await _fire(sf, _schedule(audience=audience, strategy={"strategy": "preferred", "order": order}), lookup)
-    assert rows[a].platform == "slack"
-
-    await followup_store.record_inbound(
-        sf, org_id=ORG, platform="telegram", platform_user_id="555",
-        channel_identifier="bot1", at=SLOT - timedelta(hours=1),
-    )
-    await followup_store.record_inbound(
-        sf, org_id=ORG, platform="whatsapp", platform_user_id="4070",
-        channel_identifier="pn1", at=SLOT - timedelta(days=2),
-    )
-    rows = await _fire(sf, _schedule(audience=audience, strategy={"strategy": "last_interacted", "order": order}), lookup)
-    assert rows[a].platform == "telegram"
-
-    rows = await _fire(sf, _schedule(audience=audience, strategy={"strategy": "fallback", "order": order}), lookup)
-    assert rows[a].platform == "whatsapp"
-    assert rows[a].fallback_platforms == ["telegram", "slack"]
-
-
-@pytest.mark.asyncio
-async def test_without_a_strategy_the_step_keeps_its_single_channel(sf):
+async def test_without_a_journey_the_step_keeps_its_single_channel(sf):
     a = uuid.uuid4()
     schedule = _schedule([a])
     del schedule.config["journey"]
@@ -195,20 +197,21 @@ async def test_a_failed_send_moves_to_the_next_reachable_channel(sf):
 
 
 @pytest.mark.asyncio
-async def test_an_unconfirmed_send_moves_on_when_its_time_is_up(sf):
-    row = await _fallback_invitation(sf, state="accepted", fallback_at=SLOT)
-    assert await journey.advance_fallbacks(sf, now=SLOT - timedelta(minutes=1)) == 0
-    assert await journey.advance_fallbacks(sf, now=SLOT + timedelta(minutes=1)) == 1
+async def test_an_opener_the_send_pass_could_not_hand_over_moves_on_next_tick(sf):
+    row = await _fallback_invitation(sf, state="failed")
+    assert await journey.advance_fallbacks(sf, now=SLOT) == 1
     assert (await _reload(sf, row.id)).platform == "telegram"
+    # Once each: nothing is left to try.
+    assert await journey.advance_fallbacks(sf, now=SLOT) == 0
 
 
 @pytest.mark.asyncio
-async def test_a_read_receipt_records_read_and_stops_the_fallback(sf):
-    row = await _fallback_invitation(sf, state="accepted", fallback_at=SLOT, provider_message_id="wamid.1")
+async def test_a_read_receipt_records_read(sf):
+    row = await _fallback_invitation(sf, state="accepted", provider_message_id="wamid.1")
     assert await apply_status_callback(sf, provider_message_id="wamid.1", status="read", reason=None)
     seen = await _reload(sf, row.id)
     assert seen.read_at is not None and seen.delivery_state == "delivered"
-    assert await journey.advance_fallbacks(sf, now=SLOT + timedelta(hours=1)) == 0
+    assert seen.platform == "whatsapp"
 
 
 @pytest.mark.asyncio
@@ -222,7 +225,7 @@ async def test_a_successful_post_on_a_channel_without_receipts_is_delivered(sf, 
 
 
 # ---------------------------------------------------------------------------
-# Quiet hours, zones, branch, exit
+# Quiet hours, zones, exit
 # ---------------------------------------------------------------------------
 
 
@@ -276,28 +279,6 @@ async def test_each_person_is_asked_at_the_steps_time_in_their_own_zone(sf):
 
 
 @pytest.mark.asyncio
-async def test_a_branch_keeps_only_who_matched_the_earlier_step(sf):
-    red, green = uuid.uuid4(), uuid.uuid4()
-    lookup = _lookup({("whatsapp", red): "4070", ("whatsapp", green): "4071"})
-    first = _schedule([red, green])
-    rows = await _fire(sf, first, lookup)
-    async with sf() as db:
-        for user, outcome in ((red, "red"), (green, "green")):
-            row = await db.get(ProgramInvitationRow, rows[user].id)
-            row.response_state, row.outcome = "completed", outcome
-        await db.commit()
-    then = _schedule([red, green])
-    then.config["branch"] = {"step_id": str(first.program_id), "when": "outcome", "outcomes": ["red"]}
-    rows = await _fire(sf, then, lookup, now=SLOT + timedelta(days=1))
-    assert rows[red].delivery_state == "queued"
-    assert (rows[green].delivery_state, rows[green].reason) == ("skipped", "Not on this branch")
-
-    then.config["branch"] = {"step_id": str(first.program_id), "when": "replied"}
-    rows = await _fire(sf, then, lookup, now=SLOT + timedelta(days=2))
-    assert {u for u, r in rows.items() if r.delivery_state == "queued"} == {red, green}
-
-
-@pytest.mark.asyncio
 async def test_a_journey_ends_its_people_after_its_days(sf):
     done, ongoing = uuid.uuid4(), uuid.uuid4()
     schedule = _schedule(audience={"protocol": "onboarding"}, exit_after_days=180)
@@ -348,7 +329,7 @@ async def test_the_funnel_counts_each_step_from_invited_to_answered(sf):
     f = funnels[step.program_id]
     assert (f["invited"], f["skipped"], f["sent"], f["delivered"], f["read"]) == (3, 1, 1, 1, 1)
     assert (f["replied"], f["completed"], f["failed"], f["no_reply"]) == (1, 1, 1, 0)
-    assert f["skip_reasons"] == {"No whatsapp identity": 1}
+    assert f["skip_reasons"] == {"No reachable channel": 1}
     assert f["outcomes"] == {"red": 1} and f["channels"] == {"whatsapp": 2}
     assert funnels[other]["invited"] == 0
 
