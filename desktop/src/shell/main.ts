@@ -34,7 +34,7 @@ import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
 import { hostPathOf, shownPath } from "../session-path.js";
-import { backendFor } from "../vm/backends.js";
+import { backendFor, backendHere } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
 import type { Boot } from "../vm/manager.js";
@@ -489,7 +489,7 @@ const vmFor = (): VmClient => {
   if (vm) return vm;
   vm = appVm({
     vm: {
-      ...vmOptions(root, hostUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, "agent.img") : undefined }),
+      ...vmOptions(root, hostUser(), VM_ENV, { image: delivery?.folder, agentDisk: VM_RESOURCES ? join(VM_RESOURCES, backendHere().agentDiskFile) : undefined }),
       ca: companyCertificates,
     },
     ready: vmReady,

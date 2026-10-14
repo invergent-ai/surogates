@@ -6,10 +6,7 @@ fn main() {
     use vm::{command, Command};
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match command(&arguments) {
-        Ok(Command::Run(_run)) => {
-            eprintln!("surogate-vm run is not built in this crate yet");
-            std::process::exit(70);
-        }
+        Ok(Command::Run(run)) => std::process::exit(vm::run::run(run)),
         Ok(Command::Check) => {
             println!("{}", vm::check::check());
         }

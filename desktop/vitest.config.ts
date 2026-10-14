@@ -14,6 +14,8 @@ export const MACOS = [
   "test/clean-child.test.ts", "test/agent-disk-imports.test.ts", "test/policy-darwin.test.ts",
   // The VM backend: what starts no program, and surogate-vm's stand-in started as the app starts it, on the app's built code.
   "test/vm-darwin.test.ts", "test/vm-darwin-boot.test.ts",
+  // The guest image's unpack with Node's own zstd, in this package's Electron, on the app's built code.
+  "test/vm-image-node.test.ts",
   // The shell and the browser on macOS.
   "test/shell-places-darwin.test.ts", "test/computer-name-darwin.test.ts", "test/backups-darwin.test.ts", "test/folders-held-darwin.test.ts", "test/mac-helper.test.ts",
   "test/login-item-darwin.test.ts", "test/deep-link-darwin.test.ts", "test/credentials-darwin.test.ts",
@@ -42,6 +44,9 @@ export const WINDOWS = [
   "test/folders-held-win32.test.ts",
   // The native programs' one workspace, and the one script that builds the Windows app.
   "test/windows-native.test.ts",
+  // The guest's disks as Windows opens them, fixed VHDs: one mounted read-only; and the image's delivery, unpacked with
+  // Node's own zstd in this package's Electron, on the app's built code.
+  "test/vhd-win32.test.ts", "test/vm-image-node.test.ts",
   // Every folder and file the app shows its person, by its Windows path.
   "test/shown-paths.test.ts",
 ];

@@ -1,6 +1,13 @@
 // The Host Compute Service for one caller (hcs::api): the VM made from the service's document, the caller's files
-// granted to it as the caller, its console read, its exit told, and every grant taken back as the caller once the VM
-// has gone, so no entry for a VM that is no more stays in a file's ACL.
+// granted to it as the caller, its console read from before it is made, its exit told, and every grant taken back as
+// the caller once the VM has gone, so no entry for a VM that is no more stays in a file's ACL.
+//
+// Nothing else is granted. Not the installed app's agent disk: HcsGrantVmAccess gives the VM's own account full control
+// of a file (FA, measured on a Windows runner), which no VM is given of the one file every user's VM boots; each VM reads
+// it as its folder lets every user of the computer, as WSL's own VM reads the disks WSL installs (WSL,
+// src/windows/service/exe/WslCoreVm.cpp, "VMWP may already have access via inherited ACLs"). And nothing to the group of
+// all VMs (S-1-5-83-0): on a Windows 11 PC with Virtual Machine Platform alone, without Hyper-V's own management, that
+// SID maps to no account (icacls: "No mapping between account names and security IDs was done").
 
 use std::sync::Arc;
 use std::thread;
@@ -33,12 +40,28 @@ pub struct Hcs<'a> {
 
 /// The most of the console one notice carries.
 const CONSOLE_CHUNK: usize = 4096;
+/// The console's pipe's descriptor: SYSTEM and administrators all access, as the service's default descriptor gives
+/// them and the only write it gives, which HCS's worker opens COM1's other end with; and no one else, not even to read,
+/// as the default lets everyone do: a user who took the pipe's one instance first would leave the guest's console with
+/// nowhere to go.
+pub const CONSOLE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
-// The console's pipe, made by the service before the VM, which HCS's worker connects to as COM1's other end, as
-// WSL's service makes its own (WSL, src/windows/common/Dmesg.cpp, CreateConsolePipe: one instance, the service's
-// default descriptor). Read until the VM goes.
-fn console(name: &str, notify: Notify) -> Result<Arc<Pipe>, Failure> {
-    let pipe = Arc::new(Pipe::server(name, None, Way::Inbound, true, true).map_err(|error| Failure { code: -1, words: format!("the console's pipe could not be made: {error}") })?);
+/// The guest's console, as the service reads it: the server's end of COM1's pipe, read on a thread of its own until
+/// this goes, which ends the read.
+pub struct Console(Arc<Pipe>);
+
+impl Drop for Console {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// The console's pipe *name*, made by the service before the VM, which HCS's worker connects to as COM1's other end,
+/// and what the guest prints there told to *notify*. Both ways and one instance, as WSL's service makes its own (WSL,
+/// src/windows/common/Dmesg.cpp, CreateConsolePipe: PIPE_ACCESS_DUPLEX): the worker opens a serial port's other end
+/// to read and to write, which a pipe its server alone reads refuses.
+pub fn console(name: &str, notify: Notify) -> Result<Console, Failure> {
+    let pipe = Arc::new(Pipe::server(name, Some(CONSOLE_SDDL), Way::Duplex, true, true).map_err(|error| Failure { code: -1, words: format!("the console's pipe could not be made: {error}") })?);
     let reading = pipe.clone();
     thread::spawn(move || {
         if reading.accept().is_err() {
@@ -54,7 +77,7 @@ fn console(name: &str, notify: Notify) -> Result<Arc<Pipe>, Failure> {
             }
         }
     });
-    Ok(pipe)
+    Ok(Console(pipe))
 }
 
 /// One VM, by the service's one handle to it.
@@ -63,7 +86,6 @@ pub struct HcsVm {
     id: String,
     granted: Vec<String>,
     token: Handle,
-    console: Arc<Pipe>,
 }
 
 impl Vm for HcsVm {
@@ -93,9 +115,8 @@ impl HcsVm {
 
 impl Drop for HcsVm {
     fn drop(&mut self) {
-        // The last handle closed ends the VM (ShouldTerminateOnLastHandleClosed); then its console, and its grants.
+        // The last handle closed ends the VM (ShouldTerminateOnLastHandleClosed); then its grants.
         self.system.take();
-        self.console.cancel();
         revoke(&self.token, &self.id, &self.granted);
     }
 }
@@ -118,6 +139,7 @@ fn duplicate(token: &Handle) -> Result<Handle, Failure> {
 
 impl Hypervisor for Hcs<'_> {
     type Vm = HcsVm;
+    type Console = Console;
 
     fn new_id(&self) -> String {
         let mut guid: GUID = unsafe { std::mem::zeroed() };
@@ -130,6 +152,10 @@ impl Hypervisor for Hcs<'_> {
 
     fn console(&self, id: &str) -> String {
         format!(r"\\.\pipe\surogate-console-{id}")
+    }
+
+    fn listen(&self, name: &str) -> Result<Console, Failure> {
+        console(name, self.notify.clone())
     }
 
     fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(HcsVm, String), Failure> {
@@ -147,16 +173,15 @@ impl Hypervisor for Hcs<'_> {
             }
             given.push(path.clone());
         }
-        let made = console(&self.console(id), self.notify.clone()).and_then(|console| {
-            let system = System::create(id, document)?;
+        let made = System::create(id, document).and_then(|system| {
             let notify = self.notify.clone();
             system.on_exit(Box::new(move |status| notify(Notice::Exited(exit_status(status.as_deref())))))?;
             let properties = system.properties(None)?;
             let runtime = runtime_id(&properties).ok_or_else(|| Failure { code: -1, words: format!("HCS named no runtime ID for the VM: {properties}") })?;
-            Ok((system, console, runtime))
+            Ok((system, runtime))
         });
         match made {
-            Ok((system, console, runtime)) => Ok((HcsVm { system: Some(system), id: id.to_owned(), granted: given, token, console }, runtime)),
+            Ok((system, runtime)) => Ok((HcsVm { system: Some(system), id: id.to_owned(), granted: given, token }, runtime)),
             Err(failure) => {
                 revoke(&token, id, &given);
                 Err(failure)

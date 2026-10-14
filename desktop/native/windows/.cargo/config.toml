@@ -1,0 +1,5 @@
+# The programs carry the C runtime in them (the MSVC target's static one), as the app's node.exe and Electron carry
+# theirs: a PC without Visual C++'s redistributable runs them as it runs those. Cargo reads this from the workspace's
+# folder and every folder under it, wherever the build is started from there.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -54,8 +54,9 @@ beforeEach(async () => {
   served = new Map();
   heard = [];
   answer = ranged;
-  // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away.
-  rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300_000)]);
+  // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away: in
+  // whole sectors, as a disk is.
+  rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300 * 1024)]);
   kernel = randomBytes(200_000);
   initrd = randomBytes(50_000);
   manifest = { key: KEY, arch: "amd64", files: [publish("rootfs.img", rootfs), publish("vmlinuz", kernel), publish("initrd", initrd)] };

@@ -5,17 +5,16 @@
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts defender
 // Written down, no PASS or FAIL: the times with protection on and with the exclusion.
 
-import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, it } from "vitest";
 
-import { lab, ms, ready, record, ROOTS, scratch } from "./harness.js";
+import { lab, ms, ready, record, ROOTS, scratch, windowsPowerShell } from "./harness.js";
 
 const defender = () => {
   try {
-    return execFileSync("powershell.exe", ["-NoProfile", "-Command", "(Get-MpComputerStatus).RealTimeProtectionEnabled"], { encoding: "utf8" }).trim();
+    return windowsPowerShell("(Get-MpComputerStatus).RealTimeProtectionEnabled");
   } catch (error) {
     return `?: ${(error as Error).message}`;
   }

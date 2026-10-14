@@ -64,6 +64,11 @@ jobs:
       - name: Check the desktop's types
         run: npm run typecheck
 
+      # The app's code, which a file of the project runs as the app does: the image's delivery, in this package's
+      # Electron.
+      - name: Build the app's code
+        run: npx tsc -p tsconfig.build.json
+
       - name: Run the suites that pass on Windows
         run: npx vitest run --project windows
 
@@ -215,20 +220,116 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
-      - name: Build the desktop
-        env:
-          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
-        run: npm run build
+      # The app's code alone, which the stand-in imports: npm run build is the Linux app's build, and refuses here.
+      - name: Build the app's code
+        run: npx tsc -p tsconfig.build.json
 
       - name: Run the VM backend against the stand-in
         run: npx vitest run test/vm-win32.test.ts
 
+  # What vm-boot boots, which nothing builds on Windows: the x64 guest's image (images/guest/), from the guest stage of
+  # images/sandbox/Dockerfile, unpacked as the measurements boot it, and the agent disk, made with e2fsprogs under
+  # fakeroot, each as the release builds it, on a Linux runner; and the measurements' agent disk beside them. Kept a
+  # day, for this run's boot alone, and published nowhere. It gates nothing, as the boot does not.
+  vm-guest:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # A cold build of the guest. This bounds the job once a runner has taken it, and not before.
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        working-directory: desktop
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Build the desktop
+        working-directory: desktop
+        run: npm run build
+
+      # The agent's disk holds root's files, and is made by a user who is not root, under fakeroot:
+      # in no user namespace, which a stock Ubuntu 24.04 refuses a program without a profile of its own.
+      - name: Install fakeroot, which the agent's disk is made with
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fakeroot
+
+      - name: Make the agent disk
+        working-directory: desktop
+        run: npm run agent-disk
+
+      # The guest stage adds LibreOffice, the Python data stack and Node, and the disk is made inside
+      # the build: reclaim the toolchains the runner never uses. Not the tool cache, which holds this
+      # job's Node.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Unpacked beside the downloads, as the measurements boot it.
+      - name: Build the image
+        run: images/guest/build.sh --arch amd64 images/guest/out
+
+      - name: Keep the image for the boot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-guest-amd64
+          path: |
+            images/guest/out/initrd
+            images/guest/out/rootfs.img
+            images/guest/out/vmlinuz
+            images/guest/out/manifest.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Keep the agent disk for the boot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-agent-disk
+          path: desktop/dist/agent.img
+          retention-days: 1
+          if-no-files-found: error
+
+      # The measurements' agent disk, whose init also runs, as the guest's root, a probe a measurement leaves in a
+      # shared folder, and writes the kernel's own log to the console once the agent has said hello, each line with its
+      # time since the kernel's start (test/vm/win32/measure/probe.sh, put in as macOS's prepare.sh puts its own). Never
+      # the app's, so made out of dist/; last, so the boot has its image and its agent disk whatever becomes of this one.
+      - name: Make the measurements' agent disk
+        continue-on-error: true
+        working-directory: desktop
+        run: |
+          tree=$(mktemp -d) && mkdir "$tree/vm" && ln -s "$PWD/dist" "$tree/dist"
+          ln -s "$PWD/vm/agent-disk.sh" "$PWD/vm/enter-root" "$tree/vm/"
+          awk 'FNR == NR { probe = probe $0 "\n"; next } /^exec \/usr\/bin\/tini/ { printf "%s", probe } { print }' test/vm/win32/measure/probe.sh vm/init > "$tree/vm/init"
+          chmod 755 "$tree/vm/init" && grep -q measure-probe "$tree/vm/init"
+          mkdir -p test/vm/win32/measure/probing
+          "$tree/vm/agent-disk.sh" test/vm/win32/measure/probing/agent.img
+
+      - name: Keep the measurements' agent disk for the boot
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-agent-measure-disk
+          path: desktop/test/vm/win32/measure/probing/agent.img
+          retention-days: 1
+          if-no-files-found: error
+
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
-  # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
-  # fetches the guest build's image if a run of it is named, and runs the boot and requirements measurements. If the
-  # guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's own words. Either
-  # way the result is kept, and the job does not fail the branch.
+  # virtualization on its runners. It builds the native programs and the desktop, takes vm-guest's image and agent
+  # disks, gives the agent disk its VHD footer, installs the development service laid out as the installed app is, the
+  # agent disk beside it in Program Files, and runs the boot and requirements measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
+  # own words. Either way the result is kept with each boot's console and Hyper-V's own events, and the job does not
+  # fail the branch.
   vm-boot:
+    needs: vm-guest
     runs-on: windows-2025
     timeout-minutes: 40
     continue-on-error: true
@@ -257,23 +358,84 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
-      - name: Build the desktop
+      # The app's code alone, which gives the agent disk its footer below: npm run build is the Linux app's build, and
+      # refuses here.
+      - name: Build the app's code
         working-directory: desktop
-        env:
-          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
-        run: npm run build
+        run: npx tsc -p tsconfig.build.json
 
+      - name: Take the guest image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-guest-amd64
+          path: images/guest/out
+
+      - name: Take the agent disk
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-agent-disk
+          path: desktop/dist
+
+      # Where there is none, the boot with the kernel's log says the agent disk is missing, and the rest boot on.
+      - name: Take the measurements' agent disk
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-agent-measure-disk
+          path: desktop/test/vm/win32/measure/probing
+
+      # Hyper-V opens a disk only as a VHD: the raw agent disk the release makes, made a fixed one in place by the
+      # app's own code (scripts/vhd-footer.mjs), as the app's Windows layout makes it.
+      - name: Give the agent disk its VHD footer
+        working-directory: desktop
+        run: node scripts/vhd-footer.mjs dist/agent.img
+
+      # The service, and the agent disk with its footer, in the development install's folder of Program Files, as the
+      # installed app has them: the service grants the agent disk from there to each VM it boots, by its own right.
       - name: Install the development VM service
         working-directory: desktop/native/windows
-        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
+        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1 -AgentDisk ..\..\dist\agent.img
 
+      # The app's agent disk where the development service laid it out. The measurements give the image's disk its own
+      # footer, as the app's delivery does, and the measurements' agent disk too, each in the data folder.
       - name: Try one real boot, and record what happened
         working-directory: desktop
         continue-on-error: true
+        env:
+          SUROGATE_VM_PROBING_DISK: ${{ github.workspace }}\desktop\test\vm\win32\measure\probing\agent.img
         run: |
           $said = npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot 2>&1 | Out-String
           $said
           "### A real boot on a GitHub runner`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
+
+      # Each boot's console as the guest printed it, kept beside the findings; and what Hyper-V's own logs said of the
+      # VMs while the job ran (its 40 minutes, and a margin), each event at its UTC time, to set beside each boot's
+      # "asked at".
+      - name: Say each boot's console, and Hyper-V's own events
+        if: always()
+        working-directory: desktop
+        run: |
+          $kept = "test/vm/win32/measure/out/consoles"
+          New-Item -ItemType Directory -Force $kept | Out-Null
+          $consoles = foreach ($log in Get-ChildItem "$env:TEMP\surogate-measure\*\logs\vm-console.log" -ErrorAction SilentlyContinue) {
+            $name = $log.Directory.Parent.Name
+            Copy-Item $log.FullName "$kept\$name.log"
+            "--- $name, $($log.Length) bytes, last written $($log.LastWriteTimeUtc.ToString('o'))"
+            Get-Content -Raw $log.FullName
+          }
+          $consoles = $consoles | Out-String
+          $consoles
+          "### Each boot's console`n``````n$consoles``````" >> $env:GITHUB_STEP_SUMMARY
+          $since = (Get-Date).AddMinutes(-45)
+          $logs = Get-WinEvent -ListLog 'Microsoft-Windows-Hyper-V*' -ErrorAction SilentlyContinue | Where-Object { $_.RecordCount -gt 0 } | ForEach-Object LogName
+          $events = foreach ($log in $logs) { Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -ErrorAction SilentlyContinue }
+          # The worker's performance summaries (3086) carry what their message leaves out, in their properties.
+          $events = $events | Sort-Object TimeCreated | ForEach-Object {
+            $more = if ($_.Id -eq 3086) { " | " + (($_.Properties | ForEach-Object { "$($_.Value)" }) -join '; ') -replace '\s+', ' ' } else { "" }
+            "{0} {1} {2} {3}: {4}{5}" -f $_.TimeCreated.ToUniversalTime().ToString('HH:mm:ss.fff'), $_.LogName.Replace('Microsoft-Windows-', ''), $_.Id, $_.LevelDisplayName, ($_.Message -replace '\s+', ' '), $more
+          } | Out-String
+          $events
+          "### Hyper-V's own events, UTC`n``````n$events``````" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Keep what the boot found
         if: always()
@@ -283,6 +445,117 @@ jobs:
           path: desktop/test/vm/win32/measure/out
           if-no-files-found: ignore
           retention-days: 7
+
+  # The Windows app as the release makes it, signed with this run's own certificate in the release's signing account's
+  # place: laid out (scripts/package-win.sh), with a stand-in for the agent disk and the guest image's manifest, which the
+  # release builds on Linux, and the layout checked (test/package-win.test.ts); every program signed and checked as the
+  # release checks its own (scripts/sign-win.ps1); the MSI made with the WiX Toolset (scripts/msi-win.ps1), and one of a
+  # later version from the same layout, both signed and checked; then installed, checked, upgraded, downgraded and
+  # removed (test/msi.test.ps1). The roots the run made are trusted by the runner while the job runs, and by nothing
+  # else; what they signed goes nowhere. It gates: this is what the release builds, signs and installs.
+  msi:
+    runs-on: windows-2025
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
+      - name: Build the app for Windows, with every native part of it
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
+
+      # A disk of zeros in the agent disk's place, and a manifest of the image's form: the MSI installs them as it
+      # installs the release's.
+      - name: Lay out the app
+        shell: bash
+        run: |
+          mkdir -p ../out/stand-in
+          head -c 16777216 /dev/zero > ../out/stand-in/agent.img
+          printf '{"key":"%s","arch":"amd64","files":[]}\n' "$(printf '0%.0s' $(seq 64))" > ../out/stand-in/manifest.json
+          scripts/package-win.sh 0.1.0 ../out/stand-in/manifest.json ../out/stand-in/agent.img ../out/win
+
+      - name: Check the layout
+        env:
+          SUROGATE_WIN_LAYOUT: ${{ github.workspace }}\out\win\Surogate
+          SUROGATE_WIN_VERSION: "0.1.0"
+          SUROGATE_WIN_AGENT_DISK: ${{ github.workspace }}\out\stand-in\agent.img
+          SUROGATE_WIN_VM_MANIFEST: ${{ github.workspace }}\out\stand-in\manifest.json
+        run: npx vitest run --project unit --reporter=verbose test/package-win.test.ts
+
+      - name: Sign every program with this run's certificate, and check each as the release checks its own
+        id: programs
+        run: |
+          ./scripts/sign-win.ps1 list ..\out\win ..\out\programs.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\programs.txt 'CN=Surogate trial signer'
+          "root=$root" >> $env:GITHUB_OUTPUT
+          ./scripts/sign-win.ps1 verify ..\out\win 'CN=Surogate trial signer' $root
+
+      - name: Make the MSI, and one of a later version
+        run: |
+          ./scripts/sign-win.ps1 signed-by ..\out\win 'CN=Surogate trial signer'
+          ./scripts/msi-win.ps1 0.1.0 ..\out\win\Surogate ..\out\win\msi ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi
+          ./scripts/msi-win.ps1 0.1.1 ..\out\win\Surogate ..\out\win\msi ..\out\msi\surogate-desktop-0.1.1-win32-x64.msi
+
+      - name: Sign the MSIs with this run's certificate, and check them
+        id: msis
+        run: |
+          ./scripts/sign-win.ps1 list ..\out\msi ..\out\msis.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\msis.txt 'CN=Surogate trial signer'
+          "root=$root" >> $env:GITHUB_OUTPUT
+          ./scripts/sign-win.ps1 verify ..\out\msi 'CN=Surogate trial signer' $root
+          ./scripts/sign-win.ps1 contents ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi ..\out\win\Surogate 'CN=Surogate trial signer' $root
+
+      # An MSI signed by another signer than its programs, as one the account signed around a trial's programs would be:
+      # the release's check of what an MSI holds refuses it.
+      - name: Refuse an MSI that holds programs another signed
+        id: mixed
+        run: |
+          New-Item -ItemType Directory -Force ..\out\mixed | Out-Null
+          Copy-Item ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi ..\out\mixed\
+          ./scripts/sign-win.ps1 list ..\out\mixed ..\out\mixed.txt
+          $root = ./scripts/sign-win.ps1 trial ..\out\mixed.txt 'CN=Surogate account stand-in'
+          "root=$root" >> $env:GITHUB_OUTPUT
+          ./scripts/sign-win.ps1 verify ..\out\mixed 'CN=Surogate account stand-in' $root
+          $refused = $false
+          try { ./scripts/sign-win.ps1 contents ..\out\mixed\surogate-desktop-0.1.0-win32-x64.msi ..\out\win\Surogate 'CN=Surogate account stand-in' $root } catch { $refused = "$_" -match 'not signed by CN=Surogate account stand-in alone'; "$_" }
+          if (-not $refused) { throw 'The check of what an MSI holds took an MSI of programs another signed' }
+
+      - name: Install, check and remove the MSI
+        timeout-minutes: 30
+        run: ./test/msi.test.ps1 -Msi ..\out\msi\surogate-desktop-0.1.0-win32-x64.msi -Version 0.1.0 -Layout ..\out\win\Surogate -Newer ..\out\msi\surogate-desktop-0.1.1-win32-x64.msi -NewerVersion 0.1.1
+
+      - name: Trust this run's roots no more
+        if: always()
+        env:
+          PROGRAMS_ROOT: ${{ steps.programs.outputs.root }}
+          MSIS_ROOT: ${{ steps.msis.outputs.root }}
+          MIXED_ROOT: ${{ steps.mixed.outputs.root }}
+        run: foreach ($root in $env:PROGRAMS_ROOT, $env:MSIS_ROOT, $env:MIXED_ROOT) { if ($root) { ./scripts/sign-win.ps1 untrust $root } }
 
   # The shell and the browser on Windows: surogate-helper.exe's own lints and tests, those that fill the runner's
   # certificate stores among them; the app end to end with no VM; and the browser host on the runner's own Chrome and

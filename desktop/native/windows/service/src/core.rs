@@ -6,9 +6,12 @@
 // A caller is anyone who can open the pipe, so nothing a request names is taken on trust:
 // - the caller is an interactive user, by its token (caller.rs), before a line of theirs is acted on;
 // - the helper the VM ends with is the caller's own process, by the pipe's own word for it;
-// - every file is of path.rs's form, in the caller's own data folder (the agent disk may also be the installed app's),
-//   and that data folder in the caller's own profile; and each is opened as the caller, so what the caller cannot
-//   reach is refused, with no reparse point on its way;
+// - every file is of path.rs's form, in the caller's own data folder (the agent disk may also be the installed app's
+//   own, and no other file of the installed app's), and that data folder in the caller's own profile; and each is
+//   opened as the caller, so what the caller cannot reach is refused, with no reparse point on its way;
+// - each of the caller's files is granted to the VM alone (HcsGrantVmAccess) for its life, by the caller's own right to
+//   change its ACL; the installed app's agent disk is granted to none, and read by each VM as its folder lets every user
+//   (hyper.rs);
 // - the document is built here, from those few fields, never taken from the caller;
 // - one VM for one data folder, eight shares at most, and a share's name never given twice in a VM.
 
@@ -48,6 +51,9 @@ impl Checked {
     }
 }
 
+/// The installed app's agent disk, in its folder (the installer's layout), which every user's VM boots.
+pub const AGENT_DISK: &str = r"resources\vm\agent.vhd";
+
 /// The disk as the caller reaches it.
 pub trait Files {
     /// The caller's own profile folder (GetUserProfileDirectoryW of its token).
@@ -70,10 +76,14 @@ pub trait Vm {
 /// The Host Compute Service, for one caller.
 pub trait Hypervisor {
     type Vm: Vm;
+    /// A VM's console, read while it is held.
+    type Console;
     /// A new VM ID, never used before.
     fn new_id(&self) -> String;
     /// The named pipe the VM *id*'s console is read from.
     fn console(&self, id: &str) -> String;
+    /// The console's pipe *console* made, and read from now on.
+    fn listen(&self, console: &str) -> Result<Self::Console, Failure>;
     /// The VM *id* made from *document*, not started, with the VM given access to each of *granted*, as the caller;
     /// its runtime ID.
     fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(Self::Vm, String), Failure>;
@@ -102,8 +112,10 @@ pub struct Caller {
     pub pid: u32,
 }
 
-struct Booted<V> {
+struct Booted<V, C> {
     vm: V,
+    // Read from before the VM was made until after its handle has closed.
+    console: C,
     data: String,
     started: bool,
     // The shares in the guest now, and every name given in this VM.
@@ -117,7 +129,7 @@ pub struct Session<'a, H: Hypervisor, F: Files> {
     files: &'a F,
     roots: &'a Roots,
     caller: Caller,
-    booted: Option<Booted<H::Vm>>,
+    booted: Option<Booted<H::Vm, H::Console>>,
     ended: bool,
 }
 
@@ -191,7 +203,17 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
                 return Err(refuse(&format!("{what} outside the caller's data folder")));
             }
         }
-        let installed = self.files.installed().is_some_and(|folder| within(agent_disk, folder));
+        let installed = match self.files.installed() {
+            Some(folder) if within(agent_disk, folder) => {
+                // The one file of the installed app's that a VM is given.
+                let own = format!(r"{}\{AGENT_DISK}", folder.trim_end_matches('\\'));
+                if !agent_disk.eq_ignore_ascii_case(&own) {
+                    return Err(refuse("a file of the installed app's that is not its agent disk"));
+                }
+                true
+            }
+            _ => false,
+        };
         if !installed && (!within(agent_disk, data) || agent_disk.len() == data.len()) {
             return Err(refuse("the agent disk outside the caller's data folder and the installed app's"));
         }
@@ -217,13 +239,16 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
             console: self.hypervisor.console(&id),
         };
         let made = hcs::document(&machine).map_err(|why| refuse(&why)).and_then(|document| {
-            // The installed app's agent disk is the VM group's to read from its install; every other file is the caller's.
+            // The console read before the VM is made, which HCS's worker connects COM1 to: the kernel's first lines are read.
+            let console = self.hypervisor.listen(&machine.console).map_err(refused)?;
+            // The caller's own files, granted to the VM as the caller; the installed app's agent disk, to none (hyper.rs).
             let granted: Vec<String> = [kernel, initrd, rootfs, sessions].into_iter().chain((!installed).then_some(agent_disk)).map(str::to_owned).collect();
-            self.hypervisor.create(&id, &document, &granted).map_err(refused)
+            let (vm, runtime_id) = self.hypervisor.create(&id, &document, &granted).map_err(refused)?;
+            Ok((vm, console, runtime_id))
         });
         let outcome = match made {
-            Ok((vm, runtime_id)) => {
-                self.booted = Some(Booted { vm, data: data.to_owned(), started: false, live: HashSet::new(), named: HashSet::new() });
+            Ok((vm, console, runtime_id)) => {
+                self.booted = Some(Booted { vm, console, data: data.to_owned(), started: false, live: HashSet::new(), named: HashSet::new() });
                 Ok(runtime_id)
             }
             Err(answer) => {
@@ -291,12 +316,13 @@ impl<'a, H: Hypervisor, F: Files> Session<'a, H, F> {
     }
 
     /// The session's end, however it came: the connection gone, the helper gone, a kill or an exit. The VM's handle
-    /// closes, which ends it, and its data folder is free for another.
+    /// closes, which ends it, then its console's read, and its data folder is free for another.
     pub fn end(&mut self) {
         self.ended = true;
         if let Some(booted) = self.booted.take() {
             self.roots.give_back(&booted.data);
             drop(booted.vm);
+            drop(booted.console);
         }
     }
 }
@@ -366,6 +392,15 @@ mod tests {
         }
     }
 
+    struct FakeConsole {
+        log: Rc<Log>,
+    }
+    impl Drop for FakeConsole {
+        fn drop(&mut self) {
+            self.log.said("console closed");
+        }
+    }
+
     struct FakeHcs {
         log: Rc<Log>,
         fail: Option<&'static str>,
@@ -373,12 +408,20 @@ mod tests {
     }
     impl Hypervisor for FakeHcs {
         type Vm = FakeVm;
+        type Console = FakeConsole;
         fn new_id(&self) -> String {
             *self.made.borrow_mut() += 1;
             format!("00000000-0000-0000-0000-{:012}", self.made.borrow())
         }
         fn console(&self, id: &str) -> String {
             format!(r"\\.\pipe\surogate-console-{id}")
+        }
+        fn listen(&self, console: &str) -> Result<FakeConsole, Failure> {
+            self.log.said(format!("console {console}"));
+            if self.fail == Some("console") {
+                return Err(Failure { code: -1, words: "the console's pipe could not be made: Access is denied. (os error 5)".into() });
+            }
+            Ok(FakeConsole { log: self.log.clone() })
         }
         fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(FakeVm, String), Failure> {
             self.log.said(format!("create {id} granting {}", granted.join(" ")));
@@ -463,18 +506,23 @@ mod tests {
                 format!(r"check {DATA}\vm\sessions.vhdx Written"),
             ]
         );
-        // The installed app's agent disk is not granted as the caller: it is the VM group's to read from its install.
-        assert_eq!(log[6], format!(r"create 00000000-0000-0000-0000-000000000001 granting {DATA}\vm\image\vmlinuz {DATA}\vm\image\initrd {DATA}\vm\image\rootfs.vhd {DATA}\vm\sessions.vhdx"));
+        // The console is read before the VM is made, so the kernel's first lines are.
+        assert_eq!(log[6], r"console \\.\pipe\surogate-console-00000000-0000-0000-0000-000000000001");
+        // The installed app's agent disk is granted to no VM: each reads it as its folder lets every user.
+        assert_eq!(log[7], format!(r"create 00000000-0000-0000-0000-000000000001 granting {DATA}\vm\image\vmlinuz {DATA}\vm\image\initrd {DATA}\vm\image\rootfs.vhd {DATA}\vm\sessions.vhdx"));
         // The document is the service's own, with the caller's SID and the console's pipe.
-        assert!(log[7].contains(r#""DefaultBindSecurityDescriptor":"D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-1-2-3-1001)""#), "{}", log[7]);
-        assert!(log[7].contains(r#""NamedPipe":"\\\\.\\pipe\\surogate-console-00000000-0000-0000-0000-000000000001""#), "{}", log[7]);
+        assert!(log[8].contains(r#""DefaultBindSecurityDescriptor":"D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-1-2-3-1001)""#), "{}", log[8]);
+        assert!(log[8].contains(r#""NamedPipe":"\\\\.\\pipe\\surogate-console-00000000-0000-0000-0000-000000000001""#), "{}", log[8]);
         assert_eq!(session.handle(Request::Start { id: 2 }), [Answer::Started { id: 2 }]);
         assert_eq!(session.helper(), Some(4242));
         assert_eq!(session.handle(Request::Share { id: 3, name: "r1".into(), path: r"C:\Users\ana\Documents\shop".into(), read_only: false }), [Answer::Shared { id: 3 }]);
         assert_eq!(session.handle(Request::Unshare { id: 4, name: "r1".into() }), [Answer::Unshared { id: 4 }]);
         assert_eq!(session.handle(Request::Kill { id: 5 }), [Answer::Stopped { reason: Reason::Killed, why: None }]);
-        // The kill terminates the VM, and its handle is closed.
-        assert_eq!(w.log.all()[w.log.all().len() - 6..], ["start", r"check C:\Users\ana\Documents\shop Folder", r"share r1 C:\Users\ana\Documents\shop false", "unshare r1", "terminate", "closed"]);
+        // The kill terminates the VM, its handle is closed, and then its console.
+        assert_eq!(
+            w.log.all()[w.log.all().len() - 7..],
+            ["start", r"check C:\Users\ana\Documents\shop Folder", r"share r1 C:\Users\ana\Documents\shop false", "unshare r1", "terminate", "closed", "console closed"]
+        );
         assert!(session.ended());
         assert_eq!(why(&session.handle(Request::Start { id: 6 })), "the VM of this connection has stopped");
     }
@@ -487,6 +535,23 @@ mod tests {
         let agent_disk = format!(r"{DATA}\vm\agent.vhd");
         assert!(matches!(session.handle(Request::Boot { id: 1, data, kernel, initrd, rootfs, agent_disk: agent_disk.clone(), sessions, cpus, command_line, helper_pid })[..], [Answer::Created { .. }]));
         assert!(w.log.all().iter().any(|line| line.starts_with("create ") && line.ends_with(&agent_disk)));
+    }
+
+    #[test]
+    fn takes_no_file_of_the_installed_app_s_but_its_agent_disk() {
+        let w = world(None, vec![]);
+        let with = |agent_disk: &str| {
+            let Request::Boot { data, kernel, initrd, rootfs, sessions, cpus, command_line, helper_pid, .. } = boot(1) else { unreachable!() };
+            Session::new(&w.hcs, &w.files, &w.roots, ANA()).handle(Request::Boot { id: 1, data, kernel, initrd, rootfs, agent_disk: agent_disk.into(), sessions, cpus, command_line, helper_pid })
+        };
+        for other in [r"C:\Program Files\Surogate\service\surogate-service.exe", r"C:\Program Files\Surogate\resources\vm\other.vhd", r"C:\Program Files\Surogate\agent.vhd"] {
+            assert_eq!(why(&with(other)), "a file of the installed app's that is not its agent disk", "{other}");
+        }
+        assert!(!w.log.all().iter().any(|line| line.starts_with("check") || line.starts_with("create")), "{:?}", w.log.all());
+        // Its own name, ASCII case aside, as NTFS takes it: reached as the caller, and granted to no VM.
+        assert!(matches!(with(r"C:\Program Files\Surogate\Resources\VM\Agent.vhd")[..], [Answer::Created { .. }]));
+        assert!(w.log.all().contains(&r"check C:\Program Files\Surogate\Resources\VM\Agent.vhd File".to_owned()), "{:?}", w.log.all());
+        assert!(!w.log.all().iter().any(|line| line.starts_with("create ") && line.contains("Agent.vhd")), "{:?}", w.log.all());
     }
 
     #[test]
@@ -608,7 +673,31 @@ mod tests {
             session.handle(boot(1));
             session.handle(Request::Start { id: 2 });
         }
-        assert_eq!(w.log.all().last().map(String::as_str), Some("closed"));
+        assert_eq!(w.log.all()[w.log.all().len() - 2..], ["closed", "console closed"]);
         assert!(matches!(Session::new(&w.hcs, &w.files, &w.roots, ANA()).handle(boot(1))[..], [Answer::Created { .. }]));
+    }
+
+    #[test]
+    fn reads_the_console_from_before_the_vm_is_made_until_after_its_handle_has_closed() {
+        let w = world(None, vec![]);
+        let mut session = Session::new(&w.hcs, &w.files, &w.roots, ANA());
+        session.handle(boot(1));
+        session.handle(Request::Start { id: 2 });
+        let log = w.log.all();
+        let at = |what: &str| log.iter().position(|line| line.starts_with(what)).unwrap_or_else(|| panic!("no {what} in {log:?}"));
+        assert!(at("console ") < at("create ") && at("create ") < at("start"), "{log:?}");
+        assert!(!log.contains(&"console closed".to_owned()), "{log:?}");
+        session.end();
+        assert_eq!(w.log.all()[w.log.all().len() - 2..], ["closed", "console closed"]);
+    }
+
+    #[test]
+    fn refuses_a_boot_whose_console_cannot_be_read_makes_no_vm_and_frees_the_data_folder() {
+        let w = world(Some("console"), vec![]);
+        for _ in 0..2 {
+            let answers = Session::new(&w.hcs, &w.files, &w.roots, ANA()).handle(boot(1));
+            assert_eq!(answers, [Answer::Refused { id: Some(1), why: "the console's pipe could not be made: Access is denied. (os error 5)".into(), code: Some(-1) }]);
+        }
+        assert!(!w.log.all().iter().any(|line| line.starts_with("create")), "{:?}", w.log.all());
     }
 }
