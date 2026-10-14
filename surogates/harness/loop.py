@@ -102,6 +102,7 @@ from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
+from surogates.channels.capabilities import capabilities_for
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
@@ -2824,7 +2825,7 @@ class AgentHarness(
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
-            has_forms=session.channel == "whatsapp" and bool(whatsapp_forms),
+            has_forms=capabilities_for(session.channel).forms and bool(whatsapp_forms),
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(

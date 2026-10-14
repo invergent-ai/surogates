@@ -22,12 +22,14 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import (
     channel_user_email, mask_readable_phones, masked_phone, normalize_wa_id, readable_phone,
 )
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import (
+    ChannelContactRow,
     ChannelIdentity,
     Event,
     OutreachMessageRow,
@@ -107,7 +109,7 @@ TEAM_OVERVIEW_SCHEMA = ToolSchema(
             "person": {
                 "type": "string",
                 "description": (
-                    "A name or phone fragment to show only that person, with "
+                    "A name, phone fragment or channel handle to show only that person, with "
                     "their latest conversation lines and what the agent "
                     "remembers about them."
                 ),
@@ -130,7 +132,8 @@ TEAM_MESSAGE_PERSON_SCHEMA = ToolSchema(
     name="team_message_person",
     description=(
         "Team only. Send an enrolled person the team member's message, word "
-        "for word, from the business's WhatsApp number. First call without "
+        "for word, on their channel: the one they prefer, else the one they "
+        "last wrote on. First call without "
         "confirmation: it shows who would receive what, sends nothing and "
         "gives a confirmation code. Show that to the team member and only after "
         "they answer yes call again with the same arguments and that code. "
@@ -141,7 +144,7 @@ TEAM_MESSAGE_PERSON_SCHEMA = ToolSchema(
         "properties": {
             "person": {
                 "type": "string",
-                "description": "The person's name or a fragment of their phone number.",
+                "description": "The person's name, a fragment of their phone number, or their handle on a channel.",
             },
             "text": {
                 "type": "string",
@@ -182,7 +185,7 @@ TEAM_UPDATE_PERSON_SCHEMA = ToolSchema(
         "properties": {
             "person": {
                 "type": "string",
-                "description": "The person's name or a fragment of their phone number.",
+                "description": "The person's name, a fragment of their phone number, or their handle on a channel.",
             },
             "protocol": {
                 "type": "string",
@@ -323,11 +326,29 @@ class _Person:
         self.rows = described.rows
         self.display_name = described.display_name
         self.phone = described.wa_id
+        self.handles = described.handles
         self.label = described.name or f"user {described.user_id}"
+
+    @property
+    def contact(self) -> str:
+        """How the person is reached, masked: the phone, else a channel id."""
+        if self.phone:
+            return masked_phone(self.phone)
+        for platform, found in self.handles.items():
+            if found:
+                return f"{platform} …{found[0][-4:]}"
+        return "no contact"
 
     def matches(self, fragment: str) -> bool:
         digits = "".join(c for c in fragment if c.isdigit())
         if len(digits) >= 4 and digits in self.phone:
+            return True
+        handle = fragment.strip().lstrip("@").casefold()
+        if len(handle) >= 3 and any(
+            handle in h.casefold()
+            for platform, found in self.handles.items() if platform != "whatsapp"
+            for h in found
+        ):
             return True
         needle = fold_label(fragment.strip())
         names = [self.display_name] + [r.patient_name or "" for r in self.rows]
@@ -344,10 +365,44 @@ async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> l
     return [_Person(d) for d in described.values()]
 
 
+def _senders(ctx: Any, settings: Any) -> dict[str, str]:
+    """The agent's sender per channel; the team member's own conversation
+    names one for its channel when the settings do not."""
+    own = {ctx.channel: ctx.sender} if ctx.sender and capabilities_for(ctx.channel).can_initiate else {}
+    return {**own, **followup_store.senders_of(settings)}
+
+
 def _sender(ctx: Any, settings: Any) -> str | None:
-    return (settings.channel_identifier if settings else None) or (
-        ctx.sender if ctx.channel == "whatsapp" else None
-    ) or None
+    return _senders(ctx, settings).get("whatsapp")
+
+
+async def _last_wrote(sf: Any, ctx: Any, settings: Any, people: list) -> dict[uuid.UUID, datetime]:
+    """When each person last wrote to any of the agent's senders."""
+    owner = {
+        (platform, handle): p.user_id
+        for p in people for platform, found in p.handles.items() for handle in found
+    }
+    senders = set(_senders(ctx, settings).values())
+    if not owner or not senders:
+        return {}
+    async with sf() as db:
+        rows = (
+            await db.execute(
+                sa.select(
+                    ChannelContactRow.platform, ChannelContactRow.platform_user_id,
+                    ChannelContactRow.last_inbound_at,
+                )
+                .where(ChannelContactRow.org_id == ctx.org_id)
+                .where(ChannelContactRow.channel_identifier.in_(senders))
+                .where(ChannelContactRow.platform_user_id.in_({h for _, h in owner}))
+            )
+        ).all()
+    out: dict[uuid.UUID, datetime] = {}
+    for platform, handle, at in rows:
+        user_id = owner.get((platform, handle))
+        if user_id is not None and (user_id not in out or as_utc(at) > as_utc(out[user_id])):
+            out[user_id] = at
+    return out
 
 
 def _ago(at: datetime | None, now: datetime) -> str:
@@ -372,7 +427,7 @@ async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Perso
     if len(matches) > 1:
         return (
             f"'{fragment}' matches more than one person. Ask the team member which "
-            "one:\n" + "\n".join(f"- {p.label} ({masked_phone(p.phone)})" for p in matches)
+            "one:\n" + "\n".join(f"- {p.label} ({p.contact})" for p in matches)
         )
     return matches[0]
 
@@ -652,17 +707,10 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         return "Nobody is enrolled with this business's follow-up yet."
 
     ids = [p.user_id for p in people]
-    sender = _sender(ctx, settings)
-
-    async def no_one() -> dict:
-        return {}
 
     configs, last_in, invitations, alerts, undelivered = await asyncio.gather(
         followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id),
-        followup_store.last_inbound_by_user(
-            sf, org_id=ctx.org_id, platform="whatsapp", channel_identifier=sender,
-            platform_user_ids=[p.phone for p in people if p.phone],
-        ) if sender else no_one(),
+        _last_wrote(sf, ctx, settings, people),
         _invitations(sf, ctx.org_id, ctx.agent_id, ids, now),
         _alerts(sf, ctx.org_id, ctx.agent_id, ids, now),
         _undelivered(sf, ctx.org_id, ctx.agent_id, ids, now),
@@ -673,7 +721,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
 
     new, changed, silent = [], [], []
     for person in people:
-        wrote = last_in.get(person.phone)
+        wrote = last_in.get(person.user_id)
         active = [r for r in person.rows if r.status == "active"]
         for row in person.rows:
             if as_utc(row.created_at) >= since:
@@ -688,10 +736,9 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             silent.append(f"{person.label} (wrote {_ago(wrote, now)})")
 
     async def block(person: _Person) -> str:
-        wrote = last_in.get(person.phone)
+        wrote = last_in.get(person.user_id)
         head = person.label
-        if person.phone:
-            head += f" · {masked_phone(person.phone)}"
+        head += f" · {person.contact}"
         lines = [f"• {head}"]
         for row in person.rows:
             zone = zones.get(row.protocol, "UTC")
@@ -739,7 +786,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         f"Paused or ended (last {since_hours}h): " + ("; ".join(changed) or "none"),
         "Silent 3 days or more: " + ("; ".join(silent) or "none"),
         "Open items, messages that did not arrive (last 72h): " + ("; ".join(
-            f"{p.label}: {plain_reason(reason, settings.texts if settings else None)}, call them ({masked_phone(p.phone)})"
+            f"{p.label}: {plain_reason(reason, settings.texts if settings else None)}, call them ({p.contact})"
             for p in people for reason in undelivered.get(p.user_id, [])
         ) or "none"),
     ]
@@ -859,17 +906,21 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         return f"Nothing sent: {person}"
 
     async with sf() as db:
-        identity = (
+        found = (
             await db.execute(
                 sa.select(ChannelIdentity)
                 .where(ChannelIdentity.org_id == ctx.org_id)
-                .where(ChannelIdentity.platform == "whatsapp")
                 .where(ChannelIdentity.user_id == person.user_id)
+                .order_by(ChannelIdentity.id.desc())
             )
-        ).scalars().first()
-    if identity is None:
-        return f"Nothing sent: {person.label} has no WhatsApp number."
-    phone = masked_phone(identity.platform_user_id)
+        ).scalars().all()
+    identities: dict[str, Any] = {}
+    for identity in found:
+        if capabilities_for(identity.platform).can_initiate:
+            identities.setdefault(identity.platform, identity)
+    if not identities:
+        return f"Nothing sent: {person.label} has no number or account the business can write to."
+    phone = person.contact
     call = f"Call them instead ({phone}); {PHONE_HINT}"
     active = any(r.status == "active" for r in person.rows)
     if not active and arguments.get("even_if_paused") is not True:
@@ -882,26 +933,46 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
             "Ask the team member whether to message them anyway; only if they say "
             f"yes, call again with even_if_paused: true. {call}"
         )
-    if followup_store.permission_status(identity) != "granted":
+    granted = {
+        p: i for p, i in identities.items() if followup_store.permission_status(i) == "granted"
+    }
+    if not granted:
         return (
             f"Nothing sent: {person.label} has not given permission to be "
-            f"messaged on WhatsApp. {call}"
+            f"messaged on {_names(identities)}. {call}"
         )
-    sender = _sender(ctx, settings)
-    if not sender:
-        return f"Nothing sent: WhatsApp is not switched on for this business. {call}"
-    template = settings.message_template_name if settings else None
-    is_open = window_open(
-        await followup_store.last_inbound(
-            sf, org_id=ctx.org_id, platform="whatsapp",
-            platform_user_id=identity.platform_user_id, channel_identifier=sender,
-        ),
-        datetime.now(timezone.utc),
+    senders = _senders(ctx, settings)
+    if not any(p in senders for p in granted):
+        return f"Nothing sent: {_names(granted)} is not switched on for this business. {call}"
+    now = datetime.now(timezone.utc)
+    last: dict[str, datetime | None] = {}
+    for p in granted:
+        if p in senders:
+            last[p] = await followup_store.last_inbound(
+                sf, org_id=ctx.org_id, platform=p,
+                platform_user_id=granted[p].platform_user_id, channel_identifier=senders[p],
+            )
+    # A bot cannot write first to someone who never wrote to it.
+    usable = [p for p in last if last[p] is not None or not capabilities_for(p).needs_prior_contact]
+    if not usable:
+        return f"Nothing sent: {person.label} has never written to the business on {_names(last)}. {call}"
+    preferred = next(
+        (r.preferred_channel for r in person.rows if r.status == "active" and r.preferred_channel in usable),
+        None,
     )
+    wrote = [p for p in usable if last[p] is not None]
+    platform = preferred or (
+        max(wrote, key=lambda p: as_utc(last[p])) if wrote
+        else "whatsapp" if "whatsapp" in usable else usable[0]
+    )
+    name = _names([platform])
+    windowed = bool(capabilities_for(platform).window_hours)
+    template = (settings.message_template_name if settings else None) if windowed else None
+    is_open = not windowed or window_open(last[platform], now)
     if not is_open and not template:
         return (
             f"Nothing sent: {person.label} has not written in the last 24 hours, "
-            "so WhatsApp only lets an approved message template reach them, and "
+            f"so {name} only lets an approved message template reach them, and "
             f"the business has none chosen under Follow-up. {call}"
         )
 
@@ -909,7 +980,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         kwargs, "team_message_person", arguments,
         f"Will send to {person.label} ({phone}): «{text}»"
         + (
-            ", now, as a normal WhatsApp message." if is_open else
+            f", now, as a normal {name} message." if is_open else
             ". Their 24h window is closed, so the approved opener template goes "
             "first and your text follows the moment they answer."
         ),
@@ -920,15 +991,15 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
 
     await followup_store.queue_outreach(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
-        platform="whatsapp", channel_identifier=sender, kind="operator",
+        platform=platform, channel_identifier=senders[platform], kind="operator",
         text=text, template_name=template,
-        template_language=settings.message_template_language if settings else None,
+        template_language=(settings.message_template_language if settings and template else None),
         subject_user_id=person.user_id, created_by=f"team:{ctx.user_id}",
     )
     if is_open:
         return (
-            f"Sent now: {person.label} wrote in the last 24 hours, so your text "
-            "goes out as a normal WhatsApp message within a minute."
+            f"Sent now: your text goes out to {person.label} as a normal "
+            f"{name} message within a minute."
         )
     hours = operator_unanswered_hours(settings)
     return (
@@ -936,6 +1007,13 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         "your text goes the moment they answer. You will be told here when it "
         f"arrives, or if they have not answered within {hours} hours."
     )
+
+
+_PLATFORM_NAMES = {"whatsapp": "WhatsApp", "slack": "Slack", "telegram": "Telegram"}
+
+
+def _names(platforms: Any) -> str:
+    return " or ".join(_PLATFORM_NAMES.get(p, p) for p in platforms)
 
 
 # ---------------------------------------------------------------------------

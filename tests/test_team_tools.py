@@ -787,3 +787,29 @@ def test_a_phone_is_grouped_the_way_its_country_writes_it_and_masks_whole(wa_id,
     assert readable_phone(wa_id) == shown
     assert all(len(g) < 7 for g in shown.split())
     assert mask_readable_phones(f"call {shown}.") == f"call {masked_phone(wa_id)}."
+
+
+@pytest.mark.asyncio
+async def test_a_person_on_slack_is_found_by_handle_and_messaged_there(sf, practice):
+    # Ioana also has Slack, prefers it, and the agent has a Slack sender:
+    # the text goes straight into her Slack DM, no WhatsApp template.
+    ioana, _ = practice.ioana
+    async with sf() as db:
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=ioana, platform="slack", platform_user_id="U0IOANA",
+            platform_meta={"contact_permission": {"status": "granted"}},
+        ))
+        await db.commit()
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, senders={"slack": "T1"})
+    await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ioana, protocol="post-op",
+        preferred_channel="slack",
+    )
+    out = await _confirmed(
+        team.handle_team_message_person,
+        {"person": "@u0ioana", "text": "See you tomorrow."}, _kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Sent now:") and "Slack" in out
+    [row] = await _outreach(sf)
+    assert (row.user_id, row.platform, row.channel_identifier) == (ioana, "slack", "T1")
+    assert row.template_name is None

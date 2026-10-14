@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -436,12 +436,14 @@ def _requester(created_by: str | None) -> uuid.UUID | None:
 @dataclass
 class Described:
     """A person as the team knows them: their enrollments, the name they go
-    by, and their WhatsApp number."""
+    by, their WhatsApp number, and their ids and names on every channel."""
 
     user_id: uuid.UUID
     rows: list
     display_name: str
     wa_id: str
+    #: ``{platform: [platform_user_id, username…]}``.
+    handles: dict = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -488,17 +490,27 @@ async def describe_people(
             (await db.execute(sa.select(User.id, User.display_name).where(User.id.in_(ids)))).all()
         )
         phones: dict[uuid.UUID, str] = {}
-        for user_id, wa_id in (
+        handles: dict[uuid.UUID, dict[str, list[str]]] = {}
+        for user_id, platform, pid, meta in (
             await db.execute(
-                sa.select(ChannelIdentity.user_id, ChannelIdentity.platform_user_id)
+                sa.select(
+                    ChannelIdentity.user_id, ChannelIdentity.platform,
+                    ChannelIdentity.platform_user_id, ChannelIdentity.platform_meta,
+                )
                 .where(ChannelIdentity.org_id == org_id)
-                .where(ChannelIdentity.platform == "whatsapp")
                 .where(ChannelIdentity.user_id.in_(ids))
             )
         ).all():
-            phones.setdefault(user_id, wa_id)
+            if platform == "whatsapp":
+                phones.setdefault(user_id, pid)
+            names_there = [str((meta or {}).get(k) or "") for k in ("username", "display_name")]
+            handles.setdefault(user_id, {}).setdefault(platform, []).extend(
+                h for h in (pid, *names_there) if h
+            )
     return {
-        uid: Described(uid, rows, names.get(uid) or "", phones.get(uid) or "")
+        uid: Described(
+            uid, rows, names.get(uid) or "", phones.get(uid) or "", handles.get(uid, {}),
+        )
         for uid, rows in rows_by_user.items()
     }
 

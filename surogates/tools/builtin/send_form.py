@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.whatsapp_flows import (
     BODY_CHARS,
     BUTTON_CHARS,
@@ -115,18 +116,19 @@ async def handle_send_form(arguments: dict, **kwargs: Any) -> str:
     session_id = uuid.UUID(str(kwargs["session_id"]))
     session = await store.get_session(session_id)
     config = session.config or {}
-    wa_id = str(config.get("whatsapp_channel_id") or "")
+    caps = capabilities_for(session.channel)
+    person = str(config.get(f"{session.channel}_channel_id") or "")
     sender = str(config.get("channel_identifier") or "")
-    if session.channel != "whatsapp" or not wa_id or not sender:
-        return "Not sent: forms can only be sent in a WhatsApp conversation."
+    if not caps.forms or not person or not sender:
+        return f"Not sent: forms cannot be sent in a {session.channel or 'web'} conversation."
 
-    # Outside the 24-hour window only an approved template reaches the
-    # person, and Meta would refuse this message.
+    # Outside the service window only an approved template reaches the
+    # person, and the provider would refuse this message.
     last = await followup_store.last_inbound(
-        kwargs["session_factory"], org_id=session.org_id, platform="whatsapp",
-        platform_user_id=wa_id, channel_identifier=sender,
-    )
-    if not window_open(last, datetime.now(timezone.utc)):
+        kwargs["session_factory"], org_id=session.org_id, platform=session.channel,
+        platform_user_id=person, channel_identifier=sender,
+    ) if caps.window_hours else None
+    if caps.window_hours and not window_open(last, datetime.now(timezone.utc)):
         return (
             "Not sent: the person has not written in the last 24 hours, so "
             "WhatsApp lets only an approved template reach them. A Program's "

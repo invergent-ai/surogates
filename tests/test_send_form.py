@@ -132,7 +132,7 @@ async def test_a_closed_window_refuses(window):
 async def test_only_in_a_whatsapp_conversation(window):
     store = _Store(channel="slack")
     result = await handle_send_form({"form": "vitals", "message": "x"}, **_kwargs(store))
-    assert result.startswith("Not sent: forms can only be sent in a WhatsApp")
+    assert result.startswith("Not sent: forms cannot be sent in a")
 
 
 def test_the_form_event_reaches_only_the_whatsapp_outbox():
