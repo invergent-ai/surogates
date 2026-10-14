@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from surogates.browser.control import BROWSER_HAND_BACK, RESUMES, TAKEN_OVER_FROM
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
@@ -305,7 +306,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
-    elif event_type == EventType.CHANNEL_FORM and channel == "whatsapp":
+    elif event_type == EventType.CHANNEL_FORM and capabilities_for(channel).forms:
         payload["flow"] = data.get("interactive") or {}
     elif (
         event_type == EventType.INBOX_INPUT_REQUIRED

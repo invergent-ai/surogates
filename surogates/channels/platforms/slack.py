@@ -507,6 +507,7 @@ class SlackPlatform:
     supports_edit = True
     capabilities = ChannelCapabilities(
         can_initiate=True, opener="text", buttons=True, identity="member",
+        label="Slack",
     )
 
     # Slack rejects chat.postMessage over ~40k chars (msg_too_long); stay

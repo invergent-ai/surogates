@@ -8,9 +8,9 @@ declaring what it can do rather than by finding every such test.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-__all__ = ["ChannelCapabilities", "capabilities_for", "initiating_platforms"]
+__all__ = ["ChannelCapabilities", "capabilities_for", "channel_names", "initiating_platforms"]
 
 
 @dataclass(frozen=True)
@@ -20,10 +20,10 @@ class ChannelCapabilities:
     opener: Literal["template", "text"] | None = None  # how a first message opens a conversation
     window_hours: int | None = None     # provider service window; None = no window
     buttons: bool = False
-    lists: bool = False
     forms: bool = False
     identity: Literal["phone", "member", "chat", "user", "external"] | None = None
     receipts: frozenset[str] = frozenset()   # {"delivered", "read"} the provider reports
+    label: str | None = None            # as people write it; None = the kind itself
 
 
 _NONE = ChannelCapabilities()
@@ -74,6 +74,11 @@ def capabilities_for(kind: str | None) -> ChannelCapabilities:
         return _NONE
     platform = _registry().get(kind)
     return getattr(platform, "capabilities", None) or BUILTIN.get(kind, _NONE)
+
+
+def channel_names(platforms: Any) -> str:
+    """Channels as people write them: "WhatsApp or Telegram"."""
+    return " or ".join(capabilities_for(p).label or p for p in platforms)
 
 
 def initiating_platforms() -> tuple[str, ...]:

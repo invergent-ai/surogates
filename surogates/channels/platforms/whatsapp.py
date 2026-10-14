@@ -725,7 +725,7 @@ class WhatsAppPlatform:
     topology = "webhook"
     capabilities = ChannelCapabilities(
         can_initiate=True, opener="template", window_hours=24, buttons=True,
-        lists=True, forms=True, identity="phone",
+        forms=True, identity="phone", label="WhatsApp",
         receipts=frozenset({"delivered", "read"}),
     )
 

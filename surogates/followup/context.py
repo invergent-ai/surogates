@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 
-from surogates.channels.capabilities import capabilities_for
+from surogates.channels.capabilities import capabilities_for, channel_names
 from surogates.channels.identity import readable_phone
 from surogates.db.models import (
     ChannelIdentity,
@@ -35,14 +35,6 @@ __all__ = [
     "start_text",
     "told",
 ]
-
-
-_PLATFORM_NAMES = {"whatsapp": "WhatsApp", "slack": "Slack", "telegram": "Telegram"}
-
-
-def channel_names(platforms: Any) -> str:
-    """Channels as people write them: "WhatsApp or Telegram"."""
-    return " or ".join(_PLATFORM_NAMES.get(p, p) for p in platforms)
 
 
 class Context:

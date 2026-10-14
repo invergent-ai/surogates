@@ -14,7 +14,7 @@ from typing import Any, NamedTuple
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
-from surogates.channels.capabilities import capabilities_for
+from surogates.channels.capabilities import capabilities_for, channel_names
 from surogates.channels.identity import channel_user_email, masked_phone
 from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import ChannelIdentity, User
@@ -33,8 +33,6 @@ __all__ = [
     "named_account",
     "reachable",
 ]
-
-_NAMES = {"whatsapp": "WhatsApp", "slack": "Slack", "telegram": "Telegram"}
 
 
 async def channel_holder(sf: Any, org_id: uuid.UUID, platform: str, platform_user_id: str) -> User | None:
@@ -96,7 +94,7 @@ async def channel_account(
         elif bound != platform_user_id:
             # Never move a person's number, as the Users page refuses to.
             shown = masked_phone(bound) if platform == "whatsapp" else f"…{bound[-4:]}"
-            return f"that person's account already has the {_NAMES.get(platform, platform)} id {shown}."
+            return f"that person's account already has the {channel_names([platform])} id {shown}."
         # Someone who wrote first has a runtime shadow account, which the
         # linked identity policy refuses; being vouched for makes them known.
         if user.auth_provider == platform:
@@ -169,10 +167,10 @@ async def reachable(
         p: i for p, i in identities.items() if followup_store.permission_status(i) == "granted"
     }
     if not granted:
-        return [], f"has not given permission to be messaged on {_names(identities)}"
+        return [], f"has not given permission to be messaged on {channel_names(identities)}"
     with_sender = [p for p in granted if senders.get(p)]
     if not with_sender:
-        return [], f"{_names(granted)} is not switched on for this business"
+        return [], f"{channel_names(granted)} is not switched on for this business"
     out: list[Reach] = []
     why: str | None = None
     for platform in with_sender:
@@ -182,13 +180,13 @@ async def reachable(
             platform_user_id=granted[platform].platform_user_id, channel_identifier=senders[platform],
         )
         if caps.needs_prior_contact and last is None:
-            why = why or f"has never written to the business on {_names([platform])}"
+            why = why or f"has never written to the business on {channel_names([platform])}"
             continue
         closed = bool(caps.window_hours) and not window_open(last, now)
         if closed and not template:
             why = why or (
                 f"has not written in the last {caps.window_hours} hours, so "
-                f"{_names([platform])} only lets an approved template reach them, "
+                f"{channel_names([platform])} only lets an approved template reach them, "
                 "and none is chosen"
             )
             continue
@@ -199,10 +197,6 @@ async def reachable(
         r.platform != "whatsapp",
     ))
     return out, (None if out else why)
-
-
-def _names(platforms: Any) -> str:
-    return " or ".join(_NAMES.get(p, p) for p in platforms)
 
 
 #: Whole messages that mean "stop writing to me", whatever the agent makes of
@@ -264,7 +258,7 @@ async def withdraw_consent(
             sf, org_id=org_id, platform=platform, platform_user_id=platform_user_id,
             recorded_by=by, method="opt_out", status="withdrawn",
         )
-    channel = _names([platform])
+    channel = channel_names([platform])
     ended = []
     for row in await followup_store.enrollments(
         sf, org_id=org_id, agent_id=agent_id, user_id=user_id, status="active",

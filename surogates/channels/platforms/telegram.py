@@ -465,7 +465,7 @@ class TelegramPlatform:
     #: A bot may only write to someone who has started it.
     capabilities = ChannelCapabilities(
         can_initiate=True, needs_prior_contact=True, opener="text",
-        buttons=True, identity="chat",
+        buttons=True, identity="chat", label="Telegram",
     )
 
     descriptor = ChannelDescriptor(
