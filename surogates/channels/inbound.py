@@ -951,6 +951,7 @@ class ChannelInboundPipeline:
             from surogates.api.routes._commerce_turn import (
                 AllowanceReserveError,
                 limit_notice,
+                limit_texts,
                 reserve_allowance,
             )
             from surogates.runtime.platform_client import (
@@ -986,6 +987,11 @@ class ChannelInboundPipeline:
                             limit_notice(
                                 exc.detail,
                                 runtime_payload.get("commerce_buy_url"),
+                                await limit_texts(
+                                    deps.session_factory,
+                                    org_id=routing.org_id,
+                                    agent_id=routing.agent_id,
+                                ),
                             ),
                         )
                     except Exception:

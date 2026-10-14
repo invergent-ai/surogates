@@ -424,27 +424,70 @@ async def buyer_identity(session_factory, *, org_id, user_id) -> dict | None:
     }
 
 
-def limit_notice(code: str | None, buy_url: str | None) -> str:
+#: The wording of :func:`limit_notice`, by key; the business overrides each
+#: in its follow-up settings ``texts`` (Settings → Messages, in its language).
+LIMIT_TEXTS = {
+    "plan_owner_out_notice": (
+        "This assistant is temporarily unavailable. Its owner has run out of "
+        "credit."
+    ),
+    "plan_required_notice": (
+        "A subscription is required to keep chatting with this assistant."
+    ),
+    "plan_channel_notice": "Your current plan doesn't include this channel.",
+    "plan_upgrade_notice": (
+        "You have used this month's free allowance. Upgrade to keep chatting."
+    ),
+    "plan_limit_notice": "You've reached your usage limit for this assistant.",
+    "plan_link": "Get more access here: {link}",
+    "plan_try_later": "Please try again later.",
+}
+
+
+def limit_notice(
+    code: str | None, buy_url: str | None, texts: dict | None = None,
+) -> str:
     """User-facing notice when the allowance or paid-turn gate refuses a
     turn no client is waiting on: a channel's, or a project thread's.
 
-    Names the reason (subscription vs. usage limit) and appends the buy
-    link when the agent projects one, so the user gets a real path to
-    keep going rather than a dead "try again later".
+    Names the reason (subscription vs. usage limit vs. a spent Free plan)
+    and appends the buy link when the agent projects one, so the user gets
+    a real path to keep going rather than a dead "try again later".
+    *texts* is the business's wording (follow-up settings), key by key.
     """
+    from surogates.followup.store import render_text
+
+    def say(key: str, **values) -> str:
+        return render_text((texts or {}).get(key), LIMIT_TEXTS[key], **values)
+
     if code == "operator_subscription_exhausted":
         # The agent OWNER ran out of platform credit; buying more access
         # cannot help the sender, so no buy link is offered.
-        return (
-            "This assistant is temporarily unavailable. Its owner has "
-            "run out of credit."
-        )
+        return say("plan_owner_out_notice")
     if code == "subscription_required":
-        lead = "A subscription is required to keep chatting with this assistant."
+        lead = say("plan_required_notice")
     elif code == "channel_not_included":
-        lead = "Your current plan doesn't include this channel."
+        lead = say("plan_channel_notice")
+    elif code == "upgrade_required":
+        lead = say("plan_upgrade_notice")
     else:
-        lead = "You've reached your usage limit for this assistant."
+        lead = say("plan_limit_notice")
     if buy_url:
-        return f"{lead} Get more access here: {buy_url}"
-    return f"{lead} Please try again later."
+        return f"{lead} {say('plan_link', link=buy_url)}"
+    return f"{lead} {say('plan_try_later')}"
+
+
+async def limit_texts(session_factory, *, org_id, agent_id: str) -> dict:
+    """The business's wording for :func:`limit_notice`; ``{}`` on any miss."""
+    import uuid
+
+    from surogates.followup import store as followup_store
+
+    try:
+        settings = await followup_store.get_settings(
+            session_factory, org_id=uuid.UUID(str(org_id)), agent_id=agent_id,
+        )
+    except Exception:  # noqa: BLE001 — the platform wording still goes out
+        logger.warning("limit wording unreadable; using the default", exc_info=True)
+        return {}
+    return dict(getattr(settings, "texts", None) or {})

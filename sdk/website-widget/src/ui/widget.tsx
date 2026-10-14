@@ -64,6 +64,9 @@ function paywallCopy(code: string): string {
   if (code === 'subscription_required') {
     return 'This assistant requires an active subscription.';
   }
+  if (code === 'upgrade_required') {
+    return 'You have used this month’s free allowance. Upgrade to keep chatting.';
+  }
   if (code === 'insufficient_tokens') {
     return 'You’re out of tokens for this assistant.';
   }

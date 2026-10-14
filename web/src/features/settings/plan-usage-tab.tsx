@@ -62,7 +62,20 @@ interface CommerceOverview {
   purchasable: boolean;
 }
 
-const ACTIVE_SUB = new Set(["active", "trialing"]);
+// The Free plan renews like a paid one; a trial ends on its own date.
+function subscriptionLabel(status: string, periodEnd?: string | null): string {
+  const date = periodEnd ? new Date(periodEnd).toLocaleDateString() : null;
+  if (status === "trialing") {
+    return `Free trial${date ? ` · ends ${date}` : ""}`;
+  }
+  if (status === "free") {
+    return `Free plan${date ? ` · renews ${date}` : ""}`;
+  }
+  if (status === "active") {
+    return `Active${date ? ` · renews ${date}` : ""}`;
+  }
+  return "None";
+}
 
 const errorMessage = (e: unknown, fallback: string): string =>
   e instanceof Error ? e.message : fallback;
@@ -174,15 +187,10 @@ export function PlanUsageTab() {
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Subscription</span>
                 <span className="shrink-0 text-right font-medium">
-                  {ACTIVE_SUB.has(ent.subscription_status)
-                    ? `Active${
-                        ent.current_period_end
-                          ? ` · renews ${new Date(
-                              ent.current_period_end,
-                            ).toLocaleDateString()}`
-                          : ""
-                      }`
-                    : "None"}
+                  {subscriptionLabel(
+                    ent.subscription_status,
+                    ent.current_period_end,
+                  )}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
