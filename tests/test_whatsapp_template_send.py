@@ -177,8 +177,9 @@ async def test_a_delivery_status_callback_updates_the_invitation(
 
     row = await reload_invitation(accepted_invitation.id)
     assert row.delivery_state == "failed"
-    # The response axis must not move: they were never reached.
-    assert row.response_state == "awaiting_reply"
+    # Never reached, so never asked: not an open question that would keep
+    # the person's next step from reaching them until the deadline.
+    assert row.response_state == "not_started"
     # Provider wording has its own column, so a late status can never
     # overwrite the agent's operational note or a skip explanation in `reason`.
     assert "undeliverable" in (row.delivery_error or "").lower()
