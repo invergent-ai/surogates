@@ -155,7 +155,27 @@ async def test_api_delivery_is_handed_to_ops_for_the_agents_webhook():
     [(url, body)] = ops.posts
     assert url == "/api/agents/agent-1/runtime/api-deliveries"
     assert body["outbox_id"] == 12 and body["external_id"] == "crm-42" and body["kind"] == "step"
-    assert body["step"]["id"] == "p-1" and body["text"].startswith("Bună ziua")
+    assert body["text"].startswith("Bună ziua")
+
+
+async def test_the_step_the_agent_wrote_is_named_in_the_hand_off(sf):
+    from datetime import datetime, timezone
+
+    from tests import test_program_agent_steps as steps
+
+    program = await steps._program(sf, channel="api", channel_identifier="agent-1", name="Day 3 check")
+    inv = await steps._invitation(sf, program, await steps._person(sf), platform="api",
+                                  platform_user_id="crm-42", response_state="awaiting_reply",
+                                  session_id=steps.SESSION, woken_at=datetime.now(timezone.utc))
+    store = api_store()
+    store.event = reply_event(message={"content": "x"})  # the agent's own message, no step marker
+    row = item("Cum vă simțiți în a treia zi?", id=13)
+    row.session_id = steps.SESSION
+    ops = Ops()
+    assert (await outbound.deliver_api([row], session_store=store, ops=ops, session_factory=sf)).success
+    body = ops.posts[0][1]
+    assert body["step"] == {"id": str(program.program_id), "name": "Day 3 check", "journey": "recovery"}
+    assert body["invitation_id"] == str(inv.id) and body["kind"] == "step"
 
 
 @pytest.mark.parametrize("status, exc, retryable", [

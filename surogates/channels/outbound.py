@@ -248,21 +248,51 @@ async def deliver_web(group: list[Any], *, session_store: Any, push: Any) -> Sen
 # ---------------------------------------------------------------------------
 
 
-def api_delivery(session: Any, msg: Message) -> dict:
+async def step_of(session_factory: Any, msg: Message) -> dict | None:
+    """The step a message is for: the opener's own, else the step the agent was woken to write in
+    this conversation and has not written yet.  ``{id, name, journey, invitation_id}`` or ``None``."""
+    from surogates.db.models import ProgramInvitationRow, ProgramScheduleRow
+    from surogates.programs.journey import journey_of, protocol_of
+
+    async with session_factory() as db:
+        if msg.meta.get("invitation_id"):
+            invitation = await db.get(ProgramInvitationRow, UUID(str(msg.meta["invitation_id"])))
+        else:
+            invitation = (await db.execute(
+                sa.select(ProgramInvitationRow)
+                .where(ProgramInvitationRow.session_id == msg.item.session_id)
+                .where(ProgramInvitationRow.woken_at.isnot(None))
+                .where(ProgramInvitationRow.outbox_id.is_(None))
+                .where(ProgramInvitationRow.response_state == "awaiting_reply")
+                .order_by(ProgramInvitationRow.woken_at.desc()).limit(1)
+            )).scalar_one_or_none()
+        program_id = invitation.program_id if invitation is not None else msg.meta.get("program_id")
+        if program_id is None:
+            return None
+        config = (await db.execute(
+            sa.select(ProgramScheduleRow.config).where(ProgramScheduleRow.program_id == UUID(str(program_id)))
+        )).scalar_one_or_none() or {}
+    return {"id": str(program_id), "name": str(config.get("name") or ""),
+            "journey": journey_of(config).get("slug") or protocol_of(config),
+            "invitation_id": str(invitation.id) if invitation is not None else None}
+
+
+def api_delivery(session: Any, msg: Message, step: dict | None = None) -> dict:
     """The hand-off to ops for the agent's webhook (``message.deliver``; see
     "API delivery" in the journeys spec's round 2 contracts)."""
-    meta, config = msg.meta, session.config or {}
-    step = ({"id": str(meta["program_id"]), "name": str(meta.get("step_name") or ""),
-             "journey": meta.get("journey")} if meta.get("program_id") else None)
+    config = session.config or {}
+    step = dict(step) if step else None
+    invitation_id = step.pop("invitation_id", None) if step else None
+    kind = msg.kind if msg.kind in ("step", "alert", "form") else "message"
     return {
         "outbox_id": msg.item.id, "session_id": str(session.id), "user_id": str(session.user_id),
         "external_id": str(config.get("api_channel_id") or ""),
-        "kind": msg.kind if msg.kind in ("step", "alert", "form") else "message",
-        "text": msg.text, "buttons": None, "invitation_id": meta.get("invitation_id"), "step": step,
+        "kind": "step" if step and kind == "message" else kind,
+        "text": msg.text, "buttons": None, "invitation_id": invitation_id, "step": step,
     }
 
 
-async def deliver_api(group: list[Any], *, session_store: Any, ops: Any) -> SendResult:
+async def deliver_api(group: list[Any], *, session_store: Any, ops: Any, session_factory: Any = None) -> SendResult:
     """Hand the text to ops, which posts it, signed, to the agent's webhook and retries it.
 
     *ops* is an ``httpx.AsyncClient`` on the ops API with the runtime token.
@@ -278,8 +308,9 @@ async def deliver_api(group: list[Any], *, session_store: Any, ops: Any) -> Send
     if msg is None:
         return SendResult(success=True)
     try:
+        step = await step_of(session_factory, msg) if session_factory is not None else None
         resp = await ops.post(f"/api/agents/{session.agent_id}/runtime/api-deliveries",
-                              json=api_delivery(session, msg), timeout=15.0)
+                              json=api_delivery(session, msg, step), timeout=15.0)
     except Exception as exc:  # noqa: BLE001 — the network: retried
         return SendResult(success=False, error=f"ops unreachable: {exc}", retryable=True)
     if resp.status_code in (200, 202):
@@ -361,7 +392,7 @@ def start_loops(*, settings: Any, session_factory: Any, session_store: Any, deli
         return await deliver_web(group, session_store=session_store, push=push)
 
     async def api(group: list[Any]) -> SendResult:
-        return await deliver_api(group, session_store=session_store, ops=ops)
+        return await deliver_api(group, session_store=session_store, ops=ops, session_factory=session_factory)
 
     loops = {"web": (web, {}), "api": (api, {"max_age": API_MAX_AGE})}
     return [
