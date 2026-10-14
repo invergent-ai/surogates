@@ -20,6 +20,14 @@ def _applies(session: Any, session_factory: Any) -> bool:
     return session_factory is not None and load_settings().office.agent_editing
 
 
+async def _open_locations(session_factory: Any, session: Any, locations: list[str]) -> set[str]:
+    """Those of *locations* whose file is open in the editor. On a computer without case: its folder may ignore it."""
+    if device_of(session.config) is None:
+        return await office_sessions.open_locations(session_factory, locations)
+    found = {document.location.lower() for document in await office_sessions.open_like(session_factory, locations)}
+    return {location for location in locations if location.lower() in found}
+
+
 async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
     """Why a write_file or patch to a document open in the editor is refused, or None."""
     if tool_name not in WRITING_TOOLS or not isinstance(tool_args, dict) or not _applies(session, session_factory):
@@ -36,7 +44,7 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
                     "like docs/report.docx."
                 )
     paths = {location_of(session, relative_path(p, session)): relative_path(p, session) for p in targets}
-    for location in sorted(await office_sessions.open_locations(session_factory, list(paths))):
+    for location in sorted(await _open_locations(session_factory, session, list(paths))):
         return (
             f"{paths[location]} is open in the document editor, where people may be editing it: change it with "
             f"office_edit (read it with office_read), not with {tool_name}."
@@ -52,7 +60,7 @@ async def open_document_note(tool_args: Any, session: Any, *, session_factory: A
     path = relative_path(raw, session)
     if device_of(session.config) is not None and not within_folder(path):
         return None  # it cannot be matched to an open document
-    if not await office_sessions.open_locations(session_factory, [location_of(session, path)]):
+    if not await _open_locations(session_factory, session, [location_of(session, path)]):
         return None
     return (
         f"{path} is open in the document editor: this read can lag what people are writing there. Use office_read "

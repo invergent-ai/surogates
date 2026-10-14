@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
@@ -36,6 +37,34 @@ def editor_request_id(doc_key: str, pending: dict[str, Any]) -> str:
 def editor_invocation(doc_key: str, pending: dict[str, Any]) -> str:
     """The device invocation of that write, as ``session_files`` names it."""
     return f"{REQUEST_PREFIX}{EDITOR_REQUEST}{editor_request_id(doc_key, pending)}"
+
+
+def _folded(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+async def on_disk_spelling(files: DeviceWorkspaceIO, path: str) -> str:
+    """*path*, relative to the folder, spelled as the computer's folder lists it.
+
+    A folder that ignores case or Unicode form (macOS, Windows) finds ``plan.docx`` for ``Plan.docx``: each name not
+    listed as written, but found all the same, takes the one listed spelling, so one file is one document however it
+    is asked for. A name the computer does not find stays as written, with the rest of the path: a new file, or a
+    folder that tells case apart.
+    """
+    parts = [part for part in path.split("/") if part]
+    done: list[str] = []
+    for index, part in enumerate(parts):
+        try:
+            names = await files.list_dir(await files.resolve("/".join(done)))
+        except (FileNotFoundError, NotADirectoryError):
+            return "/".join([*done, *parts[index:]])
+        if part not in names:
+            matches = [name for name in names if _folded(name) == _folded(part)]
+            if len(matches) != 1 or await files.stat(await files.resolve("/".join([*done, part]))) is None:
+                return "/".join([*done, *parts[index:]])
+            part = matches[0]
+        done.append(part)
+    return "/".join(done)
 
 
 class FolderNotReady(Exception):

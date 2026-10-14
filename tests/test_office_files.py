@@ -10,9 +10,11 @@ from uuid import uuid4
 import pytest
 
 from surogates.devices.binding import Binding
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.office import files as office_files
 from surogates.office.agent import location_of
-from surogates.office.files import EDITOR_REQUEST, FolderNotReady, document_session, editor_files
+from surogates.office.files import EDITOR_REQUEST, FolderNotReady, document_session, editor_files, on_disk_spelling
+from tests.device_computer import Computer
 
 DEVICE = str(uuid4())
 FOLDER = "/home/me/project"
@@ -33,6 +35,34 @@ def test_a_pane_path_spelled_otherwise_names_the_same_document_on_a_computer():
     assert location_of(on_computer(), "docs/./a.docx") == location_of(on_computer(), "docs//a.docx") == (
         f"device:{DEVICE}:{FOLDER}/docs/a.docx"
     )
+
+
+def test_a_computer_location_is_one_unicode_form():
+    nfd = "Re\u0301sume\u0301.docx"
+    nfc = "R\u00e9sum\u00e9.docx"
+    assert location_of(on_computer(), nfd) == location_of(on_computer(), nfc)
+
+
+def _io(files, *, ignores_case):
+    return DeviceWorkspaceIO(Computer(FOLDER, files, ignores_case=ignores_case), root=FOLDER, identity=f"device:{DEVICE}")
+
+
+async def test_a_name_the_computer_finds_in_another_case_takes_its_listed_spelling():
+    io = _io({"Docs/Plan.docx": b"x"}, ignores_case=True)
+    assert await on_disk_spelling(io, "docs/plan.docx") == "Docs/Plan.docx"
+    assert await on_disk_spelling(io, "Docs/Plan.docx") == "Docs/Plan.docx"
+
+
+async def test_a_folder_that_tells_case_apart_keeps_the_name_as_written():
+    io = _io({"plan.docx": b"x"}, ignores_case=False)
+    # Not found as written: a new file, not plan.docx.
+    assert await on_disk_spelling(io, "Plan.docx") == "Plan.docx"
+
+
+async def test_a_name_not_there_stays_as_written_with_the_rest_of_its_path():
+    io = _io({"docs/a.docx": b"x"}, ignores_case=True)
+    # docs is found as written otherwise; new is not there, so it and b.docx stay as written.
+    assert await on_disk_spelling(io, "Docs/new/b.docx") == "docs/new/b.docx"
 
 
 def test_a_thread_and_its_master_name_a_document_alike():

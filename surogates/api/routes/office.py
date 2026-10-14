@@ -29,7 +29,7 @@ from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.chats import live_session
 from surogates.office.editor_config import build_editor_config
-from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session
+from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, on_disk_spelling
 from surogates.office.kinds import office_kind
 from surogates.office.tokens import InvalidOfficeToken, read_document_server_body, read_url_token
 from surogates.session.events import EventType
@@ -76,6 +76,8 @@ async def get_workspace_editor(
     async with workspace_files(request, target) as files:
         if not isinstance(files, DOCUMENT_FILES):
             raise HTTPException(status_code=409, detail="This workspace cannot be opened in the editor yet.")
+        if isinstance(files, DeviceWorkspaceIO):
+            path = await on_disk_spelling(files, path)
         stat = await files.stat(await files.resolve(path))
         if stat is None:
             raise HTTPException(status_code=404, detail=f"File not found: {path}")

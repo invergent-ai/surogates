@@ -205,6 +205,40 @@ async def test_a_turn_on_the_computer_saves_the_document_it_edited(session_facto
     assert flushed == [f"{document.doc_key}.{session.id}"] and len(sent) == 1
 
 
+async def test_a_turn_on_the_computer_saves_the_document_under_any_spelling_once(session_factory, monkeypatch):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = SessionStore(session_factory)
+    session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={
+        "storage_bucket": "b", "workspace_path": "/home/me/notes",
+        "execution": {"kind": "device", "device_id": "00000000-0000-0000-0000-000000000001"},
+    })
+    document = await office_sessions.open_or_reuse(
+        session_factory, location=location_of(session, "Plan.docx"), path="Plan.docx", session_id=session.id,
+    )
+    after = await store.last_event_id(session.id)
+    for path in ("plan.docx", "PLAN.docx"):
+        await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": path, "ops": []}})
+    flushed, sent = [], []
+
+    class Runtime:
+        def __init__(self, office):
+            pass
+
+        async def flush(self, page):
+            flushed.append(page)
+            return True
+
+    async def force_save(office, key, userdata):
+        sent.append(userdata)
+        return 4  # nothing unsaved: every edit is saved
+
+    monkeypatch.setattr(turn_end, "RuntimeOffice", Runtime)
+    monkeypatch.setattr(turn_end, "force_save", force_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert flushed == [f"{document.doc_key}.{session.id}"] and len(sent) == 1
+
+
 async def test_a_refused_path_saves_nothing_and_stops_no_other_save(session_factory, storage, monkeypatch):
     store, session, document, _ = await _turn(session_factory, storage)
     after = await store.last_event_id(session.id)

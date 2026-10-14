@@ -36,6 +36,15 @@ async def test_same_location_reuses_the_key(session_factory):
     assert set(two.session_ids) == {first, second}
 
 
+async def test_open_rows_are_found_without_case(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location="device:d:/f/Plan.docx", path="Plan.docx", session_id=uuid4())
+    [found] = await office_sessions.open_like(session_factory, ["device:d:/f/plan.DOCX"])
+    assert found.id == document.id
+    assert await office_sessions.open_like(session_factory, ["device:d:/f/other.docx"]) == []
+    named = await office_sessions.open_or_reuse(session_factory, location="device:d:/f/Ședință.docx", path="Ședință.docx", session_id=uuid4())
+    assert [found.id for found in await office_sessions.open_like(session_factory, ["device:d:/f/Ședință.docx"])] == [named.id]
+
+
 async def test_concurrent_opens_get_one_key(session_factory):
     location = _location()
     chats = [uuid4() for _ in range(8)]

@@ -203,7 +203,7 @@ async def test_a_closing_document_that_lands_during_the_wait_opens_fresh(client,
 FOLDER = "/home/me/notes"
 
 
-async def _computer_chat(client, app, session_factory, monkeypatch, files, *, config=None):
+async def _computer_chat(client, app, session_factory, monkeypatch, files, *, config=None, ignores_case=False):
     """A chat on a folder of the user's computer, whose files a fake computer answers; the sessions asked for, kept."""
     _, headers, user_id, chat = await _user_chat(client, app, session_factory)
     device_id = str(uuid.uuid4())
@@ -213,7 +213,7 @@ async def _computer_chat(client, app, session_factory, monkeypatch, files, *, co
         config={"storage_bucket": chat.config["storage_bucket"], "workspace_path": FOLDER,
                 "execution": {"kind": "device", "device_id": device_id, "device_name": "Mac"}, **(config or {})},
     )
-    computer = computer_io(FOLDER, files, device_id=device_id)
+    computer = computer_io(FOLDER, files, device_id=device_id, ignores_case=ignores_case)
     asked: list = []
 
     @asynccontextmanager
@@ -252,6 +252,21 @@ async def test_a_document_on_the_computer_opens_and_is_fetched_from_it(client, a
     fetched = await client.get(f"/v1/office/files/{config['document']['url'].rsplit('/', 1)[1]}")
     assert fetched.status_code == 200 and fetched.content == b"PK-on-the-mac"
     assert (await office_sessions.get_open(session_factory, document.id)).base_version == computer.runner.files[f"{FOLDER}/docs/Plan.docx"][1]
+
+
+async def test_a_document_asked_for_in_another_case_opens_as_the_computer_spells_it(client, app, session_factory, monkeypatch):
+    headers, _, device_chat, _, _ = await _computer_chat(
+        client, app, session_factory, monkeypatch, {"Docs/Plan.docx": b"PK-on-the-mac"}, ignores_case=True,
+    )
+    first = await client.get(f"/v1/sessions/{device_chat.id}/workspace/editor",
+                             params={"path": "docs/plan.docx"}, headers=headers)
+    assert first.status_code == 200, first.text
+    document = await office_sessions.get_open(session_factory, _row_id(first.json()["config"]))
+    assert document.location.endswith(f"{FOLDER}/Docs/Plan.docx") and document.path == "Docs/Plan.docx"
+    again = await client.get(f"/v1/sessions/{device_chat.id}/workspace/editor",
+                             params={"path": "Docs/Plan.docx"}, headers=headers)
+    assert again.status_code == 200, again.text
+    assert again.json()["config"]["document"]["key"] == first.json()["config"]["document"]["key"]
 
 
 async def test_a_document_over_the_computers_cap_is_refused(client, app, session_factory, monkeypatch):

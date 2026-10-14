@@ -861,6 +861,8 @@ class OfficeSession(Base):
             postgresql_where=text("status = 'open'"),
         ),
         Index("idx_office_sessions_pending", "updated_at", postgresql_where=text("pending_save IS NOT NULL")),
+        # Open rows looked up without case: a folder on a computer may ignore it.
+        Index("idx_office_sessions_open_location_folded", text("lower(location)"), postgresql_where=text("status = 'open'")),
         CheckConstraint("status IN ('open', 'closed')", name="ck_office_sessions_status"),
     )
 

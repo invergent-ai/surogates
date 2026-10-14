@@ -666,10 +666,6 @@ Metrics wait until a dashboard needs them.
 - **In Surogate Desktop the editor frame gets no permission grants**
   (`desktop/src/shell/window-policy.ts`), so copy and paste that needs the
   async Clipboard API fails there; keyboard copy and paste still work.
-- **On a computer whose folder ignores case (macOS, Windows), a document opened
-  under two spellings (`plan.docx`, `Plan.docx`) gets two editing sessions**: the
-  second to save lands as a conflict copy, and a sandbox write under the other
-  spelling is not refused.
 
 ## Deferred
 

@@ -131,3 +131,21 @@ async def test_on_the_computer_a_document_through_home_is_refused_and_not_matche
     other = "/Users/me/other/b.docx"
     await office_sessions.open_or_reuse(session_factory, location=f"device:{DEVICE}:{other}", path="b.docx", session_id=session.id)
     assert await guard.open_document_note({"path": other}, session, session_factory=session_factory) is None
+
+
+async def test_on_the_computer_another_spelling_of_an_open_document_is_refused_and_noted(session_factory):
+    session = await _computer_chat(session_factory)
+    await office_sessions.open_or_reuse(session_factory, location=location_of(session, "Plan.docx"), path="Plan.docx",
+                                        session_id=session.id)
+    said = await guard.refused_open_document("write_file", {"path": "plan.docx", "content": "x"}, session,
+                                             session_factory=session_factory)
+    assert said and said.startswith("plan.docx is open in the document editor")
+    assert (await guard.open_document_note({"path": "plan.docx"}, session, session_factory=session_factory)).startswith("plan.docx")
+
+
+async def test_in_the_cloud_another_spelling_is_another_file(session_factory):
+    session = await _session_with_open(session_factory, path="Plan.docx")
+    assert await guard.refused_open_document("write_file", {"path": "plan.docx", "content": "x"}, session,
+                                             session_factory=session_factory) is None
+    assert await guard.refused_open_document("write_file", {"path": "Plan.docx", "content": "x"}, session,
+                                             session_factory=session_factory)

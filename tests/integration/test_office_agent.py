@@ -111,9 +111,9 @@ async def test_other_files_are_refused(session_factory, redis_client, storage):
 FOLDER = "/home/me/notes"
 
 
-def _computer(monkeypatch, files, device_id):
+def _computer(monkeypatch, files, device_id, *, ignores_case=False):
     """A fake computer answering every request of the office code; the sessions and requests asked for, kept."""
-    io = computer_io(FOLDER, files, device_id=device_id)
+    io = computer_io(FOLDER, files, device_id=device_id, ignores_case=ignores_case)
     asked: list = []
 
     @asynccontextmanager
@@ -154,6 +154,17 @@ async def test_a_document_open_in_the_editor_is_not_looked_up_on_the_computer_ag
     assert len(asked) == 1
     await _open(session, storage, session_factory, redis_client, runtime, "a.docx")
     assert len(asked) == 1 and len(runtime.opened) == 2
+
+
+async def test_another_spelling_of_a_document_the_pane_has_open_joins_it(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+    io, _ = _computer(monkeypatch, {"Plan.docx": b"PK"}, device_id, ignores_case=True)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    pane = await office_sessions.open_or_reuse(session_factory, location=location_of(session, "Plan.docx"), path="Plan.docx",
+                                               session_id=session.id, user=("user:1", "Flavius"))
+    opened = await _open(session, storage, session_factory, redis_client, FakeRuntime(), "plan.docx", create=True)
+    assert opened.document.doc_key == pane.doc_key and opened.path == "Plan.docx"
+    assert opened.created is False and not [kind for kind, _ in io.runner.calls if kind == "write"]
 
 
 async def test_a_new_document_on_the_computer_is_made_through_the_editors_own_request(session_factory, redis_client, storage, monkeypatch):

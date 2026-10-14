@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from surogates.db.models import OfficeSession
@@ -137,6 +137,19 @@ async def open_locations(session_factory: Any, locations: list[str]) -> set[str]
             select(OfficeSession.location).where(OfficeSession.location.in_(locations), OfficeSession.status == OPEN)
         )
         return set(found.all())
+
+
+async def open_like(session_factory: Any, locations: list[str]) -> list[OpenDocument]:
+    """The open rows at *locations*, compared without case: a folder on a computer may ignore it. Each row once."""
+    if not locations:
+        return []
+    # Lowered by the database on both sides: Python's lower() folds letters a C-locale database's does not.
+    keys = [func.lower(location) for location in sorted(set(locations))]
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(func.lower(OfficeSession.location).in_(keys), OfficeSession.status == OPEN)
+        )
+        return [_snapshot(row) for row in rows.all()]
 
 
 async def open_documents(session_factory: Any) -> list[OpenDocument]:

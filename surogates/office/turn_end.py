@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from surogates.config import OfficeSettings
+from surogates.devices.binding import device_of
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of, relative_path, within_folder
 from surogates.office.commands import force_save
@@ -50,10 +51,19 @@ async def save_turn(*, store: Any, session: Any, after: int, office: OfficeSetti
         relative = [relative_path(path.strip(), session) for path in paths]
         locations = list(dict.fromkeys(location_of(session, path) for path in relative if within_folder(path)))
         runtime = RuntimeOffice(office)
+        on_computer = device_of(session.config) is not None
+        saved: set[Any] = set()
         for location in locations:
-            document = await office_sessions.open_at(session_factory, location)
-            if document is not None:
-                await _save(runtime, office, session_factory, document, str(session.id))
+            if on_computer:
+                # Without case, since its folder may ignore it: plan.docx saves Plan.docx's open document.
+                documents = await office_sessions.open_like(session_factory, [location])
+            else:
+                document = await office_sessions.open_at(session_factory, location)
+                documents = [document] if document is not None else []
+            for document in documents:
+                if document.id not in saved:
+                    saved.add(document.id)
+                    await _save(runtime, office, session_factory, document, str(session.id))
 
 
 async def _save(runtime: RuntimeOffice, office: OfficeSettings, session_factory: Any,

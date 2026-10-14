@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import posixpath
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,17 @@ from uuid import UUID, uuid4
 
 from surogates.config import OfficeSettings
 from surogates.devices.binding import device_of
-from surogates.devices.workspace import DeviceOperationError, said
+from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO, said
 from surogates.office import sessions as office_sessions
 from surogates.office.editor_config import build_editor_config
-from surogates.office.files import DENIED_ON_COMPUTER, DOCUMENT_FILES, FolderNotReady, document_session, editor_files
+from surogates.office.files import (
+    DENIED_ON_COMPUTER,
+    DOCUMENT_FILES,
+    FolderNotReady,
+    document_session,
+    editor_files,
+    on_disk_spelling,
+)
 from surogates.office.kinds import office_kind
 from surogates.office.runtime_office import RuntimeOffice
 from surogates.session.attachment_ingest import workspace_root_id
@@ -72,14 +80,15 @@ def location_of(session: Any, path: str) -> str:
     """Where *path*, relative to the workspace, is: one name however the file is reached.
 
     A cloud session names it as the workspace layer does (``StorageWorkspaceIO.location``), literally; a session on
-    a computer by its path there, normalised as the pane names it (not as the computer resolves it).  A project
+    a computer by its path there, normalised as the pane names it (not as the computer resolves it) and in one
+    Unicode form, since a computer's folder may store either.  A project
     thread's copy sits at the folder's own path, so it names the real file, as its master does: the editor only ever
     opens that one.
     """
     device_id = device_of(session.config)
     if device_id is not None:
         folder = str(session.config["workspace_path"]).rstrip("/")
-        return f"device:{device_id}:{posixpath.join(folder, posixpath.normpath(path))}"
+        return f"device:{device_id}:{unicodedata.normalize('NFC', posixpath.join(folder, posixpath.normpath(path)))}"
     prefix = boundary_workspace_prefix(session.config, session, workspace_root_id(session))
     return StorageWorkspaceIO(None, bucket=session.config["storage_bucket"], prefix=prefix).location(path)
 
@@ -109,10 +118,14 @@ async def open_for_agent(
                 if not isinstance(files, DOCUMENT_FILES):
                     raise AgentDocumentError("This workspace cannot be edited live yet.")
                 try:
+                    if isinstance(files, DeviceWorkspaceIO):
+                        path = await on_disk_spelling(files, path)
                     key = await files.resolve(path)
                 except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
                     raise AgentDocumentError(str(exc)) from None
-                missing = await files.etag(key) is None
+                location = location_of(target, path)
+                # Asked for in another spelling of a document the editor has open: that one.
+                missing = await office_sessions.open_at(session_factory, location) is None and await files.etag(key) is None
             if missing:
                 if not create:
                     raise AgentDocumentError(
