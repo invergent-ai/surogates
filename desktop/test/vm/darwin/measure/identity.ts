@@ -5,7 +5,7 @@
 // root sees them and as the Mac does; then, once the Mac has moved the folder aside and made another at its path,
 // as a command of a chat whose folder held it could, which of the two the root is shown, and its inodes.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts identity
-// Prints what each side saw. PASS or FAIL: the root was set up and the look ran. Whether the inodes are the Mac's,
+// Prints what each side saw. PASS, FAIL or UNTESTED: the root was set up and the look ran. Whether the inodes are the Mac's,
 // and which folder the root is shown after the move, decide whether the VM manager can check a share's folder by
 // its identity in the guest, and are not judged here.
 
@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { expect, it } from "vitest";
 
-import { lab, ready, record, ROOTS, scratch } from "./harness.js";
+import { judged, lab, ready, record, ROOTS, scratch, type Verdict } from "./harness.js";
 
 const NAMES = [".", "sub", "file.txt", "linked.txt"];
 
@@ -26,14 +26,14 @@ it("shows what inode numbers Apple's share gives the guest, and which folder a r
   writeFileSync(join(folder, "file.txt"), "the first folder\n");
   linkSync(join(folder, "file.txt"), join(folder, "linked.txt"));
   const found: Record<string, unknown> = { "the Mac's inodes": Object.fromEntries(NAMES.map((name) => [name, statSync(join(folder, name)).ino])) };
-  let looked = false;
+  let looked: Verdict = false;
   const booted = await lab("identity");
   try {
     const root = ROOTS[0]!;
     await ready(booted.guest, root, folder);
     const look = await booted.run(root, `stat -c '%n %i' ${NAMES.join(" ")}`);
     found["the guest's inodes"] = look.output.trim().split("\n");
-    looked = look.returncode === 0;
+    looked = judged([look], look.returncode === 0);
     renameSync(folder, aside);
     mkdirSync(folder);
     writeFileSync(join(folder, "file.txt"), "the second folder\n");

@@ -43,6 +43,7 @@ from surogates.channels.constants import (
     API_CHANNEL,
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
+    outbound_dm,
 )
 from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
@@ -1416,6 +1417,14 @@ async def send_message(
         event_data["metadata"] = body.metadata
     if attachments_payload:
         event_data["attachments"] = attachments_payload
+    if tenant.user_id is not None and outbound_dm(session.channel, session.config):
+        # The web chat a step waited in: the person's message may be its answer.
+        from surogates.channels.outbound import begin_step_reply
+        await begin_step_reply(
+            request.app.state.session_factory, store, org_id=session.org_id,
+            agent_id=session.agent_id, platform="web",
+            platform_user_id=str(tenant.user_id), session_id=session_id,
+        )
     event_id = await store.emit_event(
         session_id,
         EventType.USER_MESSAGE,

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Failure, NUL_REFUSED } from "../src/files/answers.js";
-import { checkWrite, inFolderRefusal, movesOutOfDependency, protectedInFolder } from "../src/files/protect.js";
+import { checkWrite, folded, inFolderRefusal, movesOutOfDependency, protectedInFolder } from "../src/files/protect.js";
 
 const home = "/home/tester";
 let folder: string;
@@ -157,6 +157,29 @@ describe("checkWrite, in the folder", () => {
 
   it.each(["a.txt", ".gitignore", ".git/HEAD", ".env", ".claude/settings.json", "sub/bashrc"])("allows %s", (path) => {
     expect(checkWrite(folder, home, path)).toBeNull();
+  });
+});
+
+// APFS compares names as Unicode's canonical equivalence takes them, then without case: a name and its decomposed
+// spelling are one name there, as each of these pairs is.
+describe("the fold, as APFS compares names", () => {
+  it.each([
+    ["caf\u00e9", "cafe\u0301"], ["CAF\u00c9", "cafe\u0301"], ["CAFE\u0301", "caf\u00e9"], ["\uac00", "\u1100\u1161"],
+    // Two marks in either order, which canonical ordering puts in one.
+    ["a\u0301\u0328", "a\u0328\u0301"], ["\u01fa", "A\u030a\u0301"], ["\u212a", "k"],
+  ])("takes %s and %s as one", (one, other) => {
+    expect(folded(one)).toBe(folded(other));
+  });
+
+  it("takes as a protected name each spelling it took before, the Kelvin sign's by its canonical K, and none with a mark on a letter", () => {
+    for (const path of [".git/hoo\u212As/x", ".git/hooKs/x", ".g\u0130t/config", ".g\u0131t/config", ".vſcode/x", ".git/conﬁg"]) {
+      expect(checkWrite(folder, home, path), path).toBe(inFolderRefusal(path));
+    }
+    // A mark on a letter of one is another name, to APFS and to the fold, in either spelling: no write lands in .git. İ
+    // decomposed, I and a dot above, is a letter with a mark too.
+    for (const path of [".g\u00edt/config", ".gi\u0301t/config", ".vsc\u00f6de/x", ".vsco\u0308de/x", ".mcp.jso\u0303n", ".gI\u0307t/config"]) {
+      expect(checkWrite(folder, home, path), path).toBeNull();
+    }
   });
 });
 

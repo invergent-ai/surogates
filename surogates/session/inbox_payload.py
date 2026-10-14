@@ -25,6 +25,11 @@ class InboxRow:
 # the session is actively viewed. Kinds not listed here need a real response.
 ACKNOWLEDGE_ONLY_KINDS = frozenset({"task_complete", "progress_checkin"})
 
+#: Tool-call id prefix of the ``ask_user_question`` call the harness makes out
+#: of a final reply that asked the user something.  Its ``context`` is that
+#: reply, the one ``context`` written for the person rather than about them.
+ASK_USER_QUESTION_RESCUE_PREFIX = "call_ask_user_question_rescue_"
+
 _TITLE_TRUNCATE = 120
 _BODY_TRUNCATE = 1000
 

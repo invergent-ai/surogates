@@ -31,9 +31,15 @@ so ``thread_key`` is always ``None`` and ``visibility`` is ``"dm"``.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import hashlib
 import hmac
+import json
 import logging
+import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -41,6 +47,7 @@ from fastapi import Request
 from fastapi.responses import PlainTextResponse, Response
 
 from surogates.channels.base import SendResult
+from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.platforms.whatsapp_api import (
     DEFAULT_API_VERSION,
@@ -53,7 +60,17 @@ from surogates.channels.platforms.whatsapp_api import (
 from surogates.channels.platforms.whatsapp_format import render_whatsapp
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 from surogates.channels.text_split import split_text
+from surogates.channels.whatsapp_flows import (
+    BODY_CHARS,
+    BUTTON_CHARS,
+    MAX_LIST_ROWS,
+    MAX_REPLY_BUTTONS,
+    ROW_DESCRIPTION_CHARS,
+    ROW_TITLE_CHARS,
+    form_reply_text,
+)
 from surogates.programs.delivery import schedule_status_apply
+from surogates.session.interactive_input import fold_label
 
 __all__ = [
     "WhatsAppPlatform",
@@ -77,7 +94,30 @@ _MAX_MESSAGE_CHARS = 4096
 #: reaction, system, unsupported, order, location, contacts — returns None
 #: rather than starting an agent turn with an empty prompt.
 _MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
-_MESSAGE_TYPES = ("text",) + _MEDIA_TYPES
+
+#: Meta drops the typing indicator after 25 s, or as soon as any message is
+#: sent, so a longer turn needs it re-sent.
+_TYPING_EVERY_S = 20.0
+#: A turn whose end we never observe (lost outbox row, crashed worker whose
+#: lease has not expired yet) must not type forever.
+_TYPING_CAP_S = 300.0
+
+
+@dataclass
+class _Typing:
+    token: str
+    phone_number_id: str
+    wamid: str
+    api_version: str
+    turn_active: Callable[[], Awaitable[bool]]
+    deadline: float
+    task: asyncio.Task | None = None
+
+
+#: Taps: a reply button or list row from an interactive message, a WhatsApp
+#: Flow completion, or a quick-reply button on an approved template.
+_TAP_TYPES = ("interactive", "button")
+_MESSAGE_TYPES = ("text",) + _MEDIA_TYPES + _TAP_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +345,46 @@ def _file_ref(raw_message: dict, msg_type: str) -> InboundFileRef | None:
     )
 
 
+def _flow_reply(reply: dict) -> tuple[str, dict]:
+    """A Flow completion's text, and its submitted fields with the token the
+    flow was sent with taken out of them.
+
+    The text is the fields as ``label: value`` lines under their keys; the
+    pipeline relabels them once it has checked the token against the
+    conversation, then drops the token.
+    """
+    raw = reply.get("response_json")
+    try:
+        fields = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return str(raw or ""), {}
+    if not isinstance(fields, dict):
+        return str(fields or ""), {}
+    token = fields.pop("flow_token", None)
+    return form_reply_text({}, fields), {
+        "flow_fields": fields, **({"flow_token": str(token)} if token else {}),
+    }
+
+
+def _tap_text(raw_message: dict, msg_type: str) -> str:
+    """The text a tap stands for.
+
+    A button or row title is the choice label verbatim, so the shared
+    ``resolve_text_answer`` matches it to the pending question; a list row's
+    description is left out for the same reason.
+    """
+    if msg_type == "button":
+        return str((raw_message.get("button") or {}).get("text") or "")
+    interactive = raw_message.get("interactive") or {}
+    kind = interactive.get("type")
+    reply = interactive.get(kind) if isinstance(kind, str) else None
+    if not isinstance(reply, dict):
+        return ""
+    if kind in ("button_reply", "list_reply"):
+        return str(reply.get("title") or "")
+    return ""
+
+
 def parse(
     body: Any,
     *,
@@ -360,22 +440,51 @@ def parse(
             raw_messages = [
                 m for m in value.get("messages") or [] if isinstance(m, dict)
             ]
-            for index, raw_message in enumerate(raw_messages):
-                message = _build_message(raw_message, names=names, identifier=body_pnid)
-                if message is not None:
-                    dropped = len(raw_messages) - index - 1
-                    if dropped:
-                        # The dispatcher runs one pipeline pass per webhook.
-                        # Meta rarely batches user messages (bursts, retry
-                        # backlogs) — but the loss must be visible when it
-                        # does.  Fan-out is a recorded v2 item.
-                        logger.warning(
-                            "[whatsapp] dropping %d additional batched "
-                            "message(s) for pnid=%s (one message per webhook)",
-                            dropped, body_pnid,
-                        )
-                    return message
+            built = [
+                m for m in (
+                    _build_message(raw, names=names, identifier=body_pnid)
+                    for raw in raw_messages
+                ) if m is not None
+            ]
+            if built:
+                return _merge_batch(built, pnid=body_pnid)
     return None
+
+
+def _merge_batch(messages: list[InboundMessage], *, pnid: str | None) -> InboundMessage:
+    """One message for a webhook that batched several from one person.
+
+    The dispatcher runs one pipeline pass per webhook, and Meta batches a
+    burst ("Bună ziua" / "am o comandă" / "nu a ajuns azi").  Keeping only
+    the first dropped the complaint.  Same-sender messages are joined in
+    order, with every attachment; ``ts`` stays the first wamid so a retried
+    batch still deduplicates, while ``source.wamid`` is the last one, the
+    message a read receipt and the typing indicator should point at.
+    """
+    first = messages[0]
+    same = [m for m in messages if m.platform_user_id == first.platform_user_id]
+    if len(same) < len(messages):
+        logger.warning(
+            "[whatsapp] dropping %d batched message(s) from other senders for pnid=%s",
+            len(messages) - len(same), pnid,
+        )
+    if len(same) == 1:
+        return first
+    files = [f for m in same for f in (m.files or [])]
+    kind = next((m.kind for m in same if m.files), first.kind)
+    source = dict(first.source or {})
+    source["wamid"] = (same[-1].source or {}).get("wamid") or source.get("wamid")
+    for m in same[1:]:
+        for flag in ("flow_reply", "voice"):
+            if (m.source or {}).get(flag):
+                source[flag] = True
+    return dataclasses.replace(
+        first,
+        kind=kind,
+        text="\n".join(m.text for m in same if m.text),
+        files=files,
+        source=source,
+    )
 
 
 def _build_message(
@@ -407,9 +516,19 @@ def _build_message(
 
     wamid = raw_message.get("id") or ""
 
+    files: list[InboundFileRef] = []
+    interactive = raw_message.get("interactive") or {}
+    # A Flow's form fields are never a pending question's answer.
+    flow_reply = msg_type == "interactive" and interactive.get("type") == "nfm_reply"
+    flow_text, flow_source = _flow_reply(interactive.get("nfm_reply") or {}) if flow_reply else ("", {})
     if msg_type == "text":
         text = ((raw_message.get("text") or {}).get("body")) or ""
-        files: list[InboundFileRef] = []
+    elif msg_type in _TAP_TYPES:
+        text = (flow_text if flow_reply else _tap_text(raw_message, msg_type)).strip()
+        if not text:
+            logger.debug("[whatsapp] ignoring a tap with no text: %s", raw_message.get(msg_type))
+            return None
+        msg_type = "text"
     else:
         block = raw_message.get(msg_type) or {}
         text = block.get("caption") or ""
@@ -420,6 +539,9 @@ def _build_message(
         "phone_number_id": identifier,
         "wamid": wamid,
     }
+    if flow_reply:
+        source["flow_reply"] = True
+        source.update(flow_source)
     if msg_type == "audio":
         source["voice"] = bool((raw_message.get("audio") or {}).get("voice"))
 
@@ -445,9 +567,12 @@ def _build_message(
 def _render_input_prompt(payload: dict) -> str:
     """Render an ``ask_user_question`` prompt as plain text.
 
-    WhatsApp has no native buttons in this integration, so the choices are
-    listed in the message body and a plain typed reply resolves the pending
-    record through the shared ``resolve_text_answer`` path.
+    The fallback for prompts :func:`_interactive_prompt` cannot carry
+    (several questions, open-ended ones, labels over Meta's limits): the
+    choices are listed in the message body.  A typed reply naming a choice,
+    or any reply to a single open question, answers it; anything else,
+    including any reply to several questions, reaches the agent as the
+    person's message and dismisses the question.
 
     The question shape is the one normalised by
     ``tools.builtin.ask_user_question._validate_questions`` and emitted
@@ -459,7 +584,7 @@ def _render_input_prompt(payload: dict) -> str:
     would invite a "1" that the resolver records as a free-form answer.
 
     No header or footer of our own: the people on the other end are
-    end users writing in their own language, and any typed reply answers.
+    end users writing in their own language.
     """
     lines: list[str] = []
     context = (payload.get("context") or "").strip()
@@ -477,6 +602,106 @@ def _render_input_prompt(payload: dict) -> str:
                 lines.append(f"  • {label}")
 
     return "\n".join(line for line in lines if line)
+
+
+#: The list message's button text when the agent gives none.  A glyph, not a
+#: word: people read the prompt in their own language and an English
+#: "Choose" would be the only foreign text on the screen.
+_DEFAULT_LIST_BUTTON = "☰"
+
+#: Graph errors for an interactive message Meta will not accept as built
+#: (131009: parameter value is not valid; 100: invalid parameter).
+_INTERACTIVE_REFUSED = re.compile(r"graph error (131009|100) ")
+
+
+def _template_object(template: dict) -> dict:
+    """The Cloud API ``template`` object, with a FLOW button's token when one is set.
+
+    Only the FLOW button takes a parameter: quick replies on the same
+    template have fixed payloads and need no component.  ``index`` is the
+    button's position among all the template's buttons.
+    """
+    out: dict[str, Any] = {"name": template["name"], "language": {"code": template["language"]}}
+    button = template.get("flow_button")
+    if isinstance(button, dict) and button.get("flow_token"):
+        action: dict[str, Any] = {"flow_token": button["flow_token"]}
+        if button.get("flow_action_data"):
+            action["flow_action_data"] = button["flow_action_data"]
+        out["components"] = [{
+            "type": "button",
+            "sub_type": "flow",
+            "index": str(button.get("index") or "0"),
+            "parameters": [{"type": "action", "action": action}],
+        }]
+    return out
+
+
+def _interactive_prompt(payload: dict) -> dict | None:
+    """The ``interactive`` object for a single choice question, or ``None``.
+
+    Up to three short labels without descriptions become reply buttons;
+    otherwise up to ten rows become a list.  Either way the tap comes back
+    carrying the label as its title, which ``resolve_text_answer`` matches.
+    A prompt over any Cloud API limit goes out as text instead: a truncated
+    label would no longer match the choice it stands for.
+    """
+    questions = [q for q in payload.get("questions") or [] if isinstance(q, dict)]
+    if len(questions) != 1:
+        return None
+    question = questions[0]
+    choices = [c for c in question.get("choices") or [] if isinstance(c, dict) and c.get("label")]
+    if not choices or len(choices) > MAX_LIST_ROWS:
+        return None
+    # Meta refuses repeated button or row titles, and a tap carries only the
+    # title, so two equal labels could not tell their choices apart anyway.
+    if len({fold_label(c["label"]) for c in choices}) != len(choices):
+        return None
+
+    body = "\n".join(
+        part for part in (
+            (payload.get("context") or "").strip(),
+            (question.get("prompt") or "").strip(),
+        ) if part
+    )
+    if not body or len(body) > BODY_CHARS:
+        return None
+
+    if (
+        len(choices) <= MAX_REPLY_BUTTONS
+        and not any(c.get("description") for c in choices)
+        and all(len(c["label"]) <= BUTTON_CHARS for c in choices)
+    ):
+        return {
+            "type": "button",
+            "body": {"text": body},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": f"choice:{i}", "title": c["label"]}}
+                    for i, c in enumerate(choices)
+                ],
+            },
+        }
+
+    if any(
+        len(c["label"]) > ROW_TITLE_CHARS
+        or len(c.get("description") or "") > ROW_DESCRIPTION_CHARS
+        for c in choices
+    ):
+        return None
+    rows = []
+    for i, c in enumerate(choices):
+        row = {"id": f"choice:{i}", "title": c["label"]}
+        if c.get("description"):
+            row["description"] = c["description"]
+        rows.append(row)
+    return {
+        "type": "list",
+        "body": {"text": body},
+        "action": {
+            "button": question.get("button_label") or _DEFAULT_LIST_BUTTON,
+            "sections": [{"rows": rows}],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +723,11 @@ class WhatsAppPlatform:
 
     kind = "whatsapp"
     topology = "webhook"
+    capabilities = ChannelCapabilities(
+        can_initiate=True, opener="template", window_hours=24, buttons=True,
+        forms=True, identity="phone", label="WhatsApp",
+        receipts=frozenset({"delivered", "read"}),
+    )
 
     #: Meta verifies the callback URL with an unsigned GET on the same path.
     #: The dispatcher mounts a GET route only for platforms declaring this.
@@ -539,6 +769,8 @@ class WhatsAppPlatform:
         # WhatsAppPlatform instances are process-lifetime singletons; no
         # explicit close is needed.
         self._http = httpx.AsyncClient(timeout=30.0)
+        # (phone_number_id, wa_id) -> the typing keep-alive of the turn under way.
+        self._typing: dict[tuple[str, str], _Typing] = {}
 
     # ------------------------------------------------------------------
     # Route path
@@ -655,10 +887,7 @@ class WhatsAppPlatform:
                     "recipient_type": "individual",
                     "to": wa_id,
                     "type": "template",
-                    "template": {
-                        "name": template["name"],
-                        "language": {"code": template["language"]},
-                    },
+                    "template": _template_object(template),
                 },
                 api_version=api_version,
             )
@@ -666,7 +895,31 @@ class WhatsAppPlatform:
                 return SendResult(success=False, error=error or "send failed")
             return SendResult(success=True, message_id=wamid)
 
-        if item.payload.get("input_prompt"):
+        flow = item.payload.get("flow")
+        if flow or item.payload.get("input_prompt"):
+            interactive = flow or _interactive_prompt(item.payload)
+            if interactive is not None:
+                wamid, error = await send_message(
+                    self._http,
+                    token=token,
+                    phone_number_id=phone_number_id,
+                    payload={
+                        "messaging_product": "whatsapp",
+                        "recipient_type": "individual",
+                        "to": wa_id,
+                        "type": "interactive",
+                        "interactive": interactive,
+                    },
+                    api_version=api_version,
+                )
+                if wamid is not None:
+                    self._stop_typing(phone_number_id, wa_id)
+                    return SendResult(success=True, message_id=wamid)
+                # A refused interactive question would dead-letter while
+                # ask_user_question waits on an answer the person never saw.
+                if flow or not _INTERACTIVE_REFUSED.match(error or ""):
+                    return SendResult(success=False, error=error or "send failed")
+                logger.warning("[whatsapp] interactive prompt refused, sending it as text: %s", error)
             text = _render_input_prompt(item.payload)
         else:
             text = render_whatsapp(item.payload.get("content", "") or "")
@@ -704,6 +957,12 @@ class WhatsAppPlatform:
 
         if last_id is None:
             return SendResult(success=False, error="send failed")
+        # Text beside a tool call or a coding run's heartbeat is the turn still
+        # going; an answer or a question ends what the person waits for.
+        if item.payload.get("intermediate") or item.payload.get("code_run"):
+            self._rearm_typing(phone_number_id, wa_id)
+        else:
+            self._stop_typing(phone_number_id, wa_id)
         return SendResult(success=True, message_id=last_id)
 
     # ------------------------------------------------------------------
@@ -777,20 +1036,25 @@ class WhatsAppPlatform:
         return uploaded
 
     # ------------------------------------------------------------------
-    # ack_received — read receipt + typing indicator in one call
+    # keep_typing — read receipt + typing indicator, held for the turn
     # ------------------------------------------------------------------
 
-    async def ack_received(self, msg: Any, *, creds: dict, config: dict) -> None:
-        """Mark the inbound message read and show the typing pip.
+    def keep_typing(
+        self,
+        msg: Any,
+        *,
+        creds: dict,
+        turn_active: Callable[[], Awaitable[bool]],
+    ) -> None:
+        """Mark *msg* read and keep the typing pip up while its turn runs.
 
-        One request sets blue double-checkmarks *and* the typing indicator.
-        This is the only progress signal WhatsApp offers: it cannot edit a
-        sent message, so the dispatcher swallows every intermediate
-        narration event and the agent would otherwise be silent for the
-        whole tool-calling phase.
+        This is the only progress signal WhatsApp offers.  Meta shows the pip for at most 25 s and drops it
+        on any outbound message, so it is re-sent every 20 s, and right
+        after a message that does not end the turn, until a question or an
+        answer goes out, *turn_active* says the turn is over, or the cap.
 
-        Called only when the pipeline accepted the message, so filtered
-        senders never receive a receipt.  Best-effort; never raises.
+        Called only for messages that reach the agent, so filtered senders
+        never receive a receipt.  Returns at once; never raises.
         """
         token: str = (creds or {}).get("access_token") or ""
         source = getattr(msg, "source", None) or {}
@@ -798,20 +1062,68 @@ class WhatsAppPlatform:
         phone_number_id = source.get("phone_number_id") or (creds or {}).get(
             "phone_number_id"
         )
-        if not token or not wamid or not phone_number_id:
+        wa_id = getattr(msg, "identifier", "") or ""
+        if not token or not wamid or not phone_number_id or not wa_id:
             return
-
-        _, error = await send_message(
-            self._http,
+        key = (phone_number_id, wa_id)
+        self._stop_typing(*key)
+        state = _Typing(
             token=token,
             phone_number_id=phone_number_id,
+            wamid=wamid,
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+            turn_active=turn_active,
+            deadline=asyncio.get_running_loop().time() + _TYPING_CAP_S,
+        )
+        self._typing[key] = state
+        self._start_typing(key, state)
+
+    def _start_typing(self, key: tuple[str, str], state: _Typing) -> None:
+        state.task = asyncio.get_running_loop().create_task(
+            self._typing_loop(key, state)
+        )
+
+    def _rearm_typing(self, phone_number_id: str, wa_id: str) -> None:
+        state = self._typing.get((phone_number_id, wa_id))
+        if state is None:
+            return
+        if state.task is not None:
+            state.task.cancel()
+        self._start_typing((phone_number_id, wa_id), state)
+
+    def _stop_typing(self, phone_number_id: str, wa_id: str) -> None:
+        state = self._typing.pop((phone_number_id, wa_id), None)
+        if state is not None and state.task is not None:
+            state.task.cancel()
+
+    async def _typing_loop(self, key: tuple[str, str], state: _Typing) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                await self._mark_read_typing(state)
+                await asyncio.sleep(_TYPING_EVERY_S)
+                if loop.time() >= state.deadline or not await state.turn_active():
+                    break
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.warning("[whatsapp] typing keep-alive failed", exc_info=True)
+        if self._typing.get(key) is state:
+            del self._typing[key]
+
+    async def _mark_read_typing(self, state: _Typing) -> None:
+        """One request sets blue double-checkmarks *and* the typing pip."""
+        _, error = await send_message(
+            self._http,
+            token=state.token,
+            phone_number_id=state.phone_number_id,
             payload={
                 "messaging_product": "whatsapp",
                 "status": "read",
-                "message_id": wamid,
+                "message_id": state.wamid,
                 "typing_indicator": {"type": "text"},
             },
-            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+            api_version=state.api_version,
         )
         if error and "131009" in error:
             # wamid older than 30 days — common after a long-quiet

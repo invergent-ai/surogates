@@ -11,7 +11,7 @@ import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ACCOUNT, connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { dataHome, heldBack, key, launch, MAIN, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
+import { dataHome, dialogs, heldBack, key, launch, MAIN, press, prompt, promptsShown, quit, shellPage, stubNative } from "./launch.js";
 
 let home: string;
 let folder: string;
@@ -341,6 +341,22 @@ describe("the folder sheet", () => {
     await expect.poll(async () => text(await prompt(app!), "#prompt-title")).toBe(`Work in ${folder.split("/").at(-1)}?`);
     await press(await prompt(app!), "accept");
     expect(await prepared).toMatchObject({ folder });
+  });
+
+  // On a Mac a dialog attached to the window is a sheet, which waits behind the folder sheet as it closes: it is a panel
+  // of its own there (prompts.ts), and attached to the window elsewhere.
+  it("shows the folder dialog at a refusal's Change…, attached to the window as the system's own way is, and the sheet for what it picks", async () => {
+    const client = await signedIn(join(home, "surogate"));
+    const prepared = prepare(client);
+    const refused = await prompt(app!);
+    expect(await text(refused, "#prompt-title")).toBe("surogate cannot be used");
+    await app!.evaluate((_electron, chosen) => Object.assign(globalThis, { folder: chosen }), folder);
+    await press(refused, "change");
+    const attached = process.platform !== "darwin";
+    await expect.poll(() => dialogs(app!)).toEqual([{ attached }, { attached }]);
+    await expect.poll(async () => text(await prompt(app!), "#prompt-title")).toBe(`Work in ${folder.split("/").at(-1)}?`);
+    await key(await prompt(app!), "Escape");
+    expect(await prepared).toBeNull();
   });
 
   it("cannot use the user's cache, which holds the app's own, nor the app's cache or a folder in it", async () => {

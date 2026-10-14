@@ -80,11 +80,10 @@ export interface VmOptions extends Disks {
   bwrap?: string; // what a folder the guest reads alone is shared through (linux.ts): the version's own copy, else the PATH's
   // macOS's (darwin.ts): surogate-vm, unless a test says; the app's data folder and its own files, the only
   // folders surogate-vm takes the guest's files from, unless they are where the sessions disk and the agent
-  // disk say; and how the folders are laid out in the guest.
+  // disk say.
   program?: string;
   data?: string;
   bundle?: string;
-  layout?: "multiple" | "single";
   cpus?: number;
   pingMs?: number;
   shareMs?: number;
@@ -148,9 +147,12 @@ export interface VmBackend {
    * *deadline* (performance.now()), once the VM has gone: a guest that does not let a
    * folder go is given no other. The agent's unmount is lazy, so the guest may still hold
    * the share when this is asked, until the deadline. Whether a tag comes again is the
-   * backend's: Linux's never does within a boot, and one whose places are fixed may.
+   * backend's: Linux's never does within a boot. One whose devices are fixed (darwin.ts) gives
+   * a device another folder only where the guest *released* it, its answer to the teardown or
+   * the unplace saying that nothing of it is mounted in any namespace of the guest any more: a
+   * root that still held a mount of the device would be served the next folder.
    */
-  unshare(share: Share, deadline: number): Promise<void>;
+  unshare(share: Share, deadline: number, as?: { released?: boolean }): Promise<void>;
   /** Ends the VM at once; settles once all of it has gone. Its runtime files go at the next boot, or with the manager. */
   kill(): Promise<void>;
 }
@@ -234,7 +236,6 @@ interface Root {
   setup: Promise<Outcome | null> | null; // null once set up, or why not
   folder: Folder; // what it shares, by its identity
   at: string; // where the root's commands see it
-  down?: Promise<void>; // its teardown, once one is asked: asked again, the same
 }
 
 // A place's two shares, once the agent has mounted them, and the folder its history's share serves.
@@ -323,6 +324,8 @@ export class Guest {
   private leave: () => void = () => {};
   private left = false;
   private readonly roots = new Map<string, Root>();
+  // Each root's teardown under way, its entry out of roots already: asked again, the same; a setup of the root waits for it.
+  private readonly going = new Map<string, Promise<void>>();
   // Each folder's place in this guest, by its key, from when it is asked for: what was asked, and its shares.
   private readonly places = new Map<string, { place: Place; placed: Promise<Placed> }>();
   private keepalive: NodeJS.Timeout | undefined;
@@ -456,6 +459,14 @@ export class Guest {
    */
   async ready(root: string, folder: Folder, ended: ProcessHandle[] = [], at = folder.path): Promise<Outcome | null> {
     for (let turn = 0; turn < SHARINGS; turn += 1) {
+      // Nothing is set up on the share of a root being torn down: the teardown lets it go, and a device given again
+      // (darwin.ts) would serve the root the next folder. Its setup waits, and shares the folder anew.
+      const going = this.going.get(root);
+      if (going) {
+        await going;
+        if (this.left) return SANDBOX_STOPPED;
+        continue;
+      }
       const known = this.roots.get(root);
       // Another folder is shared for the root than this operation names, as a thread's copy made again leaves it:
       // that share goes first, with what runs in it, and the named folder is shared in its place. A chat's folder
@@ -609,7 +620,7 @@ export class Guest {
       }
       throw new Error(answer.type === "failed" ? answer.message : "the guest refused it");
     } catch (error) {
-      // Not mounted: neither is the guest's.
+      // Not mounted: neither is the guest's. Nor is either released: the guest may have mounted one before it failed.
       if (!this.left) for (const share of shares.reverse()) await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
       throw error;
     }
@@ -645,9 +656,14 @@ export class Guest {
     if (this.places.get(place.key) !== known) return false;
     this.places.delete(place.key);
     if (!placed || this.left) return true;
+    const answer = await this.request({ type: "unplace", key: place.key }, this.setupMs);
     // Unanswered: the agent is stuck, and the guest goes.
-    if (!(await this.request({ type: "unplace", key: place.key }, this.setupMs))) this.lose();
-    else for (const share of [placed.real, placed.history]) await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+    if (!answer) {
+      this.lose();
+      return true;
+    }
+    const released = answer.type === "done" && answer.released === true;
+    for (const share of [placed.real, placed.history]) await this.vm.unshare(share, performance.now() + this.shareMs, { released }).catch(() => this.lose());
     return true;
   }
 
@@ -657,11 +673,18 @@ export class Guest {
    * the folder go, is lost, the root's processes with it.
    */
   teardown(root: string): Promise<void> {
+    // Asked again while it is let go, as by an operation that names another folder: the same teardown.
+    const going = this.going.get(root);
+    if (going) return going;
     const entry = this.roots.get(root);
     if (!entry) return Promise.resolve();
-    // Asked again while it is let go, as by an operation that names another folder: the same teardown.
-    entry.down ??= this.takeDown(root, entry);
-    return entry.down;
+    // Out of the list in this tick, before anything is waited for: nothing finds it to set up again.
+    this.roots.delete(root);
+    const down: Promise<void> = this.takeDown(root, entry).finally(() => {
+      if (this.going.get(root) === down) this.going.delete(root);
+    });
+    this.going.set(root, down);
+    return down;
   }
 
   private async takeDown(root: string, entry: Root): Promise<void> {
@@ -672,7 +695,6 @@ export class Guest {
     this.up.delete(root);
     // One that could not be added has left already.
     const share = await entry.share.catch(() => null);
-    if (this.roots.get(root) === entry) this.roots.delete(root);
     this.proxy.forget(root);
     if (!share) return;
     const answer = await this.request({ type: "teardown", root, share }, this.setupMs);
@@ -682,7 +704,8 @@ export class Guest {
     // and its removal would wait on the guest for good: it stays, its place taken, until the
     // VM stops. The root's next setup gets a share of its own. Any other failure lets it go.
     if (answer.type === "failed" && answer.message === HELD) return;
-    await this.vm.unshare(share, performance.now() + this.shareMs).catch(() => this.lose());
+    // Released where the guest said nothing of the share is mounted in it any more: else its device takes no other folder.
+    await this.vm.unshare(share, performance.now() + this.shareMs, { released: answer.type === "done" && answer.released === true }).catch(() => this.lose());
   }
 
   /**

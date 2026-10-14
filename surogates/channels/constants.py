@@ -11,6 +11,8 @@ of literals scattered per file.
 
 from __future__ import annotations
 
+from surogates.channels.capabilities import BUILTIN
+
 __all__ = [
     "ADAPTER_CHANNELS",
     "API_CHANNEL",
@@ -18,9 +20,11 @@ __all__ = [
     "END_USER_CHANNELS",
     "INBOX_NOTIFY_CHANNELS",
     "INTERACTIVE_PROMPT_CHANNELS",
+    "OUTBOUND_DM_CHANNELS",
     "SERVICE_ACCOUNT_CHANNELS",
     "STUDIO_CHANNEL",
     "multi_session_disabled",
+    "outbound_dm",
 ]
 
 #: A programmatic client driving the agent with a service-account token.
@@ -67,9 +71,23 @@ def queue_priority(channel: str | None) -> float:
 #: channel value would never be claimed and sit "pending" forever.
 ADAPTER_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 
+#: Channels the platform writes first on without an inbound webhook adapter
+#: (:mod:`surogates.channels.outbound`, the voice worker).  Only the person's
+#: own conversation on them, ``agent:<kind>:dm:<id>``, gets outbox rows: a
+#: live inbound call, an ordinary web chat or an integrator's API session
+#: is answered where it happens.
+OUTBOUND_DM_CHANNELS = frozenset(BUILTIN)
+
+
+def outbound_dm(channel: str | None, config: dict | None) -> bool:
+    """Whether a session is a person's own conversation on an outbound channel."""
+    return channel in OUTBOUND_DM_CHANNELS and str(
+        (config or {}).get("channel_session_key") or "",
+    ).startswith(f"agent:{channel}:dm:")
+
 #: Channels whose platform can render an ``ask_user_question`` prompt
-#: (Slack: Answer button + modal; Telegram: inline keyboard; WhatsApp:
-#: numbered plain text).  A channel OUTSIDE this set gets no
+#: (Slack: buttons for a few short choices, else Answer button + modal; Telegram: inline keyboard; WhatsApp:
+#: reply buttons or a list, else bulleted text).  A channel OUTSIDE this set gets no
 #: ``input_prompt`` outbox row at all — ``_build_channel_payload`` returns
 #: an empty payload and ``store`` drops it — so the user sees nothing and
 #: the session parks waiting for an answer that can never arrive.  Adding a

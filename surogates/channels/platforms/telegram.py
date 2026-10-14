@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 from typing import Any, Callable
 
 import httpx
 
 from surogates.channels.base import SendResult
+from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor
 from surogates.channels.platforms.telegram_format import render_html, render_plain
@@ -53,6 +55,12 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The Bot API.  Overridable only so a local stack can run end to end against
+#: a stand-in server; production never sets it.
+TELEGRAM_API_BASE = (
+    os.environ.get("SUROGATES_TELEGRAM_API_BASE") or "https://api.telegram.org"
+).rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +335,7 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 
 def _bot_api_url(bot_token: str, method: str) -> str:
     """Return the full Telegram Bot API URL for *method*."""
-    return f"https://api.telegram.org/bot{bot_token}/{method}"
+    return f"{TELEGRAM_API_BASE}/bot{bot_token}/{method}"
 
 
 def _extract_files(message: dict) -> list[InboundFileRef]:
@@ -454,6 +462,11 @@ class TelegramPlatform:
 
     kind = "telegram"
     topology = "webhook"
+    #: A bot may only write to someone who has started it.
+    capabilities = ChannelCapabilities(
+        can_initiate=True, needs_prior_contact=True, opener="text",
+        buttons=True, identity="chat", label="Telegram",
+    )
 
     descriptor = ChannelDescriptor(
         vault_refs=lambda identifier: {
@@ -722,8 +735,10 @@ class TelegramPlatform:
         chat_id: str,
         is_dm: bool,
         text: str,
+        buttons: list[str] | None = None,
     ) -> bool:
-        """Privately deliver *text* to *sender_id*.
+        """Privately deliver *text* to *sender_id*, with *buttons* as one-tap
+        replies when given (each sends its label as an ordinary message).
 
         On Telegram a user's id is their private chat id, so this is a plain
         ``sendMessage`` to the sender.  Returns ``True`` on delivery, ``False``
@@ -731,9 +746,13 @@ class TelegramPlatform:
         private delivery fails.
         """
         bot_token: str = creds.get("bot_token") or ""
-        result, _ = await self._api(
-            bot_token, "sendMessage", {"chat_id": sender_id, "text": text}
-        )
+        payload: dict[str, Any] = {"chat_id": sender_id, "text": text}
+        if buttons:
+            payload["reply_markup"] = {
+                "keyboard": [[{"text": b} for b in buttons]],
+                "one_time_keyboard": True, "resize_keyboard": True,
+            }
+        result, _ = await self._api(bot_token, "sendMessage", payload)
         return result is not None
 
     # ------------------------------------------------------------------
@@ -800,7 +819,7 @@ class TelegramPlatform:
                 )
                 return None
             download_url = (
-                f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+                f"{TELEGRAM_API_BASE}/file/bot{bot_token}/{file_path}"
             )
             resp = await self._http.get(download_url)
             if resp.status_code < 200 or resp.status_code >= 300:

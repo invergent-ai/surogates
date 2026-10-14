@@ -121,3 +121,68 @@ def test_no_agent_uses_deployment_setting():
         "level": "enhanced",
         "text": disclosure_text("enhanced"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Language and custom text
+# ---------------------------------------------------------------------------
+
+
+def _cfg(**transparency):
+    from surogates.runtime.governance import disclosure_config
+
+    return disclosure_config({"transparency": {"enabled": True, **transparency}})
+
+
+def test_every_language_has_every_level():
+    from surogates.governance.transparency import (
+        DISCLOSURE_LANGUAGES,
+        DISCLOSURE_TRANSLATIONS,
+        TransparencyLevel,
+    )
+
+    assert set(DISCLOSURE_LANGUAGES) >= {"en", "ro", "hu", "de", "fr", "it", "es"}
+    levels = {level for level in TransparencyLevel if level is not TransparencyLevel.NONE}
+    for language in DISCLOSURE_LANGUAGES:
+        assert set(DISCLOSURE_TRANSLATIONS[language]) == levels, language
+        assert all("50" in text for text in DISCLOSURE_TRANSLATIONS[language].values())
+
+
+def test_language_picks_the_translation():
+    text = _cfg(level="basic", language="ro")["text"]
+    assert text.startswith("Vorbiți cu un asistent bazat pe inteligență artificială.")
+    assert "art. 50 alin. (1)" in text
+
+
+def test_region_suffix_and_case_are_ignored():
+    assert _cfg(level="enhanced", language="DE-at")["text"] == _cfg(
+        level="enhanced", language="de",
+    )["text"]
+
+
+def test_unknown_or_missing_language_is_english():
+    english = _cfg(level="full")["text"]
+    assert english == disclosure_text("full")
+    assert _cfg(level="full", language="xx")["text"] == english
+
+
+def test_custom_text_replaces_the_level_copy():
+    cfg = _cfg(level="enhanced", language="ro", text="  Sunt asistentul virtual al cabinetului.  ")
+    assert cfg == {
+        "enabled": True,
+        "level": "enhanced",
+        "text": "Sunt asistentul virtual al cabinetului.",
+    }
+
+
+def test_blank_custom_text_keeps_the_default():
+    assert _cfg(level="basic", text="   ")["text"] == disclosure_text("basic")
+
+
+def test_custom_text_does_not_override_level_none_or_disabled():
+    assert _cfg(level="none", text="Hi")["text"] == ""
+    from surogates.runtime.governance import disclosure_config
+
+    assert disclosure_config(
+        {"transparency": {"enabled": False, "text": "Hi"}},
+    )["text"] == ""

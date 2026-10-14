@@ -819,6 +819,29 @@ class VoiceSettings(BaseSettings):
     idle_processes: int = 2  # prewarmed job processes; LiveKit's default is one per CPU core
     process_init_timeout: float = 30.0  # importing surogates + loading Silero; LiveKit's 10 s is too tight
     health_port: int = 8003
+    # Outbound calls (surogates.voice.outbound): this voice worker dials the voice outbox. A number calls
+    # out through its routing row's ``outbound_trunk_id``, else this trunk; neither, it cannot call.
+    outbound_calls: bool = False
+    outbound_trunk_id: str = ""
+    ring_seconds: float = 30.0  # unanswered after this: "no answer", and the step tries the next channel
+    dial_concurrency: int = 4  # calls one voice worker places at once (each also takes a line)
+
+
+class VapidSettings(BaseSettings):
+    """Browser push for people reached on web (``surogates.channels.web_push``).
+
+    No keys, no push: the step still waits in the person's web chat.  Each
+    agent also turns it on (``followup_settings.web_push``).
+    """
+
+    model_config = {"env_prefix": "SUROGATES_VAPID_"}
+
+    public_key: str = ""  # base64url uncompressed P-256 point, also given to browsers
+    private_key: str = ""  # base64url raw private scalar
+    subject: str = "mailto:support@surogate.ai"  # who push services contact about our pushes
+    # Hosts besides the browsers' push services a subscription may point at,
+    # comma-separated: only for a local stub on a laptop, never in production.
+    extra_push_hosts: str = ""
 
 
 class OfficeSettings(BaseSettings):
@@ -897,6 +920,7 @@ class Settings(BaseSettings):
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
     channels: ChannelsSettings = Field(default_factory=ChannelsSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    vapid: VapidSettings = Field(default_factory=VapidSettings)
     office: OfficeSettings = Field(default_factory=OfficeSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount

@@ -39,3 +39,33 @@ async def test_session_store_redacts_event_data_before_persisting(
     assert "abcdefghijklmnopqrstuvwxyz123456" not in serialized
     assert "refresh-secret" not in serialized
     assert "refresh_token=***" in serialized
+
+
+async def test_delivery_data_reaches_the_outbox_but_never_the_event_log(
+    session_store,
+    session_factory,
+) -> None:
+    from sqlalchemy import select
+
+    from surogates.db.models import DeliveryOutbox
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="whatsapp",
+        config={"whatsapp_channel_id": "40700000001", "channel_identifier": "pn1"},
+    )
+    masked = {"message": {"role": "assistant", "content": "Call +40…111"}}
+    whole = {"message": {"role": "assistant", "content": "Call +40 711 111 111"}}
+
+    event_id = await session_store.emit_event(
+        session.id, EventType.LLM_RESPONSE, masked, delivery_data=whole,
+    )
+
+    events = await session_store.get_events(session.id)
+    assert "711 111 111" not in json.dumps([e.data for e in events])
+    async with session_factory() as db:
+        outbox = (await db.execute(
+            select(DeliveryOutbox).where(DeliveryOutbox.event_id == event_id)
+        )).scalar_one()
+    assert outbox.payload["content"] == "Call +40 711 111 111"

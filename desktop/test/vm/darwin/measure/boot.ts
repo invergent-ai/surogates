@@ -22,9 +22,11 @@ import { gzipSync } from "node:zlib";
 import { expect, it } from "vitest";
 
 import type { VmOptions } from "../../../../src/vm/manager.js";
-import { IMAGE, lab, median, ms, PROBING_DISK, PROGRAM, record, scratch, type Timeline, told } from "./harness.js";
+import { DESKTOP, IMAGE, lab, median, ms, PROBING_DISK, PROGRAM, record, scratch, type Timeline, told } from "./harness.js";
 
-const RULE = "surogate: the protected-names rule attached 15 of 15 hooks";
+// The rule attached whole, by its own list of hooks: its lsm programs (vm/rule.bpf.c), which vm/init expects every one of.
+const HOOKS = (readFileSync(join(DESKTOP, "vm", "rule.bpf.c"), "utf8").match(/^SEC\("lsm\//gm) ?? []).length;
+const RULE = `surogate: the protected-names rule attached ${HOOKS} of ${HOOKS} hooks`;
 
 const check = (program: string) => {
   try {

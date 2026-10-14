@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
+from surogates.memory.store import merge_entry
 from surogates.runtime.memory_io import (
     read_user_memory, write_user_memory,
 )
@@ -124,12 +125,11 @@ class R2MemoryStore:
     # ── Write APIs ─────────────────────────────────────────────────
 
     async def add(self, target: str, content: str) -> dict[str, Any]:
-        """Append ``content`` to ``target``'s working set and persist."""
+        """Append ``content`` to ``target``'s working set, or replace the
+        entry with its title, and persist."""
         self._check_target(target)
-        current = self._content[target]
-        self._content[target] = (
-            current + _ENTRY_DELIMITER + content if current else content
-        )
+        entries, _ = merge_entry(self.get_entries(target), content)
+        self._content[target] = _ENTRY_DELIMITER.join(entries)
         await self._persist(target=target, action="add")
         return {"target": target, "action": "add"}
 

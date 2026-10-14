@@ -83,6 +83,47 @@ async def commerce_overview(
     return summary
 
 
+_NO_BUYER_IDENTITY = (
+    "Purchases require an account created through the agent's sign-in "
+    "(your account was provisioned by the operator)."
+)
+
+
+@router.post("/commerce/free-plan")
+async def commerce_free_plan(
+    body: CommerceCheckoutRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> dict:
+    """Start the agent's Free plan from the Plan & Usage tab: no card,
+    the same claim the buy page makes."""
+    identity = await firebase_buyer_identity(request, tenant)
+    if identity is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=_NO_BUYER_IDENTITY,
+        )
+    client = _platform_client(request)
+    try:
+        return await client.commerce_free_plan(
+            str(agent_runtime.agent_id), offer_id=body.offer_id, **identity,
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = "The Free plan is not available."
+        try:
+            detail = str(exc.response.json().get("detail") or detail)
+        except ValueError:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=detail,
+        ) from exc
+    except (PlatformAuthError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The Free plan is temporarily unavailable; try again.",
+        ) from exc
+
+
 @router.post("/commerce/checkout", response_model=CommerceCheckoutResponse)
 async def commerce_checkout(
     body: CommerceCheckoutRequest,
@@ -94,11 +135,7 @@ async def commerce_checkout(
     if identity is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Purchases require an account created through the "
-                "agent's sign-in (your account was provisioned by the "
-                "operator)."
-            ),
+            detail=_NO_BUYER_IDENTITY,
         )
     client = _platform_client(request)
     try:

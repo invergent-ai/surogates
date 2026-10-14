@@ -113,7 +113,7 @@ async def test_the_slack_opener_lands_in_the_direct_message_session(
     # own message, not something the person said.
     ((event_sid, event), ) = captured["store"].emitted
     assert event_sid == _sid
-    assert event["content"] == "[Check-in opener sent: Time for your check-in. Reply to begin.]"
+    assert event["content"] == "[Step message sent: Time for your check-in. Reply to begin.]"
     assert event["synthetic"] == "checkin_opener"
     assert event["metadata"]["program_id"] == str(inv.program_id)
     assert captured["config"]["slack_channel_id"] == "D777"
@@ -171,3 +171,70 @@ async def test_an_undeliverable_opener_fails_its_user_visibly(
     assert row.delivery_error == "Slack: user_not_found"
     assert row.response_state == "not_started"
     assert row.outbox_id is None
+
+
+def _text_enqueue(monkeypatch, sf, *, config):
+    from surogates.programs import opener as opener_mod
+
+    captured = {}
+
+    async def _session(store, redis, *, session_key, config, **kw):
+        captured["key"], captured["config"] = session_key, config
+        return uuid.uuid4()
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", _session)
+
+    async def _config(program_id):
+        return config
+
+    delivery = _Delivery()
+    enqueue = make_opener_enqueue(
+        session_store=_Store(), redis=None, session_factory=sf,
+        delivery_service=delivery, config_for_program=_config,
+    )
+    return enqueue, delivery, captured
+
+
+@pytest.mark.asyncio
+async def test_telegram_opens_only_for_someone_who_started_the_bot(
+    monkeypatch, sf, make_invitation,
+):
+    from surogates.followup import store as followup_store
+
+    inv = await make_invitation(
+        delivery_state="queued", response_state="not_started",
+        platform="telegram", platform_user_id="555", channel_identifier="mybot",
+    )
+    enqueue, delivery, captured = _text_enqueue(
+        monkeypatch, sf, config={"channel_identifier": "other", "opener_text": "Hello"},
+    )
+    with pytest.raises(OpenerUndeliverable) as exc:
+        await enqueue(inv)
+    assert "has not written" in exc.value.reason
+
+    await followup_store.record_inbound(
+        sf, org_id=inv.org_id, platform="telegram", platform_user_id="555",
+        channel_identifier="mybot",
+    )
+    assert await enqueue(inv) == 99
+    # The invitation's own sender wins over the Program's, and the DM is the
+    # private chat the reply pipeline keys on.
+    assert captured["key"] == "agent:telegram:dm:555"
+    assert captured["config"]["telegram_channel_id"] == "555"
+    ((_, _, channel, destination, payload),) = delivery.calls
+    assert channel == "telegram"
+    assert destination == {"chat_id": "555", "channel_identifier": "mybot"}
+    assert payload == {"content": "Hello"}
+
+
+@pytest.mark.asyncio
+async def test_a_channel_that_cannot_write_first_is_undeliverable():
+    from surogates.programs.opener import resolve_dm
+
+    with pytest.raises(OpenerUndeliverable):
+        await resolve_dm("website", "u1", "s1")
+    target = await resolve_dm("whatsapp", "40700", "pn1")
+    assert target.session_key == "agent:whatsapp:dm:40700"
+    assert target.destination == {
+        "wa_id": "40700", "phone_number_id": "pn1", "channel_identifier": "pn1",
+    }

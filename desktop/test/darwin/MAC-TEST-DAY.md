@@ -2,7 +2,7 @@
 
 This runbook tests the checkout it is in: the macOS VM backend, the file host under Seatbelt, and the shell and the browser. Run it on an Apple-silicon Mac with macOS 14 or later.
 
-Steps 0 to 5 are the first day's. The second day runs them again, then the checks under "Second day" at the end.
+Steps 0 to 5 are the first day's. The second day runs them again, then the checks under "Second day"; the third day runs the checks under "Third day" at the end.
 
 Work in a fresh macOS user account made for this (System Settings › Users & Groups, an administrator), never your own. Everything below runs as that user.
 
@@ -65,14 +65,14 @@ swift test --package-path native/macos && native/out/surogate-vm check
 ```
 
 - `prepare.sh` builds the app's code and `native/out/surogate-vm`, signed ad hoc. In a container, it makes `dist/agent.img`, and the measurements' own agent disk, `test/vm/darwin/measure/probing/agent.img`. Its last lines say "ready".
-- The check passes with 28 tests, 0 failures, and `{"supported":true}`.
+- The check passes with 30 tests, 0 failures, and `{"supported":true}`.
 - Each root runs on a uid of its own from 10000 up, as on Linux, where its folder shows it that uid. A measurement that runs a command and stops at "This chat's folder shows as root's in the sandbox, so no command runs in it", or "… as another user's …", means Apple's share did not show that uid: report it with `share-owners`' findings.
 
-Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`. Each prints `MEASURE …` lines and a `PASS` or `FAIL` for each check, and writes `test/vm/darwin/measure/out/<name>.json`.
+Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`. Each prints `MEASURE …` lines and a `PASS`, `FAIL` or `UNTESTED` for each check, and writes `test/vm/darwin/measure/out/<name>.json`. A check is `UNTESTED` where a command it judges did not run in its root, as when the root's folder could not be entered: it fails the measurement, and its words say why.
 
 1. **`boot`:** a first boot, which makes the sessions disk, then three boots that find it there, and one whose console has the kernel's own log. Pass:
    - the three later boots say hello in under 1.5 s at their median;
-   - the rule attached 15 of 15 at every boot;
+   - the rule attached every hook at every boot, as many as the rule has (`vm/rule.bpf.c`'s lsm programs);
    - the kernel gzipped is refused ("did not boot");
    - `surogate-vm check` says `"supported":true`, and `false` when signed without its entitlement.
 
@@ -87,17 +87,23 @@ Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/me
    **A FAIL of a protected write is a security finding: stop and report it before anything else.**
 3. **`ports`:** the guest sees `ai.surogate.control`, `ai.surogate.net` and `ai.surogate.inbound`, and a 261 KB result comes back whole.
 4. **`disks`:** vda, vdb and vdc in that order, read-only 1, 1, 0, and vdc 32 GiB.
-5. **`shares`:** for each of `multiple` and `single`, every root reads its own folder and no other. If only `single` passes, say so: the backend then switches layout.
+5. **`shares`:** each folder on one of the eight devices, with the measurements' agent disk. Pass:
+   - every root reads its own folder;
+   - `a root's share held open is not released at its teardown, and its device takes no other folder`: the guest's root holds a file of a root's share open while the root is torn down;
+   - `a root whose folder was taken out keeps its device from the next folder, and sees no other root's`;
+   - `a root torn down gives its device to a folder once every device never used has one`.
+
+   **A FAIL of either of the two in the middle is a security finding: stop and report it before anything else.** An `UNTESTED` of either means it did not get that far (its `failed` finding says why, or the probe did not run): send its words before going on.
 6. **`identity`:** recorded only: the inode numbers Apple's share shows the guest beside the Mac's own, and which folder a root is shown once the Mac has moved its folder aside and made another at its path. Pass: `PASS the root was set up and the look ran`.
-7. **`coherence`:** 0 stale reads of 1,000, the large file seen whole, and `git status` sees the 10 changes.
+7. **`coherence`:** 0 stale reads of 1,000, the large file seen whole, and `git status` sees the 10 changes. The repository is made on the Mac: a session makes no `.git` in a shared folder, on any OS.
 8. **`owners`:** a session runs as a uid from 10000 up, sees its folder as that uid's, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
 9. **`mmap`:** recorded only.
-10. **`descriptors`:** all 150,000 files found, 1,000 read, git commits them, and no EMFILE.
-11. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, nor reach it from another folder on the same device: no rename, hard link or exchange into it or out of it, and no write through a link out. The folder on the Mac is unchanged. It runs whether or not its chat's setup is refused.
+10. **`descriptors`:** all 150,000 files found, 1,000 read, git commits them in the repository the Mac made, and no EMFILE.
+11. **`readonly`:** the guest's root can't write the read-only share, even after remounting it read-write, nor reach it from a root's folder on another device: no rename, hard link or exchange into it or out of it, and no write through a link out. The folder on the Mac is unchanged. It runs whether or not its chat's setup is refused. Each try is one line, ending `allowed` or `refused`. The line `a remount read-write, recorded` says whether the guest's root could remount it: either is a pass, since each write after it reaches Apple's server, which must refuse it.
 
-    **A line that says `allowed`, or a FAIL of `the folder on the host as it was`, is a security finding: stop and report it before anything else. A place's read-only folder then needs a device of its own.**
+    **A try that ends `allowed`, but for the remount's, or a FAIL of `the folder on the host as it was`, is a security finding: stop and report it before anything else.**
 12. **`tcc`:** watch for privacy prompts and note which app each names. Optionally, set `MEASURE_VOLUME=/Volumes/<a USB stick>` to include a removable drive.
-13. **`network`:** if macOS asks about the local network, note the app it names, and allow it. Pass: a command reaches this Mac's LAN address through the proxy.
+13. **`network`:** if macOS asks about the local network, note the app it names, and allow it. Pass: the proxy refuses a command this Mac's own LAN address, allowed though it was, as it refuses every address of this computer's; and the host reaches a root's own server.
 14. **`lifetime`:** nothing of the VM is left after `surogate-vm` is killed.
 15. **`sleep`, by hand:** when it says so, sleep the Mac for a minute or more, then wake it. Pass: the command went on, and the guest's clock is within 2 s.
 16. **`memory`:** about 20 minutes; recorded only.
@@ -165,15 +171,16 @@ The same Mac and the same test account as the first day. First bring the checkou
 
 ### The VM
 
-1. **The new guest image.** Each root now runs on its own uid, the image loads its entropy device's driver, and the guest's rule reads each name whole, so the first day's image is not this checkout's. From the checkout's top:
+1. **The new guest image.** Each root now runs on its own uid, the image loads its entropy device's driver, and the guest's rule reads each name whole, so the first day's image is not this checkout's. From the checkout's top, take the newest successful run of the arm64 guest workflow for this checkout, as the first day's step 1 does:
    ```
    rm -rf images/guest/out
-   gh run download 38450928316 -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
+   run=$(gh run list -R invergent-ai/surogates --workflow desktop-guest-arm64.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+   gh run download "$run" -R invergent-ai/surogates -n desktop-guest-arm64 -D images/guest/out
    ```
-   Then compare its key with this checkout's, as the first day's step 1 does. If they differ, or the run's image is gone, find the newest run as step 1 does, or let `prepare.sh` build the image.
+   Then compare its key with this checkout's, as the first day's step 1 does. If they differ, or the run's image is gone, let `prepare.sh` build the image.
    Pass: `images/guest/out` holds `rootfs.img.zst`, `vmlinuz.zst` and `manifest.json`, with this checkout's key.
 2. **Prepare:** `cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh`. Pass: it ends with "ready", and `test/vm/darwin/measure/probing/agent.img` is there.
-3. **surogate-vm's tests on this Xcode:** `swift test --package-path native/macos`. Pass: "Executed 28 tests, with 0 failures".
+3. **surogate-vm's tests on this Xcode:** `swift test --package-path native/macos`. Pass: "Executed 30 tests, with 0 failures".
 4. **The boot and its timings:** `npx vitest run -c test/vm/darwin/measure/vitest.config.ts boot`.
    - Pass: as the first day's step 3.1 says.
    - Whatever it says, keep `test/vm/darwin/measure/out/boot.json`: its "where the kernel's boot went", its timelines and its console say where the time goes.
@@ -238,3 +245,34 @@ First make the app again, as the first day's step 4 does (`scripts/mac-build.sh`
 10. **The browser's signature, and its folder.**
     - Settings → Browser lists Chrome and Edge, neither with "this browser's signature does not check out". If you can, install Brave or Vivaldi from its own site to `/Applications`: it is listed without those words too. Each is checked against its maker's signature, which a Mac shows only here for Brave and Vivaldi.
     - Start a chat on `~/Applications`. Pass: the folder sheet refuses it, saying the app runs a browser there outside the sandbox.
+
+## Third day
+
+The same Mac and the same test account as the second day. First bring the checkout to the branch's newest head: `git pull` in `surogates`. Each step says what a pass looks like; send back every one that fails, with its words.
+
+### The VM
+
+1. **The guest image:** as the second day's step 1, the newest successful run of the arm64 guest workflow for this checkout, its key compared with this checkout's.
+2. **Prepare, and surogate-vm's tests:** `cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh`, then `swift test --package-path native/macos`. Pass: it ends with "ready", and "Executed 30 tests, with 0 failures".
+3. **The measurements, in this order,** each as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`. Each folder is now shared on a device of its own, and a check whose command did not run in its root says `UNTESTED`, which fails the measurement.
+   1. **`escape` first.** Pass: as the first day's step 3.2 says, every check `PASS`. **A FAIL of a protected write is a security finding: stop and report it before anything else.** An `UNTESTED` check means its command did not run in its root: stop there too and send its words, since every measurement after it shares folders the same way.
+   2. **`shares`.** Pass: as the first day's step 3.5 says. **A FAIL of `a root's share held open is not released at its teardown, and its device takes no other folder`, or of `a root whose folder was taken out keeps its device from the next folder, and sees no other root's`, is a security finding: stop and report it before anything else.** An `UNTESTED` of either: stop too, and send its words. Its `the devices, by folder` and `each let go, and whether released` findings say which device each folder took, and how each was let go.
+   3. **`readonly`.** Pass: as the first day's step 3.11 says. **A try that ends `allowed`, but for the remount's, or a FAIL of `the folder on the host as it was`, is a security finding: stop and report it before anything else.**
+   4. **`identity`:** as the first day's step 3.6. Send back its two lines of inodes, and what the root was shown after the move.
+   5. **`coherence`:** as the first day's step 3.7.
+   6. **`descriptors`:** as the first day's step 3.10.
+
+**Send back:** the whole `test/vm/darwin/measure/out/` folder, and every FAIL and UNTESTED with its words.
+
+### The shell
+
+Make the app again, as the first day's step 4 does (`scripts/mac-build.sh`, then `test/darwin/dev-bundle.sh`): it replaces `bin/node`, so no file of it needs removing first. In Surogate Dev, signed in to your agent:
+
+1. **A project thread on a folder of this Mac** (the first day's step 5.3). Make a folder in `~/Documents` a git repository on the Mac (`git init`, and a first commit). Create a project with that folder, and start a thread from a proposed card.
+   - Pass: the thread works in its own copy, none of its answers says "could not add this chat's folder", and its turn lands its change in the folder.
+   - A chat's own `git init` in a shared folder is refused, on every OS: the agent is told to make a repository in its home folder, and the folder's own on the Mac.
+2. **The folder sheet's Change….** Start a chat and choose `/Applications` in the folder dialog: the sheet refuses it. Click Change….
+   - Pass: a folder dialog shows at once, as a window of its own. Choose a folder in `~/Documents`: the sheet for it shows. Then start another chat: its folder dialog shows too.
+   - If no dialog shows after Change…, note it, wait ten minutes, and note whether the next prompt (a new chat's folder dialog) shows: no prompt may wait behind it for good.
+
+**Send back:** each step that fails, with its words.

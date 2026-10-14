@@ -177,8 +177,9 @@ async def test_a_delivery_status_callback_updates_the_invitation(
 
     row = await reload_invitation(accepted_invitation.id)
     assert row.delivery_state == "failed"
-    # The response axis must not move: they were never reached.
-    assert row.response_state == "awaiting_reply"
+    # Never reached, so never asked: not an open question that would keep
+    # the person's next step from reaching them until the deadline.
+    assert row.response_state == "not_started"
     # Provider wording has its own column, so a late status can never
     # overwrite the agent's operational note or a skip explanation in `reason`.
     assert "undeliverable" in (row.delivery_error or "").lower()
@@ -538,3 +539,140 @@ async def test_a_whatsapp_program_with_no_template_fails_its_users_not_forever(
     with pytest.raises(OpenerUndeliverable) as exc:
         await enqueue(queued_invitation)
     assert "template" in exc.value.reason
+
+
+@pytest.mark.asyncio
+async def test_a_template_with_a_flow_button_carries_a_token_the_reply_can_be_checked_against(
+    monkeypatch, queued_invitation,
+):
+    from surogates.programs import opener as opener_mod
+    from surogates.programs.opener import make_opener_enqueue
+
+    async def _session(*args, **kwargs):
+        return uuid.uuid4()
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", _session)
+    emitted = {}
+
+    class Store:
+        async def emit_synthetic_user_message(self, session_id, **kwargs):
+            emitted.update(kwargs["metadata"])
+            return 42
+
+    class Delivery:
+        payload = None
+
+        async def enqueue(self, session_id, event_id, channel, destination, payload):
+            Delivery.payload = payload
+            return 99
+
+    async def _config(program_id):
+        return {
+            "template_name": "daily", "template_language": "ro", "channel_identifier": "127",
+            "template_flow_button": {"index": 0, "form": "vitals"},
+        }
+
+    await make_opener_enqueue(
+        session_store=Store(), redis=None, session_factory=None,
+        delivery_service=Delivery(), config_for_program=_config,
+    )(queued_invitation)
+
+    token = emitted["flow_token"]
+    assert token.startswith("vitals:")
+    assert Delivery.payload == {"template": {
+        "name": "daily", "language": "ro", "flow_button": {"index": "0", "flow_token": token},
+    }}
+
+
+@pytest.mark.asyncio
+async def test_ops_projection_of_the_flow_button_by_flow_id_is_sent(monkeypatch, queued_invitation):
+    from surogates.programs import opener as opener_mod
+    from surogates.programs.opener import make_opener_enqueue
+
+    async def _session(*args, **kwargs):
+        return uuid.uuid4()
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", _session)
+    emitted, sent = {}, {}
+
+    class Store:
+        async def emit_synthetic_user_message(self, session_id, **kwargs):
+            emitted.update(kwargs["metadata"])
+            return 42
+
+    class Delivery:
+        async def enqueue(self, session_id, event_id, channel, destination, payload):
+            sent.update(payload)
+            return 99
+
+    async def _config(program_id):
+        return {
+            "template_name": "daily", "template_language": "ro", "channel_identifier": "127",
+            "template_flow_button": {"index": 1, "flow_id": "1187"},
+            "form_data": {"reminder": "Evening pills"},
+        }
+
+    await make_opener_enqueue(
+        session_store=Store(), redis=None, session_factory=None,
+        delivery_service=Delivery(), config_for_program=_config,
+    )(queued_invitation)
+
+    token = emitted["flow_token"]
+    assert token.startswith("1187:")
+    assert sent["template"]["flow_button"] == {
+        "index": "1", "flow_token": token, "flow_action_data": {"reminder": "Evening pills"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_flow_button_goes_out_as_a_template_button_component(monkeypatch):
+    sent = {}
+
+    async def _fake_send(client, *, token, phone_number_id, payload, api_version):
+        sent.update(payload)
+        return "wamid.3", None
+
+    monkeypatch.setattr("surogates.channels.platforms.whatsapp.send_message", _fake_send)
+    await WhatsAppPlatform().send(
+        _item({"template": {
+            "name": "daily", "language": "ro",
+            "flow_button": {"index": "0", "flow_token": "vitals:abc"},
+        }}),
+        creds={"access_token": "T"},
+    )
+    assert sent["template"] == {
+        "name": "daily",
+        "language": {"code": "ro"},
+        "components": [{
+            "type": "button", "sub_type": "flow", "index": "0",
+            "parameters": [{"type": "action", "action": {"flow_token": "vitals:abc"}}],
+        }],
+    }
+
+
+@pytest.mark.asyncio
+async def test_form_data_rides_on_the_flow_button_after_quick_replies(monkeypatch):
+    sent = {}
+
+    async def _fake_send(client, *, token, phone_number_id, payload, api_version):
+        sent.update(payload)
+        return "wamid.4", None
+
+    monkeypatch.setattr("surogates.channels.platforms.whatsapp.send_message", _fake_send)
+    # Quick replies at 0 and 1 take no component; the FLOW button at 2 does.
+    await WhatsAppPlatform().send(
+        _item({"template": {
+            "name": "daily", "language": "ro",
+            "flow_button": {
+                "index": "2", "flow_token": "1187:abc",
+                "flow_action_data": {"reminder": "Evening pills"},
+            },
+        }}),
+        creds={"access_token": "T"},
+    )
+    assert sent["template"]["components"] == [{
+        "type": "button", "sub_type": "flow", "index": "2",
+        "parameters": [{"type": "action", "action": {
+            "flow_token": "1187:abc", "flow_action_data": {"reminder": "Evening pills"},
+        }}],
+    }]

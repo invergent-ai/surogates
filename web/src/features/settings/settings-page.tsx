@@ -23,6 +23,7 @@ import { surogatesWebChatAdapter } from "@/features/chat";
 import { BrowserProfilesTab } from "./browser-profiles-tab";
 import { DevicesTab } from "./devices-tab";
 import { PlanUsageTab } from "./plan-usage-tab";
+import { NotificationsSection } from "./notifications-section";
 import { PasswordSection } from "./password-section";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
@@ -422,6 +423,7 @@ export function SettingsPage() {
                   email={user.email}
                 />
               )}
+              <NotificationsSection />
             </TabsContent>
 
             {/* ── Connected Channels ── */}

@@ -31,6 +31,7 @@ import logging
 import os
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request
@@ -603,6 +604,59 @@ class ChannelWebhookDispatcher:
 # ---------------------------------------------------------------------------
 
 
+#: Text the model writes beside tool calls within this long of the burst's
+#: first message goes out as one message: one edit on Slack, one post on
+#: WhatsApp and Telegram, which rate-limit rapid sends.
+_BURST_WINDOW = timedelta(seconds=1)
+
+
+def _narration_only(item: Any) -> bool:
+    """Plain text beside a tool call, with nothing else for the platform to do."""
+    payload = item.payload or {}
+    content = payload.get("content")
+    return (
+        bool(payload.get("intermediate"))
+        and isinstance(content, str)
+        and bool(content.strip())
+        and "MEDIA:" not in content
+        and {k for k in payload if not k.startswith("_")} <= {"content", "intermediate"}
+    )
+
+
+def _bursts(items: list) -> list[tuple[Any, list]]:
+    """*items* in order, each session's back-to-back narration within
+    :data:`_BURST_WINDOW` folded into its first item, which carries their text.
+
+    ponytail: only what one claimed batch holds folds; a burst split across
+    two claims goes out as two messages, which is the old behaviour at worst.
+    """
+    groups: list[tuple[Any, list]] = []
+    open_burst: dict[Any, tuple[Any, list]] = {}
+    for item in items:
+        burst = open_burst.get(item.session_id)
+        if (
+            burst is not None
+            and _narration_only(item)
+            and item.destination == burst[0].destination
+            and item.created_at is not None
+            and burst[0].created_at is not None
+            and item.created_at - burst[0].created_at <= _BURST_WINDOW
+        ):
+            head, absorbed = burst
+            head.payload["content"] = f"{head.payload['content']}\n\n{item.payload['content']}"
+            absorbed.append(item)
+            continue
+        group = (item, [])
+        groups.append(group)
+        open_burst[item.session_id] = group if _narration_only(item) else None
+    return groups
+
+
+def _progress_chars(platform: Any) -> int:
+    """The longest progress message *platform* edits as one message."""
+    return getattr(platform, "_MAX_MESSAGE_CHARS", 4000)
+
+
 class ChannelDeliveryDispatcher:
     """Claims pending outbox items for a platform and delivers them via its API.
 
@@ -665,9 +719,10 @@ class ChannelDeliveryDispatcher:
             platform.kind, worker_id, limit=self._BATCH_LIMIT
         )
 
-        for item in items:
+        for item, absorbed in _bursts(items):
+            delivered = False
             try:
-                await self._deliver_item(platform, item)
+                delivered = await self._deliver_item(platform, item)
             except Exception as exc:
                 # Safety net: _deliver_item already catches per-item errors
                 # internally, but guard the outer loop too.
@@ -679,6 +734,19 @@ class ChannelDeliveryDispatcher:
                     await self._record_delivery_failure(item, str(exc))
                 except Exception:
                     pass
+            # Their text went out in *item*; if it did not, they are retried
+            # on their own, so none of it is lost.
+            if absorbed:
+                ids = [other.id for other in absorbed]
+                try:
+                    if delivered:
+                        await self._delivery.mark_delivered_many(ids)
+                    else:
+                        await self._delivery.mark_failed_many(
+                            ids, f"sent with outbox {item.id}, which failed",
+                        )
+                except Exception:
+                    logger.exception("[delivery] settling outboxes %s failed", ids)
 
         return len(items)
 
@@ -722,11 +790,18 @@ class ChannelDeliveryDispatcher:
         else:
             await self._delivery.mark_failed(item.id, error)
 
-    async def _deliver_item(self, platform: ChannelPlatform, item: Any) -> None:
+    async def _deliver_item(self, platform: ChannelPlatform, item: Any) -> bool:
         """Process a single outbox item: resolve creds and call platform.send.
 
         For Slack, parse any ``MEDIA:`` markers out of the reply text, upload the
         referenced workspace files, and never let the raw marker reach Slack.
+
+        Text the model writes beside a tool call is never dropped.  On an
+        edit-capable platform it is appended to the turn's single progress
+        message, whose text so far is kept with its ts; an answer or a question
+        then goes beside that message, never over it.
+
+        Returns whether the item was delivered.
         """
         # 1. Extract channel identifier.
         identifier: str = item.destination.get("channel_identifier", "")
@@ -736,7 +811,7 @@ class ChannelDeliveryDispatcher:
                 item.id,
             )
             await self._record_delivery_failure(item, "missing channel_identifier")
-            return
+            return False
 
         # 2. Resolve tenant from the routing cache.
         resolved = await resolve_tenant(self._cache, platform.kind, identifier)
@@ -749,7 +824,7 @@ class ChannelDeliveryDispatcher:
             await self._record_delivery_failure(
                 item, f"channel deprovisioned: {identifier}"
             )
-            return
+            return False
 
         org_id: str = resolved["org_id"]
 
@@ -762,23 +837,9 @@ class ChannelDeliveryDispatcher:
             refs=platform.descriptor.vault_refs(identifier),
         )
 
-        intermediate = bool(item.payload.get("intermediate"))
         supports_edit = getattr(platform, "supports_edit", False)
-
-        # Intermediate narration: fold into the single progress message on
-        # edit-capable platforms; suppress elsewhere so only the final answer
-        # reaches the channel.
-        if intermediate and not supports_edit:
-            await self._delivery.mark_delivered(item.id, provider_message_id=None)
-            return
-        if intermediate and self._redis is not None:
-            fresh = await self._redis.set(
-                f"channel-progress-edit:{platform.kind}:{item.session_id}",
-                "1", ex=1, nx=True,
-            )
-            if not fresh:  # a sub-second-old edit already in flight — coalesce
-                await self._delivery.mark_delivered(item.id, provider_message_id=None)
-                return
+        intermediate = bool(item.payload.get("intermediate"))
+        narration: str | None = None
 
         # Coding-run heartbeat: fold every update for a run into a single "main
         # coding message" edited in place (latest activity only), independent of
@@ -799,10 +860,18 @@ class ChannelDeliveryDispatcher:
         # coding-run heartbeats so they never hijack the turn's placeholder.
         elif not code_run_id and self._redis is not None:
             from surogates.channels.channel_progress import take_progress_update
-            update_ts = await take_progress_update(
+            placeholder = await take_progress_update(
                 self._redis, platform.kind, item.session_id,
                 item.destination.get("channel_id", ""),
             )
+            update_ts = placeholder["ts"] if placeholder else None
+            narration = (placeholder or {}).get("text")
+            content = item.payload.get("content") or ""
+            if narration and not (
+                _narration_only(item)
+                and len(narration) + 2 + len(content) <= _progress_chars(platform)
+            ):
+                update_ts = None
             if update_ts is not None:
                 item.destination["update_ts"] = update_ts
 
@@ -874,9 +943,12 @@ class ChannelDeliveryDispatcher:
                 await self._delivery.mark_delivered(
                     item.id, provider_message_id=uploaded[0]
                 )
-                return
+                return True
             # Nothing uploaded — show a generic, non-leaking failure message.
             item.payload["content"] = _MEDIA_UPLOAD_FAILED_MSG
+
+        if update_ts is not None and narration:
+            item.payload["content"] = f"{narration}\n\n{item.payload.get('content') or ''}"
 
         # 4. Send the text via the platform, with per-item exception isolation.
         try:
@@ -887,7 +959,7 @@ class ChannelDeliveryDispatcher:
                 item.id, platform.kind, exc,
             )
             await self._record_delivery_failure(item, str(exc))
-            return
+            return False
 
         if result.success:
             await self._delivery.mark_delivered(
@@ -917,22 +989,25 @@ class ChannelDeliveryDispatcher:
                                 "[delivery] set_code_run_ts failed for outbox %d — ignoring",
                                 item.id,
                             )
-                elif intermediate:
+                elif intermediate and supports_edit and not code_run_id:
                     ts = result.message_id or update_ts
-                    if ts:
-                        try:
+                    text = item.payload.get("content") or ""
+                    try:
+                        if ts and len(text) <= _progress_chars(platform):
                             await set_placeholder(
                                 self._redis, platform.kind, item.session_id,
                                 channel=item.destination.get("channel_id", ""),
-                                ts=ts,
-                                thread_ts=item.destination.get("thread_ts"),
+                                ts=ts, thread_ts=item.destination.get("thread_ts"),
+                                text=text,
                             )
-                        except Exception:
-                            logger.warning(
-                                "[delivery] set_placeholder failed for outbox %d — ignoring",
-                                item.id,
-                            )
-                elif update_ts is not None:
+                        else:
+                            await clear_placeholder(self._redis, platform.kind, item.session_id)
+                    except Exception:
+                        logger.warning(
+                            "[delivery] recording the progress message failed for outbox %d — ignoring",
+                            item.id,
+                        )
+                elif update_ts is not None or narration:
                     try:
                         await clear_placeholder(self._redis, platform.kind, item.session_id)
                     except Exception:
@@ -966,9 +1041,10 @@ class ChannelDeliveryDispatcher:
                     logger.warning(
                         "[delivery] send_files raised for outbox %d", item.id, exc_info=True,
                     )
-        else:
-            error = result.error or "send failed"
-            await self._record_delivery_failure(item, error)
+            return True
+        error = result.error or "send failed"
+        await self._record_delivery_failure(item, error)
+        return False
 
 
 # ---------------------------------------------------------------------------

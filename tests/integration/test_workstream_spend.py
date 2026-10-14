@@ -56,7 +56,7 @@ class Ops:
         if self.tokens_left is not None:
             self.tokens_left = max(0, self.tokens_left - actual_tokens)
 
-    async def commerce_authorize(self, agent_id, *, firebase_uid, estimated_tokens, email=None, name=None, channel=None):
+    async def commerce_authorize(self, agent_id, *, firebase_uid, estimated_tokens, email=None, name=None, channel=None, end_user_id=None):
         self.held.append(("paid", firebase_uid, channel))
         if not self.paid_left:
             raise CommercePaymentRequiredError("insufficient_tokens")

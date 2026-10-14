@@ -20,6 +20,11 @@ CHECKIN_OPENER_MARKER = "checkin_opener"
 OUTREACH_OPENER_MARKER = "outreach_opener"
 OPENER_SYNTHETIC_MARKERS = (CHECKIN_OPENER_MARKER, OUTREACH_OPENER_MARKER)
 
+#: A final answer of exactly this is the agent choosing to write nothing: it
+#: stays in the transcript and never reaches a messaging channel.  A turn the
+#: platform woke (a journey step) is the agent's to stay quiet in.
+SILENT_REPLY = "NO_MESSAGE"
+
 
 @unique
 class EventType(str, Enum):
@@ -75,6 +80,11 @@ class EventType(str, Enum):
     CODE_RUN_PROGRESS = "code.run_progress"
     CODE_RUN_CHANNEL_UPDATE = "code.run_channel_update"
     CODE_RUN_RESULT = "code.run_result"
+
+    # A WhatsApp Flow (native form) sent by ``send_form``; delivered to the
+    # channel, and the record a submitted form's ``flow_token`` is checked
+    # against.
+    CHANNEL_FORM = "channel.form"
 
     # Session lifecycle
     SESSION_START = "session.start"

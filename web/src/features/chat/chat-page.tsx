@@ -7,6 +7,7 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
+import { useAttention } from "@/hooks/use-attention";
 import { type DesktopDeviceState, getDesktop } from "@/lib/desktop-bridge";
 import {
   type HandedMessage,
@@ -31,6 +32,7 @@ import { getChatRouteState } from "./chat-route-state";
 import { ComputerBrowser } from "./computer-browser";
 import { LocalChatBar } from "./local-chat-bar";
 import { NewChatPlace } from "./new-chat-place";
+import { NotifyOptIn } from "./notify-opt-in";
 import {
   surogatesWebChatAdapter,
   toAgentChatSession,
@@ -133,6 +135,11 @@ export function ChatPage() {
 
   const sessionId = chatRouteState.sessionId;
   const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([]);
+  useAttention(
+    chatMessages
+      .filter((m) => m.role === "assistant" && m.status === "complete")
+      .at(-1)?.id ?? null,
+  );
 
   // In Surogate Desktop a new chat works in a folder of this computer (Section 8). The line under
   // the composer is read again for each chat opened, and whenever the window comes back: the
@@ -382,6 +389,9 @@ export function ChatPage() {
             {sessionId && (
               <LocalChatBar key={sessionId} sessionId={sessionId} />
             )}
+            <NotifyOptIn
+              engaged={chatMessages.some((m) => m.role === "user")}
+            />
             <AgentChat
               sessionId={sessionId ?? null}
               adapter={chatAdapter}

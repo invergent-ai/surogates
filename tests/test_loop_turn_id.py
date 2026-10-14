@@ -469,3 +469,38 @@ async def test_a_folders_harness_request_that_gives_up_logs_by_why(
     assert await ArtifactCompletionMixin._folder_cursor(harness, session) is None
     assert await ArtifactCompletionMixin._walk_folder(harness, session, since="1") is None
     assert [record.levelno for record in caplog.records] == [level] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel, reason, asks_for_a_reply", [
+    ("whatsapp", "tool_loop_halt", True),
+    ("telegram", "invalid_tool_calls", True),
+    ("web", "budget_exhausted", False),
+])
+async def test_a_halted_channel_turn_still_replies_to_the_person(
+    monkeypatch: pytest.MonkeyPatch, channel: str, reason: str, asks_for_a_reply: bool,
+) -> None:
+    """A WhatsApp turn halted on a repeated malformed memory call left the
+    patient, who had just tapped a button, with no reply at all."""
+    sent: list[dict] = []
+
+    async def fake_call_llm_with_retry(**kwargs: Any) -> tuple[dict, dict]:
+        sent.append(kwargs["create_kwargs"])
+        return {"role": "assistant", "content": "Am notat. Revin imediat."}, {}
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    store = AsyncMock()
+    harness = _make_loop_harness(session_store=store)
+    session = _make_session().model_copy(update={"channel": channel})
+
+    await harness._request_final_summary(
+        session, [{"role": "user", "content": "Da, sunt de acord"}], "system",
+        SimpleNamespace(lease_token=uuid4()), request="Da, sunt de acord", reason=reason,
+    )
+
+    assert "tools" not in sent[0]
+    asked = sent[0]["messages"][-1]["content"]
+    assert ("reply now to the person" in asked) is asks_for_a_reply
+    response = next(c.args[2] for c in store.emit_event.await_args_list if c.args[1] == EventType.LLM_RESPONSE)
+    assert (response["message"]["content"], response["finish_reason"]) == ("Am notat. Revin imediat.", reason)
+    assert harness._complete_session.await_args.kwargs["reason"] == reason

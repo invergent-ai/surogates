@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import unicodedata
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select, update
@@ -54,6 +55,9 @@ async def pending_input_for_session(
         "tool_call_id": (row.action_ref or {}).get("tool_call_id", ""),
         "questions": payload.get("questions") or [],
         "context": payload.get("context", ""),
+        # Who was asked: the turn's acting principal, which in a shared
+        # thread is not every participant.
+        "user_id": row.user_id,
         # The blocked tool waits at most its own timeout; callers that
         # convert free-text messages into answers use this to ignore
         # rows orphaned by a tool timeout on a still-active session
@@ -63,20 +67,26 @@ async def pending_input_for_session(
 
 
 def match_choice_label(text: str, choices: list[dict]) -> str | None:
-    """The choice *text* selects, matched case- and padding-insensitively.
+    """The choice *text* selects, matched case-, diacritics- and padding-insensitively.
 
     The one definition of "is this answer on the menu", shared by the
     free-text channel resolver and the server-side ``is_other`` check so
     the two cannot drift.
     """
-    target = (text or "").strip().lower()
+    target = fold_label(text)
     if not target:
         return None
     for choice in choices:
         label = (choice.get("label") or "").strip()
-        if label and label.lower() == target:
+        if label and fold_label(label) == target:
             return label
     return None
+
+
+def fold_label(text: str) -> str:
+    """People often type without diacritics: "Nu stiu" for "Nu știu"."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").strip())
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 async def asked_questions(
