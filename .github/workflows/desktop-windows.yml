@@ -323,9 +323,9 @@ jobs:
           if-no-files-found: error
 
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
-  # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
-  # takes vm-guest's image and agent disks, gives the agent disk its VHD footer, and runs the boot and requirements
-  # measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
+  # virtualization on its runners. It builds the native programs and the desktop, takes vm-guest's image and agent
+  # disks, gives the agent disk its VHD footer, installs the development service laid out as the installed app is, the
+  # agent disk beside it in Program Files, and runs the boot and requirements measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
   # own words. Either way the result is kept with each boot's console and Hyper-V's own events, and the job does not
   # fail the branch.
   vm-boot:
@@ -390,17 +390,18 @@ jobs:
         working-directory: desktop
         run: node scripts/vhd-footer.mjs dist/agent.img
 
+      # The service, and the agent disk with its footer, in the development install's folder of Program Files, as the
+      # installed app has them: the service grants the agent disk from there to each VM it boots, by its own right.
       - name: Install the development VM service
         working-directory: desktop/native/windows
-        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
+        run: powershell -ExecutionPolicy Bypass -File dev-service.ps1 -AgentDisk ..\..\dist\agent.img
 
-      # The agent disk with its footer. The measurements give the image's disk its own, as the app's delivery does, and
-      # the measurements' agent disk too.
+      # The app's agent disk where the development service laid it out. The measurements give the image's disk its own
+      # footer, as the app's delivery does, and the measurements' agent disk too, each in the data folder.
       - name: Try one real boot, and record what happened
         working-directory: desktop
         continue-on-error: true
         env:
-          SUROGATE_VM_AGENT_DISK: ${{ github.workspace }}\desktop\dist\agent.img
           SUROGATE_VM_PROBING_DISK: ${{ github.workspace }}\desktop\test\vm\win32\measure\probing\agent.img
         run: |
           $said = npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot 2>&1 | Out-String

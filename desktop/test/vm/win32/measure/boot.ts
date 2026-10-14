@@ -10,15 +10,17 @@
 // surogate-vm.exe's start, its lines, the boot line, the console's first byte and each of its lines, and the hello, or
 // why it failed; and how long the image's copy took to reach the disk before the first.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts boot
-// PASS or FAIL: every boot reaches hello, the later ones in under 1.5 s at the median, and the rule attached at every
-// boot.
+// The first boot's agent disk is the app's, where the installed app has it (harness.ts, AGENT_DISK): what the service
+// grants on it is read from its ACL before the boot, while its VM runs and once it has gone.
+// PASS or FAIL: every boot reaches hello, the later ones in under 1.5 s at the median, the rule attached at every
+// boot, and the agent disk granted to its VM alone while it runs, and to no group of VMs, and that grant taken back.
 
 import { readFileSync } from "node:fs";
 
 import { expect, it } from "vitest";
 
 import type { VmOptions } from "../../../../src/vm/manager.js";
-import { BootFailed, IMAGE_FLUSH_MS, lab, median, ms, PROBING_DISK, record, ROOTS, type Timeline, told } from "./harness.js";
+import { AGENT_DISK, BootFailed, IMAGE_FLUSH_MS, lab, median, ms, PROBING_DISK, record, ROOTS, type Timeline, told, vmEntries } from "./harness.js";
 
 const RULE = "surogate: the protected-names rule attached 16 of 16 hooks";
 // The last line of the kernel's log on the console (probe.sh), and how long it is waited for after the hello.
@@ -44,8 +46,9 @@ const waitedIn = (timeline: Timeline) => {
 
 // A boot of the data folder "boot", new for the first (*fresh*), and the time to its hello from the start of the
 // surogate-vm.exe that booted it, or to its failure; how long the backend waited before it, where it asked again.
-// *logged*: the console's kernel log is waited for after the hello, before the guest is stopped.
-async function boot(extra: Partial<VmOptions>, { fresh = false, logged = false } = {}): Promise<Booted> {
+// *logged*: the console's kernel log is waited for after the hello, before the guest is stopped; *running*, called
+// while the guest runs.
+async function boot(extra: Partial<VmOptions>, { fresh = false, logged = false, running = () => {} } = {}): Promise<Booted> {
   const begun = performance.now();
   try {
     const booted = await lab("boot", extra, undefined, { fresh });
@@ -56,6 +59,7 @@ async function boot(extra: Partial<VmOptions>, { fresh = false, logged = false }
       while (!booted.timeline.console.some(({ line }) => line === LOGGED) && performance.now() < by) await new Promise((resolve) => setTimeout(resolve, 100));
     }
     await booted.run(ROOTS[0]!, "true").catch(() => undefined);
+    running();
     await booted.stop();
     // Read once the guest has gone, when all it printed has reached the log.
     return { ms: took, ...(waited > 0 ? { waited } : {}), attached: readFileSync(booted.options.console, "utf8").includes(RULE), timeline: booted.timeline };
@@ -135,8 +139,23 @@ const said = ({ ms: took, failed, waited, timeline }: Booted) => ({
   "its console, ms seen: line": timeline.console.map(({ ms: seen, line }) => `${seen}: ${line}`),
 });
 
+// The VMs' entries in the agent disk's ACL once the service has taken its last VM's grant back, which it does as that
+// VM's session ends, just after the guest has gone (an earlier measurement's VM, or this one's): waited for, for 10 s at
+// most.
+async function revoked(): Promise<string[]> {
+  const by = performance.now() + 10_000;
+  for (;;) {
+    const left = vmEntries(AGENT_DISK);
+    if (left.length === 0 || performance.now() > by) return left;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 it("boots the x64 guest to its hello through HCS, with its initrd, and says where the time goes", async () => {
-  const first = await boot({}, { fresh: true });
+  const before = await revoked();
+  let during: string[] = [];
+  const first = await boot({}, { fresh: true, running: () => (during = vmEntries(AGENT_DISK)) });
+  const after = await revoked();
   const later: Booted[] = [];
   for (let n = 0; n < 3; n += 1) later.push(await boot({}));
   const logged = await boot({ agentDisk: PROBING_DISK }, { logged: true });
@@ -151,10 +170,16 @@ it("boots the x64 guest to its hello through HCS, with its initrd, and says wher
     "each boot": boots.map(said),
     "the boot with the kernel's log": said(logged),
     "where the kernel's boot went": kernelTimes(logged.timeline),
+    "the agent disk": AGENT_DISK,
+    "its ACL's entries for VMs before the first boot": before,
+    "while the first boot's VM runs": during,
+    "once it has gone": after,
   }, {
     "every boot reaches hello": [...boots, logged].every(({ failed: why }) => why === undefined),
     "the later boots reach hello in under 1.5 s at the median": times.length === later.length && median(times) < 1_500,
     "the protected-names rule attached at every boot": boots.every(({ attached }) => attached),
+    "the agent disk granted to its VM alone while it runs, and to no group of VMs": before.length === 0 && during.length === 1 && during[0]!.includes(";S-1-5-83-1-"),
+    "the agent disk's grant taken back once its VM has gone": after.length === 0,
   });
   expect(failed).toEqual([]);
 });

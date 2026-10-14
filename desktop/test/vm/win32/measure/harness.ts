@@ -29,8 +29,8 @@ export const IMAGE = realpathSync(process.env.SUROGATE_VM_IMAGE ?? join(DESKTOP,
 /**
  * The measurements' data folder, as the app's own is to its VM: in this user's profile by its long names, as the
  * service takes no other and its walk refuses a short name (a runner's temp folder is under RUNNER~1), and holding
- * every file a boot names, as the service takes the kernel, the initrd and the disks from the caller's data folder
- * alone. Each measurement has a folder of its own in it.
+ * every file a boot names but the app's agent disk, as the service takes the kernel, the initrd and the other disks
+ * from the caller's data folder alone. Each measurement has a folder of its own in it.
  */
 export const DATA = join(realpathSync.native(tmpdir()), "surogate-measure");
 
@@ -66,8 +66,8 @@ if (!existsSync(join(IMAGE_COPY, "manifest.json")) || !readFileSync(join(IMAGE_C
 /** How long the image's copy took to reach the disk once copied, where this process copied it; else null. */
 export const IMAGE_FLUSH_MS = flushedMs;
 
-// The agent disk *from*, copied into the data folder's *folder*, and a fixed VHD there on disk: given its footer,
-// unless it has it already (vm/vhd.ts). None is, where *from* is not there, and the service says so at the boot.
+// A measurement's agent disk *from*, copied into the data folder's *folder*, and a fixed VHD there on disk: given its
+// footer, unless it has it already (vm/vhd.ts). None is, where *from* is not there, and the service says so at the boot.
 async function copied(from: string, folder: string): Promise<string> {
   rmSync(join(DATA, folder), { recursive: true, force: true });
   mkdirSync(join(DATA, folder), { recursive: true });
@@ -80,9 +80,24 @@ async function copied(from: string, folder: string): Promise<string> {
   return to;
 }
 
-/** The agent disk as a fixed VHD, copied into the data folder: the app's, or the one whose init runs a measurement's probe as root. */
-export const AGENT_DISK = await copied(process.env.SUROGATE_VM_AGENT_DISK ?? join(DESKTOP, "dist", "agent.vhd"), "agent");
+/**
+ * The app's agent disk, where the installed app has it, as near as the development service lets it be: in the
+ * development install's folder of Program Files (native/windows/dev-service.ps1 lays it out, a fixed VHD), which only
+ * administrators write, and from which the service grants it to each VM by its own right. Never copied into the data
+ * folder, where the service would grant it by the caller's.
+ */
+export const AGENT_DISK = process.env.SUROGATE_VM_AGENT_DISK ?? join(process.env.ProgramFiles ?? "C:\\Program Files", "Surogate Dev", "resources", "vm", "agent.vhd");
+/** The measurements' own agent disk, whose init runs a measurement's probe as root, copied into the data folder as a fixed VHD. */
 export const PROBING_DISK = await copied(process.env.SUROGATE_VM_PROBING_DISK ?? join(DESKTOP, "dist", "agent-measure.vhd"), "probing");
+
+/**
+ * The entries of *path*'s ACL for VMs, each as its SDDL says it, (A;;<rights>;;;<SID>): a VM's own SID is
+ * S-1-5-83-1-…, which HcsGrantVmAccess grants and HcsRevokeVmAccess takes away, and S-1-5-83-0 is the group of all VMs.
+ */
+export function vmEntries(path: string): string[] {
+  const sddl = execFileSync("powershell.exe", ["-NoProfile", "-Command", `(Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Sddl`], { encoding: "utf8" }).trim();
+  return (sddl.match(/\([^()]*\)/g) ?? []).filter((entry) => entry.includes(";S-1-5-83-"));
+}
 /** surogate-vm.exe, the Cargo build's (native/windows/target/release). */
 export const PROGRAM = process.env.SUROGATE_VM_PROGRAM ?? join(DESKTOP, "native", "windows", "target", "release", "surogate-vm.exe");
 /** Where each measurement writes what it found. */
