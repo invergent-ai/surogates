@@ -317,3 +317,59 @@ async def test_a_journey_ends_its_people_after_its_days(sf):
     assert (ended.status, ended.status_reason) == ("ended", "Journey finished")
     [still] = await followup_store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=ongoing)
     assert still.status == "active"
+
+
+# ---------------------------------------------------------------------------
+# Funnel and dry run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_funnel_counts_each_step_from_invited_to_answered(sf):
+    from surogates.programs.funnel import step_funnel
+
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    lookup = _lookup({("whatsapp", a): "4070", ("whatsapp", b): "4071"})
+    step = _schedule([a, b, c])
+    rows = await _fire(sf, step, lookup)
+    async with sf() as db:
+        for user, delivery, response, read, outcome in (
+            (a, "delivered", "completed", SLOT, "red"),
+            (b, "failed", "not_started", None, None),
+        ):
+            row = await db.get(ProgramInvitationRow, rows[user].id)
+            row.delivery_state, row.response_state, row.read_at, row.outcome = delivery, response, read, outcome
+        await db.commit()
+    other = uuid.uuid4()
+    funnels = await step_funnel(
+        sf, org_id=ORG, agent_id=AGENT, program_ids=[step.program_id, other],
+        since=SLOT - timedelta(days=1),
+    )
+    f = funnels[step.program_id]
+    assert (f["invited"], f["skipped"], f["sent"], f["delivered"], f["read"]) == (3, 1, 1, 1, 1)
+    assert (f["replied"], f["completed"], f["failed"], f["no_reply"]) == (1, 1, 1, 0)
+    assert f["skip_reasons"] == {"No whatsapp identity": 1}
+    assert f["outcomes"] == {"red": 1} and f["channels"] == {"whatsapp": 2}
+    assert funnels[other]["invited"] == 0
+
+
+def test_the_dry_run_follows_cadence_window_and_zone():
+    from surogates.programs.simulate import simulate
+
+    steps = [
+        {"id": "s1", "name": "Week one", "weekdays": ["mon", "wed", "fri"],
+         "times_local": ["09:00"], "timezone": "Europe/Bucharest",
+         "audience": {"protocol": "p", "day_from": 0, "day_to": 6}},
+        {"id": "s2", "name": "Day ten", "weekdays": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+         "times_local": ["10:00"], "timezone": "Europe/Bucharest",
+         "audience": {"protocol": "p", "day_from": 10, "day_to": 10}},
+    ]
+    # Monday 2026-10-12 is day 0.
+    events = simulate(steps, start_date=date(2026, 10, 12), timezone=None, days=14, today=date(2026, 10, 12))
+    assert [(e["step_id"], e["at"][:16]) for e in events] == [
+        ("s1", "2026-10-12T06:00"), ("s1", "2026-10-14T06:00"),
+        ("s1", "2026-10-16T06:00"), ("s2", "2026-10-22T07:00"),
+    ]
+    # The person's own zone moves every slot to their local time.
+    shifted = simulate(steps[:1], start_date=date(2026, 10, 12), timezone="America/New_York", days=1, today=date(2026, 10, 12))
+    assert shifted == [{"at": "2026-10-12T13:00:00+00:00", "step_id": "s1", "name": "Week one"}]
