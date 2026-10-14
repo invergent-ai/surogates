@@ -6,10 +6,20 @@
 # The pin moves in one change: VERSION and SHA256 together, the hash read from that release's
 # SHASUMS256.txt once `gpg --verify SHASUMS256.txt.asc` passes with nodejs/release-keys' keys,
 # each fetched with `curl -q` and checked in a keyring of its own, never the user's.
+#
+# It is the first step of npm run build, the Linux app's build. On Windows it refuses, naming the Windows app's build,
+# npm run build:win32, which makes the node the app's hosts run on there, bin/node.exe, itself.
 set -euo pipefail
 
 VERSION=v22.23.3
 SHA256=1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    echo "npm run build is the Linux app's build, with Linux's node: on Windows, build the app with npm run build:win32" >&2
+    exit 1
+    ;;
+esac
 
 cd "$(dirname "$0")/.."
 [ "$(bin/node --version 2>/dev/null)" = "$VERSION" ] && exit 0

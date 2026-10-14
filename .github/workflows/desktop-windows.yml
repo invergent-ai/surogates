@@ -215,10 +215,9 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
-      - name: Build the desktop
-        env:
-          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
-        run: npm run build
+      # The app's code alone, which the stand-in imports: npm run build is the Linux app's build, and refuses here.
+      - name: Build the app's code
+        run: npx tsc -p tsconfig.build.json
 
       - name: Run the VM backend against the stand-in
         run: npx vitest run test/vm-win32.test.ts
@@ -354,11 +353,11 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: npm ci
 
-      - name: Build the desktop
+      # The app's code alone, which gives the agent disk its footer below: npm run build is the Linux app's build, and
+      # refuses here.
+      - name: Build the app's code
         working-directory: desktop
-        env:
-          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
-        run: npm run build
+        run: npx tsc -p tsconfig.build.json
 
       - name: Take the guest image
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
