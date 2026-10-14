@@ -6,18 +6,12 @@ import Foundation
 
 public let MAX_LINE = 64 * 1024
 
-/// How the folders shared into the guest are laid out: one virtio-fs device whose share holds every
-/// folder, each a directory by its name (multiple), or eight devices of a folder each (single).
-public enum Layout: String, Sendable {
-  case multiple
-  case single
-}
-
 /// What the VM manager asks.
 public enum Request: Equatable {
   case boot(Boot)
   case share(id: Int, name: String, path: String, readOnly: Bool)
-  case unshare(id: Int, name: String)
+  /// *released*: the guest has said nothing of the folder's device is mounted in it any more (Shares.swift).
+  case unshare(id: Int, name: String, released: Bool)
   case kill
 }
 
@@ -31,9 +25,8 @@ public struct Boot: Equatable {
   public var cpus: Int
   public var memoryMiB: Int
   public var commandLine: String
-  public var layout: Layout
 
-  public init(kernel: String, rootfs: String, agentDisk: String, sessions: String, console: String, cpus: Int, memoryMiB: Int, commandLine: String, layout: Layout) {
+  public init(kernel: String, rootfs: String, agentDisk: String, sessions: String, console: String, cpus: Int, memoryMiB: Int, commandLine: String) {
     self.kernel = kernel
     self.rootfs = rootfs
     self.agentDisk = agentDisk
@@ -42,7 +35,6 @@ public struct Boot: Equatable {
     self.cpus = cpus
     self.memoryMiB = memoryMiB
     self.commandLine = commandLine
-    self.layout = layout
   }
 }
 
@@ -64,7 +56,7 @@ public enum Answer: Equatable {
   case listening
   case started(BootTimes)
   case failed(why: String)
-  case shared(id: Int, tag: String, name: String?)
+  case shared(id: Int, tag: String)
   case unshared(id: Int)
   /// A line refused: of a share or an unshare, by its id; of anything else, with none.
   case refused(id: Int?, why: String)
@@ -77,9 +69,7 @@ public enum Answer: Equatable {
     case .listening: object = ["type": "listening"]
     case let .started(times): object = ["type": "started", "ms": ["validated": times.validated, "running": times.running]]
     case let .failed(why): object = ["type": "failed", "why": why]
-    case let .shared(id, tag, name):
-      object = ["type": "shared", "id": id, "tag": tag]
-      if let name { object["name"] = name }
+    case let .shared(id, tag): object = ["type": "shared", "id": id, "tag": tag]
     case let .unshared(id): object = ["type": "unshared", "id": id]
     case let .refused(id, why):
       object = ["type": "refused", "why": why]
@@ -106,10 +96,10 @@ public struct Refusal: Error, Equatable {
 private struct Wire: Decodable {
   let type: String
   let id: Int?
-  let kernel, rootfs, agentDisk, sessions, console, commandLine, layout: String?
+  let kernel, rootfs, agentDisk, sessions, console, commandLine: String?
   let cpus, memoryMiB: Int?
   let name, path: String?
-  let readOnly: Bool?
+  let readOnly, released: Bool?
 }
 
 /// One line as a request, or why it is refused.
@@ -121,17 +111,19 @@ public func parse(_ line: Data) -> Result<Request, Refusal> {
   switch wire.type {
   case "boot":
     guard let kernel = wire.kernel, let rootfs = wire.rootfs, let agentDisk = wire.agentDisk, let sessions = wire.sessions, let console = wire.console,
-          let cpus = wire.cpus, let memoryMiB = wire.memoryMiB, let commandLine = wire.commandLine, let layout = wire.layout.flatMap(Layout.init(rawValue:))
-    else { return .failure(Refusal("a boot without its files, its machine or its layout")) }
-    return .success(.boot(Boot(kernel: kernel, rootfs: rootfs, agentDisk: agentDisk, sessions: sessions, console: console, cpus: cpus, memoryMiB: memoryMiB, commandLine: commandLine, layout: layout)))
+          let cpus = wire.cpus, let memoryMiB = wire.memoryMiB, let commandLine = wire.commandLine
+    else { return .failure(Refusal("a boot without its files or its machine")) }
+    return .success(.boot(Boot(kernel: kernel, rootfs: rootfs, agentDisk: agentDisk, sessions: sessions, console: console, cpus: cpus, memoryMiB: memoryMiB, commandLine: commandLine)))
   case "share":
     guard let id = wire.id, let name = wire.name, let path = wire.path, let readOnly = wire.readOnly else {
       return .failure(Refusal(id: wire.id, "a share without its id, name, path or readOnly"))
     }
     return .success(.share(id: id, name: name, path: path, readOnly: readOnly))
   case "unshare":
-    guard let id = wire.id, let name = wire.name else { return .failure(Refusal(id: wire.id, "an unshare without its id or name")) }
-    return .success(.unshare(id: id, name: name))
+    guard let id = wire.id, let name = wire.name, let released = wire.released else {
+      return .failure(Refusal(id: wire.id, "an unshare without its id, name or released"))
+    }
+    return .success(.unshare(id: id, name: name, released: released))
   case "kill":
     return .success(.kill)
   default:

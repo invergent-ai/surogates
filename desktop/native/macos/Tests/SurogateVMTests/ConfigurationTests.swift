@@ -8,8 +8,8 @@ import XCTest
 @testable import SurogateVM
 
 final class ConfigurationTests: XCTestCase {
-  private func made(_ layout: Layout) throws -> (VZVirtualMachineConfiguration, Laid) {
-    let laid = try Laid(self, layout: layout)
+  private func made() throws -> (VZVirtualMachineConfiguration, Laid) {
+    let laid = try Laid(self)
     var pair: [Int32] = [0, 0]
     XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
     addTeardownBlock { pair.forEach { close($0) } }
@@ -22,7 +22,7 @@ final class ConfigurationTests: XCTestCase {
   }
 
   func testHoldsTheDevicesThePlanNamesAndNoOther() throws {
-    let (made, laid) = try made(.multiple)
+    let (made, laid) = try made()
     XCTAssertTrue(made.platform is VZGenericPlatformConfiguration)
     let loader = try XCTUnwrap(made.bootLoader as? VZLinuxBootLoader)
     XCTAssertEqual(loader.kernelURL.path, laid.boot.kernel)
@@ -42,10 +42,7 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(ports.map(\.name), [nil, "ai.surogate.control", "ai.surogate.net", "ai.surogate.inbound"])
     XCTAssertEqual(ports.map(\.isConsole), [true, false, false, false])
     XCTAssertTrue(ports.allSatisfy { $0.attachment is VZFileHandleSerialPortAttachment })
-    XCTAssertEqual(made.directorySharingDevices.count, 1)
-    let share = try XCTUnwrap(made.directorySharingDevices.first as? VZVirtioFileSystemDeviceConfiguration)
-    XCTAssertEqual(share.tag, "surogate")
-    XCTAssertEqual((share.share as? VZMultipleDirectoryShare)?.directories.count, 0)
+    XCTAssertEqual(made.directorySharingDevices.count, 8)
     XCTAssertEqual(made.entropyDevices.count, 1)
     XCTAssertTrue(made.entropyDevices.first is VZVirtioEntropyDeviceConfiguration)
     XCTAssertEqual(made.memoryBalloonDevices.count, 1)
@@ -56,8 +53,8 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertFalse(made.directorySharingDevices.contains { ($0 as? VZVirtioFileSystemDeviceConfiguration)?.share is VZLinuxRosettaDirectoryShare })
   }
 
-  func testHasEightDevicesOfAFolderEachEachEmptyAndReadOnlyAtTheStartInTheSingleLayout() throws {
-    let (made, laid) = try made(.single)
+  func testHasEightDevicesOfAFolderEachEachEmptyAndReadOnlyAtTheStart() throws {
+    let (made, laid) = try made()
     let devices = made.directorySharingDevices.compactMap { $0 as? VZVirtioFileSystemDeviceConfiguration }
     XCTAssertEqual(devices.map(\.tag), ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"])
     for device in devices {

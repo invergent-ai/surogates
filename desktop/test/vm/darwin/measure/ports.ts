@@ -4,11 +4,11 @@
 // when the host's end of a port's socket ends. Decides that named ports carry the guest's transport,
 // or a vsock bridge in the guest.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts ports
-// PASS or FAIL: the three names are there, and the 261 KB come back whole. The rest is written down.
+// PASS, FAIL or UNTESTED: the three names are there, and the 261 KB come back whole. The rest is written down.
 
 import { expect, it } from "vitest";
 
-import { lab, median, ms, ready, record, ROOTS, scratch } from "./harness.js";
+import { judged, lab, median, ms, ready, record, ROOTS, scratch } from "./harness.js";
 
 it("carries the agent's ports by their names, whole", async () => {
   const booted = await lab("ports");
@@ -35,8 +35,9 @@ it("carries the agent's ports by their names, whole", async () => {
     "261 KB result's length": large.output.length,
     "the inbound port's host end ended, then a command": `${JSON.stringify(after.output.trim())} in ${ms(begun)} ms; ${gone}`,
   }, {
-    "the guest sees the ports ai.surogate.control, ai.surogate.net and ai.surogate.inbound": ["ai.surogate.control", "ai.surogate.net", "ai.surogate.inbound"].every((name) => names.some((line) => line.endsWith(` ${name}`))),
-    "a 261 KB result comes back whole": large.output.length === 261_000 && /^A+$/.test(large.output),
+    "the guest sees the ports ai.surogate.control, ai.surogate.net and ai.surogate.inbound":
+      judged([listed], ["ai.surogate.control", "ai.surogate.net", "ai.surogate.inbound"].every((name) => names.some((line) => line.endsWith(` ${name}`)))),
+    "a 261 KB result comes back whole": judged([large], large.output.length === 261_000 && /^A+$/.test(large.output)),
   });
   await booted.stop().catch(() => {});
   expect(failed).toEqual([]);

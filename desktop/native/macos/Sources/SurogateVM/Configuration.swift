@@ -2,7 +2,7 @@
 // names, and nothing else. No network device (VZVirtualMachineConfiguration.networkDevices empty is
 // the macOS form of QEMU's -nic none), no socket, graphics, keyboard, pointing, audio or USB
 // device, no serial port and no Rosetta share: what crosses into the guest is three disks, the
-// console and three named ports, the folders' share, an entropy device and a balloon.
+// console and three named ports, the folders' eight devices, an entropy device and a balloon.
 
 #if canImport(Virtualization)
 import Foundation
@@ -53,28 +53,18 @@ public func configuration(for plan: MachinePlan, ports: [Int32], console: Int32,
     consoles.ports[index] = port
   }
   configuration.consoleDevices = [consoles]
-  // VZVirtioFileSystemDeviceConfiguration(tag:), its tag checked by validateTag(_:): the one device for every
-  // folder starts with none (VZMultipleDirectoryShare(directories:)), each of the eight with the empty folder,
-  // read-only (VZSingleDirectoryShare(directory:)).
+  // VZVirtioFileSystemDeviceConfiguration(tag:), its tag checked by validateTag(_:): each of the eight starts with
+  // the empty folder, read-only (VZSingleDirectoryShare(directory:)).
   configuration.directorySharingDevices = try plan.shareTags.map { tag in
     try VZVirtioFileSystemDeviceConfiguration.validateTag(tag)
     let device = VZVirtioFileSystemDeviceConfiguration(tag: tag)
-    if plan.layout == .multiple {
-      device.share = multipleShare([:])
-    } else {
-      device.share = singleShare(SharedFolder(path: empty, readOnly: true))
-    }
+    device.share = singleShare(SharedFolder(path: empty, readOnly: true))
     return device
   }
   configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
   // VZVirtioTraditionalMemoryBalloonDeviceConfiguration, never inflated: its target is never lowered.
   configuration.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
   return configuration
-}
-
-/// VZMultipleDirectoryShare(directories:): each folder by its name, each a VZSharedDirectory(url:readOnly:).
-func multipleShare(_ folders: [String: SharedFolder]) -> VZMultipleDirectoryShare {
-  VZMultipleDirectoryShare(directories: folders.mapValues { VZSharedDirectory(url: URL(fileURLWithPath: $0.path), readOnly: $0.readOnly) })
 }
 
 /// VZSingleDirectoryShare(directory:) of a VZSharedDirectory(url:readOnly:).

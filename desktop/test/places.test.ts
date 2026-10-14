@@ -75,7 +75,7 @@ const recording = (asked: unknown[], places: Partial<ControlPlaces> = {}, roots:
       asked.push(["share", folder, uid, as?.readonly === true]);
       return { kind: "virtiofs", tag: `r${made}` };
     },
-    unshare: async (share) => void asked.push(["unshare", share]),
+    unshare: async (share, _deadline, as) => void asked.push(as?.released ? ["unshare", share, "released"] : ["unshare", share]),
   };
 };
 
@@ -153,9 +153,12 @@ describe("the agent's places", () => {
       mount: async (args) => void ran.push(["mount", ...args]),
       vsock: async (args) => void ran.push(["surogate-vsock", ...args]),
       unmount: async (args) => void ran.push(["umount", ...args]),
-      device: async () => {
-        ran.push(["device"]);
-        return "/device";
+      superblocks: {
+        remember: async (tag, at) => void ran.push(["remember", tag, at]),
+        released: async (tag) => {
+          ran.push(["released", tag]);
+          return tag !== "s8";
+        },
       },
     });
     return { ran, places };
@@ -193,22 +196,33 @@ describe("the agent's places", () => {
     expect(ran).toHaveLength(2);
   });
 
-  it("mounts Apple's shares as the host shared them: folders of its one device for every folder, bound from it, or two of its eight by their tags", async () => {
+  it("mounts Apple's shares as the host shared them, two of its eight devices by their tags, each mount's connection remembered", async () => {
     const { ran, places } = recorded();
-    await places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r2" });
-    await places.mount("fedcba9876543210", { kind: "vz", tag: "s1" }, { kind: "vz", tag: "s2" });
+    await places.mount(KEY, { kind: "vz", tag: "s1" }, { kind: "vz", tag: "s2" });
+    const at = (name: string) => join(dir, "places", KEY, name);
     expect(ran).toEqual([
-      ["device"],
-      ["mount", "--bind", "-o", "nosuid,nodev,noexec", "/device/r1", join(dir, "places", KEY, "history")],
-      ["device"],
-      ["mount", "--bind", "-o", "ro,nosuid,nodev,noexec", "/device/r2", join(dir, "places", KEY, "real")],
-      ["mount", "-t", "virtiofs", "-o", "nosuid,nodev,noexec", "s1", join(dir, "places", "fedcba9876543210", "history")],
-      ["mount", "-t", "virtiofs", "-o", "ro,nosuid,nodev,noexec", "s2", join(dir, "places", "fedcba9876543210", "real")],
+      ["mount", "-t", "virtiofs", "-o", "nosuid,nodev,noexec", "s1", at("history")], ["remember", "s1", at("history")],
+      ["mount", "-t", "virtiofs", "-o", "ro,nosuid,nodev,noexec", "s2", at("real")], ["remember", "s2", at("real")],
     ]);
-    // The one device's folders are told apart by their names: other names are other shares.
-    await expect(places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r3" })).rejects.toThrow("already mounted from other shares");
-    await places.mount(KEY, { kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "surogate", name: "r2" });
-    expect(ran).toHaveLength(6);
+    await expect(places.mount(KEY, { kind: "vz", tag: "s1" }, { kind: "vz", tag: "s3" })).rejects.toThrow("already mounted from other shares");
+    await places.mount(KEY, { kind: "vz", tag: "s1" }, { kind: "vz", tag: "s2" });
+    expect(ran).toHaveLength(4);
+  });
+
+  it("says a place of Apple's devices let go is released once both its mounts have gone and both devices are, and never one of Linux's", async () => {
+    const { ran, places } = recorded();
+    await places.mount(KEY, { kind: "vz", tag: "s1" }, { kind: "vz", tag: "s2" });
+    expect(await places.unmount(KEY)).toBe(true);
+    expect(ran.slice(4)).toEqual([
+      ["umount", "-l", join(dir, "places", KEY, "real")], ["umount", "-l", join(dir, "places", KEY, "history")], ["released", "s1"], ["released", "s2"],
+    ]);
+    // One device not released, as while something still holds a mount of it: the place is not.
+    await places.mount(KEY, { kind: "vz", tag: "s7" }, { kind: "vz", tag: "s8" });
+    expect(await places.unmount(KEY)).toBe(false);
+    // Linux's, whose tags are never given again, and a place not mounted: nothing is said released.
+    await places.mount(KEY, R1, R2);
+    expect(await places.unmount(KEY)).toBe(false);
+    expect(await places.unmount(KEY)).toBe(false);
   });
 
   it("mounts the host's Plan 9 shares through a stream to its server's port, the history for writing and the folder read-only, as the root's guest uid", async () => {
@@ -365,6 +379,13 @@ describe("the agent's control port, asked for a place", () => {
     expect(failing.sent).toEqual([{ type: "failed", id: 3, message: "mount: wrong fs type" }]);
   });
 
+  it("says a place let go released its two shares' devices only where the places say so", async () => {
+    const { sent, tell } = control({ unmount: async (key) => key === KEY });
+    await tell({ type: "unplace", id: 1, key: KEY });
+    await tell({ type: "unplace", id: 2, key: "fedcba9876543210" });
+    expect(sent).toEqual([{ type: "done", id: 1, released: true }, { type: "done", id: 2 }]);
+  });
+
   it("refuses a place request whose fields are not a place's", async () => {
     const { sent, asked, tell } = control({});
     await tell({ type: "place", id: 1, key: 7, history: R1, real: R2 });
@@ -407,6 +428,23 @@ describe("the VM manager, asked for a folder's place", () => {
     expect(asked.slice(6)).toEqual([
       ["share", join(dir, "store"), 0, false], ["share", join(dir, "Documents"), 0, true], ["mount", KEY, R1, R2],
     ]);
+    await manager.stop();
+  });
+
+  it("lets a place's two shares go as released only where the guest said so of both", async () => {
+    const asked: unknown[] = [];
+    let releases = true;
+    const unmount = async (key: string) => {
+      asked.push(["unmount", key]);
+      return releases;
+    };
+    const manager = new VmManager(options(), recording(asked, { unmount }));
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.unplace(place());
+    releases = false;
+    expect(await manager.place(place(), signal())).toBeNull();
+    await manager.unplace(place());
+    expect(asked.filter((call) => (call as unknown[])[0] === "unshare")).toEqual([["unshare", R2, "released"], ["unshare", R1, "released"], ["unshare", R2], ["unshare", R1]]);
     await manager.stop();
   });
 

@@ -5,7 +5,7 @@
 
 import type { Outcome } from "../link/protocol.js";
 import type { ProcessHandle } from "./processes.js";
-import { type FromAgent, type HostUser, P9_ANAME, PLAN9_PORT, type Share, type ToAgent, VZ_NAME, VZ_TAG } from "./protocol.js";
+import { type FromAgent, type HostUser, P9_ANAME, PLAN9_PORT, type Share, type ToAgent, VZ_TAG } from "./protocol.js";
 
 export const NO_HELLO = "The host has not answered hello";
 const NO_PLACES = "The agent keeps no folder's history";
@@ -14,7 +14,8 @@ const NO_PLACES = "The agent keeps no folder's history";
 export interface ControlRoots {
   uid(root: string): number;
   setup(root: string, folder: string, share: Share, user: HostUser, ended: ProcessHandle[]): Promise<void>;
-  teardown(root: string, share: Share): Promise<void>;
+  // Resolves true where nothing of the share is mounted in the guest any more (protocol.ts, FromAgent's released).
+  teardown(root: string, share: Share): Promise<boolean | void>;
   // Never rejects: whatever goes wrong is an outcome.
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
 }
@@ -22,7 +23,8 @@ export interface ControlRoots {
 // What the control asks of the folders' places (places.ts).
 export interface ControlPlaces {
   mount(key: string, history: Share, real: Share): Promise<void>;
-  unmount(key: string): Promise<void>;
+  // Resolves true where nothing of either share is mounted in the guest any more.
+  unmount(key: string): Promise<boolean | void>;
   // Never rejects: whatever goes wrong is an outcome.
   history(key: string, request: { thread: string; user: string; action: string; args: Record<string, unknown> }, signal: AbortSignal): Promise<Outcome>;
   // The guest's stop: every request ends, and none starts after. Settles once what they ran has gone, or past its bound.
@@ -53,14 +55,17 @@ const certificatesOf = (value: unknown): string[] => (Array.isArray(value) && va
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-// The kinds of share this agent mounts. Apple's names one of the VM's devices, and a folder's directory in it; a
-// Plan 9 share, the host's server's port and the options it takes, each in its form (root.ts, checkShare).
+// The kinds of share this agent mounts. Apple's names one of the VM's eight devices, and nothing else; a Plan 9 share,
+// the host's server's port and the options it takes, each in its form (root.ts, checkShare).
 function isShare(value: unknown): value is Share {
   if (!isRecord(value) || !isText(value.tag)) return false;
   if (value.kind === "virtiofs") return true;
   if (value.kind === "p9") return value.port === PLAN9_PORT && (value.aname === undefined || (isText(value.aname) && P9_ANAME.test(value.aname)));
-  return value.kind === "vz" && VZ_TAG.test(value.tag) && (value.name === undefined || (isText(value.name) && VZ_NAME.test(value.name)));
+  return value.kind === "vz" && VZ_TAG.test(value.tag) && Object.keys(value).length === 2;
 }
+
+// A request's done, *released* where what it let go is released (protocol.ts, FromAgent's done).
+const done = (id: number, released: boolean | void): FromAgent => (released === true ? { type: "done", id, released: true } : { type: "done", id });
 
 function isUser(value: unknown): value is HostUser {
   if (!isRecord(value)) return false;
@@ -148,7 +153,7 @@ export class Control {
     } else if (message.type === "teardown") {
       if (!isText(message.root) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("teardown") });
       this.roots.teardown(message.root, message.share).then(
-        () => this.send({ type: "done", id }),
+        (released) => this.send(done(id, released)),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
     } else if (message.type === "history") {
@@ -165,7 +170,7 @@ export class Control {
       if (!isText(message.key) || !shared) return this.send({ type: "failed", id, message: malformed(type) });
       if (!this.places) return this.send({ type: "failed", id, message: NO_PLACES });
       (type === "place" ? this.places.mount(message.key, message.history, message.real) : this.places.unmount(message.key)).then(
-        () => this.send({ type: "done", id }),
+        (released) => this.send(done(id, released)),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );
     } else if (message.type === "time") {

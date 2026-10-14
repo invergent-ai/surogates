@@ -2,8 +2,8 @@
 // through surogate-vm (native/macos), the one program of the app's with the framework's
 // entitlement. It speaks surogate-vm's line protocol (vm-helper.ts) on its stdin and stdout, and
 // connects to the guest's control, net and inbound ports as Unix sockets surogate-vm makes in the
-// runtime folder, as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server,
-// which maps no owner and shows each file as the asking uid's: every root runs on its own uid, as
+// runtime folder, as the Linux backend connects to QEMU's. Each folder is shared by Apple's own virtio-fs server, on
+// one of eight devices, which maps no owner and shows each file as the asking uid's: every root runs on its own uid, as
 // on Linux, where its folder shows it that uid (guest/root.ts, checkOwner). surogate-vm stops the VM when its
 // stdin ends, so the VM ends with the manager however it ends; it writes its pid in the runtime
 // folder, and the next boot's sweep ends one that outlived its manager.
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { cleanly, spawnClean } from "../clean-child.js";
 import type { Share } from "../guest/protocol.js";
-import { MAX_SHARES } from "../guest/protocol.js";
+import { MAX_SHARES, VZ_TAG } from "../guest/protocol.js";
 import { basename, dirname, join } from "../host-path.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
 import { guestCpus, kernelLine } from "./qemu.js";
@@ -26,11 +26,6 @@ import { Helper, late, type Said, type Start } from "./vm-helper.js";
 
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const MEMORY_MIB = 2048;
-// How the folders are laid out in the guest (native/macos, Shares.swift): one device that holds every
-// folder, or eight of a folder each, as a Mac measures which the framework takes while the guest runs
-// (test/vm/darwin/measure/shares.ts).
-export type Layout = "multiple" | "single";
-export const LAYOUT: Layout = "multiple";
 // How long surogate-vm has after its kill line to end the VM and exit, before it is killed.
 const KILL_MS = 1_000;
 // The longest Unix socket path Darwin takes, its sockaddr_un's sun_path without the NUL.
@@ -115,7 +110,7 @@ export function darwinBoot(start: Start): BootVm {
       }
       helper.send({
         type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
-        cpus: options.cpus ?? guestCpus(), memoryMiB: MEMORY_MIB, commandLine: COMMAND_LINE, layout: options.layout ?? LAYOUT,
+        cpus: options.cpus ?? guestCpus(), memoryMiB: MEMORY_MIB, commandLine: COMMAND_LINE,
       });
       const started = await helper.first((said) => said.type === "started" || said.type === "failed", deadline);
       if (started === "late") throw new Error("the VM did not start in time");
@@ -175,7 +170,7 @@ export function requirementsDarwin(program = VM_PROGRAM, ms = 5_000): Promise<st
   });
 }
 
-// A folder shared into the guest: its name in surogate-vm, and what holds it.
+// A folder shared into the guest on one of the eight devices: its name in surogate-vm, and what holds it.
 interface Shared {
   name: string;
   held: "chat" | "copy" | "place";
@@ -189,8 +184,11 @@ class DarwinVm implements VmBackend {
   // VZSharedDirectory's init(url:readOnly:) takes a folder by its URL, and Apple's documentation does not say when the
   // framework's server opens it: as it is shared, at the guest's first look, or at each.
   readonly opensByPath = true;
-  // Each share in the guest, by its tag and name; each name, r<n>, is never given again in this VM.
+  // Each share in the guest, by its device's tag; each name, r<n>, is never given again in this VM. And the devices
+  // retired: let go without the guest's word that nothing of them is left in it (manager.ts, VmBackend.unshare), each
+  // holds its empty folder and takes no other until the VM restarts, since a root may still hold a mount of it.
   private readonly shares = new Map<string, Shared>();
+  private readonly retired = new Set<string>();
   private made = 0;
   private asked = 0;
   private killed: Promise<void> | null = null;
@@ -220,51 +218,57 @@ class DarwinVm implements VmBackend {
   }
 
   /**
-   * *folder* shared into the running guest, by *deadline*, as a directory of the one device for every folder
-   * (or one of eight, as surogate-vm lays them out). Apple's share maps no owner, so *uid* maps nothing: it
-   * shows each file as the asking uid's, the root's own; 0 is the guest's root's, for a folder's place.
-   * *readonly*: the place's real folder, which
-   * Apple's server keeps read-only (VZSharedDirectory's readOnly).
+   * *folder* shared into the running guest, by *deadline*, on a free device of the eight, as surogate-vm gives
+   * it. Apple's share maps no owner, so *uid* maps nothing: it shows each file as the asking uid's, the root's
+   * own; 0 is the guest's root's, for a folder's place. *readonly*: the place's real folder, which Apple's
+   * server keeps read-only (VZSharedDirectory's readOnly). A device surogate-vm gives that holds another folder,
+   * or is retired, ends the VM: a root may still hold a mount of it, and would be served this folder.
    */
   async share(folder: string, uid: number, deadline: number, { readonly = false, copy = false } = {}): Promise<Share> {
     if (this.killed) throw new Error("the VM has gone");
-    if (this.shares.size >= MAX_SHARES) throw new Error(this.full());
+    if (this.shares.size + this.retired.size >= MAX_SHARES) throw new Error(this.full());
     const name = `r${(this.made += 1)}`;
     const said = await this.answer({ type: "share", id: (this.asked += 1), name, path: folder, readOnly: readonly }, deadline);
     if (said.type !== "shared") throw new Error(said.type === "refused" ? `the folder could not be shared: ${said.why}` : "surogate-vm answered no share");
-    const share: Share = said.name === undefined ? { kind: "vz", tag: said.tag } : { kind: "vz", tag: said.tag, name: said.name };
-    this.shares.set(key(share), { name, held: uid === 0 ? "place" : copy ? "copy" : "chat", removal: null });
-    return share;
+    if (!VZ_TAG.test(said.tag) || this.shares.has(said.tag) || this.retired.has(said.tag)) {
+      await this.kill();
+      throw new Error(`surogate-vm gave a device a root may still hold: ${said.tag.slice(0, 16)}`);
+    }
+    this.shares.set(said.tag, { name, held: uid === 0 ? "place" : copy ? "copy" : "chat", removal: null });
+    return { kind: "vz", tag: said.tag };
   }
 
   /**
-   * *share* out of the running guest, by *deadline*: surogate-vm takes its folder out of the device's share.
-   * One it does not let go of in time, or refuses, ends the VM: the share would hold its place, half-removed.
+   * *share* out of the running guest, by *deadline*: surogate-vm gives its device the empty folder. Its device
+   * takes the next folder only where the guest *released* it; it is retired otherwise. One surogate-vm does not
+   * let go of in time, or refuses, ends the VM: the share would hold its place, half-removed.
    */
-  unshare(share: Share, deadline: number): Promise<void> {
-    const shared = this.shares.get(key(share));
+  unshare(share: Share, deadline: number, { released = false } = {}): Promise<void> {
+    const shared = this.shares.get(share.tag);
     if (!shared) return Promise.resolve();
-    shared.removal ??= this.remove(share, shared, deadline);
+    shared.removal ??= this.remove(share, shared, deadline, released);
     return shared.removal;
   }
 
-  private async remove(share: Share, shared: Shared, deadline: number): Promise<void> {
-    const said = await this.answer({ type: "unshare", id: (this.asked += 1), name: shared.name }, deadline);
+  private async remove(share: Share, shared: Shared, deadline: number, released: boolean): Promise<void> {
+    const said = await this.answer({ type: "unshare", id: (this.asked += 1), name: shared.name, released }, deadline);
     if (said.type !== "unshared") {
       await this.kill();
       throw new Error(said.type === "refused" ? `the folder could not be let go: ${said.why}` : "surogate-vm let no folder go");
     }
-    this.shares.delete(key(share));
+    this.shares.delete(share.tag);
+    if (!released) this.retired.add(share.tag);
   }
 
-  // Why no other folder is shared: what holds each place, as on Linux.
+  // Why no other folder is shared: what holds each device, as on Linux what holds each place, and the devices retired.
   private full(): string {
     const count = (what: Shared["held"]) => [...this.shares.values()].filter(({ held }) => held === what).length;
-    const [chats, copies, places] = [count("chat"), count("copy"), count("place")];
+    const [chats, copies, places, retired] = [count("chat"), count("copy"), count("place"), this.retired.size];
     const held = [
       ...(chats > 0 ? [`the folders of ${chats} ${chats === 1 ? "chat" : "chats"}`] : []),
       ...(copies > 0 ? [copies === 1 ? "the copy of 1 thread" : `the copies of ${copies} threads`] : []),
       ...(places > 0 ? [`${places} for the histories of project folders, which take two each`] : []),
+      ...(retired > 0 ? [`${retired} kept empty until it restarts, since what ran there may not have let go of ${retired === 1 ? "it" : "them"}`] : []),
     ];
     const last = held.pop();
     return `it holds as many folders as it has room for, ${MAX_SHARES}: ${held.length > 0 ? `${held.join(", ")}, and ${last}` : last}`;
@@ -284,5 +288,3 @@ class DarwinVm implements VmBackend {
     return this.killed;
   }
 }
-
-const key = (share: Share) => `${share.tag}/${share.kind === "vz" ? share.name ?? "" : ""}`;

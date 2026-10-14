@@ -29,7 +29,7 @@ struct Laid {
   let places: Places
   let boot: Boot
 
-  init(_ test: XCTestCase, layout: Layout = .multiple) throws {
+  init(_ test: XCTestCase) throws {
     let root = try folder(test)
     let places = Places(run: "\(root)/run", data: "\(root)/data", image: "\(root)/image", bundle: "\(root)/app")
     for path in [places.run, places.data, places.image, places.bundle, "\(places.data)/logs", "\(places.data)/vm"] { dir(path) }
@@ -41,7 +41,7 @@ struct Laid {
     boot = Boot(
       kernel: "\(places.image)/vmlinuz", rootfs: "\(places.image)/rootfs.img", agentDisk: "\(places.bundle)/agent.img", sessions: "\(places.data)/vm/sessions.img",
       console: "\(places.data)/logs/vm-console.log", cpus: 2, memoryMiB: 2048,
-      commandLine: "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet", layout: layout
+      commandLine: "root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet"
     )
   }
 }

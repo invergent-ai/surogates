@@ -26,16 +26,17 @@ const SENSITIVE_PREFIXES = ["/etc/", "/boot/", "/usr/lib/systemd/"];
 const SENSITIVE_PATHS = ["/var/run/docker.sock", "/run/docker.sock"];
 
 // The characters a volume that compares names without case may take as ASCII letters, and the letters.
-// Unicode's full case folding, as an ext4 casefold folder folds names, takes ſ (U+017F) to s, the Kelvin
-// sign (U+212A) to k, ß and ẞ to ss and the ligatures U+FB00 to U+FB06 to the letters they join; exFAT's and
-// NTFS's upper-casing takes ſ to S and ı (U+0131) to I; Turkic folding takes İ (U+0130) to i. APFS's folding
-// is Apple's own and not documented: each is taken as one, and a Mac measures it (test/vm/darwin/measure).
-// The guest's rule folds the same (vm/rule-match.h, sg_fold).
+// Unicode's full case folding, as an ext4 casefold folder folds names, takes ſ (U+017F) to s, ß and ẞ to ss
+// and the ligatures U+FB00 to U+FB06 to the letters they join; exFAT's and NTFS's upper-casing takes ſ to S
+// and ı (U+0131) to I; Turkic folding takes İ (U+0130) to i. The Kelvin sign (U+212A) is K by canonical
+// equivalence (folded), and k without case. APFS's folding is Apple's own and not documented: each is taken as
+// one, and a Mac measures it (test/vm/darwin/measure/owners.ts). The guest's rule folds the same
+// (vm/rule-match.h, sg_fold).
 const FOLDS: ReadonlyMap<string, string> = new Map([
-  ["\u017f", "s"], ["\u0131", "i"], ["\u0130", "i"], ["\u00df", "ss"], ["\u212a", "k"], ["\u1e9e", "ss"],
+  ["\u017f", "s"], ["\u0131", "i"], ["\u0130", "i"], ["\u00df", "ss"], ["\u1e9e", "ss"],
   ["\ufb00", "ff"], ["\ufb01", "fi"], ["\ufb02", "fl"], ["\ufb03", "ffi"], ["\ufb04", "ffl"], ["\ufb05", "st"], ["\ufb06", "st"],
 ]);
-const FOLDING = /[\u017f\u0131\u0130\u00df\u212a\u1e9e\ufb00-\ufb06]/g;
+const FOLDING = /[\u017f\u0131\u0130\u00df\u1e9e\ufb00-\ufb06]/g;
 // The code points HFS+'s comparison of names ignores (Apple's Technical Note TN1150, "HFS Plus Volume Format", its
 // case-insensitive string comparison): there a name that holds them is the name without them.
 const IGNORED = /[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g;
@@ -50,10 +51,19 @@ function untrailed(name: string): string {
 
 /**
  * One component, *name*, as the volume a folder lies on may take it: without the code points HFS+ ignores, then
- * without the dots and spaces it ends with, then folded as a volume that compares names without case compares it.
- * Each name a volume takes as a protected one is that one, on every volume and every OS.
+ * without the dots and spaces it ends with; each character a volume may take as letters as those letters; then as
+ * APFS compares names, by Unicode's canonical equivalence (its canonical decomposition, NFD: a name and its
+ * decomposed spelling are one), then without case. Each name a volume takes as a protected one is that one, on every
+ * volume and every OS. The guest's rule has no canonical equivalence, and needs none: the only character whose
+ * decomposition is an ASCII letter is the Kelvin sign, which it takes as k, and a letter with a mark, in either
+ * spelling, is no ASCII name, to APFS or to either fold.
  */
-export const folded = (name: string): string => untrailed(name.replace(IGNORED, "")).replace(FOLDING, (found) => FOLDS.get(found)!).toLowerCase();
+export const folded = (name: string): string => {
+  // An ASCII name holds nothing a volume ignores or takes as letters, and is its own canonical decomposition.
+  if (!NOT_ASCII.test(name)) return untrailed(name).toLowerCase();
+  return untrailed(name.replace(IGNORED, "")).replace(FOLDING, (found) => FOLDS.get(found)!).normalize("NFD").toLowerCase();
+};
+const NOT_ASCII = /[^\x00-\x7f]/;
 
 /** A folder-relative key's components, each folded. */
 export const foldedParts = (key: string): string[] => key.split("/").map(folded);

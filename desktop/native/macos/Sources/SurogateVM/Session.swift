@@ -57,7 +57,7 @@ public final class Session {
   private var ports: [Int32]?
   private var pending: Boot?
   private var machine: Machine?
-  private var book = ShareBook(layout: .multiple)
+  private var book = ShareBook()
   // When the boot line was read, on around.now's clock: the started line's times are from it.
   private var asked = 0.0
 
@@ -98,19 +98,19 @@ public final class Session {
       do {
         try checkShared(path, in: places)
         let folder = SharedFolder(path: path, readOnly: readOnly)
-        let (change, tag, shown) = try book.sharing(name, folder)
+        let (change, tag) = try book.sharing(name, folder)
         try machine.apply(change)
-        book.commit(name, folder, change)
-        around.say(.shared(id: id, tag: tag, name: shown))
+        book.commit(name, change)
+        around.say(.shared(id: id, tag: tag))
       } catch {
         around.say(.refused(id: id, why: words(error)))
       }
-    case let .success(.unshare(id, name)):
+    case let .success(.unshare(id, name, released)):
       guard state == .running, let machine else { return around.say(.refused(id: id, why: "the guest is not running")) }
       guard let change = book.unsharing(name) else { return around.say(.unshared(id: id)) }
       do {
         try machine.apply(change)
-        book.commitUnshare(name, change)
+        book.commitUnshare(change, released: released)
         around.say(.unshared(id: id))
       } catch {
         around.say(.refused(id: id, why: words(error)))
@@ -149,7 +149,6 @@ public final class Session {
   private func begin(_ boot: Boot) {
     do {
       let planned = try plan(boot, cpus: around.cpus, memory: around.memory)
-      book = ShareBook(layout: boot.layout)
       let made = try around.machine(planned, ports ?? [])
       let validated = since(asked)
       machine = made

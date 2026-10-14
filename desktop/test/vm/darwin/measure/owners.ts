@@ -8,8 +8,8 @@
 // APFS takes as one name. Another uid's write, with the share's owner shown as each asking uid's, is recorded alone:
 // a root's share is mounted in no other root's namespace.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts owners
-// PASS or FAIL: a session runs as a uid from 10000 up and sees its folder as that uid's, the host user owns what the
-// guest makes, and every pair of names APFS takes as one the fold takes as one too.
+// PASS, FAIL or UNTESTED: a session runs as a uid from 10000 up and sees its folder as that uid's, the host user owns
+// what the guest makes, and every pair of names APFS takes as one the fold takes as one too.
 
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 
 import { folded } from "../../../../src/files/protect.js";
-import { lab, PROBING_DISK, ready, record, ROOTS, scratch, USER } from "./harness.js";
+import { judged, lab, PROBING_DISK, ready, record, ROOTS, scratch, USER } from "./harness.js";
 
 // Names APFS may take as one: each ASCII name, and the others to look it up by.
 const ALIASES: Array<[string, string[]]> = [
@@ -54,14 +54,16 @@ it("shows the host user's files as theirs, and takes the names APFS takes as one
   const booted = await lab("owners", { agentDisk: PROBING_DISK });
   await ready(booted.guest, ROOTS[0]!, folder);
   const root = ROOTS[0]!;
-  const seen = (await booted.run(root, "id -u; id -g; stat -c '%u %g %a' . host.txt")).output.trim().split("\n");
-  const tried = (await booted.run(root, [
+  const looked = await booted.run(root, "id -u; id -g; stat -c '%u %g %a' . host.txt");
+  const seen = looked.output.trim().split("\n");
+  const trying = await booted.run(root, [
     "t() { \"$@\" 2>&1 && echo ok || echo failed; }",
     "echo made: $(t sh -c 'echo guest > made.txt')", "echo chmod: $(t chmod 600 made.txt)", "echo hard link: $(t ln made.txt hard.txt)",
     "echo symlink: $(t ln -s made.txt soft.txt)", "echo fifo: $(t mkfifo fifo)", "echo xattr: $(t python3 -c \"import os; os.setxattr('made.txt', 'user.surogate', b'1')\")",
     "echo rename over: $(t sh -c 'echo other > other.txt && mv -f other.txt made.txt')",
     ...ALIASES.flatMap(([, others]) => others.map((other) => `echo "lookup ${other}: $(t test -e '${other}')"`)),
-  ].join("\n"))).output;
+  ].join("\n"));
+  const tried = trying.output;
   const made = existsSync(join(folder, "made.txt")) ? statSync(join(folder, "made.txt")) : null;
   const asRoot = await probe(join(folder), [
     "echo device node: $(mknod \"$here/node\" c 1 3 2>&1 && echo ok || echo failed)",
@@ -74,9 +76,9 @@ it("shows the host user's files as theirs, and takes the names APFS takes as one
     "what a session could do": tried.trim().split("\n"), "made.txt on the host": made ? `uid ${made.uid} gid ${made.gid} mode ${(made.mode & 0o777).toString(8)}` : "not made",
     "what the guest's root could do": asRoot.trim().split("\n"), "names APFS takes as one that the fold does not": misses,
   }, {
-    "a session runs as a uid from 10000 up": Number(seen[0]) >= 10_000,
-    "the session sees its folder and the Mac's file as its own uid's": [seen[2], seen[3]].every((line) => line?.split(" ")[0] === seen[0]),
-    "the host user owns a file the guest makes": made?.uid === USER.uid,
+    "a session runs as a uid from 10000 up": judged([looked], Number(seen[0]) >= 10_000),
+    "the session sees its folder and the Mac's file as its own uid's": judged([looked], [seen[2], seen[3]].every((line) => line?.split(" ")[0] === seen[0])),
+    "the host user owns a file the guest makes": judged([trying], made?.uid === USER.uid),
     "every pair of names APFS takes as one the fold takes as one": misses.length === 0,
   });
   expect(failed).toEqual([]);

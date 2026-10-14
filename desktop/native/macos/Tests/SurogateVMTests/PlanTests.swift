@@ -16,11 +16,10 @@ final class PlanTests: XCTestCase {
     ])
     XCTAssertEqual(planned.ports, [nil, "ai.surogate.control", "ai.surogate.net", "ai.surogate.inbound"])
     XCTAssertEqual(planned.console, laid.boot.console)
-    XCTAssertEqual(planned.shareTags, ["surogate"])
+    XCTAssertEqual(planned.shareTags, ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"])
     XCTAssertEqual([planned.entropyDevices, planned.memoryBalloons], [1, 1])
     XCTAssertEqual(planned.memoryBytes, 2048 << 20)
     XCTAssertEqual(planned.commandLine, laid.boot.commandLine)
-    XCTAssertEqual(try plan(try Laid(self, layout: .single).boot, cpus: cpus, memory: memory).shareTags, ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"])
   }
 
   func testKeepsTheMachineWithinThisMacsBounds() throws {

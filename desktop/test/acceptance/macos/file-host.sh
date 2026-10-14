@@ -29,8 +29,7 @@ step() {
 
 build() {
   npm ci --no-audit --no-fund >/dev/null && npm run electron:install >/dev/null && npx tsc -p tsconfig.build.json \
-    && native/spawn/build.sh && native/fsat/build.sh && native/helper/build.sh && mkdir -p bin && cp "$(command -v node)" bin/node \
-    && scripts/rg.sh
+    && native/spawn/build.sh && native/fsat/build.sh && native/helper/build.sh && scripts/mac-node.sh && scripts/rg.sh
 }
 step "build what the file host runs on" build
 export PATH="$DESKTOP/bin:$PATH"
@@ -54,13 +53,20 @@ if said=$(mkdir -p "$documents" 2>&1); then places+=("$documents"); else skip "t
 image="$log/probe.dmg"
 volume=""
 mkdir -p "$log/volume"
-if ! said=$(hdiutil create -quiet -size 64m -fs ExFAT -volname SurogateProbe "$image" 2>&1); then
-  skip "the exFAT disk image" "hdiutil create: $said"
-elif ! said=$(hdiutil attach -quiet -nobrowse -mountpoint "$log/volume" "$image" 2>&1); then
-  skip "the exFAT disk image" "hdiutil attach: $said"
+# hdiutil's own words, which -quiet would close: what refused the image, or its exit status where it said nothing.
+said=$(hdiutil create -size 64m -fs ExFAT -volname SurogateProbe "$image" 2>&1)
+made=$?
+if [ "$made" -ne 0 ]; then
+  skip "the exFAT disk image" "hdiutil create: ${said:-no words, exit $made}"
 else
-  volume="$log/volume"
-  places+=("$volume")
+  said=$(hdiutil attach -nobrowse -mountpoint "$log/volume" "$image" 2>&1)
+  attached=$?
+  if [ "$attached" -ne 0 ]; then
+    skip "the exFAT disk image" "hdiutil attach: ${said:-no words, exit $attached}"
+  else
+    volume="$log/volume"
+    places+=("$volume")
+  fi
 fi
 icloud="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
 if [ ! -d "$icloud" ]; then

@@ -7,7 +7,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/vm/darwin/measure/*.ts"],
-    exclude: ["test/vm/darwin/measure/harness.ts", "test/vm/darwin/measure/vitest.config.ts"],
+    exclude: ["test/vm/darwin/measure/harness.ts", "test/vm/darwin/measure/verdicts.ts", "test/vm/darwin/measure/vitest.config.ts"],
     testTimeout: 3_600_000,
     hookTimeout: 600_000,
     fileParallelism: false,

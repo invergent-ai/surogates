@@ -1,8 +1,8 @@
 # Measurements only, never the app's (prepare.sh puts this in the measurements' agent disk's init, before
 # the agent starts): a probe a measurement leaves in a shared folder, .measure-probe, run as the guest's
-# root, its output left beside it as .measure-probe.out.
+# root, its output left beside it as .measure-probe.out: a root's folder, or a folder's place's history.
 ( while :; do
-    for probe in /run/surogate/shares/*/.measure-probe /run/surogate/shares/*/*/.measure-probe; do
+    for probe in /run/surogate/shares/*/.measure-probe /run/surogate/places/*/history/.measure-probe; do
       [ -f "$probe" ] || continue
       sh "$probe" > "$probe.partial" 2>&1 || true
       mv "$probe.partial" "$probe.out"

@@ -5,14 +5,16 @@
 // Mac's own name, and a notification's click. With no VM: none boots on the macOS runner. On a Mac alone.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ElectronApplication, Page } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { connect, FakeAgent, signedInAndAdded, webClient } from "./fake-agent.js";
-import { clickNotice, dataHome, dataRoot, ELECTRON, launch, notices, quit, secondLaunch, shellPage, stubNative, stubNotifications } from "./launch.js";
+import {
+  clickNotice, dataHome, dataRoot, dialogs, ELECTRON, launch, notices, press, prompt, quit, secondLaunch, shellPage, stubNative, stubNotifications,
+} from "./launch.js";
 
 const CHAT = "7d2e0f8a-2b3c-4d5e-9f60-718293a4b5c6";
 // The bundle this package's Electron runs from, as Launch Services knows the app the tests launch, and the main
@@ -228,6 +230,28 @@ describe.runIf(process.platform === "darwin")("the app on a Mac", () => {
     // Read by the helper as the app starts it.
     const named = execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim();
     await expect.poll(() => settings!.textContent("#computer")).toBe(named);
+  });
+
+  // A dialog attached to the window is an AppKit sheet, which waits behind any sheet the window still has: begun as
+  // the folder sheet's Change… closed it, it never showed, and every prompt after it waited.
+  it("opens the folder dialog at a refusal's Change… as a panel of its own, never as a sheet of the window, and the sheet for what it picks after it", async () => {
+    const { shell, client } = await signedIn();
+    const chosen = realpathSync(mkdtempSync("/tmp/sf-"));
+    try {
+      // The app's own data: no chat may work there.
+      await shell.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), dataRoot(home));
+      const prepared = client.evaluate(() => window.surogateDesktop!.prepareFolder("pick"));
+      const refused = await prompt(shell);
+      expect(await refused.$$eval("#prompt-buttons button", (buttons) => buttons.map((button) => button.dataset.id))).toEqual(["cancel", "change"]);
+      await shell.evaluate((_electron, picked) => Object.assign(globalThis, { folder: picked }), chosen);
+      await press(refused, "change");
+      await expect.poll(() => dialogs(shell)).toEqual([{ attached: false }, { attached: false }]);
+      await expect.poll(async () => (await prompt(shell)).textContent("#prompt-title")).toBe(`Work in ${chosen.split("/").at(-1)}?`);
+      await press(await prompt(shell), "cancel");
+      expect(await prepared).toBeNull();
+    } finally {
+      rmSync(chosen, { recursive: true, force: true });
+    }
   });
 
   it("opens the chat a notification is for when it is clicked", async () => {
