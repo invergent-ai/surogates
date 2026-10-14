@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ from surogates.db.models import (
     DeliveryOutbox,
     ProgramInvitationRow,
     Event,
+    FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
     SessionLease,
@@ -331,28 +333,31 @@ async def _expire_unanswered(session_factory: Any, *, now: datetime) -> int:
             .values(state="failed", reason=_unanswered(int(UNANSWERED_AFTER.total_seconds() // 3600)))
         )
         expired = int(result.rowcount or 0)
-        operator = (
+        # One statement per wait an agent has set: the waits are few, the
+        # held messages may not be.
+        wait = sa.func.coalesce(
+            sa.select(FollowupSettingsRow.operator_unanswered_hours)
+            .where(FollowupSettingsRow.org_id == OutreachMessageRow.org_id)
+            .where(FollowupSettingsRow.agent_id == OutreachMessageRow.agent_id)
+            .scalar_subquery(),
+            OPERATOR_UNANSWERED_HOURS,
+        )
+        waits = set((
             await db.execute(
-                sa.select(OutreachMessageRow.id, OutreachMessageRow.sent_at, FollowupSettingsRow)
-                .outerjoin(FollowupSettingsRow, sa.and_(
-                    FollowupSettingsRow.org_id == OutreachMessageRow.org_id,
-                    FollowupSettingsRow.agent_id == OutreachMessageRow.agent_id,
-                ))
-                .where(OutreachMessageRow.state == "awaiting_reply")
-                .where(OutreachMessageRow.kind == "operator")
-                .where(_TEAM_REQUESTED)
-                .where(OutreachMessageRow.sent_at.isnot(None))
-                .where(OutreachMessageRow.sent_at <= now - timedelta(hours=1))
+                sa.select(sa.distinct(FollowupSettingsRow.operator_unanswered_hours))
+                .where(FollowupSettingsRow.operator_unanswered_hours.isnot(None))
             )
-        ).all()
-        for row_id, sent_at, settings in operator:
-            hours = operator_unanswered_hours(settings)
-            if as_utc(sent_at) <= as_utc(now) - timedelta(hours=hours):
-                result = await db.execute(
-                    held.where(OutreachMessageRow.id == row_id)
-                    .values(state="failed", reason=_unanswered(hours))
-                )
-                expired += int(result.rowcount or 0)
+        ).scalars()) | {OPERATOR_UNANSWERED_HOURS}
+        for hours in sorted(waits):
+            result = await db.execute(
+                held.where(OutreachMessageRow.kind == "operator")
+                .where(_TEAM_REQUESTED)
+                .where(OutreachMessageRow.sent_at <= now - timedelta(hours=hours))
+                .where(wait == hours)
+                .values(state="failed", reason=_unanswered(hours))
+                .execution_options(synchronize_session=False)
+            )
+            expired += int(result.rowcount or 0)
         await db.commit()
         return expired
 
@@ -368,30 +373,99 @@ def _requester(created_by: str | None) -> uuid.UUID | None:
         return None
 
 
-async def describe_person(
-    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID,
-) -> tuple[str, str, str]:
-    """(name, readable phone, timezone) of a person, as the team knows them."""
-    rows = await followup_store.enrollments(
-        session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
-    )
-    enrollment = followup_store.labelling_enrollment(rows)
+@dataclass
+class Described:
+    """A person as the team knows them: their enrollments, the name they go
+    by, and their WhatsApp number."""
+
+    user_id: uuid.UUID
+    rows: list
+    display_name: str
+    wa_id: str
+
+    @property
+    def name(self) -> str:
+        return followup_store.person_label(
+            self.display_name, followup_store.labelling_enrollment(self.rows),
+        )
+
+    def zone(self, zones: dict[str, str]) -> str:
+        enrollment = followup_store.labelling_enrollment(self.rows)
+        return zones.get(getattr(enrollment, "protocol", None)) or next(iter(zones.values()), "UTC")
+
+
+async def describe_people(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    user_ids: Any = None,
+    rows_by_user: dict[uuid.UUID, list] | None = None,
+) -> dict[uuid.UUID, Described]:
+    """Each person of *user_ids* (or of *rows_by_user*, their enrollments
+    already read), described in at most three reads whatever their number."""
+    if rows_by_user is None:
+        ids = list(dict.fromkeys(user_ids or ()))
+        rows_by_user = {uid: [] for uid in ids}
+        if ids:
+            async with session_factory() as db:
+                found = (
+                    await db.execute(
+                        sa.select(FollowupEnrollmentRow)
+                        .where(FollowupEnrollmentRow.org_id == org_id)
+                        .where(FollowupEnrollmentRow.agent_id == agent_id)
+                        .where(FollowupEnrollmentRow.user_id.in_(ids))
+                        .order_by(FollowupEnrollmentRow.created_at)
+                    )
+                ).scalars().all()
+            for row in found:
+                rows_by_user[row.user_id].append(row)
+    ids = list(rows_by_user)
+    if not ids:
+        return {}
     async with session_factory() as db:
-        user = await db.get(User, user_id)
-        wa_id = (
+        names = dict(
+            (await db.execute(sa.select(User.id, User.display_name).where(User.id.in_(ids)))).all()
+        )
+        phones: dict[uuid.UUID, str] = {}
+        for user_id, wa_id in (
             await db.execute(
-                sa.select(ChannelIdentity.platform_user_id)
+                sa.select(ChannelIdentity.user_id, ChannelIdentity.platform_user_id)
                 .where(ChannelIdentity.org_id == org_id)
                 .where(ChannelIdentity.platform == "whatsapp")
-                .where(ChannelIdentity.user_id == user_id)
+                .where(ChannelIdentity.user_id.in_(ids))
             )
-        ).scalars().first()
-    zones = await followup_store.protocol_timezones(
-        session_factory, org_id=org_id, agent_id=agent_id,
+        ).all():
+            phones.setdefault(user_id, wa_id)
+    return {
+        uid: Described(uid, rows, names.get(uid) or "", phones.get(uid) or "")
+        for uid, rows in rows_by_user.items()
+    }
+
+
+async def describe_person(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    user_id: uuid.UUID,
+    zones: dict[str, str] | None = None,
+    described: Described | None = None,
+) -> tuple[str, str, str]:
+    """(name, readable phone, timezone) of a person, as the team knows them."""
+    if described is None:
+        described = (await describe_people(
+            session_factory, org_id=org_id, agent_id=agent_id, user_ids=[user_id],
+        ))[user_id]
+    if zones is None:
+        zones = await followup_store.protocol_timezones(
+            session_factory, org_id=org_id, agent_id=agent_id,
+        )
+    return (
+        described.name or "?",
+        readable_phone(described.wa_id) if described.wa_id else "?",
+        described.zone(zones),
     )
-    zone = zones.get(getattr(enrollment, "protocol", None)) or next(iter(zones.values()), "UTC")
-    name = followup_store.person_label(user.display_name if user else None, enrollment)
-    return name or "?", readable_phone(wa_id) if wa_id else "?", zone
 
 
 def plain_reason(reason: str | None, texts: dict | None = None) -> str:
