@@ -96,16 +96,38 @@ async def test_a_path_through_home_is_the_open_document(session_factory):
                                                  session_factory=session_factory), path
 
 
-async def test_writing_an_open_document_on_the_computer_is_refused(session_factory):
+DEVICE = "00000000-0000-0000-0000-000000000001"
+
+
+async def _computer_chat(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
-    session = await SessionStore(session_factory).create_session(
+    return await SessionStore(session_factory).create_session(
         user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={
-            "storage_bucket": "b", "workspace_path": "/home/me/notes",
-            "execution": {"kind": "device", "device_id": "00000000-0000-0000-0000-000000000001"},
+            "storage_bucket": "b", "workspace_path": "/home/me/notes", "execution": {"kind": "device", "device_id": DEVICE},
         },
     )
+
+
+async def test_writing_an_open_document_on_the_computer_is_refused(session_factory):
+    session = await _computer_chat(session_factory)
     await office_sessions.open_or_reuse(session_factory, location=location_of(session, "a.docx"), path="a.docx", session_id=session.id)
     said = await guard.refused_open_document("write_file", {"path": "/home/me/notes/a.docx", "content": "x"}, session,
                                              session_factory=session_factory)
     assert said and "office_edit" in said
+
+
+async def test_on_the_computer_a_document_through_home_is_refused_and_not_matched(session_factory):
+    session = await _computer_chat(session_factory)
+    said = await guard.refused_open_document("write_file", {"path": "~/notes/a.docx", "content": "x"}, session,
+                                             session_factory=session_factory)
+    assert said == (
+        "~/notes/a.docx names a file through the computer's home folder: name it by its path in the chat's folder, "
+        "like docs/report.docx."
+    )
+    assert await guard.refused_open_document("write_file", {"path": "~/notes.md", "content": "x"}, session,
+                                             session_factory=session_factory) is None
+    # Another chat's open document on the computer is not this chat's to note.
+    other = "/Users/me/other/b.docx"
+    await office_sessions.open_or_reuse(session_factory, location=f"device:{DEVICE}:{other}", path="b.docx", session_id=session.id)
+    assert await guard.open_document_note({"path": other}, session, session_factory=session_factory) is None

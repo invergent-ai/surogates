@@ -19,7 +19,7 @@ from PIL import Image
 
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
-from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path
+from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
 from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOffice, RuntimeOfficeError
 from surogates.session.files import ComputerAway, session_files
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -147,6 +147,8 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         return _error('"path" names the document in the workspace.')
     session = await kwargs["session_store"].get_session(UUID(str(kwargs["session_id"])))
     path = relative_path(raw_path, session)
+    if not within_folder(path):
+        return _error("Name the document by its path in the chat's folder, like docs/report.docx.")
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
     try:

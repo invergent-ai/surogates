@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -13,6 +15,9 @@ from sqlalchemy import delete
 
 from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
+from surogates.devices.binding import Binding
+from surogates.office import agent as office_agent
+from surogates.office import files as office_files
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.runtime_office import OfficeBusy, PageGone
@@ -20,6 +25,7 @@ from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import session_workspace_key
 from surogates.tools.builtin import office as office_tools
+from tests.device_computer import computer_io
 
 from .conftest import create_org, create_user
 
@@ -79,12 +85,12 @@ def storage(tmp_path):
     return LocalBackend(str(tmp_path))
 
 
-async def _kwargs(session_factory, storage, redis_client, platform_client=None):
+async def _kwargs(session_factory, storage, redis_client, platform_client=None, config=None):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     store = SessionStore(session_factory)
     session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="writer", channel="web",
-                                         config={"storage_bucket": "b"})
+                                         config={"storage_bucket": "b", **(config or {})})
     await storage.write("b", session_workspace_key(session.id, "a.docx"), b"PK-docx")
     return session, {
         "session_id": str(session.id), "agent_id": "writer", "session_store": store, "storage": storage,
@@ -149,3 +155,50 @@ async def test_the_agents_name_comes_from_its_runtime_config(session_factory, st
     _, kwargs = await _kwargs(session_factory, storage, redis_client, platform_client=Platform())
     await office_tools._office_read({"path": "a.docx"}, **kwargs)
     assert FakeRuntime.calls[0] == ("open", "Writer")
+
+
+FOLDER = "/home/me/notes"
+
+
+async def _on_a_computer(session_factory, storage, redis_client, monkeypatch, files):
+    """A chat on a folder of a fake computer: the computer, and the tools' kwargs."""
+    device_id = str(uuid4())
+    computer = computer_io(FOLDER, files, device_id=device_id)
+
+    @asynccontextmanager
+    async def on_it(session, **kwargs):
+        yield computer
+
+    async def bound(_db, _root):
+        return Binding("bound")
+
+    for module in (office_tools, office_agent, office_files):
+        monkeypatch.setattr(module, "session_files", on_it)
+    monkeypatch.setattr(office_files, "binding_of", bound)
+    _, kwargs = await _kwargs(session_factory, storage, redis_client, config={
+        "workspace_path": FOLDER, "execution": {"kind": "device", "device_id": device_id},
+    })
+    return computer, kwargs
+
+
+async def test_on_a_computer_a_document_through_home_is_refused_and_not_made(session_factory, storage, redis_client, monkeypatch):
+    computer, kwargs = await _on_a_computer(session_factory, storage, redis_client, monkeypatch, {})
+    answer = json.loads(await office_tools._office_edit({"path": "~/Documents/notes/a.docx", "ops": [{"op": "delete"}]}, **kwargs))
+    assert answer["error"] == "Name the document by its path in the chat's folder, like docs/report.docx."
+    assert "write" not in [kind for kind, _ in computer.runner.calls]
+
+
+async def test_on_a_computer_a_picture_it_cannot_read_is_said(session_factory, storage, redis_client, monkeypatch):
+    computer, kwargs = await _on_a_computer(session_factory, storage, redis_client, monkeypatch, {"a.docx": b"PK"})
+    run = computer.runner.run
+
+    async def unavailable(kind, args, payload=None):
+        if kind == "read":
+            return {"error": {"type": "unavailable", "message": "The computer is busy"}}
+        return await run(kind, args, payload)
+
+    computer.runner.run = unavailable
+    ops = [{"op": "insert", "target": {"end": True},
+            "content": {"markdown": "<?block p?>", "blocks": {"p": {"type": "image", "path": "chart.png"}}}}]
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": ops}, **kwargs))
+    assert answer["error"] == "Could not read chart.png: The computer is busy"

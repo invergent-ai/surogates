@@ -19,7 +19,9 @@ from surogates.devices.workspace import said
 from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
-from surogates.office.files import DOCUMENT_FILES, document_session, editor_files, editor_invocation, editor_request_id
+from surogates.office.files import (
+    DENIED_ON_COMPUTER, DOCUMENT_FILES, document_session, editor_files, editor_invocation, editor_request_id,
+)
 from surogates.office.runtime_office import close_pages
 from surogates.session.events import EventType
 from surogates.session.files import ComputerAway
@@ -39,9 +41,6 @@ CLAIMS_PER_PASS = 20
 # ponytail: a waiting row holds the serial pass, and its own row lock, for up to this on every pass, so many saves
 # waiting on computers delay the others; claim rows released, or run the waits concurrently, to lift it.
 COMPUTER_WAIT_S = 5.0
-# The desktop's words for its user's explicit no to a change (desktop/src/binding/approvals.ts, DENIED.change).
-# Any other refusal (nobody answered, it could not ask, the file is locked) is retried: a closing save dropped is lost.
-DENIED_ON_COMPUTER = "The user denied this change on this computer"
 
 
 class SaveWaiting(Exception):
@@ -173,6 +172,8 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
             raise
         raise SaveWaiting("waiting", computer) from None
     except PermissionError as exc:
+        # Only the user's explicit no declines it. Any other refusal (nobody answered, it could not ask, the file is
+        # locked) is retried: a closing save dropped is lost.
         if computer is None or DENIED_ON_COMPUTER not in said(exc):
             raise
         raise SaveDeclined(computer) from None

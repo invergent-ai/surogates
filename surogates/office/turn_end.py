@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from surogates.config import OfficeSettings
 from surogates.office import sessions as office_sessions
-from surogates.office.agent import location_of, relative_path
+from surogates.office.agent import location_of, relative_path, within_folder
 from surogates.office.commands import force_save
 from surogates.office.runtime_office import PageGone, RuntimeOffice, RuntimeOfficeError, page_id
 from surogates.runtime.turn_slots import turn_waiting
@@ -45,8 +45,10 @@ async def save_turn(*, store: Any, session: Any, after: int, office: OfficeSetti
         return
     # Waiting on the document server holds none of the worker's turn slots; a turn that edited nothing gives none back.
     async with turn_waiting():
-        # As office_edit named them: stripped, relative to the workspace, one name however the file is reached.
-        locations = list(dict.fromkeys(location_of(session, relative_path(path.strip(), session)) for path in paths))
+        # As office_edit named them: stripped, relative to the workspace, one name however the file is reached. A path
+        # outside the folder, which office_edit refused, is skipped: on a computer it could name another chat's.
+        relative = [relative_path(path.strip(), session) for path in paths]
+        locations = list(dict.fromkeys(location_of(session, path) for path in relative if within_folder(path)))
         runtime = RuntimeOffice(office)
         for location in locations:
             document = await office_sessions.open_at(session_factory, location)

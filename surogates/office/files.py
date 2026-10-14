@@ -24,6 +24,8 @@ DOCUMENT_FILES = (StorageWorkspaceIO, DeviceWorkspaceIO)
 # The request ids of the editor's writes to a computer. No route's request id holds a dot, so none is taken for one,
 # and the desktop knows them (desktop/src/binding/approvals.ts).
 EDITOR_REQUEST = "editor."
+# The desktop's words for its user's explicit no to a change (desktop/src/binding/approvals.ts, DENIED.change).
+DENIED_ON_COMPUTER = "The user denied this change on this computer"
 
 
 def editor_request_id(doc_key: str, pending: dict[str, Any]) -> str:

@@ -13,7 +13,7 @@ from surogates.devices.binding import device_of
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.office import sessions as office_sessions
 from surogates.office.editor_config import build_editor_config
-from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, editor_files
+from surogates.office.files import DENIED_ON_COMPUTER, DOCUMENT_FILES, FolderNotReady, document_session, editor_files
 from surogates.office.kinds import office_kind
 from surogates.office.runtime_office import RuntimeOffice
 from surogates.session.attachment_ingest import workspace_root_id
@@ -47,21 +47,30 @@ def agent_user_id(agent_id: str, session_id: UUID | str) -> str:
 def relative_path(path: str, session: Any) -> str:
     """*path* as the model may write it (``/workspace/x``, ``__WORKSPACE__/x``, ``~/x``: the sandbox's HOME is the
     workspace), relative to the workspace and normalised; ``.`` is the workspace itself. A ``..`` out of it is kept,
-    for the workspace to refuse."""
+    for the workspace to refuse.  On a computer ``~`` and ``$HOME`` are its user's home, not the folder: they are kept
+    as given, and ``within_folder`` refuses them."""
     root = str(session.config.get("workspace_path") or "/workspace").rstrip("/")
-    for prefix in ("~", "$HOME", "${HOME}", "__WORKSPACE__", root):
+    homes = () if device_of(session.config) is not None else ("~", "$HOME", "${HOME}")
+    for prefix in (*homes, "__WORKSPACE__", root):
         if path == prefix or path.startswith(prefix + "/"):
             path = path[len(prefix):].lstrip("/")
             break
     return posixpath.normpath(path or ".")
 
 
+def within_folder(path: str) -> bool:
+    """Whether *path*, as ``relative_path`` gives it, names a file inside the workspace: not an absolute path outside
+    it, a home folder's, or a way out."""
+    return not path.startswith(("/", "~", "$")) and path != ".." and not path.startswith("../")
+
+
 def location_of(session: Any, path: str) -> str:
     """Where *path*, relative to the workspace, is: one name however the file is reached.
 
     A cloud session names it as the workspace layer does (``StorageWorkspaceIO.location``), literally; a session on
-    a computer by its normalised path there, as the computer resolves it.  A project thread's copy sits at the
-    folder's own path, so it names the real file, as its master does: the editor only ever opens that one.
+    a computer by its path there, normalised as the pane names it (not as the computer resolves it).  A project
+    thread's copy sits at the folder's own path, so it names the real file, as its master does: the editor only ever
+    opens that one.
     """
     device_id = device_of(session.config)
     if device_id is not None:
@@ -104,9 +113,9 @@ async def open_for_agent(
         raise AgentDocumentError(str(exc)) from None
     except ComputerAway as exc:
         raise AgentDocumentError(f"{exc}: the document opens once it is back.") from None
-    except PermissionError:
-        raise AgentDocumentError(f"{path} was not made: the computer's user declined it.") from None
     except (DeviceOperationError, OSError) as exc:
+        if isinstance(exc, PermissionError) and DENIED_ON_COMPUTER in said(exc):
+            raise AgentDocumentError(f"{path} was not made: the computer's user declined it.") from None
         raise AgentDocumentError(said(exc)) from None
     location = location_of(target, path)
     user_id = agent_user_id(agent_id, session.id)

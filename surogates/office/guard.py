@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from surogates.config import load_settings
+from surogates.devices.binding import device_of
 from surogates.office import sessions as office_sessions
-from surogates.office.agent import location_of, relative_path
+from surogates.office.agent import location_of, relative_path, within_folder
 from surogates.office.kinds import office_kind
 from surogates.sandbox.history import YOU
 from surogates.tools.builtin.file_ops import patch_targets
@@ -24,7 +25,17 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
     if tool_name not in WRITING_TOOLS or not isinstance(tool_args, dict) or not _applies(session, session_factory):
         return None
     targets = [str(tool_args.get("path") or "")] if tool_name == "write_file" else patch_targets(tool_args)
-    paths = {location_of(session, relative_path(p, session)): relative_path(p, session) for p in targets if p and office_kind(p)}
+    targets = [p for p in targets if p and office_kind(p)]
+    if device_of(session.config) is not None:
+        # The editor may have it open by its path in the folder, which this one cannot be matched to. The desktop
+        # refuses a write outside the folder anyway, so nothing that could be written is lost.
+        for p in targets:
+            if not within_folder(relative_path(p, session)):
+                return (
+                    f"{p} names a file through the computer's home folder: name it by its path in the chat's folder, "
+                    "like docs/report.docx."
+                )
+    paths = {location_of(session, relative_path(p, session)): relative_path(p, session) for p in targets}
     for location in sorted(await office_sessions.open_locations(session_factory, list(paths))):
         return (
             f"{paths[location]} is open in the document editor, where people may be editing it: change it with "
@@ -39,6 +50,8 @@ async def open_document_note(tool_args: Any, session: Any, *, session_factory: A
     if not raw or not office_kind(raw) or not _applies(session, session_factory):
         return None
     path = relative_path(raw, session)
+    if device_of(session.config) is not None and not within_folder(path):
+        return None  # it cannot be matched to an open document
     if not await office_sessions.open_locations(session_factory, [location_of(session, path)]):
         return None
     return (

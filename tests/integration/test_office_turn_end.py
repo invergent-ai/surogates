@@ -218,3 +218,26 @@ async def test_a_refused_path_saves_nothing_and_stops_no_other_save(session_fact
     monkeypatch.setattr(turn_end, "_save", recording_save)
     await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
     assert saved == [document.location]
+
+
+async def test_a_path_outside_the_folder_on_the_computer_saves_nothing(session_factory, monkeypatch):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = SessionStore(session_factory)
+    device = "00000000-0000-0000-0000-000000000001"
+    session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={
+        "storage_bucket": "b", "workspace_path": "/home/me/notes", "execution": {"kind": "device", "device_id": device},
+    })
+    # Another chat's document on the same computer, open in the editor.
+    other = "/Users/me/other/b.docx"
+    await office_sessions.open_or_reuse(session_factory, location=f"device:{device}:{other}", path="b.docx", session_id=session.id)
+    after = await store.last_event_id(session.id)
+    await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": other}})
+    saved: list[str] = []
+
+    async def recording_save(runtime, office, session_factory, opened, session_id):
+        saved.append(opened.location)
+
+    monkeypatch.setattr(turn_end, "_save", recording_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert saved == []
