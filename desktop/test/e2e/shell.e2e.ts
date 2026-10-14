@@ -28,7 +28,7 @@ const focused = (shell: ElectronApplication) =>
   expect.poll(() => shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused())).toBe(true);
 
 // An agent kept from an earlier run, at an address nothing answers on, and its user's sign-in, as
-// the basic store keeps it: the window shows its three columns.
+// the basic store keeps it: the window shows its sidebar and its centre.
 function seedAgent(): void {
   mkdirSync(join(home, "surogate"), { recursive: true });
   writeFileSync(join(home, "surogate", "agent.json"), JSON.stringify({
@@ -57,10 +57,27 @@ describe("the shell", () => {
     expect(readFileSync(`/proc/${pid}/cmdline`, "utf8")).not.toContain("--ozone-platform=wayland");
   });
 
-  it("is one window of three columns with no native frame, under the system's own controls", async () => {
+  it("is one window with no native frame, under the system's own controls: of two columns in a chat of no project, of three in a project", async () => {
     seedAgent();
     app = await launch(home);
     const page = await shellPage(app);
+    // A chat of no project: the sidebar and the centre, which reaches the window's right edge.
+    await expect.poll(() => page.evaluate(() => document.body.classList.contains("no-project"))).toBe(true);
+    expect(await page.isVisible("#panel")).toBe(false);
+    expect(await page.evaluate(() => Math.round(document.querySelector("#centre")!.getBoundingClientRect().right))).toBe(
+      await page.evaluate(() => window.innerWidth),
+    );
+    // The main process's state as it is, but with a project open: the page draws the Overview beside it.
+    const state = await page.evaluate(() => (globalThis as unknown as { surogateShell: { state(): Promise<unknown> } }).surogateShell.state());
+    await app.evaluate(({ BrowserWindow }, asItIs) => {
+      const contents = BrowserWindow.getAllWindows()[0]!.webContents;
+      contents.ipc.removeHandler("shell:state");
+      contents.ipc.handle("shell:state", () => ({
+        ...(asItIs as object),
+        view: { kind: "project", id: "0f1e2d3c-4b5a-4697-8a8b-9c0d1e2f3a4b", name: "Report", masterSessionId: "m", thread: null },
+      }));
+      contents.send("shell:changed");
+    }, state);
     await page.waitForSelector("#panel #close-panel");
     const layout = await page.evaluate(() => {
       const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect().toJSON() as DOMRect;
@@ -89,7 +106,8 @@ describe("the shell", () => {
     seedAgent();
     app = await launch(home);
     const page = await shellPage(app);
-    await page.waitForSelector("#panel #close-panel");
+    // Drawn from the main process's state, as a chat of no project is.
+    await expect.poll(() => page.evaluate(() => document.body.classList.contains("no-project"))).toBe(true);
     const line = () => page.$eval("#copying", (found) => ({
       text: found.textContent, role: found.getAttribute("role"), present: found.closest("[hidden]") === null, height: found.getBoundingClientRect().height,
     }));
