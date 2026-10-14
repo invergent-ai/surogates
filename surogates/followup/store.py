@@ -111,13 +111,6 @@ ABILITIES = (
     "see_people", "message_person", "enroll", "pause_resume_end", "edit_details",
     "see_full_phones", "manage_team", "handle_escalations",
 )
-#: Entries saved before permissions were plain lists named a preset; each
-#: still reads as the lists it stood for.
-_LEGACY_PRESETS: dict[str, tuple[Any, Any]] = {
-    "full": ("all", "all"),
-    "assistant": ("all", tuple(a for a in ABILITIES if a != "manage_team")),
-    "alerts_only": (("urgent", "attention"), ("see_full_phones",)),
-}
 #: What a shared destination receives when it does not say.
 DESTINATION_RECEIVES = ("urgent", "attention", "missed_replies")
 #: The recipient of a message sent to a shared destination, not a person.
@@ -626,18 +619,12 @@ def _normalised(field: str, value: Any) -> Any:
 
 
 def _permission_lists(entry: dict) -> dict[str, Any]:
-    """``receives`` and ``can`` of an entry, each ``"all"`` or a list; an
-    older entry's preset gives the lists it stood for."""
-    legacy = _LEGACY_PRESETS.get(str(entry.get("preset") or ""), ("all", "all"))
-    return {
-        key: entry[key] if entry.get(key) is not None else fallback
-        for key, fallback in zip(("receives", "can"), legacy)
-    }
+    """``receives`` and ``can`` of an entry, each ``"all"`` or a list."""
+    return {key: "all" if entry.get(key) is None else entry[key] for key in ("receives", "can")}
 
 
 def _permission_entry(entry: Any) -> dict:
-    """An entry as it is saved: lists (or ``"all"``) and what they handle,
-    never a preset name."""
+    """An entry as it is saved: lists (or ``"all"``) and what they handle."""
     entry = dict(entry or {})
     out: dict[str, Any] = {}
     for (key, items), allowed in zip(_permission_lists(entry).items(), (RECEIVE_KINDS, ABILITIES)):

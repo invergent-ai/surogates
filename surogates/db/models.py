@@ -1351,8 +1351,8 @@ class FollowupSettingsRow(Base):
         server_default=text("'{}'"),
     )
     #: What each team member receives and may do:
-    #: ``{user_id: {preset, receives: [...], can: [...], handles}}``.  A
-    #: member not listed is ``full``.
+    #: ``{user_id: {receives, can, handles}}``.  A member not listed gets
+    #: everything.
     team_permissions: Mapped[dict[str, dict]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
         server_default=text("'{}'"),

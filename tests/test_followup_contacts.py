@@ -351,34 +351,6 @@ async def test_permissions_default_to_everything_and_refusals_name_the_action(sf
 
 
 @pytest.mark.asyncio
-async def test_an_older_preset_reads_as_its_lists_and_is_saved_as_lists(sf, clinic):
-    doctor, _, nurse = clinic
-    async with sf() as db:
-        from surogates.db.models import FollowupSettingsRow
-
-        row = await db.get(FollowupSettingsRow, (ORG, AGENT))
-        row.team_permissions = {str(doctor): {"preset": "assistant"},
-                                str(nurse): {"preset": "alerts_only"}}
-        await db.commit()
-    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
-    assert not store.can(settings, doctor, "manage_team") and store.can(settings, doctor, "enroll")
-    assert store.member_permissions(settings, nurse)["receives"] == {"urgent", "attention"}
-    saved = await store.update_settings(
-        sf, org_id=ORG, agent_id=AGENT, team_permissions=settings.team_permissions,
-    )
-    assert saved.team_permissions[str(doctor)] == {
-        "receives": "all", "can": [a for a in store.ABILITIES if a != "manage_team"],
-    }
-    assert saved.team_permissions[str(nurse)] == {
-        "receives": ["urgent", "attention"], "can": ["see_full_phones"],
-    }
-    full = await store.update_settings(
-        sf, org_id=ORG, agent_id=AGENT, team_permissions={str(doctor): {"preset": "full"}},
-    )
-    assert full.team_permissions[str(doctor)] == {"receives": "all", "can": "all"}
-
-
-@pytest.mark.asyncio
 async def test_escalate_names_its_recipients_by_what_they_handle(sf, clinic):
     doctor, _, nurse = clinic
     ion, session = await _user(sf, "Ion", "40711111111")
