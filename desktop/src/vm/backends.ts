@@ -43,6 +43,8 @@ export interface Backend {
   freshDoor(): string | null;
   /** The longest Unix socket path this OS takes, in bytes, without the NUL, or null where the ports are not Unix sockets. */
   socketMax: number | null;
+  /** The sessions disk's file name, in the data folder's vm folder: a raw file the guest formats, or a VHDX, as Hyper-V attaches a disk. */
+  sessionsFile: string;
 }
 
 const LINUX: Backend = {
@@ -57,6 +59,7 @@ const LINUX: Backend = {
   // The door is a socket in this user's own 0700 runtime folder: no other user can reach it, so no fresh name is needed.
   freshDoor: () => null,
   socketMax: 107,
+  sessionsFile: "sessions.img",
 };
 
 const DARWIN: Backend = {
@@ -68,6 +71,7 @@ const DARWIN: Backend = {
   addresses: (run) => socketsIn(run),
   freshDoor: () => null,
   socketMax: SOCKET_MAX,
+  sessionsFile: "sessions.img",
 };
 
 const WIN32: Backend = {
@@ -82,6 +86,8 @@ const WIN32: Backend = {
   freshDoor: () => freshDoorWin32(),
   // The ports are named pipes, not Unix sockets: no path-length limit.
   socketMax: null,
+  // Hyper-V attaches a VHDX; surogate-vm.exe makes it, empty and dynamic, at the first boot.
+  sessionsFile: "sessions.vhdx",
 };
 
 /** The backend for *platform*: Linux's, macOS's or Windows's, or null on an OS whose backend is not built yet. */

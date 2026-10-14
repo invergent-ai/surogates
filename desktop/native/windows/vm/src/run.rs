@@ -202,7 +202,8 @@ fn relay(listening: Socket, pipe: Pipe) {
         return;
     }
     let socket = Arc::new(Socket(taken));
-    // The connection outlives this computer's sleep (HVSOCKET_CONNECTED_SUSPEND), as the guest's own run does.
+    // The connection is kept while the VM is paused or saved, not dropped (HVSOCKET_CONNECTED_SUSPEND); an answer that
+    // it is not kept changes nothing else.
     let keep: u32 = 1;
     unsafe { setsockopt(socket.0, HV_PROTOCOL_RAW as i32, HVSOCKET_CONNECTED_SUSPEND as i32, (&keep as *const u32).cast(), 4) };
     // The VM manager connected before the boot; this takes it.
