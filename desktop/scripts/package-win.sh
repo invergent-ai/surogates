@@ -14,6 +14,8 @@
 #     resources\release-keys        install.sh's release keys, as the app reads them (scripts/release-keys.mjs)
 #     bin\                          surogate-vm.exe and surogate-helper.exe, the user's side of the VM and the app's helper
 #     service\                      surogate-service.exe, the Surogate VM service, LocalSystem, which the MSI installs
+#   msi\
+#     surogate_msi.dll              the MSI's own custom action (native/windows/msi), in the MSI and never installed
 #
 # srt has no part in the Windows app (src/hosts/srt-win32.ts): its own Windows programs are left out of node_modules, so
 # that no program ships that the app never runs. Nothing here is signed: the release signs every program but node.exe.
@@ -21,8 +23,8 @@
 # Usage, on Windows on x64, in Git for Windows' bash, after npm run electron:install and npm run build:win32, from any
 # folder, with its paths as that folder names them:
 #   scripts/package-win.sh <version> <vm manifest.json> <agent disk> <out>
-# It writes <out>\Surogate\, replacing one that was there. The agent disk is vm/agent-disk.sh's, which the release
-# builds on Linux, and the VM manifest the amd64 guest image's, the one the Windows app boots.
+# It writes <out>\Surogate\ and <out>\msi\, replacing those that were there. The agent disk is vm/agent-disk.sh's,
+# which the release builds on Linux, and the VM manifest the amd64 guest image's, the one the Windows app boots.
 set -euo pipefail
 
 VERSION="${1:-}"
@@ -50,7 +52,7 @@ node -e 'const { arch } = JSON.parse(require("node:fs").readFileSync(process.arg
 # The app's own node, by its pin, in place of the one a development build copies from the PATH.
 scripts/node.sh
 BUILT=native/windows/target/release
-for part in dist/native/ntat.node bin/node.exe bin/rg.exe "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$BUILT/surogate-service.exe"; do
+for part in dist/native/ntat.node bin/node.exe bin/rg.exe "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$BUILT/surogate-service.exe" "$BUILT/surogate_msi.dll"; do
   [ -f "$part" ] || { echo "package-win.sh: $part is missing: run npm run build:win32 first" >&2; exit 1; }
 done
 
@@ -87,6 +89,10 @@ node scripts/vhd-footer.mjs "$top/resources/vm/agent.img"
 cp "$VM_MANIFEST" "$top/resources/vm/manifest.json"
 node scripts/release-keys.mjs release/install.sh "$top/resources/release-keys"
 
-rm -rf "$OUT/Surogate"
+mkdir -p "$stage/msi"
+cp "$BUILT/surogate_msi.dll" "$stage/msi/"
+
+rm -rf "$OUT/Surogate" "$OUT/msi"
 mv "$top" "$OUT/Surogate"
+mv "$stage/msi" "$OUT/msi"
 echo "$OUT/Surogate"

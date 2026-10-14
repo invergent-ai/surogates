@@ -1,0 +1,16 @@
+[package]
+name = "msi"
+description = "surogate_msi.dll: the MSI's own custom action, which turns on Windows's Virtual Machine Platform and asks for the restart that needs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "surogate_msi"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_System_ApplicationInstallationAndServicing", "Win32_System_DataExchange", "Win32_System_SystemInformation", "Win32_System_Threading",
+] }

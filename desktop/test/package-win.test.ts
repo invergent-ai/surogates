@@ -234,11 +234,16 @@ describe.runIf(process.platform === "win32" && LAYOUT)("the Windows app's layout
 
   it("has the app's own programs carry the C runtime in them, as a PC without Visual C++'s redistributable runs them", () => {
     const ours = ["bin\\surogate-helper.exe", "bin\\surogate-vm.exe", "service\\surogate-service.exe", "resources\\app\\dist\\native\\ntat.node"].map((file) => at(file));
-    for (const program of ours) {
+    for (const program of [...ours, join(top, "..", "msi", "surogate_msi.dll")]) {
       const imports = importsOf(program);
       expect(imports.length, program).toBeGreaterThan(0);
       expect(imports.filter((name) => /^(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)/.test(name)), program).toEqual([]);
     }
+  });
+
+  it("has the MSI's custom action beside it, as the workspace built it, and nothing else there", () => {
+    expect(readdirSync(join(top, "..", "msi"))).toEqual(["surogate_msi.dll"]);
+    expect(readFileSync(join(top, "..", "msi", "surogate_msi.dll")).equals(readFileSync(join(DESKTOP, "native", "windows", "target", "release", "surogate_msi.dll")))).toBe(true);
   });
 
   it("has no program but those the release signs and node.exe, which ships as nodejs.org signed it", () => {
