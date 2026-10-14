@@ -245,6 +245,11 @@ type TimelineEntry =
 
 const WORKING_ON_IT_DELAY_MS = 250;
 
+// The transcript and composer column (every max-w-4xl inside the thread):
+// Claude's medium measure, 960px of text inside 32px gutters. A host's own
+// transcript-width setting overrides it — its rule outranks this utility.
+const TRANSCRIPT_WIDTH = "[--container-4xl:64rem]";
+
 /**
  * ``ask_user_question`` is the one tool whose accompanying assistant
  * ``content`` is a full user-facing message body (e.g. a proposed
@@ -1330,7 +1335,9 @@ function CommandRow({ message, label, boxed = false }: CommandRowProps) {
   const [open, setOpen] = useState(false);
   const calls = callsWithOutput(message);
   const rowClass = cn(
-    "flex w-full items-center gap-1 text-left text-sm text-muted-foreground",
+    // Lighter than muted on a dark page: the web client's dark muted tone
+    // is a slate that sinks into the background at this size.
+    "flex w-full items-center gap-1 text-left text-sm text-muted-foreground dark:text-foreground/70",
     boxed ? "py-2" : "py-0.5",
   );
   const text = <span className="min-w-0 truncate">{renderInlineMarkdown(label)}</span>;
@@ -2223,7 +2230,7 @@ export function ChatThread({
       // then opens across that gap. There the composer keeps its usual place
       // at the bottom edge and the greeting takes the space above it.
       // data-transcript: the host's transcript settings shape this, the composer with it.
-      <div data-transcript="" className="flex flex-1 flex-col items-center justify-end overflow-hidden bg-background px-3 text-base md:justify-center">
+      <div data-transcript="" className={cn(TRANSCRIPT_WIDTH, "flex flex-1 flex-col items-center justify-end overflow-hidden bg-background px-3 text-base md:justify-center")}>
         <div className="flex w-full flex-1 flex-col justify-center md:flex-none">
           <h2 className="mb-6 text-center text-2xl font-bold text-foreground md:mb-8">
             What should we do ?
@@ -2236,7 +2243,7 @@ export function ChatThread({
 
   return (
     // data-transcript: the host's transcript settings shape this, the composer with it.
-    <div data-transcript="" className="flex flex-1 flex-col overflow-hidden bg-background text-base">
+    <div data-transcript="" className={cn(TRANSCRIPT_WIDTH, "flex flex-1 flex-col overflow-hidden bg-background text-base")}>
       <Conversation className="relative flex-1 min-h-0">
         <ConversationContent className="mx-auto w-full max-w-4xl">
           {messages.length === 0 && isLoadingHistory ? (
