@@ -76,6 +76,10 @@ async def test_a_form_reply_answers_an_open_check_in(monkeypatch):
         "surogates.programs.inbound.get_occurrence",
         AsyncMock(return_value=SimpleNamespace(skill_ref="tavi-day-3")),
     )
+    monkeypatch.setattr(
+        "surogates.programs.step_context.step_context",
+        AsyncMock(return_value="[Step context, from the platform] Run the 'tavi-day-3' skill"),
+    )
     checkins = []
 
     async def emit_synthetic_user_message(self, session_id, *, content, synthetic, metadata=None):
@@ -89,7 +93,7 @@ async def test_a_form_reply_answers_an_open_check_in(monkeypatch):
     result, said, _ = await _handle(monkeypatch, _flow_msg(), sent_form="vitals")
     assert result == InboundOutcome.PROCESSED
     attach.assert_awaited_once()
-    assert checkins and checkins[0].startswith("[Check-in] Run the 'tavi-day-3' skill")
+    assert checkins and checkins[0].startswith("[Step context, from the platform]")
     assert said[-1]["content"].startswith("Form 'Semne vitale' submitted:")
 
 

@@ -114,14 +114,16 @@ async def test_preferred_then_last_written_then_the_steps_own_channel(sf):
     )
     assert (rows[wrote].platform, rows[wrote].channel_identifier) == ("telegram", "bot1")
     assert rows[plain].platform == "whatsapp"
-    # The rest are tried once each if the send fails.
-    assert sorted(rows[plain].fallback_platforms) == ["slack", "telegram"]
+    # The rest are tried once each if the send fails; Telegram only for
+    # someone who has written to the bot.
+    assert rows[plain].fallback_platforms == ["slack"]
 
 
 @pytest.mark.asyncio
 async def test_a_preferred_channel_nobody_can_send_on_is_passed_over(sf):
     a = uuid.uuid4()
     await _enrol(sf, a, preferred_channel="slack")
+    await _started_the_bot(sf)
     rows = await _fire(sf, _schedule(audience=AUDIENCE), _lookup({("telegram", a): "555"}))
     assert (rows[a].platform, rows[a].fallback_platforms) == ("telegram", None)
 
@@ -171,6 +173,7 @@ async def test_an_open_question_on_one_channel_is_not_asked_again_on_another(sf)
     a = uuid.uuid4()
     lookup = _lookup({("whatsapp", a): "4070", ("telegram", a): "555"})
     await _enrol(sf, a)
+    await _started_the_bot(sf)
     first = await _fire(sf, _schedule(audience=AUDIENCE), lookup)
     async with sf() as db:
         row = await db.get(ProgramInvitationRow, first[a].id)
@@ -206,6 +209,7 @@ async def test_silence_pauses_and_writing_resumes_on_the_channel_the_person_uses
             platform_meta={"contact_permission": {"status": "granted"}},
         ))
         await db.commit()
+    await _started_the_bot(sf)
     step = _schedule(audience=AUDIENCE)
     step.config["pause_after_missed"] = 1
     first = (await _fire(sf, step, lookup))[a]
@@ -246,8 +250,17 @@ async def test_without_a_journey_the_step_keeps_its_single_channel(sf):
 # ---------------------------------------------------------------------------
 
 
+async def _started_the_bot(sf, at=SLOT - timedelta(days=30)):
+    """The person wrote to the Telegram bot once, so it may write to them."""
+    await followup_store.record_inbound(
+        sf, org_id=ORG, platform="telegram", platform_user_id="555",
+        channel_identifier="bot1", at=at,
+    )
+
+
 async def _fallback_invitation(sf, *, state, **extra):
     user = uuid.uuid4()
+    await _started_the_bot(sf)
     schedule = _schedule()
     async with sf() as db:
         db.add(ProgramScheduleRow(
@@ -495,3 +508,36 @@ def test_a_steps_own_sender_wins_on_its_channel():
     assert journey.senders_for(config) == {**SENDERS, "whatsapp": "pn2"}
     config["channel_identifier"] = ""
     assert journey.senders_for(config) == SENDERS
+
+
+@pytest.mark.asyncio
+async def test_telegram_counts_only_for_someone_who_wrote_to_the_bot(sf):
+    a = uuid.uuid4()
+    lookup = _lookup({("whatsapp", a): "4070", ("telegram", a): "555"})
+    await _enrol(sf, a)
+    await _enrol_preference(sf, a, "telegram")
+    never_wrote = (await _fire(sf, _schedule(audience=AUDIENCE), lookup))[a]
+    assert (never_wrote.platform, never_wrote.fallback_platforms) == ("whatsapp", None)
+    await followup_store.record_inbound(
+        sf, org_id=ORG, platform="telegram", platform_user_id="555",
+        channel_identifier="bot1", at=SLOT - timedelta(days=1),
+    )
+    async with sf() as db:
+        await db.execute(sa.update(ProgramInvitationRow).values(response_state="completed"))
+        await db.commit()
+    wrote = (await _fire(sf, _schedule(audience=AUDIENCE), lookup, now=SLOT + timedelta(days=1)))[a]
+    assert wrote.platform == "telegram"
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_skips_telegram_for_someone_who_never_wrote_to_the_bot(sf):
+    from surogates.db.models import ChannelContactRow
+
+    row = await _fallback_invitation(sf, state="failed")
+    async with sf() as db:
+        await db.execute(sa.delete(ChannelContactRow))
+        await db.commit()
+    assert await journey.advance_fallbacks(sf, now=SLOT) == 0
+    left = await _reload(sf, row.id)
+    assert left.platform == "whatsapp"
+    assert [(a["platform"], a["state"]) for a in left.attempts][-1] == ("telegram", "skipped")

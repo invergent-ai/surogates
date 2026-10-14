@@ -50,6 +50,7 @@ from surogates.followup.context import (
     told,
 )
 from surogates.followup.eligibility import as_utc, day_index, next_contact
+from surogates.programs.journey import quiet_until
 from surogates.followup.outreach import (
     Described,
     describe_people,
@@ -146,7 +147,10 @@ TEAM_MESSAGE_PERSON_SCHEMA = ToolSchema(
         "confirmation: it shows who would receive what, sends nothing and "
         "gives a confirmation code. Show that to the team member and only after "
         "they answer yes call again with the same arguments and that code. "
-        "Never reword the team member's text."
+        "Never reword the team member's text. Inside the person's quiet "
+        "hours the message is held until they end, and the preview says when "
+        "in the person's local time; pass send_now only if the team member "
+        "asks to send it anyway."
     ),
     parameters={
         "type": "object",
@@ -164,6 +168,13 @@ TEAM_MESSAGE_PERSON_SCHEMA = ToolSchema(
                 "description": (
                     "Only true after you told the team member the person's "
                     "follow-up is paused or ended and they still want this sent."
+                ),
+            },
+            "send_now": {
+                "type": "boolean",
+                "description": (
+                    "Only true when the team member wants it sent during the "
+                    "person's quiet hours instead of when they end."
                 ),
             },
             "confirmation": {
@@ -1051,14 +1062,24 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     is_open = not reach.needs_template
     template = template_name if reach.needs_template else None
 
+    send_now = arguments.get("send_now") is True
+    held = None if send_now else await quiet_until(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id, now=now,
+    )
+    hold = (
+        f" It is quiet hours for {person.label}, so it is held until "
+        f"{held[0].astimezone(ZoneInfo(held[1])):%a %H:%M} their time ({held[1]}); "
+        "say if it should go now instead."
+        if held else ""
+    )
     refused = await _unconfirmed(
         kwargs, "team_message_person", arguments,
         f"Will send to {person.label}{via} ({phone}): «{text}»"
         + (
-            f", now, as a normal {name} message." if is_open else
+            f", as a normal {name} message." if is_open else
             ". Their 24h window is closed, so the approved opener template goes "
             "first and your text follows the moment they answer."
-        ),
+        ) + hold,
         "Nothing has been sent.",
     )
     if refused:
@@ -1070,7 +1091,10 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         text=text, template_name=template,
         template_language=(settings.message_template_language if settings and template else None),
         subject_user_id=person.user_id, created_by=f"team:{ctx.user_id}",
+        send_now=send_now,
     )
+    if held:
+        return f"Queued for {person.label}.{hold}"
     if is_open:
         return (
             f"Sent now: your text goes out to {person.label} as a normal "

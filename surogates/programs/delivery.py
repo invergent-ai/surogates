@@ -28,7 +28,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
-from surogates.db.models import ProgramInvitationRow
+from surogates.db.models import DeliveryOutbox, ProgramInvitationRow
 from surogates.followup.outreach import apply_outreach_status
 from surogates.programs.journey import fall_back
 
@@ -99,6 +99,8 @@ async def record_outbox_result(
             )
         ).scalar_one_or_none()
         if row is None:
+            row = await _woken_step_of(db, outbox_id)
+        if row is None:
             return False
 
         if error:
@@ -119,6 +121,34 @@ async def record_outbox_result(
             _advance(row, "accepted" if "delivered" in receipts else "delivered")
         await db.commit()
     return True
+
+
+async def _woken_step_of(db: Any, outbox_id: int) -> ProgramInvitationRow | None:
+    """The step the agent was woken to write in this outbox row's
+    conversation and has not written yet: this row is its message.
+
+    Keyed on the row from then on, so the provider's statuses reach the step
+    as they do an opener's.  Served by idx_program_invitations_woken.
+    """
+    session_id = (
+        await db.execute(sa.select(DeliveryOutbox.session_id).where(DeliveryOutbox.id == outbox_id))
+    ).scalar_one_or_none()
+    if session_id is None:
+        return None
+    row = (
+        await db.execute(
+            sa.select(ProgramInvitationRow)
+            .where(ProgramInvitationRow.session_id == session_id)
+            .where(ProgramInvitationRow.woken_at.isnot(None))
+            .where(ProgramInvitationRow.outbox_id.is_(None))
+            .where(ProgramInvitationRow.response_state == "awaiting_reply")
+            .order_by(ProgramInvitationRow.woken_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        row.outbox_id = outbox_id
+    return row
 
 
 async def apply_status_callback(

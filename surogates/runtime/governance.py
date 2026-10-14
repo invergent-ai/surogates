@@ -165,7 +165,8 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
 #: Tools that were renamed: a policy written with the old name keeps meaning
 #: the same tool.  ``checkin_escalate`` became ``escalate`` when escalation
 #: stopped being limited to check-ins; the ``care_team_*`` tools became
-#: ``team_*`` when follow-up stopped being only for clinics.  Applied here,
+#: ``team_*`` when follow-up stopped being only for clinics, and
+#: ``checkin_outcome`` became ``step_outcome`` with journeys.  Applied here,
 #: where ops' blobs are parsed, so the allow, deny and approval lists all
 #: honour it, and to a model's calls by :func:`rename_tool_calls`.
 RENAMED_TOOLS = {
@@ -174,6 +175,7 @@ RENAMED_TOOLS = {
     "care_team_message_patient": "team_message_person",
     "care_team_update_patient": "team_update_person",
     "care_team_enroll_patient": "team_enroll_person",
+    "checkin_outcome": "step_outcome",
 }
 
 

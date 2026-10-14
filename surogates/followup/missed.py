@@ -43,6 +43,11 @@ __all__ = [
 #: not re-read the same silence all day.
 LOOKBACK = timedelta(hours=6)
 
+#: The agent is woken at each deadline and may handle the silence itself
+#: (escalate, or record its decision); the team's alert waits this long after
+#: the deadline, or after that wake, and stands down if it did.
+AGENT_GRACE = timedelta(minutes=10)
+
 #: Openers whose streak this process already judged, with their deadline.
 _JUDGED: dict[Any, datetime] = {}
 
@@ -97,6 +102,11 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
                 .where(ProgramInvitationRow.escalation_state == "none")
                 .where(ProgramInvitationRow.deadline_at.isnot(None))
                 .where(ProgramInvitationRow.deadline_at >= now - LOOKBACK)
+                .where(
+                    sa.func.coalesce(
+                        ProgramInvitationRow.deadline_woken_at, ProgramInvitationRow.deadline_at,
+                    ) <= now - AGENT_GRACE
+                )
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).scalars().all()

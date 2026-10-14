@@ -4,6 +4,13 @@ The match is on ``(org_id, agent_id, platform, platform_user_id)`` and an open
 response state.  ``agent_id`` is part of the key because ``channel_identities``
 is org-scoped and one person can be bound to several agents: without it, one
 agent's Program would swallow another agent's reply.
+
+A person can have one open step per journey, so two journeys can each be
+waiting on them in the same conversation.  The rule is deterministic: a reply
+answers the step **opened most recently** there (``opened_at``, then the
+newest row).  That is the question the person last saw, so it is the one
+they are most likely answering; the step context the agent reads names it,
+and the other step stays open until its own deadline.
 """
 
 from __future__ import annotations
@@ -28,6 +35,15 @@ _OPEN_STATES = ("awaiting_reply", "replied", "in_progress")
 #: Another recipient of the same step (the person or a contact) answered it.
 ANSWERED_BY_OTHER = "answered_by_other"
 
+_PERSON_COLUMN = getattr(ProgramInvitationRow, "person_user_id", None)
+
+#: Which of several open steps a message belongs to.  Rows from before
+#: ``opened_at`` existed sort by when they were created.
+MOST_RECENTLY_OPENED = (
+    ProgramInvitationRow.opened_at.desc().nulls_last(),
+    ProgramInvitationRow.created_at.desc(),
+)
+
 
 async def open_invitation_for(
     session_factory: Any,
@@ -36,23 +52,37 @@ async def open_invitation_for(
     agent_id: str,
     platform: str,
     platform_user_id: str,
+    user_id: uuid.UUID | None = None,
 ) -> ProgramInvitationRow | None:
-    """The newest open invitation this sender is answering, if any."""
+    """The open invitation this sender is answering: the most recently opened.
+
+    With *user_id* (the sender's resolved person) a step counts whichever
+    of the person's channels its opener went out on, and a step about them
+    sent to one of their contacts counts too; without it, only this channel
+    identity's.
+    """
+    if user_id is not None:
+        whose = [ProgramInvitationRow.user_id == user_id]
+        if _PERSON_COLUMN is not None:
+            whose.append(_PERSON_COLUMN == user_id)
+        sender = sa.or_(*whose)
+    else:
+        sender = sa.and_(
+            ProgramInvitationRow.platform == platform,
+            ProgramInvitationRow.platform_user_id == platform_user_id,
+        )
     async with session_factory() as db:
         return (
             await db.execute(
                 sa.select(ProgramInvitationRow)
                 .where(ProgramInvitationRow.org_id == org_id)
                 .where(ProgramInvitationRow.agent_id == agent_id)
-                .where(ProgramInvitationRow.platform == platform)
-                .where(
-                    ProgramInvitationRow.platform_user_id == platform_user_id
-                )
+                .where(sender)
                 .where(ProgramInvitationRow.response_state.in_(_OPEN_STATES))
-                .order_by(ProgramInvitationRow.created_at.desc())
+                .order_by(*MOST_RECENTLY_OPENED)
                 .limit(1)
             )
-        ).scalar_one_or_none()
+        ).scalars().first()
 
 
 async def get_occurrence(

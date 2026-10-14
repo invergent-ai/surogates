@@ -1052,6 +1052,13 @@ class ProgramInvitationRow(Base):
             "idx_program_invitations_person_open",
             "org_id", "agent_id", "user_id", "response_state",
         ),
+        # The agent's message in a conversation it was woken in for a step,
+        # matched back to that step when the dispatcher posts it.
+        Index(
+            "idx_program_invitations_woken",
+            "session_id",
+            postgresql_where=text("woken_at IS NOT NULL AND outbox_id IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1134,6 +1141,23 @@ class ProgramInvitationRow(Base):
     #: Who on the team took the escalation, and when it was dealt with.
     escalation_owner: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: When the send pass claimed this step: its opener went out, or the
+    #: agent was woken to write it.  A reply answers the most recently
+    #: opened step in the conversation.
+    opened_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: When the agent was woken to write this step itself, instead of a
+    #: template going first.  Its first message in ``session_id`` is the
+    #: step's message, and the delivery report is matched through it.
+    woken_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: When the agent was woken because the deadline passed with no reply.
+    #: Set once, before the wake, so a step is never woken twice for it.
+    deadline_woken_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -1479,6 +1503,11 @@ class OutreachMessageRow(Base):
     #: When this message's outcome was reported to whoever asked for it,
     #: or its failure to the team.  Reported once, never re-read.
     reported_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True,
+    )
+    #: Held until then: a team member's message that would reach the person
+    #: inside their quiet hours.  Null sends at once.
+    not_before: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(

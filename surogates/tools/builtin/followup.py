@@ -213,7 +213,11 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
         "to another phase, or pause or end it (for example "
         "while they are away). Pausing or ending tells the team, "
         "with your reason. Only change what the person or the business has "
-        "told you; never move a phase on your own judgement."
+        "told you; never move a phase on your own judgement. When the date "
+        "the journey counts from moves (an appointment is "
+        "rescheduled), set start_date to the new date: every step, including "
+        "those before it (negative days), follows the new date from now on; "
+        "steps already sent stay as they were."
     ),
     parameters={
         "type": "object",
@@ -221,7 +225,10 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
             "protocol": {"type": "string", "description": "The protocol slug."},
             "start_date": {
                 "type": "string",
-                "description": "The corrected day 0, as YYYY-MM-DD.",
+                "description": (
+                    "Day 0, the date the journey counts from, as YYYY-MM-DD: "
+                    "a correction or a rescheduled date. May be in the future."
+                ),
             },
             "start_date_approximate": {
                 "type": "boolean",

@@ -918,7 +918,14 @@ async def send_queued_outreach(
             await db.execute(
                 sa.select(OutreachMessageRow)
                 .where(sa.or_(
-                    OutreachMessageRow.state == "queued",
+                    sa.and_(
+                        OutreachMessageRow.state == "queued",
+                        # Held through the person's quiet hours.
+                        sa.or_(
+                            OutreachMessageRow.not_before.is_(None),
+                            OutreachMessageRow.not_before <= now,
+                        ),
+                    ),
                     sa.and_(OutreachMessageRow.state == "awaiting_reply", answered),
                 ))
                 .order_by(OutreachMessageRow.created_at)

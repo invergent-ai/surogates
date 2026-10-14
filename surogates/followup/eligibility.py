@@ -15,13 +15,17 @@ from zoneinfo import ZoneInfo
 from surogates.programs.cadence import iter_occurrences
 
 __all__ = [
-    "Audience", "as_utc", "day_index", "ineligibility", "next_contact",
-    "start_date_problem",
+    "MAX_DAY", "MIN_DAY", "Audience", "as_utc", "day_index", "ineligibility",
+    "next_contact", "start_date_problem",
 ]
 
 #: The longest a protocol can run, in days.  Bounds the window fields so a
 #: typo like 3650000 is refused rather than silently meaning "forever".
 MAX_DAY = 3650
+
+#: How far before its start date a journey may reach someone: day -1 is the
+#: day before the date it counts from (a reminder before an appointment).
+MIN_DAY = -365
 
 
 @dataclass(frozen=True)
@@ -29,7 +33,7 @@ class Audience:
     """Which enrolled people a Program speaks to.
 
     ``day_from``/``day_to`` are inclusive and count from the enrollment's
-    ``start_date`` (day 0).  ``phases`` restricts to people whose enrollment
+    ``start_date`` (day 0); negative days fall before it.  ``phases`` restricts to people whose enrollment
     carries one of these phases.  ``silent_days`` keeps only people who have
     not written for at least that many days.
     """
@@ -67,8 +71,8 @@ class Audience:
                 return None
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"audience.{key} must be a whole number")
-            if not 0 <= value <= MAX_DAY:
-                raise ValueError(f"audience.{key} must be between 0 and {MAX_DAY}")
+            if not MIN_DAY <= value <= MAX_DAY:
+                raise ValueError(f"audience.{key} must be between {MIN_DAY} and {MAX_DAY}")
             return value
 
         day_from, day_to = _day("day_from"), _day("day_to")
@@ -120,7 +124,8 @@ def start_date_problem(start: date, today: date) -> str | None:
 
 
 def day_index(start_date: date | None, today: date) -> int | None:
-    """Days since ``start_date``, with the start itself being day 0."""
+    """Days since ``start_date``, with the start itself being day 0 and
+    the days before it negative."""
     if start_date is None:
         return None
     return (today - start_date).days

@@ -53,7 +53,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "user_reports": ToolLocation.HARNESS,
     # Write invitation, enrollment, outreach and inbox rows — the worker's
     # database, never a sandbox.
-    "checkin_outcome": ToolLocation.HARNESS,
+    "step_outcome": ToolLocation.HARNESS,
     "followup_enroll": ToolLocation.HARNESS,
     "followup_update": ToolLocation.HARNESS,
     "followup_status": ToolLocation.HARNESS,

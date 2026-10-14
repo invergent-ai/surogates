@@ -97,7 +97,7 @@ def test_parse_round_trip():
     {},
     {"protocol": ""},
     {"protocol": "p", "day_from": 5, "day_to": 4},
-    {"protocol": "p", "day_from": -1},
+    {"protocol": "p", "day_from": -366},
     {"protocol": "p", "day_to": 10**6},
     {"protocol": "p", "day_from": "3"},
     {"protocol": "p", "day_from": True},
@@ -192,3 +192,31 @@ def test_phase_and_silence_are_respected():
     silent = FIRST_MONTH | {"audience": {"protocol": "tavi", "silent_days": 3}}
     at, _ = _next([silent])
     assert at == datetime(2026, 10, 17, 5, 30, tzinfo=timezone.utc)
+
+
+# --- days before the start date ----------------------------------------------
+
+def test_days_before_the_start_are_negative_and_can_be_targeted():
+    eve = Audience.from_config({"protocol": "p", "day_from": -1, "day_to": -1})
+    assert day_index(TODAY + timedelta(days=1), TODAY) == -1
+    assert _check(eve, start=TODAY + timedelta(days=1)) is None
+    assert _check(eve, start=TODAY) == "Day 0 is past day -1"
+    assert _check(eve, start=TODAY + timedelta(days=3)) == "Day -3 is before day -1"
+
+
+def test_the_next_contact_before_a_future_start_is_the_day_before():
+    reminder = FIRST_MONTH | {"audience": {"protocol": "tavi", "day_from": -1, "day_to": -1}}
+    start = AT_TUESDAY.date() + timedelta(days=10)
+    at, _ = _next([reminder], start_date=start)
+    assert at == datetime(2026, 10, 22, 5, 30, tzinfo=timezone.utc)  # day -1, 08:30
+
+
+def test_a_dry_run_reaches_the_days_before_the_start():
+    from surogates.programs.simulate import simulate
+
+    step = FIRST_MONTH | {"id": "s1", "audience": {"protocol": "tavi", "day_from": -2, "day_to": 0}}
+    events = simulate(
+        [step], start_date=date(2026, 10, 20), timezone=None, days=14,
+        today=date(2026, 10, 13),
+    )
+    assert [e["at"][:10] for e in events] == ["2026-10-18", "2026-10-19", "2026-10-20"]

@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from enum import Enum
 from typing import Any, Awaitable, Callable
@@ -885,6 +886,7 @@ class ChannelInboundPipeline:
                 agent_id=routing.agent_id,
                 platform=routing.platform,
                 platform_user_id=msg.platform_user_id,
+                user_id=identity.user_id,
             )
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -1023,6 +1025,11 @@ class ChannelInboundPipeline:
         ):
             try:
                 from surogates.programs.inbound import attach_reply, get_occurrence
+                from surogates.programs.step_context import (
+                    REPLY,
+                    STEP_MARKER,
+                    step_context,
+                )
 
                 _occurrence = await get_occurrence(
                     deps.session_factory, _checkin_invitation.occurrence_id,
@@ -1038,17 +1045,18 @@ class ChannelInboundPipeline:
                 )
                 await deps.session_store.emit_synthetic_user_message(
                     session_id,
-                    content=(
-                        f"[Check-in] Run the '{_skill_ref}' skill with this "
-                        "person now. Record the result with checkin_outcome "
-                        "when the check-in ends; use escalate if "
-                        "anything needs the team's attention."
+                    content=await step_context(
+                        deps.session_factory, _checkin_invitation, event=REPLY,
+                        now=datetime.now(timezone.utc), session_id=session_id,
+                        writer_user_id=identity.user_id,
                     ),
-                    synthetic="checkin",
+                    synthetic=STEP_MARKER,
                     metadata={
                         "program_id": str(_checkin_invitation.program_id),
                         "occurrence_id": str(_checkin_invitation.occurrence_id),
+                        "invitation_id": str(_checkin_invitation.id),
                         "skill_ref": _skill_ref,
+                        "step_event": REPLY,
                     },
                 )
             except Exception:  # noqa: BLE001

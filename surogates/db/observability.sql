@@ -1278,3 +1278,13 @@ UPDATE followup_enrollments e SET user_id = f.person_id
 FROM _followed_people f
 WHERE e.id = f.enrollment_id;
 DROP TABLE _followed_people;
+
+-- ── the agent writes each step: when it was opened, woken, and held ──
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS opened_at timestamptz,
+    ADD COLUMN IF NOT EXISTS woken_at timestamptz,
+    ADD COLUMN IF NOT EXISTS deadline_woken_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_woken
+    ON program_invitations (session_id) WHERE woken_at IS NOT NULL AND outbox_id IS NULL;
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS not_before timestamptz;

@@ -86,18 +86,25 @@ async def sweep_deadlines(session_factory: Any, *, now: datetime | None = None) 
         # report at all (the outbox row was lost, or the process died between
         # claiming and handing over): record the delivery failure so the
         # operator sees it, rather than leaving a row that looks in flight.
-        unreported = await db.execute(
-            sa.update(ProgramInvitationRow)
-            .where(ProgramInvitationRow.response_state == "awaiting_reply")
-            .where(ProgramInvitationRow.delivery_state == "queued")
-            .where(ProgramInvitationRow.deadline_at.isnot(None))
-            .where(ProgramInvitationRow.deadline_at <= now)
-            .values(
-                delivery_state="failed",
-                delivery_error="No delivery report by the deadline",
+        # A step the agent was woken to write and wrote nothing for (and did
+        # not skip) says so, apart from a send that was lost.
+        for woken, error in (
+            (True, "The agent wrote no message for this step"),
+            (False, "No delivery report by the deadline"),
+        ):
+            unreported = await db.execute(
+                sa.update(ProgramInvitationRow)
+                .where(ProgramInvitationRow.response_state == "awaiting_reply")
+                .where(ProgramInvitationRow.delivery_state == "queued")
+                .where(ProgramInvitationRow.deadline_at.isnot(None))
+                .where(ProgramInvitationRow.deadline_at <= now)
+                .where(
+                    ProgramInvitationRow.woken_at.isnot(None) if woken
+                    else ProgramInvitationRow.woken_at.is_(None)
+                )
+                .values(delivery_state="failed", delivery_error=error)
             )
-        )
-        swept += int(unreported.rowcount or 0)
+            swept += int(unreported.rowcount or 0)
 
         # Whatever the delivery failure was, an ``awaiting_reply`` that was
         # never delivered is not an open check-in.  Left as is it suppresses

@@ -65,7 +65,7 @@ async def _invitation(sf, program_id, patient, *, days_ago, response="no_reply_b
             agent_id=AGENT, user_id=patient, platform="whatsapp",
             platform_user_id="40700000001", delivery_state=delivery,
             response_state=response, escalation_state="none",
-            deadline_at=created + timedelta(hours=10), created_at=created,
+            deadline_at=created, created_at=created,
         )
         db.add(row)
         await db.commit()
@@ -246,7 +246,7 @@ async def test_a_slack_programs_alert_goes_out_on_slack_never_whatsapp(sf):
             platform_meta={"contact_permission": {"status": "granted"}},
         ))
         await db.commit()
-    await _invitation(sf, program_id, patient, days_ago=0)
+    await _invitation(sf, program_id, patient, days_ago=0.01)
 
     assert await alert_missed_checkins(sf, now=NOW) == 1
     [alert] = await _alerts(sf)

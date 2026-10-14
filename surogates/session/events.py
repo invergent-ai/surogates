@@ -20,6 +20,11 @@ CHECKIN_OPENER_MARKER = "checkin_opener"
 OUTREACH_OPENER_MARKER = "outreach_opener"
 OPENER_SYNTHETIC_MARKERS = (CHECKIN_OPENER_MARKER, OUTREACH_OPENER_MARKER)
 
+#: A final answer of exactly this is the agent choosing to write nothing: it
+#: stays in the transcript and never reaches a messaging channel.  A turn the
+#: platform woke (a journey step) is the agent's to stay quiet in.
+SILENT_REPLY = "NO_MESSAGE"
+
 
 @unique
 class EventType(str, Enum):

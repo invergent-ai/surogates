@@ -923,9 +923,15 @@ async def queue_outreach(
     severity: str | None = None,
     alert_reason: str | None = None,
     destination: str | None = None,
+    send_now: bool = False,
 ) -> OutreachMessageRow:
     """Queue one message.  With ``dedupe_key``, queuing the same cause twice
     returns the first row instead of writing to the person again.
+
+    A team member's message to a person (``operator``) is held through the
+    person's quiet hours: the row's ``not_before`` says until when, for the
+    caller to tell the sender.  *send_now* sends it anyway.  Alerts to the
+    team are never held.
 
     The only gate on platform: a row for a channel outreach cannot reach is
     refused here, so nothing downstream has to check again.
@@ -939,6 +945,15 @@ async def queue_outreach(
     text = text.strip()
     if not text:
         raise ValueError("an outreach message needs text")
+    not_before = None
+    if kind == "operator" and not send_now:
+        from surogates.programs.journey import quiet_until
+
+        held = await quiet_until(
+            session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+            now=datetime.now(timezone.utc),
+        )
+        not_before = held[0] if held else None
     async with session_factory() as db:
         row = OutreachMessageRow(
             org_id=org_id, agent_id=agent_id, user_id=user_id,
@@ -948,6 +963,7 @@ async def queue_outreach(
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=dedupe_key, severity=severity, alert_reason=alert_reason,
             destination=destination or None,
+            not_before=not_before,
         )
         db.add(row)
         try:

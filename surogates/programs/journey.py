@@ -19,6 +19,7 @@ import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
 from surogates.db.models import (
+    ChannelContactRow,
     ChannelIdentity,
     FollowupEnrollmentRow,
     ProgramInvitationRow,
@@ -123,6 +124,48 @@ def in_quiet_hours(config: dict, zone: str, now: datetime) -> bool:
     return local >= start or local < end
 
 
+def quiet_end(config: dict, zone: str, now: datetime) -> datetime:
+    """When the quiet hours *now* falls in end, in UTC."""
+    end = time.fromisoformat(str(journey_of(config)["quiet_hours"]["end"]))
+    local = as_utc(now).astimezone(ZoneInfo(zone))
+    at = datetime.combine(local.date(), end, tzinfo=ZoneInfo(zone))
+    if at <= local:
+        at += timedelta(days=1)
+    return as_utc(at.astimezone(ZoneInfo("UTC")))
+
+
+async def quiet_until(
+    session_factory: Any, *, org_id: Any, agent_id: str, user_id: Any, now: datetime,
+) -> tuple[datetime, str] | None:
+    """``(when, zone)`` a message to this person may go out, when they are
+    in the quiet hours of a journey they are active in; else ``None``.
+
+    The latest end wins when two journeys disagree.
+    """
+    by_protocol = {}
+    for config in await followup_store.active_program_configs(
+        session_factory, org_id=org_id, agent_id=agent_id,
+    ):
+        protocol = protocol_of(config)
+        if protocol and journey_of(config).get("quiet_hours"):
+            by_protocol.setdefault(protocol, config)
+    if not by_protocol:
+        return None
+    held = None
+    for enrollment in await followup_store.enrollments(
+        session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id, status="active",
+    ):
+        config = by_protocol.get(enrollment.protocol)
+        if config is None:
+            continue
+        zone = person_zone(enrollment, config)
+        if in_quiet_hours(config, zone, now):
+            end = quiet_end(config, zone, now)
+            if held is None or end > held[0]:
+                held = (end, zone)
+    return held
+
+
 async def _identity(db: Any, org_id: Any, platform: str, user_id: Any) -> Any:
     return (
         await db.execute(
@@ -148,28 +191,36 @@ async def choose_channel(
     """(platform, identity, sender, the other reachable channels) for one
     person, or ``None`` when no channel with a sender reaches them.
 
-    Reachable means a granted identity there and a sender of the agent's.
-    The person's preferred channel wins, then the one they last wrote on,
-    then the step's own channel.
+    Reachable means a granted identity there and a sender of the agent's,
+    and, on a channel where the platform can only answer someone who wrote
+    first (Telegram), that the person has written to that sender.  The
+    person's preferred channel wins, then the one they last wrote on, then
+    the step's own channel.
     """
     senders = senders_for(config)
     reachable: dict[str, Any] = {}
+    last: dict[str, datetime | None] = {}
     for platform in senders:
-        if not capabilities_for(platform).can_initiate:
+        caps = capabilities_for(platform)
+        if not caps.can_initiate:
             continue
         identity = await identity_lookup(org_id, platform, user_id)
-        if identity is not None and followup_store.permission_status(identity) == "granted":
-            reachable[platform] = identity
+        if identity is None or followup_store.permission_status(identity) != "granted":
+            continue
+        last[platform] = await followup_store.last_inbound(
+            session_factory, org_id=org_id, platform=platform,
+            platform_user_id=identity.platform_user_id, channel_identifier=senders[platform],
+        )
+        if caps.needs_prior_contact and last[platform] is None:
+            continue
+        reachable[platform] = identity
     if not reachable:
         return None
     chosen = getattr(enrollment, "preferred_channel", None)
     if chosen not in reachable:
         newest = None
-        for platform, identity in reachable.items():
-            at = await followup_store.last_inbound(
-                session_factory, org_id=org_id, platform=platform,
-                platform_user_id=identity.platform_user_id, channel_identifier=senders[platform],
-            )
+        for platform in reachable:
+            at = last[platform]
             if at is not None and (newest is None or as_utc(at) > newest[0]):
                 newest = (as_utc(at), platform)
         own = str(config.get("channel") or "whatsapp")
@@ -208,6 +259,12 @@ async def fall_back(db: Any, row: ProgramInvitationRow, *, now: datetime, config
         if (
             platform in senders and identity is not None
             and followup_store.permission_status(identity) == "granted"
+            and (
+                not capabilities_for(platform).needs_prior_contact
+                or await db.get(ChannelContactRow, (
+                    row.org_id, platform, identity.platform_user_id, senders[platform],
+                )) is not None
+            )
         ):
             break
         attempts.append({

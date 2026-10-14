@@ -19,14 +19,23 @@ sees the question it is being answered to.
 The opener text is emitted as a synthetic user message first.  Without it the
 transcript shows a reply to a question that was never asked, and
 ``delivery_outbox.event_id`` is NOT NULL regardless.
+
+Where the channel lets the platform write now (a text channel, or WhatsApp
+inside its service window), no opener is sent at all: the agent is woken in
+the person's conversation with the step context and writes the step itself
+(:func:`make_step_waker`).  The approved template goes first only where the
+channel demands one.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
+
+import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import get_or_create_channel_session
@@ -54,8 +63,8 @@ class OpenerUndeliverable(Exception):
 
 
 def _opener_text(config: dict) -> str:
-    name = config.get("template_name") or "check-in"
-    return f"[Check-in opener sent: template '{name}']"
+    name = config.get("template_name") or "step"
+    return f"[Step message sent: template '{name}']"
 
 
 def _default_slack_client(bot_token: str):
@@ -192,6 +201,99 @@ async def resolve_dm(
     raise OpenerUndeliverable(f"The platform cannot write first on {platform}")
 
 
+@dataclass(frozen=True)
+class Woken:
+    """What the send pass gets back when the agent writes the step itself."""
+
+    session_id: UUID
+
+
+def make_step_waker(
+    *,
+    session_store: Any,
+    redis: Any,
+    session_factory: Any,
+    wake_session: Any,
+    config_for_program: Any,
+    storage: Any = None,
+    settings: Any = None,
+    credentials_for: Any = None,
+    slack_client_factory: Any = None,
+):
+    """Build ``async (invitation, *, event, config=None) -> session id``.
+
+    Wakes the agent in the person's one-to-one conversation for a step:
+    writes the step context block (see :mod:`surogates.programs.step_context`)
+    as a synthetic message and queues the session.  *wake_session* is
+    ``async (org_id, agent_id, session_id) -> None`` (the shared work queue).
+
+    For a due step the invitation learns its conversation and ``woken_at``
+    **before** the session is queued: the agent's message is matched back to
+    the step through them, and the dispatcher can post it as soon as the
+    turn runs.  The caller has already claimed the invitation; this never
+    claims anything itself.
+    """
+    from surogates.programs.step_context import DUE, STEP_MARKER, step_context
+
+    async def _wake(invitation: Any, *, event: str, config: dict | None = None) -> UUID:
+        config = config if config is not None else await config_for_program(invitation.program_id) or {}
+        platform = invitation.platform
+        sender = str(
+            getattr(invitation, "channel_identifier", None)
+            or config.get("channel_identifier") or ""
+        )
+        now = datetime.now(timezone.utc)
+        session_id = invitation.session_id if event != DUE else None
+        if session_id is None:
+            target = await resolve_dm(
+                platform, invitation.platform_user_id, sender,
+                credentials_for=credentials_for,
+                slack_client_factory=slack_client_factory, org_id=invitation.org_id,
+            )
+            session_id = await dm_session(
+                session_store, redis,
+                session_factory=session_factory, storage=storage, settings=settings,
+                org_id=invitation.org_id, agent_id=invitation.agent_id,
+                user_id=invitation.user_id, platform=platform,
+                session_key=target.session_key, channel_id=target.channel_id, sender=sender,
+            )
+        can_write = True
+        if capabilities_for(platform).window_hours:
+            from surogates.followup.outreach import window_open
+
+            can_write = window_open(await last_inbound(
+                session_factory, org_id=invitation.org_id, platform=platform,
+                platform_user_id=invitation.platform_user_id, channel_identifier=sender,
+            ), now)
+        content = await step_context(
+            session_factory, invitation, event=event, now=now, config=config,
+            session_id=session_id, can_write=can_write,
+        )
+        await session_store.emit_synthetic_user_message(
+            session_id, content=content, synthetic=STEP_MARKER,
+            metadata={
+                "program_id": str(invitation.program_id),
+                "occurrence_id": str(invitation.occurrence_id),
+                "invitation_id": str(invitation.id),
+                "skill_ref": str(config.get("skill_ref") or ""),
+                "step_event": event,
+            },
+        )
+        if event == DUE:
+            async with session_factory() as db:
+                await db.execute(
+                    sa.update(ProgramInvitationRow)
+                    .where(ProgramInvitationRow.id == invitation.id)
+                    .where(ProgramInvitationRow.outbox_id.is_(None))
+                    .values(session_id=session_id, woken_at=now)
+                )
+                await db.commit()
+        await wake_session(invitation.org_id, invitation.agent_id, session_id)
+        return session_id
+
+    return _wake
+
+
 def make_opener_enqueue(
     *,
     session_store: Any,
@@ -203,6 +305,7 @@ def make_opener_enqueue(
     config_for_program: Any,
     credentials_for: Any = None,
     slack_client_factory: Any = None,
+    waker: Any = None,
 ):
     """Build the ``enqueue`` callable ``send_queued_openers`` needs in production.
 
@@ -213,8 +316,13 @@ def make_opener_enqueue(
     *slack_client_factory* is ``(bot_token) -> client`` with an async
     ``conversations_open(users=...)``; the default is slack_sdk's.
 
-    Returns ``async (invitation) -> int`` — the outbox row id — or raises
-    :class:`OpenerUndeliverable`.
+    *waker* (see :func:`make_step_waker`) lets the agent write the step:
+    then, wherever the channel allows a message now, the agent is woken and
+    :class:`Woken` comes back instead of an outbox id.  Without one the
+    opener text is sent word for word.
+
+    Returns ``async (invitation) -> int | Woken`` — the outbox row id — or
+    raises :class:`OpenerUndeliverable`.
     """
     async def _session(invitation, platform, session_key, *, channel_id, sender) -> UUID:
         return await dm_session(
@@ -257,7 +365,7 @@ def make_opener_enqueue(
         # The transcript event is a user-role message; the marker keeps the
         # model from reading its own invitation as something the person said.
         event_id = await session_store.emit_synthetic_user_message(
-            session_id, content=f"[Check-in opener sent: {text}]",
+            session_id, content=f"[Step message sent: {text}]",
             synthetic=CHECKIN_OPENER_MARKER,
             metadata=_metadata(invitation, template_name=None),
         )
@@ -265,13 +373,35 @@ def make_opener_enqueue(
             session_id, event_id, platform, target.destination, {"content": text},
         )
 
-    async def _enqueue(invitation: Any) -> int:
+    async def _agent_writes(invitation: Any, config: dict, sender: str) -> bool:
+        """Whether the agent may write this step now, rather than a template."""
+        caps = capabilities_for(invitation.platform)
+        if waker is None or not caps.can_initiate:
+            return False
+        last = await last_inbound(
+            session_factory, org_id=invitation.org_id, platform=invitation.platform,
+            platform_user_id=invitation.platform_user_id, channel_identifier=sender,
+        )
+        if caps.needs_prior_contact and last is None:
+            raise OpenerUndeliverable(
+                f"The person has not written to this {invitation.platform} sender yet, "
+                "so it cannot write to them first"
+            )
+        if caps.opener == "text":
+            return True
+        from surogates.followup.outreach import window_open
+
+        return bool(caps.window_hours) and window_open(last, datetime.now(timezone.utc))
+
+    async def _enqueue(invitation: Any) -> int | Woken:
         config = await config_for_program(invitation.program_id) or {}
         platform = invitation.platform
         sender = str(
             getattr(invitation, "channel_identifier", None)
             or config.get("channel_identifier") or ""
         )
+        if await _agent_writes(invitation, config, sender):
+            return Woken(await waker(invitation, event="due", config=config))
         opener = capabilities_for(platform).opener
         if opener == "text":
             return await _enqueue_text(invitation, config, sender)

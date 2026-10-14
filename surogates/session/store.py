@@ -57,7 +57,7 @@ from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
 )
-from surogates.session.events import OPENER_SYNTHETIC_MARKERS, EventType
+from surogates.session.events import OPENER_SYNTHETIC_MARKERS, SILENT_REPLY, EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     ASK_USER_QUESTION_RESCUE_PREFIX,
@@ -281,6 +281,8 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             content = strip_next_action_blocks(content)
             if channel in INTERACTIVE_PROMPT_CHANNELS:
                 content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
+        if content and content.strip() == SILENT_REPLY:
+            content = ""  # the agent chose to write nothing
         if content:
             payload["content"] = content
             # Delivered either way: the model writes to the person beside its

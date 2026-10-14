@@ -113,7 +113,7 @@ async def test_the_slack_opener_lands_in_the_direct_message_session(
     # own message, not something the person said.
     ((event_sid, event), ) = captured["store"].emitted
     assert event_sid == _sid
-    assert event["content"] == "[Check-in opener sent: Time for your check-in. Reply to begin.]"
+    assert event["content"] == "[Step message sent: Time for your check-in. Reply to begin.]"
     assert event["synthetic"] == "checkin_opener"
     assert event["metadata"]["program_id"] == str(inv.program_id)
     assert captured["config"]["slack_channel_id"] == "D777"
