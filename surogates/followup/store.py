@@ -85,7 +85,7 @@ __all__ = [
 ]
 
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
-ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "team")
+ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "team", "api")
 OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome", "notice")
 
 #: Settings fields :func:`update_settings` accepts.

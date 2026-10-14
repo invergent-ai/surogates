@@ -109,12 +109,23 @@ DEFAULT_TEXTS = {
         "A message from the team was waiting for your reply but expired "
         "before you answered. They know you have written back."
     ),
-    # The {why} of the notices above.
+    # The {why} of the notices above: every reason the runtime records maps
+    # to one of these, so a notice never quotes the platform's English.
     "why_window_closed": "their 24h WhatsApp window had closed",
     "why_no_permission": "no permission to message them",
     "why_template_failed": "WhatsApp refused the template",
     "why_expired": "no answer to the opening template",
     "why_no_template": "their 24h window is closed and no approved template is chosen",
+    "why_no_opener": "the step has no message to open with",
+    "why_no_number": "there is no number or account on record for them",
+    "why_no_channel": "no channel the business has can reach them",
+    "why_not_written_first": "they have not written to the business on that channel yet",
+    "why_not_in_time": "it could not be sent in time",
+    "why_no_phone_line": "the business has no phone line that can call out",
+    "why_no_webhook": "the business's app connection is not set up",
+    "why_setup": "the channel is not set up correctly for this business",
+    "why_stopped": "the step was stopped before it was sent",
+    "why_undelivered": "it could not be delivered",
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
@@ -542,28 +553,40 @@ async def describe_person(
     )
 
 
+#: How each recorded reason reads, first match wins: ``(fragments, key)``.
+#: Anything else (a provider's own wording) is ``why_undelivered``.
+_REASONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("did not answer the template",), "why_expired"),
+    (("131047",), "why_window_closed"),
+    (("no approved template", "no approved"), "why_no_template"),
+    (("132015", "132016", "paused", "disabled", "rejected", "template was not"), "why_template_failed"),
+    (("permission",), "why_no_permission"),
+    (("no opener message",), "why_no_opener"),
+    (("has not written to this", "never written"), "why_not_written_first"),
+    (("within the response window", "no delivery report by the deadline"), "why_not_in_time"),
+    (("call out",), "why_no_phone_line"),
+    (("no webhook",), "why_no_webhook"),
+    (("credential vault", "bot token", "opened no direct message"), "why_setup"),
+    (("stopped before",), "why_stopped"),
+    (("identity", "no number", "no whatsapp"), "why_no_number"),
+    (("no reachable channel", "cannot write first", "no shared destination", "not switched on"),
+     "why_no_channel"),
+)
+
+
 def plain_reason(reason: str | None, texts: dict | None = None) -> str:
     """Why a message did not arrive, in words a team member can act on.
 
     Each kind of reason is a ``why_*`` wording the agent's ``texts`` can
-    override, so the team reads it in their own language.
+    override, so the team reads it in their own language; a reason the
+    runtime does not recognise reads as ``why_undelivered``, never as the
+    provider's own text.
     """
-    text = (reason or "").strip()
-    lowered = text.lower()
-    if "did not answer the template" in lowered:
-        key = "why_expired"
-    elif "131047" in lowered:
-        key = "why_window_closed"
-    elif any(k in lowered for k in ("132015", "132016", "paused", "disabled", "rejected", "template was not")):
-        key = "why_template_failed"
-    elif "permission" in lowered:
-        key = "why_no_permission"
-    elif "no approved" in lowered:
-        key = "why_no_template"
-    elif "no whatsapp identity" in lowered:
-        return "no WhatsApp number on record"
-    else:
-        return text[:200] or "unknown reason"
+    lowered = (reason or "").lower()
+    key = next(
+        (k for fragments, k in _REASONS if any(f in lowered for f in fragments)),
+        "why_undelivered",
+    )
     return followup_store.render_text((texts or {}).get(key), DEFAULT_TEXTS[key])
 
 
