@@ -7,6 +7,7 @@ import { type BrowserWindow, dialog } from "electron";
 
 import type { ApprovalAnswer, ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
+import { forThisOs } from "../platform.js";
 import { guestPathOf, hostPathOf } from "../session-path.js";
 import { approval, folderSheet, freeMode, handBack, type HandBackRequest, type PromptContent } from "./prompt-content.js";
 import { PromptQueue, TIMEOUT } from "./prompt-queue.js";
@@ -36,6 +37,12 @@ const ownPath = (folder: string): string => {
   }
 };
 
+// Whether the folder dialog is attached to the app's window: not on macOS, where it is a panel of its own. There one
+// attached is an AppKit sheet of the window (NSSavePanel's beginSheetModalForWindow), which shows only once a sheet the
+// window has ends: begun as the folder sheet's Change… closed that, a modal window of the app's own and a sheet too,
+// it never showed, a panel off the screen, and every prompt after it waited its turn behind it.
+const ATTACHED = forThisOs({ darwin: false }) ?? true;
+
 async function pick(parent: BrowserWindow | undefined, startIn: string): Promise<string | null> {
   const options = {
     title: "Choose a folder",
@@ -43,7 +50,7 @@ async function pick(parent: BrowserWindow | undefined, startIn: string): Promise
     defaultPath: ownPath(startIn),
     properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">,
   };
-  const { canceled, filePaths } = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  const { canceled, filePaths } = parent && ATTACHED ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
   const picked = canceled ? null : (filePaths[0] ?? null);
   if (picked === null) return null;
   try {
@@ -64,7 +71,8 @@ export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts & 
       return openPrompt({ parent, page: options.page, preload: options.preload, content, queue, unseen: options.unseen }, shown);
     }, signal);
   return {
-    // ponytail: the system's dialog cannot be closed from here, so a dialog left open holds the line until the user closes it.
+    // The system's dialog cannot be closed from here: one left open past its time, or one the system never showed,
+    // holds the line for CLOSING_MS more, then the next prompt opens beside it (prompt-queue.ts).
     pickFolder: async (startIn, signal) => {
       const picked = await queue.ask(() => pick(options.parent(), startIn), signal);
       return picked === TIMEOUT ? null : picked;

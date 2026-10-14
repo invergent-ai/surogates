@@ -205,12 +205,14 @@ export async function launch(home: string, env: Record<string, string> = {}, arg
 // another, with their checkbox ticked when globalThis.checked is, and with globalThis.hold set,
 // only once globalThis.release() is called; the folder dialog picks globalThis.folder, or is
 // cancelled; nothing leaves for the system browser.
-// What each was asked is kept in the main process, as globalThis.asked and .opened.
+// What each was asked is kept in the main process, as globalThis.asked and .opened; and each folder dialog,
+// whether it was attached to a window, as .dialogs (dialogs()).
 export async function stubNative(shell: ElectronApplication): Promise<void> {
   await shell.evaluate(({ dialog, shell: electronShell }) => {
     const asked: unknown[] = [];
     const opened: string[] = [];
-    Object.assign(globalThis, { asked, opened, answer: 0 });
+    const dialogs: Array<{ attached: boolean }> = [];
+    Object.assign(globalThis, { asked, opened, dialogs, answer: 0 });
     const chosen = globalThis as unknown as { answer: number; checked?: boolean; folder?: string; hold?: boolean; release?: () => void };
     dialog.showMessageBox = ((...args: unknown[]) => {
       asked.push(args.at(-1));
@@ -220,14 +222,21 @@ export async function stubNative(shell: ElectronApplication): Promise<void> {
         chosen.release = () => resolve(answered());
       });
     }) as typeof dialog.showMessageBox;
-    dialog.showOpenDialog = (() => Promise.resolve({ canceled: !chosen.folder, filePaths: chosen.folder ? [chosen.folder] : [] })) as
-      unknown as typeof dialog.showOpenDialog;
+    // dialog.showOpenDialog([window, ]options): attached to the window given.
+    dialog.showOpenDialog = ((...args: unknown[]) => {
+      dialogs.push({ attached: args.length > 1 });
+      return Promise.resolve({ canceled: !chosen.folder, filePaths: chosen.folder ? [chosen.folder] : [] });
+    }) as unknown as typeof dialog.showOpenDialog;
     electronShell.openExternal = (url: string) => {
       opened.push(url);
       return Promise.resolve();
     };
   });
 }
+
+/** Each folder dialog the app has asked for since stubNative, whether attached to its window. */
+export const dialogs = (shell: ElectronApplication): Promise<Array<{ attached: boolean }>> =>
+  shell.evaluate(() => (globalThis as unknown as { dialogs: Array<{ attached: boolean }> }).dialogs);
 
 // The window's own page. Playwright's first window may be the agent's web client instead,
 // once there is an agent: its view is made with the window.
