@@ -395,6 +395,37 @@ async def test_the_care_team_member_is_not_alerted_about_themselves(sf, patient)
     assert await _outreach(sf) == []
 
 
+async def _escalations(sf):
+    from surogates.db.models import EscalationRow
+
+    async with sf() as db:
+        return (await db.execute(sa.select(EscalationRow))).scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_outside_any_step_is_queued_for_the_team(sf, patient, care_team):
+    user_id, session_id = patient
+    await followup.handle_escalate(
+        {"reason": "Are febră de ieri", "severity": "red"}, **_kw(sf, session_id),
+    )
+    [esc] = await _escalations(sf)
+    assert (esc.org_id, esc.agent_id, esc.user_id) == (ORG, AGENT, user_id)
+    assert (esc.kind, esc.severity, esc.state) == ("alert", "red", "raised")
+    assert (esc.reason, esc.platform, esc.session_id) == ("Are febră de ieri", "whatsapp", session_id)
+    assert esc.invitation_id is None and esc.program_id is None
+    # The team's alerts carry the record's id, so a reminder finds it.
+    [alert] = await _outreach(sf)
+    assert alert.dedupe_key.startswith(f"escalation:-:{esc.id.hex}:")
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_nobody_hears_is_queued_as_failed(sf, patient):
+    _, session_id = patient
+    await followup.handle_escalate({"reason": "durere"}, **_kw(sf, session_id))
+    [esc] = await _escalations(sf)
+    assert esc.state == "failed"
+
+
 def test_every_registered_tool_runs_in_the_harness():
     # An unlisted tool defaults to the sandbox, which has no database: the
     # tools would fail on every call in production.

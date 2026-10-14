@@ -1429,6 +1429,42 @@ class OutreachMessageRow(Base):
     )
 
 
+class EscalationRow(Base):
+    """Something about one person that a human on the team must deal with.
+
+    Its own record, not a state on an invitation: most escalations happen in
+    free conversation, with no step open, and the team's queue must hold
+    those too.
+    """
+
+    __tablename__ = "escalations"
+    __table_args__ = (
+        Index("idx_escalations_agent_open", "org_id", "agent_id", "resolved_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The person it is about.
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    #: The channel the person was on when it was raised.
+    platform: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    invitation_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True, index=True)
+    program_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
+    #: ``alert`` (raised by the agent) or ``missed_replies``.
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    #: ``raised``, or ``failed`` when nobody could be told.
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="raised")
+    session_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
+    owner: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Browser Profiles
 # ---------------------------------------------------------------------------

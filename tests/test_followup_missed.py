@@ -284,3 +284,29 @@ async def test_each_team_member_is_told_on_their_own_channel(sf):
     assert by_user[b].template_name is None
     with pytest.raises(ValueError):
         await store.update_settings(sf, org_id=ORG, agent_id=AGENT, senders={"web": "x"})
+
+
+@pytest.mark.asyncio
+async def test_a_missed_streak_is_an_escalation_the_team_can_take(sf):
+    from surogates.db.models import EscalationRow
+
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    async with sf() as db:
+        [esc] = (await db.execute(sa.select(EscalationRow))).scalars().all()
+    assert (esc.id, esc.kind, esc.state, esc.user_id) == (inv, "missed_replies", "raised", patient)
+    assert (esc.invitation_id, esc.program_id, esc.platform) == (inv, program_id, "whatsapp")
+    assert esc.reason.startswith("Ion Pop")
+
+
+@pytest.mark.asyncio
+async def test_a_missed_streak_nobody_hears_is_a_failed_escalation(sf):
+    from surogates.db.models import EscalationRow
+
+    program_id, patient, _ = await _setup(sf, threshold=1, recipients=False)
+    await _invitation(sf, program_id, patient, days_ago=0.10)
+    await alert_missed_checkins(sf, now=NOW)
+    async with sf() as db:
+        [esc] = (await db.execute(sa.select(EscalationRow))).scalars().all()
+    assert esc.state == "failed"

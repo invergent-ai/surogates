@@ -21,10 +21,10 @@ from surogates.channels.capabilities import capabilities_for, initiating_platfor
 from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
+    EscalationRow,
     FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
-    ProgramInvitationRow,
     ProgramScheduleRow,
 )
 from surogates.followup.eligibility import Audience
@@ -56,6 +56,7 @@ __all__ = [
     "permission_status",
     "protocol_timezones",
     "queue_outreach",
+    "record_escalation",
     "record_inbound",
     "render_text",
     "resolve_escalation",
@@ -806,17 +807,38 @@ async def queue_outreach(
 # ---------------------------------------------------------------------------
 
 
-async def _escalation(
-    session_factory: Any, org_id: uuid.UUID, agent_id: str, invitation_id: uuid.UUID, **values: Any,
-) -> ProgramInvitationRow | None:
-    """Set *values* on one of the agent's escalated invitations; ``None``
-    when there is no such escalation."""
+async def record_escalation(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID,
+    kind: str, reason: str, state: str = "raised", severity: str | None = None,
+    platform: str | None = None, invitation_id: uuid.UUID | None = None,
+    program_id: uuid.UUID | None = None, session_id: uuid.UUID | None = None,
+    escalation_id: uuid.UUID | None = None,
+) -> uuid.UUID:
+    """Write one escalation for the team's queue.  With *escalation_id*, a
+    retried cause updates its record instead of adding a second one."""
+    escalation_id = escalation_id or uuid.uuid4()
     async with session_factory() as db:
-        row = await db.get(ProgramInvitationRow, invitation_id)
-        if (
-            row is None or row.org_id != org_id or row.agent_id != agent_id
-            or row.escalation_state == "none"
-        ):
+        row = await db.get(EscalationRow, escalation_id)
+        if row is None:
+            row = EscalationRow(
+                id=escalation_id, org_id=org_id, agent_id=agent_id, user_id=user_id,
+            )
+            db.add(row)
+        row.kind, row.reason, row.state, row.severity = kind, reason, state, severity
+        row.platform, row.session_id = platform, session_id
+        row.invitation_id, row.program_id = invitation_id, program_id
+        await db.commit()
+    return escalation_id
+
+
+async def _escalation(
+    session_factory: Any, org_id: uuid.UUID, agent_id: str, escalation_id: uuid.UUID, **values: Any,
+) -> EscalationRow | None:
+    """Set *values* on one of the agent's escalations; ``None`` when there
+    is no such escalation."""
+    async with session_factory() as db:
+        row = await db.get(EscalationRow, escalation_id)
+        if row is None or row.org_id != org_id or row.agent_id != agent_id:
             return None
         for field, value in values.items():
             setattr(row, field, value)
@@ -827,24 +849,22 @@ async def _escalation(
 
 async def claim_escalation(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
-    invitation_id: uuid.UUID, owner: str,
-) -> ProgramInvitationRow | None:
+    escalation_id: uuid.UUID, owner: str,
+) -> EscalationRow | None:
     """Make *owner* (a team member's id or name) the one dealing with it."""
     owner = (owner or "").strip()
     if not owner:
         raise ValueError("an escalation needs an owner")
-    return await _escalation(
-        session_factory, org_id, agent_id, invitation_id, escalation_owner=owner,
-    )
+    return await _escalation(session_factory, org_id, agent_id, escalation_id, owner=owner)
 
 
 async def resolve_escalation(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
-    invitation_id: uuid.UUID, resolved: bool = True,
-) -> ProgramInvitationRow | None:
+    escalation_id: uuid.UUID, resolved: bool = True,
+) -> EscalationRow | None:
     """Mark it dealt with, or open it again with ``resolved=False``."""
     return await _escalation(
-        session_factory, org_id, agent_id, invitation_id,
+        session_factory, org_id, agent_id, escalation_id,
         resolved_at=_utcnow() if resolved else None,
     )
 

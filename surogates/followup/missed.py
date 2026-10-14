@@ -187,6 +187,14 @@ async def _alert_if_streak(
         },
     )
 
+    # Keyed on the invitation, so a pass retried after a crash updates the
+    # one record instead of queuing the team a second item.
+    await followup_store.record_escalation(
+        session_factory, escalation_id=inv.id, org_id=inv.org_id,
+        agent_id=inv.agent_id, user_id=inv.user_id, kind="missed_replies",
+        reason=text, state="raised" if queued else "failed", platform=inv.platform,
+        invitation_id=inv.id, program_id=inv.program_id, session_id=inv.session_id,
+    )
     async with session_factory() as db:
         row = await db.get(ProgramInvitationRow, inv.id)
         if queued:

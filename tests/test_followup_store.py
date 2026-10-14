@@ -6,6 +6,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+import sqlalchemy as sa
 
 from surogates.db.models import ProgramScheduleRow
 from surogates.followup import store
@@ -317,25 +318,35 @@ async def test_a_persons_zone_and_channel_are_validated_and_kept(sf):
 
 
 @pytest.mark.asyncio
-async def test_an_escalation_is_claimed_and_resolved(sf, make_invitation):
-    from surogates.db.models import ProgramInvitationRow
-
-    quiet = await make_invitation(delivery_state="delivered", response_state="completed")
-    raised = await make_invitation(delivery_state="delivered", response_state="replied")
-    async with sf() as db:
-        raised_row = await db.get(ProgramInvitationRow, raised.id)
-        raised_row.escalation_state = "raised"
-        org = raised_row.org_id
-        await db.commit()
+async def test_an_escalation_is_claimed_and_resolved(sf):
+    org, person = uuid.uuid4(), uuid.uuid4()
+    esc = await store.record_escalation(
+        sf, org_id=org, agent_id="a1", user_id=person, kind="alert", reason="fever",
+    )
     assert await store.claim_escalation(
-        sf, org_id=quiet.org_id, agent_id="a1", invitation_id=quiet.id, owner="ana",
+        sf, org_id=org, agent_id="a1", escalation_id=uuid.uuid4(), owner="ana",
     ) is None
     assert await store.claim_escalation(
-        sf, org_id=uuid.uuid4(), agent_id="a1", invitation_id=raised.id, owner="ana",
+        sf, org_id=uuid.uuid4(), agent_id="a1", escalation_id=esc, owner="ana",
     ) is None
-    row = await store.claim_escalation(sf, org_id=org, agent_id="a1", invitation_id=raised.id, owner="ana")
-    assert row.escalation_owner == "ana" and row.resolved_at is None
-    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", invitation_id=raised.id)
+    row = await store.claim_escalation(sf, org_id=org, agent_id="a1", escalation_id=esc, owner="ana")
+    assert row.owner == "ana" and row.resolved_at is None
+    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", escalation_id=esc)
     assert row.resolved_at is not None
-    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", invitation_id=raised.id, resolved=False)
+    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", escalation_id=esc, resolved=False)
     assert row.resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_recording_an_escalation_again_keeps_one_record(sf):
+    from surogates.db.models import EscalationRow
+
+    org, person, key = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    for state in ("failed", "raised"):
+        await store.record_escalation(
+            sf, escalation_id=key, org_id=org, agent_id="a1", user_id=person,
+            kind="missed_replies", reason="silent", state=state,
+        )
+    async with sf() as db:
+        [row] = (await db.execute(sa.select(EscalationRow))).scalars().all()
+    assert row.state == "raised"

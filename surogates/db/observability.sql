@@ -1118,3 +1118,70 @@ ALTER TABLE followup_settings
     ADD COLUMN IF NOT EXISTS team_channels jsonb NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_program_invitations_person_open
     ON program_invitations (org_id, agent_id, user_id, response_state);
+
+-- ── escalations: one record each, raised in a step or outside any ────
+CREATE TABLE IF NOT EXISTS escalations (
+    id uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    agent_id text NOT NULL,
+    user_id uuid NOT NULL,
+    platform text,
+    invitation_id uuid,
+    program_id uuid,
+    kind text NOT NULL,
+    severity text,
+    reason text NOT NULL,
+    state text NOT NULL DEFAULT 'raised',
+    session_id uuid,
+    owner text,
+    resolved_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_agent_open
+    ON escalations (org_id, agent_id, resolved_at, created_at);
+CREATE INDEX IF NOT EXISTS ix_escalations_invitation_id
+    ON escalations (invitation_id);
+-- Earlier escalations lived on their step's invitation, or (outside a
+-- step) only as the team's alert messages; each becomes one record.  An
+-- alert's key is escalation:<invitation or ->:<id>:<recipient>.
+INSERT INTO escalations (id, org_id, agent_id, user_id, platform, invitation_id,
+                         program_id, kind, severity, reason, state, session_id,
+                         owner, resolved_at, created_at)
+SELECT pi.id, pi.org_id, pi.agent_id, pi.user_id, pi.platform, pi.id, pi.program_id,
+       CASE WHEN a.dedupe_key LIKE 'missed:%' OR coalesce(pi.reason, '') LIKE 'No answer to%'
+            THEN 'missed_replies' ELSE 'alert' END,
+       a.severity, coalesce(a.alert_reason, pi.reason, ''), pi.escalation_state,
+       pi.session_id, pi.escalation_owner, pi.resolved_at, coalesce(a.created_at, pi.created_at)
+FROM program_invitations pi
+LEFT JOIN LATERAL (
+    SELECT o.dedupe_key, o.severity, o.alert_reason, o.created_at
+    FROM outreach_messages o
+    WHERE o.org_id = pi.org_id AND o.kind = 'alert'
+      AND (o.dedupe_key LIKE 'escalation:' || pi.id::text || ':%'
+           OR o.dedupe_key LIKE 'missed:' || pi.id::text || ':%')
+    ORDER BY o.created_at
+    LIMIT 1
+) a ON true
+WHERE pi.escalation_state IN ('raised', 'failed')
+  AND NOT EXISTS (SELECT 1 FROM escalations e WHERE e.invitation_id = pi.id)
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO escalations (id, org_id, agent_id, user_id, platform, kind, severity,
+                         reason, state, session_id, created_at)
+SELECT DISTINCT ON (k.key)
+       split_part(k.key, ':', 3)::uuid, o.org_id, o.agent_id, o.subject_user_id,
+       s.channel, 'alert', o.severity, coalesce(o.alert_reason, o.text), 'raised',
+       ev.session_id, o.created_at
+FROM outreach_messages o
+CROSS JOIN LATERAL (SELECT regexp_replace(o.dedupe_key, ':[^:]*$', '') AS key) k
+LEFT JOIN LATERAL (
+    SELECT e.session_id FROM events e
+    WHERE e.org_id = o.org_id AND e.type = 'followup.escalation'
+      AND e.data->>'escalation' = k.key
+    LIMIT 1
+) ev ON true
+LEFT JOIN sessions s ON s.id = ev.session_id
+WHERE o.kind = 'alert' AND o.dedupe_key LIKE 'escalation:-:%'
+  AND o.subject_user_id IS NOT NULL
+  AND split_part(k.key, ':', 3) ~ '^[0-9a-f]{32}$'
+ORDER BY k.key, o.created_at
+ON CONFLICT (id) DO NOTHING;

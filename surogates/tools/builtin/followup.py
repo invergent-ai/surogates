@@ -663,7 +663,8 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     # The key groups this escalation's alerts and its event, so an unopened
     # red one is reminded once and read as one, and names the check-in
     # whose history records it.
-    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{uuid.uuid4().hex}"
+    escalation_id = uuid.uuid4()
+    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{escalation_id.hex}"
     inboxed = target_id is not None and await _inbox(
         sf, ctx, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
@@ -695,6 +696,16 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
             if note:
                 row.reason = note
             await db.commit()
+
+    if ctx.user_id is not None:
+        await followup_store.record_escalation(
+            sf, escalation_id=escalation_id, org_id=ctx.org_id, agent_id=ctx.agent_id,
+            user_id=ctx.user_id, kind="alert", reason=reason, severity=severity,
+            state="raised" if inboxed or queued else "failed", platform=ctx.channel or None,
+            session_id=ctx.session_id,
+            invitation_id=invitation.id if invitation is not None else None,
+            program_id=invitation.program_id if invitation is not None else None,
+        )
 
     if not inboxed and not queued:
         return (
