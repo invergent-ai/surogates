@@ -64,6 +64,11 @@ jobs:
       - name: Check the desktop's types
         run: npm run typecheck
 
+      # The app's code, which a file of the project runs as the app does: the image's delivery, in this package's
+      # Electron.
+      - name: Build the app's code
+        run: npx tsc -p tsconfig.build.json
+
       - name: Run the suites that pass on Windows
         run: npx vitest run --project windows
 
