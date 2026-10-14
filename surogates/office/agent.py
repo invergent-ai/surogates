@@ -55,7 +55,15 @@ def relative_path(path: str, session: Any) -> str:
 
 
 def location_of(session: Any, path: str) -> str:
-    """Where *path* is in a cloud session's workspace, as the workspace layer names it (``StorageWorkspaceIO.location``)."""
+    """Where *path*, relative to the workspace, is: one name however the file is reached.
+
+    A cloud session names it as the workspace layer does (``StorageWorkspaceIO.location``); a session on a computer
+    by its path there.  A project thread's copy sits at the folder's own path, so it names the real file, as its
+    master does: the editor only ever opens that one.
+    """
+    device_id = device_of(session.config)
+    if device_id is not None:
+        return f"device:{device_id}:{posixpath.join(str(session.config['workspace_path']).rstrip('/'), path)}"
     prefix = boundary_workspace_prefix(session.config, session, workspace_root_id(session))
     return StorageWorkspaceIO(None, bucket=session.config["storage_bucket"], prefix=prefix).location(path)
 
