@@ -3,11 +3,11 @@
 // gives them (VZVirtioBlockDeviceConfiguration.blockDeviceIdentifier), which disks are read-only, and
 // whether the sessions disk takes discard. Decides whether the guest's init must find the disks by serial.
 //   npx vitest run -c test/vm/darwin/measure/vitest.config.ts disks
-// PASS or FAIL: the order and read-only disks are Linux's. The serials and discard are written down.
+// PASS, FAIL or UNTESTED: the order and read-only disks are Linux's. The serials and discard are written down.
 
 import { expect, it } from "vitest";
 
-import { lab, ready, record, ROOTS, scratch } from "./harness.js";
+import { judged, lab, ready, record, ROOTS, scratch } from "./harness.js";
 
 it("names the guest's disks in Linux's order", async () => {
   const booted = await lab("disks");
@@ -16,9 +16,9 @@ it("names the guest's disks in Linux's order", async () => {
   await booted.stop();
   const disks = new Map(listed.output.trim().split("\n").map((line) => [line.split(" ")[0]!, Object.fromEntries(line.split(" ").slice(1).map((pair) => pair.split("=")))]));
   const failed = record("disks", { disks: Object.fromEntries(disks) }, {
-    "vda, vdb and vdc, and no other": [...disks.keys()].join(" ") === "vda vdb vdc",
-    "the image and the agent disk read-only, the sessions disk not": [disks.get("vda")?.ro, disks.get("vdb")?.ro, disks.get("vdc")?.ro].join(" ") === "1 1 0",
-    "the sessions disk is the 32 GiB one": disks.get("vdc")?.sectors === String((32 * 1024 ** 3) / 512),
+    "vda, vdb and vdc, and no other": judged([listed], [...disks.keys()].join(" ") === "vda vdb vdc"),
+    "the image and the agent disk read-only, the sessions disk not": judged([listed], [disks.get("vda")?.ro, disks.get("vdb")?.ro, disks.get("vdc")?.ro].join(" ") === "1 1 0"),
+    "the sessions disk is the 32 GiB one": judged([listed], disks.get("vdc")?.sectors === String((32 * 1024 ** 3) / 512)),
   });
   expect(failed).toEqual([]);
 });
