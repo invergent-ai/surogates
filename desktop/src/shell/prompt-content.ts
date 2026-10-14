@@ -201,6 +201,8 @@ export function approval(request: ApprovalRequest): PromptContent {
     if (request.editor) {
       return {
         ...OPERATION,
+        // An allow covers the document's later saves too, so it is not "once".
+        buttons: [button("deny", "Deny"), button("stop_asking", "Allow and stop asking", true), button("allow", "Allow", true)],
         title: `Save ${named(request.path)}?`,
         lead: `The document editor wants to save this document${where}, ${sizeOf(bytes)}. Allowed, its later saves of it go through until you quit Surogate.`,
         details: [file],

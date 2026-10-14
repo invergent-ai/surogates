@@ -141,6 +141,8 @@ describe("an approval prompt", () => {
       `The document editor wants to save this document in notes, ${sizeOf(2048)}. Allowed, its later saves of it go through until you quit Surogate.`,
     );
     expect(content.details).toEqual([{ label: "File", value: "docs/Plan.docx", code: true, keep: "" }]);
+    expect(content.buttons.map(({ id, label }) => [id, label])).toEqual([["deny", "Deny"], ["stop_asking", "Allow and stop asking"], ["allow", "Allow"]]);
+    expect([allowing(content), content.focus, content.cancel]).toEqual([["stop_asking", "allow"], "deny", "deny"]);
   });
 
   it("asks about a delete, and names a path outside the folder whole, never as the folder's", () => {
