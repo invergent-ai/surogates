@@ -8,7 +8,7 @@ const MOUNTING = ["test/vm-stalled-folder.test.ts", "test/vm/guest-places.test.t
 // part of the app built for macOS adds its own. A project on macOS alone: on Linux each is the unit project's.
 export const MACOS = [
   "test/platform.test.ts", "test/backoff.test.ts", "test/egress.test.ts", "test/flags.test.ts", "test/guest-control.test.ts", "test/output.test.ts",
-  "test/protocol.test.ts", "test/vm-manifest.test.ts",
+  "test/protocol.test.ts", "test/vm-manifest.test.ts", "test/state-schema.test.ts",
   // The file host under Seatbelt: clean spawns, and what needs nothing built. Its other suites need fsat, rg and a
   // node at bin/node, and take long: the workflow's file-host job runs them, each on its own.
   "test/clean-child.test.ts", "test/agent-disk-imports.test.ts", "test/policy-darwin.test.ts",
@@ -40,6 +40,7 @@ export const WINDOWS = [
   "test/login-item-win32.test.ts", "test/deep-link-win32.test.ts", "test/app-identity-win32.test.ts", "test/notifications-win32.test.ts",
   "test/menus-win32.test.ts", "test/main-window-win32.test.ts", "test/quick-entry-win32.test.ts",
   "test/ca-source-win32.test.ts", "test/tools-look.test.ts", "test/installer-win32.test.ts", "test/installer.test.ts",
+  "test/state-schema.test.ts",
   "test/browser-known-win32.test.ts", "test/browser-processes-win32.test.ts", "test/browser-host-win32.test.ts",
   "test/folders-held-win32.test.ts",
   // The native programs' one workspace, and the one script that builds the Windows app.

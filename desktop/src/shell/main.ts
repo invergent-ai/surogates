@@ -67,6 +67,7 @@ import { QuickEntry, quickEntryKeys, unheldWords } from "./quick-entry.js";
 import { type SandboxAction, sandboxLine } from "./sandbox.js";
 import { accountOf, DesktopSession, SessionStore, type SignedIn, type SignedInAccount } from "./session.js";
 import { ownSpelling } from "./spellcheck.js";
+import { newerData } from "./state-schema.js";
 import { appTools, appVm, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
 import { keepChecked, updateLine, Updates, type UpdatesOptions } from "./updates.js";
@@ -92,7 +93,7 @@ const PANE_PRELOAD = join(import.meta.dirname, "pane-preload.cjs");
 const ASSETS = join(import.meta.dirname, "..", "..", "assets");
 const DICTIONARIES = join(import.meta.dirname, "..", "..", "dictionaries");
 // The app's version, as its package names it.
-const VERSION = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string }).version;
+const { version: VERSION, stateSchema: STATE_SCHEMA } = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf8")) as { version: string; stateSchema: number };
 
 // Where the app keeps what it keeps (places.ts): everything under one root, Electron's own data too.
 const places = placesFor(process.env, app.getPath("home"));
@@ -2804,6 +2805,13 @@ if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
     });
   });
   void app.whenReady().then(() => {
+    // An older app put over a newer one, on macOS and Windows: it reads none of the newer one's data, and says what to install.
+    const refused = newerData(root, STATE_SCHEMA, VERSION);
+    if (refused) {
+      stopped = true;
+      void dialog.showMessageBox({ type: "error", ...refused }).finally(() => app.quit());
+      return;
+    }
     credentials = new CredentialStore(join(root, "credentials.json"), safeStorage, report);
     notifications = new Notifications(Notification.isSupported() ? (content) => new Notification(content) : null, report);
     sessionStore = new SessionStore(join(root, "session.json"), safeStorage, report);
