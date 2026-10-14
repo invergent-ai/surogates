@@ -27,6 +27,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import Audience, as_utc
+from surogates.followup.people import can_write_first
 from surogates.programs.cadence import next_occurrences
 
 logger = logging.getLogger(__name__)
@@ -277,8 +278,7 @@ async def choose_channel(
     reachable: dict[str, Any] = {}
     last: dict[str, datetime | None] = {}
     for platform in senders:
-        caps = capabilities_for(platform)
-        if not caps.can_initiate:
+        if not capabilities_for(platform).can_initiate:
             continue
         identity = await identity_lookup(org_id, platform, user_id)
         if identity is None or followup_store.permission_status(identity) != "granted":
@@ -287,9 +287,8 @@ async def choose_channel(
             session_factory, org_id=org_id, platform=platform,
             platform_user_id=identity.platform_user_id, channel_identifier=senders[platform],
         )
-        if caps.needs_prior_contact and last[platform] is None:
-            continue
-        reachable[platform] = identity
+        if can_write_first(platform, identity, senders[platform], last[platform]):
+            reachable[platform] = identity
     if not reachable:
         return None
     chosen = getattr(enrollment, "preferred_channel", None)
@@ -338,15 +337,16 @@ async def fall_back(db: Any, row: ProgramInvitationRow, *, now: datetime, config
     while remaining:
         platform = remaining.pop(0)
         identity = await _identity(db, row.org_id, platform, row.user_id)
-        if (
-            platform in senders and identity is not None
-            and followup_store.permission_status(identity) == "granted"
-            and (
-                not capabilities_for(platform).needs_prior_contact
-                or await db.get(ChannelContactRow, (
-                    row.org_id, platform, identity.platform_user_id, senders[platform],
-                )) is not None
-            )
+        contact = (
+            await db.get(ChannelContactRow, (
+                row.org_id, platform, identity.platform_user_id, senders[platform],
+            ))
+            if identity is not None and platform in senders
+            and capabilities_for(platform).needs_prior_contact else None
+        )
+        if can_write_first(
+            platform, identity, senders.get(platform),
+            contact.last_inbound_at if contact is not None else None,
         ):
             break
         attempts.append({

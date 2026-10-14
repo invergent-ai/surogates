@@ -29,6 +29,7 @@ __all__ = [
     "is_stop",
     "withdraw_consent",
     "channel_account",
+    "can_write_first",
     "channel_holder",
     "named_account",
     "reachable",
@@ -129,6 +130,21 @@ async def named_account(sf: Any, *, org_id: uuid.UUID, agent_id: str, name: str)
     return user_id
 
 
+def can_write_first(platform: str, identity: Any, sender: str | None, last_inbound: datetime | None) -> bool:
+    """The one rule for whether a message may go out first to *identity* on
+    *platform*: the channel lets the platform write first, the person granted
+    permission there, the agent has a *sender* on it, and, where the provider
+    only lets a business answer someone who wrote first (Telegram), they
+    wrote to that sender (*last_inbound*).  The provider's service window is
+    not part of it: a template reopens that."""
+    caps = capabilities_for(platform)
+    return (
+        caps.can_initiate and identity is not None and bool(sender)
+        and followup_store.permission_status(identity) == "granted"
+        and (not caps.needs_prior_contact or last_inbound is not None)
+    )
+
+
 class Reach(NamedTuple):
     """A channel a message can go out on now."""
 
@@ -179,7 +195,7 @@ async def reachable(
             sf, org_id=org_id, platform=platform,
             platform_user_id=granted[platform].platform_user_id, channel_identifier=senders[platform],
         )
-        if caps.needs_prior_contact and last is None:
+        if not can_write_first(platform, granted[platform], senders[platform], last):
             why = why or f"has never written to the business on {channel_names([platform])}"
             continue
         closed = bool(caps.window_hours) and not window_open(last, now)
