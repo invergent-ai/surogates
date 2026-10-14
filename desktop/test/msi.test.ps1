@@ -1,9 +1,12 @@
 # The Windows app's MSI (windows/msi/Surogate.wxs), installed, checked and removed on this computer, as an
 # administrator on a computer where Virtual Machine Platform is on, as the Windows runner is: on such a computer the MSI
 # leaves the feature on and asks for no restart. What a computer without the feature does, its restart among it, is
-# measured on a PC (the test day's Mw14). Each check says ok or FAIL; the script fails once all have run if any failed.
-# With -Newer, an MSI of a later version made from the same layout: it upgrades the first in place, and the first,
-# installed over it, takes its place again.
+# measured by hand, on a PC without the feature, at the test day. Each check says ok or FAIL; the script fails once all
+# have run if any failed. Before the first install, a standard user of this computer (made here, and removed at the
+# end) makes Surogate's folders of ProgramData, as any user may, with files of theirs in them; before another, a link to
+# a folder of theirs stands in the folder's place. With -Newer, an MSI of a later version made from the same layout: it
+# upgrades the first in place, and the first, installed over it, takes its place again, each keeping what the install
+# before it was given.
 #
 #   pwsh -File desktop\test\msi.test.ps1 -Msi <msi> -Version <x.y.z> -Layout <its layout> [-Newer <msi> -NewerVersion <x.y.z>]
 param(
@@ -25,6 +28,10 @@ $Data = Join-Path $env:ProgramData 'Surogate'
 $Scheme = 'HKLM:\Software\Classes\surogate'
 $Shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Surogate.lnk'
 $Rules = "Surogate's file tools: node", "Surogate's file tools: rg"
+$Remembered = 'HKLM:\Software\Surogate'
+$Elsewhere = Join-Path $env:SystemDrive 'SurogateElsewhere'
+$Squatter = 'surogate-squatter'
+$Victim = Join-Path $env:SystemDrive 'SurogateSquatted'
 $Logs = Join-Path ([IO.Path]::GetTempPath()) "surogate-msi-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $Logs | Out-Null
 $failed = [Collections.Generic.List[string]]::new()
@@ -106,13 +113,63 @@ function Check-Gone([string] $When) {
   Check "$When, no Start menu shortcut" (-not (Test-Path $Shortcut))
   foreach ($rule in $Rules) { Check "$When, no firewall rule $rule" (-not (Get-Rule $rule)) }
   Check "$When, no entry in Installed apps" (@(Get-Product).Count -eq 0)
+  Check "$When, nothing remembered under HKLM\Software\Surogate" (-not (Test-Path $Remembered))
+}
+
+# The access rules *path* has of its own, each "<who> <rights> <inheritance>", in order of their words; whether any is
+# inherited is said as "inherited".
+function Get-Rules([string] $Path) {
+  @((Get-Acl $Path).Access | ForEach-Object { if ($_.IsInherited) { 'inherited' } else { "$($_.IdentityReference) $($_.AccessControlType) $($_.FileSystemRights) $($_.InheritanceFlags)" } } | Sort-Object)
+}
+
+# A folder made as the squatter makes one in ProgramData: theirs, with every right of theirs, and *files* of theirs in it,
+# each theirs alone and read-only, so that only its owner may touch it.
+function Squat([string] $Path, [string[]] $Files) {
+  New-Item -ItemType Directory -Force $Path | Out-Null
+  icacls $Path /setowner $Squatter | Out-Null
+  icacls $Path /grant "${Squatter}:(OI)(CI)F" | Out-Null
+  foreach ($file in $Files) {
+    $at = Join-Path $Path $file
+    Set-Content -Path $at -Value '{"base":"https://squatter.example.test","channel":"squatted"}'
+    icacls $at /setowner $Squatter | Out-Null
+    icacls $at /inheritance:r /grant:r "${Squatter}:F" | Out-Null
+    (Get-Item $at).Attributes = 'ReadOnly'
+  }
+}
+
+# The folder *path* as the install leaves it: SYSTEM's or administrators', with exactly *rules* of its own and none
+# inherited.
+function Check-Taken([string] $What, [string] $Path, [string[]] $Rules) {
+  $acl = if (Test-Path $Path) { Get-Acl $Path } else { $null }
+  $owner = if ($acl) { $acl.Owner } else { 'missing' }
+  Check "$What is SYSTEM's or administrators'" ($owner -in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') $owner
+  $found = @(if ($acl) { Get-Rules $Path })
+  Check "$What has exactly its own access rules" ($acl -and $acl.AreAccessRulesProtected -and (($found -join '|') -eq (($Rules | Sort-Object) -join '|'))) ($found -join '; ')
+}
+$DataRules = 'NT AUTHORITY\SYSTEM Allow FullControl ContainerInherit, ObjectInherit', 'BUILTIN\Administrators Allow FullControl ContainerInherit, ObjectInherit',
+  'BUILTIN\Users Allow ReadAndExecute, Synchronize ContainerInherit, ObjectInherit'
+$ApplyRules = 'NT AUTHORITY\SYSTEM Allow FullControl ContainerInherit, ObjectInherit', 'BUILTIN\Administrators Allow FullControl ContainerInherit, ObjectInherit'
+
+# The record's base and channel, as one line of JSON; nothing where there is none.
+function Get-Record {
+  $record = Join-Path $Data 'install.json'
+  if (Test-Path $record) { Get-Content -Raw $record | ConvertFrom-Json | ConvertTo-Json -Compress } else { '' }
 }
 
 $vmp = Get-Vmp
 Check 'Virtual Machine Platform is on before the install, as on the runner' ($vmp -eq 'Enabled') $vmp
 Check-Gone 'before the install'
 
-$install = Msiexec 'install' "/i `"$Msi`" SUROGATE_BASE=https://updates.example.test SUROGATE_CHANNEL=beta"
+# Surogate's folders of ProgramData made first by a standard user, with files of theirs: a library in apply, a file
+# beside the record, and a record of theirs.
+$password = "$([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(18)))aA1!"
+net user $Squatter $password /add | Out-Null
+Check 'a standard user is made to squat the folders' ($LASTEXITCODE -eq 0) "net user exited $LASTEXITCODE"
+Squat $Data @('planted.txt', 'install.json')
+Squat (Join-Path $Data 'apply') @('wintrust.dll')
+Check 'the squatter owns both folders before the install' ((Get-Acl $Data).Owner -like "*\$Squatter" -and (Get-Acl (Join-Path $Data 'apply')).Owner -like "*\$Squatter") "$((Get-Acl $Data).Owner)"
+
+$install = Msiexec 'install' "/i `"$Msi`""
 Check 'it installs, and asks for no restart' ($install.Code -eq 0) "msiexec exited $($install.Code)"
 Check 'its custom action left Virtual Machine Platform on' ($install.Log -match "Surogate: Windows's Virtual Machine Platform is on" -and (Get-Vmp) -eq 'Enabled') (Get-Vmp)
 
@@ -175,11 +232,16 @@ foreach ($pair in @(@($Rules[0], 'resources\app\bin\node.exe'), @($Rules[1], 're
   Check "the firewall rule $($pair[0]) blocks every connection out of $($pair[1])" ($rule -and $rule.Direction -eq 'Outbound' -and $rule.Action -eq 'Block' -and $rule.Enabled -eq 'True' -and $program -eq (Join-Path $Installed $pair[1])) "$($rule | Format-List DisplayName, Direction, Action, Enabled, Profile | Out-String) $program"
 }
 
-# The install record, of the base and channel the command line gave, where only administrators and SYSTEM write; and
-# apply\, which only they reach.
+# The install record, of the public base and channel where the command line gave none, where only administrators and
+# SYSTEM write; and apply\, which only they reach. Both folders the squatter made are the install's, and what they put
+# in them is gone, but the record, which is SYSTEM's and the install's own.
 $record = Join-Path $Data 'install.json'
-$said = if (Test-Path $record) { Get-Content -Raw $record } else { '' }
-Check 'the install record holds the base and channel given' ($said -and ($said | ConvertFrom-Json | ConvertTo-Json -Compress) -eq '{"base":"https://updates.example.test","channel":"beta"}') $said
+Check 'with no base or channel given, the record holds the public ones' ((Get-Record) -eq '{"base":"https://surogate.ai","channel":"stable"}') (Get-Record)
+Check-Taken '%ProgramData%\Surogate, which the squatter made,' $Data $DataRules
+Check-Taken '%ProgramData%\Surogate\apply, which the squatter made,' (Join-Path $Data 'apply') $ApplyRules
+Check 'what the squatter put in either folder is gone' (-not (Test-Path (Join-Path $Data 'planted.txt')) -and -not (Test-Path (Join-Path $Data 'apply\wintrust.dll'))) "$(Get-ChildItem -Force -Recurse $Data -ErrorAction SilentlyContinue | ForEach-Object FullName)"
+$recordOwner = if (Test-Path $record) { (Get-Acl $record).Owner } else { 'missing' }
+Check 'the record is SYSTEM''s or administrators'', with no access rule of its own' ($recordOwner -in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators' -and @(Get-Rules $record | Where-Object { $_ -ne 'inherited' }).Count -eq 0) "$recordOwner; $((Get-Rules $record) -join '; ')"
 $dataAcl = if (Test-Path $Data) { Get-Acl $Data } else { $null }
 Check '%ProgramData%\Surogate inherits nothing, and only administrators and SYSTEM write it' ($dataAcl -and $dataAcl.AreAccessRulesProtected -and @(Get-Writers $Data).Count -eq 0 -and @(Get-Writers $record).Count -eq 0) "$(if ($dataAcl) { $dataAcl.Access | Out-String } else { 'missing' })"
 $apply = Join-Path $Data 'apply'
@@ -198,26 +260,46 @@ Check 'its custom action does not run at the uninstall' ($remove.Log -notmatch "
 Check-Gone 'after the uninstall'
 Check 'Virtual Machine Platform is still on after the uninstall' ((Get-Vmp) -eq 'Enabled') (Get-Vmp)
 
-# With SUROGATE_VMP=0, as a policy that turns the feature on itself would give, the custom action does not run; with no
-# base or channel, the record holds the public ones.
-$again = Msiexec 'install-without-vmp' "/i `"$Msi`" SUROGATE_VMP=0"
-Check 'it installs with SUROGATE_VMP=0' ($again.Code -eq 0) "msiexec exited $($again.Code)"
+# Another folder for the app, by the command line, is refused, and nothing is installed anywhere.
+foreach ($given in "INSTALLFOLDER=`"$Elsewhere\`"", "TARGETDIR=`"$Elsewhere\`"") {
+  $elsewhere = Msiexec "elsewhere-$($given.Split('=')[0])" "/i `"$Msi`" $given"
+  Check "an install given $($given.Split('=')[0]) is refused, in words" ($elsewhere.Code -ne 0 -and $elsewhere.Log -match 'Surogate installs into its own folder of Program Files alone') "msiexec exited $($elsewhere.Code)"
+  Check "an install given $($given.Split('=')[0]) installs nothing" (-not (Test-Path $Elsewhere) -and -not (Test-Path $Installed) -and @(Get-Product).Count -eq 0)
+}
+
+# A link in the data folder's place, to a folder of the squatter's: removed and not followed, and the folder the install's
+# own. With SUROGATE_VMP=0, as a policy that turns the feature on itself would give, and a base and channel of its own:
+# each remembered, and kept by every later install that gives none.
+New-Item -ItemType Directory -Force $Victim | Out-Null
+icacls $Victim /setowner $Squatter | Out-Null
+$victimSddl = (Get-Acl $Victim).Sddl
+New-Item -ItemType Junction -Path $Data -Target $Victim | Out-Null
+$again = Msiexec 'install-given' "/i `"$Msi`" SUROGATE_VMP=0 SUROGATE_BASE=https://mirror.example.test SUROGATE_CHANNEL=beta"
+Check 'it installs with SUROGATE_VMP=0 and a base and channel of its own' ($again.Code -eq 0) "msiexec exited $($again.Code)"
 Check 'with SUROGATE_VMP=0 the custom action does not run' ($again.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $again.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
-$said = if (Test-Path $record) { Get-Content -Raw $record } else { '' }
-Check 'with no base or channel given, the record holds the public ones' ($said -and ($said | ConvertFrom-Json | ConvertTo-Json -Compress) -eq '{"base":"https://surogate.ai","channel":"stable"}') $said
+Check 'the install record holds the base and channel given' ((Get-Record) -eq '{"base":"https://mirror.example.test","channel":"beta"}') (Get-Record)
+Check 'a link in the data folder''s place is removed, and the folder is one' ((Get-Item $Data -Force).LinkType -eq $null -and -not ((Get-Item $Data -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) "$((Get-Item $Data -Force).LinkType)"
+Check 'the folder the link named is as it was, and holds nothing of the install''s' ((Get-Acl $Victim).Sddl -eq $victimSddl -and @(Get-ChildItem -Force $Victim).Count -eq 0) "$(Get-ChildItem -Force $Victim | ForEach-Object Name)"
+Check-Taken '%ProgramData%\Surogate, made where the link was,' $Data $DataRules
+$kept = Get-ItemProperty $Remembered -ErrorAction SilentlyContinue
+Check 'the base, the channel and SUROGATE_VMP are remembered' ($kept -and $kept.Base -eq 'https://mirror.example.test' -and $kept.Channel -eq 'beta' -and $kept.VirtualMachinePlatform -eq '0') "$($kept | Format-List Base, Channel, VirtualMachinePlatform | Out-String)"
 
 if ($Newer) {
-  $up = Msiexec 'upgrade' "/i `"$Newer`" SUROGATE_VMP=0"
-  $product = @(Get-Product)
-  # The two are made of one layout: Installed apps, the service and the app's program say which is installed.
-  Check 'a newer MSI upgrades it in place' ($up.Code -eq 0 -and $product.Count -eq 1 -and $product[0].DisplayVersion -eq $NewerVersion -and (Get-Service SurogateVM -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $Installed 'Surogate.exe'))) "msiexec exited $($up.Code); $(@($product | ForEach-Object DisplayVersion) -join ', ')"
-  $down = Msiexec 'downgrade' "/i `"$Msi`" SUROGATE_VMP=0"
-  $product = @(Get-Product)
-  Check 'an older MSI replaces the newer' ($down.Code -eq 0 -and $product.Count -eq 1 -and $product[0].DisplayVersion -eq $Version -and (Get-Service SurogateVM -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $Installed 'Surogate.exe'))) "msiexec exited $($down.Code); $(@($product | ForEach-Object DisplayVersion) -join ', ')"
+  # Each with no property: what the install before it was given is kept, the feature's policy too.
+  foreach ($step in @(@('upgrade', $Newer, $NewerVersion, 'a newer MSI upgrades it in place'), @('downgrade', $Msi, $Version, 'an older MSI replaces the newer'))) {
+    $run = Msiexec $step[0] "/i `"$($step[1])`""
+    $product = @(Get-Product)
+    # The two are made of one layout: Installed apps, the service and the app's program say which is installed.
+    Check $step[3] ($run.Code -eq 0 -and $product.Count -eq 1 -and $product[0].DisplayVersion -eq $step[2] -and (Get-Service SurogateVM -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $Installed 'Surogate.exe'))) "msiexec exited $($run.Code); $(@($product | ForEach-Object DisplayVersion) -join ', ')"
+    Check "the $($step[0]) keeps the base and channel given before" ((Get-Record) -eq '{"base":"https://mirror.example.test","channel":"beta"}') (Get-Record)
+    Check "the $($step[0]) keeps SUROGATE_VMP=0, and runs no DISM" ($run.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $run.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
+  }
 }
 $last = Msiexec 'remove-again' "/x `"$Msi`""
 Check 'it uninstalls again' ($last.Code -eq 0) "msiexec exited $($last.Code)"
 Check-Gone 'after the last uninstall'
 
+net user $Squatter /delete | Out-Null
+Remove-Item -Recurse -Force $Victim -ErrorAction SilentlyContinue
 "msiexec's logs: $Logs"
 if ($failed.Count) { throw "msi.test.ps1: $($failed.Count) checks failed: $($failed -join '; ')" }

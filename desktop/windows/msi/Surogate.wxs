@@ -16,12 +16,18 @@
   - two outbound Windows Firewall rules that block the file host's node.exe and rg.exe, a second layer to the walk
     that contains them (src/hosts/srt-win32.ts), for the network alone;
   - the install record, %ProgramData%\Surogate\install.json, of the base and channel the command line gives
-    (SUROGATE_BASE, SUROGATE_CHANNEL), in a folder only administrators and SYSTEM write, beside apply\, which only
-    they read or write, for the copies an update is checked from;
+    (SUROGATE_BASE, SUROGATE_CHANNEL), in a folder SYSTEM owns and only administrators and SYSTEM write, beside apply\,
+    which only they read or write, for the copies an update is checked from. A folder of either name that was there
+    before, which any user of %ProgramData% may make, is taken back by the MSI's own custom action first: SYSTEM made its
+    owner, its access list replaced, what it held removed, and a link in its place removed, never followed;
+  - the base, the channel and SUROGATE_VMP remembered under HKLM\Software\Surogate: each later install, an upgrade or
+    a repair, keeps them, unless its own command line gives another;
   - and, by its own custom action (native/windows/msi), Windows's Virtual Machine Platform turned on, with the restart
     that needs asked for at the end. SUROGATE_VMP=0 leaves it to an administrator's policy.
   Each release's MSI is a major upgrade of every other: a newer one replaces an older in place, and an older one,
   given by an administrator, replaces a newer one. The uninstall removes all it installed and leaves each user's data.
+  It installs into %ProgramFiles%\Surogate and nowhere else: whose access list is the app's integrity, and the
+  service's. An INSTALLFOLDER or a TARGETDIR on the command line is refused, and so is any folder it would come to.
 
   Built with: -d Version=<x.y.z> -bindpath Layout=<the layout> -bindpath Msi=<the custom action's folder>
 -->
@@ -37,11 +43,43 @@
     <Property Id="WINDOWS_BUILD">
       <RegistrySearch Id="WindowsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" />
     </Property>
-    <Launch Condition="Installed OR (VersionNT64 AND WINDOWS_BUILD &gt;= 22000)" Message="Surogate needs Windows 11 on a 64-bit PC." />
+    <!-- An administrative extract (msiexec /a), which installs nothing, is the release's check of what an MSI holds. -->
+    <Launch Condition="Installed OR ACTION = &quot;ADMIN&quot; OR (VersionNT64 AND WINDOWS_BUILD &gt;= 22000)" Message="Surogate needs Windows 11 on a 64-bit PC." />
 
-    <Property Id="SUROGATE_BASE" Value="https://surogate.ai" Secure="yes" />
-    <Property Id="SUROGATE_CHANNEL" Value="stable" Secure="yes" />
-    <Property Id="SUROGATE_VMP" Secure="yes" />
+    <!-- %ProgramFiles%\Surogate alone: refused if the command line names a folder, and again once the folders are worked
+         out, if the install's is any other than Program Files' own, by the environment's name for it. -->
+    <Launch Condition="Installed OR ACTION = &quot;ADMIN&quot; OR (NOT INSTALLFOLDER AND NOT TARGETDIR)"
+            Message="Surogate installs into its own folder of Program Files alone: give it no INSTALLFOLDER and no TARGETDIR." />
+    <SetProperty Id="SUROGATE_FOLDER" Action="NameSurogatesFolder" Value="[%ProgramW6432]\Surogate\" Before="CostFinalize" Sequence="both" />
+    <CustomAction Id="RefuseAnotherFolder" Error="Surogate installs into its own folder of Program Files alone, [SUROGATE_FOLDER], and into no other." />
+    <InstallUISequence>
+      <Custom Action="RefuseAnotherFolder" After="CostFinalize" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; SUROGATE_FOLDER" />
+    </InstallUISequence>
+    <InstallExecuteSequence>
+      <Custom Action="RefuseAnotherFolder" After="CostFinalize" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; SUROGATE_FOLDER" />
+    </InstallExecuteSequence>
+
+    <!-- What an earlier install was given, read back (HKLM\Software\Surogate, the Remembered component), unless this
+         install's command line gives it again: each is kept before the search, which would replace it, and given back
+         after it. Then the public base and channel where neither gave one. (The WiX Toolset's "remember property"
+         pattern.) -->
+    <Property Id="SUROGATE_BASE" Secure="yes">
+      <RegistrySearch Id="RememberedBase" Root="HKLM" Key="Software\Surogate" Name="Base" Type="raw" />
+    </Property>
+    <Property Id="SUROGATE_CHANNEL" Secure="yes">
+      <RegistrySearch Id="RememberedChannel" Root="HKLM" Key="Software\Surogate" Name="Channel" Type="raw" />
+    </Property>
+    <Property Id="SUROGATE_VMP" Secure="yes">
+      <RegistrySearch Id="RememberedVmp" Root="HKLM" Key="Software\Surogate" Name="VirtualMachinePlatform" Type="raw" />
+    </Property>
+    <SetProperty Id="GIVEN_SUROGATE_BASE" Action="KeepGivenBase" Value="[SUROGATE_BASE]" Before="AppSearch" Sequence="first" Condition="SUROGATE_BASE" />
+    <SetProperty Id="GIVEN_SUROGATE_CHANNEL" Action="KeepGivenChannel" Value="[SUROGATE_CHANNEL]" Before="AppSearch" Sequence="first" Condition="SUROGATE_CHANNEL" />
+    <SetProperty Id="GIVEN_SUROGATE_VMP" Action="KeepGivenVmp" Value="[SUROGATE_VMP]" Before="AppSearch" Sequence="first" Condition="SUROGATE_VMP" />
+    <SetProperty Id="SUROGATE_BASE" Action="GiveBackBase" Value="[GIVEN_SUROGATE_BASE]" After="AppSearch" Sequence="first" Condition="GIVEN_SUROGATE_BASE" />
+    <SetProperty Id="SUROGATE_CHANNEL" Action="GiveBackChannel" Value="[GIVEN_SUROGATE_CHANNEL]" After="AppSearch" Sequence="first" Condition="GIVEN_SUROGATE_CHANNEL" />
+    <SetProperty Id="SUROGATE_VMP" Action="GiveBackVmp" Value="[GIVEN_SUROGATE_VMP]" After="AppSearch" Sequence="first" Condition="GIVEN_SUROGATE_VMP" />
+    <SetProperty Id="SUROGATE_BASE" Action="PublicBase" Value="https://surogate.ai" After="GiveBackBase" Sequence="first" Condition="NOT SUROGATE_BASE" />
+    <SetProperty Id="SUROGATE_CHANNEL" Action="PublicChannel" Value="stable" After="GiveBackChannel" Sequence="first" Condition="NOT SUROGATE_CHANNEL" />
 
     <Icon Id="Surogate.ico" SourceFile="..\surogate.ico" />
     <Property Id="ARPPRODUCTICON" Value="Surogate.ico" />
@@ -97,10 +135,19 @@
                                 Program="[INSTALLFOLDER]resources\app\bin\rg.exe" Outbound="yes" Action="block" Profile="all" Scope="any" />
       </Component>
 
+      <Component Id="Remembered" Directory="INSTALLFOLDER" Guid="{5764B397-9833-4BF1-8352-DCF0722EDE12}">
+        <RegistryKey Root="HKLM" Key="Software\Surogate">
+          <RegistryValue Name="Base" Type="string" Value="[SUROGATE_BASE]" KeyPath="yes" />
+          <RegistryValue Name="Channel" Type="string" Value="[SUROGATE_CHANNEL]" />
+          <RegistryValue Name="VirtualMachinePlatform" Type="string" Value="[SUROGATE_VMP]" />
+        </RegistryKey>
+      </Component>
+
       <Component Id="InstallRecord" Directory="DataFolder">
-        <!-- Not inherited from %ProgramData%, whose users may make files in a folder of it. -->
+        <!-- SYSTEM's own, and not inherited from %ProgramData%, whose users may make folders in it and own what they make
+             (native/windows/msi, folders.rs, which holds the same descriptors). -->
         <CreateFolder>
-          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
+          <PermissionEx Sddl="O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
         </CreateFolder>
         <File Id="InstallRecord" Name="install.json" Source="install.json.in" KeyPath="yes">
           <util:FormatFile BinaryRef="InstallRecord" />
@@ -109,7 +156,7 @@
 
       <Component Id="ApplyFolder" Directory="ApplyFolder" Guid="{A65820BD-4F91-4E62-BD16-0F344F66AA82}">
         <CreateFolder>
-          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+          <PermissionEx Sddl="O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
         </CreateFolder>
       </Component>
     </Feature>
@@ -117,7 +164,11 @@
     <Binary Id="InstallRecord" SourceFile="install.json.in" />
     <Binary Id="SurogateMsi" SourceFile="!(bindpath.Msi)\surogate_msi.dll" />
     <CustomAction Id="EnableVirtualMachinePlatform" BinaryRef="SurogateMsi" DllEntry="EnableVirtualMachinePlatform" Execute="deferred" Impersonate="no" Return="check" />
+    <!-- The install's folders of %ProgramData% taken back, where they were there before it, before it makes them. -->
+    <SetProperty Id="TakeBackDataFolders" Value="[DataFolder]" Before="TakeBackDataFolders" Sequence="execute" />
+    <CustomAction Id="TakeBackDataFolders" BinaryRef="SurogateMsi" DllEntry="TakeBackDataFolders" Execute="deferred" Impersonate="no" Return="check" />
     <InstallExecuteSequence>
+      <Custom Action="TakeBackDataFolders" Before="CreateFolders" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="EnableVirtualMachinePlatform" Before="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot; AND SUROGATE_VMP &lt;&gt; &quot;0&quot;" />
     </InstallExecuteSequence>
     <!-- The restart the custom action asks for, asked of Windows at the install's end. -->

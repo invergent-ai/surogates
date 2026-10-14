@@ -1,6 +1,6 @@
 [package]
 name = "msi"
-description = "surogate_msi.dll: the MSI's own custom action, which turns on Windows's Virtual Machine Platform and asks for the restart that needs"
+description = "surogate_msi.dll: the MSI's own custom actions, which take back its folders of ProgramData and turn on Windows's Virtual Machine Platform"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -12,5 +12,6 @@ crate-type = ["cdylib"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
-  "Win32_System_ApplicationInstallationAndServicing", "Win32_System_DataExchange", "Win32_System_SystemInformation", "Win32_System_Threading",
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_ApplicationInstallationAndServicing",
+  "Win32_System_DataExchange", "Win32_System_SystemInformation", "Win32_System_Threading",
 ] }

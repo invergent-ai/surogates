@@ -1,14 +1,23 @@
-//! The MSI's own custom action (windows/msi/Surogate.wxs), in the MSI's Binary table and never installed:
-//! `EnableVirtualMachinePlatform`, deferred, run as LocalSystem once the files are in place. It turns on Windows's
-//! Virtual Machine Platform, which the Host Compute Service that the Surogate VM service calls needs, with DISM, as
-//! WSL's installer turns it on (WSL's `WslInstall.cpp`): `dism.exe /Online /Enable-Feature
-//! /FeatureName:VirtualMachinePlatform /NoRestart`, and `/Quiet`, as no one reads its words. DISM's 3010
-//! (ERROR_SUCCESS_REBOOT_REQUIRED) says the feature is on once Windows restarts: the action marks the install as
-//! needing that restart as the WiX Toolset's own deferred actions mark one (`WcaDeferredActionRequiresReboot`, a global
-//! atom that its `CheckRebootRequired` action reads at the install's end and turns into
-//! `MsiSetMode(MSIRUNMODE_REBOOTATEND)`), so Windows asks for it then. Any other answer leaves the feature as DISM left it
-//! and the install goes on, said in its log: the app says what the computer lacks of its sandbox, and how to turn it on
-//! (src/vm/win32.ts). Where an administrator turns the feature on by policy, the MSI's SUROGATE_VMP=0 runs none of it.
+//! The MSI's own custom actions (windows/msi/Surogate.wxs), in the MSI's Binary table and never installed, each deferred
+//! and run as LocalSystem:
+//!
+//! - `TakeBackDataFolders`, before the MSI makes its folders of `%ProgramData%`: a `Surogate` or `apply` folder that is
+//!   there already, which any user may have made, as `%ProgramData%` lets its users make folders, is the install's again
+//!   (folders.rs).
+//! - `EnableVirtualMachinePlatform`, once the files are in place. It turns on Windows's Virtual Machine Platform, which
+//!   the Host Compute Service that the Surogate VM service calls needs, with DISM, as WSL's installer turns it on (WSL's
+//!   `WslInstall.cpp`): `dism.exe /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /NoRestart`, and `/Quiet`,
+//!   as no one reads its words. DISM's 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) says the feature is on once Windows
+//!   restarts: the action marks the install as needing that restart as the WiX Toolset's own deferred actions mark one
+//!   (`WcaDeferredActionRequiresReboot`, a global atom that its `CheckRebootRequired` action reads at the install's end
+//!   and turns into `MsiSetMode(MSIRUNMODE_REBOOTATEND)`), so Windows asks for it then. Any other answer leaves the
+//!   feature as DISM left it and the install goes on, said in its log: the app says what the computer lacks of its
+//!   sandbox, and how to turn it on (src/vm/win32.ts). Where an administrator turns the feature on by policy, the MSI's
+//!   SUROGATE_VMP=0 runs none of it, at this install and at every later one, which remembers it.
+
+pub mod folders;
+#[cfg(windows)]
+mod take_back;
 
 /// The DISM line that turns the feature on, after its program's path.
 pub const DISM: [&str; 5] = ["/Online", "/Enable-Feature", "/FeatureName:VirtualMachinePlatform", "/NoRestart", "/Quiet"];
@@ -47,7 +56,7 @@ pub fn said(turned: &Turned) -> String {
 }
 
 #[cfg(windows)]
-mod action {
+pub(crate) mod action {
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
@@ -59,7 +68,7 @@ mod action {
 
     use super::{said, turned, Turned, DISM, RESTART_ATOM};
 
-    fn wide(text: &str) -> Vec<u16> {
+    pub(crate) fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(Some(0)).collect()
     }
 
@@ -71,7 +80,7 @@ mod action {
     }
 
     /// *words* in the install's log.
-    fn log(install: MSIHANDLE, words: &str) {
+    pub(crate) fn log(install: MSIHANDLE, words: &str) {
         unsafe {
             let record = MsiCreateRecord(1);
             if record == 0 {
