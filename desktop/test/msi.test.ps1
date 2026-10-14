@@ -377,12 +377,12 @@ if ($Newer) {
   $Keys = Join-Path $Installed 'resources\release-keys'
   $ended = (Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList '/c', 'exit' -WindowStyle Hidden -PassThru -Wait).Id
   $Staged = Join-Path $Logs "staged\$NewerVersion"
-  function Apply-Update([string] $Name, [string] $AsVersion, [string[]] $Release, [switch] $Other) {
+  function Apply-Update([string] $Name, [string] $AsVersion, [string[]] $Release, [switch] $Other, [int] $WaitFor = $ended) {
     Remove-Item -Recurse -Force $Staged -ErrorAction SilentlyContinue
     $signed = @(if ($Other) { '--other' })
     node (Join-Path $PSScriptRoot 'win32\test-release.mjs') $Staged @Release $Keys @signed | Out-Null
     $err = Join-Path $Logs "admin-$Name.err"
-    $run = Start-Process -FilePath $Admin -ArgumentList 'apply', '--wait', $ended, '--manifest', (Join-Path $Staged 'manifest.json'), '--signature', (Join-Path $Staged 'manifest.json.sig'), '--msi', (Join-Path $Staged 'release.msi'), '--version', $AsVersion -Wait -PassThru -RedirectStandardError $err
+    $run = Start-Process -FilePath $Admin -ArgumentList 'apply', '--wait', $WaitFor, '--manifest', (Join-Path $Staged 'manifest.json'), '--signature', (Join-Path $Staged 'manifest.json.sig'), '--msi', (Join-Path $Staged 'release.msi'), '--version', $AsVersion -Wait -PassThru -RedirectStandardError $err
     [pscustomobject]@{ Code = $run.ExitCode; Said = if (Test-Path $err) { (Get-Content -Raw $err) } else { '' } }
   }
   $record = Get-Content -Raw (Join-Path $Data 'install.json') | ConvertFrom-Json
@@ -395,6 +395,21 @@ if ($Newer) {
     $asked = if ($refusal[0] -eq 'same') { $Version } else { $NewerVersion }
     $run = Apply-Update $refusal[0] $asked $refusal[2] -Other:($refusal[0] -eq 'unsigned')
     Check "surogate-admin refuses $($refusal[1]), and installs nothing" ($run.Code -eq 3 -and $run.Said -match $refusal[3] -and @(Get-Product)[0].DisplayVersion -eq $Version) "exit $($run.Code): $($run.Said)"
+  }
+  # An administrator who approves for a standard user runs it as their own account, which the user's process lets not open
+  # it: it waits by the system's list of processes. The squatter, a standard user, starts one that ends in about three
+  # seconds; the apply waits for it, then answers for the release, here another channel's, refused.
+  $began = Get-Date
+  $theirs = try {
+    $credential = [pscredential]::new("$env:COMPUTERNAME\$Squatter", (ConvertTo-SecureString $password -AsPlainText -Force))
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\ping.exe') -ArgumentList '-n', '4', '127.0.0.1' -Credential $credential -WorkingDirectory $env:SystemRoot -WindowStyle Hidden -PassThru
+  } catch { "$_" }
+  if ($theirs -is [Diagnostics.Process]) {
+    $run = Apply-Update 'theirs' $NewerVersion @($Newer, $NewerVersion, 'nightly') -WaitFor $theirs.Id
+    $waited = [math]::Round(((Get-Date) - $began).TotalSeconds, 1)
+    Check "surogate-admin waits for a standard user's process it may not open, then answers for the release" ($run.Code -eq 3 -and $run.Said -match 'channel nightly' -and $waited -ge 2) "exit $($run.Code) after $waited s: $($run.Said)"
+  } else {
+    Check "surogate-admin waits for a standard user's process it may not open, then answers for the release" $false "the squatter's process could not be started: $theirs"
   }
   # An MSI that is not the manifest's: one byte more than the one it names.
   Remove-Item -Recurse -Force $Staged -ErrorAction SilentlyContinue
@@ -411,16 +426,18 @@ if ($Newer) {
   Check 'apply holds the installed release''s copies alone' (($kept -join ',') -eq $NewerVersion -and (Test-Path (Join-Path $Data "apply\$NewerVersion\release.msi"))) ($kept -join ', ')
   $copiesAcl = Get-Acl (Join-Path $Data "apply\$NewerVersion")
   Check 'the update''s copies are the Administrators'', with no one else let change them' ($copiesAcl.Owner -eq 'BUILTIN\Administrators' -and @(Get-Writers (Join-Path $Data "apply\$NewerVersion")).Count -eq 0) "$($copiesAcl.Owner); $(@(Get-Writers (Join-Path $Data "apply\$NewerVersion")) -join '; ')"
-  $updateLog = Join-Path $env:SystemRoot "Temp\surogate-update-$NewerVersion.log"
-  Check 'the update''s MSI keeps the install''s own folder it runs from' ((Test-Path $updateLog) -and (Get-Content -Raw $updateLog) -match "Surogate: $([regex]::Escape($Data)) is the install's own already, and is kept") $updateLog
+  # Windows Installer's log, in a folder the admin program made for it, which only administrators reach.
+  $updateLog = if ($update.Said -match "Windows Installer's log is (.+?)\s*$") { $Matches[1] } else { '' }
+  Check 'the update''s log is in a folder of its own, which only administrators reach' ($updateLog -and (Test-Path $updateLog) -and (Get-Acl (Split-Path $updateLog)).Owner -eq 'BUILTIN\Administrators' -and @(Get-Writers (Split-Path $updateLog)).Count -eq 0 -and (Split-Path -Leaf (Split-Path $updateLog)) -match '^surogate-[0-9a-f]{32}$') "$updateLog"
+  Check 'the update''s MSI keeps the install''s own folder it runs from' ($updateLog -and (Get-Content -Raw $updateLog) -match "Surogate: $([regex]::Escape($Data)) is the install's own already, and is kept") $updateLog
 }
 if ($Newer) {
   # The last uninstall as the app's Remove Surogate from This Computer has it run: surogate-admin.exe remove, once the app
   # has ended, finds the installed product by the MSI's upgrade code and uninstalls it.
   $err = Join-Path $Logs 'admin-remove.err'
   $run = Start-Process -FilePath $Admin -ArgumentList 'remove', '--wait', $ended -Wait -PassThru -RedirectStandardError $err
-  $removeLog = Join-Path $env:SystemRoot 'Temp\surogate-remove.log'
-  $last = [pscustomobject]@{ Code = $run.ExitCode; Log = if (Test-Path $removeLog) { Get-Content -Raw $removeLog } else { '' } }
+  $removeLog = if ((Get-Content -Raw $err) -match "Windows Installer's log is (.+?)\s*$") { $Matches[1] } else { '' }
+  $last = [pscustomobject]@{ Code = $run.ExitCode; Log = if ($removeLog -and (Test-Path $removeLog)) { Get-Content -Raw $removeLog } else { '' } }
   Check 'surogate-admin removes the app' ($last.Code -eq 0) "exit $($last.Code): $(Get-Content -Raw $err)"
 } else {
   $last = Msiexec 'remove-again' "/x `"$Msi`""

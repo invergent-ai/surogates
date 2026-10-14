@@ -3,7 +3,8 @@
 //! administrators and SYSTEM reach, its owner the Administrators, so that its maker's own account cannot change it
 //! (SHGetKnownFolderPath, CreateDirectoryW and CreateFileW with a descriptor of their own), the MSI hashed as it is
 //! copied (CNG's SHA-256); the copies checked (release.rs, and WinVerifyTrust for the MSI's signer, through
-//! surogate-helper's verify); and Windows Installer run on the copy (msiexec, from the system's own folder).
+//! surogate-helper's verify); and Windows Installer run on the copy (msiexec, from the system's own folder), its log in
+//! a folder of the run's own.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -13,9 +14,11 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-use windows_sys::Win32::Security::Cryptography::{BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData, BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE};
+use windows_sys::Win32::Security::Cryptography::{
+    BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptGenRandom, BCryptHashData, BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+};
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
@@ -24,6 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::ApplicationInstallationAndServicing::MsiEnumRelatedProductsW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
@@ -96,15 +100,73 @@ impl Drop for Descriptor {
     }
 }
 
-/// Whether the process *pid* has ended, waiting up to *seconds* for it; one that is not there has.
+// Whether the system's list of processes holds *pid* (CreateToolhelp32Snapshot), which needs no right to the process.
+fn listed(pid: u32) -> bool {
+    // SAFETY: a snapshot taken here and closed by Handle; the entry is as long as it says.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return true;
+    }
+    let snapshot = Handle(snapshot);
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+    let mut more = unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0;
+    while more {
+        if entry.th32ProcessID == pid {
+            return true;
+        }
+        more = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
+    }
+    false
+}
+
+/// Whether the process *pid* has ended, waiting up to *seconds* for it; one that is not there has. The app's process
+/// may be another account's, a standard user's whose administrator approved: its access list then lets this one not
+/// open it, and its id is looked for in the system's list of processes instead, until it is gone.
 fn ended(pid: u32, seconds: u32) -> bool {
     // SAFETY: a handle opened here and closed by Handle.
     let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if process.is_null() {
-        return last_error() == ERROR_INVALID_PARAMETER;
+        if last_error() == ERROR_INVALID_PARAMETER {
+            return true;
+        }
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
+        while listed(pid) {
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        return true;
     }
     let process = Handle(process);
     unsafe { WaitForSingleObject(process.0, seconds * 1000) == 0 }
+}
+
+/// A folder of this run's own for Windows Installer's log, in Windows's Temp, where every user may make files: by a name
+/// no one can know before, made afresh under the Administrators' descriptor, so that no user's file or link is written
+/// to in its place.
+fn log_folder() -> Result<PathBuf, Failure> {
+    let temp = folder_of(GetSystemWindowsDirectoryW, "Windows")?.join("Temp");
+    let descriptor = Descriptor::of(FOLDER)?;
+    let attributes = descriptor.attributes();
+    for _ in 0..8 {
+        let mut random = [0u8; 16];
+        // SAFETY: the buffer is as long as said; the system's own generator needs no provider.
+        if unsafe { BCryptGenRandom(null_mut(), random.as_mut_ptr(), random.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) } != 0 {
+            return Err(failed("a name for the log's folder could not be drawn"));
+        }
+        let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let folder = temp.join(format!("surogate-{name}"));
+        // SAFETY: the path and the attributes outlive the call.
+        if unsafe { CreateDirectoryW(wide(&folder).as_ptr(), &attributes) } != 0 {
+            return Ok(folder);
+        }
+        if last_error() != ERROR_ALREADY_EXISTS {
+            return Err(failed(format!("{} could not be made: Windows error {}", folder.display(), last_error())));
+        }
+    }
+    Err(failed("no folder for the log could be made in Windows's Temp"))
 }
 
 /// %ProgramData%, as Windows knows it, never as an environment names it.
@@ -335,7 +397,7 @@ fn run(apply: &Apply) -> Result<String, Failure> {
     }
     // Windows Installer, from the system's own folder, on the copy; its log where it runs, in Windows's Temp.
     let msiexec = folder_of(GetSystemDirectoryW, "system")?.join("msiexec.exe");
-    let log = folder_of(GetSystemWindowsDirectoryW, "Windows")?.join("Temp").join(format!("surogate-update-{}.log", apply.version));
+    let log = log_folder()?.join(format!("surogate-update-{}.log", apply.version));
     let status = std::process::Command::new(&msiexec)
         .args([OsStr::new("/i"), msi.as_os_str(), OsStr::new("/qn"), OsStr::new("/norestart"), OsStr::new("/l*v"), log.as_os_str()])
         .status()
@@ -350,7 +412,8 @@ fn run(apply: &Apply) -> Result<String, Failure> {
             let _ = std::fs::remove_dir_all(entry.path()).or_else(|_| std::fs::remove_file(entry.path()));
         }
     }
-    Ok(if code == RESTART_NEEDED { format!("Surogate {} is installed, and a restart of Windows finishes it", apply.version) } else { String::new() })
+    let installed = if code == RESTART_NEEDED { format!("Surogate {} is installed, and a restart of Windows finishes it", apply.version) } else { format!("Surogate {} is installed", apply.version) };
+    Ok(format!("{installed}: Windows Installer's log is {}", log.display()))
 }
 
 // The MSI's UpgradeCode (windows/msi/Surogate.wxs), which every release's MSI shares.
@@ -381,7 +444,7 @@ fn run_remove(wait: u32) -> Result<String, Failure> {
         return Err(failed(if products.is_empty() { "Surogate is not installed on this computer".to_string() } else { format!("Windows Installer lists Surogate {} times", products.len()) }));
     };
     let msiexec = folder_of(GetSystemDirectoryW, "system")?.join("msiexec.exe");
-    let log = folder_of(GetSystemWindowsDirectoryW, "Windows")?.join("Temp").join("surogate-remove.log");
+    let log = log_folder()?.join("surogate-remove.log");
     let status = std::process::Command::new(&msiexec)
         .args([OsStr::new("/x"), OsStr::new(product), OsStr::new("/qn"), OsStr::new("/norestart"), OsStr::new("/l*v"), log.as_os_str()])
         .status()
@@ -390,7 +453,8 @@ fn run_remove(wait: u32) -> Result<String, Failure> {
     if code != 0 && code != RESTART_NEEDED {
         return Err((exit::INSTALLER_FAILED, format!("Windows Installer ended {code}, and Surogate was not removed: its log is {}", log.display())));
     }
-    Ok(if code == RESTART_NEEDED { "Surogate is removed, and a restart of Windows finishes it".to_string() } else { String::new() })
+    let removed = if code == RESTART_NEEDED { "Surogate is removed, and a restart of Windows finishes it" } else { "Surogate is removed" };
+    Ok(format!("{removed}: Windows Installer's log is {}", log.display()))
 }
 
 /// The app removed for every user of this computer, once its process *wait* has ended: its exit code, and its words.
