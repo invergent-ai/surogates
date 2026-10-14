@@ -299,8 +299,8 @@ const BLOCK = 64 * 1024;
 const ZEROS = Buffer.alloc(BLOCK);
 
 // What Node's own zstd unpacks, written to *file* a block at a time: a block of zeros is not written but passed over,
-// which leaves a hole where the file system makes one there (APFS does; NTFS fills it, as its file is not marked
-// sparse), and the file's length is set at the end, the zeros it ends with counted.
+// which leaves a hole where the file system makes one there (APFS keeps a file sparse by criteria of its own; NTFS fills
+// it, as its file is not marked sparse), and the file's length is set at the end, the zeros it ends with counted.
 class Sparse extends Writable {
   private readonly block = Buffer.alloc(BLOCK);
   private held = 0;
