@@ -904,6 +904,38 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
     return surfaced
 
 
+async def _refresh_holds(session_factory: Any, *, now: datetime) -> int:
+    """Judge each held message's quiet hours again, in the person's zone as
+    it is now: a zone changed since the message was queued moves its time,
+    or sends it at once.  ``not_before`` is the estimate shown to whoever
+    sent it, kept current.  Returns how many changed.
+    """
+    from surogates.programs.journey import quiet_until
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(OutreachMessageRow)
+                .where(OutreachMessageRow.state == "queued")
+                .where(OutreachMessageRow.not_before.isnot(None))
+                .order_by(OutreachMessageRow.created_at)
+                .limit(BATCH)
+            )
+        ).scalars().all()
+    changed = 0
+    for row in rows:
+        held = await quiet_until(
+            session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id, now=now,
+        )
+        until = held[0] if held else None
+        if until is not None and row.not_before is not None and as_utc(until) == as_utc(row.not_before):
+            continue
+        changed += await _transition(
+            session_factory, row.id, from_states=("queued",), not_before=until,
+        )
+    return changed
+
+
 async def send_queued_outreach(
     session_factory: Any,
     *,
@@ -928,7 +960,7 @@ async def send_queued_outreach(
     """
     for bookkeeping in (
         _expire_unanswered, _report_outcomes, _remind_unseen_red_alerts,
-        _surface_person_failures,
+        _surface_person_failures, _refresh_holds,
     ):
         try:
             await bookkeeping(session_factory, now=now)

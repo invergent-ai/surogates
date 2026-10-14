@@ -664,3 +664,105 @@ def test_the_reply_counts_honestly():
         "The team was notified (1); 1 team member(s) could not be reached: x."
     )
     assert told(2, None) == "The team was notified (2)."
+
+
+# --- held messages and the person's channel --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_new_message_from_the_same_member_replaces_their_held_one(sf, clinic, monkeypatch):
+    from surogates.programs import journey
+
+    doctor, _, _ = clinic
+    ion, _ = await _user(sf, "Ion", "40711111111")
+    morning = datetime.now(timezone.utc) + timedelta(hours=9)
+
+    async def quiet(*_a, **_k):
+        return (morning, "Australia/Sydney")
+
+    monkeypatch.setattr(journey, "quiet_until", quiet)
+    first = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ion, platform="whatsapp",
+        channel_identifier="pn1", kind="operator", text="Veniți mâine la 10.",
+        template_name=None, template_language=None, subject_user_id=ion,
+        created_by=f"team:{doctor}",
+    )
+    assert first.not_before is not None
+    second = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ion, platform="whatsapp",
+        channel_identifier="pn1", kind="operator", text="Veniți joi, 15 octombrie, la 10.",
+        template_name=None, template_language=None, subject_user_id=ion,
+        created_by=f"team:{doctor}", send_now=True,
+    )
+    rows = {r.id: r for r in await _all(sf, OutreachMessageRow)}
+    assert rows[first.id].state == "replaced"
+    assert (rows[second.id].state, rows[second.id].not_before) == ("queued", None)
+
+
+@pytest.mark.asyncio
+async def test_a_held_message_follows_the_persons_zone_as_it_is_at_send_time(sf, clinic, monkeypatch):
+    from surogates.followup import outreach
+    from surogates.programs import journey
+
+    doctor, _, _ = clinic
+    ion, _ = await _user(sf, "Ion", "40711111111")
+    now = datetime.now(timezone.utc)
+    held = [(now + timedelta(hours=9), "Australia/Sydney")]
+
+    async def quiet(*_a, **_k):
+        return held[0]
+
+    monkeypatch.setattr(journey, "quiet_until", quiet)
+    row = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ion, platform="whatsapp",
+        channel_identifier="pn1", kind="operator", text="x",
+        template_name=None, template_language=None, subject_user_id=ion,
+        created_by=f"team:{doctor}",
+    )
+    # The person moved: their quiet hours end at another time, then not at all.
+    held[0] = (now + timedelta(hours=2), "Europe/Bucharest")
+    assert await outreach._refresh_holds(sf, now=now) == 1
+    [row] = [r for r in await _all(sf, OutreachMessageRow) if r.id == row.id]
+    assert outreach.as_utc(row.not_before) == held[0][0]
+    held[0] = None
+    assert await outreach._refresh_holds(sf, now=now) == 1
+    [row] = [r for r in await _all(sf, OutreachMessageRow) if r.id == row.id]
+    assert row.not_before is None
+    assert await outreach._refresh_holds(sf, now=now) == 0
+
+
+def test_the_preferred_channel_is_the_most_recently_set():
+    from types import SimpleNamespace as N
+
+    now = datetime.now(timezone.utc)
+    rows = [N(preferred_channel="whatsapp", updated_at=now - timedelta(days=1)),
+            N(preferred_channel="slack", updated_at=now), N(preferred_channel=None, updated_at=now)]
+    assert store.preferred_channel(rows) == "slack"
+    assert store.preferred_channel([]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_step_outside_a_journey_uses_the_persons_latest_preference(sf, clinic):
+    from types import SimpleNamespace as N
+
+    from surogates.programs.journey import choose_channel
+
+    ion, _ = await _user(sf, "Ion", "40711111111")
+    for protocol in ("a", "b"):
+        await store.upsert_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=ion, protocol=protocol,
+                                      start_date=None, phase=None, enrolled_by="agent")
+    for protocol, channel in (("b", "telegram"), ("a", "whatsapp"), ("b", "telegram")):
+        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=ion,
+                                      protocol=protocol, preferred_channel=channel)
+
+    async def lookup(org_id, platform, user_id):
+        return N(platform_user_id="1", platform_meta=GRANTED)
+
+    config = {"channel": "whatsapp", "channel_identifier": "pn1",
+              "journey": {"senders": {"whatsapp": "pn1", "telegram": "bot1"}}}
+    from surogates.followup.store import record_inbound
+
+    await record_inbound(sf, org_id=ORG, platform="telegram", platform_user_id="1", channel_identifier="bot1")
+    chosen = await choose_channel(config, org_id=ORG, user_id=ion, enrollment=None,
+                                  identity_lookup=lookup, session_factory=sf, agent_id=AGENT)
+    assert chosen[0] == "telegram"

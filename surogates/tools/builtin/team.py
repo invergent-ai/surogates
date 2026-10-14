@@ -1032,10 +1032,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     senders = _senders(ctx, settings)
     now = datetime.now(timezone.utc)
     template_name = settings.message_template_name if settings else None
-    preferred = next(
-        (r.preferred_channel for r in person.rows if r.status == "active" and r.preferred_channel),
-        None,
-    )
+    preferred = followup_store.preferred_channel(person.rows)
     # The person on their best channel; a closed window with no template
     # falls through to their other channels.  Someone with none is reached
     # through their contacts.

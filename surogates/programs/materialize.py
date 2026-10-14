@@ -190,7 +190,7 @@ async def materialize_occurrence(
                 chosen[user_id] = await choose_channel(
                     config, org_id=schedule.org_id, user_id=user_id,
                     enrollment=enrollment, identity_lookup=identity_lookup,
-                    session_factory=session_factory,
+                    session_factory=session_factory, agent_id=schedule.agent_id,
                 )
     paused: set[uuid.UUID] = set()
     if pause:

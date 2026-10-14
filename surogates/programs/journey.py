@@ -257,6 +257,7 @@ async def choose_channel(
     enrollment: Any,
     identity_lookup: Any,
     session_factory: Any,
+    agent_id: str | None = None,
 ) -> tuple[str, Any, str, list[str]] | None:
     """(platform, identity, sender, the other reachable channels) for one
     person, or ``None`` when no channel with a sender reaches them.
@@ -287,6 +288,12 @@ async def choose_channel(
     if not reachable:
         return None
     chosen = getattr(enrollment, "preferred_channel", None)
+    if enrollment is None and agent_id is not None:
+        # Outside one journey (a fixed roster, a contact's copy): the channel
+        # the person most recently asked for in any of theirs.
+        chosen = followup_store.preferred_channel(await followup_store.enrollments(
+            session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+        ))
     if chosen not in reachable:
         newest = None
         for platform in reachable:

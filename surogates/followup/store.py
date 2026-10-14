@@ -433,6 +433,15 @@ def person_label(display_name: str | None, enrollment: Any = None, texts: Any = 
     return " · ".join(parts)
 
 
+def preferred_channel(rows: Iterable[Any]) -> str | None:
+    """The channel a person most recently asked for, across all their
+    enrollments: the latest-updated one that names a channel."""
+    named = [r for r in rows if getattr(r, "preferred_channel", None)]
+    if not named:
+        return None
+    return max(named, key=lambda r: (r.updated_at is not None, r.updated_at or 0)).preferred_channel
+
+
 def labelling_enrollment(rows: Iterable[FollowupEnrollmentRow]) -> FollowupEnrollmentRow | None:
     """The enrollment that best names a person: active, then one with a name."""
     return min(
@@ -1014,6 +1023,26 @@ async def queue_outreach(
     text = text.strip()
     if not text:
         raise ValueError("an outreach message needs text")
+    if kind == "operator" and (created_by or "").startswith("team:"):
+        # A team member writing to the same person again (reworded, or "send
+        # it now") replaces what of theirs is still held: the person must not
+        # get the stale one when the quiet hours end.
+        async with session_factory() as db:
+            await db.execute(
+                sa.update(OutreachMessageRow)
+                .where(OutreachMessageRow.org_id == org_id)
+                .where(OutreachMessageRow.agent_id == agent_id)
+                .where(OutreachMessageRow.created_by == created_by)
+                .where(OutreachMessageRow.kind == "operator")
+                .where(OutreachMessageRow.state == "queued")
+                .where(OutreachMessageRow.not_before.isnot(None))
+                .where(sa.or_(
+                    OutreachMessageRow.subject_user_id == (subject_user_id or user_id),
+                    OutreachMessageRow.user_id == user_id,
+                ))
+                .values(state="replaced", reason="Replaced by a newer message from the same team member")
+            )
+            await db.commit()
     not_before = None
     if kind == "operator" and not send_now:
         from surogates.programs.journey import quiet_until
