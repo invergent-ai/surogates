@@ -36,6 +36,7 @@ from uuid import UUID
 
 from sqlalchemy.exc import InterfaceError, OperationalError
 
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.dedup import MessageDeduplicator
 from surogates.channels.constants import multi_session_disabled
 from surogates.channels.source import (
@@ -684,9 +685,9 @@ class ChannelInboundPipeline:
                     platform_user_id=msg.platform_user_id,
                     channel_identifier=routing.identifier,
                 )
-                # Outreach is only ever queued on its platforms, so other
-                # channels have nothing held to look for.
-                if routing.platform in followup_store.OUTREACH_PLATFORMS:
+                # Outreach is only ever queued where we may write first, so
+                # other channels have nothing held to look for.
+                if capabilities_for(routing.platform).can_initiate:
                     await deliver_pending(
                         deps.session_factory,
                         deps.session_store,

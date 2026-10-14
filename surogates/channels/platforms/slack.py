@@ -64,6 +64,7 @@ from surogates.channels.errors import ChannelApiError
 from fastapi.responses import Response
 
 from surogates.channels.base import SendResult
+from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.channel_backfill import (
     BackfillLimits,
     ChannelMeta,
@@ -493,6 +494,9 @@ class SlackPlatform:
 
     kind = "slack"
     supports_edit = True
+    capabilities = ChannelCapabilities(
+        can_initiate=True, opener="text", buttons=True, identity="member",
+    )
 
     # Slack rejects chat.postMessage over ~40k chars (msg_too_long); stay
     # under it with headroom for Slack's own escaping.

@@ -47,6 +47,7 @@ from fastapi import Request
 from fastapi.responses import PlainTextResponse, Response
 
 from surogates.channels.base import SendResult
+from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.platforms.whatsapp_api import (
     DEFAULT_API_VERSION,
@@ -722,6 +723,11 @@ class WhatsAppPlatform:
 
     kind = "whatsapp"
     topology = "webhook"
+    capabilities = ChannelCapabilities(
+        can_initiate=True, opener="template", window_hours=24, buttons=True,
+        lists=True, forms=True, identity="phone",
+        receipts=frozenset({"delivered", "read"}),
+    )
 
     #: Meta verifies the callback URL with an unsigned GET on the same path.
     #: The dispatcher mounts a GET route only for platforms declaring this.

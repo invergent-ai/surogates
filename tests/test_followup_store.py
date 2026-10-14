@@ -155,6 +155,11 @@ async def test_queue_outreach_validates(sf):
     row = await store.queue_outreach(sf, **base, kind="alert", text=" fever ")
     assert row.state == "queued"
     assert row.text == "fever"
+    # Any channel we may write first on; never one that cannot.
+    slack = await store.queue_outreach(sf, **{**base, "platform": "slack"}, kind="alert", text="hi")
+    assert slack.platform == "slack"
+    with pytest.raises(ValueError):
+        await store.queue_outreach(sf, **{**base, "platform": "web"}, kind="alert", text="hi")
 
 
 @pytest.mark.asyncio

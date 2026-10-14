@@ -34,6 +34,7 @@ from typing import Any, Callable
 import httpx
 
 from surogates.channels.base import SendResult
+from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor
 from surogates.channels.platforms.telegram_format import render_html, render_plain
@@ -454,6 +455,11 @@ class TelegramPlatform:
 
     kind = "telegram"
     topology = "webhook"
+    #: A bot may only write to someone who has started it.
+    capabilities = ChannelCapabilities(
+        can_initiate=True, needs_prior_contact=True, opener="text",
+        buttons=True, identity="chat",
+    )
 
     descriptor = ChannelDescriptor(
         vault_refs=lambda identifier: {

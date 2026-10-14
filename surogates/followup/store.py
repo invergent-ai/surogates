@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
+from surogates.channels.capabilities import capabilities_for
 from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
@@ -34,7 +35,6 @@ __all__ = [
     "ENROLLMENT_SOURCES",
     "ENROLLMENT_STATUSES",
     "OUTREACH_KINDS",
-    "OUTREACH_PLATFORMS",
     "SETTINGS_FIELDS",
     "ALERT_SEVERITIES",
     "active_program_configs",
@@ -63,9 +63,6 @@ __all__ = [
 ENROLLMENT_STATUSES = ("active", "paused", "ended")
 ENROLLMENT_SOURCES = ("agent", "operator", "purchase", "team")
 OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome", "notice")
-#: Where outreach can reach a person.  WhatsApp only: it is the one channel
-#: whose rules (a template outside the 24-hour window) outreach implements.
-OUTREACH_PLATFORMS = ("whatsapp",)
 
 #: Settings fields :func:`update_settings` accepts.
 SETTINGS_FIELDS = frozenset({
@@ -655,7 +652,7 @@ async def queue_outreach(
         raise ValueError(f"kind must be one of {', '.join(OUTREACH_KINDS)}")
     if severity is not None and severity not in ALERT_SEVERITIES:
         raise ValueError(f"severity must be one of {', '.join(ALERT_SEVERITIES)}")
-    if platform not in OUTREACH_PLATFORMS:
+    if not capabilities_for(platform).can_initiate:
         raise ValueError(f"outreach is not available on {platform}")
     text = text.strip()
     if not text:
