@@ -87,7 +87,13 @@ Then run each measurement in this order, as `npx vitest run -c test/vm/darwin/me
    **A FAIL of a protected write is a security finding: stop and report it before anything else.**
 3. **`ports`:** the guest sees `ai.surogate.control`, `ai.surogate.net` and `ai.surogate.inbound`, and a 261 KB result comes back whole.
 4. **`disks`:** vda, vdb and vdc in that order, read-only 1, 1, 0, and vdc 32 GiB.
-5. **`shares`:** each folder on one of the eight devices. Pass: every root reads its own folder; a device is given again once its root is torn down; and a root whose folder was taken out from under it keeps its device from the next folder, and sees no other root's. **A FAIL of the last is a security finding: stop and report it before anything else.**
+5. **`shares`:** each folder on one of the eight devices, with the measurements' agent disk. Pass:
+   - every root reads its own folder;
+   - `a root's share held open is not released at its teardown, and its device takes no other folder`: the guest's root holds a file of a root's share open while the root is torn down;
+   - `a root whose folder was taken out keeps its device from the next folder, and sees no other root's`;
+   - `a root torn down gives its device to a folder once every device never used has one`.
+
+   **A FAIL of either of the two in the middle is a security finding: stop and report it before anything else.** An `UNTESTED` of either means it did not get that far (its `failed` finding says why, or the probe did not run): send its words before going on.
 6. **`identity`:** recorded only: the inode numbers Apple's share shows the guest beside the Mac's own, and which folder a root is shown once the Mac has moved its folder aside and made another at its path. Pass: `PASS the root was set up and the look ran`.
 7. **`coherence`:** 0 stale reads of 1,000, the large file seen whole, and `git status` sees the 10 changes. The repository is made on the Mac: a session makes no `.git` in a shared folder, on any OS.
 8. **`owners`:** a session runs as a uid from 10000 up, sees its folder as that uid's, and you own what the guest makes. Every pair of names APFS takes as one is folded as one. A FAIL names the alias missed.
@@ -250,7 +256,7 @@ The same Mac and the same test account as the second day. First bring the checko
 2. **Prepare, and surogate-vm's tests:** `cd desktop && npm ci && npm run electron:install && test/vm/darwin/measure/prepare.sh`, then `swift test --package-path native/macos`. Pass: it ends with "ready", and "Executed 30 tests, with 0 failures".
 3. **The measurements, in this order,** each as `npx vitest run -c test/vm/darwin/measure/vitest.config.ts <name>`. Each folder is now shared on a device of its own, and a check whose command did not run in its root says `UNTESTED`, which fails the measurement.
    1. **`escape` first.** Pass: as the first day's step 3.2 says, every check `PASS`. **A FAIL of a protected write is a security finding: stop and report it before anything else.** An `UNTESTED` check means its command did not run in its root: stop there too and send its words, since every measurement after it shares folders the same way.
-   2. **`shares`.** Pass: as the first day's step 3.5 says. **A FAIL of `a root whose folder was taken out keeps its device from the next folder, and sees no other root's` is a security finding: stop and report it before anything else.** Its `the devices, by folder` finding says which device each folder took.
+   2. **`shares`.** Pass: as the first day's step 3.5 says. **A FAIL of `a root's share held open is not released at its teardown, and its device takes no other folder`, or of `a root whose folder was taken out keeps its device from the next folder, and sees no other root's`, is a security finding: stop and report it before anything else.** An `UNTESTED` of either: stop too, and send its words. Its `the devices, by folder` and `each let go, and whether released` findings say which device each folder took, and how each was let go.
    3. **`readonly`.** Pass: as the first day's step 3.11 says. **A try that ends `allowed`, but for the remount's, or a FAIL of `the folder on the host as it was`, is a security finding: stop and report it before anything else.**
    4. **`identity`:** as the first day's step 3.6. Send back its two lines of inodes, and what the root was shown after the move.
    5. **`coherence`:** as the first day's step 3.7.
