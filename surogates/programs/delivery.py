@@ -155,8 +155,13 @@ async def apply_status_callback(
             row.read_at = row.read_at or datetime.now(timezone.utc)
         else:
             moved = _advance(row, status)
-        if moved and reason and status in ("failed", "undelivered"):
-            row.delivery_error = reason[:500]
+        if moved and status in ("failed", "undelivered"):
+            # Meta often fails a message without a reason; the person was
+            # still never asked, so they are not awaited either.
+            if reason:
+                row.delivery_error = reason[:500]
+            if row.response_state == "awaiting_reply":
+                row.response_state = "not_started"
             await fall_back(db, row, now=datetime.now(timezone.utc))
         await db.commit()
 

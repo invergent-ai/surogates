@@ -706,7 +706,7 @@ async def test_the_reminder_wait_is_the_agents_setting_and_marks_the_check_in(sf
 # --- failures reaching a person ---------------------------------------------
 
 
-async def _failed_opener(sf, user_id, *, error, at=NOW, state="failed"):
+async def _failed_opener(sf, user_id, *, error, at=NOW, state="failed", fallbacks=None):
     from surogates.db.models import ProgramInvitationRow
 
     async with sf() as db:
@@ -716,6 +716,7 @@ async def _failed_opener(sf, user_id, *, error, at=NOW, state="failed"):
             platform_user_id="40711111111", delivery_state=state,
             delivery_error=error if state != "canceled" else None,
             reason=error if state == "canceled" else None, created_at=at,
+            fallback_platforms=fallbacks,
         ))
         await db.commit()
 
@@ -744,6 +745,14 @@ async def test_a_failed_program_opener_tells_the_team_once_per_person_per_day(sf
     texts = [n.text for n in await _notices(sf) if n.text.startswith("⚠️ A message")]
     assert len(texts) == 2
     assert "no permission to message them" in texts[0] + texts[1]
+
+
+@pytest.mark.asyncio
+async def test_an_opener_with_another_channel_to_try_is_not_reported_yet(sf, doctor_session):
+    _, row = await _team_message(sf)
+    await _failed_opener(sf, row.user_id, error="Never started the bot", fallbacks=["whatsapp"])
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=1))
+    assert [n for n in await _notices(sf) if n.text.startswith("⚠️ A message")] == []
 
 
 @pytest.mark.asyncio

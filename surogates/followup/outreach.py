@@ -752,6 +752,8 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
     since = now - OUTCOME_LOOKBACK
     invitation_failed = sa.and_(
         ProgramInvitationRow.reported_at.is_(None),
+        # Another channel is still to be tried: not a failure to report yet.
+        ProgramInvitationRow.fallback_platforms.is_(None),
         sa.or_(
             ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")),
             sa.and_(

@@ -35,10 +35,11 @@ def journey_of(config: dict) -> dict:
 
 
 def senders_for(config: dict) -> dict[str, str]:
-    """The sender per channel this step may write from: the journey's, with
-    the step's own channel and sender filling in what it does not name."""
+    """The sender per channel this step may write from: the step's own on
+    its channel (the one Studio checks before activating and test-sends
+    from), the journey's on every other."""
     own = {str(config.get("channel") or "whatsapp"): str(config.get("channel_identifier") or "")}
-    merged = {**own, **(journey_of(config).get("senders") or {})}
+    merged = {**(journey_of(config).get("senders") or {}), **{p: s for p, s in own.items() if s}}
     return {platform: str(sender) for platform, sender in merged.items() if sender}
 
 

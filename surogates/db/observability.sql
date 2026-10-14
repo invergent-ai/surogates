@@ -1185,3 +1185,7 @@ WHERE o.kind = 'alert' AND o.dedupe_key LIKE 'escalation:-:%'
   AND split_part(k.key, ':', 3) ~ '^[0-9a-f]{32}$'
 ORDER BY k.key, o.created_at
 ON CONFLICT (id) DO NOTHING;
+
+-- ── a step's fallbacks and attempts: none is SQL NULL, not JSON null ─
+UPDATE program_invitations SET fallback_platforms = NULL WHERE fallback_platforms = 'null'::jsonb;
+UPDATE program_invitations SET attempts = NULL WHERE attempts = 'null'::jsonb;

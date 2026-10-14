@@ -73,7 +73,7 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
 
 
 async def _has_open_invitation(db, schedule, user_id) -> bool:
-    """Is this user already mid-check-in with this agent, on any channel?
+    """Is this user already in the middle of a step with this agent, on any channel?
 
     Counts an unanswered opener too.  The sweep runs first in the tick, so an
     ``awaiting_reply`` row still here is one whose deadline has not passed —
@@ -90,9 +90,15 @@ async def _has_open_invitation(db, schedule, user_id) -> bool:
             .where(ProgramInvitationRow.org_id == schedule.org_id)
             .where(ProgramInvitationRow.agent_id == schedule.agent_id)
             .where(ProgramInvitationRow.user_id == user_id)
-            .where(
-                ProgramInvitationRow.response_state.in_(_OPEN_RESPONSE_STATES)
-            )
+            # A queued opener not yet sent (held through quiet hours, or
+            # from a step that fired in the same tick) is a question too.
+            .where(sa.or_(
+                ProgramInvitationRow.response_state.in_(_OPEN_RESPONSE_STATES),
+                sa.and_(
+                    ProgramInvitationRow.delivery_state == "queued",
+                    ProgramInvitationRow.response_state == "not_started",
+                ),
+            ))
         )
     ).scalar_one() > 0
 
@@ -120,7 +126,7 @@ async def materialize_occurrence(
     # Resolved before the occurrence's transaction opens: an audience is one
     # read per enrolled person, the pause one per reachable person, and none
     # of it needs the row lock.
-    roster, last_by_phone = await _roster(
+    roster, last_by_user = await _roster(
         schedule, config, platform=platform, now=now,
         session_factory=session_factory, identity_lookup=identity_lookup,
         with_last_inbound=pause is not None,
@@ -136,13 +142,15 @@ async def materialize_occurrence(
     paused: set[uuid.UUID] = set()
     if pause:
         for user_id, identity, _enrollment in roster:
+            if per_person and chosen[user_id] is not None:
+                identity = chosen[user_id][1]
             if (
                 identity is not None
                 and followup_store.permission_status(identity) == "granted"
                 and await paused_by_silence(
                     session_factory, program_id=schedule.program_id,
                     user_id=user_id, count=pause,
-                    last_inbound_at=last_by_phone.get(identity.platform_user_id),
+                    last_inbound_at=last_by_user.get(user_id),
                 )
             ):
                 paused.add(user_id)
@@ -179,7 +187,7 @@ async def materialize_occurrence(
             if reason is not None:
                 pass
             elif await _has_open_invitation(db, schedule, user_id):
-                reason = "Previous check-in still open"
+                reason = "An earlier step is still waiting for an answer"
             elif user_id in paused:
                 reason = (
                     f"Paused: the last {pause} openers went unanswered; "
@@ -220,7 +228,7 @@ async def _roster(
     session_factory: Any,
     identity_lookup: Any,
     with_last_inbound: bool = False,
-) -> tuple[list[tuple[uuid.UUID, Any, Any]], dict[str, datetime]]:
+) -> tuple[list[tuple[uuid.UUID, Any, Any]], dict[uuid.UUID, datetime]]:
     """The people this occurrence is for, each with their channel identity
     and enrollment (``None`` on a fixed roster).
 
@@ -229,18 +237,28 @@ async def _roster(
     their own zone.  When people have zones of their own, only those whose
     zone produced this slot are asked: the same cadence fires once per zone.
 
-    Also returns when each person last wrote to the Program's sender, keyed
-    by phone: read in one query when the audience's silence filter or the
-    caller (*with_last_inbound*, for the pause) needs it, else empty.
+    Also returns when each person last wrote, by user: to the Program's
+    sender, or inside a journey to any of the business's channels (a person
+    may be reached on another).  Read in one query when the audience's
+    silence filter or the caller (*with_last_inbound*, for the pause) needs
+    it, else empty.
     """
     sender = str(config.get("channel_identifier") or "")
 
-    async def _last_inbound(identities) -> dict[str, datetime]:
-        return await followup_store.last_inbound_by_user(
+    async def _last_inbound(identities: dict) -> dict[uuid.UUID, datetime]:
+        if journey_of(config):
+            return await followup_store.last_inbound_by_person(
+                session_factory, org_id=schedule.org_id, user_ids=list(identities),
+            )
+        by_phone = await followup_store.last_inbound_by_user(
             session_factory, org_id=schedule.org_id, platform=platform,
             channel_identifier=sender,
-            platform_user_ids=[i.platform_user_id for i in identities if i is not None],
+            platform_user_ids=[i.platform_user_id for i in identities.values() if i is not None],
         )
+        return {
+            uid: by_phone[i.platform_user_id]
+            for uid, i in identities.items() if i is not None and i.platform_user_id in by_phone
+        }
 
     if config.get("audience") is None:
         roster = []
@@ -249,7 +267,7 @@ async def _roster(
             roster.append(
                 (uid, await identity_lookup(schedule.org_id, platform, uid), None),
             )
-        last = await _last_inbound(i for _, i, _ in roster) if with_last_inbound else {}
+        last = await _last_inbound({u: i for u, i, _ in roster}) if with_last_inbound else {}
         return roster, last
 
     try:
@@ -275,13 +293,12 @@ async def _roster(
         e.user_id: await identity_lookup(schedule.org_id, platform, e.user_id)
         for e in enrollments
     }
-    last_by_phone: dict[str, datetime] = {}
+    last_by_user: dict[uuid.UUID, datetime] = {}
     if audience.silent_days is not None or with_last_inbound:
-        last_by_phone = await _last_inbound(identities.values())
+        last_by_user = await _last_inbound(identities)
     roster = []
     for enrollment in enrollments:
-        identity = identities[enrollment.user_id]
-        last = last_by_phone.get(identity.platform_user_id) if identity is not None else None
+        last = last_by_user.get(enrollment.user_id)
         if ineligibility(
             audience,
             start_date=enrollment.start_date,
@@ -291,8 +308,8 @@ async def _roster(
             today=now.astimezone(ZoneInfo(zones[enrollment.user_id])).date(),
             now=now,
         ) is None:
-            roster.append((enrollment.user_id, identity, enrollment))
-    return roster, last_by_phone
+            roster.append((enrollment.user_id, identities[enrollment.user_id], enrollment))
+    return roster, last_by_user
 
 
 async def send_queued_openers(

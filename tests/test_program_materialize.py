@@ -212,7 +212,7 @@ async def test_a_user_with_an_open_check_in_is_skipped(
     )
     rows = await _invitations(sf, occ_id)
     assert rows[0].delivery_state == "skipped"
-    assert "still open" in rows[0].reason.lower()
+    assert "still waiting for an answer" in rows[0].reason.lower()
 
 
 @pytest_asyncio.fixture
@@ -254,7 +254,7 @@ async def test_a_user_with_an_unanswered_opener_is_skipped(
     )
     rows = await _invitations(sf, occ_id)
     assert rows[0].delivery_state == "skipped"
-    assert "still open" in rows[0].reason.lower()
+    assert "still waiting for an answer" in rows[0].reason.lower()
 
 
 @pytest.mark.asyncio

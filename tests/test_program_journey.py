@@ -156,6 +156,9 @@ async def test_a_whatsapp_only_person_is_asked_exactly_as_before_journeys(sf):
     without = _schedule([ok, missing, withdrawn])
     del without.config["journey"]
     after = await _fire(sf, with_journey, lookup)
+    async with sf() as db:  # answered, so the second firing may ask again
+        await db.execute(sa.update(ProgramInvitationRow).values(response_state="completed"))
+        await db.commit()
     before = await _fire(sf, without, lookup)
     assert {u: _key(r) for u, r in after.items()} == {u: _key(r) for u, r in before.items()}
     assert _key(after[ok]) == ("whatsapp", "4070", "pn1", "queued", None)
@@ -176,7 +179,49 @@ async def test_an_open_question_on_one_channel_is_not_asked_again_on_another(sf)
     await _enrol_preference(sf, a, "telegram")
     again = (await _fire(sf, _schedule(audience=AUDIENCE), lookup, now=SLOT + timedelta(days=1)))[a]
     assert again.platform == "telegram"
-    assert (again.delivery_state, again.reason) == ("skipped", "Previous check-in still open")
+    assert (again.delivery_state, again.reason) == ("skipped", "An earlier step is still waiting for an answer")
+
+
+@pytest.mark.asyncio
+async def test_two_steps_due_at_once_ask_a_person_one_question(sf):
+    a = uuid.uuid4()
+    lookup = _lookup({("whatsapp", a): "4070"})
+    await _enrol(sf, a)
+    first = (await _fire(sf, _schedule(audience=AUDIENCE), lookup))[a]
+    second = (await _fire(sf, _schedule(audience=AUDIENCE), lookup))[a]
+    assert first.delivery_state == "queued"
+    assert (second.delivery_state, second.reason) == (
+        "skipped", "An earlier step is still waiting for an answer",
+    )
+
+
+@pytest.mark.asyncio
+async def test_silence_pauses_and_writing_resumes_on_the_channel_the_person_uses(sf):
+    a = uuid.uuid4()
+    lookup = _lookup({("telegram", a): "555"})
+    await _enrol(sf, a)
+    async with sf() as db:
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=a, platform="telegram", platform_user_id="555",
+            platform_meta={"contact_permission": {"status": "granted"}},
+        ))
+        await db.commit()
+    step = _schedule(audience=AUDIENCE)
+    step.config["pause_after_missed"] = 1
+    first = (await _fire(sf, step, lookup))[a]
+    assert first.platform == "telegram"
+    async with sf() as db:
+        row = await db.get(ProgramInvitationRow, first.id)
+        row.delivery_state, row.response_state = "delivered", "no_reply_by_deadline"
+        await db.commit()
+    paused = (await _fire(sf, step, lookup, now=SLOT + timedelta(days=1)))[a]
+    assert paused.delivery_state == "skipped" and paused.reason.startswith("Paused")
+    await followup_store.record_inbound(
+        sf, org_id=ORG, platform="telegram", platform_user_id="555",
+        channel_identifier="bot1", at=datetime.now(timezone.utc),  # after the rows were written
+    )
+    resumed = (await _fire(sf, step, lookup, now=SLOT + timedelta(days=2)))[a]
+    assert (resumed.delivery_state, resumed.reason) == ("queued", None)
 
 
 async def _enrol_preference(sf, user, channel):
@@ -246,6 +291,27 @@ async def test_a_failed_send_moves_to_the_next_reachable_channel(sf):
     assert moved.fallback_platforms is None
     # Slack had no identity for them: tried and passed over, on the record.
     assert [(a["platform"], a["state"]) for a in moved.attempts] == [("whatsapp", "failed"), ("slack", "skipped")]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_status_without_a_reason_still_moves_on(sf):
+    row = await _fallback_invitation(sf, state="accepted", provider_message_id="wamid.1")
+    assert await apply_status_callback(sf, provider_message_id="wamid.1", status="failed", reason=None)
+    moved = await _reload(sf, row.id)
+    assert (moved.platform, moved.delivery_state, moved.response_state) == ("telegram", "queued", "not_started")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_status_with_nowhere_left_frees_the_person(sf):
+    row = await _fallback_invitation(
+        sf, state="accepted", provider_message_id="wamid.2",
+    )
+    async with sf() as db:
+        (await db.get(ProgramInvitationRow, row.id)).fallback_platforms = None
+        await db.commit()
+    await apply_status_callback(sf, provider_message_id="wamid.2", status="undelivered", reason=None)
+    failed = await _reload(sf, row.id)
+    assert (failed.delivery_state, failed.response_state) == ("undelivered", "not_started")
 
 
 @pytest.mark.asyncio
@@ -421,3 +487,11 @@ def test_the_dry_run_follows_cadence_window_and_zone():
     # The person's own zone moves every slot to their local time.
     shifted = simulate(steps[:1], start_date=date(2026, 10, 12), timezone="America/New_York", days=1, today=date(2026, 10, 12))
     assert shifted == [{"at": "2026-10-12T13:00:00+00:00", "step_id": "s1", "name": "Week one"}]
+
+
+def test_a_steps_own_sender_wins_on_its_channel():
+    config = _schedule().config
+    config["channel_identifier"] = "pn2"
+    assert journey.senders_for(config) == {**SENDERS, "whatsapp": "pn2"}
+    config["channel_identifier"] = ""
+    assert journey.senders_for(config) == SENDERS

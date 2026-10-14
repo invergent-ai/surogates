@@ -48,6 +48,7 @@ __all__ = [
     "is_team_member",
     "labelling_enrollment",
     "last_inbound",
+    "last_inbound_by_person",
     "last_inbound_by_user",
     "notify_care_team",
     "notify_team",
@@ -735,6 +736,30 @@ async def last_inbound_by_user(
             )
         ).all()
     return {pid: at for pid, at in rows}
+
+
+async def last_inbound_by_person(
+    session_factory: Any, *, org_id: uuid.UUID, user_ids: Iterable[uuid.UUID],
+) -> dict[uuid.UUID, datetime]:
+    """When each person last wrote to the business, on any channel and sender."""
+    ids = list(user_ids)
+    if not ids:
+        return {}
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(ChannelIdentity.user_id, sa.func.max(ChannelContactRow.last_inbound_at))
+                .join(ChannelContactRow, sa.and_(
+                    ChannelContactRow.platform == ChannelIdentity.platform,
+                    ChannelContactRow.platform_user_id == ChannelIdentity.platform_user_id,
+                ))
+                .where(ChannelIdentity.org_id == org_id)
+                .where(ChannelContactRow.org_id == org_id)
+                .where(ChannelIdentity.user_id.in_(ids))
+                .group_by(ChannelIdentity.user_id)
+            )
+        ).all()
+    return {uid: at for uid, at in rows if at is not None}
 
 
 # ---------------------------------------------------------------------------

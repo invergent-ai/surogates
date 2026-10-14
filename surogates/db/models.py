@@ -1118,11 +1118,12 @@ class ProgramInvitationRow(Base):
     outcome: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: The person's other reachable channels, tried once each when a send fails.
     fallback_platforms: Mapped[Optional[list]] = mapped_column(
-        JSONB().with_variant(JSON(), "sqlite"), nullable=True,
+        # None is SQL NULL, never JSON null: queries test IS NULL.
+        JSONB(none_as_null=True).with_variant(JSON(none_as_null=True), "sqlite"), nullable=True,
     )
     #: Channels already tried: ``[{platform, state, error, at}]``.
     attempts: Mapped[Optional[list]] = mapped_column(
-        JSONB().with_variant(JSON(), "sqlite"), nullable=True,
+        JSONB(none_as_null=True).with_variant(JSON(none_as_null=True), "sqlite"), nullable=True,
     )
     read_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime(), nullable=True,
