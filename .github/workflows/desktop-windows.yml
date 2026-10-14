@@ -295,16 +295,16 @@ jobs:
           if-no-files-found: error
 
       # The measurements' agent disk, whose init also runs, as the guest's root, a probe a measurement leaves in a
-      # shared folder, and writes the kernel's own log to the console, each line with its time since the kernel's start
-      # (test/vm/darwin/measure/probe.sh, put in as macOS's prepare.sh puts it). Never the app's, so made out of dist/;
-      # last, so the boot has its image and its agent disk whatever becomes of this one.
+      # shared folder, and writes the kernel's own log to the console once the agent has said hello, each line with its
+      # time since the kernel's start (test/vm/win32/measure/probe.sh, put in as macOS's prepare.sh puts its own). Never
+      # the app's, so made out of dist/; last, so the boot has its image and its agent disk whatever becomes of this one.
       - name: Make the measurements' agent disk
         continue-on-error: true
         working-directory: desktop
         run: |
           tree=$(mktemp -d) && mkdir "$tree/vm" && ln -s "$PWD/dist" "$tree/dist"
           ln -s "$PWD/vm/agent-disk.sh" "$PWD/vm/enter-root" "$tree/vm/"
-          awk 'FNR == NR { probe = probe $0 "\n"; next } /^exec \/usr\/bin\/tini/ { printf "%s", probe } { print }' test/vm/darwin/measure/probe.sh vm/init > "$tree/vm/init"
+          awk 'FNR == NR { probe = probe $0 "\n"; next } /^exec \/usr\/bin\/tini/ { printf "%s", probe } { print }' test/vm/win32/measure/probe.sh vm/init > "$tree/vm/init"
           chmod 755 "$tree/vm/init" && grep -q measure-probe "$tree/vm/init"
           mkdir -p test/vm/win32/measure/probing
           "$tree/vm/agent-disk.sh" test/vm/win32/measure/probing/agent.img
