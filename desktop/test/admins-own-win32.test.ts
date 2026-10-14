@@ -18,10 +18,15 @@ const SYSTEM = "*S-1-5-18";
 const ADMINISTRATORS = "*S-1-5-32-544";
 const USERS = "*S-1-5-32-545";
 
-// *path*'s owner and its own access list, nothing inherited: each grant as icacls takes one.
+// The runner's own account, which makes every file and folder here.
+const me = () => /S-1-[0-9-]+/.exec(execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }))![0];
+
+// *path*'s owner and its own access list, exactly *grants*: nothing inherited, and no entry left for the account that
+// made it, as Windows gives the maker of a folder on the runner.
 function setAcl(path: string, owner: string, grants: string[]): void {
   execFileSync("icacls", [path, "/setowner", owner], { stdio: "pipe" });
   execFileSync("icacls", [path, "/inheritance:r", "/grant:r", ...grants], { stdio: "pipe" });
+  execFileSync("icacls", [path, "/remove:g", `*${me()}`], { stdio: "pipe" });
 }
 
 const folderGrants = (users = "(OI)(CI)(RX)") => [`${SYSTEM}:(OI)(CI)(F)`, `${ADMINISTRATORS}:(OI)(CI)(F)`, `${USERS}:${users}`];
@@ -65,8 +70,7 @@ describe.runIf(WINDOWS)("an administrator's word on Windows", { timeout: 30_000 
   });
 
   it("refuses a record owned by a user, an administrator's own account included", () => {
-    const me = /S-1-[0-9-]+/.exec(execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }))![0];
-    setAcl(record, `*${me}`, fileGrants());
+    setAcl(record, `*${me()}`, fileGrants());
     expect(() => adminsOwn(record)).toThrow(`${record} is not the installer's: only an administrator may own it`);
   });
 
