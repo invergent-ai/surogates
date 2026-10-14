@@ -213,7 +213,7 @@ switch ($Command) {
       $said = & $signtool verify /pa /all $node 2>&1 | Out-String
       $code = $LASTEXITCODE
       $cms = Get-PeSignature $node
-      $names = if ($cms) { @(Get-Signers $cms | ForEach-Object { [Security.Cryptography.X509Certificates.X500DistinguishedName]::new($_).Format($true) }) } else { @() }
+      $names = @(if ($cms) { Get-Signers $cms | ForEach-Object { [Security.Cryptography.X509Certificates.X500DistinguishedName]::new($_).Format($true) } })
       # Its subject's own organization and common name, each the whole of its part: no name that holds them passes.
       $openjs = $names.Count -ge 1 -and @($names | Where-Object { -not ($_ -match '(?m)^O=OpenJS Foundation\r?$' -and $_ -match '(?m)^CN=OpenJS Foundation\r?$') }).Count -eq 0
       if ($code -ne 0 -or -not $openjs) { $wrong = @($wrong) + "$node`: not the OpenJS Foundation's: $($names -join '; ')`n$said" }
