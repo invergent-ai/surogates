@@ -33,7 +33,8 @@ from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.memory_boundary import boundary_token
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.channels.whatsapp_flows import new_flow_token
-from surogates.followup.store import last_inbound
+from surogates.db.models import ProgramInvitationRow
+from surogates.followup.store import last_inbound, shared_memory_boundary
 from surogates.session.events import CHECKIN_OPENER_MARKER
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,10 @@ async def dm_session(
             f"{platform}_channel_id": channel_id,
             f"{platform}_thread_key": None,
             "channel_identifier": sender,
-            "memory_boundary": boundary_token(
+            # The followed person's record, shared with their contacts.
+            "memory_boundary": await shared_memory_boundary(
+                session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+            ) or boundary_token(
                 platform=platform, channel_id=channel_id, visibility="dm",
                 source={"chat_type": "private"}, fallback_id=session_key,
             ),

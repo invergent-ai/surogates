@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date, datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import sqlalchemy as sa
@@ -22,16 +22,33 @@ from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
     EscalationRow,
+    FollowupContactRow,
     FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
     ProgramScheduleRow,
+    Session as SessionRow,
+    User,
 )
 from surogates.followup.eligibility import Audience
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ABILITIES",
+    "PRESETS",
+    "RECEIVE_KINDS",
+    "Recipient",
+    "Speaker",
+    "can",
+    "contacts",
+    "link_contact",
+    "member_permissions",
+    "recipients_for",
+    "remove_contact",
+    "shared_memory_boundary",
+    "speaker_for",
+    "writer_line",
     "CareTeamMember",
     "TeamMember",
     "ENROLLMENT_SOURCES",
@@ -74,13 +91,35 @@ OUTREACH_KINDS = ("alert", "operator", "enrolment", "welcome", "notice")
 #: Settings fields :func:`update_settings` accepts.
 SETTINGS_FIELDS = frozenset({
     "escalation_service_account_id", "channel_identifier",
-    "alert_recipient_user_ids", "senders", "team_channels", "alert_template_name",
+    "alert_recipient_user_ids", "senders", "team_channels", "team_permissions",
+    "team_destinations", "alert_template_name",
     "alert_template_language", "message_template_name",
     "message_template_language", "welcome_template_name",
     "welcome_template_language", "offer_protocols", "texts",
     "operator_unanswered_hours", "red_alert_reminder_minutes", "web_push",
 })
 ALERT_SEVERITIES = ("red", "yellow")
+
+#: What a team member can be sent, and what they can do, in the team tools
+#: and in Studio.  A member's ``team_permissions`` entry names a preset and
+#: may list either set item by item.
+RECEIVE_KINDS = (
+    "urgent", "attention", "missed_replies", "new_enrolments", "daily_report",
+    "delivery_failures",
+)
+ABILITIES = (
+    "see_people", "message_person", "enroll", "pause_resume_end", "edit_details",
+    "see_full_phones", "manage_team",
+)
+PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "full": (RECEIVE_KINDS, ABILITIES),
+    "assistant": (RECEIVE_KINDS, tuple(a for a in ABILITIES if a != "manage_team")),
+    "alerts_only": (("urgent", "attention"), ("see_full_phones",)),
+}
+#: What a shared destination receives when it does not say.
+DESTINATION_RECEIVES = ("urgent", "attention", "missed_replies")
+#: The recipient of a message sent to a shared destination, not a person.
+NO_PERSON = uuid.UUID(int=0)
 #: Allowed ranges, inclusive, for the settings that time outreach.  The
 #: passes that act on them look back far enough to cover the maximum.
 SETTINGS_RANGES = {
@@ -426,8 +465,10 @@ async def grant_contact_permission(
     platform_user_id: str,
     recorded_by: str,
     method: str = "consent",
+    status: str = "granted",
 ) -> bool:
-    """Record that the person consented to be messaged.
+    """Record that the person consented to be messaged (or, with
+    ``status="withdrawn"``, that they asked not to be any more).
 
     Same shape ops writes when an operator records permission; ``method``
     says how it was given — ``consent`` in conversation, ``purchase`` at
@@ -450,7 +491,7 @@ async def grant_contact_permission(
             return False
         meta = dict(row.platform_meta or {})
         meta["contact_permission"] = {
-            "status": "granted",
+            "status": status,
             "recorded_at": _utcnow().replace(tzinfo=None).isoformat(),
             "recorded_by": recorded_by,
             "method": method,
@@ -499,6 +540,13 @@ def _normalised(field: str, value: Any) -> Any:
         for platforms in channels.values():
             _known_platforms(platforms)
         return {user: platforms for user, platforms in channels.items() if platforms}
+    if field == "team_permissions":
+        return {
+            str(uuid.UUID(str(user))): _permission_entry(entry)
+            for user, entry in (value or {}).items()
+        }
+    if field == "team_destinations":
+        return [_destination(d) for d in (value or [])]
     if field in ("offer_protocols", "texts"):
         return {
             str(k): str(v).strip() for k, v in (value or {}).items()
@@ -507,6 +555,60 @@ def _normalised(field: str, value: Any) -> Any:
     if isinstance(value, str):
         return value or None
     return value
+
+
+def _permission_entry(entry: Any) -> dict:
+    entry = dict(entry or {})
+    preset = str(entry.get("preset") or "full")
+    if preset not in PRESETS:
+        raise ValueError(f"preset must be one of {', '.join(PRESETS)}")
+    out: dict[str, Any] = {"preset": preset}
+    for key, allowed in (("receives", RECEIVE_KINDS), ("can", ABILITIES)):
+        if entry.get(key) is not None:
+            items = list(dict.fromkeys(str(i) for i in entry[key]))
+            unknown = set(items) - set(allowed)
+            if unknown:
+                raise ValueError(f"unknown {key}: {', '.join(sorted(unknown))}")
+            out[key] = items
+    handles = str(entry.get("handles") or "").strip()
+    if handles:
+        out["handles"] = handles[:500]
+    return out
+
+
+def _destination(value: Any) -> dict:
+    value = dict(value or {})
+    platform = str(value.get("platform") or "").strip()
+    channel_id = str(value.get("channel_id") or "").strip()
+    caps = capabilities_for(platform)
+    if not caps.can_initiate or caps.window_hours or not channel_id:
+        raise ValueError("a team destination is a channel id on Slack or Telegram")
+    receives = list(dict.fromkeys(str(k) for k in (value.get("receives") or DESTINATION_RECEIVES)))
+    unknown = set(receives) - set(RECEIVE_KINDS)
+    if unknown:
+        raise ValueError(f"unknown receives: {', '.join(sorted(unknown))}")
+    out = {"platform": platform, "channel_id": channel_id, "receives": receives}
+    name = str(value.get("name") or "").strip()
+    return {**out, "name": name} if name else out
+
+
+def member_permissions(settings: Any, user_id: Any) -> dict[str, Any]:
+    """``{preset, receives, can, handles}`` of one team member; ``full``
+    unless their entry says otherwise."""
+    entry = ((getattr(settings, "team_permissions", None) or {}) if settings else {}).get(str(user_id)) or {}
+    preset = entry.get("preset") if entry.get("preset") in PRESETS else "full"
+    receives, abilities = PRESETS[preset]
+    return {
+        "preset": preset,
+        "receives": frozenset(entry["receives"] if entry.get("receives") is not None else receives),
+        "can": frozenset(entry["can"] if entry.get("can") is not None else abilities),
+        "handles": str(entry.get("handles") or ""),
+    }
+
+
+def can(settings: Any, user_id: Any, ability: str) -> bool:
+    """Whether a team member may do *ability*; nobody off the team may."""
+    return is_team_member(settings, user_id) and ability in member_permissions(settings, user_id)["can"]
 
 
 def _known_platforms(platforms: Iterable[str]) -> None:
@@ -572,6 +674,8 @@ async def notify_team(
     only_user_id: uuid.UUID | None = None,
     severity: str | None = None,
     reason: str | None = None,
+    topic: str | None = None,
+    to: Iterable[Any] | None = None,
 ) -> tuple[int, str | None]:
     """Queue *text* for every alert recipient.  Returns (queued, why none).
 
@@ -586,12 +690,33 @@ async def notify_team(
     something) is told instead.  *reason* is what it is about when *text*
     dresses it up (a severity mark, a footer naming the person); the team
     digest lists that.
+
+    *topic* is what kind of message it is (:data:`RECEIVE_KINDS`): only the
+    members who receive that kind are told, and the team's shared
+    destinations that do.  *to* is the members the agent chose: those of them
+    who receive it, else everyone who does.  *only_user_id* always reaches
+    its member: it answers their own request.
     """
+    if topic is not None and topic not in RECEIVE_KINDS:
+        raise ValueError(f"topic must be one of {', '.join(RECEIVE_KINDS)}")
     recipients = list(settings.alert_recipient_user_ids or []) if settings else []
+    destinations: list[dict] = []
     if only_user_id is not None:
         recipients = [only_user_id]
-    if not recipients:
-        return 0, "no team members are configured"
+    else:
+        if topic is not None:
+            recipients = [r for r in recipients if topic in member_permissions(settings, r)["receives"]]
+        chosen = {str(u) for u in to or ()}
+        recipients = [r for r in recipients if str(r) in chosen] or recipients
+        destinations = [
+            d for d in ((getattr(settings, "team_destinations", None) or []) if settings else [])
+            if topic is None or topic in (d.get("receives") or DESTINATION_RECEIVES)
+        ]
+    if not recipients and not destinations:
+        return 0, (
+            "no team member receives this kind of message" if topic and settings
+            and settings.alert_recipient_user_ids else "no team members are configured"
+        )
     senders = {
         platform: sender
         for platform, sender in {**(fallback_senders or {}), **senders_of(settings)}.items()
@@ -629,6 +754,19 @@ async def notify_team(
             template_language=settings.alert_template_language if template else None,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=f"{dedupe_prefix}:{recipient_id}" if dedupe_prefix else None,
+            severity=severity, alert_reason=(reason or text).strip(),
+        )
+        queued += 1
+    for destination in destinations:
+        platform = destination.get("platform")
+        if platform not in senders:
+            continue
+        await queue_outreach(
+            session_factory, org_id=org_id, agent_id=agent_id, user_id=NO_PERSON,
+            platform=platform, channel_identifier=senders[platform], kind=kind, text=text,
+            template_name=None, template_language=None, subject_user_id=subject_user_id,
+            created_by=created_by, destination=destination["channel_id"],
+            dedupe_key=f"{dedupe_prefix}:{destination['channel_id']}" if dedupe_prefix else None,
             severity=severity, alert_reason=(reason or text).strip(),
         )
         queued += 1
@@ -784,6 +922,7 @@ async def queue_outreach(
     dedupe_key: str | None = None,
     severity: str | None = None,
     alert_reason: str | None = None,
+    destination: str | None = None,
 ) -> OutreachMessageRow:
     """Queue one message.  With ``dedupe_key``, queuing the same cause twice
     returns the first row instead of writing to the person again.
@@ -808,6 +947,7 @@ async def queue_outreach(
             template_language=template_language or None, state="queued",
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=dedupe_key, severity=severity, alert_reason=alert_reason,
+            destination=destination or None,
         )
         db.add(row)
         try:
@@ -833,7 +973,7 @@ async def queue_outreach(
 
 
 async def record_escalation(
-    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID,
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID | None,
     kind: str, reason: str, state: str = "raised", severity: str | None = None,
     platform: str | None = None, invitation_id: uuid.UUID | None = None,
     program_id: uuid.UUID | None = None, session_id: uuid.UUID | None = None,
@@ -892,6 +1032,270 @@ async def resolve_escalation(
         session_factory, org_id, agent_id, escalation_id,
         resolved_at=_utcnow() if resolved else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Followed people and their contacts
+# ---------------------------------------------------------------------------
+
+
+class Recipient(NamedTuple):
+    """Who a step for one followed person goes to."""
+
+    user_id: uuid.UUID
+    role: str  # "person" or "contact"
+    relation: str | None
+
+
+class Speaker(NamedTuple):
+    """Who is writing, for whom."""
+
+    person_user_id: uuid.UUID
+    person_name: str
+    name: str
+    role: str  # "person" or "contact"
+    relation: str | None
+
+
+async def contacts(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    person_user_id: uuid.UUID | None = None,
+    contact_user_id: uuid.UUID | None = None,
+    status: str | None = "confirmed",
+) -> list[FollowupContactRow]:
+    """Links of this agent, oldest first, narrowed by whichever filters are given."""
+    query = (
+        sa.select(FollowupContactRow)
+        .where(FollowupContactRow.org_id == org_id)
+        .where(FollowupContactRow.agent_id == agent_id)
+        .order_by(FollowupContactRow.created_at, FollowupContactRow.id)
+    )
+    for column, value in (
+        (FollowupContactRow.person_user_id, person_user_id),
+        (FollowupContactRow.contact_user_id, contact_user_id),
+        (FollowupContactRow.status, status),
+    ):
+        if value is not None:
+            query = query.where(column == value)
+    async with session_factory() as db:
+        return list((await db.execute(query)).scalars().all())
+
+
+async def recipients_for(session_factory: Any, enrollment: Any) -> list[Recipient]:
+    """The followed person, then each confirmed contact: who a step goes to."""
+    linked = await contacts(
+        session_factory, org_id=enrollment.org_id, agent_id=enrollment.agent_id,
+        person_user_id=enrollment.user_id,
+    )
+    return [Recipient(enrollment.user_id, "person", None)] + [
+        Recipient(c.contact_user_id, "contact", c.relation)
+        for c in linked if c.contact_user_id != enrollment.user_id
+    ]
+
+
+async def link_contact(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    person_user_id: uuid.UUID,
+    contact_user_id: uuid.UUID,
+    relation: str | None,
+    created_by: str,
+    status: str = "confirmed",
+    asked_user_id: uuid.UUID | None = None,
+) -> FollowupContactRow:
+    """Link *contact_user_id* to the person, or update an existing link.
+
+    A confirmed link is never turned back into a pending one.  Raises
+    :class:`TeamMember` for a member of the team and ValueError for the
+    person themselves.
+    """
+    if status not in ("confirmed", "pending"):
+        raise ValueError("status must be confirmed or pending")
+    if contact_user_id == person_user_id:
+        raise ValueError("the person cannot be their own contact")
+    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    if is_team_member(settings, contact_user_id):
+        raise TeamMember("this person is on the team, not a contact")
+    relation = (relation or "").strip()[:200] or None
+    for attempt in (1, 2):
+        async with session_factory() as db:
+            row = (
+                await db.execute(
+                    sa.select(FollowupContactRow)
+                    .where(FollowupContactRow.org_id == org_id)
+                    .where(FollowupContactRow.agent_id == agent_id)
+                    .where(FollowupContactRow.person_user_id == person_user_id)
+                    .where(FollowupContactRow.contact_user_id == contact_user_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = FollowupContactRow(
+                    org_id=org_id, agent_id=agent_id, person_user_id=person_user_id,
+                    contact_user_id=contact_user_id, created_by=created_by,
+                    status=status, created_at=_utcnow(),
+                )
+                db.add(row)
+            elif status == "confirmed":
+                row.status = "confirmed"
+            if relation:
+                row.relation = relation
+            row.asked_user_id = asked_user_id if row.status == "pending" else None
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                if attempt == 2:
+                    raise
+                continue
+            await db.refresh(row)
+            return row
+    raise AssertionError("unreachable")
+
+
+async def remove_contact(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
+    person_user_id: uuid.UUID, contact_user_id: uuid.UUID,
+) -> bool:
+    async with session_factory() as db:
+        result = await db.execute(
+            sa.delete(FollowupContactRow)
+            .where(FollowupContactRow.org_id == org_id)
+            .where(FollowupContactRow.agent_id == agent_id)
+            .where(FollowupContactRow.person_user_id == person_user_id)
+            .where(FollowupContactRow.contact_user_id == contact_user_id)
+        )
+        await db.commit()
+    return int(result.rowcount or 0) > 0
+
+
+async def display_names(session_factory: Any, user_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, str]:
+    ids = list(dict.fromkeys(user_ids))
+    if not ids:
+        return {}
+    async with session_factory() as db:
+        return {
+            uid: name or ""
+            for uid, name in (
+                await db.execute(sa.select(User.id, User.display_name).where(User.id.in_(ids)))
+            ).all()
+        }
+
+
+async def person_name(session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID) -> str:
+    """The followed person's own name: their enrollment's, else their account's."""
+    row = labelling_enrollment(
+        await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
+    )
+    if row is not None and row.patient_name:
+        return row.patient_name
+    return (await display_names(session_factory, [user_id])).get(user_id, "")
+
+
+async def speaker_for(
+    session_factory: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    user_id: uuid.UUID | None,
+    person_user_id: uuid.UUID | None = None,
+) -> Speaker | None:
+    """Who *user_id* is to this agent's follow-up: the followed person, or a
+    confirmed contact of one (*person_user_id* picks which, else the most
+    recent link).  ``None`` for anyone else."""
+    if user_id is None:
+        return None
+    own = await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
+    links = await contacts(session_factory, org_id=org_id, agent_id=agent_id, contact_user_id=user_id)
+    if own and (person_user_id is None or person_user_id == user_id):
+        name = await person_name(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
+        return Speaker(user_id, name, name, "person", None)
+    if person_user_id is not None:
+        links = [c for c in links if c.person_user_id == person_user_id]
+    if not links:
+        return None
+    link = links[-1]
+    names = await display_names(session_factory, [user_id])
+    return Speaker(
+        link.person_user_id,
+        await person_name(session_factory, org_id=org_id, agent_id=agent_id, user_id=link.person_user_id),
+        names.get(user_id, ""), "contact", link.relation,
+    )
+
+
+def writer_line(speaker: Speaker | None) -> str:
+    """Who is writing, as the agent reads it in its context."""
+    if speaker is None:
+        return ""
+    if speaker.role == "person":
+        return f"Writing: {speaker.person_name or 'the person'} (the person followed)"
+    who = speaker.name or "a contact"
+    return f"Writing: {who} ({speaker.relation or 'contact'}), for {speaker.person_name or 'the person followed'}"
+
+
+#: Channels whose one-to-one conversations keep a memory partition of their own.
+_PARTITIONED = ("whatsapp", "telegram", "slack", "voice")
+
+
+async def shared_memory_boundary(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID | None,
+) -> str | None:
+    """The memory partition a followed person's record lives in, for a
+    one-to-one conversation of theirs or of a contact; ``None`` for anyone
+    else, who keeps the conversation's own.
+
+    Chosen once and kept on the person's enrollments: the partition of the
+    conversation already holding their record (their own newest, else their
+    contacts' in link order), so nothing written before is left behind.
+    """
+    if session_factory is None:
+        return None
+    speaker = await speaker_for(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
+    if speaker is None:
+        return None
+    person = speaker.person_user_id
+    rows = await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=person)
+    found = next((r.memory_boundary for r in rows if r.memory_boundary), None)
+    if found or not rows:
+        return found
+    linked = await contacts(session_factory, org_id=org_id, agent_id=agent_id, person_user_id=person)
+    async with session_factory() as db:
+        for candidate in [person, *(c.contact_user_id for c in linked)]:
+            configs = (
+                await db.execute(
+                    sa.select(SessionRow.config)
+                    .where(SessionRow.org_id == org_id)
+                    .where(SessionRow.agent_id == agent_id)
+                    .where(SessionRow.user_id == candidate)
+                    .where(SessionRow.channel.in_(_PARTITIONED))
+                    .order_by(SessionRow.created_at.desc())
+                )
+            ).scalars().all()
+            found = next(
+                (
+                    str(c.get("memory_boundary")) for c in configs
+                    if (c or {}).get("memory_boundary") and not c.get("multi_party")
+                    and str(c.get("memory_boundary")) != "public"
+                ),
+                None,
+            )
+            if found:
+                break
+        found = found or f"person:{person}"
+        await db.execute(
+            sa.update(FollowupEnrollmentRow)
+            .where(FollowupEnrollmentRow.org_id == org_id)
+            .where(FollowupEnrollmentRow.agent_id == agent_id)
+            .where(FollowupEnrollmentRow.user_id == person)
+            .where(FollowupEnrollmentRow.memory_boundary.is_(None))
+            .values(memory_boundary=found)
+        )
+        await db.commit()
+    return found
 
 
 # The names ops imports from a pinned runtime wheel; kept until ops moves.

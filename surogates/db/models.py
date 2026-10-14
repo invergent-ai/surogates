@@ -1064,6 +1064,9 @@ class ProgramInvitationRow(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    #: The followed person this step is about, when the recipient is one of
+    #: their contacts.  Null on older rows: ``user_id`` is the person.
+    person_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -1206,12 +1209,50 @@ class FollowupEnrollmentRow(Base):
     timezone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: The channel the person asked to be reached on.
     preferred_channel: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The memory partition the person's record lives in, shared by their
+    #: own conversations and their contacts'.  Set on first use from the
+    #: conversation already holding it, so no record is left behind.
+    memory_boundary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class FollowupContactRow(Base):
+    """Someone linked to a followed person: a relative, a carer.
+
+    Every step reaches the person and each confirmed contact, an answer from
+    any of them answers it for all, and they share the person's record.  A
+    ``pending`` link waits for an already-linked person to say yes.
+    """
+
+    __tablename__ = "followup_contacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id", "agent_id", "person_user_id", "contact_user_id",
+            name="uq_followup_contact",
+        ),
+        Index("idx_followup_contacts_contact", "org_id", "agent_id", "contact_user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    person_user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    contact_user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    #: Who they are to the person, in the words given, e.g. "daughter".
+    relation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: ``confirmed`` or ``pending``.
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="confirmed")
+    #: On a pending link: who was asked to confirm it.
+    asked_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(),
     )
 
 
@@ -1245,6 +1286,19 @@ class FollowupSettingsRow(Base):
     team_channels: Mapped[dict[str, list]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
         server_default=text("'{}'"),
+    )
+    #: What each team member receives and may do:
+    #: ``{user_id: {preset, receives: [...], can: [...], handles}}``.  A
+    #: member not listed is ``full``.
+    team_permissions: Mapped[dict[str, dict]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+        server_default=text("'{}'"),
+    )
+    #: Shared places that also receive alerts, e.g. a Slack channel:
+    #: ``[{platform, channel_id, receives: [...]}]``.
+    team_destinations: Mapped[list[dict]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=list,
+        server_default=text("'[]'"),
     )
     #: Whether people reached on web get a browser push when a message waits
     #: for them in their chat (they must also have allowed it in a browser).
@@ -1358,6 +1412,9 @@ class OutreachMessageRow(Base):
     #: The recipient.
     user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
     platform: Mapped[str] = mapped_column(Text, nullable=False)
+    #: A shared place (a Slack channel id) the message goes to instead of a
+    #: person; ``user_id`` is then the nil id.
+    destination: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: The business sender to write from.
     channel_identifier: Mapped[str] = mapped_column(Text, nullable=False)
     #: ``alert`` · ``operator`` · ``enrolment`` · ``welcome`` · ``notice``.
@@ -1451,8 +1508,8 @@ class EscalationRow(Base):
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    #: The person it is about.
-    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    #: The person it is about; null when the conversation had no known person.
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
     #: The channel the person was on when it was raised.
     platform: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     invitation_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True, index=True)

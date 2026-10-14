@@ -1196,3 +1196,85 @@ UPDATE program_invitations SET outcome = NULL WHERE outcome IN ('completed', 'de
 -- ── a browser push when a message waits in a person's web chat ───────
 ALTER TABLE followup_settings
     ADD COLUMN IF NOT EXISTS web_push boolean NOT NULL DEFAULT false;
+
+-- ── followed people and their contacts; the team's permissions ───────
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS person_user_id uuid;
+ALTER TABLE followup_enrollments
+    ADD COLUMN IF NOT EXISTS memory_boundary text;
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS team_permissions jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS team_destinations jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS destination text;
+-- An escalation from a conversation with no known person is still queued.
+ALTER TABLE escalations ALTER COLUMN user_id DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_occurrence_person
+    ON program_invitations (occurrence_id, person_user_id);
+-- An enrollment a relative made on their own account for someone else
+-- (answered_by set, the name not theirs) becomes the followed person's: a
+-- user of their own, with the relative as a confirmed contact.  The ids are
+-- derived from the enrollment, so a re-run finds what it made and changes
+-- nothing; an enrollment already on a person with contacts is left alone.
+DROP TABLE IF EXISTS pg_temp._followed_people;
+CREATE TEMP TABLE _followed_people AS
+SELECT e.id AS enrollment_id, e.org_id, e.agent_id, e.user_id AS contact_id, e.protocol,
+       btrim(e.patient_name) AS name, btrim(e.answered_by) AS relation,
+       md5('followed-person:' || e.org_id || ':' || e.agent_id || ':' || e.user_id
+           || ':' || lower(btrim(e.patient_name)))::uuid AS person_id
+FROM followup_enrollments e
+JOIN users u ON u.id = e.user_id
+WHERE nullif(btrim(e.answered_by), '') IS NOT NULL
+  AND nullif(btrim(e.patient_name), '') IS NOT NULL
+  AND lower(btrim(e.patient_name)) <> lower(btrim(u.display_name))
+  AND NOT EXISTS (
+      SELECT 1 FROM followup_contacts c
+      WHERE c.org_id = e.org_id AND c.agent_id = e.agent_id AND c.person_user_id = e.user_id
+  );
+INSERT INTO users (id, org_id, email, display_name, auth_provider)
+SELECT DISTINCT ON (person_id) person_id, org_id,
+       'person-' || person_id || '@' || org_id || '.people.surogate.local', name, 'external'
+FROM _followed_people
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO agent_users (id, org_id, agent_id, user_id, source, created_at)
+SELECT DISTINCT ON (person_id) md5('agent-user:' || person_id)::uuid, org_id, agent_id,
+       person_id, 'manual', now()
+FROM _followed_people
+ON CONFLICT (org_id, agent_id, user_id) DO NOTHING;
+INSERT INTO followup_contacts (id, org_id, agent_id, person_user_id, contact_user_id,
+                               relation, status, created_by, created_at)
+SELECT DISTINCT ON (person_id) md5('contact:' || person_id)::uuid, org_id, agent_id,
+       person_id, contact_id, relation, 'confirmed', 'migration', now()
+FROM _followed_people
+ON CONFLICT ON CONSTRAINT uq_followup_contact DO NOTHING;
+-- The relative's steps of that journey were about the person.
+UPDATE program_invitations pi SET person_user_id = f.person_id
+FROM _followed_people f, program_schedules ps
+WHERE pi.org_id = f.org_id AND pi.agent_id = f.agent_id AND pi.user_id = f.contact_id
+  AND pi.person_user_id IS NULL AND ps.program_id = pi.program_id
+  AND ps.config->'audience'->>'protocol' = f.protocol;
+-- So were the escalations raised in those steps, and, when the relative
+-- follows nobody else and is not followed themselves, every other one.
+UPDATE escalations x SET user_id = f.person_id
+FROM _followed_people f
+WHERE x.org_id = f.org_id AND x.agent_id = f.agent_id AND x.user_id = f.contact_id
+  AND (
+      x.program_id IN (
+          SELECT ps.program_id FROM program_schedules ps
+          WHERE ps.org_id = f.org_id AND ps.agent_id = f.agent_id
+            AND ps.config->'audience'->>'protocol' = f.protocol
+      )
+      OR (
+          (SELECT count(DISTINCT g.person_id) FROM _followed_people g
+           WHERE g.org_id = f.org_id AND g.agent_id = f.agent_id AND g.contact_id = f.contact_id) = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM followup_enrollments o
+              WHERE o.org_id = f.org_id AND o.agent_id = f.agent_id AND o.user_id = f.contact_id
+                AND o.id NOT IN (SELECT enrollment_id FROM _followed_people)
+          )
+      )
+  );
+UPDATE followup_enrollments e SET user_id = f.person_id
+FROM _followed_people f
+WHERE e.id = f.enrollment_id;
+DROP TABLE _followed_people;
