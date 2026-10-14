@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
-from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from types import SimpleNamespace
@@ -15,11 +14,12 @@ from uuid import UUID
 from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession, Workstream
 from surogates.devices.binding import device_of
-from surogates.devices.operations import TooManyRequests
+from surogates.devices.operations import DeviceOperations, TooManyRequests
+from surogates.devices.workspace import said
 from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
-from surogates.office.files import DOCUMENT_FILES, document_session, editor_files, editor_request_id
+from surogates.office.files import DOCUMENT_FILES, document_session, editor_files, editor_invocation, editor_request_id
 from surogates.office.runtime_office import close_pages
 from surogates.session.events import EventType
 from surogates.session.files import ComputerAway
@@ -36,7 +36,12 @@ SAVE_FAILED_AFTER = 10
 # Rows one pass lands at most, one transaction each.
 CLAIMS_PER_PASS = 20
 # How long one pass waits on a computer for a save: one still waiting is the next pass's to join again.
+# ponytail: a waiting row holds the serial pass, and its own row lock, for up to this on every pass, so many saves
+# waiting on computers delay the others; claim rows released, or run the waits concurrently, to lift it.
 COMPUTER_WAIT_S = 5.0
+# The desktop's words for its user's explicit no to a change (desktop/src/binding/approvals.ts, DENIED.change).
+# Any other refusal (nobody answered, it could not ask, the file is locked) is retried: a closing save dropped is lost.
+DENIED_ON_COMPUTER = "The user denied this change on this computer"
 
 
 class SaveWaiting(Exception):
@@ -141,28 +146,58 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
     data = await storage.read(*blob)
     target = await document_session(session, session_factory=session_factory)
     computer = _computer_of(target)
+    if computer is not None:
+        await _cancel_abandoned(row, target, session_factory=session_factory, redis=redis)
+    deadline = None
     try:
         async with editor_files(target, storage=storage, session_factory=session_factory, redis=redis,
                                 request_id=editor_request_id(row.doc_key, pending), data=data) as files:
             if not isinstance(files, DOCUMENT_FILES):
                 raise RuntimeError(f"{row.path}: this workspace cannot take the editor's saves")
-            async with asyncio.timeout(COMPUTER_WAIT_S) if computer is not None else nullcontext():
-                await _write(row, files, data, session=session, session_factory=session_factory,
-                             session_store=session_store, storage=storage, redis=redis, office=office,
-                             settings=settings, on_computer=computer is not None)
+            # Only the computer's operations run under its wait: a pass joining this request again asks for the same.
+            async with asyncio.timeout(COMPUTER_WAIT_S if computer is not None else None) as deadline:
+                copy_path = await _write(row, files, data, session=session, session_factory=session_factory,
+                                         session_store=session_store, storage=storage, redis=redis,
+                                         settings=settings, on_computer=computer is not None)
     except ComputerAway as away:
         if away.revoked:
             raise
         raise SaveWaiting("offline", away.name) from None
-    except (TimeoutError, TooManyRequests):
+    except TooManyRequests:
         if computer is None:
             raise
         raise SaveWaiting("waiting", computer) from None
-    except PermissionError:
-        if computer is None:
+    except TimeoutError:
+        # Only this pass's own wait running out: a timeout the computer answered (a network folder's) is a failure.
+        if computer is None or deadline is None or not deadline.expired():
+            raise
+        raise SaveWaiting("waiting", computer) from None
+    except PermissionError as exc:
+        if computer is None or DENIED_ON_COMPUTER not in said(exc):
             raise
         raise SaveDeclined(computer) from None
+    if copy_path is not None:
+        await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
+                        {"path": row.path, "conflict_path": copy_path})
+        await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
+        await close_pages(office, row.doc_key, row.session_ids)
+        office_sessions.mark_closed(row)
     return blob
+
+
+async def _cancel_abandoned(row: OfficeSession, target: Any, *, session_factory: Any, redis: Any) -> None:
+    """Cancel the writes that saves this one replaced, or tries it left, may still have open on the computer."""
+    pending = dict(row.pending_save or {})
+    abandoned = pending.pop("abandoned", None) or []
+    if not abandoned:
+        return
+    operations = DeviceOperations(session_factory, redis)
+    for item in abandoned:
+        try:
+            await operations.cancel_invocation(target.id, editor_invocation(row.doc_key, item))
+        except Exception:  # one that still lands shows as a conflict copy
+            logger.warning("could not cancel an abandoned save of %s on its computer", row.path, exc_info=True)
+    row.pending_save = pending
 
 
 def _computer_of(session: Any) -> str | None:
@@ -173,8 +208,10 @@ def _computer_of(session: Any) -> str | None:
 
 
 async def _write(row: OfficeSession, files: Any, data: bytes, *, session: Any, session_factory: Any, session_store: Any,
-                 storage: Any, redis: Any, office: OfficeSettings, settings: Any, on_computer: bool) -> None:
-    """Write the save over the version the editor opened, or, when the file changed since, beside it as a copy."""
+                 storage: Any, redis: Any, settings: Any, on_computer: bool) -> str | None:
+    """Write the save over the version the editor opened, or, when the file changed since, beside it as a copy;
+    the copy's path, or None."""
+    pending = dict(row.pending_save or {})
     key = await files.resolve(row.path)
     # On a computer the project's own landing records it, as yours: the save is the folder's, through its master.
     project = None if on_computer else await _project_of(session_factory, session)
@@ -186,7 +223,6 @@ async def _write(row: OfficeSession, files: Any, data: bytes, *, session: Any, s
                 raise RuntimeError("landing a project's save needs the runtime's settings")
             state = SimpleNamespace(session_factory=session_factory, session_store=session_store, storage=storage,
                                     settings=settings, redis=redis)
-            pending = dict(row.pending_save or {})
             await land_editor_save(
                 state, project, path=row.path,
                 author=await editor_author(session_store, project, list(pending.get("authors") or [])),
@@ -203,15 +239,13 @@ async def _write(row: OfficeSession, files: Any, data: bytes, *, session: Any, s
             current = None
         if current == data:
             office_sessions.mark_landed(row, version)
-            return
-        copy_path = await _write_copy(files, row.path, data)
-        await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
-                        {"path": row.path, "conflict_path": copy_path})
-        await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
-        await close_pages(office, row.doc_key, row.session_ids)
-        office_sessions.mark_closed(row)
-    else:
-        office_sessions.mark_landed(row, await files.etag(key))
+            return None
+        # Named by the save's own time, not the clock: a pass joining this request again asks for the same copy.
+        lastsave = pending.get("lastsave")
+        return await _write_copy(files, row.path, data,
+                                 datetime.fromisoformat(lastsave) if lastsave else datetime.now(timezone.utc))
+    office_sessions.mark_landed(row, await files.etag(key))
+    return None
 
 
 async def _project_of(session_factory: Any, session: Any) -> Workstream | None:
@@ -240,8 +274,8 @@ async def editor_author(session_store: Any, project: Any, authors: list[str]) ->
     return {"name": thread.title or "Thread", "email": f"thread:{thread.id}@surogate"}
 
 
-async def _write_copy(files: Any, path: str, data: bytes) -> str:
-    for candidate in conflict_copy_paths(path, datetime.now(timezone.utc)):
+async def _write_copy(files: Any, path: str, data: bytes, when: datetime) -> str:
+    for candidate in conflict_copy_paths(path, when):
         try:
             await files.write_if(await files.resolve(candidate), data, expected=None)
         except RevisionConflict:

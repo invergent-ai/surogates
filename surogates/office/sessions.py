@@ -188,7 +188,7 @@ async def set_pending(
         if previous and datetime.fromisoformat(previous["lastsave"]) > lastsave:
             row.pending_save = {**previous, "close": close, "marks": marks, "authors": authors, "changes": changes}
             return key
-        row.pending_save = {
+        pending: dict[str, Any] = {
             "bucket": bucket,
             "key": key,
             "lastsave": lastsave.isoformat(),
@@ -198,6 +198,13 @@ async def set_pending(
             "authors": authors,
             "changes": changes,
         }
+        abandoned = list(previous.get("abandoned") or [])
+        if previous.get("waiting") == "waiting":
+            # Its write may still be open on the computer: landing later, it would make this save a conflict copy.
+            abandoned.append({"key": previous["key"], "try": int(previous.get("try", 0))})
+        if abandoned:
+            pending["abandoned"] = abandoned
+        row.pending_save = pending
         replaced = previous.get("key")
         return str(replaced) if replaced and replaced != key else None
 
@@ -287,7 +294,11 @@ def mark_waiting(row: OfficeSession, reason: str) -> bool:
 def next_try(row: OfficeSession) -> None:
     """Let the next try ask the computer anew: a request joined again only repeats what it got."""
     pending = dict(row.pending_save or {})
-    pending["try"] = int(pending.get("try", 0)) + 1
+    left = int(pending.get("try", 0))
+    if pending.get("waiting") == "waiting":
+        # The request it leaves may still be open on the computer, for the save job to cancel.
+        pending["abandoned"] = [*(pending.get("abandoned") or []), {"key": pending["key"], "try": left}]
+    pending["try"] = left + 1
     row.pending_save = pending
 
 

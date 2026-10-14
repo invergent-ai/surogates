@@ -250,7 +250,8 @@ class EventType(str, Enum):
     # A save from the document editor failed (data: path, and status or attempts; or reason "declined" and computer).
     OFFICE_SAVE_FAILED = "office.save_failed"
     # A save from the document editor waits for the computer its file is on (data: path, computer, and reason:
-    # "offline", or "waiting" for the computer's user to allow it). Said once per pending save.
+    # "offline", or "waiting" for the computer's user to allow it). Said when a pending save starts waiting, or
+    # its reason changes.
     OFFICE_SAVE_WAITING = "office.save_waiting"
     # A save that had waited for its computer landed (data: path).
     OFFICE_SAVED = "office.saved"

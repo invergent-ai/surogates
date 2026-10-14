@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -13,6 +16,7 @@ from sqlalchemy import delete
 from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
 from surogates.devices.binding import Binding
+from surogates.devices.operations import DeviceOperations, TooManyRequests
 from surogates.office import files as office_files
 from surogates.office import saves as office_saves
 from surogates.office import sessions as office_sessions
@@ -80,14 +84,16 @@ class Desk:
         monkeypatch.setattr(office_saves, "COMPUTER_WAIT_S", 0.2)
 
 
-async def _computer_document(session_factory, storage, desk, path="a.docx"):
+async def _computer_document(session_factory, storage, desk, path="a.docx", history=None, boundary=None):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     store = SessionStore(session_factory)
     device_id = desk.io.identity.split(":", 1)[1]
     session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="default", channel="web", config={
         "storage_bucket": "b", "workspace_path": FOLDER,
-        "execution": {"kind": "device", "device_id": device_id, "device_name": "Mac"},
+        "execution": {"kind": "device", "device_id": device_id, "device_name": "Mac",
+                      **({"history": history} if history else {})},
+        **({"workspace_boundary": boundary} if boundary else {}),
     })
     key = f"{FOLDER}/{path}"
     document = await office_sessions.open_or_reuse(
@@ -97,11 +103,29 @@ async def _computer_document(session_factory, storage, desk, path="a.docx"):
     return store, session, key, document
 
 
-async def _pend(session_factory, storage, document, data, *, close=False):
+async def _pend(session_factory, storage, document, data, *, close=False, lastsave=None):
     pending_key = f"_office/pending/{document.doc_key}/{uuid4().hex}"
     await storage.write("b", pending_key, data)
-    await office_sessions.set_pending(session_factory, document.id, bucket="b", key=pending_key, close=close)
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key=pending_key, close=close,
+                                      lastsave=lastsave)
     return pending_key
+
+
+def _answer_writes(desk, error):
+    """The computer answers every write with *error*; its own runner, to put back."""
+    original = desk.io.runner.run
+
+    async def run(kind, args, payload=None):
+        if kind == "write":
+            return {"error": error}
+        return await original(kind, args, payload)
+
+    desk.io.runner.run = run
+    return original
+
+
+async def _nothing(*_args, **_kwargs):
+    return None
 
 
 async def _land(session_factory, redis_client, storage, store):
@@ -156,6 +180,39 @@ async def test_a_save_waiting_for_its_users_ok_joins_the_same_request_again(sess
     assert first["request_id"] == second["request_id"] and first["change"] == second["change"]
     pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
     assert pending["waiting"] == "waiting" and pending["attempts"] == 0
+    assert (await _types(store, session.id)).count(EventType.OFFICE_SAVE_WAITING.value) == 1
+
+
+async def test_too_many_open_requests_is_waiting_not_a_failed_try(session_factory, redis_client, storage, monkeypatch):
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, _, _, document = await _computer_document(session_factory, storage, desk)
+    await _pend(session_factory, storage, document, b"v2")
+    desk.away = TooManyRequests("too many of your changes are open on this computer")
+    assert await _land(session_factory, redis_client, storage, store) == 0
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["waiting"] == "waiting" and pending["attempts"] == 0
+
+
+async def test_a_pass_cancels_the_writes_left_open_by_the_saves_it_replaced(session_factory, redis_client, storage, monkeypatch):
+    cancelled: list = []
+
+    async def cancel_invocation(_self, calling_session_id, invocation_id):
+        cancelled.append((calling_session_id, invocation_id))
+        return 1
+
+    monkeypatch.setattr(DeviceOperations, "cancel_invocation", cancel_invocation)
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, session, key, document = await _computer_document(session_factory, storage, desk)
+    first = await _pend(session_factory, storage, document, b"v2")
+    desk.hold = True
+    assert await _land(session_factory, redis_client, storage, store) == 0
+    await _pend(session_factory, storage, document, b"v3")
+    assert await _land(session_factory, redis_client, storage, store) == 0
+    assert cancelled == [(session.id, f"request:editor.{document.doc_key}.{PurePosixPath(first).name}.0")]
+    assert "abandoned" not in (await office_sessions.get_open(session_factory, document.id)).pending_save
+    desk.hold = False
+    assert await _land(session_factory, redis_client, storage, store) == 1
+    assert len(cancelled) == 1 and desk.io.runner.files[key][0] == b"v3"
 
 
 async def test_a_declined_save_is_dropped_and_said(session_factory, redis_client, storage, monkeypatch):
@@ -172,18 +229,45 @@ async def test_a_declined_save_is_dropped_and_said(session_factory, redis_client
     assert failed.data == {"path": "a.docx", "reason": "declined", "computer": "Mac"}
 
 
+async def test_a_declined_closing_save_closes_its_document(session_factory, redis_client, storage, monkeypatch):
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, _, _, document = await _computer_document(session_factory, storage, desk)
+    pending_key = await _pend(session_factory, storage, document, b"v2", close=True)
+    desk.deny = True
+    assert await _land(session_factory, redis_client, storage, store) == 0
+    assert await office_sessions.get_open(session_factory, document.id) is None
+    assert not await storage.exists("b", pending_key)
+
+
+@pytest.mark.parametrize("failure", [
+    {"type": "os", "code": "EACCES", "message": "Nobody answered on this computer in time, so the change was not made"},
+    {"type": "os", "code": "ETIMEDOUT", "message": "Operation timed out"},
+    "revoked",
+])
+async def test_a_failure_short_of_a_denial_is_retried_never_dropped(session_factory, redis_client, storage, monkeypatch,
+                                                                    failure):
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, _, _, document = await _computer_document(session_factory, storage, desk)
+    # A closing save: the last editor has left, so dropping it would lose the edits.
+    pending_key = await _pend(session_factory, storage, document, b"v2", close=True)
+    if failure == "revoked":
+        desk.away = ComputerAway("Mac", revoked=True)
+    else:
+        _answer_writes(desk, failure)
+    for _ in range(2):
+        assert await _land(session_factory, redis_client, storage, store) == 0
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["key"] == pending_key and pending["attempts"] == 2 and "waiting" not in pending
+    assert await storage.exists("b", pending_key)
+    first, second = desk.requests
+    assert first["request_id"] != second["request_id"]
+
+
 async def test_a_failed_save_asks_the_computer_anew_next_time(session_factory, redis_client, storage, monkeypatch):
     desk = Desk(monkeypatch, {"a.docx": b"v1"})
     store, _, _, document = await _computer_document(session_factory, storage, desk)
     await _pend(session_factory, storage, document, b"v2")
-    original = desk.io.runner.run
-
-    async def unavailable(kind, args, payload=None):
-        if kind == "write":
-            return {"error": {"type": "unavailable", "message": "another chat on this computer is working in this folder"}}
-        return await original(kind, args, payload)
-
-    desk.io.runner.run = unavailable
+    original = _answer_writes(desk, {"type": "unavailable", "message": "another chat on this computer is working in this folder"})
     assert await _land(session_factory, redis_client, storage, store) == 0
     desk.io.runner.run = original
     assert await _land(session_factory, redis_client, storage, store) == 1
@@ -205,3 +289,44 @@ async def test_a_changed_file_on_the_computer_lands_as_a_copy_beside_it(session_
     assert desk.io.runner.files[key][0] == b"someone else"
     copies = [k for k in desk.io.runner.files if k.startswith(f"{FOLDER}/a (edited ")]
     assert len(copies) == 1 and desk.io.runner.files[copies[0]][0] == b"mine"
+
+
+async def test_a_conflict_copy_is_named_by_the_saves_own_time(session_factory, redis_client, storage, monkeypatch):
+    monkeypatch.setattr(office_saves, "drop_editors", _nothing)
+    monkeypatch.setattr(office_saves, "close_pages", _nothing)
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, _, key, document = await _computer_document(session_factory, storage, desk)
+    await desk.io.write(key, b"someone else")
+    await _pend(session_factory, storage, document, b"mine", lastsave=datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc))
+    await _land(session_factory, redis_client, storage, store)
+    assert desk.io.runner.files[f"{FOLDER}/a (edited 2026-01-02 03.04 UTC).docx"][0] == b"mine"
+
+
+async def test_a_project_threads_save_is_a_plain_write_through_its_master(session_factory, redis_client, storage,
+                                                                          monkeypatch):
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    project_id = uuid4()
+    store, thread, key, document = await _computer_document(
+        session_factory, storage, desk, history={"thread": str(uuid4())}, boundary=f"workstream:{project_id}",
+    )
+    master = await store.create_session(user_id=thread.user_id, org_id=thread.org_id, agent_id="default", channel="web",
+                                        config={**thread.config, "execution": {**thread.config["execution"], "history": None}})
+
+    async def master_of(_factory, pid):
+        assert pid == project_id
+        return master
+
+    async def project_of(_factory, _session):
+        return SimpleNamespace(id=project_id, user_id=thread.user_id)
+
+    async def land_editor_save(*_args, **_kwargs):
+        raise AssertionError("a save on a computer is no history landing")
+
+    monkeypatch.setattr(office_files, "_master_of", master_of)
+    monkeypatch.setattr(office_saves, "_project_of", project_of)
+    monkeypatch.setattr(office_saves, "land_editor_save", land_editor_save)
+    await _pend(session_factory, storage, document, b"v2")
+    assert await _land(session_factory, redis_client, storage, store) == 1
+    assert desk.io.runner.files[key][0] == b"v2"
+    [request] = desk.requests
+    assert request["access"].session_id == master.id

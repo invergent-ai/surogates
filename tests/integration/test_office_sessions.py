@@ -154,6 +154,31 @@ async def test_mark_attempt_counts_up(session_factory):
     assert (await office_sessions.get_open(session_factory, document.id)).pending_save["attempts"] == 2
 
 
+async def test_a_save_replacing_one_waiting_on_its_computer_records_its_write_abandoned(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k1", close=False)
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False)
+    assert "abandoned" not in (await office_sessions.get_open(session_factory, document.id)).pending_save
+    async with office_sessions.claim_pending(session_factory) as row:
+        row.pending_save = {**row.pending_save, "waiting": "waiting", "try": 2}
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k3", close=False)
+    assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [{"key": "k2", "try": 2}]
+    # Kept by the saves after it until a pass cancels it.
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k4", close=False)
+    assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [{"key": "k2", "try": 2}]
+
+
+async def test_leaving_a_waiting_try_records_its_request_abandoned(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k", close=False)
+    async with office_sessions.claim_pending(session_factory) as row:
+        office_sessions.next_try(row)
+        office_sessions.mark_waiting(row, "waiting")
+        office_sessions.next_try(row)
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["try"] == 2 and pending["abandoned"] == [{"key": "k", "try": 1}]
+
+
 async def test_never_opened_rows_are_closed(session_factory):
     stale = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
     seen = await office_sessions.open_or_reuse(session_factory, location=_location(), path="b.docx", session_id=uuid4())

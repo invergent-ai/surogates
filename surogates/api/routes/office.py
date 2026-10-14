@@ -24,13 +24,12 @@ from surogates.api.routes.workspace import (
 )
 from surogates.api.session_guards import is_scheduled_run_session, require_device_access
 from surogates.db.models import User
-from surogates.devices.operations import DeviceOperations
 from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.chats import live_session
 from surogates.office.editor_config import build_editor_config
-from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, editor_invocation
+from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session
 from surogates.office.kinds import office_kind
 from surogates.office.tokens import InvalidOfficeToken, read_document_server_body, read_url_token
 from surogates.session.events import EventType
@@ -209,7 +208,6 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     storage = request.app.state.storage
     await storage.write(bucket, key, data)
     changes = _changes(payload)
-    previous = dict(document.pending_save or {})
     discarded = await office_sessions.set_pending(
         request.app.state.session_factory, document.id, bucket=bucket, key=key, close=close,
         lastsave=_saved_at(payload, received),
@@ -224,19 +222,6 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
             await storage.delete(bucket, discarded)
         except Exception:  # the save is recorded; the stray object only costs storage
             logger.warning("could not delete the discarded save %s/%s", bucket, discarded, exc_info=True)
-    if discarded and discarded == previous.get("key") and previous.get("waiting") == "waiting":
-        # Its write may still be open on the computer: landing later, it would make this newer save a conflict copy.
-        await _cancel_editor_write(request, session, document.doc_key, previous)
-
-
-async def _cancel_editor_write(request: Request, session: Any, doc_key: str, pending: dict[str, Any]) -> None:
-    try:
-        target = await document_session(session, session_factory=request.app.state.session_factory)
-        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel_invocation(
-            target.id, editor_invocation(doc_key, pending),
-        )
-    except Exception:  # the newer save is kept either way; a write that still lands shows as a conflict copy
-        logger.warning("could not cancel the replaced save of %s on its computer", doc_key, exc_info=True)
 
 
 def _saved_at(payload: dict[str, Any], received: datetime) -> datetime:
