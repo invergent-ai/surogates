@@ -1,17 +1,36 @@
 #!/usr/bin/env bash
-# The app's own node (spec, Section 11): Node 22 LTS for linux-x64, the floor of this package's
-# engines, its tarball checked against the sha256 that nodejs.org's signed SHASUMS256.txt gives,
-# stripped, without npm, at bin/node. A bin/node of that version already there is kept.
+# The app's own node (spec, Section 11): Node 22 LTS, the floor of this package's engines, for the computer the app is
+# built on, its archive checked against the sha256 that nodejs.org's signed SHASUMS256.txt gives, without npm. On
+# Linux on x64, linux-x64's, stripped, at bin/node. On Windows on x64, win-x64's node.exe at bin/node.exe, as nodejs.org
+# made it and signed it: never stripped, which would break the OpenJS Foundation's signature that the app keeps. A bin/
+# node of that version already there is kept. Any other computer is refused.
 #
-# The pin moves in one change: VERSION and SHA256 together, the hash read from that release's
+# The pin moves in one change: VERSION and each SHA256 together, each hash read from that release's
 # SHASUMS256.txt once `gpg --verify SHASUMS256.txt.asc` passes with nodejs/release-keys' keys,
-# each fetched with `curl -q` and checked in a keyring of its own, never the user's.
+# each fetched with `curl -q` and checked in a keyring of its own, never the user's. native/ntat/build.ps1 pins the
+# headers and win-x64/node.lib of the same version, which ntat is built against.
 set -euo pipefail
 
 VERSION=v22.23.3
-SHA256=1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) TARGET=linux-x64 SHA256=1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af ;;
+  MINGW64_NT*-x86_64 | MSYS_NT*-x86_64) TARGET=win-x64 SHA256=2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71 ;;
+  *) echo "node.sh fetches the app's node for Linux and Windows on x64" >&2; exit 1 ;;
+esac
 
 cd "$(dirname "$0")/.."
+if [ "$TARGET" = win-x64 ]; then
+  [ "$(bin/node.exe --version 2>/dev/null)" = "$VERSION" ] && exit 0
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  # -q first, or curl reads the user's curlrc, whose headers, logins and netrc would go out with it.
+  curl -q -fsSL --proto '=https' -o "$tmp/node.zip" "https://nodejs.org/dist/$VERSION/node-$VERSION-win-x64.zip"
+  echo "$SHA256  $tmp/node.zip" | sha256sum --check --quiet
+  unzip -q "$tmp/node.zip" "node-$VERSION-win-x64/node.exe" -d "$tmp"
+  mkdir -p bin
+  mv "$tmp/node-$VERSION-win-x64/node.exe" bin/node.exe
+  exit 0
+fi
 [ "$(bin/node --version 2>/dev/null)" = "$VERSION" ] && exit 0
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
