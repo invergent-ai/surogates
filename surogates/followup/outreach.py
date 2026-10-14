@@ -257,10 +257,11 @@ async def deliver_pending(
         return 0
 
     delivered = 0
+    agents = _Agents(session_factory)
     for row in rows:
         if row.state == "failed":
             await _answered_too_late(
-                session_factory, session_store, row, session_id=session_id, now=now,
+                session_factory, session_store, row, session_id=session_id, agents=agents,
             )
         elif await _deliver_now(
             session_factory, session_store, row,
@@ -271,7 +272,7 @@ async def deliver_pending(
 
 
 async def _answered_too_late(
-    session_factory: Any, session_store: Any, row: Any, *, session_id: uuid.UUID, now: datetime,
+    session_factory: Any, session_store: Any, row: Any, *, session_id: uuid.UUID, agents: _Agents,
 ) -> None:
     """Someone answered a template after the message behind it expired.
 
@@ -283,30 +284,86 @@ async def _answered_too_late(
         session_factory, row.id, from_states=("failed",), state="answered_late",
     ):
         return
-    settings = await followup_store.get_settings(
-        session_factory, org_id=row.org_id, agent_id=row.agent_id,
-    )
-    texts = (settings.texts or {}) if settings else {}
+    settings = await agents.settings(row.org_id, row.agent_id)
     await _write_text(
-        session_store, session_id, row,
-        followup_store.render_text(
-            texts.get("expired_message_to_person"), DEFAULT_TEXTS["expired_message_to_person"],
-        ),
+        session_store, session_id, row, _wording(settings, "expired_message_to_person"),
     )
     requester = _requester(row.created_by)
     if requester is None:
         return
     name, phone, _zone = await describe_person(
         session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
+        zones=await agents.zones(row.org_id, row.agent_id),
     )
-    await followup_store.notify_team(
+    await _tell_requester(
+        session_factory, settings, row, requester,
+        text=_wording(settings, "late_answer_notice", name=name, phone=phone),
+        dedupe_prefix=f"late:{row.id}",
+    )
+
+
+class _Agents:
+    """Each agent's follow-up settings and protocol zones, read once a pass."""
+
+    def __init__(self, session_factory: Any) -> None:
+        self._sf = session_factory
+        self._settings: dict[tuple, Any] = {}
+        self._zones: dict[tuple, dict[str, str]] = {}
+
+    async def settings(self, org_id: uuid.UUID, agent_id: str) -> Any:
+        key = (org_id, agent_id)
+        if key not in self._settings:
+            self._settings[key] = await followup_store.get_settings(
+                self._sf, org_id=org_id, agent_id=agent_id,
+            )
+        return self._settings[key]
+
+    async def zones(self, org_id: uuid.UUID, agent_id: str) -> dict[str, str]:
+        key = (org_id, agent_id)
+        if key not in self._zones:
+            self._zones[key] = await followup_store.protocol_timezones(
+                self._sf, org_id=org_id, agent_id=agent_id,
+            )
+        return self._zones[key]
+
+    async def describe(
+        self, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID, described: Described,
+    ) -> tuple[str, str, str]:
+        return await describe_person(
+            self._sf, org_id=org_id, agent_id=agent_id, user_id=user_id,
+            zones=await self.zones(org_id, agent_id), described=described,
+        )
+
+
+async def _described(session_factory: Any, found: Any) -> dict[tuple, Described]:
+    """Each ``(org_id, agent_id, user_id)`` of *found*, described one agent at a time."""
+    by_agent: dict[tuple, set] = {}
+    for org_id, agent_id, user_id in found:
+        by_agent.setdefault((org_id, agent_id), set()).add(user_id)
+    out: dict[tuple, Described] = {}
+    for (org_id, agent_id), ids in by_agent.items():
+        for user_id, described in (await describe_people(
+            session_factory, org_id=org_id, agent_id=agent_id, user_ids=ids,
+        )).items():
+            out[(org_id, agent_id, user_id)] = described
+    return out
+
+
+def _wording(settings: Any, key: str, **values: Any) -> str:
+    """The agent's wording for *key*, else the platform's."""
+    texts = (settings.texts or {}) if settings else {}
+    return followup_store.render_text(texts.get(key), DEFAULT_TEXTS[key], **values)
+
+
+async def _tell_requester(
+    session_factory: Any, settings: Any, row: Any, requester: uuid.UUID, *,
+    text: str, dedupe_prefix: str,
+) -> tuple[int, str | None]:
+    """A notice about *row* to the team member who asked for it, only."""
+    return await followup_store.notify_team(
         session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
         kind="notice", created_by="outreach", subject_user_id=row.user_id,
-        text=followup_store.render_text(
-            texts.get("late_answer_notice"), DEFAULT_TEXTS["late_answer_notice"],
-            name=name, phone=phone,
-        ),
-        dedupe_prefix=f"late:{row.id}", only_user_id=requester,
+        text=text, dedupe_prefix=dedupe_prefix, only_user_id=requester,
         fallback_sender=row.channel_identifier,
     )
 
@@ -530,36 +587,33 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                 .limit(BATCH)
             )
         ).scalars().all()
+    unasked = [row.id for row in rows if _requester(row.created_by) is None]
+    await _mark_reported(session_factory, OutreachMessageRow, unasked, now)
+    rows = [row for row in rows if row.id not in unasked]
+    agents = _Agents(session_factory)
+    people = await _described(
+        session_factory, ((r.org_id, r.agent_id, r.user_id) for r in rows),
+    )
     reported = 0
     for row in rows:
         requester = _requester(row.created_by)
-        if requester is None:
-            await _mark_reported(session_factory, OutreachMessageRow, [row.id], now)
-            continue
         try:
-            settings = await followup_store.get_settings(
-                session_factory, org_id=row.org_id, agent_id=row.agent_id,
+            settings = await agents.settings(row.org_id, row.agent_id)
+            name, phone, zone = await agents.describe(
+                row.org_id, row.agent_id, row.user_id,
+                people[(row.org_id, row.agent_id, row.user_id)],
             )
-            name, phone, zone = await describe_person(
-                session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
-            )
-            texts = (settings.texts or {}) if settings else {}
             if row.state == "delivered":
                 at = as_utc(row.delivered_at or now).astimezone(ZoneInfo(zone))
-                text = followup_store.render_text(
-                    texts.get("delivered_notice"), DEFAULT_TEXTS["delivered_notice"],
-                    name=name, time=f"{at:%H:%M}", phone=phone,
-                )
+                text = _wording(settings, "delivered_notice", name=name, time=f"{at:%H:%M}", phone=phone)
             else:
-                text = followup_store.render_text(
-                    texts.get("undelivered_notice"), DEFAULT_TEXTS["undelivered_notice"],
-                    name=name, why=plain_reason(row.reason, texts), phone=phone,
+                text = _wording(
+                    settings, "undelivered_notice",
+                    name=name, why=plain_reason(row.reason, settings.texts if settings else None), phone=phone,
                 )
-            queued, _ = await followup_store.notify_team(
-                session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
-                kind="notice", text=text, created_by="outreach",
-                subject_user_id=row.user_id, dedupe_prefix=f"outcome:{row.id}",
-                only_user_id=requester, fallback_sender=row.channel_identifier,
+            queued, _ = await _tell_requester(
+                session_factory, settings, row, requester,
+                text=text, dedupe_prefix=f"outcome:{row.id}",
             )
             await _mark_reported(session_factory, OutreachMessageRow, [row.id], now)
             reported += queued
@@ -634,10 +688,7 @@ async def _remind(
     queued, why_not = await followup_store.notify_team(
         session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
         kind="alert", severity="red", created_by="reminder",
-        text=followup_store.render_text(
-            ((settings.texts or {}) if settings else {}).get("red_alert_reminder"),
-            DEFAULT_TEXTS["red_alert_reminder"], minutes=minutes, text=row.text,
-        ),
+        text=_wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
         dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
         fallback_sender=row.channel_identifier,
@@ -683,15 +734,53 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
     each marked reported once its notice is queued.  Whatever a team member
     asked for is reported to them by :func:`_report_outcomes` instead.
     """
+    since = now - OUTCOME_LOOKBACK
+    invitation_failed = sa.and_(
+        ProgramInvitationRow.reported_at.is_(None),
+        sa.or_(
+            ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")),
+            sa.and_(
+                ProgramInvitationRow.delivery_state == "canceled",
+                ProgramInvitationRow.reason.ilike("%permission%"),
+            ),
+        ),
+        ProgramInvitationRow.created_at >= since,
+    )
+    message_failed = sa.and_(
+        OutreachMessageRow.reported_at.is_(None),
+        OutreachMessageRow.state == "failed",
+        OutreachMessageRow.created_at >= since,
+        sa.not_(_TEAM_REQUESTED),
+    )
+    # Most passes find nothing unreported: two index reads, and done.
     async with session_factory() as db:
+        involved = set((
+            await db.execute(
+                sa.select(ProgramInvitationRow.org_id, ProgramInvitationRow.agent_id)
+                .where(invitation_failed).distinct()
+            )
+        ).all()) | set((
+            await db.execute(
+                sa.select(OutreachMessageRow.org_id, OutreachMessageRow.agent_id)
+                .where(message_failed).distinct()
+            )
+        ).all())
+        if not involved:
+            return 0
         teams = {
             (row.org_id, row.agent_id): row
-            for row in (await db.execute(sa.select(FollowupSettingsRow))).scalars()
+            for row in (
+                await db.execute(
+                    sa.select(FollowupSettingsRow).where(
+                        sa.tuple_(FollowupSettingsRow.org_id, FollowupSettingsRow.agent_id)
+                        .in_(list(involved))
+                    )
+                )
+            ).scalars()
             if row.alert_recipient_user_ids
         }
     if not teams:
         return 0
-    since = now - OUTCOME_LOOKBACK
     async with session_factory() as db:
         invitations = (
             await db.execute(
@@ -701,15 +790,7 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                     ProgramInvitationRow.user_id, ProgramInvitationRow.created_at,
                     sa.func.coalesce(ProgramInvitationRow.delivery_error, ProgramInvitationRow.reason),
                 )
-                .where(ProgramInvitationRow.reported_at.is_(None))
-                .where(sa.or_(
-                    ProgramInvitationRow.delivery_state.in_(("failed", "undelivered")),
-                    sa.and_(
-                        ProgramInvitationRow.delivery_state == "canceled",
-                        ProgramInvitationRow.reason.ilike("%permission%"),
-                    ),
-                ))
-                .where(ProgramInvitationRow.created_at >= since)
+                .where(invitation_failed)
                 .where(sa.tuple_(ProgramInvitationRow.org_id, ProgramInvitationRow.agent_id).in_(list(teams)))
                 .order_by(ProgramInvitationRow.created_at.desc())
                 .limit(BATCH)
@@ -723,10 +804,7 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                     OutreachMessageRow.user_id, OutreachMessageRow.created_at,
                     OutreachMessageRow.reason,
                 )
-                .where(OutreachMessageRow.reported_at.is_(None))
-                .where(OutreachMessageRow.state == "failed")
-                .where(OutreachMessageRow.created_at >= since)
-                .where(sa.not_(_TEAM_REQUESTED))
+                .where(message_failed)
                 .where(sa.tuple_(OutreachMessageRow.org_id, OutreachMessageRow.agent_id).in_(list(teams)))
                 .order_by(OutreachMessageRow.created_at.desc())
                 .limit(BATCH)
@@ -743,21 +821,26 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
             failure["first"] = min(failure["first"], (as_utc(at), reason), key=lambda f: f[0])
             failure["rows"].append((model, row_id))
 
+    agents = _Agents(session_factory)
+    people = await _described(
+        session_factory,
+        ((f["org_id"], f["agent_id"], f["user_id"]) for f in failures.values()
+         if not followup_store.is_team_member(teams[(f["org_id"], f["agent_id"])], f["user_id"])),
+    )
     surfaced = 0
     for key, failure in failures.items():
         org_id, agent_id, user_id = failure["org_id"], failure["agent_id"], failure["user_id"]
         settings = teams[(org_id, agent_id)]
         try:
             if not followup_store.is_team_member(settings, user_id):
-                name, phone, _zone = await describe_person(
-                    session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+                name, phone, _zone = await agents.describe(
+                    org_id, agent_id, user_id, people[(org_id, agent_id, user_id)],
                 )
                 queued, _ = await followup_store.notify_team(
                     session_factory, settings, org_id=org_id, agent_id=agent_id,
                     kind="notice", created_by="outreach", subject_user_id=user_id,
-                    text=followup_store.render_text(
-                        (settings.texts or {}).get("person_failure_notice"),
-                        DEFAULT_TEXTS["person_failure_notice"],
+                    text=_wording(
+                        settings, "person_failure_notice",
                         name=name, why=plain_reason(failure["first"][1], settings.texts), phone=phone,
                     ),
                     dedupe_prefix=key,
