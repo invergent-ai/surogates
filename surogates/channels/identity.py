@@ -10,6 +10,7 @@ Used by Slack, Teams, Telegram, and Webhook adapters.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -56,6 +57,137 @@ def channel_user_email(platform: str, platform_user_id: str, org_id: UUID | str)
     """
     local_part = platform_user_id.lstrip("@")
     return f"{platform}-{local_part}@{org_id}.channels.surogate.local"
+
+
+# ITU-T E.164 country codes of one and two digits; every other is three.
+_ONE_DIGIT_CC = {"1", "7"}
+_TWO_DIGIT_CC = {
+    "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43",
+    "44", "45", "46", "47", "48", "49", "51", "52", "53", "54", "55", "56",
+    "57", "58", "60", "61", "62", "63", "64", "65", "66", "81", "82", "84",
+    "86", "90", "91", "92", "93", "94", "95", "98",
+}
+# (country code, subscriber digits) -> group sizes, as the country writes it.
+_GROUPS = {
+    ("1", 10): (3, 3, 4),        # +1 202 555 0123
+    ("40", 9): (3, 3, 3),        # +40 712 000 103
+    ("44", 10): (4, 6),          # +44 7946 095812
+    ("49", 10): (3, 3, 4),       # +49 151 234 5678
+    ("49", 11): (3, 4, 4),       # +49 151 2345 6789
+    ("33", 9): (1, 2, 2, 2, 2),  # +33 6 12 34 56 78
+    ("39", 10): (3, 3, 4),       # +39 312 345 6789
+    ("34", 9): (3, 3, 3),        # +34 612 345 678
+    ("36", 9): (2, 3, 4),        # +36 20 123 4567
+}
+
+
+def readable_phone(wa_id: str) -> str:
+    """A bare-digit WhatsApp id as a team member reads and taps it.
+
+    The rule, kept identical to ops' ``surogate_ops.utils.phone.readable_phone``
+    and the Studio frontend:
+
+    1. Keep the digits only. The country code is the first one digit when
+       that is 1 or 7, the first two when they are a two-digit E.164 code,
+       else the first three.
+    2. When the country code and the number of digits after it match a row
+       of ``_GROUPS``, split them by that row's sizes.
+    3. Otherwise split them into threes from the left, a lone last digit
+       joining the group before it.
+
+    No group is longer than six digits: WhatsApp links the result as a
+    number to call, and event redaction masks seven or more digits after a
+    ``+``.  Only for text the platform delivers to a team member; the model
+    and the event log get :func:`masked_phone`, see
+    :func:`mask_readable_phones`.
+    """
+    digits = "".join(c for c in str(wa_id or "") if c.isdigit())
+    if digits[:1] in _ONE_DIGIT_CC:
+        cc = digits[:1]
+    elif digits[:2] in _TWO_DIGIT_CC:
+        cc = digits[:2]
+    else:
+        cc = digits[:3]
+    rest = digits[len(cc):]
+    sizes = _GROUPS.get((cc, len(rest)))
+    if sizes is None:
+        sizes = [3] * (len(rest) // 3) + ([len(rest) % 3] if len(rest) % 3 else [])
+        if len(sizes) > 1 and sizes[-1] == 1:
+            sizes[-2:] = [4]
+    groups, at = [], 0
+    for size in sizes:
+        groups.append(rest[at:at + size])
+        at += size
+    return " ".join(["+" + cc, *groups])
+
+
+#: A phone-like run: digits with spaces, dashes, dots or brackets between,
+#: never part of a longer word or id.
+_READABLE_PHONE_RE = re.compile(r"(?<![\w(-])\+?\(?\d[\d \-.()]{5,}\d(?![\w-])")
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?: \d{1,2})?")
+
+
+def masked_phone(wa_id: str) -> str:
+    """Enough of a number to tell two people apart, never enough to dial:
+    what the model and the event log may hold."""
+    digits = "".join(c for c in str(wa_id or "") if c.isdigit())
+    return f"+{digits[:2]}…{digits[-3:]}" if len(digits) > 5 else "no number"
+
+
+def mask_readable_phones(text: str) -> str:
+    """*text* with every phone-like run of seven or more digits masked,
+    however it is written (``+40 746 148 303``, ``0746-148-303``,
+    ``40746148303``); dates are left alone."""
+    def mask(match: re.Match) -> str:
+        number = match.group()
+        if sum(c.isdigit() for c in number) < 7 or _DATE_RE.fullmatch(number.strip()):
+            return number
+        return masked_phone(number)
+
+    return _READABLE_PHONE_RE.sub(mask, text)
+
+
+def normalize_wa_id(raw: str) -> str:
+    """The bare-digit WhatsApp ``wa_id`` for a number as people type it.
+
+    Identical to ops' ``surogate_ops.utils.phone.normalize_wa_id``: both
+    sides must store the same id for one number, or an inbound message
+    misses the account and falls through to the pairing prompt.
+
+    Raises:
+        ValueError: when *raw* cannot be a WhatsApp id.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Phone number is required.")
+    text = raw.strip()
+    # The international prefix goes before punctuation, so a leading "00"
+    # is not kept as two digits of the number.
+    if text.startswith("+"):
+        text = text[1:]
+    elif text.startswith("00"):
+        text = text[2:]
+    if not re.fullmatch(r"[0-9\s\-()./]+", text):
+        raise ValueError("Phone number must contain only digits and phone punctuation.")
+    # "(0)" marks a trunk prefix dropped when dialling from abroad; a zero
+    # hidden inside a bracketed area code is ambiguous, so it is refused.
+    for group in re.findall(r"\(([^)]*)\)", text):
+        inner = group.strip()
+        if inner != "0" and inner.startswith("0"):
+            raise ValueError(
+                "Write the number without the national trunk prefix — for "
+                "example +44 20 7946 0958, not +44 (020) 7946 0958."
+            )
+    digits = re.sub(r"[^0-9]", "", re.sub(r"\(\s*0\s*\)", "", text))
+    if not digits:
+        raise ValueError("Phone number must contain digits.")
+    if digits.startswith("0"):
+        raise ValueError(
+            "Phone number needs a country code — write it in international "
+            "form, for example +40 746 148 303."
+        )
+    if not 8 <= len(digits) <= 15:
+        raise ValueError("Phone number should be 8–15 digits including the country code.")
+    return digits
 
 
 async def resolve_identity(
@@ -317,6 +449,16 @@ def make_cached_identity_resolver(
 # idle-but-resumable (re-activated on reuse); active/processing are in flight.
 # Any other status (failed, archived, …) starts a fresh session.
 _RESUMABLE_STATUSES = REUSABLE_SESSION_STATUSES
+
+
+async def revive_channel_session(session_store: SessionStore, session_id: UUID) -> None:
+    """Re-activate an idle (completed/paused) conversation a message is about
+    to be added to.  Called once the message may run a turn: a revival whose
+    message a gate then refused would wake the agent with nothing to answer."""
+    session = await session_store.get_session(session_id)
+    if session.status in ("completed", "paused"):
+        await session_store.resume_session(session_id, source="channel_message")
+        logger.info("Resuming %s session %s (status=%s)", session.channel, session_id, session.status)
 
 
 async def get_or_create_channel_session(

@@ -72,6 +72,24 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     return pending
 
 
+def _nothing_to_answer(pending: list[Any]) -> bool:
+    """Whether every pending event is the AI disclosure shown to a sender or a
+    message kept but refused for want of a plan (``held``).
+
+    Run on that, the model has no new words to answer and writes from its
+    instructions alone, which a channel delivers to the person verbatim.  A
+    held message is answered with the next message that is let through.
+    """
+    return bool(pending) and all(
+        _event_type(event) == EventType.DISCLOSURE_PRESENTED.value
+        or (
+            _event_type(event) == EventType.USER_MESSAGE.value
+            and bool((getattr(event, "data", None) or {}).get("held"))
+        )
+        for event in pending
+    )
+
+
 def _ends_a_commands_turn(event: Any) -> bool:
     """Whether *event* is the ``session.complete`` that ended a command's turn: it names the command's message."""
     return _event_type(event) == EventType.SESSION_COMPLETE.value and "answers" in (getattr(event, "data", None) or {})

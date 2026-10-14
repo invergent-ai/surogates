@@ -618,6 +618,12 @@ def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:
 # a git repository, and a thread's copy holds none to bundle.
 THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOLS)
 
+# Tools the streaming executor holds until the response is saved.  A question
+# or a form started mid-stream wrote its channel row to the outbox before the
+# text the model wrote beside it, so patients got the question or form before
+# the introduction leading up to it.
+HELD_UNTIL_SAVED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS | AFTER_THE_RESPONSE_TOOLS | frozenset({"ask_user_question", "send_form"})
+
 
 def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
     """What a session under a project's thread is refused in the call of *tool_name*, as its refusal names it; None when it may run.
@@ -2012,6 +2018,7 @@ async def _run_single_tool(
                     tool_call_id=tool_call_id,
                     lease_token=lease.lease_token,
                     session_config=session.config,
+                    channel=getattr(session, "channel", None),
                     bundle=bundle,
                     platform_client=platform_client,
                     expert_transcript=expert_transcript,

@@ -421,8 +421,12 @@ class PlatformClient:
         email: str | None = None,
         name: str | None = None,
         channel: str | None = None,
+        end_user_id: str | None = None,
     ) -> dict:
         """Reserve tokens for one end-user turn on a monetized agent.
+
+        ``end_user_id`` lets ops recognise people the business brought in
+        (its team, followed people, their contacts), who never need a plan.
 
         Returns the reservation receipt
         ``{entitlement_id, reserved_tokens, reservation_id}`` (all-zero
@@ -443,6 +447,8 @@ class PlatformClient:
             body["name"] = name
         if channel is not None:
             body["channel"] = channel
+        if end_user_id is not None:
+            body["end_user_id"] = end_user_id
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/commerce/authorize",
             json=body,
@@ -520,6 +526,29 @@ class PlatformClient:
             body["name"] = name
         return await self._post_commerce(
             f"/api/agents/agents/{agent_id}/commerce/checkout", body,
+        )
+
+    async def commerce_free_plan(
+        self,
+        agent_id: str,
+        *,
+        firebase_uid: str,
+        offer_id: str,
+        email: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Put the user on the agent's Free plan (no card, no Stripe).
+
+        Returns ``{"subscription_status", "current_period_end",
+        "period_token_remaining"}``; refusals surface like
+        :meth:`commerce_checkout`'s."""
+        body: dict = {"firebase_uid": firebase_uid, "offer_id": offer_id}
+        if email is not None:
+            body["email"] = email
+        if name is not None:
+            body["name"] = name
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/commerce/free-plan", body,
         )
 
     async def commerce_debit(

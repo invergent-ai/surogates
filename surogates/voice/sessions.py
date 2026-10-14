@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Any
@@ -47,6 +47,7 @@ SPEAK = "[This call is in {0}: speak only {0}.] "
 def speak_note(language: str) -> str:
     return SPEAK.format(language_name(language))
 GREETED = "[You already answered the phone with: «{}».] "
+CALLED = "[You phoned this person; as they answered you said: «{}».] "
 GREETING_CUT = "[You answered the phone, but the caller interrupted you after: «{}».] "
 
 
@@ -124,6 +125,10 @@ class CallSession:
     # told True when a tool starts and False when the answer resumes: LiveKit keeps the agent "speaking"
     # from "O clipă, verific." to the answer, so only the session knows the agent is working (the typing)
     on_lookup: Callable[[bool], None] | None = None
+    # before the callee's first words reach the agent: an outbound step call binds its step here
+    before_first_words: Callable[[], Awaitable[Any]] | None = None
+    # an alert call: the callee's words are checked for a yes, which acknowledges it
+    on_heard: Callable[[str], Awaitable[Any]] | None = None
     _user_event: int = 0
 
     async def send(self, text: str) -> int:
@@ -138,6 +143,11 @@ class CallSession:
             self._user_event = answered
             return answered
         content, self.note = f"{self.note}{text}", ""
+        if self.on_heard is not None:
+            await self.on_heard(text)
+        if self.before_first_words is not None:
+            first, self.before_first_words = self.before_first_words, None
+            await first()
         if (await self.store.get_session(self.session_id)).status in ("completed", "paused", "failed"):
             await self.store.resume_session(self.session_id, source="voice")
         data = {"content": content, "media_urls": [], "media_types": [],
@@ -286,16 +296,91 @@ class VoiceSessions:
         """
         caller_id = normalize_caller(caller)
         remember = target.remember_callers and caller_id != ANONYMOUS
-        ident = await get_or_create_channel_identity(
-            self._sf, platform="voice", platform_user_id=caller_id if remember else f"call:{call_id}",
-            org_id=target.org_id, display_name=caller_id if caller_id != ANONYMOUS else "anonymous caller")
+        user_id = await same_person(self._sf, target.org_id, caller_id) if remember else None
+        if user_id is None:
+            user_id = (await get_or_create_channel_identity(
+                self._sf, platform="voice", platform_user_id=caller_id if remember else f"call:{call_id}",
+                org_id=target.org_id, display_name=caller_id if caller_id != ANONYMOUS else "anonymous caller",
+            )).user_id
+        boundary = f"phone:{caller_id}" if remember else f"voice:call:{call_id}"
+        if remember:
+            boundary = await _shared_boundary(self._sf, target.org_id, target.agent_id, user_id) or boundary
         session_id = await get_or_create_channel_session(
-            self._store, self._redis, session_key=f"agent:voice:call:{call_id}", user_id=ident.user_id,
+            self._store, self._redis, session_key=f"agent:voice:call:{call_id}", user_id=user_id,
             org_id=target.org_id, agent_id=target.agent_id, channel="voice",
-            config={"memory_boundary": f"phone:{caller_id}" if remember else f"voice:call:{call_id}",
+            config={"memory_boundary": boundary,
                     "voice_call_id": call_id, "voice_called": called, "voice_caller": caller_id, "multi_party": False},
             session_factory=self._sf, storage=self._storage, settings=self._settings)
-        return CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=target.org_id,
-                           agent_id=target.agent_id, user_id=ident.user_id, caller=caller_id, language=language,
+        call = CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=target.org_id,
+                           agent_id=target.agent_id, user_id=user_id, caller=caller_id, language=language,
                            lines=lines or default_lines(language),
                            note=speak_note(language) + (GREETED.format(greeting) if greeting else ""))
+        if remember:  # a known number calling back may be answering a step
+            call.before_first_words = self._step_reply(call)
+        return call
+
+    async def join_call(self, session_id: UUID, *, call_id: str, callee: str, said: str,
+                        language: str = "ro", lines: Lines | None = None) -> CallSession:
+        """The conversation an outbound call was placed from: the callee is its person, by construction
+        (we dialled their number), and what they say answers whatever the call was placed for."""
+        session = await self._store.get_session(session_id)
+        await self._store.update_session_config_key(session_id, "voice_call_id", call_id)
+        call = CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=session.org_id,
+                           agent_id=session.agent_id, user_id=session.user_id, caller=normalize_caller(callee),
+                           language=language, lines=lines or default_lines(language),
+                           note=speak_note(language) + (CALLED.format(said) if said else ""))
+        call.before_first_words = self._step_reply(call)
+        return call
+
+    def _step_reply(self, call: CallSession) -> Callable[[], Awaitable[Any]]:
+        from surogates.channels.outbound import begin_step_reply
+
+        return lambda: begin_step_reply(self._sf, self._store, org_id=call.org_id, agent_id=call.agent_id,
+                                        platform="voice", platform_user_id=call.caller, session_id=call.session_id)
+
+
+async def same_person(session_factory: Any, org_id: UUID, number: str) -> UUID | None:
+    """The person this number already belongs to in the org, by exact match only: their voice identity,
+    else their WhatsApp one (whose ``wa_id`` is the same bare digits), which then gains the voice identity
+    so the next call finds it directly. Never by name."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from surogates.db.models import ChannelIdentity
+
+    from surogates.db.models import User
+
+    async with session_factory() as db:
+        rows = (await db.execute(
+            sa.select(ChannelIdentity.platform, ChannelIdentity.user_id, User.auth_provider)
+            .join(User, User.id == ChannelIdentity.user_id)
+            .where(ChannelIdentity.org_id == org_id)
+            .where(ChannelIdentity.platform.in_(("voice", "whatsapp")))
+            .where(ChannelIdentity.platform_user_id == number)
+        )).all()
+        found = {platform: (user_id, provider) for platform, user_id, provider in rows}
+        voice, whatsapp = found.get("voice"), found.get("whatsapp")
+        if whatsapp is None or (voice is not None and (voice[0] == whatsapp[0] or voice[1] != "voice")):
+            return voice[0] if voice else None
+        # Known on WhatsApp, and on the phone only as the account an earlier call made: one person.
+        await db.execute(
+            pg_insert(ChannelIdentity)
+            .values(org_id=org_id, user_id=whatsapp[0], platform="voice", platform_user_id=number)
+            .on_conflict_do_update(index_elements=["org_id", "platform", "platform_user_id"],
+                                   set_={"user_id": whatsapp[0]})
+        )
+        await db.commit()
+    log.info("caller %s… is the WhatsApp person %s", number[:4], whatsapp[0])
+    return whatsapp[0]
+
+
+async def _shared_boundary(session_factory: Any, org_id: UUID, agent_id: str, user_id: UUID) -> str | None:
+    """The followed person's shared memory partition, when they have one (their WhatsApp and
+    phone conversations then share it)."""
+    try:
+        from surogates.followup.store import shared_memory_boundary
+
+        return await shared_memory_boundary(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
+    except Exception:  # noqa: BLE001 — the number's own partition
+        log.debug("no shared memory partition for %s", user_id, exc_info=True)
+        return None

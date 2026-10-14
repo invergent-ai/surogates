@@ -8,7 +8,9 @@ counter increments).
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,9 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from surogates.browser.control import BROWSER_HAND_BACK, RESUMES, TAKEN_OVER_FROM
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
+    outbound_dm,
 )
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
@@ -54,9 +58,10 @@ from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
 )
-from surogates.session.events import OPENER_SYNTHETIC_MARKERS, EventType
+from surogates.session.events import OPENER_SYNTHETIC_MARKERS, SILENT_REPLY, EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
+    ASK_USER_QUESTION_RESCUE_PREFIX,
     apply_read_receipt,
     build_inbox_row,
 )
@@ -89,6 +94,8 @@ class _EventWrite:
     id: int = 0
     stamped: Any = None
     inbox_publish: tuple[int, str, UUID] | None = None
+    #: What the channel delivers when it must differ from what the log keeps.
+    delivery_data: dict | None = None
 
 
 class BrowserControlBusy(Exception):
@@ -199,6 +206,7 @@ _DELIVERABLE_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
     EventType.CODE_RUN_CHANNEL_UPDATE,
     EventType.SESSION_STOPPED,
+    EventType.CHANNEL_FORM,
 })
 
 # Delivered to the channel when a /stop actually halts the running turn, so the
@@ -222,19 +230,65 @@ _MAX_LISTED_DESCENDANTS = 1000
 
 
 
+def _without_trailing_prompt(content: str, tool_calls: Any, channel: str) -> str:
+    """*content* without a closing question its own ask_user_question asks.
+
+    The channel prompt follows right after, so a reply ending in "Cum vă
+    numiți?" beside a call asking "Cum vă numiți?" showed the person the
+    same question twice.  Exact match only (whitespace aside), and only for
+    a single question: anything else is not provably a repeat.  A call the
+    tool will refuse asks nothing, so its text is delivered intact.
+    """
+    from surogates.tools.builtin.ask_user_question import _validate_questions, max_choices
+
+    asks = [
+        call for call in tool_calls or []
+        if isinstance(call, dict) and (call.get("function") or {}).get("name") == "ask_user_question"
+    ]
+    if len(asks) != 1:
+        return content
+    try:
+        questions = _validate_questions(
+            json.loads(asks[0]["function"].get("arguments") or "{}").get("questions"),
+            max_choices=max_choices(channel),
+        )
+    except (TypeError, ValueError, AttributeError):
+        return content
+    return _strip_trailing_question(content, questions)
+
+
+def _strip_trailing_question(content: str, questions: Any) -> str:
+    """*content* without a closing repeat of a single question's prompt."""
+    if not isinstance(questions, list) or len(questions) != 1 or not isinstance(questions[0], dict):
+        return content
+    words = str(questions[0].get("prompt") or "").split()
+    if not words:
+        return content
+    repeat = re.search(r"\s+".join(map(re.escape, words)) + r"\s*\Z", content)
+    if repeat is None or (repeat.start() and not content[repeat.start() - 1].isspace()):
+        return content
+    return content[: repeat.start()].rstrip()
+
+
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
     deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
-    message still has tool_calls, i.e. it is narration before a tool call rather
-    than the turn's final answer)."""
+    message still has tool_calls, i.e. more of the turn follows)."""
     payload: dict[str, Any] = {}
     if event_type == EventType.LLM_RESPONSE:
         msg = data.get("message", {})
         content = msg.get("content", "") if isinstance(msg, dict) else ""
         if content and isinstance(content, str):
             content = strip_next_action_blocks(content)
+            if channel in INTERACTIVE_PROMPT_CHANNELS:
+                content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
+        if content and content.strip() == SILENT_REPLY:
+            content = ""  # the agent chose to write nothing
         if content:
             payload["content"] = content
+            # Delivered either way: the model writes to the person beside its
+            # tool calls (an introduction, an emergency script beside
+            # escalate), so this only tells a channel the turn goes on.
             payload["intermediate"] = bool(
                 isinstance(msg, dict) and msg.get("tool_calls")
             )
@@ -252,24 +306,44 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
+    elif event_type == EventType.CHANNEL_FORM and capabilities_for(channel).forms:
+        payload["flow"] = data.get("interactive") or {}
     elif (
         event_type == EventType.INBOX_INPUT_REQUIRED
         and channel in INTERACTIVE_PROMPT_CHANNELS
     ):
         questions = data.get("questions") or []
         if questions:
+            tool_call_id = (data.get("tool_call_id") or "").strip()
             payload = {
                 "input_prompt": True,
-                "tool_call_id": (data.get("tool_call_id") or "").strip(),
+                "tool_call_id": tool_call_id,
                 "questions": questions,
-                "context": strip_next_action_blocks(data.get("context", "") or ""),
             }
+            # A model's own ``context`` narrates its reasoning for the
+            # operator inbox ("step 4 of the enrolment skill: ..."), and
+            # patients received it verbatim.  Only the harness rescue's
+            # context is the agent's reply to the person.
+            if tool_call_id.startswith(ASK_USER_QUESTION_RESCUE_PREFIX):
+                payload["context"] = _strip_trailing_question(
+                    strip_next_action_blocks(data.get("context", "") or ""), questions,
+                )
+            elif data.get("message"):
+                # ``message`` is the schema's field for words to the person;
+                # an invented ``context`` stays the operator's.
+                payload["context"] = _strip_trailing_question(data["message"], questions)
     return payload
 
 
 # The canonical-conversation stamp, as a SQL predicate.  The stamp is a
 # JSON boolean, so ``astext`` compares against the string form.
-_SINGLE_SESSION_MARKER = SessionRow.config["single_session"].astext == "true"
+_SINGLE_SESSION_MARKER = or_(
+    SessionRow.config["single_session"].astext == "true",
+    # The person's own web conversation the platform writes first into
+    # (surogates.channels.outbound) is the one a step waits in for their
+    # next visit, so it counts as their dedicated conversation too.
+    SessionRow.config["channel_session_key"].astext.startswith("agent:web:dm:"),
+)
 
 # Delivery-destination field per adapter channel and the session-config
 # key it is read from.  Used by both the cached destination build and
@@ -1317,6 +1391,7 @@ class SessionStore:
         *,
         lease_token: UUID | None = None,
         status: str | None = None,
+        delivery_data: dict | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
@@ -1326,6 +1401,10 @@ class SessionStore:
         an event that says a session is paused and the status that makes it
         so are both there or neither.  ``archived`` is final, as for
         :meth:`update_session_status`.
+
+        With *delivery_data*, a channel delivers that instead of *data*: a
+        platform text whose full phone number the team needs, while the
+        event, which the model reads, keeps it masked.
 
         With *lease_token*, the event is committed only while that token is
         the session's lease: a worker that lost the session must not answer
@@ -1341,6 +1420,8 @@ class SessionStore:
         cleanly in ORM ``update().values()``.
         """
         event = await self._ready_event(session_id, event_type, data)
+        if delivery_data is not None:
+            event.delivery_data = redact_sensitive_data(delivery_data)
         async with self._sf() as db:
             if lease_token is not None:
                 held = (await db.execute(
@@ -1519,7 +1600,7 @@ class SessionStore:
                 session_id,
                 event.id,
                 event_type,
-                event.data,
+                event.delivery_data or event.data,
             )
 
     async def _enqueue_channel_delivery(
@@ -1567,7 +1648,7 @@ class SessionStore:
             # Everything else (web/website SSE, api/task/delegation/worker
             # consumers, ambient's gated mate_ambient_post path) has no claimer
             # — rows for those channels would sit "pending" forever.
-            if channel not in ADAPTER_CHANNELS:
+            if channel not in ADAPTER_CHANNELS and not outbound_dm(channel, config):
                 return
 
             # Build channel-specific destination from session config.

@@ -1053,3 +1053,244 @@ ALTER TABLE office_sessions ADD COLUMN IF NOT EXISTS user_names JSONB NOT NULL D
 
 -- How many of the document server's history entries an open document's landed saves covered.
 ALTER TABLE office_sessions ADD COLUMN IF NOT EXISTS changes_seen INTEGER NOT NULL DEFAULT 0;
+
+-- ── followup_enrollments: who the person is, and how sure the start is ──
+-- The user's display name is their WhatsApp profile, which is a relative's
+-- when a relative enrolled them; these name the person and who answers.
+ALTER TABLE followup_enrollments
+    ADD COLUMN IF NOT EXISTS patient_name text,
+    ADD COLUMN IF NOT EXISTS answered_by text,
+    ADD COLUMN IF NOT EXISTS start_date_approximate boolean NOT NULL DEFAULT false;
+
+-- ── followup_settings: how long a team member's held message may wait ─
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS operator_unanswered_hours integer;
+
+-- ── red alerts nobody opened are sent again, once ────────────────────
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS red_alert_reminder_minutes integer;
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS severity text,
+    ADD COLUMN IF NOT EXISTS reminded_at timestamptz;
+
+-- ── a red alert's reminder, kept off the escalation it reminds of ────
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS reminder_state text;
+
+-- ── a message's outcome is reported once ─────────────────────────────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS reported_at timestamptz;
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS reported_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_outreach_messages_unreported
+    ON outreach_messages (created_at) WHERE reported_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_unreported
+    ON program_invitations (created_at) WHERE reported_at IS NULL;
+
+-- ── whether a team member read an alert ──────────────────────────────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS read_at timestamptz;
+
+-- ── a text's provider id, kept apart from its template's ─────────────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS text_message_id text;
+CREATE INDEX IF NOT EXISTS ix_outreach_messages_text_message_id
+    ON outreach_messages (text_message_id);
+
+-- ── "care team" became "team": rewrite what was recorded under the old name
+UPDATE outreach_messages
+    SET created_by = 'team:' || substr(created_by, length('care-team:') + 1)
+    WHERE created_by LIKE 'care-team:%';
+UPDATE followup_enrollments SET enrolled_by = 'team' WHERE enrolled_by = 'care_team';
+
+-- ── what an alert is about, apart from how its text presents it ──────
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS alert_reason text;
+
+-- ── journeys: a step picks a channel per person, and falls back ──────
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS channel_identifier text,
+    ADD COLUMN IF NOT EXISTS outcome text,
+    ADD COLUMN IF NOT EXISTS fallback_platforms jsonb,
+    ADD COLUMN IF NOT EXISTS attempts jsonb,
+    ADD COLUMN IF NOT EXISTS read_at timestamptz,
+    ADD COLUMN IF NOT EXISTS escalation_owner text,
+    ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
+ALTER TABLE followup_enrollments
+    ADD COLUMN IF NOT EXISTS timezone text,
+    ADD COLUMN IF NOT EXISTS preferred_channel text;
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS senders jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS team_channels jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_person_open
+    ON program_invitations (org_id, agent_id, user_id, response_state);
+
+-- ── escalations: one record each, raised in a step or outside any ────
+CREATE TABLE IF NOT EXISTS escalations (
+    id uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    agent_id text NOT NULL,
+    user_id uuid NOT NULL,
+    platform text,
+    invitation_id uuid,
+    program_id uuid,
+    kind text NOT NULL,
+    severity text,
+    reason text NOT NULL,
+    state text NOT NULL DEFAULT 'raised',
+    session_id uuid,
+    owner text,
+    resolved_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_agent_open
+    ON escalations (org_id, agent_id, resolved_at, created_at);
+CREATE INDEX IF NOT EXISTS ix_escalations_invitation_id
+    ON escalations (invitation_id);
+-- Earlier escalations lived on their step's invitation, or (outside a
+-- step) only as the team's alert messages; each becomes one record.  An
+-- alert's key is escalation:<invitation or ->:<id>:<recipient>.
+INSERT INTO escalations (id, org_id, agent_id, user_id, platform, invitation_id,
+                         program_id, kind, severity, reason, state, session_id,
+                         owner, resolved_at, created_at)
+SELECT pi.id, pi.org_id, pi.agent_id, pi.user_id, pi.platform, pi.id, pi.program_id,
+       CASE WHEN a.dedupe_key LIKE 'missed:%' OR coalesce(pi.reason, '') LIKE 'No answer to%'
+            THEN 'missed_replies' ELSE 'alert' END,
+       a.severity, coalesce(a.alert_reason, pi.reason, ''), pi.escalation_state,
+       pi.session_id, pi.escalation_owner, pi.resolved_at, coalesce(a.created_at, pi.created_at)
+FROM program_invitations pi
+LEFT JOIN LATERAL (
+    SELECT o.dedupe_key, o.severity, o.alert_reason, o.created_at
+    FROM outreach_messages o
+    WHERE o.org_id = pi.org_id AND o.kind = 'alert'
+      AND (o.dedupe_key LIKE 'escalation:' || pi.id::text || ':%'
+           OR o.dedupe_key LIKE 'missed:' || pi.id::text || ':%')
+    ORDER BY o.created_at
+    LIMIT 1
+) a ON true
+WHERE pi.escalation_state IN ('raised', 'failed')
+  AND NOT EXISTS (SELECT 1 FROM escalations e WHERE e.invitation_id = pi.id)
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO escalations (id, org_id, agent_id, user_id, platform, kind, severity,
+                         reason, state, session_id, created_at)
+SELECT DISTINCT ON (k.key)
+       split_part(k.key, ':', 3)::uuid, o.org_id, o.agent_id, o.subject_user_id,
+       s.channel, 'alert', o.severity, coalesce(o.alert_reason, o.text), 'raised',
+       ev.session_id, o.created_at
+FROM outreach_messages o
+CROSS JOIN LATERAL (SELECT regexp_replace(o.dedupe_key, ':[^:]*$', '') AS key) k
+LEFT JOIN LATERAL (
+    SELECT e.session_id FROM events e
+    WHERE e.org_id = o.org_id AND e.type = 'followup.escalation'
+      AND e.data->>'escalation' = k.key
+    LIMIT 1
+) ev ON true
+LEFT JOIN sessions s ON s.id = ev.session_id
+WHERE o.kind = 'alert' AND o.dedupe_key LIKE 'escalation:-:%'
+  AND o.subject_user_id IS NOT NULL
+  AND split_part(k.key, ':', 3) ~ '^[0-9a-f]{32}$'
+ORDER BY k.key, o.created_at
+ON CONFLICT (id) DO NOTHING;
+
+-- ── a step's fallbacks and attempts: none is SQL NULL, not JSON null ─
+UPDATE program_invitations SET fallback_platforms = NULL WHERE fallback_platforms = 'null'::jsonb;
+UPDATE program_invitations SET attempts = NULL WHERE attempts = 'null'::jsonb;
+
+-- ── a step's outcome is the agent's label, never its status ──────────
+UPDATE program_invitations SET outcome = NULL WHERE outcome IN ('completed', 'declined');
+
+-- ── a browser push when a message waits in a person's web chat ───────
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS web_push boolean NOT NULL DEFAULT false;
+
+-- ── followed people and their contacts; the team's permissions ───────
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS person_user_id uuid;
+ALTER TABLE followup_enrollments
+    ADD COLUMN IF NOT EXISTS memory_boundary text;
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS team_permissions jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS team_destinations jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS destination text;
+-- An escalation from a conversation with no known person is still queued.
+ALTER TABLE escalations ALTER COLUMN user_id DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_occurrence_person
+    ON program_invitations (occurrence_id, person_user_id);
+-- An enrollment a relative made on their own account for someone else
+-- (answered_by set, the name not theirs) becomes the followed person's: a
+-- user of their own, with the relative as a confirmed contact.  The ids are
+-- derived from the enrollment, so a re-run finds what it made and changes
+-- nothing; an enrollment already on a person with contacts is left alone.
+DROP TABLE IF EXISTS pg_temp._followed_people;
+CREATE TEMP TABLE _followed_people AS
+SELECT e.id AS enrollment_id, e.org_id, e.agent_id, e.user_id AS contact_id, e.protocol,
+       btrim(e.patient_name) AS name, btrim(e.answered_by) AS relation,
+       md5('followed-person:' || e.org_id || ':' || e.agent_id || ':' || e.user_id
+           || ':' || lower(btrim(e.patient_name)))::uuid AS person_id
+FROM followup_enrollments e
+JOIN users u ON u.id = e.user_id
+WHERE nullif(btrim(e.answered_by), '') IS NOT NULL
+  AND nullif(btrim(e.patient_name), '') IS NOT NULL
+  AND lower(btrim(e.patient_name)) <> lower(btrim(u.display_name))
+  AND NOT EXISTS (
+      SELECT 1 FROM followup_contacts c
+      WHERE c.org_id = e.org_id AND c.agent_id = e.agent_id AND c.person_user_id = e.user_id
+  );
+INSERT INTO users (id, org_id, email, display_name, auth_provider)
+SELECT DISTINCT ON (person_id) person_id, org_id,
+       'person-' || person_id || '@' || org_id || '.people.surogate.local', name, 'external'
+FROM _followed_people
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO agent_users (id, org_id, agent_id, user_id, source, created_at)
+SELECT DISTINCT ON (person_id) md5('agent-user:' || person_id)::uuid, org_id, agent_id,
+       person_id, 'manual', now()
+FROM _followed_people
+ON CONFLICT (org_id, agent_id, user_id) DO NOTHING;
+INSERT INTO followup_contacts (id, org_id, agent_id, person_user_id, contact_user_id,
+                               relation, status, created_by, created_at)
+SELECT DISTINCT ON (person_id) md5('contact:' || person_id)::uuid, org_id, agent_id,
+       person_id, contact_id, relation, 'confirmed', 'migration', now()
+FROM _followed_people
+ON CONFLICT ON CONSTRAINT uq_followup_contact DO NOTHING;
+-- The relative's steps of that journey were about the person.
+UPDATE program_invitations pi SET person_user_id = f.person_id
+FROM _followed_people f, program_schedules ps
+WHERE pi.org_id = f.org_id AND pi.agent_id = f.agent_id AND pi.user_id = f.contact_id
+  AND pi.person_user_id IS NULL AND ps.program_id = pi.program_id
+  AND ps.config->'audience'->>'protocol' = f.protocol;
+-- So were the escalations raised in those steps, and, when the relative
+-- follows nobody else and is not followed themselves, every other one.
+UPDATE escalations x SET user_id = f.person_id
+FROM _followed_people f
+WHERE x.org_id = f.org_id AND x.agent_id = f.agent_id AND x.user_id = f.contact_id
+  AND (
+      x.program_id IN (
+          SELECT ps.program_id FROM program_schedules ps
+          WHERE ps.org_id = f.org_id AND ps.agent_id = f.agent_id
+            AND ps.config->'audience'->>'protocol' = f.protocol
+      )
+      OR (
+          (SELECT count(DISTINCT g.person_id) FROM _followed_people g
+           WHERE g.org_id = f.org_id AND g.agent_id = f.agent_id AND g.contact_id = f.contact_id) = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM followup_enrollments o
+              WHERE o.org_id = f.org_id AND o.agent_id = f.agent_id AND o.user_id = f.contact_id
+                AND o.id NOT IN (SELECT enrollment_id FROM _followed_people)
+          )
+      )
+  );
+UPDATE followup_enrollments e SET user_id = f.person_id
+FROM _followed_people f
+WHERE e.id = f.enrollment_id;
+DROP TABLE _followed_people;
+
+-- ── the agent writes each step: when it was opened, woken, and held ──
+ALTER TABLE program_invitations
+    ADD COLUMN IF NOT EXISTS opened_at timestamptz,
+    ADD COLUMN IF NOT EXISTS woken_at timestamptz,
+    ADD COLUMN IF NOT EXISTS deadline_woken_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_program_invitations_woken
+    ON program_invitations (session_id) WHERE woken_at IS NOT NULL AND outbox_id IS NULL;
+ALTER TABLE outreach_messages
+    ADD COLUMN IF NOT EXISTS not_before timestamptz;

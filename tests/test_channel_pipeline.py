@@ -49,7 +49,7 @@ class _FakeSessionStore:
         self._next_session_id: UUID = uuid4()
 
     async def emit_event(
-        self, session_id: UUID, event_type: EventType, data: dict,
+        self, session_id: UUID, event_type: EventType, data: dict, **_: Any,
     ) -> None:
         self.events.append((session_id, event_type, data))
 
@@ -1272,9 +1272,60 @@ async def test_allowance_gate_blocks_exhausted_channel_user():
         msg, routing=_make_routing(), config=_make_config(), deps=deps,
     )
     assert result == InboundOutcome.DROPPED
-    # Blocked BEFORE emit/enqueue: no turn runs.
+    # No turn runs, but the message is kept (held) for when they have access.
     assert deps._enqueued == []
-    assert not any(e[1] == EventType.USER_MESSAGE for e in deps.session_store.events)
+    kept = [e for e in deps.session_store.events if e[1] == EventType.USER_MESSAGE]
+    assert len(kept) == 1
+    assert kept[0][2]["held"] == "allowance_exhausted"
+    assert kept[0][2]["content"] == msg.text
+
+
+def _fresh_conversation(store) -> None:
+    """A conversation with no message yet: the AI disclosure is owed."""
+    from types import SimpleNamespace as _NS
+
+    async def _get_session(session_id):
+        return _NS(message_count=0)
+
+    async def _has_event(*args, **kwargs):
+        return False
+
+    store.get_session = _get_session
+    store.has_event = _has_event
+
+
+@pytest.mark.asyncio
+async def test_plan_refusal_comes_before_the_ai_disclosure():
+    """A stranger refused for want of a plan is not shown the disclosure
+    (nothing of the agent's is going to answer them yet)."""
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+
+    msg = _make_msg(is_dm=True, ts="allow.disc")
+    deps = _make_deps()
+    _fresh_conversation(deps.session_store)
+    deps.platform_client = _FakeAllowanceClient(
+        error=AllowanceExhaustedError("subscription_required"),
+    )
+
+    async def _rc(agent_id):
+        return {
+            "end_user_token_allowance": 1000,
+            "commerce_buy_url": "https://buy.example/agent",
+            "governance": {"transparency": {"enabled": True, "text": "I am an AI."}},
+        }
+
+    deps.runtime_config = _rc
+    nudges: list[str] = []
+
+    async def _nudge(session_id, m, text):
+        nudges.append(text)
+
+    deps.input_nudge = _nudge
+    await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert nudges and all("I am an AI." not in n for n in nudges)
+    assert "https://buy.example/agent" in nudges[0]
 
 
 @pytest.mark.asyncio
@@ -1394,3 +1445,37 @@ async def test_allowance_gate_forwards_the_channel_and_blocks_excluded():
     assert result == InboundOutcome.DROPPED
     assert nudges and "doesn't include this channel" in nudges[0]
     assert "https://buy.example/agent" in nudges[0]
+
+
+@pytest.mark.asyncio
+async def test_let_through_the_sender_meets_the_ai_disclosure():
+    msg = _make_msg(is_dm=True, ts="allow.disc.ok")
+    deps = _make_deps()
+    _fresh_conversation(deps.session_store)
+    deps.platform_client = _FakeAllowanceClient(
+        receipt={"allowance_id": "al-1", "reserved_tokens": 7, "reservation_id": "r-1"},
+    )
+
+    async def _rc(agent_id):
+        return {
+            "end_user_token_allowance": 1000,
+            "governance": {"transparency": {"enabled": True, "text": "I am an AI."}},
+        }
+
+    deps.runtime_config = _rc
+
+    async def _append(session_id, key, value):
+        return None
+
+    deps.session_store.append_session_config_list = _append
+    nudges: list[str] = []
+
+    async def _nudge(session_id, m, text):
+        nudges.append(text)
+
+    deps.input_nudge = _nudge
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert result == InboundOutcome.PROCESSED
+    assert "I am an AI." in nudges

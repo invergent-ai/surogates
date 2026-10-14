@@ -32,6 +32,7 @@ from surogates.channels.dispatcher import (
 from surogates.channels.identity import (
     get_or_create_channel_session,
     make_cached_identity_resolver,
+    revive_channel_session,
     resolve_real_identity,
 )
 from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
@@ -141,7 +142,7 @@ def _make_deps_factory(
         /workspace and inbound attachments are skipped.
         """
         return await get_or_create_channel_session(
-            *args, storage=storage, settings=settings, **kwargs
+            *args, storage=storage, settings=settings, resume=False, **kwargs
         )
 
     def _link_prompt(code: str, base: str = "") -> str:
@@ -208,6 +209,16 @@ def _make_deps_factory(
                     kind, msg.platform_user_id,
                 )
             return bool(delivered)
+
+        async def _private_sender(msg: Any, text: str, buttons: list[str]) -> bool:
+            """Privately ask the sender something, with one-tap answers."""
+            send_private = getattr(platform, "send_private", None)
+            if send_private is None:
+                return False
+            return bool(await send_private(
+                creds, sender_id=msg.platform_user_id, chat_id=msg.identifier,
+                is_dm=msg.is_dm, text=text, buttons=buttons,
+            ))
 
         async def _progress(session_id: Any, channel_id: str, thread_ts: Any) -> None:
             post = getattr(platform, "post_thinking_placeholder", None)
@@ -323,6 +334,21 @@ def _make_deps_factory(
                 text=text,
             )
 
+        async def _keep_typing(session_id: Any, msg: Any) -> None:
+            keep = getattr(platform, "keep_typing", None)
+            if keep is None:
+                return
+
+            # The worker holds the lease for the whole wake, including while
+            # ask_user_question waits, so a pending question also ends the turn.
+            async def _turn_active() -> bool:
+                return (
+                    await session_store.has_live_lease(session_id)
+                    and await _pending_input(session_id) is None
+                )
+
+            keep(msg, creds=creds, turn_active=_turn_active)
+
         return PipelineDeps(
             session_store=session_store,
             redis=redis,
@@ -335,13 +361,16 @@ def _make_deps_factory(
             follow_enabled=_resolve_follow,
             pairing=pairing,
             pairing_sender=_pairing_sender,
+            private_sender=_private_sender,
             backfill=_backfill,
             progress=_progress,
             attachments=_attachments,
             pending_input=_pending_input,
             input_nudge=_input_nudge,
+            keep_typing=_keep_typing,
             platform_client=platform_client,
             runtime_config=runtime_config,
+            revive_session=revive_channel_session,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into
@@ -595,6 +624,14 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
             name=f"channel-delivery-{platform.kind}",
         )
         tasks.append(task)
+
+    # Web chat and integrators' apps: no platform webhook, written first all the same.
+    from surogates.channels.outbound import start_loops
+    tasks += start_loops(
+        settings=settings, session_factory=sf, session_store=session_store,
+        delivery=delivery_service,
+        kinds=("web", "api") if kind is None else (kind,),
+    )
 
     reconciler_task = asyncio.create_task(
         reconciler.run(redis),

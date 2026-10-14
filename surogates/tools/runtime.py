@@ -55,6 +55,8 @@ class ToolRuntime:
             channel_messages,
             checkin,
             followup,
+            send_form,
+            team,
             voice_call,
             coding_agent,
             coordinator,
@@ -120,8 +122,10 @@ class ToolRuntime:
             channel_files,  # fetch_channel_file (pull a shared channel file)
             channel_messages,  # fetch_channel_messages (read recent channel messages)
             whiteboard,  # whiteboard_draw (canvas chat surface)
-            checkin,  # checkin_outcome (Program check-ins)
+            checkin,  # step_outcome (journey steps)
             followup,  # followup_enroll/update/status, escalate
+            team,  # team_* (only for the agent's alert recipients)
+            send_form,  # send_form (a WhatsApp Flow, for agents with published forms)
             voice_call,  # end_call (a phone call's agent hangs up)
         ]
 

@@ -11,7 +11,9 @@ their blood pressure at 03:00.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime, time, timedelta
+from itertools import islice
 from zoneinfo import ZoneInfo
 
 _UTC = ZoneInfo("UTC")
@@ -40,8 +42,23 @@ def next_occurrences(
     *count* — possibly none — when the cadence is empty or cannot be
     satisfied within the scan window.
     """
+    return list(islice(
+        iter_occurrences(after, weekdays=weekdays, times_local=times_local, timezone=timezone),
+        count,
+    ))
+
+
+def iter_occurrences(
+    after: datetime,
+    *,
+    weekdays: list[str],
+    times_local: list[str],
+    timezone: str,
+) -> Iterator[datetime]:
+    """The fire instants strictly after *after*, in order, computed only as
+    far as they are read; see :func:`next_occurrences`."""
     if not weekdays or not times_local:
-        return []
+        return
     if after.tzinfo is None:
         after = after.replace(tzinfo=_UTC)
     else:
@@ -50,14 +67,14 @@ def next_occurrences(
     tz = ZoneInfo(timezone)
     wanted = {_WEEKDAYS[d] for d in weekdays if d in _WEEKDAYS}
     if not wanted:
-        return []
+        return
 
     parsed = sorted(
         time(int(hh), int(mm))
         for hh, _, mm in (t.partition(":") for t in times_local)
     )
 
-    found: list[datetime] = []
+    found: set[datetime] = set()
     day = after.astimezone(tz).date()
     for _ in range(_MAX_DAYS_SCANNED):
         if day.weekday() in wanted:
@@ -77,8 +94,6 @@ def next_occurrences(
                 for slot in parsed
             }):
                 if utc > after and utc not in found:
-                    found.append(utc)
-                    if len(found) == count:
-                        return found
+                    found.add(utc)
+                    yield utc
         day += timedelta(days=1)
-    return found

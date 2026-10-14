@@ -47,6 +47,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import os
 import time
 from typing import Any
 
@@ -64,6 +65,7 @@ from surogates.channels.errors import ChannelApiError
 from fastapi.responses import Response
 
 from surogates.channels.base import SendResult
+from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.channel_backfill import (
     BackfillLimits,
     ChannelMeta,
@@ -119,6 +121,16 @@ def _slack_error_code(exc: SlackApiError) -> str:
         return resp.get("error") or ""
     except Exception:
         return ""
+
+
+#: Slack's Web API (slack_sdk wants the trailing slash).  Overridable only so a
+#: local stack can run end to end against a stand-in server; production never
+#: sets it.
+SLACK_API_BASE = os.environ.get("SUROGATES_SLACK_API_BASE") or "https://slack.com/api/"
+
+
+def web_client(bot_token: str) -> AsyncWebClient:
+    return AsyncWebClient(token=bot_token, base_url=SLACK_API_BASE)
 
 
 # Replay-guard window in seconds (±5 minutes matches Slack's recommendation).
@@ -493,6 +505,10 @@ class SlackPlatform:
 
     kind = "slack"
     supports_edit = True
+    capabilities = ChannelCapabilities(
+        can_initiate=True, opener="text", buttons=True, identity="member",
+        label="Slack",
+    )
 
     # Slack rejects chat.postMessage over ~40k chars (msg_too_long); stay
     # under it with headroom for Slack's own escaping.
@@ -603,7 +619,7 @@ class SlackPlatform:
         singletons so no explicit close is needed.
         """
         if bot_token not in self._clients:
-            self._clients[bot_token] = AsyncWebClient(token=bot_token)
+            self._clients[bot_token] = web_client(bot_token)
         return self._clients[bot_token]
 
     async def _resolve_bot_user_id(self, bot_token: str) -> str:
@@ -793,10 +809,12 @@ class SlackPlatform:
         from fastapi.responses import JSONResponse
         from surogates.channels.platforms.slack_interactive import (
             ANSWER_ACTION_ID,
+            CHOICE_ACTION_PREFIX,
             MODAL_CALLBACK_ID,
             ModalErrors,
             build_answered_blocks,
             build_question_modal,
+            parse_choice,
             parse_modal_submission,
         )
         from surogates.session import interactive_input
@@ -811,6 +829,39 @@ class SlackPlatform:
             return Response(status_code=200)
 
         payload_type = payload.get("type")
+        tapped = next(
+            (a for a in payload.get("actions", [])
+             if str(a.get("action_id") or "").startswith(CHOICE_ACTION_PREFIX)),
+            None,
+        ) if payload_type == "block_actions" else None
+        if tapped is not None:
+            # One tap answers it: no form, and the message turns into the answer.
+            try:
+                ref = json.loads(tapped.get("value") or "{}")
+                pending = await interactive_input.pending_input_for_session(
+                    deps.session_store,
+                    session_id=ref.get("session_id") or "",
+                    tool_call_id=ref.get("tool_call_id") or "",
+                )
+                parsed = parse_choice(tapped, pending["questions"]) if pending else None
+                if parsed is None:
+                    return Response(status_code=200)
+                session_id, tool_call_id, responses = parsed
+                resolved = await interactive_input.resolve_input_response(
+                    deps.session_store, session_id=session_id,
+                    tool_call_id=pending["tool_call_id"] or tool_call_id, responses=responses,
+                )
+                channel_id = (payload.get("channel") or {}).get("id") or ""
+                message_ts = ((payload.get("container") or {}).get("message_ts")
+                              or (payload.get("message") or {}).get("ts") or "")
+                if resolved and channel_id and message_ts:
+                    answered_text, answered_blocks = build_answered_blocks(responses)
+                    await self._get_client((creds or {}).get("bot_token") or "").chat_update(
+                        channel=channel_id, ts=message_ts, text=answered_text, blocks=answered_blocks,
+                    )
+            except Exception:
+                logger.warning("[SlackPlatform] /interact choice failed", exc_info=True)
+            return Response(status_code=200)
         if payload_type == "block_actions":
             action = next(
                 (
@@ -1064,7 +1115,8 @@ class SlackPlatform:
             return None
         from urllib.parse import urlparse
         host = (urlparse(url).hostname or "").lower()
-        if host != "slack.com" and not host.endswith(".slack.com"):
+        stand_in = urlparse(SLACK_API_BASE).hostname if os.environ.get("SUROGATES_SLACK_API_BASE") else None
+        if host != "slack.com" and not host.endswith(".slack.com") and host != stand_in:
             logger.warning("[SlackPlatform] download_file refusing non-slack host: %s", host)
             return None
         try:
