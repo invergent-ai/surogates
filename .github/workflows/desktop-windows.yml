@@ -225,8 +225,8 @@ jobs:
 
   # What vm-boot boots, which nothing builds on Windows: the x64 guest's image (images/guest/), from the guest stage of
   # images/sandbox/Dockerfile, unpacked as the measurements boot it, and the agent disk, made with e2fsprogs under
-  # fakeroot, each as the release builds it, on a Linux runner. Kept a day, for this run's boot alone, and published
-  # nowhere. It gates nothing, as the boot does not.
+  # fakeroot, each as the release builds it, on a Linux runner; and the measurements' agent disk beside them. Kept a
+  # day, for this run's boot alone, and published nowhere. It gates nothing, as the boot does not.
   vm-guest:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # A cold build of the guest. This bounds the job once a runner has taken it, and not before.
@@ -294,11 +294,36 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # The measurements' agent disk, whose init also runs, as the guest's root, a probe a measurement leaves in a
+      # shared folder, and writes the kernel's own log to the console, each line with its time since the kernel's start
+      # (test/vm/darwin/measure/probe.sh, put in as macOS's prepare.sh puts it). Never the app's, so made out of dist/;
+      # last, so the boot has its image and its agent disk whatever becomes of this one.
+      - name: Make the measurements' agent disk
+        continue-on-error: true
+        working-directory: desktop
+        run: |
+          tree=$(mktemp -d) && mkdir "$tree/vm" && ln -s "$PWD/dist" "$tree/dist"
+          ln -s "$PWD/vm/agent-disk.sh" "$PWD/vm/enter-root" "$tree/vm/"
+          awk 'FNR == NR { probe = probe $0 "\n"; next } /^exec \/usr\/bin\/tini/ { printf "%s", probe } { print }' test/vm/darwin/measure/probe.sh vm/init > "$tree/vm/init"
+          chmod 755 "$tree/vm/init" && grep -q measure-probe "$tree/vm/init"
+          mkdir -p test/vm/win32/measure/probing
+          "$tree/vm/agent-disk.sh" test/vm/win32/measure/probing/agent.img
+
+      - name: Keep the measurements' agent disk for the boot
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-agent-measure-disk
+          path: desktop/test/vm/win32/measure/probing/agent.img
+          retention-days: 1
+          if-no-files-found: error
+
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
   # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
-  # takes vm-guest's image and agent disk, gives the agent disk its VHD footer, and runs the boot and requirements
+  # takes vm-guest's image and agent disks, gives the agent disk its VHD footer, and runs the boot and requirements
   # measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
-  # own words. Either way the result is kept, and the job does not fail the branch.
+  # own words. Either way the result is kept with each boot's console and Hyper-V's own events, and the job does not
+  # fail the branch.
   vm-boot:
     needs: vm-guest
     runs-on: windows-2025
@@ -347,6 +372,14 @@ jobs:
           name: desktop-agent-disk
           path: desktop/dist
 
+      # Where there is none, the boot with the kernel's log says the agent disk is missing, and the rest boot on.
+      - name: Take the measurements' agent disk
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-agent-measure-disk
+          path: desktop/test/vm/win32/measure/probing
+
       # Hyper-V opens a disk only as a VHD: the raw agent disk the release makes, made a fixed one in place by the
       # app's own code (scripts/vhd-footer.mjs), as the app's Windows layout makes it.
       - name: Give the agent disk its VHD footer
@@ -357,16 +390,45 @@ jobs:
         working-directory: desktop/native/windows
         run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
 
-      # The agent disk with its footer. The measurements give the image's disk its own, as the app's delivery does.
+      # The agent disk with its footer. The measurements give the image's disk its own, as the app's delivery does, and
+      # the measurements' agent disk too.
       - name: Try one real boot, and record what happened
         working-directory: desktop
         continue-on-error: true
         env:
           SUROGATE_VM_AGENT_DISK: ${{ github.workspace }}\desktop\dist\agent.img
+          SUROGATE_VM_PROBING_DISK: ${{ github.workspace }}\desktop\test\vm\win32\measure\probing\agent.img
         run: |
           $said = npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot 2>&1 | Out-String
           $said
           "### A real boot on a GitHub runner`n``````n$said``````" >> $env:GITHUB_STEP_SUMMARY
+
+      # Each boot's console as the guest printed it, kept beside the findings; and what Hyper-V's own logs said of the
+      # VMs while the job ran (its 40 minutes, and a margin), each event at its UTC time, to set beside each boot's
+      # "asked at".
+      - name: Say each boot's console, and Hyper-V's own events
+        if: always()
+        working-directory: desktop
+        run: |
+          $kept = "test/vm/win32/measure/out/consoles"
+          New-Item -ItemType Directory -Force $kept | Out-Null
+          $consoles = foreach ($log in Get-ChildItem "$env:TEMP\surogate-measure\*\logs\vm-console.log" -ErrorAction SilentlyContinue) {
+            $name = $log.Directory.Parent.Name
+            Copy-Item $log.FullName "$kept\$name.log"
+            "--- $name, $($log.Length) bytes, last written $($log.LastWriteTimeUtc.ToString('o'))"
+            Get-Content -Raw $log.FullName
+          }
+          $consoles = $consoles | Out-String
+          $consoles
+          "### Each boot's console`n``````n$consoles``````" >> $env:GITHUB_STEP_SUMMARY
+          $since = (Get-Date).AddMinutes(-45)
+          $logs = Get-WinEvent -ListLog 'Microsoft-Windows-Hyper-V*' -ErrorAction SilentlyContinue | Where-Object { $_.RecordCount -gt 0 } | ForEach-Object LogName
+          $events = foreach ($log in $logs) { Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -ErrorAction SilentlyContinue }
+          $events = $events | Sort-Object TimeCreated | ForEach-Object {
+            "{0} {1} {2} {3}: {4}" -f $_.TimeCreated.ToUniversalTime().ToString('HH:mm:ss.fff'), $_.LogName.Replace('Microsoft-Windows-', ''), $_.Id, $_.LevelDisplayName, ($_.Message -replace '\s+', ' ')
+          } | Out-String
+          $events
+          "### Hyper-V's own events, UTC`n``````n$events``````" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Keep what the boot found
         if: always()
