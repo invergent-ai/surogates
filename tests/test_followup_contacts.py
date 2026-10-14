@@ -766,3 +766,39 @@ async def test_a_step_outside_a_journey_uses_the_persons_latest_preference(sf, c
     chosen = await choose_channel(config, org_id=ORG, user_id=ion, enrollment=None,
                                   identity_lookup=lookup, session_factory=sf, agent_id=AGENT)
     assert chosen[0] == "telegram"
+
+
+# --- who the business covers, and people with one name ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_anyone_ever_followed_and_their_contacts_are_covered(sf, clinic):
+    doctor, _, _ = clinic
+    andrei, _ = await _user(sf, "Andrei", "40711111111")
+    ana, _ = await _user(sf, "Ana", "40722222222")
+    stranger, _ = await _user(sf, "X", "40733333333")
+    await store.upsert_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=andrei, protocol="post-op",
+                                  start_date=None, phase=None, enrolled_by="agent")
+    await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=andrei, protocol="post-op",
+                                  status="ended", status_reason="Asked to stop")
+    await store.link_contact(sf, org_id=ORG, agent_id=AGENT, person_user_id=andrei,
+                             contact_user_id=ana, relation="fiica", created_by="t")
+    covered = lambda uid: store.covered_by_business(sf, org_id=ORG, agent_id=AGENT, user_id=uid)  # noqa: E731
+    assert await covered(andrei) and await covered(ana) and await covered(doctor)
+    assert not await covered(stranger)
+
+
+@pytest.mark.asyncio
+async def test_two_people_with_one_name_stay_two_in_the_overview(sf, clinic):
+    _doctor, doctor_session, _ = clinic
+    first, s1 = await _user(sf, "Maria Popescu", "40711111111")
+    second, s2 = await _user(sf, "Maria Popescu", "40722222222")
+    for uid in (first, second):
+        await store.upsert_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=uid, protocol="post-op",
+                                      start_date=date.today(), phase=None, enrolled_by="agent",
+                                      patient_name="Maria Popescu")
+    for session in (s1, s2):
+        await followup.handle_escalate({"reason": "leșin", "severity": "red"}, **_kw(sf, session))
+    result = await team.handle_team_overview({}, **_kw(sf, doctor_session))
+    assert "Maria Popescu (+40…111)" in result and "Maria Popescu (+40…222)" in result
+    assert result.count("alert ") == 2

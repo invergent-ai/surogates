@@ -432,7 +432,29 @@ async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> l
             person.contact_handles.extend(
                 [contact.display_name, contact.wa_id] if contact.wa_id else [contact.display_name]
             )
+    _disambiguate(out)
     return out
+
+
+def _disambiguate(people: list[_Person]) -> None:
+    """Two people with one name never read as one: each such label gains
+    their masked number (or a channel handle), and their id where that is
+    not enough.  Everything else is keyed by user id already."""
+    def clash() -> dict[str, list[_Person]]:
+        by_label: dict[str, list[_Person]] = {}
+        for p in people:
+            by_label.setdefault(fold_label(p.label), []).append(p)
+        return {k: v for k, v in by_label.items() if len(v) > 1}
+
+    for same in clash().values():
+        for p in same:
+            handle = next((h[0] for h in p.handles.values() if h), "")
+            mark = masked_phone(p.phone) if p.phone else (f"…{handle[-4:]}" if handle else "")
+            if mark:
+                p.label = f"{p.label} ({mark})"
+    for same in clash().values():
+        for p in same:
+            p.label = f"{p.label} #{str(p.user_id)[:6]}"
 
 
 def _senders(ctx: Any, settings: Any) -> dict[str, str]:

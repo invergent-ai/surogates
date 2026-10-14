@@ -433,6 +433,25 @@ def person_label(display_name: str | None, enrollment: Any = None, texts: Any = 
     return " · ".join(parts)
 
 
+async def covered_by_business(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID,
+) -> bool:
+    """Whether the business brought *user_id* in, so no plan or package may
+    stand between them and the agent: on its team, ever followed in one of
+    its journeys (active, paused or ended: someone whose follow-up ended can
+    still write about an emergency), or a confirmed contact of someone who
+    ever was."""
+    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    if is_team_member(settings, user_id):
+        return True
+    if await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id):
+        return True
+    for link in await contacts(session_factory, org_id=org_id, agent_id=agent_id, contact_user_id=user_id):
+        if await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=link.person_user_id):
+            return True
+    return False
+
+
 def preferred_channel(rows: Iterable[Any]) -> str | None:
     """The channel a person most recently asked for, across all their
     enrollments: the latest-updated one that names a channel."""
