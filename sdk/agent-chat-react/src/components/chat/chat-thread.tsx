@@ -64,7 +64,7 @@ import {
 import { ChatMessage } from "./chat-message";
 import { renderInlineMarkdown } from "./inline-markdown";
 import { ChatComposer } from "./chat-composer";
-import { SessionPaneCard } from "./session-pane-card";
+import type { ComposerTrayProps } from "./composer-tray";
 import { IntegrationsBand } from "../connections/integrations-band";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
@@ -89,7 +89,6 @@ import {
   EyeIcon,
   FileEditIcon,
   FileTextIcon,
-  FolderIcon,
   GlobeIcon,
   LaptopIcon,
   LibraryIcon,
@@ -147,39 +146,15 @@ interface ChatThreadProps {
   // wire their own.
   onComposerError?: (err: ChatComposerError) => void;
   /**
-   * Resources this session has produced, offered as cards above the composer.
-   * The right column starts closed, so these are how a viewer opens it.
+   * Resources this session has produced, offered as tabs at the top of the
+   * composer card. Forwarded as-is to ChatComposer.
    */
-  paneCards?: {
-    browser?: {
-      subtitle?: string;
-      thumbnail?: string | null;
-      onOpen: () => void;
-    } | null;
-    /**
-     * Files are an accordion, not a drawer: the card is the header and
-     * `panel` (the workspace) expands in place between it and the composer.
-     */
-    files?: {
-      count?: number;
-      open: boolean;
-      onToggle: () => void;
-      panel: React.ReactNode;
-    } | null;
-  };
+  paneCards?: ComposerTrayProps;
 
-  // Pane toggle wiring — forwarded to the composer's tools row. AgentChat
-  // owns the visibility state; the composer renders the buttons.
-  showBrowser?: boolean;
-  onToggleBrowser?: () => void;
-  showWorkspace?: boolean;
-  onToggleWorkspace?: () => void;
-  canShowBrowser?: boolean;
   browserProfileId?: string | null;
   onSelectBrowserProfile?: (id: string | null) => void;
   browserProfilesEnabled?: boolean;
   browserProfileLocked?: boolean;
-  canShowWorkspace?: boolean;
   // Simple/Expert view-mode toggle — also threaded into AssistantGroup
   // in B9 to gate the actual render path. When omitted, the composer
   // hides the toggle and the thread defaults to Simple internally.
@@ -1955,16 +1930,10 @@ export function ChatThread({
   onRetry,
   onComposerError,
   paneCards,
-  showBrowser = false,
-  onToggleBrowser,
-  showWorkspace = false,
-  onToggleWorkspace,
-  canShowBrowser = false,
   browserProfileId,
   onSelectBrowserProfile,
   browserProfilesEnabled = false,
   browserProfileLocked = false,
-  canShowWorkspace = false,
   viewMode = "simple",
   onViewModeChange,
   deepResearchEnabled = false,
@@ -2116,53 +2085,6 @@ export function ChatThread({
           <ResearchSourcesPanel sources={researchSources} />
         </div>
       )}
-      {(paneCards?.browser || paneCards?.files) && (
-        // Layers sliding out from behind the prompt box: each card is
-        // narrower than the one below it and rounded only on top, with a
-        // negative bottom margin so the next layer covers its flat edge. The
-        // composer is the widest and last, so the stack reads as coming out
-        // of it rather than sitting on top of it.
-        <div
-          data-testid="session-pane-cards"
-          className="flex flex-col"
-        >
-          {paneCards.browser && (
-            <SessionPaneCard
-              testId="session-pane-card-browser"
-              title="Browser"
-              icon={GlobeIcon}
-              subtitle={paneCards.browser.subtitle}
-              thumbnail={paneCards.browser.thumbnail}
-              onOpen={paneCards.browser.onOpen}
-              className="w-auto rounded-t-xl border-input border-[2px] border-b-0 -mb-[10px]"
-            />
-          )}
-          {paneCards.files && (
-            <>
-              <SessionPaneCard
-                testId="session-pane-card-files"
-                title="Files"
-                icon={FolderIcon}
-                count={paneCards.files.count}
-                expanded={paneCards.files.open}
-                onOpen={paneCards.files.onToggle}
-                className="w-auto rounded-t-xl border-input border-[2px] border-b-0 -mb-[10px]"
-              />
-              {paneCards.files.open && (
-                <div
-                  data-testid="files-accordion"
-                  // A fixed height, not content height: the workspace scrolls
-                  // inside it, and the composer must stay put when a folder
-                  // with a hundred files expands.
-                  className="-mb-[10px] flex h-72 min-h-0 flex-col overflow-hidden border border-b-0 border-line"
-                >
-                  {paneCards.files.panel}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
       <ChatComposer
         onSend={onSend}
         onStop={onStop}
@@ -2173,16 +2095,11 @@ export function ChatThread({
         placeholder={askPolicy?.placeholder}
         tokenUsage={tokenUsage}
         onComposerError={onComposerError}
-        showBrowser={showBrowser}
-        onToggleBrowser={onToggleBrowser}
-        showWorkspace={showWorkspace}
-        onToggleWorkspace={onToggleWorkspace}
-        canShowBrowser={canShowBrowser}
+        paneCards={paneCards}
         browserProfileId={browserProfileId}
         onSelectBrowserProfile={onSelectBrowserProfile}
         browserProfilesEnabled={browserProfilesEnabled}
         browserProfileLocked={browserProfileLocked}
-        canShowWorkspace={canShowWorkspace}
         viewMode={viewMode}
         onViewModeChange={onViewModeChange}
         deepResearchEnabled={deepResearchEnabled}

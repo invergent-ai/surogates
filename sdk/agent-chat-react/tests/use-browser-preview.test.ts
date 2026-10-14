@@ -27,16 +27,18 @@ afterEach(() => {
 async function mount(options: {
   getBrowserPreviewSnapshot?: (id: string) => Promise<{ src: string } | null>;
   enabled?: boolean;
-}): Promise<{ current: () => string | null }> {
-  const seen = { value: null as string | null };
+}): Promise<{ current: () => string | null; refresh: () => void }> {
+  const seen = { value: null as string | null, refresh: () => {} };
   function Probe() {
-    seen.value = useBrowserPreview({
+    const preview = useBrowserPreview({
       adapter: {
         getBrowserPreviewSnapshot: options.getBrowserPreviewSnapshot,
       } as never,
       sessionId: "s-1",
       enabled: options.enabled ?? true,
     });
+    seen.value = preview.src;
+    seen.refresh = preview.refresh;
     return null;
   }
   container = document.createElement("div");
@@ -45,7 +47,7 @@ async function mount(options: {
   await act(async () => {
     root?.render(createElement(Probe));
   });
-  return { current: () => seen.value };
+  return { current: () => seen.value, refresh: () => seen.refresh() };
 }
 
 describe("useBrowserPreview", () => {
@@ -72,6 +74,22 @@ describe("useBrowserPreview", () => {
     });
     // 15s cadence: two more refreshes inside 31s.
     expect(get.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("fetches at once when asked to refresh", async () => {
+    const get = vi.fn(async () => ({ src: "x" }));
+    const probe = await mount({ getBrowserPreviewSnapshot: get });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      probe.refresh();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Not the 15s tick: the tray's refresh button asked for it.
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it("stops polling once the endpoint says there is no browser", async () => {

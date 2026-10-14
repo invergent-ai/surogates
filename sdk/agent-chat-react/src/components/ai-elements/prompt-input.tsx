@@ -957,7 +957,7 @@ export const PromptInput = ({
               distinct keys to tailwind-merge, so a mismatched pair leaves both
               the base `rounded-none` and this `rounded-3xl` on the element and
               stylesheet order — not this file — decides which one lands. */}
-          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-4 py-2 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-data-[align=block-end]:rounded-3xl has-data-[align=block-start]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
+          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-data-[align=block-end]:rounded-3xl has-data-[align=block-start]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
             {children}
           </InputGroup>
         </BrandBeam>
@@ -1261,7 +1261,7 @@ export const PromptInputSubmit = ({
 }: PromptInputSubmitProps) => {
   const isGenerating = status === "submitted" || status === "streaming";
 
-  let Icon = <ArrowUpIcon className="size-4" />;
+  let Icon = <ArrowUpIcon className="size-5" strokeWidth={2.4} />;
 
   if (status === "submitted") {
     Icon = <Spinner />;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentChatAdapter } from "../../types";
 
 /**
@@ -33,19 +33,31 @@ interface UseBrowserPreviewOptions {
   enabled: boolean;
 }
 
+export interface BrowserPreview {
+  src: string | null;
+  /** When the shown frame arrived; null until the first one does. */
+  updatedAt: Date | null;
+  /** Asks for a frame now instead of at the next tick. */
+  refresh: () => void;
+}
+
 export function useBrowserPreview({
   adapter,
   sessionId,
   enabled,
-}: UseBrowserPreviewOptions): string | null {
-  const [src, setSrc] = useState<string | null>(null);
+}: UseBrowserPreviewOptions): BrowserPreview {
+  // The fetch time, not the snapshot's own capturedAt: that arrives as a
+  // server timestamp a browser may read in the wrong zone.
+  const [frame, setFrame] = useState<{ src: string; at: Date } | null>(null);
   // Keeps the effect from re-subscribing when the adapter identity changes.
   const adapterRef = useRef(adapter);
   adapterRef.current = adapter;
+  const refreshRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!enabled || !sessionId) {
-      setSrc(null);
+      setFrame(null);
+      refreshRef.current = () => {};
       return;
     }
     let cancelled = false;
@@ -70,7 +82,7 @@ export function useBrowserPreview({
         failures = 0;
         // Keep the last good frame otherwise: blanking the card on a bad
         // refresh is worse than showing a slightly stale page.
-        if (snapshot.src) setSrc(snapshot.src);
+        if (snapshot.src) setFrame({ src: snapshot.src, at: new Date() });
       } catch {
         if (cancelled) return;
         failures += 1;
@@ -82,11 +94,14 @@ export function useBrowserPreview({
 
     void refresh();
     timer = window.setInterval(() => void refresh(), POLL_MS);
+    refreshRef.current = () => void refresh();
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      refreshRef.current = () => {};
     };
   }, [enabled, sessionId]);
 
-  return src;
+  const refreshNow = useCallback(() => refreshRef.current(), []);
+  return { src: frame?.src ?? null, updatedAt: frame?.at ?? null, refresh: refreshNow };
 }

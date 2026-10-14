@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// The composer's expert-mode buttons each open the shared command
+// The composer's menu toggles each open the shared command
 // palette in a single scope: Commands -> builtins only, Skills ->
 // app-provided skills only.  Searching inside the Commands popover must
 // keep that scope: typing must not pull skills into the results.
@@ -156,5 +156,38 @@ describe("Composer Commands search scope", () => {
 
     const labels = menuItems();
     expect(labels.some((l) => l.includes("/web-search"))).toBe(true);
+  });
+
+  it("closes a menu from its own toggle and switches scope from another", async () => {
+    const dom = mount(
+      <ChatComposer
+        onSend={sendFn}
+        onStop={stopFn}
+        isRunning={false}
+        viewMode="simple"
+        onViewModeChange={vi.fn()}
+      />,
+    );
+    const pressed = (label: string) =>
+      Array.from(dom.querySelectorAll("button"))
+        .find((b) => b.textContent?.trim() === label)
+        ?.getAttribute("aria-pressed");
+
+    // Simple mode has the toggles too.
+    clickButton(dom, "Commands");
+    expect(commandInput().placeholder).toBe("Search commands…");
+    expect(pressed("Commands")).toBe("true");
+
+    clickButton(dom, "Skills");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(commandInput().placeholder).toBe("Search skills…");
+    expect(pressed("Commands")).toBe("false");
+    expect(pressed("Skills")).toBe("true");
+
+    clickButton(dom, "Skills");
+    expect(document.querySelector("[data-slot='command-input']")).toBeNull();
+    expect(pressed("Skills")).toBe("false");
   });
 });

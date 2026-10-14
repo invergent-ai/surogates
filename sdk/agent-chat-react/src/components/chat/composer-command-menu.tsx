@@ -50,10 +50,10 @@ interface ComposerCommandMenuProps {
   onEscapeDismiss: () => void;
 }
 
-// Shared row geometry: a fixed mono-name column + a flexible description,
-// matching the design's 120px / fill split.
-const ROW_CLASS =
-  "grid grid-cols-[120px_1fr] items-baseline gap-3 rounded-md px-3 py-[9px] data-[selected=true]:bg-foreground/[0.06] [&_svg]:hidden";
+// Shared row geometry: a fixed mono-name column + a flexible description.
+// A phone gives the name column less, or the description gets nothing.
+const NAME_COLUMNS = "grid-cols-[120px_minmax(0,1fr)] sm:grid-cols-[200px_minmax(0,1fr)]";
+const ROW_CLASS = `grid ${NAME_COLUMNS} min-h-11 items-center gap-4 rounded-[10px] px-3 py-1.5 data-[selected=true]:bg-accent [&_svg]:hidden`;
 
 export function ComposerCommandMenu({
   menuMode,
@@ -83,9 +83,18 @@ export function ComposerCommandMenu({
     <PopoverContent
       side="top"
       align="start"
-      className="overflow-hidden rounded-xl p-0"
+      sideOffset={8}
+      className="overflow-hidden rounded-[20px] border border-input bg-card p-0 shadow-lg"
       style={{ width: "var(--radix-popover-trigger-width)" }}
       onCloseAutoFocus={(e) => e.preventDefault()}
+      // The toolbar's menu toggles sit outside this popup. Left to Radix, a
+      // press on one would close the menu and its click open it again, so a
+      // toggle could never close its own menu or switch it to another scope.
+      onInteractOutside={(e) => {
+        if ((e.target as Element | null)?.closest?.("[data-composer-menu-toggle]")) {
+          e.preventDefault();
+        }
+      }}
       onEscapeKeyDown={() => {
         // Escape is the canonical "back out of the popup, keep typing in
         // the chat" gesture.  Click-outside is deliberately NOT routed
@@ -101,30 +110,33 @@ export function ComposerCommandMenu({
         matches) and handles arrow keys / Enter / scroll-into-view itself.
         In the controlled modes the input mirrors the textarea so the chat
         input still reflects the query and sending the message still works.
+        Keyed by scope: a toggle can switch the open menu to another one,
+        and the search typed for commands means nothing in the skills list.
       */}
-      <Command>
+      <Command key={menuMode}>
         {/* ── Search header ─────────────────────────────────────────── */}
-        <div className="flex items-center gap-2.5 px-4 py-[13px]">
-          <SearchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        <div className="flex h-14 items-center gap-3 border-b border-border px-4.5">
+          <SearchIcon className="size-4.5 shrink-0 text-muted-foreground" />
           <CommandPrimitive.Input
             data-slot="command-input"
             placeholder={SEARCH_PLACEHOLDER[menuMode]}
-            className="min-w-0 flex-1 bg-transparent text-[13.5px] text-foreground outline-hidden placeholder:text-muted-foreground"
+            className="h-10 min-w-0 flex-1 bg-transparent text-base text-foreground outline-hidden placeholder:text-muted-foreground"
             {...(controlledSearch
               ? { value: searchQuery, onValueChange: onSearchChange }
               : {})}
           />
-          <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+          <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground max-sm:hidden">
             {SEARCH_HINT[menuMode]}
           </span>
         </div>
-        <div className="h-px w-full bg-foreground/[0.07]" />
 
         {/* ── Body ──────────────────────────────────────────────────── */}
         {skillsUnattached ? (
           <SkillsEmptyState />
         ) : (
-          <CommandList className="p-2">
+          // A fixed height, not content height: the popup must not jump as
+          // the search narrows the list.
+          <CommandList className="h-66 max-h-none px-2.5 py-2">
             {/*
               While skills are still being fetched ``adapterCommands`` is
               empty, so cmdk would flash its empty message until the
@@ -147,7 +159,7 @@ export function ComposerCommandMenu({
               [0, 1, 2].map((i) => (
                 <div
                   key={`skill-skeleton-${i}`}
-                  className="grid grid-cols-[120px_1fr] items-baseline gap-3 px-3 py-[9px]"
+                  className={`grid ${NAME_COLUMNS} min-h-11 items-center gap-4 px-3`}
                   aria-hidden="true"
                 >
                   <Skeleton className="h-4 w-20" />
@@ -218,7 +230,7 @@ function MenuRow({
         className="inline-flex min-w-0 max-w-full items-center gap-1.5"
         title={cmd.label}
       >
-        <span className="truncate font-mono text-[13px] font-medium text-amber-500">
+        <span className="truncate font-mono text-sm font-medium text-amber-500 dark:text-amber-400">
           {cmd.label}
         </span>
         {badge && (
@@ -231,7 +243,7 @@ function MenuRow({
         )}
       </span>
       <span
-        className="min-w-0 truncate text-[12.5px] text-muted-foreground"
+        className="min-w-0 truncate text-sm text-muted-foreground"
         title={cmd.description}
       >
         {cmd.description}
