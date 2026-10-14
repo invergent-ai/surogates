@@ -129,6 +129,17 @@ foreach ($folder in $Installed, (Join-Path $Installed 'service'), (Join-Path $In
   Check "only administrators write $folder" ($writers.Count -eq 0) ($writers -join '; ')
 }
 
+# The agent disk, a fixed VHD where the service lets a VM read it, with no access rule of its own: each VM reads it as
+# Users do, through the install folder's.
+$disk = Join-Path $Installed 'resources\vm\agent.vhd'
+$cookie = if (Test-Path $disk) { $bytes = [IO.File]::ReadAllBytes($disk); [Text.Encoding]::ASCII.GetString($bytes, $bytes.Length - 512, 8) } else { '' }
+Check 'the agent disk is a fixed VHD at resources\vm\agent.vhd' ($cookie -eq 'conectix') $cookie
+$diskAcl = if (Test-Path $disk) { Get-Acl $disk } else { $null }
+$own = @(if ($diskAcl) { $diskAcl.Access | Where-Object { -not $_.IsInherited } | ForEach-Object { "$($_.IdentityReference) $($_.FileSystemRights)" } } else { 'missing' })
+Check 'the agent disk has no access rule of its own' ($own.Count -eq 0) ($own -join '; ')
+$readers = @(if ($diskAcl) { $diskAcl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -eq 'BUILTIN\Users' -and ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadData) } })
+Check 'Users read the agent disk, as each VM does' ($readers.Count -gt 0) "$(if ($diskAcl) { $diskAcl.Access | Out-String })"
+
 # The service: LocalSystem, demand start, its program the installed one; interactive users may start it and do no more;
 # started again once if it fails; not running.
 $config = sc.exe qc SurogateVM | Out-String

@@ -45,6 +45,8 @@ export interface Backend {
   socketMax: number | null;
   /** The sessions disk's file name, in the data folder's vm folder: a raw file the guest formats, or a VHDX, as Hyper-V attaches a disk. */
   sessionsFile: string;
+  /** The agent disk's file name, in the installed app's resources/vm: the raw disk, or a fixed VHD, as Hyper-V opens one. */
+  agentDiskFile: string;
 }
 
 const LINUX: Backend = {
@@ -60,6 +62,7 @@ const LINUX: Backend = {
   freshDoor: () => null,
   socketMax: 107,
   sessionsFile: "sessions.img",
+  agentDiskFile: "agent.img",
 };
 
 const DARWIN: Backend = {
@@ -72,6 +75,7 @@ const DARWIN: Backend = {
   freshDoor: () => null,
   socketMax: SOCKET_MAX,
   sessionsFile: "sessions.img",
+  agentDiskFile: "agent.img",
 };
 
 const WIN32: Backend = {
@@ -88,6 +92,9 @@ const WIN32: Backend = {
   socketMax: null,
   // Hyper-V attaches a VHDX; surogate-vm.exe makes it, empty and dynamic, at the first boot.
   sessionsFile: "sessions.vhdx",
+  // The installed agent disk as a fixed VHD (scripts/package-win.sh), the one file of the install the service lets a VM
+  // read, through the install folder's own ACL.
+  agentDiskFile: "agent.vhd",
 };
 
 /** The backend for *platform*: Linux's, macOS's or Windows's, or null on an OS whose backend is not built yet. */

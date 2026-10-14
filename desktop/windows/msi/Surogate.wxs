@@ -3,10 +3,12 @@
   The Windows app's MSI, built by scripts/msi-win.ps1 with the WiX Toolset v7 from the app's layout
   (scripts/package-win.sh) once its programs are signed. Per machine, into %ProgramFiles%\Surogate, which only
   administrators write and from which the app's code and every program it runs are read. It installs:
-  - the app, every file of the layout, and the Surogate VM service (surogate-service.exe), LocalSystem, started on
-    demand by the user's surogate-vm.exe, which interactive users may start and nothing more, and started again once if
-    it fails (Microsoft Learn, "ServiceInstall table", "MsiLockPermissionsEx table"; WiX's ServiceConfig); the MSI stops
-    it before it replaces or removes its files, and removes it with the app;
+  - the app, every file of the layout, with no access rule of its own: each VM reads the agent disk,
+    resources\vm\agent.vhd, through the install folder's, as Users read it;
+  - the Surogate VM service (surogate-service.exe), LocalSystem, started on demand by the user's surogate-vm.exe, which
+    interactive users may start and nothing more, and started again once if it fails (Microsoft Learn, "ServiceInstall
+    table", "MsiLockPermissionsEx table"; WiX's ServiceConfig); the MSI stops it before it replaces or removes its files,
+    and removes it with the app;
   - the surogate:// scheme, machine-wide, which starts the app with the link after the argument that ends its switches,
     as the app's own development script registers it for a user (test/win32/dev-app.ps1); the app registers nothing;
   - the Start menu's shortcut, with the app's AppUserModelID and its toast activator (src/shell/app-identity-win32.ts),

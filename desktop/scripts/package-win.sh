@@ -10,7 +10,8 @@
 #                                   dist\native\; assets\, dictionaries\, package.json at <version>, the production
 #                                   node_modules, and bin\: the app's node.exe (scripts/node.sh, as nodejs.org signed
 #                                   it) and rg.exe, which the file host runs and the MSI's firewall rules block
-#     resources\vm\                 agent.img, the agent disk given its VHD footer, and the guest image's manifest
+#     resources\vm\                 agent.vhd, the agent disk given its VHD footer, where the service lets a VM read it
+#                                   and the app names it (src/vm/backends.ts), and the guest image's manifest
 #     resources\release-keys        install.sh's release keys, as the app reads them (scripts/release-keys.mjs)
 #     bin\                          surogate-vm.exe and surogate-helper.exe, the user's side of the VM and the app's helper
 #     service\                      surogate-service.exe, the Surogate VM service, LocalSystem, which the MSI installs
@@ -84,8 +85,8 @@ rm -rf "$app/node_modules/@anthropic-ai/sandbox-runtime/vendor/srt-win"
 
 cp "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$top/bin/"
 cp "$BUILT/surogate-service.exe" "$top/service/"
-cp "$AGENT_DISK" "$top/resources/vm/agent.img"
-node scripts/vhd-footer.mjs "$top/resources/vm/agent.img"
+cp "$AGENT_DISK" "$top/resources/vm/agent.vhd"
+node scripts/vhd-footer.mjs "$top/resources/vm/agent.vhd"
 cp "$VM_MANIFEST" "$top/resources/vm/manifest.json"
 node scripts/release-keys.mjs release/install.sh "$top/resources/release-keys"
 

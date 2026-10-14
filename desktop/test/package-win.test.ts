@@ -217,8 +217,8 @@ describe.runIf(process.platform === "win32" && LAYOUT)("the Windows app's layout
 
   it("has the agent disk as a fixed VHD, its raw bytes the disk's, and the guest image's manifest", async () => {
     const given = readFileSync(process.env.SUROGATE_WIN_AGENT_DISK!);
-    const disk = at("resources", "vm", "agent.img");
-    expect(readdirSync(at("resources", "vm")).sort()).toEqual(["agent.img", "manifest.json"]);
+    const disk = at("resources", "vm", "agent.vhd");
+    expect(readdirSync(at("resources", "vm")).sort()).toEqual(["agent.vhd", "manifest.json"]);
     expect(statSync(disk).size).toBe(given.length + FOOTER_SIZE);
     expect(await endsInFooter(disk, createHash("sha256").update(given).digest("hex"))).toBe(true);
     expect(readFileSync(disk).subarray(0, given.length).equals(given)).toBe(true);
