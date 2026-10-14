@@ -536,9 +536,10 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], windows.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, windows.fetch("permissions"))
     jobs = windows.fetch("jobs")
-    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-boot shell], jobs.keys
+    assert_equal %w[unit file-host vm-probe vm-native vm-backend vm-guest vm-boot shell], jobs.keys
     jobs.each do |name, job|
-      assert_equal "windows-2025", job.fetch("runs-on"), name
+      # On Windows, x64; but for the guest that vm-boot boots, which Docker builds on Linux, as the release builds it.
+      assert_equal name == "vm-guest" ? "blacksmith-4vcpu-ubuntu-2404" : "windows-2025", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
       # A run on a branch's head runs that branch's code: no job is given a secret, in any form,
       # an Environment's or a permission of its own, a signing token's among them.
@@ -550,6 +551,9 @@ class ReleaseWorkflowTest < Minitest::Test
       # The ref it is given, checked out with no token kept for that ref's code to use, as its files are written.
       checkouts = steps.select { |step| step["uses"].to_s.start_with?("actions/checkout@") }
       assert_equal [{ "ref" => "${{ inputs.ref }}", "persist-credentials" => false }], checkouts.map { |step| step.fetch("with") }, name
+      # Git for Windows' line ends, which Linux's git leaves as they are written.
+      next if name == "vm-guest"
+
       assert_operator steps.index { |step| step["run"].to_s.include?("git config --global core.autocrlf false") }, :<, steps.index(checkouts.first), name
     end
     refute_match(/id-token/, windows.to_s)
@@ -590,7 +594,43 @@ class ReleaseWorkflowTest < Minitest::Test
     backend = jobs.fetch("vm-backend")
     refute backend.key?("continue-on-error")
     assert_equal "npx vitest run test/vm-win32.test.ts", backend.fetch("steps").last.fetch("run").strip
-    assert_equal true, jobs.fetch("vm-boot").fetch("continue-on-error")
+    # The real boot never gates, nor does the build of what it boots: the x64 guest's image, unpacked as the
+    # measurements boot it, and the agent disk, each built on Linux and kept a day, for this run's boot alone.
+    guest = jobs.fetch("vm-guest")
+    assert_equal true, guest.fetch("continue-on-error")
+    assert_operator guest.fetch("timeout-minutes"), :<=, 90
+    guest_runs = guest.fetch("steps").map { |step| step["run"].to_s.strip }
+    assert_includes guest_runs, "images/guest/build.sh --arch amd64 images/guest/out"
+    assert_includes guest_runs, "npm run agent-disk"
+    kept = jobs.to_h { |name, job| [name, job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.map { |step| step.fetch("with") }] }
+    assert_equal [
+      { "name" => "desktop-guest-amd64", "path" => "images/guest/out/initrd\nimages/guest/out/rootfs.img\nimages/guest/out/vmlinuz\nimages/guest/out/manifest.json\n", "retention-days" => 1, "if-no-files-found" => "error" },
+      { "name" => "desktop-agent-disk", "path" => "desktop/dist/agent.img", "retention-days" => 1, "if-no-files-found" => "error" },
+    ], kept.fetch("vm-guest")
+    boot = jobs.fetch("vm-boot")
+    assert_equal true, boot.fetch("continue-on-error")
+    assert_equal "vm-guest", boot.fetch("needs")
+    assert_equal %w[desktop-win-vm-boot], kept.fetch("vm-boot").map { |with| with.fetch("name") }
+    assert_equal({ "vm-guest" => 2, "vm-boot" => 1 }, kept.reject { |_, withs| withs.empty? }.transform_values(&:length))
+    # Taken from this run alone, by no token, before the measurement that boots them.
+    steps = boot.fetch("steps")
+    taken = steps.select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-guest-amd64", "path" => "images/guest/out" }, { "name" => "desktop-agent-disk", "path" => "desktop/dist" }], taken.map { |step| step.fetch("with") }
+    measured = steps.index { |step| step["run"].to_s.include?("npx vitest run -c test/vm/win32/measure/vitest.config.ts requirements boot") }
+    refute_nil measured
+    taken.each { |step| assert_operator steps.index(step), :<, measured }
+    assert_equal '${{ github.workspace }}\desktop\dist\agent.img', steps[measured].fetch("env").fetch("SUROGATE_VM_AGENT_DISK")
+    jobs.each do |name, job|
+      next if name == "vm-boot"
+
+      refute(job.fetch("steps").any? { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }, "#{name} takes an artifact")
+    end
+    jobs.each_value do |job|
+      job.fetch("steps").each do |step|
+        refute step.fetch("with", {}).key?("overwrite"), "#{step["name"]} overwrites an artifact"
+        refute_match(/upload-artifact|download-artifact|gh run download|actions\/artifacts/, step["run"].to_s, "#{step["name"]} keeps or takes an artifact by hand")
+      end
+    end
   end
 
   def test_the_arm64_guest_is_built_and_tested_by_hand_on_an_arm64_runner_and_holds_nothing_to_leak
@@ -743,7 +783,8 @@ class ReleaseWorkflowTest < Minitest::Test
         "vm-probe" => ["0f4d9654808221f2", %w[8e0c7ce31c19bfe2 4a90b485a7208e36 3509e4e1565f84e3 bc70f17873d318df]],
         "vm-native" => ["2e44d386fc90b194", %w[fff07e32632a765a 4a90b485a7208e36 ab9ce27f59b58a83 6241cbfd200cc438]],
         "vm-backend" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 a328fdb9e026d84e e222861c9a8894a5]],
-        "vm-boot" => ["61fe7ddc5fb5c138", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 24591223ab9a9cbb d1980ca93217776e 1edc8d7d3216b9d8]],
+        "vm-guest" => ["ab2559772a48cb7e", %w[4a90b485a7208e36 d2e7366771aefc4f ddc9ff3ebe1d8351 0671721aededeb3b 18d2126a5450e6bd 06af0ce2143d3c1f 8c986439d5d86488 a6aeb1f05887979b 09d5e59cd91883c6 e65248e95c654f75]],
+        "vm-boot" => ["34f7796e82983970", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 0e63e61abc7fc19f ddc9ff3ebe1d8351 d921347b8e2d30be 535e74b2af1d7815 ee88c8a9aa9b67f9 24591223ab9a9cbb dc267d2ae84ae219 1edc8d7d3216b9d8]],
         "shell" => ["bf7e4c284f3ad2df", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 9e6fa2afc24938a3 a3172b7f07aad5c1 7dfd80c81a4c4e52 a7883cf5bcfc7d86 65a1d50c892788ed b0a9f1fb55ecc76d b6744625d7d1a184]],
       },
       "release.yml" => {
@@ -813,7 +854,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal %w[desktop-guest-arm64.yml desktop-macos.yml desktop-windows.yml release.yml update-images.yml], run.keys
     assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-guest-arm64.yml").uniq.sort
     assert_equal %w[actions/checkout actions/setup-node], run.fetch("desktop-macos.yml").uniq.sort
-    assert_equal %w[actions/checkout actions/setup-node actions/upload-artifact], run.fetch("desktop-windows.yml").uniq.sort
+    assert_equal %w[actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact], run.fetch("desktop-windows.yml").uniq.sort
     assert_equal %w[
       actions/checkout actions/download-artifact actions/setup-node actions/upload-artifact astral-sh/setup-uv docker/build-push-action
       docker/login-action docker/setup-buildx-action pnpm/action-setup softprops/action-gh-release
