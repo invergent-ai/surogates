@@ -522,6 +522,29 @@ class PlatformClient:
             f"/api/agents/agents/{agent_id}/commerce/checkout", body,
         )
 
+    async def commerce_free_plan(
+        self,
+        agent_id: str,
+        *,
+        firebase_uid: str,
+        offer_id: str,
+        email: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Put the user on the agent's Free plan (no card, no Stripe).
+
+        Returns ``{"subscription_status", "current_period_end",
+        "period_token_remaining"}``; refusals surface like
+        :meth:`commerce_checkout`'s."""
+        body: dict = {"firebase_uid": firebase_uid, "offer_id": offer_id}
+        if email is not None:
+            body["email"] = email
+        if name is not None:
+            body["name"] = name
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/commerce/free-plan", body,
+        )
+
     async def commerce_debit(
         self,
         agent_id: str,
