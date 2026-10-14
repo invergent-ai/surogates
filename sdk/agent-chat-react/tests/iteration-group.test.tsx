@@ -4,8 +4,9 @@
  *
  * - Collapsed by default when an iterationSummary is attached; only the
  *   summary line + status dot show.
- * - Click expands the row to reveal the underlying timeline (reasoning
- *   + tool entries) using the existing Expert-mode rendering helpers.
+ * - Click expands the row to what its tools returned: their output, or
+ *   a failure's code and message. A row with nothing returned does not
+ *   expand at all.
  * - Live placeholders ("Thinking..." / "Working (N tools)") replace the
  *   summary line while the iteration is still streaming.
  * - Permanently expanded fallback when the iteration is complete but no
@@ -80,8 +81,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Rework hero paragraph");
@@ -89,7 +88,7 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("long internal reasoning text");
   });
 
-  it("expands to reveal reasoning + tool entries when the row is clicked", () => {
+  it("expands to what the command's tools returned, without reasoning or a Done line", () => {
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
@@ -100,15 +99,21 @@ describe("IterationGroup", () => {
         startedAt: "",
         endedAt: "",
       },
+      reasoning: "long internal reasoning text",
+      reasoningTokens: 2500,
       toolCalls: [
-        { id: "c1", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
+        {
+          id: "c1",
+          toolName: "patch",
+          args: "{\"path\":\"x.html\"}",
+          status: "complete",
+          result: JSON.stringify({ success: true, output: "Applied 1 hunk to x.html" }),
+        },
       ],
     });
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     const trigger = dom.querySelector("button");
@@ -116,10 +121,32 @@ describe("IterationGroup", () => {
     act(() => {
       trigger!.click();
     });
-    // The condensed row label (verb + path) is now visible.
-    expect(dom.textContent).toContain("Edited x.html");
-    // The "Done" footer marks the iteration as complete.
-    expect(dom.textContent).toContain("Done");
+    expect(dom.textContent).toContain("Applied 1 hunk to x.html");
+    expect(dom.textContent).not.toContain("Thought");
+    expect(dom.textContent).not.toContain("Done");
+    expect(dom.innerHTML).not.toContain("long internal reasoning text");
+  });
+
+  it("expands a failed command to its error code and message", () => {
+    const message = buildMessage({
+      iterationSummary: {
+        iterationIndex: 0, summary: "Editor unreachable, document edit failed",
+        toolCallIds: [], startedAt: "", endedAt: "",
+      },
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "office_edit",
+          args: "{}",
+          status: "complete",
+          result: JSON.stringify({ error: "office_unreachable", message: "The live editor did not respond." }),
+        },
+      ],
+    });
+    const dom = mount(<IterationGroup message={message} />);
+    act(() => { dom.querySelector<HTMLButtonElement>("button[aria-expanded='false']")!.click(); });
+    expect(dom.textContent).toContain("office_unreachable");
+    expect(dom.textContent).toContain("The live editor did not respond.");
   });
 
   it("shows a Thinking placeholder while streaming and no tools have started", () => {
@@ -131,8 +158,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toMatch(/Thinking/i);
@@ -151,8 +176,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toMatch(/Running.+Patch.+×.+2/);
@@ -174,8 +197,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toMatch(/Running.+Patch.+x\.html/);
@@ -193,14 +214,12 @@ describe("IterationGroup", () => {
       iterationIndex: 0,
       status: "streaming",  // still tagged streaming!
       toolCalls: [
-        { id: "c1", toolName: "read_file", args: "{\"path\":\"x.html\"}", status: "complete" },
+        { id: "c1", toolName: "read_file", args: "{\"path\":\"x.html\"}", status: "complete", result: "{\"content\": \"<p>hi</p>\"}" },
       ],
     });
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     // Collapsed derived label, NOT the shimmer.
@@ -216,21 +235,18 @@ describe("IterationGroup", () => {
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        { id: "c1", toolName: "read_file", args: "{\"path\":\"x.html\"}", status: "complete" },
+        { id: "c1", toolName: "read_file", args: "{\"path\":\"x.html\"}", status: "complete", result: "{\"content\": \"<p>hi</p>\"}" },
       ],
     });
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     // Collapsed by default — derived label includes the human tool
     // name and the path detail.
     expect(dom.textContent).toContain("Read · x.html");
-    // Collapsible trigger exists so users can drill into the Expert
-    // timeline on demand.
+    // Collapsible trigger exists so users can check what it returned.
     const trigger = dom.querySelector("button[aria-expanded='false']");
     expect(trigger).not.toBeNull();
   });
@@ -248,8 +264,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Edited 3 files");
@@ -267,14 +281,12 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Used 2 tools");
   });
 
-  it("shows the reported count and hides reasoning inside expanded iterations", () => {
+  it("keeps reasoning out of a row, which has nothing to open without tool output", () => {
     const reasoning = "Private reasoning that must stay out of Simple mode.";
     const message = buildMessage({
       iterationSummary: {
@@ -285,19 +297,18 @@ describe("IterationGroup", () => {
       reasoningTokens: 2500,
     });
     const dom = mount(
-      <IterationGroup message={message} sessionId="s-1" artifactFallbacks={{}} />,
+      <IterationGroup message={message} />,
     );
-    const trigger = dom.querySelector("button[aria-expanded='false']");
-    act(() => { (trigger as HTMLButtonElement).click(); });
-    expect(dom.textContent).toContain("Thought · 2.5k tokens");
+    expect(dom.textContent).toContain("Updated the page");
+    expect(dom.querySelector("button")).toBeNull();
+    expect(dom.textContent).not.toContain("Thought");
     expect(dom.innerHTML).not.toContain(reasoning);
-    expect(dom.textContent).not.toContain("Show more");
   });
 
   it("updates the live count from reported usage without exposing the trace", () => {
     const message = buildMessage({ status: "streaming", reasoning: "Private trace" });
     const dom = mount(
-      <IterationGroup message={message} sessionId="s-1" artifactFallbacks={{}} />,
+      <IterationGroup message={message} />,
     );
     // Text alone never produces an estimated token count.
     expect(dom.textContent).toBe("Thinking...");
@@ -307,8 +318,6 @@ describe("IterationGroup", () => {
           <TooltipProvider>
             <IterationGroup
               message={{ ...message, reasoningTokens: tokens }}
-              sessionId="s-1"
-              artifactFallbacks={{}}
             />
           </TooltipProvider>,
         );
@@ -324,21 +333,19 @@ describe("IterationGroup", () => {
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete" },
+        { id: "c1", toolName: "list_files", args: "{\"path\":\".\"}", status: "complete", result: "{\"output\": \"a.txt\\nb.txt\"}" },
         { id: "c2", toolName: "search_files", args: "{}", status: "complete" },
         { id: "c3", toolName: "browser_click", args: "{}", status: "complete" },
         { id: "c4", toolName: "session_search", args: "{}", status: "complete" },
         { id: "c5", toolName: "process", args: "{}", status: "complete" },
         { id: "c6", toolName: "memory", args: "{}", status: "complete" },
         // Plus one visible tool so the iteration still renders.
-        { id: "c7", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
+        { id: "c7", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete", result: "{\"output\": \"Applied\"}" },
       ],
     });
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     // Header counts only visible tools (1: the patch).
@@ -349,13 +356,17 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("Process");
     expect(dom.textContent).not.toContain("Memory");
 
-    // Expand — only the visible tool row plus Done show in the body.
+    // Expand — every call that returned something shows its output,
+    // hidden ones included: what the agent listed is a detail worth
+    // checking. Calls that returned nothing leave no trace.
     const trigger = dom.querySelector("button[aria-expanded='false']");
     act(() => { (trigger as HTMLButtonElement).click(); });
+    expect(dom.textContent).toContain("Listed .");
+    expect(dom.textContent).toContain("a.txt");
     expect(dom.textContent).toContain("Edited x.html");
-    expect(dom.textContent).toContain("Done");
-    expect(dom.textContent).not.toContain("Listed");
+    expect(dom.textContent).toContain("Applied");
     expect(dom.textContent).not.toContain("Searched files");
+    expect(dom.textContent).not.toContain("Done");
   });
 
   it("keeps the todo tool visible in Simple mode (user-facing task management)", () => {
@@ -369,15 +380,13 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Todo");
+    // The list is the todo tool's output, so the row always opens onto it.
     const trigger = dom.querySelector("button[aria-expanded='false']");
     act(() => { (trigger as HTMLButtonElement).click(); });
     expect(dom.textContent).toContain("Todo");
-    expect(dom.textContent).toContain("Done");
   });
 
   it("hides failed tool calls in Simple mode", () => {
@@ -399,8 +408,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     // Failed first attempt is hidden, only the successful retry counts.
@@ -420,8 +427,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent ?? "").toBe("");
@@ -439,17 +444,15 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toMatch(/Thinking/);
     expect(dom.textContent).not.toContain("List Files");
   });
 
-  it("hides terminal and execute_code calls entirely in Simple mode", () => {
-    // Both header and body should drop these calls — the user wants
-    // 'what' the agent did, not 'how it shelled out to do it'.
+  it("shows a shell command's output when its row opens, never the command line", () => {
+    // The label says what the agent did; the output is the detail a
+    // reader opens the row to check. The raw command stays out.
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
@@ -468,6 +471,7 @@ describe("IterationGroup", () => {
             command: "cd __WORKSPACE__ && python3 -c 'import pandas'",
           }),
           status: "complete",
+          result: JSON.stringify({ output: "pandas 2.2.3", exit_code: 0 }),
         },
         {
           id: "c2",
@@ -480,23 +484,18 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     const trigger = dom.querySelector("button[aria-expanded='false']");
     act(() => { (trigger as HTMLButtonElement).click(); });
+    expect(dom.textContent).toContain("Investigated the workspace");
+    expect(dom.textContent).toContain("pandas 2.2.3");
+    // One call with output: no per-call label over it.
     expect(dom.textContent).not.toContain("Ran a command");
+    // execute_code returned nothing, so it leaves no trace.
     expect(dom.textContent).not.toContain("Executed code");
     expect(dom.textContent).not.toContain("python3");
     expect(dom.textContent).not.toContain("__WORKSPACE__");
-    // The header summary still renders.
-    expect(dom.textContent).toContain("Investigated the workspace");
-    // Done footer appears because there's reasoning OR a summary even
-    // when all visible tool rows are filtered out... but only if
-    // there's something else to show. With just hidden tools + a
-    // summary, the body otherwise has no rows, so showDone is false.
-    expect(dom.textContent).not.toContain("Done");
   });
 
   // ── skill_view: a deterministic row, never a model caption ──────
@@ -522,8 +521,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Reading skill copywriting");
@@ -545,8 +542,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Reading skill copywriting · tone.md");
@@ -574,8 +569,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Reading skills copywriting, social");
@@ -594,8 +587,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Reading a skill");
@@ -618,8 +609,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     // "Reading skill copywriting…" while live, "Reading skill
@@ -651,8 +640,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent).toContain("Used 2 tools");
@@ -669,8 +656,6 @@ describe("IterationGroup", () => {
     const dom = mount(
       <IterationGroup
         message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     expect(dom.textContent ?? "").toBe("");

@@ -52,7 +52,15 @@ import {
   isConversationalAsk,
 } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
-import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
+import {
+  statusColorClass,
+  effectiveStatus,
+  toolErrorSummary,
+  parseArgs,
+  readableOutput,
+  toolFailure,
+  truncate,
+} from "./tools/shared";
 import {
   cancelledToolLabel,
   deriveSingleToolLabel,
@@ -79,27 +87,10 @@ import { ThreadCards } from "./thread-cards";
 import { cn } from "../../lib/utils";
 import {
   AlertTriangle,
-  ArrowRight,
-  BookOpenIcon,
-  BotIcon,
   ChevronDown,
   ChevronRight,
-  CircleCheckIcon,
-  ClockIcon,
-  EyeIcon,
-  FileEditIcon,
-  FileTextIcon,
-  GlobeIcon,
   LaptopIcon,
-  LibraryIcon,
-  ListIcon,
   MessageSquareIcon,
-  PenLineIcon,
-  SearchIcon,
-  SparklesIcon,
-  TerminalIcon,
-  WrenchIcon,
-  type LucideIcon,
 } from "lucide-react";
 import type {
   AgentChatDeviceWaitState,
@@ -1089,11 +1080,6 @@ export interface IterationGroupProps {
   message: ChatMessageType;
   /** Only the current iteration may display a live status in the thread. */
   isActive?: boolean;
-  sessionId: string | null;
-  /** Same map AssistantGroup builds for the Expert path — see
-   *  ``ChatThread`` for the full derivation. */
-  artifactFallbacks: Record<string, string>;
-  onFileSelect?: (path: string) => void;
 }
 
 /**
@@ -1228,132 +1214,240 @@ function liveIterationLabel(message: ChatMessageType): string {
   return `Running ${running.length} tools…`;
 }
 
+
+
+// ponytail: a cap, not paging — the Expert view has the whole result.
+const OUTPUT_MAX_CHARS = 20_000;
+
 /**
- * Icon-per-tool-family mapping for Simple-mode condensed rows. Keeps
- * the expanded view visually quiet — one icon + one prose line per
- * tool call — instead of the heavy per-tool blocks the Expert view
- * uses. Falls back to a generic wrench when a new tool name lands
- * before we've added a custom row for it.
+ * The tool calls of an iteration that have something to show when its row
+ * opens: an output, a failure, or a block of their own. Hidden tools count
+ * — a command's terminal or browser call is exactly the detail a reader
+ * opens the row to check.
  */
-const _TOOL_ROW_ICON: Record<string, LucideIcon> = {
-  read_file: FileTextIcon,
-  write_file: FileTextIcon,
-  patch: FileEditIcon,
-  list_files: ListIcon,
-  search_files: SearchIcon,
-  terminal: TerminalIcon,
-  execute_code: TerminalIcon,
-  web_search: GlobeIcon,
-  web_extract: GlobeIcon,
-  web_crawl: GlobeIcon,
-  session_search: SearchIcon,
-  skill_view: BookOpenIcon,
-  skills_list: BookOpenIcon,
-  skill_manage: PenLineIcon,
-  consult_expert: SparklesIcon,
-  delegate_task: ArrowRight,
-  create_artifact: FileTextIcon,
-  memory: PenLineIcon,
-  todo: ListIcon,
-  research_memory: BookOpenIcon,
-  research_outline: ListIcon,
-  run_coding_agent: BotIcon,
-  code_run: BotIcon,
-  kb_search_pages: LibraryIcon,
-  kb_list_pages: LibraryIcon,
-  kb_read_page: LibraryIcon,
-  vision_analyze: EyeIcon,
-};
-
-function _toolRowIcon(toolName: string): LucideIcon {
-  return _TOOL_ROW_ICON[toolName] ?? WrenchIcon;
+function callsWithOutput(message: ChatMessageType): ToolCallInfo[] {
+  return (message.toolCalls ?? []).filter((tc) => {
+    if (tc.cancelled) return false;
+    if (tc.toolName === "todo" || tc.toolName === "code_run") return true;
+    return effectiveStatus(tc) === "error" || readableOutput(tc.result) !== "";
+  });
 }
 
-
-interface SimpleDetailRowProps {
-  icon: LucideIcon;
-  children: React.ReactNode;
-}
-
-function SimpleDetailRow({ icon: Icon, children }: SimpleDetailRowProps) {
-  return (
-    <div className="flex items-start gap-3 text-sm">
-      <Icon
-        className="mt-0.5 size-4 shrink-0 text-foreground/60"
-        aria-hidden
-      />
-      <div className="min-w-0 flex-1 leading-relaxed text-foreground/60">
-        {children}
+function ToolCallOutput({ tc }: { tc: ToolCallInfo }) {
+  // The todo list and a coding agent's run are their own output.
+  if (tc.toolName === "todo") return <TodoToolBlock tc={tc} />;
+  if (tc.toolName === "code_run") return <CodeRunToolBlock tc={tc} defaultOpen />;
+  if (effectiveStatus(tc) === "error") {
+    const { code, message } = toolFailure(tc.result);
+    return (
+      <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+        <p className="font-mono font-medium text-destructive">{code ?? "Failed"}</p>
+        {message && (
+          <p className="mt-1 whitespace-pre-wrap break-words text-foreground/80">
+            {truncate(message, OUTPUT_MAX_CHARS)}
+          </p>
+        )}
       </div>
+    );
+  }
+  return (
+    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-xs text-foreground/80">
+      {truncate(readableOutput(tc.result), OUTPUT_MAX_CHARS)}
+    </pre>
+  );
+}
+
+/** What a command's calls returned, each named when there is more than one. */
+function CommandOutput({ calls }: { calls: ToolCallInfo[] }) {
+  return (
+    <div className="space-y-3">
+      {calls.map((tc) => (
+        <div key={tc.id} className="space-y-1.5">
+          {calls.length > 1 && (
+            <p className="text-xs text-muted-foreground">{toolRowLabel(tc)}</p>
+          )}
+          <ToolCallOutput tc={tc} />
+        </div>
+      ))}
     </div>
   );
 }
 
 /**
- * Condensed Simple-mode expansion of an iteration: one icon + prose
- * row per tool call, plus the reasoning token count and a "Done" footer
- * when the iteration completed successfully.
- *
- * Deliberately DOES NOT reuse the Expert per-tool blocks (Patch
- * diffs, file viewers, tooltips) — Simple mode trades detail for
- * quiet. Users who want the heavy blocks switch to Expert.
+ * How Simple mode shows an iteration. A "command" is a finished one with a
+ * label and details to expand: the rows that adjacent runs are grouped from.
  */
-function IterationExpanded({
-  message,
-}: IterationGroupProps) {
-  // Internal tools and failed calls are filtered out of the visible
-  // list — the row vanishes entirely instead of exposing infra noise
-  // ("Listed .", "Searched files", failed retries, browser_* steps).
-  const calls = visibleToolCalls(message);
-  const hasReasoning = !!message.reasoning || !!message.reasoningTokens;
-  // "Done" reflects the user-visible state. If only hidden tools are
-  // still running, the iteration looks complete to the user; we don't
-  // want a stuck spinner on rows that are silent from their POV.
-  const anyVisibleRunning = calls.some((tc) => tc.status === "running");
-  const showDone =
-    !anyVisibleRunning && (calls.length > 0 || hasReasoning);
+type IterationKind = "ask" | "live" | "command" | "note" | "none";
 
-  if (!hasReasoning && calls.length === 0) return null;
+function iterationKind(message: ChatMessageType, isActive: boolean): IterationKind {
+  // ask_user_question owns its iteration's rendering in BOTH states: the
+  // question (and any quick replies) while awaiting an answer — a shimmer
+  // label alone gives the user nothing to act on and the session stalls —
+  // and the question again once answered, so the exchange stays in the
+  // thread instead of collapsing to a generic tool row that drops it.
+  if ((message.toolCalls ?? []).some((tc) => tc.toolName === "ask_user_question")) {
+    return "ask";
+  }
+  // "Live" means a tool is actively running, OR a text-only iteration is
+  // mid-stream. message.status === "streaming" alone is NOT a reliable
+  // signal — tool-using messages stay in "streaming" state across the
+  // entire rest of the turn until the next llm.response lands or the turn
+  // ends. Without this stricter check, completed iterations would stay in
+  // the shimmer state forever (user-reported bug).
+  if (isActive && isIterationLive(message)) return "live";
+  // Use the LLM summary when present, else derive a short label from the
+  // tool calls so the row stays informative without the summary_model
+  // auxiliary. Nothing to summarize and nothing to derive: no row at all —
+  // the surrounding SimpleAssistantGroup still renders the final answer.
+  const summary = message.iterationSummary?.summary;
+  if (!(summary ?? deriveIterationLabel(message))) return "none";
+  // A reasoning-only iteration has no details to expand in Simple mode.
+  if (!summary && visibleToolCalls(message).length === 0) return "note";
+  return "command";
+}
 
+function iterationLabel(message: ChatMessageType): string {
+  return message.iterationSummary?.summary ?? deriveIterationLabel(message) ?? "";
+}
+
+/** A live iteration with a tool the user can see under way: a row of its own. */
+function hasVisibleRunningTool(message: ChatMessageType): boolean {
+  return (message.toolCalls ?? []).some(
+    (tc) => tc.status === "running" && !isHiddenSimpleTool(tc),
+  );
+}
+
+interface CommandRowProps {
+  message: ChatMessageType;
+  label: string;
+  /** A row of a group's box: padded to the box, which draws its edges. */
+  boxed?: boolean;
+}
+
+/** One command: its description, opening onto what it returned. With
+ *  nothing returned yet there is nothing to open, so no chevron. */
+function CommandRow({ message, label, boxed = false }: CommandRowProps) {
+  const [open, setOpen] = useState(false);
+  const calls = callsWithOutput(message);
+  const rowClass = cn(
+    "flex w-full items-center gap-1 text-left text-sm text-muted-foreground",
+    boxed ? "py-2" : "py-0.5",
+  );
+  const text = <span className="min-w-0 truncate">{renderInlineMarkdown(label)}</span>;
   return (
-    <div className="ml-2 space-y-3 border-l border-border/40 pl-4 py-1">
-      {hasReasoning && (
-        <SimpleDetailRow icon={ClockIcon}>
-          <span>{reasoningTokenLabel(message, false)}</span>
-        </SimpleDetailRow>
+    <div className={cn(boxed && "px-3")}>
+      {calls.length === 0 ? (
+        <div className={rowClass}>{text}</div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen((prev) => !prev)}
+          aria-expanded={open}
+          className={cn(rowClass, "transition-colors hover:text-foreground")}
+        >
+          {text}
+          <ChevronRight
+            className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+            aria-hidden
+          />
+        </button>
       )}
-      {calls.map((tc) => {
-        // The todo tool's value is the visible task list itself —
-        // a generic "Updated todo list" row hides exactly what the
-        // user wants to see. Reuse the rich TodoToolBlock from the
-        // Expert renderer for this one case; everything else stays
-        // on the condensed icon + prose row.
-        if (tc.toolName === "todo") {
-          return (
-            <div key={tc.id} className="pr-1">
-              <TodoToolBlock tc={tc} />
-            </div>
-          );
-        }
-        // A coding-agent run's value is its streamed output + result —
-        // reuse the rich CodeRunToolBlock instead of a one-line row.
-        if (tc.toolName === "code_run") {
-          return (
-            <div key={tc.id} className="pr-1">
-              <CodeRunToolBlock tc={tc} defaultOpen />
-            </div>
-          );
-        }
-        return (
-          <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
-            <span>{toolRowLabel(tc)}</span>
-          </SimpleDetailRow>
-        );
-      })}
-      {showDone && (
-        <SimpleDetailRow icon={CircleCheckIcon}>
-          <span className="text-foreground">Done</span>
-        </SimpleDetailRow>
+      {open && calls.length > 0 && (
+        <div className={boxed ? "pb-3" : "pt-1"}>
+          <CommandOutput calls={calls} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Whole seconds since *since*, ticking; null without a start. */
+function useElapsedSeconds(since: Date | undefined): number | null {
+  const start = since?.getTime();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (start === undefined) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [start]);
+  return start === undefined ? null : Math.max(0, Math.floor((now - start) / 1000));
+}
+
+function formatElapsed(seconds: number): string {
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+interface CommandGroupProps {
+  /** Finished commands, oldest first. */
+  commands: ChatMessageType[];
+  /** The iteration running at the end of the run, while the run goes on. */
+  live?: ChatMessageType;
+}
+
+/**
+ * Adjacent commands under one header. While the run goes on, the header is
+ * the running iteration's label with its orb and a clock, and the box is
+ * open so the work shows as it happens; once done it reads "Ran N commands"
+ * and folds to that one line. A click on the header overrides both.
+ */
+function CommandGroup({ commands, live }: CommandGroupProps) {
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? live !== undefined;
+  // ponytail: createdAt is when this client saw the event, so a reload
+  // mid-run restarts the clock; needs the event's own timestamp to fix.
+  const elapsed = useElapsedSeconds(live ? (commands[0] ?? live).createdAt : undefined);
+  const rows = live && hasVisibleRunningTool(live) ? [...commands, live] : commands;
+  return (
+    <div className="space-y-1.5">
+      <button
+        type="button"
+        onClick={() => setChosen(!open)}
+        aria-expanded={open}
+        className="flex max-w-full items-center gap-2 py-0.5 text-left text-sm"
+      >
+        {live ? (
+          <>
+            <OrbShimmerLabel
+              state={messageOrbState(live, SIMPLE_MODE_ORB_OPTIONS)}
+              label={liveIterationLabel(live)}
+              className="min-w-0"
+            />
+            {elapsed !== null && (
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatElapsed(elapsed)}
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="text-foreground/90">Ran {commands.length} commands</span>
+        )}
+        <ChevronDown
+          className={cn(
+            "-ml-1 size-3.5 shrink-0 text-muted-foreground transition-transform",
+            !open && "-rotate-90",
+          )}
+          aria-hidden
+        />
+      </button>
+      {open && rows.length > 0 && (
+        <div
+          data-testid="command-group-rows"
+          // Under the label, not the orb, while it runs.
+          className={cn(
+            "divide-y divide-border overflow-hidden rounded-lg border border-border",
+            live && "ml-7",
+          )}
+        >
+          {rows.map((row) => (
+            <CommandRow
+              key={row.id}
+              message={row}
+              label={row === live ? liveIterationLabel(row) : iterationLabel(row)}
+              boxed
+            />
+          ))}
+        </div>
       )}
     </div>
   );
@@ -1362,23 +1456,12 @@ function IterationExpanded({
 export function IterationGroup({
   message,
   isActive = true,
-  sessionId,
-  artifactFallbacks,
-  onFileSelect,
 }: IterationGroupProps) {
-  const summary = message.iterationSummary?.summary;
-  const [open, setOpen] = useState(false);
-
-  // ask_user_question owns its iteration's rendering in BOTH states: the
-  // question (and any quick replies) while awaiting an answer — a
-  // shimmer label alone gives the user nothing to act on and the
-  // session stalls — and the question again once answered, so the
-  // exchange stays in the thread instead of collapsing to a generic
-  // tool row that drops it.
+  const kind = iterationKind(message, isActive);
   const askCall = (message.toolCalls ?? []).find(
     (tc) => tc.toolName === "ask_user_question",
   );
-  if (askCall) {
+  if (kind === "ask" && askCall) {
     return (
       <div className="px-1 py-0.5">
         <AskUserQuestionToolBlock
@@ -1389,15 +1472,7 @@ export function IterationGroup({
       </div>
     );
   }
-
-  // 1. Live iteration: shimmer label only. "Live" means a tool is
-  //    actively running, OR a text-only iteration is mid-stream.
-  //    message.status === "streaming" alone is NOT a reliable signal —
-  //    tool-using messages stay in "streaming" state across the entire
-  //    rest of the turn until the next llm.response lands or the turn
-  //    ends. Without this stricter check, completed iterations would
-  //    stay in the shimmer state forever (user-reported bug).
-  if (isActive && isIterationLive(message)) {
+  if (kind === "live") {
     // Same hidden-tool policy as the label: a lone internal list_files
     // must not leak a "searching" orb next to the quiet "Thinking…".
     return (
@@ -1408,52 +1483,13 @@ export function IterationGroup({
       />
     );
   }
-
-  // 2. Complete: collapsible row. Use the LLM summary when present,
-  //    else derive a short label from the tool calls so the row stays
-  //    informative without the summary_model auxiliary.
-  const label = summary ?? deriveIterationLabel(message);
-  if (!label) {
-    // Nothing to summarize and nothing to derive. Skip the row
-    // entirely — the surrounding SimpleAssistantGroup will still
-    // render the final-answer text and TurnSummaryCard.
-    return null;
-  }
-  // A reasoning-only iteration has no details to expand in Simple mode.
-  if (!summary && visibleToolCalls(message).length === 0) {
+  if (kind === "none") return null;
+  const label = iterationLabel(message);
+  if (kind === "note") {
     return <p className="py-0.5 text-sm text-muted-foreground">{label}</p>;
   }
-  const labelTone = summary
-    ? "text-muted-foreground italic"
-    : "text-muted-foreground";
   return (
-    <div className="space-y-1">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded py-0.5 text-left text-sm hover:bg-muted/40"
-      >
-        <span className={cn("flex-1 truncate", labelTone)}>
-          {renderInlineMarkdown(label)}
-        </span>
-        <ChevronDown
-          className={cn(
-            "size-3 shrink-0 text-foreground/60 transition-transform",
-            open && "rotate-180",
-          )}
-          aria-hidden
-        />
-      </button>
-      {open && (
-        <IterationExpanded
-          message={message}
-          sessionId={sessionId}
-          artifactFallbacks={artifactFallbacks}
-          onFileSelect={onFileSelect}
-        />
-      )}
-    </div>
+<CommandRow message={message} label={label} />
   );
 }
 
@@ -1570,7 +1606,6 @@ function SimpleAssistantGroup({
   activeAssistantId,
   isRunning,
   sessionId,
-  artifactFallbacks,
   onFileSelect,
   onRetry,
   hideTurnSummary = false,
@@ -1579,7 +1614,6 @@ function SimpleAssistantGroup({
   activeAssistantId?: string;
   isRunning: boolean;
   sessionId: string | null;
-  artifactFallbacks: Record<string, string>;
   onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
   hideTurnSummary?: boolean;
@@ -1651,77 +1685,135 @@ function SimpleAssistantGroup({
     return fromHarness;
   })();
 
+  // Adjacent commands fold into one group: "Ran 5 commands" once done, the
+  // running one's label with a clock while it goes. Anything said or shown
+  // between two commands — narration, a marker, a question — ends the run.
+  const rows: ReactNode[] = [];
+  let run: ChatMessageType[] = [];
+  const endRun = (live?: ChatMessageType) => {
+    if (live && (run.length > 0 || hasVisibleRunningTool(live))) {
+      rows.push(
+        <CommandGroup
+          key={(run[0] ?? live).id}
+          commands={run}
+          live={live}
+        />,
+      );
+    } else {
+      if (run.length > 1) {
+        rows.push(
+          <CommandGroup
+            key={run[0].id}
+            commands={run}
+          />,
+        );
+      } else if (run.length === 1) {
+        // One command is a row of its own: a group of one says nothing a
+        // row does not.
+        rows.push(
+          <IterationGroup
+            key={run[0].id}
+            message={run[0]}
+            isActive={false}
+          />,
+        );
+      }
+      if (live) {
+        rows.push(
+          <IterationGroup
+            key={live.id}
+            message={live}
+          />,
+        );
+      }
+    }
+    run = [];
+  };
+  for (const message of messages) {
+    if (message.role === "system") {
+      // Simple mode hides skill_invoked markers; artifact and error
+      // markers still render via OrphanSystemMarker.
+      if (message.systemKind === "skill_invoked") continue;
+      endRun();
+      rows.push(
+        <OrphanSystemMarker
+          key={message.id}
+          message={message}
+          sessionId={sessionId}
+          onRetry={undefined}
+        />,
+      );
+      continue;
+    }
+    // The tail text-only iteration is rendered as finalText below — don't
+    // also render an iteration row for it, or its mid-stream "Thinking…"
+    // shimmer (and post-stream "Thought through the problem" label) will
+    // sit above the same text the user sees in finalText.
+    //
+    // BUT only skip once finalText is non-empty.  During the initial
+    // thinking phase (reasoning streaming, no content yet) finalText is ""
+    // and SimpleFinalAnswer won't render anything either — letting the
+    // iteration through ensures the live "Thinking…" shimmer is visible
+    // instead of a blank gap.
+    if (message === tail && tailIsTextOnly && finalText) continue;
+    // Pull the narration line up as a sibling of the iteration row so it
+    // reads as "agent voice at root level" instead of buried inside the
+    // collapsible body.  Hidden when the assistant message had no
+    // narration to surface (typed ``done`` footer, no prose preamble, or
+    // empty content).
+    const rawContent = message.content === message.reasoning
+      ? ""
+      : (message.content ?? "").trim();
+    const { action, inferredNarration, cleaned } =
+      stripAndParseNextAction(rawContent);
+    const narrationLine = action
+      ? action.body.trim().toLowerCase() === "done"
+        ? null
+        : action.body
+      : inferredNarration;
+    // ``ask_user_question`` content is the full message the user must act
+    // on (the proposed design behind the widget), so render the whole body
+    // — collapsing it to a narration line would hide what they're
+    // approving.
+    const askBody = hasUserFacingAskContent(message) ? cleaned : null;
+    if (askBody || narrationLine) {
+      endRun();
+      rows.push(
+        askBody ? (
+          <MessageResponse key={`${message.id}:narration`}>{askBody}</MessageResponse>
+        ) : (
+          <p key={`${message.id}:narration`} className="text-sm text-foreground">
+            {renderInlineMarkdown(narrationLine ?? "")}
+          </p>
+        ),
+      );
+    }
+    const isActive = message.id === activeAssistantId;
+    const kind = iterationKind(message, isActive);
+    if (kind === "none") continue;
+    if (kind === "command") {
+      run.push(message);
+      continue;
+    }
+    if (kind === "live") {
+      endRun(message);
+      continue;
+    }
+    endRun();
+    rows.push(
+      <IterationGroup
+        key={message.id}
+        message={message}
+        isActive={isActive}
+      />,
+    );
+  }
+  endRun();
+
   return (
     <Message from="assistant">
       <MessageContent>
-        <div className="space-y-2">
-          {messages.map((message) => {
-            if (message.role === "system") {
-              // Simple mode hides skill_invoked markers; artifact and
-              // error markers still render via OrphanSystemMarker.
-              if (message.systemKind === "skill_invoked") return null;
-              return (
-                <OrphanSystemMarker
-                  key={message.id}
-                  message={message}
-                  sessionId={sessionId}
-                  onRetry={undefined}
-                />
-              );
-            }
-            // The tail text-only iteration is rendered as finalText
-            // below — don't also render an IterationGroup row for it,
-            // or its mid-stream "Thinking…" shimmer (and post-stream
-            // "Thought through the problem" label) will sit above the
-            // same text the user sees in finalText.
-            //
-            // BUT only skip once finalText is non-empty.  During the
-            // initial thinking phase (reasoning streaming, no content
-            // yet) finalText is "" and SimpleFinalAnswer won't render
-            // anything either — letting IterationGroup through ensures
-            // the live "Thinking…" shimmer is visible instead of a
-            // blank gap.
-            if (message === tail && tailIsTextOnly && finalText) return null;
-            // Pull the narration line up as a sibling of the iteration
-            // card so it reads as "agent voice at root level" instead
-            // of buried inside the collapsible body.  Hidden when the
-            // assistant message had no narration to surface (typed
-            // ``done`` footer, no prose preamble, or empty content).
-            const rawContent = message.content === message.reasoning
-              ? ""
-              : (message.content ?? "").trim();
-            const { action, inferredNarration, cleaned } =
-              stripAndParseNextAction(rawContent);
-            const narrationLine = action
-              ? action.body.trim().toLowerCase() === "done"
-                ? null
-                : action.body
-              : inferredNarration;
-            // ``ask_user_question`` content is the full message the user
-            // must act on (the proposed design behind the widget), so
-            // render the whole body — collapsing it to a narration line
-            // would hide what they're approving.
-            const askBody = hasUserFacingAskContent(message) ? cleaned : null;
-            return (
-              <div key={message.id} className="space-y-2">
-                {askBody ? (
-                  <MessageResponse>{askBody}</MessageResponse>
-                ) : narrationLine ? (
-                  <p className="text-sm text-foreground">
-                    {renderInlineMarkdown(narrationLine)}
-                  </p>
-                ) : null}
-                <IterationGroup
-                  message={message}
-                  isActive={message.id === activeAssistantId}
-                  sessionId={sessionId}
-                  artifactFallbacks={artifactFallbacks}
-                  onFileSelect={onFileSelect}
-                />
-              </div>
-            );
-          })}
-        </div>
+        <div className="space-y-2">{rows}</div>
         {finalText && (
           <div className="space-y-1">
             <LoopResultAffordance message={tail} />
@@ -1784,7 +1876,6 @@ function AssistantGroup({
         activeAssistantId={activeAssistantId}
         isRunning={isRunning}
         sessionId={sessionId}
-        artifactFallbacks={artifactFallbacks}
         onFileSelect={onFileSelect}
         onRetry={onRetry}
         hideTurnSummary={hideTurnSummary}

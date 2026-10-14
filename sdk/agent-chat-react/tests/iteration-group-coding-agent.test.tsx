@@ -1,7 +1,7 @@
 /**
  * Simple-mode rendering for run_coding_agent + code_run tool calls:
  * - a run_coding_agent call collapses to a clean "Coding agent · <task>"
- *   header, and the expanded row reads "Claude Code: <task>" / "Codex: …".
+ *   header, and its own label reads "Claude Code: <task>" / "Codex: …".
  * - a code_run frame renders the rich CodeRunToolBlock (streamed output),
  *   not a raw "code_run" tool name.
  */
@@ -10,6 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { IterationGroup } from "../src/components/chat/chat-thread";
+import { toolRowLabel } from "../src/components/chat/simple-labels";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import type { ChatMessage } from "../src/types";
 
@@ -43,26 +44,17 @@ function msg(over: Partial<ChatMessage>): ChatMessage {
 
 describe("IterationGroup — coding agent rows", () => {
   it("renders run_coding_agent as 'Coding agent · <task>', not the raw tool name", () => {
-    const dom = mount(
-      <IterationGroup
-        message={msg({
-          toolCalls: [{
-            id: "c1", toolName: "run_coding_agent",
-            args: JSON.stringify({ agent: "claude", prompt: "fix the build" }),
-            status: "complete",
-          }],
-        })}
-        sessionId="s-1"
-        artifactFallbacks={{}}
-      />,
-    );
+    const call = {
+      id: "c1", toolName: "run_coding_agent",
+      args: JSON.stringify({ agent: "claude", prompt: "fix the build" }),
+      status: "complete" as const,
+    };
+    const dom = mount(<IterationGroup message={msg({ toolCalls: [call] })} />);
     expect(dom.textContent).toContain("Coding agent");
     expect(dom.textContent).toContain("fix the build");
     expect(dom.textContent).not.toContain("run_coding_agent");
-
-    // Expand → agent-specific prose.
-    act(() => dom.querySelector("button")!.click());
-    expect(dom.textContent).toContain("Claude Code: fix the build");
+    // Its own label, the one shown over its output beside other calls.
+    expect(toolRowLabel(call)).toBe("Claude Code: fix the build");
   });
 
   it("renders a code_run frame as the rich CodeRunToolBlock", () => {
@@ -80,8 +72,6 @@ describe("IterationGroup — coding agent rows", () => {
             status: "complete",
           }],
         })}
-        sessionId="s-1"
-        artifactFallbacks={{}}
       />,
     );
     // Collapsed header reads cleanly (not "code_run").
