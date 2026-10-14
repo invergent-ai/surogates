@@ -18,9 +18,11 @@ const WRITERS: ReadonlySet<string> = new Set([
   ...OWNERS, "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "S-1-3-4",
 ]);
 
+// Each refusal names whom it found, so that an administrator can see what to change.
 function judged(said: NtatOwners, path: string): void {
-  if (!OWNERS.has(said.owner)) throw new Error(`${path} is not the installer's: only an administrator may own it`);
-  if (said.writers.some((writer) => !WRITERS.has(writer))) throw new Error(`${path} is not the installer's: only administrators may change it`);
+  if (!OWNERS.has(said.owner)) throw new Error(`${path} is not the installer's: only an administrator may own it, and ${said.owner} does`);
+  const others = [...new Set(said.writers.filter((writer) => !WRITERS.has(writer)))];
+  if (others.length > 0) throw new Error(`${path} is not the installer's: only administrators may change it, and ${others.join(", ")} may too`);
 }
 
 /**
