@@ -10,8 +10,7 @@ import Foundation
 public let PORT_NAMES = ["ai.surogate.control", "ai.surogate.net", "ai.surogate.inbound"]
 /// The sockets in the runtime folder the VM manager connects to, one for each named port.
 public let PORT_SOCKETS = ["control.sock", "net.sock", "inbound.sock"]
-/// The tag of the one device that holds every folder (Layout multiple), and of the eight (single).
-public let DEVICE_TAG = "surogate"
+/// The tags of the eight devices that each hold one folder (Shares.swift).
 public let SLOT_TAGS = (1...8).map { "s\($0)" }
 
 public struct Disk: Equatable {
@@ -31,9 +30,8 @@ public struct MachinePlan: Equatable {
   /// The console port first (hvc0, its log the console file), then the named ports.
   public let ports: [String?]
   public let console: String
-  /// The virtio-fs devices' tags: one, or eight.
+  /// The virtio-fs devices' tags.
   public let shareTags: [String]
-  public let layout: Layout
   public let entropyDevices = 1
   public let memoryBalloons = 1
 }
@@ -57,7 +55,6 @@ public func plan(_ boot: Boot, cpus: ClosedRange<Int>, memory: ClosedRange<UInt6
     ],
     ports: [nil] + PORT_NAMES,
     console: boot.console,
-    shareTags: boot.layout == .multiple ? [DEVICE_TAG] : SLOT_TAGS,
-    layout: boot.layout
+    shareTags: SLOT_TAGS
   )
 }

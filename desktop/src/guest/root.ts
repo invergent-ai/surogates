@@ -19,7 +19,7 @@ import { PROXY_URL } from "./listeners.js";
 import { socketOf } from "./network.js";
 import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
 import {
-  type Answer, HELD, type HostUser, MAX_SHARES, P9_ANAME, PLAN9_PORT, type Question, ROOT_ID, type Share, VZ_NAME, VZ_TAG,
+  type Answer, HELD, type HostUser, MAX_SHARES, P9_ANAME, PLAN9_PORT, type Question, ROOT_ID, type Share, VZ_TAG,
 } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 import { STORE } from "./trust.js";
@@ -42,6 +42,8 @@ export const slowerFor = (cmdline: string) => (/(?:^|\s)surogate\.emulated=1(?:\
 export const boundsFor = (slower: number) => ({
   emptyMs: 3_000 * slower, killedMs: 1_000 * slower, flushMs: 3_000 * slower, mountMs: 5_000 * slower,
   runnerReadyMs: 5_000 * slower, questionMs: 10_000 * slower, backstopMs: 10_000 * slower, ruleMs: 12_000 * slower,
+  // How long a teardown waits for the last connection of one of Apple's devices to go, once the root's processes have ended.
+  releaseMs: 2_000 * slower,
   // One request to a folder's history: past the history's own bound for opening a copy (local_history.py, _OPEN_TIMEOUT).
   historyMs: 600_000 * slower,
 });
@@ -69,7 +71,7 @@ const EMPTY_RETRY_MS = 10;
 // host's 5 s from its shutdown to the guest's power-off.
 const KILLED_MS = BOUNDS.killedMs;
 // How long a flush of a share waits for its server: one that has not answered by then stalled.
-// A teardown's fits the host's 15 s with EMPTY_MS; the stop's, its 5 s with KILLED_MS.
+// A teardown's fits the host's 15 s with EMPTY_MS and RELEASE_MS; the stop's, its 5 s with KILLED_MS.
 const FLUSH_MS = BOUNDS.flushMs;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
@@ -180,11 +182,9 @@ const execute = promisify(execFile);
 // looked at from here again: a stat on a stalled one would stall every root.
 const mounted = new Set<string>();
 
-// Apple's share (macOS's Virtualization framework) is a virtio-fs device too, in one of two layouts
-// (src/vm/darwin.ts): one device, DEVICE, that holds every folder, each a directory in it by its name,
-// mounted once and kept for the boot; or one of eight fixed devices, s1 to s8, a folder each, mounted
-// as Linux's tags are and let go at its teardown, as its tag is given again.
-export const DEVICE = "surogate";
+// Apple's share (macOS's Virtualization framework) is a virtio-fs device too: one of eight fixed devices, s1 to s8, a
+// folder each (src/vm/darwin.ts), mounted as Linux's tags are and let go at its teardown. Its tag is given again, so the
+// teardown says whether the device is released: nothing of it mounted in the guest any more (Connections).
 
 // What a share of a kind this guest does not mount is answered.
 export const UNMOUNTABLE = "This computer's sandbox cannot mount this kind of share";
@@ -196,9 +196,7 @@ export function checkShare(share: Share): void {
       if (!TAG.test(share.tag)) throw new Error(`not a share tag: ${share.tag}`);
       return;
     case "vz":
-      if (!VZ_TAG.test(share.tag) || (share.tag === DEVICE ? !VZ_NAME.test(share.name ?? "") : share.name !== undefined)) {
-        throw new Error(`not one of Apple's shares: ${share.tag.slice(0, 64)} ${String(share.name ?? "").slice(0, 64)}`);
-      }
+      if (!VZ_TAG.test(share.tag) || Object.keys(share).length !== 2) throw new Error(`not one of Apple's shares: ${share.tag.slice(0, 64)}`);
       return;
     case "p9":
       if (!TAG.test(share.tag) || share.port !== PLAN9_PORT || (share.aname !== undefined && !P9_ANAME.test(share.aname))) {
@@ -210,19 +208,15 @@ export function checkShare(share: Share): void {
   }
 }
 
-// The tag whose own mount is *share*'s, and goes with its teardown: none for a folder in DEVICE, whose mount stays.
-const ownMount = (share: Share) => (share.kind === "vz" && share.tag === DEVICE ? null : share.tag);
+/** Where *share*'s folder is in this guest, once mounted: under SHARES by its tag. */
+export const sharePath = (share: Share): string => join(SHARES, share.tag);
 
-/** Where *share*'s folder is in this guest, once mounted: under SHARES by its tag, or by its name in DEVICE's. */
-export function sharePath(share: Share): string {
-  return share.kind === "vz" && share.tag === DEVICE ? join(SHARES, DEVICE, share.name ?? "") : join(SHARES, share.tag);
-}
-
-// Where *share*'s folder is in this guest, its device mounted the first time.
+// Where *share*'s folder is in this guest, its device mounted the first time; the connection of one of Apple's remembered.
 async function mountShare(share: Share): Promise<string> {
   if (share.kind === "p9") return mountOnce(share.tag, p9Mount(share, "nosuid,nodev", join(SHARES, share.tag)));
-  await mountVirtiofs(ownMount(share) ?? DEVICE);
-  return sharePath(share);
+  const at = await mountVirtiofs(share.tag);
+  if (share.kind === "vz") await CONNECTIONS.remember(share.tag, at);
+  return at;
 }
 
 // The largest 9P message a Plan 9 share's mount asks for, as hcsshim's guest asks.
@@ -242,9 +236,6 @@ export function p9Mount(share: Extract<Share, { kind: "p9" }>, options: string, 
     "-o", `trans=fd,rfdno=3,wfdno=3,msize=${P9_MSIZE},version=9p2000.L,cache=none,access=client,${options},aname=${aname}`, share.tag, at,
   ];
 }
-
-/** DEVICE, mounted the first time it is asked for; where it is. */
-export const mountDevice = (): Promise<string> => mountVirtiofs(DEVICE);
 
 /**
  * Whether a root whose uid is *uid* runs on Apple's share, whose folder showed *shown* as its owner when asked as
@@ -325,21 +316,113 @@ async function mountOnce(tag: string, args: string[], program = SUROGATE_VSOCK):
   return share;
 }
 
+// The guest's FUSE connections, each a folder by its number in fusectl's list, mounted here the first time it is
+// looked in: the kernel takes a connection's folder away once its superblock has gone, which is once no mount of it is
+// left in any namespace and no file of it is open (Linux's fs/fuse/control.c, fuse_ctl_remove_conn). A virtio-fs mount
+// of a device that already has a superblock takes that one, whatever namespace holds it.
+export const FUSE_CONNECTIONS = "/sys/fs/fuse/connections";
+const RELEASE_MS = BOUNDS.releaseMs;
+const RELEASE_RETRY_MS = 10;
+
+/**
+ * The connection of the virtio-fs mount of *tag* at *at*, as *mountinfo* (proc_pid_mountinfo(5)) lists it last: the
+ * minor of its superblock's device, which names it in fusectl's list. Null where there is none.
+ */
+export function connectionOf(mountinfo: string, at: string, tag: string): number | null {
+  let found: number | null = null;
+  for (const line of mountinfo.split("\n")) {
+    const [mount = "", filesystem = ""] = line.split(" - ");
+    const fields = mount.split(" ");
+    const [type, source] = filesystem.split(" ");
+    const device = /^0:([0-9]{1,10})$/.exec(fields[2] ?? "");
+    if (fields[4] === at && type === "virtiofs" && source === tag && device) found = Number(device[1]);
+  }
+  return found;
+}
+
+// fusectl, mounted at *folder* in the agent's namespace alone, unless it is there already.
+async function listConnections(folder: string): Promise<void> {
+  const mounts = await readFile("/proc/self/mountinfo", "utf8");
+  if (mounts.split("\n").some((line) => line.split(" ")[4] === folder && line.includes(" - fusectl "))) return;
+  await execute("/usr/bin/mount", ["-t", "fusectl", "-o", "nosuid,nodev,noexec", "fusectl", folder]);
+}
+
+export interface ConnectionsOptions {
+  folder?: string; // fusectl's list: FUSE_CONNECTIONS
+  mountinfo?(): Promise<string>; // the agent's own mounts
+  list?(folder: string): Promise<void>; // makes fusectl list the guest's connections at *folder*
+  releaseMs?: number;
+}
+
+/**
+ * The connections the agent made on each of Apple's devices, by its tag: the agent alone mounts them, so these are all
+ * the guest has of a device. A device is released once each has gone; darwin.ts gives it another folder only then, and
+ * keeps one the guest has not released empty until the VM stops: a root that still held a mount of it would be served
+ * the next folder. A connection whose number could not be read is never released.
+ */
+export class Connections {
+  private readonly made = new Map<string, Set<number | null>>();
+  private listing: Promise<boolean> | null = null;
+  private readonly folder: string;
+  private readonly releaseMs: number;
+
+  constructor(private readonly options: ConnectionsOptions = {}) {
+    this.folder = options.folder ?? FUSE_CONNECTIONS;
+    this.releaseMs = options.releaseMs ?? RELEASE_MS;
+  }
+
+  /** The connection of the agent's mount of *tag* at *at*, kept until the device is released. */
+  async remember(tag: string, at: string): Promise<void> {
+    const mountinfo = await (this.options.mountinfo?.() ?? readFile("/proc/self/mountinfo", "utf8")).catch(() => "");
+    const made = this.made.get(tag) ?? new Set();
+    this.made.set(tag, made.add(connectionOf(mountinfo, at, tag)));
+  }
+
+  /**
+   * Whether nothing of *tag*'s device is left in the guest, the agent's own mounts of it having gone: each connection
+   * made on it gone from fusectl's list within the bound. True for a device the agent mounted nothing of.
+   */
+  async released(tag: string): Promise<boolean> {
+    const made = this.made.get(tag);
+    if (!made) return true;
+    if (made.has(null) || !(await this.listed())) return false;
+    for (const deadline = performance.now() + this.releaseMs; ;) {
+      if ([...made].every((minor) => !existsSync(join(this.folder, String(minor))))) {
+        this.made.delete(tag);
+        return true;
+      }
+      if (performance.now() > deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, RELEASE_RETRY_MS));
+    }
+  }
+
+  // Whether fusectl lists the guest's connections, made to the first time it is asked: one that could not be is asked again.
+  private listed(): Promise<boolean> {
+    this.listing ??= (this.options.list ?? listConnections)(this.folder).then(() => true, () => {
+      this.listing = null;
+      return false;
+    });
+    return this.listing;
+  }
+}
+
+// This agent's.
+export const CONNECTIONS = new Connections();
+
 // A share's mount goes, lazily: a process of its root's stuck in a share that stalled
-// keeps it until it lets go. The host removes the share from the guest next. A folder in
-// DEVICE has no mount of its own: its root's namespace, which bound it, has gone.
-export async function unmountShare(share: Share): Promise<void> {
+// keeps it until it lets go. The host removes the share from the guest next. True where it
+// is one of Apple's devices and released: nothing of it is left in the guest (Connections).
+export async function unmountShare(share: Share): Promise<boolean> {
   try {
     checkShare(share);
   } catch {
-    return;
+    return false;
   }
-  const tag = ownMount(share);
-  if (tag === null) return;
-  mounted.delete(tag);
-  const path = join(SHARES, tag);
+  mounted.delete(share.tag);
+  const path = join(SHARES, share.tag);
   await execute("/usr/bin/umount", ["-l", path]).catch(() => {});
   await rmdir(path).catch(() => {});
+  return share.kind === "vz" && CONNECTIONS.released(share.tag);
 }
 
 // *path*'s filesystem written out, that one alone (syncfs, as sync -f does): never sync(2),
@@ -364,7 +447,7 @@ export async function flushRoot(share: Share, stalled: boolean): Promise<boolean
   let shared = false;
   try {
     checkShare(share);
-    shared = !stalled && mounted.has(ownMount(share) ?? DEVICE);
+    shared = !stalled && mounted.has(share.tag);
   } catch {
     // Not a share of this guest's.
   }
@@ -724,8 +807,8 @@ export interface RootsOptions {
   handles?(root: string, handles: ProcessHandle[], live: number): void;
   // The roots' cgroups (CGROUPS): each background process gets one the agent makes in its root's proc.
   cgroups?: string;
-  // The mount of a share whose root was torn down goes (unmountShare).
-  unmount?(share: Share): Promise<void>;
+  // The mount of a share whose root was torn down goes (unmountShare): true where nothing of the share is left in the guest.
+  unmount?(share: Share): Promise<boolean | void>;
   // What a root torn down wrote, written out, its share's too unless it *stalled*: false when the share did not answer (flushRoot).
   flush?(share: Share, stalled: boolean): Promise<boolean>;
   // The root's socket for its connections to the host proxy, its guest user's, made before its namespaces (Network.listen); resolves with what closes it.
@@ -896,7 +979,7 @@ export class Roots {
   }
 
   // *end*, what of *root* is ending, joins whatever of it already was.
-  private ends(root: string, end: Promise<void>): Promise<void> {
+  private ends<T>(root: string, end: Promise<T>): Promise<T> {
     const all: Promise<void> = Promise.allSettled([this.endings.get(root), end]).then(() => {
       if (this.endings.get(root) === all) this.endings.delete(root);
     });
@@ -906,8 +989,9 @@ export class Roots {
 
   // Everything of *root* ends and it is forgotten, then the mount of *share*, its folder's,
   // goes: the host is letting the folder go, and removes the share next. Its next
-  // operation shares its folder and sets it up again.
-  teardown(root: string, share: Share): Promise<void> {
+  // operation shares its folder and sets it up again. True where the share is released:
+  // nothing of it is left in the guest, so its device may take another folder.
+  teardown(root: string, share: Share): Promise<boolean> {
     return this.ends(root, (async () => {
       // A setup under way lands first, and what it set up ends with the rest.
       await this.starting.get(root)?.catch(() => {});
@@ -920,10 +1004,11 @@ export class Roots {
       }
       // What it wrote, written out. A share that does not answer its own flush stalled, and is held too.
       if (!((await this.options.flush?.(share, this.held.has(root))) ?? true)) this.held.add(root);
-      await this.options.unmount?.(share);
+      const released = (await this.options.unmount?.(share)) === true;
       // What of it would not end, a process waiting on a share that stalled, still holds the
       // share: the host keeps it in the guest, which could not let it go.
       if (this.held.delete(root)) throw new Error(HELD);
+      return released;
     })());
   }
 

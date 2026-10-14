@@ -6,6 +6,8 @@
 //   FAKE_VM_BOOT=fail     the boot fails, saying why
 //   FAKE_VM_SHARE=refuse  each share is refused; =silent, never answered
 //   FAKE_VM_UNSHARE=silent each unshare is never answered
+//   FAKE_VM_REUSE=1       each share is given the first device, whatever it holds
+//   FAKE_VM_HOLDS=1       its agent's teardowns never say a share's device is released
 //   FAKE_VM_KILL=ignore   a kill line is not heeded
 //   FAKE_VM_STOP=error    once started, the VM stops by itself for an error
 //   FAKE_VM_SUPPORTED=0   check says this Mac cannot run it
@@ -80,7 +82,8 @@ const connected = await new Promise((resolve) => {
 });
 
 let state = "waiting";
-let made = 0;
+// Its eight devices, as surogate-vm's ShareBook keeps them: free, the name of the folder each holds, or retired.
+const slots = Array(8).fill("free");
 const stop = (reason, why) => {
   say(why === undefined ? { type: "stopped", reason } : { type: "stopped", reason, why });
   process.exit(0);
@@ -96,7 +99,7 @@ function boot() {
   const roots = {
     uid: () => uid,
     setup: async () => {},
-    teardown: async () => {},
+    teardown: async () => env.FAKE_VM_HOLDS !== "1",
     perform: async (root, kind, args) => ({ ok: { output: `${kind} in ${root}: ${args.command ?? ""}`, returncode: 0, timed_out: false } }),
   };
   const powerOff = env.FAKE_VM_POWEROFF === "ignore" ? () => new Promise(() => {}) : async () => stop("guest");
@@ -109,7 +112,6 @@ function boot() {
   if (env.FAKE_VM_STOP === "error") setTimeout(() => stop("error", "the hypervisor failed"), 200);
 }
 
-let pending = null;
 createInterface({ input: process.stdin }).on("line", (text) => {
   if (env.FAKE_VM_LOG) appendFileSync(env.FAKE_VM_LOG, `${text}\n`);
   let line;
@@ -120,18 +122,22 @@ createInterface({ input: process.stdin }).on("line", (text) => {
   }
   if (line.type === "boot") {
     if (state !== "waiting") return say({ type: "refused", why: "a boot after the first" });
-    pending = line;
     return boot();
   }
   if (line.type === "share") {
     if (state !== "running") return say({ type: "refused", id: line.id, why: "the guest is not running" });
     if (env.FAKE_VM_SHARE === "silent") return;
     if (env.FAKE_VM_SHARE === "refuse") return say({ type: "refused", id: line.id, why: "the fake refuses every folder" });
-    made += 1;
-    return say(pending.layout === "single" ? { type: "shared", id: line.id, tag: `s${made}` } : { type: "shared", id: line.id, tag: "surogate", name: line.name });
+    const free = env.FAKE_VM_REUSE === "1" ? 0 : slots.indexOf("free");
+    if (free < 0) return say({ type: "refused", id: line.id, why: "the VM holds as many folders as it has room for, 8" });
+    slots[free] = line.name;
+    return say({ type: "shared", id: line.id, tag: `s${free + 1}` });
   }
   if (line.type === "unshare") {
     if (env.FAKE_VM_UNSHARE === "silent") return;
+    if (typeof line.released !== "boolean") return say({ type: "refused", id: line.id, why: "an unshare without its id, name or released" });
+    const at = slots.indexOf(line.name);
+    if (at >= 0) slots[at] = line.released ? "free" : "retired";
     return say({ type: "unshared", id: line.id });
   }
   if (line.type === "kill") {

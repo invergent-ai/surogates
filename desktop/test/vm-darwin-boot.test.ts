@@ -19,6 +19,7 @@ const FAKE = fileURLToPath(new URL("./vm/darwin/fake-vm.mjs", import.meta.url));
 const DARWIN = fileURLToPath(new URL("../dist/vm/darwin.js", import.meta.url));
 const ANA = { uid: 501, gid: 20, name: "ana", home: "/Users/ana" };
 const ROOT = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
+const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 
 let dir: string;
 let options: VmOptions;
@@ -82,7 +83,7 @@ describe("the macOS VM backend", () => {
     const [line] = readFileSync(log, "utf8").trim().split("\n").map((text) => JSON.parse(text) as Record<string, unknown>);
     expect(line).toEqual({
       type: "boot", kernel: options.kernel, rootfs: options.rootfs, agentDisk: options.agentDisk, sessions: options.sessions, console: options.console,
-      cpus: expect.any(Number), memoryMiB: 2048, commandLine: `root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf`, layout: "multiple",
+      cpus: expect.any(Number), memoryMiB: 2048, commandLine: `root=/dev/vda rootfstype=ext4 ro init=/usr/sbin/surogate-init console=hvc0 panic=-1 quiet surogate.disks=virtio surogate.transport=virtio-serial surogate.names=posix lsm=landlock,lockdown,yama,integrity,apparmor,bpf`,
     });
     // The sessions disk made, sparse and the user's alone; the runtime folder theirs alone too.
     expect([statSync(options.sessions).size, statSync(options.sessions).mode & 0o777, statSync(options.run).mode & 0o777]).toEqual([32 * 1024 ** 3, 0o600, 0o700]);
@@ -144,23 +145,56 @@ describe("the macOS VM backend", () => {
   });
 });
 
+// The lines of *log* the stand-in read, of *type*.
+const linesOf = (log: string, type: string) => readFileSync(log, "utf8").trim().split("\n").map((text) => JSON.parse(text) as Record<string, unknown>).filter((line) => line.type === type);
+const soon = () => performance.now() + 5_000;
+
 describe("folders shared into the guest on macOS", () => {
-  it("shares a folder as a directory of the one device for every folder, its name never given again, or as one of eight by its tag", async () => {
-    const vm = await boot();
+  it("shares a folder as one of eight devices by its tag, under a name never given again, and gives a device another folder only once the guest released it", async () => {
+    const log = join(dir, "said.log");
+    const vm = await boot({ FAKE_VM_LOG: log });
     const work = join(dir, "work");
-    expect(await vm.share(work, 501, performance.now() + 5_000)).toEqual({ kind: "vz", tag: "surogate", name: "r1" });
-    await vm.unshare({ kind: "vz", tag: "surogate", name: "r1" }, performance.now() + 5_000);
-    expect(await vm.share(work, 501, performance.now() + 5_000)).toEqual({ kind: "vz", tag: "surogate", name: "r2" });
-    const single = await boot({}, { layout: "single", run: runtimeFolder(join(dir, "other"), dir) });
-    expect(await single.share(work, 501, performance.now() + 5_000)).toEqual({ kind: "vz", tag: "s1" });
+    const [one, two] = [await vm.share(work, 10_000, soon()), await vm.share(work, 10_001, soon())];
+    expect([one, two]).toEqual([{ kind: "vz", tag: "s1" }, { kind: "vz", tag: "s2" }]);
+    // The guest said nothing of the first is left in it; of the second, it did not.
+    await vm.unshare(one!, soon(), { released: true });
+    await vm.unshare(two!, soon());
+    expect(linesOf(log, "unshare")).toEqual([{ type: "unshare", id: 3, name: "r1", released: true }, { type: "unshare", id: 4, name: "r2", released: false }]);
+    // The first's device takes the next folder; the second's, which a root may still hold, none until the VM restarts.
+    expect(await vm.share(work, 10_002, soon())).toEqual({ kind: "vz", tag: "s1" });
+    expect(await vm.share(work, 10_003, soon())).toEqual({ kind: "vz", tag: "s3" });
+    expect(linesOf(log, "share").map(({ name }) => name)).toEqual(["r1", "r2", "r3", "r4"]);
   });
 
-  it("says why a folder was not shared, and why no ninth one is", async () => {
+  it("says why a folder was not shared, and why no ninth one is: what holds each device, the folders and those kept empty", async () => {
     const refused = await boot({ FAKE_VM_SHARE: "refuse" });
-    await expect(refused.share(join(dir, "work"), 501, performance.now() + 5_000)).rejects.toThrow("the folder could not be shared: the fake refuses every folder");
+    await expect(refused.share(join(dir, "work"), 501, soon())).rejects.toThrow("the folder could not be shared: the fake refuses every folder");
     const full = await boot({}, { run: runtimeFolder(join(dir, "full"), dir) });
-    for (let n = 0; n < 8; n += 1) await full.share(join(dir, "work"), n < 6 ? 501 : 0, performance.now() + 5_000, n === 7 ? { readonly: true } : {});
-    await expect(full.share(join(dir, "work"), 501, performance.now() + 5_000)).rejects.toThrow("it holds as many folders as it has room for, 8: the folders of 6 chats, and 2 for the histories of project folders, which take two each");
+    const shares = [];
+    for (let n = 0; n < 8; n += 1) shares.push(await full.share(join(dir, "work"), n < 6 ? 501 : 0, soon(), n === 7 ? { readonly: true } : {}));
+    await expect(full.share(join(dir, "work"), 501, soon())).rejects.toThrow("it holds as many folders as it has room for, 8: the folders of 6 chats, and 2 for the histories of project folders, which take two each");
+    await full.unshare(shares[0]!, soon());
+    await full.unshare(shares[1]!, soon());
+    await full.unshare(shares[2]!, soon(), { released: true });
+    await full.share(join(dir, "work"), 501, soon());
+    await expect(full.share(join(dir, "work"), 501, soon())).rejects.toThrow(
+      "it holds as many folders as it has room for, 8: the folders of 4 chats, 2 for the histories of project folders, which take two each, and 2 kept empty until it restarts, since what ran there may not have let go of them",
+    );
+    // Every device kept empty, or holding a folder: the words name each.
+    const kept = await boot({}, { run: runtimeFolder(join(dir, "kept"), dir) });
+    for (let n = 0; n < 8; n += 1) await kept.unshare(await kept.share(join(dir, "work"), 501, soon()), soon());
+    await expect(kept.share(join(dir, "work"), 501, soon())).rejects.toThrow("it holds as many folders as it has room for, 8: 8 kept empty until it restarts, since what ran there may not have let go of them");
+  });
+
+  it("ends the VM when surogate-vm gives a device that holds another folder, or one kept empty", async () => {
+    const reusing = await boot({ FAKE_VM_REUSE: "1" });
+    await reusing.share(join(dir, "work"), 501, soon());
+    await expect(reusing.share(join(dir, "work"), 501, soon())).rejects.toThrow("surogate-vm gave a device a root may still hold: s1");
+    await reusing.exited;
+    const kept = await boot({ FAKE_VM_REUSE: "1" }, { run: runtimeFolder(join(dir, "kept"), dir) });
+    await kept.unshare(await kept.share(join(dir, "work"), 501, soon()), soon());
+    await expect(kept.share(join(dir, "work"), 501, soon())).rejects.toThrow("surogate-vm gave a device a root may still hold: s1");
+    await kept.exited;
   });
 
   it("ends the VM when a folder is not let go by the deadline, or not shared by it", async () => {
@@ -188,6 +222,18 @@ describe("the VM manager's guest on the macOS backend", () => {
       .toEqual({ ok: { output: `run in ${ROOT}: echo hi`, returncode: 0, timed_out: false } });
     await guest.stop();
     expect(alive(pidOf())).toBe(false);
+  });
+
+  it("lets a root's folder go as released where the guest's teardown says nothing of its device is left, and keeps its device empty where it does not", async () => {
+    for (const [knobs, released] of [[{}, true], [{ FAKE_VM_HOLDS: "1" }, false]] as const) {
+      const log = join(dir, `said-${released}.log`);
+      const guest = await Guest.boot(bootDarwin, { ...options, program: program({ ...knobs, FAKE_VM_LOG: log }) });
+      expect(await guest.ready(ROOT, folder())).toBeNull();
+      expect(await guest.ready(OTHER, folder())).toBeNull();
+      await guest.teardown(ROOT);
+      expect(linesOf(log, "unshare")).toEqual([{ type: "unshare", id: 3, name: "r1", released }]);
+      await guest.stop();
+    }
   });
 
   it("shares no folder for a root whose uid is below 10000, which the rule would not judge, as on Linux", async () => {

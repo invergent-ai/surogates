@@ -67,23 +67,22 @@ export const MAX_INBOUND = 160;
 // kind names who maps the folder's owner to the root's guest uid. virtiofs: its
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
 // vz: Apple's (macOS's Virtualization framework), which maps no owner. Its tag is one of
-// the VM's fixed devices (VZ_TAG); *name*, the folder's directory in a device that holds several.
+// the VM's eight fixed devices (VZ_TAG), each holding one folder at a time.
 // p9: a share of the host's Plan 9 server (Hyper-V's), on its vsock *port*, PLAN9_PORT. Its *tag* is its name
 // there, given once in a boot as Linux's tags are; *aname*, what the server takes at the mount after that name:
 // "uid=<n>;gid=<n>", the owner the folder's files show as, the root's guest uid, so each root's are its own.
 // A backend whose share maps no owner, or maps them at the mount, adds its own kind.
 export type Share =
   | { kind: "virtiofs"; tag: string }
-  | { kind: "vz"; tag: string; name?: string }
+  | { kind: "vz"; tag: string }
   | { kind: "p9"; tag: string; port: number; aname?: string };
 
 // A p9 share's options at the mount, in their one form.
 export const P9_ANAME = /^uid=(0|[1-9][0-9]{0,9});gid=(0|[1-9][0-9]{0,9})$/;
 
-// Apple's share's devices: one that holds every folder, or one of MAX_SHARES of a folder each.
-export const VZ_TAG = /^(?:surogate|s[1-8])$/;
-// A folder's directory in the device that holds every folder: never used again in its guest, as Linux's tags are not.
-export const VZ_NAME = /^r[1-9][0-9]{0,8}$/;
+// Apple's share's devices, MAX_SHARES of a folder each. A device takes another folder once the guest has
+// released it (FromAgent's done): nothing of it is mounted in the guest any more.
+export const VZ_TAG = /^s[1-8]$/;
 
 // The control port, ai.surogate.control (spec, Section 11, Transport). The agent
 // says hello first, and the host answers it with its user and the company's CA; from
@@ -100,12 +99,12 @@ export type ToAgent =
   | { type: "setup"; id: number; root: string; folder: string; share: Share; ended: ProcessHandle[] }
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
   // Everything of a root ends, and its share's mount goes: the host is letting its folder
-  // go, and removes the share from the guest next.
+  // go, and removes the share from the guest next. Answered done, released where it is.
   | { type: "teardown"; id: number; root: string; share: Share }
   // A folder's place, for the agent's own git and in no root's namespaces: its history from the
   // app's data, mounted for writing, and the folder itself, read-only (guest/places.ts).
   | { type: "place"; id: number; key: string; history: Share; real: Share }
-  // Both mounts of a place go: the host removes its two shares next.
+  // Both mounts of a place go: the host removes its two shares next. Answered done, released where both are.
   | { type: "unplace"; id: number; key: string }
   // One request to a place's history, which the agent runs as its own user, outside every root's
   // namespaces: *action* with its arguments, for *thread*'s copy, made for *user*. Answered by a result.
@@ -125,7 +124,10 @@ export type FromAgent =
   // Unasked, each time they change: a root's process handles for the host to keep, and how many of its processes live.
   | { type: "handles"; root: string; handles: ProcessHandle[]; live: number }
   | { type: "pong"; id: number }
-  | { type: "done"; id: number; uid?: number }
+  // *released*, of a teardown's share or an unplace's two, each one of Apple's devices (VZ_TAG): nothing of it is
+  // mounted in the guest any more, in any namespace, nor any file of it open. Only then may the host give its device
+  // another folder: a root that still held a mount of it would be served that one (src/vm/darwin.ts).
+  | { type: "done"; id: number; uid?: number; released?: true }
   | { type: "failed"; id: number; message: string }
   | { type: "result"; id: number; outcome: Outcome };
 

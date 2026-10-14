@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import type { Outcome } from "../link/protocol.js";
 import { CANCELLED, SANDBOX_STOPPED } from "./command.js";
 import { PLACE_KEY, type Share } from "./protocol.js";
-import { BOUNDS, checkShare, DEVICE, mountDevice, p9Mount, SUROGATE_VSOCK } from "./root.js";
+import { BOUNDS, checkShare, CONNECTIONS, type Connections, p9Mount, SUROGATE_VSOCK } from "./root.js";
 
 export const PLACES = "/run/surogate/places";
 const MOUNT_RETRY_MS = 25;
@@ -141,8 +141,8 @@ export interface PlacesOptions {
   unmount?(args: string[]): Promise<unknown>; // umount(8)
   // A share the host has just added is there once the guest's kernel has found its device: until then its mount is tried again.
   mountMs?: number;
-  // Apple's one device that holds every folder (root.ts, DEVICE), mounted once; where it is.
-  device?(): Promise<string>;
+  // The connections made on Apple's devices (root.ts): each of its mounts remembered, and whether a device is released.
+  connections?: Pick<Connections, "remember" | "released">;
   // The history's answer to one request, as it wrote it; rejects when it ended without one. At *signal*
   // it ends everything it started, and it settles only once none of that is left.
   ask?(asked: Asked, signal: AbortSignal): Promise<string>;
@@ -157,8 +157,8 @@ interface Mounted {
   real: Share;
 }
 
-// Whether two shares are one: their kind, tag and, in Apple's one device, the folder's name; a Plan 9 share's port and options.
-const sameShare = (a: Share, b: Share) => a.kind === b.kind && a.tag === b.tag && (a.kind === "vz" ? a.name : undefined) === (b.kind === "vz" ? b.name : undefined)
+// Whether two shares are one: their kind and tag; a Plan 9 share's port and options.
+const sameShare = (a: Share, b: Share) => a.kind === b.kind && a.tag === b.tag
   && (a.kind === "p9" ? `${a.port};${a.aname}` : undefined) === (b.kind === "p9" ? `${b.port};${b.aname}` : undefined);
 
 export class Places {
@@ -175,9 +175,8 @@ export class Places {
   private readonly historyMs: number;
   private readonly waitMs: number;
   private readonly folder: string;
-  private readonly run: {
-    mount(args: string[]): Promise<unknown>; vsock(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown>; device(): Promise<string>;
-  };
+  private readonly run: { mount(args: string[]): Promise<unknown>; vsock(args: string[]): Promise<unknown>; unmount(args: string[]): Promise<unknown> };
+  private readonly connections: Pick<Connections, "remember" | "released">;
   private readonly mountMs: number;
 
   constructor(options: PlacesOptions = {}) {
@@ -186,8 +185,8 @@ export class Places {
       mount: options.mount ?? ((args) => execute("/usr/bin/mount", args)),
       vsock: options.vsock ?? ((args) => execute(SUROGATE_VSOCK, args)),
       unmount: options.unmount ?? ((args) => execute("/usr/bin/umount", args)),
-      device: options.device ?? mountDevice,
     };
+    this.connections = options.connections ?? CONNECTIONS;
     this.mountMs = options.mountMs ?? BOUNDS.mountMs;
     this.ask = options.ask ?? ((asked, signal) => askHistory(asked, signal));
     this.historyMs = options.historyMs ?? BOUNDS.historyMs;
@@ -240,28 +239,29 @@ export class Places {
     await mkdir(join(at, "history"), { recursive: true });
     await mkdir(join(at, "real"), { recursive: true });
     await chmod(this.folder, 0o700);
-    await this.attach(history, await this.from(history, OPTIONS, join(at, "history")));
+    await this.attach(history, OPTIONS, join(at, "history"));
     try {
-      await this.attach(real, await this.from(real, `ro,${OPTIONS}`, join(at, "real")));
+      await this.attach(real, `ro,${OPTIONS}`, join(at, "real"));
     } catch (error) {
       await this.run.unmount(["-l", join(at, "history")]).catch(() => {});
       throw error;
     }
   }
 
-  // mount(8)'s arguments for *share* at *at* with *options*: a virtio-fs device by its tag, or a folder in
-  // Apple's one device for every folder, bound from where that is mounted (bind and its options in one: util-linux's);
-  // or surogate-vsock's, for a Plan 9 share, whose mount(8) it runs (root.ts).
-  private async from(share: Share, options: string, at: string): Promise<string[]> {
+  // mount(8)'s arguments for *share* at *at* with *options*: a virtio-fs device by its tag, Linux's or one of Apple's
+  // eight; or surogate-vsock's, for a Plan 9 share, whose mount(8) it runs (root.ts).
+  private from(share: Share, options: string, at: string): string[] {
     if (share.kind === "p9") return p9Mount(share, options, at);
-    if (share.kind === "vz" && share.tag === DEVICE) return ["--bind", "-o", options, join(await this.run.device(), share.name ?? ""), at];
     return ["-t", "virtiofs", "-o", options, share.tag, at];
   }
 
-  private async attach(share: Share, args: string[]): Promise<void> {
+  // *share* mounted at *at*, its connection remembered where it is one of Apple's devices.
+  private async attach(share: Share, options: string, at: string): Promise<void> {
+    const args = this.from(share, options, at);
     for (const deadline = performance.now() + this.mountMs; ;) {
       try {
         await (share.kind === "p9" ? this.run.vsock(args) : this.run.mount(args));
+        if (share.kind === "vz") await this.connections.remember(share.tag, at);
         return;
       } catch (error) {
         if (performance.now() > deadline) throw error;
@@ -349,10 +349,16 @@ export class Places {
     clearTimeout(timer);
   }
 
-  /** Both mounts of *key* go, lazily, the folder's first: the host removes its two shares next. */
-  unmount(key: string): Promise<void> {
+  /**
+   * Both mounts of *key* go, lazily, the folder's first: the host removes its two shares next. True where both are
+   * Apple's devices, and released: nothing of either is left in the guest (root.ts, Connections).
+   */
+  unmount(key: string): Promise<boolean> {
+    let released = false;
     return this.after(key, async () => {
-      if (!this.mounted.delete(key)) return;
+      const known = this.mounted.get(key);
+      if (!known) return;
+      this.mounted.delete(key);
       // No request of the place outlives its mounts: each is ended, and what it ran has gone before they do.
       for (const request of this.asked.get(key) ?? []) request.abort();
       await this.turns.get(key);
@@ -362,6 +368,8 @@ export class Places {
         await rmdir(join(at, name)).catch(() => {});
       }
       await rmdir(at).catch(() => {});
-    });
+      const { history, real } = known;
+      if (history.kind === "vz" && real.kind === "vz") released = (await Promise.all([history, real].map((share) => this.connections.released(share.tag)))).every(Boolean);
+    }).then(() => released);
   }
 }

@@ -512,6 +512,25 @@ describe("a root torn down", () => {
     await manager.stop();
   });
 
+  it("tells the backend a root's share was released only where the guest said so of it", async () => {
+    const asked: unknown[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async () => {},
+      // As the agent answers where nothing of the share's device is left in the guest, and where it cannot say so.
+      teardown: async (root) => root === "root-1",
+      perform: async () => ({ ok: true }),
+    };
+    const boot: BootVm = async (...args) => ({ ...(await fakeVm(roots)(...args)), unshare: async (share, _deadline, as) => void asked.push(["unshare", share, as?.released === true]) });
+    const manager = new VmManager(options(), boot);
+    const on = (root: string) => manager.perform({ id: `which-${Math.random()}`, root, folder: { path: dir, ...statSync(dir) }, kind: "which", args: {} }, new AbortController().signal);
+    for (const root of ["root-1", "root-2", "root-3"]) expect(await on(root)).toEqual({ ok: true });
+    await manager.teardown("root-1");
+    await manager.teardown("root-2");
+    expect(asked).toEqual([["unshare", R1, true], ["unshare", R1, false]]);
+    await manager.stop();
+  });
+
   it("keeps the share of a root whose processes would not end in the guest, and loses no guest for it", async () => {
     const asked: unknown[] = [];
     const roots: ControlRoots = {

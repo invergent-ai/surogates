@@ -11,7 +11,8 @@ import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import { type HostUser, PLAN9_PORT, type Share } from "../src/guest/protocol.js";
 import {
-  admit, boundsFor, checkOwner, checkShare, enter, NOT_SET_UP, OTHER_UID, ownedBy, p9Mount, rootEnvironment, Roots, sharePath, slowerFor,
+  admit, boundsFor, checkOwner, checkShare, connectionOf, Connections, enter, NOT_SET_UP, OTHER_UID, ownedBy, p9Mount, rootEnvironment, Roots, sharePath,
+  slowerFor,
 } from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
@@ -283,6 +284,21 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     await unmounting.teardown("root-3", { kind: "virtiofs", tag: "r7" });
     await unmounting.teardown("root-4", { kind: "virtiofs", tag: "r8" });
     expect(order).toEqual(["ended", "unmount r7", "unmount r8"]);
+  });
+
+  it("says a root torn down released its share only where its unmount says nothing of the share is left in the guest", async () => {
+    const VZ: Share = { kind: "vz", tag: "s3" };
+    let releases = true;
+    const releasing = new Roots({ start: bare, uid: () => 10_000, kill: () => void children.at(-1)?.kill("SIGKILL"), unmount: async () => releases });
+    await releasing.setup("root-8", base, VZ, user);
+    expect(await releasing.teardown("root-8", VZ)).toBe(true);
+    releases = false;
+    await releasing.setup("root-8", base, VZ, user);
+    expect(await releasing.teardown("root-8", VZ)).toBe(false);
+    // Without an unmount, as in the tests, nothing is said released.
+    const unmounted = new Roots({ start: bare, uid: () => 10_000, kill: () => void children.at(-1)?.kill("SIGKILL") });
+    await unmounted.setup("root-9", base, VZ, user);
+    expect(await unmounted.teardown("root-9", VZ)).toBe(false);
   });
 
   it("says a root torn down still holds its share while what it ran cannot end, and lets the share's mount go all the same", async () => {
@@ -830,10 +846,67 @@ describe("a root on Apple's share, which shows each file as the asking uid's", (
     expect(steps.map(at)).toEqual(steps.map(at).sort((a, b) => a - b));
   });
 
-  it("finds a folder of the one device for every folder by its name, and one of the eight by its tag", () => {
-    expect(sharePath({ kind: "vz", tag: "surogate", name: "r3" })).toBe("/run/surogate/shares/surogate/r3");
+  it("finds the folder of one of the eight devices by its tag", () => {
     expect(sharePath({ kind: "vz", tag: "s2" })).toBe("/run/surogate/shares/s2");
     expect(sharePath({ kind: "virtiofs", tag: "r2" })).toBe("/run/surogate/shares/r2");
+  });
+});
+
+describe("the connections the agent made on Apple's devices", () => {
+  const MOUNTINFO = [
+    "22 1 252:0 / / ro,relatime - ext4 /dev/vda ro",
+    "40 22 0:41 / /run/surogate/shares/s1 rw,nosuid,nodev,relatime - virtiofs s1 rw",
+    "41 22 0:42 / /run/surogate/shares/s2 rw,nosuid,nodev,relatime - virtiofs s2 rw",
+    "42 22 0:43 / /run/surogate/places/0123456789abcdef/real ro,nosuid,nodev,noexec,relatime - virtiofs s3 rw",
+    "43 22 0:44 / /run/surogate/shares/r1 rw,nosuid,nodev,relatime shared:5 - virtiofs r1 rw",
+  ].join("\n");
+
+  it("reads a mount's connection as the minor of its device, the last mount of the device's tag at its path", () => {
+    expect(connectionOf(MOUNTINFO, "/run/surogate/shares/s2", "s2")).toBe(42);
+    expect(connectionOf(MOUNTINFO, "/run/surogate/places/0123456789abcdef/real", "s3")).toBe(43);
+    // After the optional fields too.
+    expect(connectionOf(MOUNTINFO, "/run/surogate/shares/r1", "r1")).toBe(44);
+    // Another tag at the path, another kind of mount, or none: no connection of that device.
+    expect(connectionOf(MOUNTINFO, "/run/surogate/shares/s2", "s1")).toBeNull();
+    expect(connectionOf(MOUNTINFO, "/", "/dev/vda")).toBeNull();
+    expect(connectionOf("", "/run/surogate/shares/s2", "s2")).toBeNull();
+    expect(connectionOf(`${MOUNTINFO}\n44 22 0:45 / /run/surogate/shares/s2 rw - virtiofs s2 rw`, "/run/surogate/shares/s2", "s2")).toBe(45);
+  });
+
+  it("releases a device once every connection made on it has left fusectl's list within its bound, and never one whose connection it could not read", async () => {
+    const listed = join(base, "connections");
+    for (const minor of ["41", "42"]) mkdirSync(join(listed, minor), { recursive: true });
+    let mountinfo = MOUNTINFO;
+    const made = new Connections({ folder: listed, mountinfo: async () => mountinfo, list: async () => {}, releaseMs: 300 });
+    await made.remember("s1", "/run/surogate/shares/s1");
+    await made.remember("s2", "/run/surogate/shares/s2");
+    // A device no mount of the agent's was made on: nothing of it is in the guest.
+    expect(await made.released("s5")).toBe(true);
+    // s1's connection goes while it waits, as once the root's namespace has: released.
+    setTimeout(() => rmSync(join(listed, "41"), { recursive: true }), 50);
+    expect(await made.released("s1")).toBe(true);
+    // s2's stays, as while a root still holds a mount of it: not within the bound, and not while it stays.
+    const begun = performance.now();
+    expect(await made.released("s2")).toBe(false);
+    expect(performance.now() - begun).toBeGreaterThanOrEqual(290);
+    expect(await made.released("s2")).toBe(false);
+    rmSync(join(listed, "42"), { recursive: true });
+    expect(await made.released("s2")).toBe(true);
+    // One whose connection could not be read is never released.
+    mountinfo = "";
+    await made.remember("s4", "/run/surogate/shares/s4");
+    expect(await made.released("s4")).toBe(false);
+  });
+
+  it("releases nothing where fusectl cannot list the guest's connections", async () => {
+    const made = new Connections({
+      folder: join(base, "none"), mountinfo: async () => MOUNTINFO, releaseMs: 50,
+      list: async () => {
+        throw new Error("mount: unknown filesystem type 'fusectl'");
+      },
+    });
+    await made.remember("s1", "/run/surogate/shares/s1");
+    expect(await made.released("s1")).toBe(false);
   });
 });
 
@@ -934,16 +1007,19 @@ describe("the agent's own bounds", () => {
     const emulated = boundsFor(slowerFor(cmdline(true)));
     expect(kvm).toEqual({
       emptyMs: 3_000, killedMs: 1_000, flushMs: 3_000, mountMs: 5_000, runnerReadyMs: 5_000, questionMs: 10_000, backstopMs: 10_000, ruleMs: 12_000,
+      releaseMs: 2_000,
       // One request to a folder's history: ten minutes, past the history's own bound for a copy's first making.
       historyMs: 600_000,
     });
     expect(emulated).toEqual(Object.fromEntries(Object.entries(kvm).map(([name, ms]) => [name, ms * 6])));
     // Only the flag itself: another value of it, or a word that ends in it, is a guest with KVM.
     for (const line of [`${cmdline(false)} surogate.emulated=10`, `${cmdline(false)} nosurogate.emulated=1`]) expect(boundsFor(slowerFor(line))).toEqual(kvm);
-    // A set-up: the share's mount, what the root ran before to end, and its runner's start. A
-    // power-off: every root's processes ended, then each share flushed. The rule, before the hello.
+    // A set-up: the share's mount, what the root ran before to end, and its runner's start. A teardown: what the root
+    // ran to end, its share flushed, and its device released. A power-off: every root's processes ended, then each
+    // share flushed. The rule, before the hello.
     for (const [bounds, waits] of [[kvm, WAITS.kvm], [emulated, WAITS.emulated]] as const) {
       expect(bounds.mountMs + bounds.emptyMs + bounds.runnerReadyMs).toBeLessThan(waits.setupMs);
+      expect(bounds.emptyMs + bounds.flushMs + bounds.releaseMs).toBeLessThan(waits.setupMs);
       expect(bounds.killedMs + bounds.flushMs).toBeLessThan(waits.powerOffMs);
       expect(bounds.ruleMs).toBeLessThan(waits.helloMs);
     }
