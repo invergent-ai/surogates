@@ -70,6 +70,8 @@ describe("the Windows VM backend", () => {
     expect(win32.boot).toBe(bootWin32);
     expect(win32.socketMax).toBeNull();
     expect(win32.addresses(options.run, ANA)).toEqual(addressesWin32(options.run));
+    // A VHDX, as Hyper-V attaches a disk; Linux and macOS keep their raw file.
+    expect([win32.sessionsFile, backendFor("linux")!.sessionsFile, backendFor("darwin")!.sessionsFile]).toEqual(["sessions.vhdx", "sessions.img", "sessions.img"]);
     expect(win32.runtimeFolder(ANA, { LOCALAPPDATA: "C:\\Users\\ana\\AppData\\Local" }, "C:\\Users\\ana\\AppData\\Local\\Surogate"))
       .toBe(runtimeFolderWin32({ LOCALAPPDATA: "C:\\Users\\ana\\AppData\\Local" }, "C:\\Users\\ana\\AppData\\Local\\Surogate"));
   });
@@ -92,6 +94,13 @@ describe("the Windows VM backend", () => {
       type: "boot", kernel: options.kernel, initrd: join(dir, "image", "initrd"), rootfs: options.rootfs, agentDisk: options.agentDisk,
       sessions: options.sessions, console: options.console, cpus: expect.any(Number), commandLine: commandLine(),
     });
+  });
+
+  it("makes the sessions disk's folder and the console log's before surogate-vm.exe makes the disk and opens the log", async () => {
+    rmSync(join(dir, "data", "vm"), { recursive: true, force: true });
+    rmSync(join(dir, "data", "logs"), { recursive: true, force: true });
+    await boot();
+    expect([statSync(join(dir, "data", "vm")).isDirectory(), statSync(join(dir, "data", "logs")).isDirectory()]).toEqual([true, true]);
   });
 
   it("rejects a boot that failed with its words", async () => {

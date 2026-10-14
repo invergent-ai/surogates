@@ -16,6 +16,7 @@ import type { Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { execFile } from "node:child_process";
+import { mkdirSync } from "node:fs";
 
 import { spawnClean } from "../clean-child.js";
 import type { HostUser, Share } from "../guest/protocol.js";
@@ -84,6 +85,10 @@ export const commandLine = (): string => kernelLine({ disks: "scsi", transport: 
 export function win32Boot(start: Start, addresses: (run: string) => Addresses = addressesWin32): BootVm {
   return async (options, signal, deadline) => {
     if (signal?.aborted) throw new Error("The boot was stopped");
+    // The folders surogate-vm.exe makes the sessions disk in and opens the console log in, as Linux's and macOS's
+    // backends make them: it makes neither folder itself.
+    mkdirSync(dirname(options.sessions), { recursive: true });
+    mkdirSync(dirname(options.console), { recursive: true });
     const program = options.program ?? VM_PROGRAM;
     const { control, net, inbound } = addresses(options.run);
     const data = options.data ?? dirname(dirname(options.sessions));

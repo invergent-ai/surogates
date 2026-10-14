@@ -1,7 +1,7 @@
 // surogate-vm.exe, the user's side of one VM, as the app's VM manager runs it (src/vm/win32.ts): it speaks the VM
 // helper's line protocol on its stdin and stdout (src/vm/vm-helper.ts), asks the Surogate VM service for the VM, binds
 // the guest's three Hyper-V sockets as the user, and serves each as a named pipe only the user may open. Its lines and
-// arguments are plain data (here); everything else is Windows's (run.rs, check.rs).
+// arguments are plain data (here), and so is what it decides (session.rs); the rest is Windows's (run.rs, check.rs).
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,10 @@ pub use pipe::lines::{Lines, Read};
 #[cfg(windows)]
 pub mod check;
 #[cfg(windows)]
+pub mod run;
+#[cfg(windows)]
 pub mod service;
+pub mod session;
 
 /// What the VM manager says, one JSON object a line.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

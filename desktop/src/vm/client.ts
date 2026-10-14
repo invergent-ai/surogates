@@ -95,7 +95,7 @@ export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEn
     ...(arch ? { arch: GUEST_ARCH[arch] } : {}),
     agentDisk: delivered.agentDisk ?? join(PACKAGE, "dist", "agent.img"),
     ...(env.SUROGATE_VM_KVM ? { kvm: env.SUROGATE_VM_KVM } : {}),
-    sessions: join(dataDir, "vm", "sessions.img"),
+    sessions: join(dataDir, "vm", backendHere().sessionsFile),
     run: backendHere().runtimeFolder(user, env, dataDir),
     console: join(dataDir, "logs", "vm-console.log"),
     user,
