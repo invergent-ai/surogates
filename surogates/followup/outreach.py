@@ -1,5 +1,7 @@
 """Get a message to one person without waiting for them to write first.
 
+On any channel that can write first; a channel without a service window
+(Slack, Telegram) takes the text straight into the person's conversation.
 WhatsApp allows free text only within 24 hours of the person's last message
 to that sender.  Inside the window the text is written into their
 conversation and delivered like any reply.  Outside it the approved template
@@ -30,6 +32,7 @@ from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import mask_readable_phones, readable_phone
 from surogates.db.models import (
     ChannelContactRow,
@@ -45,7 +48,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
-from surogates.programs.opener import dm_session, whatsapp_session_key
+from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
 from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
 
 logger = logging.getLogger(__name__)
@@ -866,8 +869,13 @@ async def send_queued_outreach(
     now: datetime,
     storage: Any = None,
     settings: Any = None,
+    credentials_for: Any = None,
+    slack_client_factory: Any = None,
 ) -> int:
     """One send pass over outreach.  Returns how many rows it moved.
+
+    *credentials_for* and *slack_client_factory* are what a Slack message
+    needs to open the direct message; see :func:`resolve_dm`.
 
     Reads queued rows, and held rows whose recipient has written since their
     template went out — the inbound path delivers those too, but not while a
@@ -911,6 +919,8 @@ async def send_queued_outreach(
                 delivery_service=delivery_service,
                 identity_lookup=identity_lookup, now=now,
                 storage=storage, settings=settings,
+                credentials_for=credentials_for,
+                slack_client_factory=slack_client_factory,
             )
         except Exception:  # noqa: BLE001 — one person, not the queue
             logger.exception(
@@ -930,6 +940,8 @@ async def _send_one(
     now: datetime,
     storage: Any,
     settings: Any,
+    credentials_for: Any = None,
+    slack_client_factory: Any = None,
 ) -> int:
     queued = row.state == "queued"
     identity = await identity_lookup(row.org_id, row.platform, row.user_id)
@@ -942,25 +954,39 @@ async def _send_one(
         # A held row keeps waiting: its template already went out.
         return await _fail(session_factory, row.id, refusal) if queued else 0
 
-    wa_id = identity.platform_user_id
+    caps = capabilities_for(row.platform)
+    user = identity.platform_user_id
+    last = await followup_store.last_inbound(
+        session_factory, org_id=row.org_id, platform=row.platform,
+        platform_user_id=user, channel_identifier=row.channel_identifier,
+    )
+    if caps.needs_prior_contact and last is None:
+        reason = f"The recipient has not written to this {row.platform} sender yet"
+        return await _fail(session_factory, row.id, reason) if queued else 0
+    try:
+        target = await resolve_dm(
+            row.platform, user, row.channel_identifier,
+            credentials_for=credentials_for,
+            slack_client_factory=slack_client_factory, org_id=row.org_id,
+        )
+    except OpenerUndeliverable as exc:
+        return await _fail(session_factory, row.id, exc.reason) if queued else 0
     session_id = await dm_session(
         session_store, redis,
         session_factory=session_factory, storage=storage, settings=settings,
         org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
-        platform=row.platform, session_key=whatsapp_session_key(wa_id),
-        channel_id=wa_id, sender=row.channel_identifier,
+        platform=row.platform, session_key=target.session_key,
+        channel_id=target.channel_id, sender=row.channel_identifier,
     )
-    last = await followup_store.last_inbound(
-        session_factory, org_id=row.org_id, platform=row.platform,
-        platform_user_id=wa_id, channel_identifier=row.channel_identifier,
-    )
-    if not window_open(last, now):
+    # Only a channel with a service window needs a template to reopen it;
+    # anywhere else the text is written straight into the conversation.
+    if caps.window_hours and not window_open(last, now):
         if not queued:
             return 0
         return await _reopen(
             session_factory, row, session_store=session_store,
             delivery_service=delivery_service, session_id=session_id,
-            wa_id=wa_id, now=now,
+            target=target, now=now,
         )
 
     if await _busy(session_factory, session_id, now):
@@ -980,7 +1006,7 @@ async def _reopen(
     session_store: Any,
     delivery_service: Any,
     session_id: uuid.UUID,
-    wa_id: str,
+    target: DmTarget,
     now: datetime,
 ) -> int:
     """The window is closed: hold the text and send the reopening template."""
@@ -1014,7 +1040,7 @@ async def _reopen(
     if not await _transition(
         session_factory, row.id, from_states=("queued",),
         state="awaiting_reply", session_id=session_id, sent_at=now,
-        platform_user_id=wa_id, rides_on=carrier,
+        platform_user_id=target.channel_id, rides_on=carrier,
     ):
         return 0
     if carrier is not None:
@@ -1028,12 +1054,7 @@ async def _reopen(
             metadata={"outreach_id": str(row.id), "template_name": row.template_name},
         )
         outbox_id = await delivery_service.enqueue(
-            session_id, event_id, row.platform,
-            {
-                "wa_id": wa_id,
-                "phone_number_id": row.channel_identifier,
-                "channel_identifier": row.channel_identifier,
-            },
+            session_id, event_id, row.platform, target.destination,
             {"template": {"name": row.template_name, "language": row.template_language}},
         )
     except Exception:

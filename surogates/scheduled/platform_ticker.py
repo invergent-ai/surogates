@@ -478,6 +478,7 @@ async def main(
                     delivery_service=_outreach_delivery,
                     identity_lookup=_identity_lookup, now=_program_now(),
                     storage=storage, settings=settings,
+                    credentials_for=_credentials_for,
                 )
             except Exception:
                 logger.exception("[outreach] send pass failed")

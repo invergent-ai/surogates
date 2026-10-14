@@ -927,3 +927,66 @@ def test_every_reason_reads_in_the_agents_own_words():
     ):
         assert outreach.plain_reason(raw, texts) == texts[key]
         assert outreach.plain_reason(raw) == outreach.DEFAULT_TEXTS[key]
+
+
+class _SlackClient:
+    def __init__(self):
+        self.opened = []
+
+    async def conversations_open(self, *, users):
+        self.opened.append(users)
+        return {"channel": {"id": "D42"}}
+
+
+@pytest.mark.asyncio
+async def test_slack_outreach_goes_straight_into_the_direct_message(sf, monkeypatch):
+    # No service window and no template: the text is written into the DM the
+    # member's reply lands in, whenever they last wrote.
+    keys = []
+
+    async def fake_dm_session(*_args, **kwargs):
+        keys.append((kwargs["session_key"], kwargs["channel_id"], kwargs["sender"]))
+        return uuid.uuid4()
+
+    monkeypatch.setattr(outreach, "dm_session", fake_dm_session)
+    row = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(), platform="slack",
+        channel_identifier="A1", kind="alert", text="Needs a call",
+        template_name=None, template_language=None,
+    )
+
+    async def lookup(org_id, platform, user_id):
+        assert platform == "slack"
+        return SimpleNamespace(
+            platform_user_id="U7", platform_meta={"contact_permission": {"status": "granted"}},
+        )
+
+    async def creds(kind, identifier, org_id):
+        return {"bot_token": "xoxb"}
+
+    client, session_store, delivery = _SlackClient(), _Store(), _Delivery()
+    moved = await outreach.send_queued_outreach(
+        sf, session_store=session_store, redis=None, delivery_service=delivery,
+        identity_lookup=lookup, now=NOW, credentials_for=creds,
+        slack_client_factory=lambda token: client,
+    )
+    assert moved == 1
+    assert client.opened == ["U7"]
+    assert keys == [("agent:slack:dm:D42", "D42", "A1")]
+    assert delivery.sent == []
+    [(_, event_type, data)] = session_store.events
+    assert event_type == EventType.LLM_RESPONSE and data["message"]["content"] == "Needs a call"
+    assert (await _row(sf, row.id)).state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_telegram_outreach_fails_for_someone_who_never_started_the_bot(sf):
+    row = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(), platform="telegram",
+        channel_identifier="mybot", kind="alert", text="hi",
+        template_name=None, template_language=None,
+    )
+    await _send(sf, _Store(), _Delivery())
+    saved = await _row(sf, row.id)
+    assert saved.state == "failed"
+    assert "has not written" in saved.reason
