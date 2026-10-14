@@ -37,3 +37,18 @@ def test_stranger_is_offered_the_free_plan_with_the_link() -> None:
         "Choose a plan to keep chatting with this assistant; there is a free one. "
         "Start free here: https://buy/x"
     )
+
+
+def test_an_emergency_line_is_added_only_when_the_business_sets_one():
+    plain = limit_notice("subscription_required", "https://b")
+    assert plain == limit_notice("subscription_required", "https://b", {"plan_emergency_line": "  "})
+    line = "Dacă este o urgență, sunați la 112."
+    for code in ("subscription_required", "channel_not_included", "upgrade_required",
+                 "free_plan_available", "operator_subscription_exhausted", None):
+        assert limit_notice(code, "https://b", {"plan_emergency_line": line}).endswith(" " + line)
+
+
+def test_the_emergency_line_is_listed_with_an_empty_default():
+    from surogates.followup.wording import all_default_texts
+
+    assert all_default_texts()["plan_emergency_line"] == ""

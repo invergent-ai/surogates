@@ -448,6 +448,9 @@ LIMIT_TEXTS = {
     "plan_limit_notice": "You've reached your usage limit for this assistant.",
     "plan_link": "Get more access here: {link}",
     "plan_try_later": "Please try again later.",
+    # Added to every refusal when the business sets it, e.g. a clinic's
+    # "If this is an emergency, call 112."  Empty: nothing is added.
+    "plan_emergency_line": "",
 }
 
 
@@ -467,6 +470,12 @@ def limit_notice(
     def say(key: str, **values) -> str:
         return render_text((texts or {}).get(key), LIMIT_TEXTS[key], **values)
 
+    notice = _refusal(code, buy_url, say)
+    line = say("plan_emergency_line").strip()
+    return f"{notice} {line}" if line else notice
+
+
+def _refusal(code: str | None, buy_url: str | None, say) -> str:
     if code == "operator_subscription_exhausted":
         # The agent OWNER ran out of platform credit; buying more access
         # cannot help the sender, so no buy link is offered.
