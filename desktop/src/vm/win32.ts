@@ -31,6 +31,15 @@ import { Helper, late, type Said, type Start } from "./vm-helper.js";
 // How long surogate-vm.exe has after its kill line to end the VM and exit, before it is killed.
 const KILL_MS = 1_000;
 
+/**
+ * The service's words for a boot of a data folder whose last VM it has not ended yet (native/windows/service, core.rs):
+ * a VM it still makes or ends in a call of HCS's that the boot did not wait for, as a boot that timed out leaves, or one
+ * stopped just before. The service ends that VM, and lets the data folder go, once HCS's call returns.
+ */
+export const ENDING = "a VM runs for this data folder already";
+// How long a boot so refused waits before it is asked again.
+const AGAIN_MS = 250;
+
 // surogate-vm.exe is given the environment the system needs and nothing of the user's, as QEMU is on Linux.
 const ENV = { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" };
 
@@ -80,9 +89,27 @@ export const commandLine = (): string => kernelLine({ disks: "scsi", transport: 
 /**
  * A boot on Windows, as *start* starts surogate-vm.exe: spawnClean in the app. surogate-vm.exe makes the three pipes
  * and says "listening"; the manager connects to them; it sends boot, and surogate-vm.exe asks the service for the VM,
- * binds the ports and answers "started".
+ * binds the ports and answers "started". One the service refuses while it still ends the data folder's last VM is
+ * asked again, by a new surogate-vm.exe, until the boot's deadline, and then says so.
  */
 export function win32Boot(start: Start, addresses: (run: string) => Addresses = addressesWin32): BootVm {
+  const once = bootOnce(start, addresses);
+  return async (options, signal, deadline) => {
+    for (;;) {
+      try {
+        return await once(options, signal, deadline);
+      } catch (error) {
+        const why = (error as Error).message;
+        if (!why.includes(ENDING) || signal?.aborted) throw error;
+        if (performance.now() + AGAIN_MS >= deadline) throw new Error(`the data folder's last VM had not ended by the boot's deadline: ${why}`);
+        await late(performance.now() + AGAIN_MS);
+      }
+    }
+  };
+}
+
+// One surogate-vm.exe's boot.
+function bootOnce(start: Start, addresses: (run: string) => Addresses): BootVm {
   return async (options, signal, deadline) => {
     if (signal?.aborted) throw new Error("The boot was stopped");
     // The folders surogate-vm.exe makes the sessions disk in and opens the console log in, as Linux's and macOS's

@@ -20,9 +20,10 @@ import { backendFor } from "../src/vm/backends.js";
 import { Door, Forwarded } from "../src/vm/inbound.js";
 import { Guest, type VmBackend, type VmOptions } from "../src/vm/manager.js";
 import type { Start } from "../src/vm/vm-helper.js";
-import { addressesWin32, bootWin32, checkWin32, commandLine, freshDoorWin32, requirementsWin32, runtimeFolderWin32, win32Boot } from "../src/vm/win32.js";
+import { addressesWin32, bootWin32, checkWin32, commandLine, ENDING, freshDoorWin32, requirementsWin32, runtimeFolderWin32, win32Boot } from "../src/vm/win32.js";
 import { built } from "./built.js";
 
+const DESKTOP = fileURLToPath(new URL("..", import.meta.url));
 const FAKE = fileURLToPath(new URL("./vm/win32/fake-vm.mjs", import.meta.url));
 const WIN32 = fileURLToPath(new URL("../dist/vm/win32.js", import.meta.url));
 const ANA = { uid: 1000, gid: 1000, name: "ana", home: "/mnt/c/Users/ana" };
@@ -103,8 +104,35 @@ describe("the Windows VM backend", () => {
     expect([statSync(join(dir, "data", "vm")).isDirectory(), statSync(join(dir, "data", "logs")).isDirectory()]).toEqual([true, true]);
   });
 
-  it("rejects a boot that failed with its words", async () => {
-    await expect(boot({ FAKE_VM_BOOT: "fail" })).rejects.toThrow("the fake was told to fail");
+  it("rejects a boot that failed with its words, at once", async () => {
+    const log = join(dir, "said.log");
+    await expect(boot({ FAKE_VM_BOOT: "fail", FAKE_VM_LOG: log })).rejects.toThrow("the fake was told to fail");
+    expect(readFileSync(log, "utf8").trim().split("\n").filter((line) => line.startsWith('{"type":"boot"'))).toHaveLength(1);
+  });
+
+  it("asks again, within its deadline, a boot the service refused while it still ends the data folder's last VM", async () => {
+    // A boot that timed out leaves its VM to the service until HCS's call returns; the service ends it then, and lets
+    // the data folder go (service/src/core.rs), in the words the backend waits on.
+    expect(readFileSync(join(DESKTOP, "native", "windows", "service", "src", "core.rs"), "utf8")).toContain(`refuse("${ENDING}")`);
+    const refusals = join(dir, "refusals");
+    writeFileSync(refusals, "2");
+    const log = join(dir, "said.log");
+    const vm = await boot({ FAKE_VM_ENDING: refusals, FAKE_VM_LOG: log });
+    expect(vm.emulated).toBeNull();
+    // Three stand-ins asked to boot, one after another, the first two refused.
+    expect(readFileSync(log, "utf8").trim().split("\n").filter((line) => line.startsWith('{"type":"boot"'))).toHaveLength(3);
+    expect(readFileSync(refusals, "utf8")).toBe("0");
+  });
+
+  it("says, at its deadline, that the data folder's last VM had not ended", async () => {
+    const refusals = join(dir, "refusals");
+    writeFileSync(refusals, "1000");
+    mkdirSync(options.run, { recursive: true });
+    const begun = performance.now();
+    await expect(win32Boot(starting({ FAKE_VM_ENDING: refusals }), testAddresses)(options, undefined, performance.now() + 2_000))
+      .rejects.toThrow(`the data folder's last VM had not ended by the boot's deadline: ${ENDING}`);
+    expect(performance.now() - begun).toBeLessThan(3_000);
+    expect(Number(readFileSync(refusals, "utf8"))).toBeLessThan(1000);
   });
 
   it("settles its exit with surogate-vm's last words when it exits", async () => {

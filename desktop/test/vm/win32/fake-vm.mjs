@@ -5,6 +5,8 @@
 // elsewhere it serves Unix sockets, so the backend's driver is exercised on Linux too. What it does besides is told by
 // its environment, as a test's wrapper sets it (vm-win32.test.ts):
 //   FAKE_VM_BOOT=fail      the boot fails, saying why
+//   FAKE_VM_ENDING=<file>  the boot fails in the service's words for a data folder whose last VM it still ends, while
+//                          the number in the file, which each such boot counts down, is above 0
 //   FAKE_VM_SHARE=refuse   each share is refused; =silent, never answered
 //   FAKE_VM_UNSHARE=silent each unshare is never answered
 //   FAKE_VM_KILL=ignore    a kill line is not heeded
@@ -13,7 +15,7 @@
 //   FAKE_VM_LOG=<file>     each line read is written there
 // Node, and no Windows API: so it runs where the tests do, on Linux and on the Windows runner.
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 
@@ -68,6 +70,13 @@ const stop = (reason, why) => {
 function boot() {
   if (env.FAKE_VM_BOOT === "fail") {
     say({ type: "failed", why: "the fake was told to fail" });
+    process.exit(1);
+  }
+  // As surogate-vm.exe says the service's refusal (native/windows/vm, session.rs), its words alone.
+  const ending = env.FAKE_VM_ENDING ? Number(readFileSync(env.FAKE_VM_ENDING, "utf8")) : 0;
+  if (ending > 0) {
+    writeFileSync(env.FAKE_VM_ENDING, String(ending - 1));
+    say({ type: "failed", why: "a VM runs for this data folder already" });
     process.exit(1);
   }
   const uid = Number(env.FAKE_VM_UID ?? 10_000);

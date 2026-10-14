@@ -3,8 +3,8 @@
 // protected-names rule attached, and where that time goes. The first boot makes the sessions disk (vm/init's mke2fs),
 // as only the app's first boot does; the three after it find the disk there and check it, as every later boot does,
 // and their median is the target's: under 1.5 s (Linux, under KVM: 650 to 752 ms). A boot that fails is written down
-// with the rest, and the boots after it are still made: one refused while the last one's VM was still being ended is
-// asked again. One later boot more, with the measurements' agent disk, has its init write the guest's uptime as the
+// with the rest, and the boots after it are still made: one the service refused while the last one's VM was still being
+// ended is asked again by the backend itself (vm/win32.ts), and how long that took is said apart. One later boot more, with the measurements' agent disk, has its init write the guest's uptime as the
 // agent starts and as the rule's outcome lands, then the kernel's own log once the agent has said hello, its waits and
 // milestones, each line with its time since the kernel's start (probe.sh). Every boot's timeline (harness.ts) has
 // surogate-vm.exe's start, its lines, the boot line, the console's first byte and each of its lines, and the hello, or
@@ -21,8 +21,6 @@ import type { VmOptions } from "../../../../src/vm/manager.js";
 import { BootFailed, IMAGE_FLUSH_MS, lab, median, ms, PROBING_DISK, record, ROOTS, type Timeline, told } from "./harness.js";
 
 const RULE = "surogate: the protected-names rule attached 16 of 16 hooks";
-// The service's refusal of a boot while the last one's VM is still being ended (service/src/core.rs).
-const ENDING = "a VM runs for this data folder already";
 // The last line of the kernel's log on the console (probe.sh), and how long it is waited for after the hello.
 const LOGGED = "surogate-measure: the kernel's log ends";
 const LOG_MS = 60_000;
@@ -37,34 +35,34 @@ interface Booted {
   timeline: Timeline;
 }
 
-// A boot of the data folder "boot", new for the first (*fresh*), and the time to its hello, or to its failure. One the
-// service refuses while the last one's VM is still being ended is asked again every second, for a minute at most.
+// How long the backend waited in *timeline* before the surogate-vm.exe that booted, or failed last, started: none where
+// it started one alone.
+const waitedIn = (timeline: Timeline) => {
+  const started = timeline.events.filter(({ what }) => what === "surogate-vm run started");
+  return started.length > 1 ? Math.round(started.at(-1)!.ms) : 0;
+};
+
+// A boot of the data folder "boot", new for the first (*fresh*), and the time to its hello from the start of the
+// surogate-vm.exe that booted it, or to its failure; how long the backend waited before it, where it asked again.
 // *logged*: the console's kernel log is waited for after the hello, before the guest is stopped.
 async function boot(extra: Partial<VmOptions>, { fresh = false, logged = false } = {}): Promise<Booted> {
-  const asked = performance.now();
-  for (;;) {
-    const begun = performance.now();
-    const waited = Math.round(begun - asked);
-    try {
-      const booted = await lab("boot", extra, undefined, { fresh });
-      const took = ms(begun);
-      if (logged) {
-        const by = performance.now() + LOG_MS;
-        while (!booted.timeline.console.some(({ line }) => line === LOGGED) && performance.now() < by) await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      await booted.run(ROOTS[0]!, "true").catch(() => undefined);
-      await booted.stop();
-      // Read once the guest has gone, when all it printed has reached the log.
-      return { ms: took, ...(waited > 0 ? { waited } : {}), attached: readFileSync(booted.options.console, "utf8").includes(RULE), timeline: booted.timeline };
-    } catch (error) {
-      const why = (error as Error).message;
-      if (why.includes(ENDING) && performance.now() - asked < 60_000) {
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-        continue;
-      }
-      const timeline = error instanceof BootFailed ? error.timeline : { begun: "", events: [], console: [] };
-      return { ms: ms(begun), failed: why, ...(waited > 0 ? { waited } : {}), attached: false, timeline };
+  const begun = performance.now();
+  try {
+    const booted = await lab("boot", extra, undefined, { fresh });
+    const waited = waitedIn(booted.timeline);
+    const took = ms(begun) - waited;
+    if (logged) {
+      const by = performance.now() + LOG_MS;
+      while (!booted.timeline.console.some(({ line }) => line === LOGGED) && performance.now() < by) await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    await booted.run(ROOTS[0]!, "true").catch(() => undefined);
+    await booted.stop();
+    // Read once the guest has gone, when all it printed has reached the log.
+    return { ms: took, ...(waited > 0 ? { waited } : {}), attached: readFileSync(booted.options.console, "utf8").includes(RULE), timeline: booted.timeline };
+  } catch (error) {
+    const timeline = error instanceof BootFailed ? error.timeline : { begun: "", events: [], console: [] };
+    const waited = waitedIn(timeline);
+    return { ms: ms(begun) - waited, failed: (error as Error).message, ...(waited > 0 ? { waited } : {}), attached: false, timeline };
   }
 }
 
@@ -131,7 +129,7 @@ function kernelTimes(timeline: Timeline): Record<string, unknown> {
 const said = ({ ms: took, failed, waited, timeline }: Booted) => ({
   [failed === undefined ? "to hello, ms" : "failed after, ms"]: took,
   ...(failed === undefined ? {} : { failed }),
-  ...(waited === undefined ? {} : { "waited first for the last boot's VM to end, ms": waited }),
+  ...(waited === undefined ? {} : { "the backend's wait for the last boot's VM to end, before it, ms": waited }),
   "asked at": timeline.begun,
   timeline: told(timeline),
   "its console, ms seen: line": timeline.console.map(({ ms: seen, line }) => `${seen}: ${line}`),
