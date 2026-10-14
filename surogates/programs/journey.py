@@ -95,20 +95,90 @@ async def zones_of(session_factory: Any, schedule: Any) -> set[str]:
 async def next_run_at(session_factory: Any, schedule: Any, after: datetime) -> datetime | None:
     """The earliest slot after *after* over every zone the Program fires in.
 
-    ponytail: zones are read when a Program fires, so someone enrolled in a
-    new zone is first reached after the Program's next slot; recompute on
-    enrolment if that one-cadence lag matters.
+    Zones that appear later (someone enrolled in a new zone, or a person's
+    zone changed) are caught by :func:`pull_forward_for_new_zones`.
     """
-    config = schedule.config or {}
+    return _earliest(schedule.config or {}, await zones_of(session_factory, schedule), after)
+
+
+def _earliest(config: dict, zones: set[str], after: datetime) -> datetime | None:
     slots = [
         found[0]
-        for zone in await zones_of(session_factory, schedule)
+        for zone in zones
         if (found := next_occurrences(
             after, weekdays=config.get("weekdays") or [],
             times_local=config.get("times_local") or [], timezone=zone, count=1,
         ))
     ]
     return min(slots, default=None)
+
+
+async def pull_forward_for_new_zones(session_factory: Any, *, now: datetime) -> int:
+    """Bring each audience Program's ``next_run_at`` forward when a zone
+    among its enrolled people now has an earlier slot.
+
+    ``next_run_at`` is computed when a Program fires, from the zones it had
+    then; a person enrolled in a new zone, or whose zone changed, would wait
+    a whole cadence for their first message while Studio showed a sooner
+    one.  Never moves a Program later, and never touches a leased row.  Two
+    reads per pass, whatever the fleet's size.
+    """
+    async with session_factory() as db:
+        schedules = (
+            await db.execute(
+                sa.select(
+                    ProgramScheduleRow.program_id, ProgramScheduleRow.org_id,
+                    ProgramScheduleRow.agent_id, ProgramScheduleRow.config,
+                    ProgramScheduleRow.next_run_at,
+                )
+                .where(ProgramScheduleRow.active.is_(True))
+                .where(sa.or_(
+                    ProgramScheduleRow.locked_until.is_(None),
+                    ProgramScheduleRow.locked_until <= now,
+                ))
+            )
+        ).all()
+        zones: dict[tuple, set[str]] = {}
+        for org_id, agent_id, protocol, zone in (
+            await db.execute(
+                sa.select(
+                    FollowupEnrollmentRow.org_id, FollowupEnrollmentRow.agent_id,
+                    FollowupEnrollmentRow.protocol, FollowupEnrollmentRow.timezone,
+                )
+                .where(FollowupEnrollmentRow.status == "active")
+                .where(FollowupEnrollmentRow.timezone.isnot(None))
+                .distinct()
+            )
+        ).all():
+            zones.setdefault((org_id, agent_id, protocol), set()).add(zone)
+    moved = 0
+    for program_id, org_id, agent_id, config, current in schedules:
+        config = config or {}
+        if config.get("audience") is None:
+            continue
+        own = zones.get((org_id, agent_id, protocol_of(config)))
+        if not own:
+            continue
+        try:
+            earliest = _earliest(config, own | {person_zone(None, config)}, now)
+        except Exception:  # noqa: BLE001 — a bad zone costs this Program, not the pass
+            logger.warning("[programs] could not read the zones of program %s", program_id)
+            continue
+        if earliest is None or (current is not None and as_utc(current) <= earliest):
+            continue
+        async with session_factory() as db:
+            result = await db.execute(
+                sa.update(ProgramScheduleRow)
+                .where(ProgramScheduleRow.program_id == program_id)
+                .where(
+                    ProgramScheduleRow.next_run_at.is_(None) if current is None
+                    else ProgramScheduleRow.next_run_at == current
+                )
+                .values(next_run_at=earliest)
+            )
+            await db.commit()
+        moved += int(result.rowcount or 0)
+    return moved
 
 
 def in_quiet_hours(config: dict, zone: str, now: datetime) -> bool:

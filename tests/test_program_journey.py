@@ -541,3 +541,36 @@ async def test_a_fallback_skips_telegram_for_someone_who_never_wrote_to_the_bot(
     left = await _reload(sf, row.id)
     assert left.platform == "whatsapp"
     assert [(a["platform"], a["state"]) for a in left.attempts][-1] == ("telegram", "skipped")
+
+
+@pytest.mark.asyncio
+async def test_someone_in_a_new_zone_brings_the_steps_next_run_forward(sf):
+    schedule = _schedule(audience=AUDIENCE)
+    # Fired at 08:00 Bucharest; the next Bucharest slot is tomorrow.
+    tomorrow = SLOT + timedelta(days=1)
+    async with sf() as db:
+        db.add(ProgramScheduleRow(
+            program_id=schedule.program_id, org_id=ORG, agent_id=AGENT,
+            active=True, config=schedule.config, next_run_at=tomorrow,
+        ))
+        await db.commit()
+
+    async def next_run():
+        async with sf() as db:
+            return (await db.execute(
+                sa.select(ProgramScheduleRow.next_run_at)
+                .where(ProgramScheduleRow.program_id == schedule.program_id)
+            )).scalar_one()
+
+    assert await journey.pull_forward_for_new_zones(sf, now=SLOT) == 0
+    a = uuid.uuid4()
+    await _enrol(sf, a, timezone="America/New_York")
+    assert await journey.pull_forward_for_new_zones(sf, now=SLOT) == 1
+    # 08:00 in New York the same day, well before Bucharest's next slot.
+    assert as_utc(await next_run()) == datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+    # Never later: a second pass leaves it.
+    assert await journey.pull_forward_for_new_zones(sf, now=SLOT) == 0
+
+
+def as_utc(value):
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)

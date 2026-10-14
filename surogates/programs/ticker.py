@@ -21,7 +21,11 @@ import sqlalchemy as sa
 
 from surogates.db.models import ProgramInvitationRow
 from surogates.followup.missed import alert_missed_checkins
-from surogates.programs.journey import advance_fallbacks, finish_journeys
+from surogates.programs.journey import (
+    advance_fallbacks,
+    finish_journeys,
+    pull_forward_for_new_zones,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +170,7 @@ class ProgramTicker:
 
         # Before the sweep: a step that did not arrive moves to its next
         # channel rather than expiring as a non-reply.
-        for journey_pass in (advance_fallbacks, finish_journeys):
+        for journey_pass in (advance_fallbacks, finish_journeys, pull_forward_for_new_zones):
             try:
                 await journey_pass(self._sf, now=_utcnow())
             except Exception:
