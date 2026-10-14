@@ -35,11 +35,16 @@ def journey_of(config: dict) -> dict:
     return (config or {}).get("journey") or {}
 
 
+def own_channel(config: dict) -> str:
+    """The channel the step itself is on."""
+    return str((config or {}).get("channel") or "whatsapp")
+
+
 def senders_for(config: dict) -> dict[str, str]:
     """The sender per channel this step may write from: the step's own on
     its channel (the one Studio checks before activating and test-sends
     from), the journey's on every other."""
-    own = {str(config.get("channel") or "whatsapp"): str(config.get("channel_identifier") or "")}
+    own = {own_channel(config): str(config.get("channel_identifier") or "")}
     merged = {**(journey_of(config).get("senders") or {}), **{p: s for p, s in own.items() if s}}
     return {platform: str(sender) for platform, sender in merged.items() if sender}
 
@@ -300,7 +305,7 @@ async def choose_channel(
             at = last[platform]
             if at is not None and (newest is None or as_utc(at) > newest[0]):
                 newest = (as_utc(at), platform)
-        own = str(config.get("channel") or "whatsapp")
+        own = own_channel(config)
         chosen = newest[1] if newest else own if own in reachable else next(iter(reachable))
     rest = [p for p in reachable if p != chosen]
     return chosen, reachable[chosen], senders[chosen], rest

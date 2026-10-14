@@ -29,6 +29,7 @@ from surogates.channels.identity import readable_phone
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
 from surogates.followup.outreach import describe_people
+from surogates.programs.journey import own_channel
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +321,7 @@ async def _alert_if_streak(
         # The Program's own sender, on its own channel: a Slack Program's
         # team id is no WhatsApp sender.
         fallback_senders={
-            str(config.get("channel") or "whatsapp"): str(config.get("channel_identifier") or ""),
+            own_channel(config): str(config.get("channel_identifier") or ""),
         },
     )
 

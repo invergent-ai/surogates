@@ -38,6 +38,7 @@ from surogates.programs.journey import (
     fires_in,
     in_quiet_hours,
     journey_of,
+    own_channel,
     person_zone,
     protocol_of,
 )
@@ -156,7 +157,7 @@ async def materialize_occurrence(
     :func:`choose_channel`) and asked only in the zone the slot is for.
     """
     config = schedule.config or {}
-    platform = config.get("channel", "whatsapp")
+    platform = own_channel(config)
     per_person = bool(journey_of(config))
     pause = threshold(config, "pause_after_missed")
     # Resolved before the occurrence's transaction opens: an audience is one
