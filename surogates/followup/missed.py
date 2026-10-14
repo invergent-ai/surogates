@@ -2,7 +2,7 @@
 
 A Program can set ``alert_after_missed: N``.  When a person's last ``N``
 openers from that Program all went unanswered, every alert recipient of the
-agent is told, by phone.  Silence is the one signal the person cannot send
+agent is told, on their own channel.  Silence is the one signal the person cannot send
 themselves: someone who fainted does not reply "I fainted".
 
 Runs right after the deadline sweep, which is what turns an unanswered opener
@@ -180,7 +180,11 @@ async def _alert_if_streak(
         agent_id=inv.agent_id, kind="alert", text=text,
         created_by="missed-checkins", subject_user_id=inv.user_id,
         dedupe_prefix=f"missed:{inv.id}",
-        fallback_sender=str(config.get("channel_identifier") or "") or None,
+        # The Program's own sender, on its own channel: a Slack Program's
+        # team id is no WhatsApp sender.
+        fallback_senders={
+            str(config.get("channel") or "whatsapp"): str(config.get("channel_identifier") or ""),
+        },
     )
 
     async with session_factory() as db:
@@ -193,8 +197,8 @@ async def _alert_if_streak(
             # be told.  Marked so the history says so and the pass moves on.
             row.escalation_state = "failed"
             row.reason = (
-                f"No answer to {threshold} openers in a row; no team "
-                "phone is configured to tell"
+                f"No answer to {threshold} openers in a row; nobody on the "
+                "team could be told"
             )
         await db.commit()
     return queued

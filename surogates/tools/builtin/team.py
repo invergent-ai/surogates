@@ -774,7 +774,7 @@ async def _send_phones(sf: Any, ctx: Any, settings: Any, people: list) -> str:
     queued, why_not = await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="notice",
         text="📞 " + "\n📞 ".join(lines), created_by="team-overview",
-        only_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
+        only_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
     )
     if not queued:
         return f"Phone numbers: could not be sent ({why_not})."
@@ -1051,7 +1051,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             ),
             reason=f"{row.protocol} {status} by {_member(ctx)}: {reason}",
             created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
-            exclude_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
+            exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
         )
         result += " " + told(queued, why_not)
     return result
@@ -1241,7 +1241,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             f"\n\n— {followup_store.person_label(name, row)} · {readable_phone(wa_id)}"
         ),
         created_by=f"team:{ctx.user_id}", subject_user_id=user_id,
-        exclude_user_id=ctx.user_id, fallback_sender=sender,
+        exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
     )
     return result + " " + told(queued, why_not)
 

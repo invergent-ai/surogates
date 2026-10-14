@@ -257,7 +257,7 @@ async def _tell_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
         text=f"{text.strip()}\n\n— {await ctx.person_label(sf)}", created_by="agent",
         subject_user_id=ctx.user_id, exclude_user_id=ctx.user_id,
-        fallback_sender=ctx.sender if ctx.channel == "whatsapp" else None,
+        fallback_senders={ctx.channel: ctx.sender},
         **extra,
     )
 

@@ -227,7 +227,7 @@ async def test_enrol_without_a_care_team_still_enrols_and_says_so(sf, patient):
         **_kw(sf, session_id),
     )
     assert "Enrolled in post-op" in result
-    assert "not notified: no team phones are configured" in result
+    assert "not notified: no team members are configured" in result
 
 
 # --- update -----------------------------------------------------------------

@@ -224,3 +224,63 @@ async def test_a_streak_is_judged_once_not_every_pass(sf, monkeypatch):
     await alert_missed_checkins(sf, now=NOW)
     await alert_missed_checkins(sf, now=NOW + timedelta(minutes=1))
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_slack_programs_alert_goes_out_on_slack_never_whatsapp(sf):
+    # The Slack team id is not a WhatsApp sender: queuing it as one sent the
+    # alert nowhere.  The Program's own channel and sender carry it instead.
+    from surogates.db.models import ChannelIdentity
+
+    program_id, patient, doctor = await _setup(sf, threshold=1, recipients=False)
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[doctor],
+    )
+    async with sf() as db:
+        sched = (await db.execute(
+            sa.select(ProgramScheduleRow).where(ProgramScheduleRow.program_id == program_id)
+        )).scalar_one()
+        sched.config = {**sched.config, "channel": "slack", "channel_identifier": "T0SLACK"}
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=doctor, platform="slack", platform_user_id="U9",
+            platform_meta={"contact_permission": {"status": "granted"}},
+        ))
+        await db.commit()
+    await _invitation(sf, program_id, patient, days_ago=0)
+
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    [alert] = await _alerts(sf)
+    assert (alert.platform, alert.channel_identifier) == ("slack", "T0SLACK")
+    assert alert.user_id == doctor and alert.template_name is None
+
+
+@pytest.mark.asyncio
+async def test_each_team_member_is_told_on_their_own_channel(sf):
+    from surogates.db.models import ChannelIdentity
+
+    a, b = uuid.uuid4(), uuid.uuid4()
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[a, b],
+        channel_identifier="pn1", senders={"slack": "T1"},
+        team_channels={str(b): ["slack", "whatsapp"]},
+        alert_template_name="alerta", alert_template_language="ro",
+    )
+    async with sf() as db:
+        for user, platform, pid in ((a, "whatsapp", "4070"), (b, "whatsapp", "4071"), (b, "slack", "U1")):
+            db.add(ChannelIdentity(
+                org_id=ORG, user_id=user, platform=platform, platform_user_id=pid,
+                platform_meta={"contact_permission": {"status": "granted"}},
+            ))
+        await db.commit()
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    queued, _ = await store.notify_team(
+        sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="x", created_by="t",
+    )
+    assert queued == 2
+    by_user = {r.user_id: r for r in await _alerts(sf)}
+    assert (by_user[a].platform, by_user[a].channel_identifier) == ("whatsapp", "pn1")
+    assert by_user[a].template_name == "alerta"
+    assert (by_user[b].platform, by_user[b].channel_identifier) == ("slack", "T1")
+    assert by_user[b].template_name is None
+    with pytest.raises(ValueError):
+        await store.update_settings(sf, org_id=ORG, agent_id=AGENT, senders={"web": "x"})

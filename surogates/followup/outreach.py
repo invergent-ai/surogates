@@ -367,7 +367,7 @@ async def _tell_requester(
         session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
         kind="notice", created_by="outreach", subject_user_id=row.user_id,
         text=text, dedupe_prefix=dedupe_prefix, only_user_id=requester,
-        fallback_sender=row.channel_identifier,
+        fallback_senders={row.platform: row.channel_identifier},
     )
 
 
@@ -694,7 +694,7 @@ async def _remind(
         text=_wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
         dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
-        fallback_sender=row.channel_identifier,
+        fallback_senders={row.platform: row.channel_identifier},
     )
     async with session_factory() as db:
         if queued:
