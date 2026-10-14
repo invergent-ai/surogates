@@ -91,11 +91,21 @@ export const AGENT_DISK = process.env.SUROGATE_VM_AGENT_DISK ?? join(process.env
 export const PROBING_DISK = await copied(process.env.SUROGATE_VM_PROBING_DISK ?? join(DESKTOP, "dist", "agent-measure.vhd"), "probing");
 
 /**
+ * What Windows PowerShell says to *command*: run with no PSModulePath of the one it was started from, as PowerShell 7,
+ * a runner's shell, sets its own, whose modules Windows PowerShell cannot load (Get-Acl's among them), and Windows
+ * PowerShell then finds its own. Throws where the command fails.
+ */
+export function windowsPowerShell(command: string): string {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toLowerCase() !== "psmodulepath"));
+  return execFileSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8", env }).trim();
+}
+
+/**
  * The entries of *path*'s ACL for VMs, each as its SDDL says it, (A;;<rights>;;;<SID>): a VM's own SID is
  * S-1-5-83-1-…, which HcsGrantVmAccess grants and HcsRevokeVmAccess takes away, and S-1-5-83-0 is the group of all VMs.
  */
 export function vmEntries(path: string): string[] {
-  const sddl = execFileSync("powershell.exe", ["-NoProfile", "-Command", `(Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Sddl`], { encoding: "utf8" }).trim();
+  const sddl = windowsPowerShell(`(Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Sddl`);
   return (sddl.match(/\([^()]*\)/g) ?? []).filter((entry) => entry.includes(";S-1-5-83-"));
 }
 /** surogate-vm.exe, the Cargo build's (native/windows/target/release). */
@@ -299,7 +309,7 @@ export async function ready(guest: Guest, root: string, folder: string): Promise
 function pc(): Record<string, string> {
   const said = (command: string) => {
     try {
-      return execFileSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8" }).trim();
+      return windowsPowerShell(command);
     } catch {
       return "";
     }
