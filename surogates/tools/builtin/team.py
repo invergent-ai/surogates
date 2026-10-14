@@ -35,6 +35,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store as followup_store
+from surogates.followup.context import load_context, local_time, start_date_from, start_text, told
 from surogates.followup.eligibility import as_utc, day_index, next_contact
 from surogates.followup.outreach import (
     Described,
@@ -47,7 +48,6 @@ from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
 from surogates.session.interactive_input import fold_label
-from surogates.tools.builtin.followup import _context, _start_date, _start_text, _told
 from surogates.tools.registry import ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -360,11 +360,6 @@ def _ago(at: datetime | None, now: datetime) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _local(at: datetime, config: dict) -> str:
-    zone = str(config.get("timezone") or "UTC")
-    return f"{at.astimezone(ZoneInfo(zone)):%a %Y-%m-%d %H:%M} {zone}"
-
-
 async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Person | str:
     """The one enrolled person *fragment* names, or why there is not one."""
     matches = [
@@ -633,7 +628,7 @@ def _memory_lines(entries: list[str] | None) -> list[str]:
 
 async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
         return NOT_TEAM
     try:
@@ -705,7 +700,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
                     phase=row.phase, enrolled_at=row.created_at,
                     last_inbound_at=wrote, now=now,
                 )
-                text += "; next message " + (_local(*found) if found else "none scheduled")
+                text += "; next message " + (local_time(*found) if found else "none scheduled")
             lines.append(text)
         invs = invitations.get(person.user_id, [])
         lines.append(
@@ -837,7 +832,7 @@ async def _unconfirmed(
 
 async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
         return NOT_TEAM
     fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
@@ -955,7 +950,7 @@ def _enrollment_of(person: _Person, protocol: str) -> Any:
 
 async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
         return NOT_TEAM
     fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
@@ -974,7 +969,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     changes: dict[str, Any] = {}
     described: list[str] = []
     try:
-        start = _start_date(arguments, zones.get(row.protocol, "UTC"))
+        start = start_date_from(arguments, zones.get(row.protocol, "UTC"))
     except ValueError as exc:
         return f"Nothing changed: {exc}."
     approximate = arguments.get("start_date_approximate")
@@ -1034,7 +1029,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if updated.answered_by:
         result += f", answered by {updated.answered_by}"
     if updated.start_date:
-        result += f", start {_start_text(updated)}"
+        result += f", start {start_text(updated)}"
     result += "."
     if status in ("paused", "ended"):
         label = followup_store.person_label(person.display_name, updated)
@@ -1047,7 +1042,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
             exclude_user_id=ctx.user_id, fallback_sender=_sender(ctx, settings),
         )
-        result += " " + _told(queued, why_not)
+        result += " " + told(queued, why_not)
     return result
 
 
@@ -1130,7 +1125,7 @@ async def _person_account(
 
 async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
         return NOT_TEAM
     try:
@@ -1153,7 +1148,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             ) + "Offered: " + (", ".join(sorted(zones)) or "none (no active Program)") + "."
         )
     try:
-        start = _start_date(arguments, zones[protocol])
+        start = start_date_from(arguments, zones[protocol])
     except ValueError as exc:
         return f"Not enrolled: {exc}."
     if start is None and arguments.get("date_unknown") is not True:
@@ -1207,7 +1202,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         return f"Not enrolled: {masked_phone(wa_id)} belongs to a member of the team."
     result = f"Enrolled {name} ({masked_phone(wa_id)}) in {protocol}"
     if row.start_date:
-        result += f" from {_start_text(row)}"
+        result += f" from {start_text(row)}"
     result += ". Permission to message them recorded on your say-so."
     if sender:
         welcome = await followup_store.queue_outreach(
@@ -1237,7 +1232,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         created_by=f"team:{ctx.user_id}", subject_user_id=user_id,
         exclude_user_id=ctx.user_id, fallback_sender=sender,
     )
-    return result + " " + _told(queued, why_not)
+    return result + " " + told(queued, why_not)
 
 
 def register(registry: Any) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -22,16 +22,18 @@ from surogates.db.models import (
     InboxItem,
     ProgramInvitationRow,
     ProgramScheduleRow,
-    Session as SessionRow,
-    User,
 )
-from surogates.channels.identity import readable_phone
 from surogates.followup import store as followup_store
-from surogates.followup.eligibility import (
-    day_index,
-    next_contact,
-    start_date_problem,
+from surogates.followup.context import (
+    Context,
+    load_context,
+    local_time,
+    parse_start_date,
+    start_date_from,
+    start_text,
+    told,
 )
+from surogates.followup.eligibility import day_index, next_contact
 from surogates.tools.builtin.checkin import _open_invitation_for_session
 from surogates.tools.registry import ToolSchema
 
@@ -246,106 +248,30 @@ ESCALATE_SCHEMA = ToolSchema(
 )
 
 
-# ---------------------------------------------------------------------------
-# Context
-# ---------------------------------------------------------------------------
-
-
-class _Context:
-    """Who and where the conversation is, read from the session itself."""
-
-    def __init__(self, session: SessionRow, user: User | None) -> None:
-        self.session_id: uuid.UUID = session.id
-        self.org_id: uuid.UUID = session.org_id
-        self.agent_id: str = session.agent_id
-        self.user_id: uuid.UUID | None = session.user_id
-        self.channel: str = session.channel or ""
-        config = session.config or {}
-        self.sender: str = str(config.get("channel_identifier") or "")
-        self.platform_user_id: str = str(
-            config.get(f"{self.channel}_channel_id") or ""
-        )
-        self.display_name: str = (user.display_name if user else "") or ""
-        #: The enrollment that names the person, when there is one.
-        self.enrollment: Any = None
-
-    def person_label(self) -> str:
-        """How the team recognises who an alert is about."""
-        name = followup_store.person_label(self.display_name, self.enrollment)
-        parts = [name] if name else []
-        if self.channel == "whatsapp" and self.platform_user_id:
-            parts.append(readable_phone(self.platform_user_id))
-        return " · ".join(parts) or f"user {self.user_id}"
-
-
-async def _context(kwargs: dict) -> tuple[_Context | None, Any]:
-    """The conversation's context and the agent's follow-up settings."""
-    sf = kwargs["session_factory"]
-    async with sf() as db:
-        session = await db.get(SessionRow, uuid.UUID(str(kwargs["session_id"])))
-        if session is None:
-            return None, None
-        user = await db.get(User, session.user_id) if session.user_id else None
-        ctx = _Context(session, user)
-    settings = await followup_store.get_settings(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
-    )
-    if ctx.user_id is not None:
-        ctx.enrollment = followup_store.labelling_enrollment(
-            await followup_store.enrollments(
-                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
-            )
-        )
-    return ctx, settings
-
-
-def _parse_date(raw: Any) -> date | None:
-    """A YYYY-MM-DD within the protocol horizon, or ValueError."""
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = date.fromisoformat(text)
-    except ValueError as exc:
-        raise ValueError(f"start_date must be YYYY-MM-DD, got {text!r}") from exc
-    problem = start_date_problem(parsed, datetime.now(timezone.utc).date())
-    if problem:
-        raise ValueError(problem)
-    return parsed
-
-
-def _start_date(arguments: dict, timezone_name: str) -> date | None:
-    """Day 0 from ``start_date`` or ``days_ago``, never both.
-
-    ``days_ago`` exists because people answer "five days ago", and a model
-    left to turn that into a date reaches for a shell to do the arithmetic.
-    It counts back from today where the protocol's Program counts days.
-    """
-    raw_days = arguments.get("days_ago")
-    if raw_days is None or (isinstance(raw_days, str) and not raw_days.strip()):
-        return _parse_date(arguments.get("start_date"))
-    if str(arguments.get("start_date") or "").strip():
-        raise ValueError("give start_date or days_ago, not both")
-    if isinstance(raw_days, bool) or not str(raw_days).strip().isdigit():
-        raise ValueError(f"days_ago must be a whole number of days, got {raw_days!r}")
-    today = datetime.now(ZoneInfo(timezone_name)).date()
-    return _parse_date((today - timedelta(days=int(str(raw_days).strip()))).isoformat())
-
-
 async def _tell_team(
-    sf: Any, ctx: _Context, settings: Any, *, kind: str, text: str, **extra: Any,
+    sf: Any, ctx: Context, settings: Any, *, kind: str, text: str, **extra: Any,
 ):
     """The team's phones, with who it is about, never the person talking."""
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
-        text=f"{text.strip()}\n\n— {ctx.person_label()}", created_by="agent",
+        text=f"{text.strip()}\n\n— {await ctx.person_label(sf)}", created_by="agent",
         subject_user_id=ctx.user_id, exclude_user_id=ctx.user_id,
         fallback_sender=ctx.sender if ctx.channel == "whatsapp" else None,
         **extra,
     )
 
 
-async def _next_contact_text(sf: Any, ctx: _Context, row: Any, configs: list[dict]) -> str:
+async def _last_inbound(sf: Any, ctx: Context) -> datetime | None:
+    """When the person last wrote in this conversation's WhatsApp window."""
+    if ctx.channel == "whatsapp" and ctx.platform_user_id and ctx.sender:
+        return await followup_store.last_inbound(
+            sf, org_id=ctx.org_id, platform="whatsapp",
+            platform_user_id=ctx.platform_user_id, channel_identifier=ctx.sender,
+        )
+    return None
+
+
+def _next_contact_text(row: Any, configs: list[dict], last: datetime | None) -> str:
     """When the Programs will next write to this person, in the Program's zone.
 
     Computed, never assumed: someone enrolled on day 40 is past every
@@ -353,12 +279,6 @@ async def _next_contact_text(sf: Any, ctx: _Context, row: Any, configs: list[dic
     """
     if row.status != "active":
         return f"No scheduled message: the enrolment is {row.status}."
-    last = None
-    if ctx.channel == "whatsapp" and ctx.platform_user_id and ctx.sender:
-        last = await followup_store.last_inbound(
-            sf, org_id=ctx.org_id, platform="whatsapp",
-            platform_user_id=ctx.platform_user_id, channel_identifier=ctx.sender,
-        )
     found = next_contact(
         configs, protocol=row.protocol, start_date=row.start_date,
         phase=row.phase, enrolled_at=row.created_at, last_inbound_at=last,
@@ -370,19 +290,11 @@ async def _next_contact_text(sf: Any, ctx: _Context, row: Any, configs: list[dic
             "at their start date and phase. Do not promise them a time."
         )
     at, config = found
-    zone = str(config.get("timezone") or "UTC")
     name = str(config.get("name") or "").strip()
     return (
-        f"Next scheduled message: {at.astimezone(ZoneInfo(zone)):%a %Y-%m-%d %H:%M} "
-        f"{zone}" + (f" (Program '{name}')" if name else "")
+        f"Next scheduled message: {local_time(at, config)}"
+        + (f" (Program '{name}')" if name else "")
         + ". When you tell the person, use this time, never one of your own."
-    )
-
-
-def _told(queued: int, why_not: str | None) -> str:
-    return (
-        f"The team was notified ({queued})."
-        if queued else f"The team was not notified: {why_not}."
     )
 
 
@@ -400,7 +312,7 @@ def with_person_name(arguments: dict) -> dict:
 async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     arguments = with_person_name(arguments)
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None or ctx.user_id is None:
         return "Enrolment needs a conversation with a known person."
     if ctx.channel != "whatsapp" or not ctx.platform_user_id:
@@ -447,7 +359,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     if not summary:
         return "Not enrolled: write a short summary for the team."
     try:
-        start = _start_date(arguments, offered[protocol])
+        start = start_date_from(arguments, offered[protocol])
     except ValueError as exc:
         return f"Not enrolled: {exc}."
     missing = _enrol_missing(arguments)
@@ -470,7 +382,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         patient_name=patient_name, answered_by=answered_by,
         start_date_approximate=approximate,
     )
-    ctx.enrollment = enrollment
+    ctx.named_by(enrollment)
     queued, why_not = await _tell_team(sf, ctx, settings, kind="enrolment", text=summary)
 
     parts = [f"Enrolled in {protocol}"]
@@ -479,19 +391,19 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     if enrollment.answered_by:
         parts.append(f"(answered by {enrollment.answered_by})")
     if enrollment.start_date:
-        parts.append(f"from {_start_text(enrollment)}")
+        parts.append(f"from {start_text(enrollment)}")
     if enrollment.phase:
         parts.append(f"phase {enrollment.phase}")
     if enrollment.start_date is None:
         return (
-            " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
+            " ".join(parts) + ". Consent recorded. " + told(queued, why_not)
             + " No start date is recorded, so no Program will message this "
             "person until the date is set. Call escalate so the team can "
             "set it, and do not promise the person any message."
         )
     return (
-        " ".join(parts) + ". Consent recorded. " + _told(queued, why_not)
-        + " " + await _next_contact_text(sf, ctx, enrollment, configs)
+        " ".join(parts) + ". Consent recorded. " + told(queued, why_not)
+        + " " + _next_contact_text(enrollment, configs, await _last_inbound(sf, ctx))
     )
 
 
@@ -524,19 +436,10 @@ def _enrol_missing(arguments: dict) -> list[str]:
     return missing
 
 
-def _start_text(row: Any) -> str:
-    if row.start_date_approximate:
-        return (
-            f"about {row.start_date.isoformat()} (approximate: the person gave "
-            f"a rough period; confirm the date when you can)"
-        )
-    return row.start_date.isoformat()
-
-
 async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     arguments = with_person_name(arguments)
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None or ctx.user_id is None:
         return "Updating an enrolment needs a conversation with a known person."
     protocol = str(arguments.get("protocol") or "").strip()
@@ -546,7 +449,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     # drops the person out of every day-windowed Program.
     if str(arguments.get("start_date") or "").strip():
         try:
-            changes["start_date"] = _parse_date(arguments.get("start_date"))
+            changes["start_date"] = parse_start_date(arguments.get("start_date"))
         except ValueError as exc:
             return f"Not updated: {exc}."
     if isinstance(arguments.get("start_date_approximate"), bool):
@@ -575,7 +478,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     )
     if row is None:
         return f"Not updated: this person is not enrolled in '{protocol}'."
-    ctx.enrollment = row
+    ctx.named_by(row)
 
     result = f"Updated {protocol}: status {row.status}"
     if row.patient_name:
@@ -583,7 +486,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     if row.answered_by:
         result += f", answered by {row.answered_by}"
     if row.start_date:
-        result += f", start {_start_text(row)}"
+        result += f", start {start_text(row)}"
     if row.phase:
         result += f", phase {row.phase}"
     result += "."
@@ -591,13 +494,13 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
         queued, why_not = await _tell_team(
             sf, ctx, settings, kind="alert", text=f"{protocol} {status}: {reason}",
         )
-        result += " " + _told(queued, why_not)
+        result += " " + told(queued, why_not)
     return result
 
 
 async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None:
         return "No conversation context."
     configs = await followup_store.active_program_configs(
@@ -628,6 +531,7 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
     )
     if not rows:
         lines.append("This person is not enrolled in any protocol.")
+    last = await _last_inbound(sf, ctx) if rows else None
     for row in rows:
         today = datetime.now(ZoneInfo(zones.get(row.protocol, "UTC"))).date()
         index = day_index(row.start_date, today)
@@ -639,7 +543,7 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         if row.answered_by:
             detail.append(f"answered by {row.answered_by}")
         detail.append(
-            f"start {_start_text(row)} (day {index} today)"
+            f"start {start_text(row)} (day {index} today)"
             if row.start_date else "no start date"
         )
         if row.phase:
@@ -648,14 +552,14 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
             detail.append(f"reason: {row.status_reason}")
         lines.append(
             ", ".join(detail) + ". "
-            + await _next_contact_text(sf, ctx, row, configs)
+            + _next_contact_text(row, configs, last)
         )
     return "\n".join(lines)
 
 
 async def _inbox(
     sf: Any,
-    ctx: _Context,
+    ctx: Context,
     *,
     service_account_id: uuid.UUID,
     event_type: str,
@@ -683,7 +587,7 @@ async def _inbox(
                 source_event_id=event.id,
                 # An existing InboxKind; the ops Inbox filters on a Literal.
                 kind="action_required",
-                title=f"Needs your attention: {ctx.person_label()}",
+                title=f"Needs your attention: {await ctx.person_label(sf)}",
                 body=reason,
                 payload={**payload, "user_id": str(ctx.user_id)},
             )
@@ -725,7 +629,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     severity = _severity(arguments.get("severity"))
 
     sf = kwargs["session_factory"]
-    ctx, settings = await _context(kwargs)
+    ctx, settings = await load_context(kwargs)
     if ctx is None:
         return "Could not escalate: no conversation context."
 
