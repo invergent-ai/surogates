@@ -1,7 +1,7 @@
 // The app's own node (spec, Section 11), as the build leaves it at bin/node, and the script that fetches it.
 
 import { execFileSync, spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -80,6 +80,25 @@ it("refuses on Windows, fetching nothing, and names the Windows app's build, whi
     expect(scripts.build!.split(" && ")[0]).toBe("scripts/node.sh");
     expect(scripts["build:win32"]!.split(" && ")).not.toContain("scripts/node.sh");
     for (const [name, script] of Object.entries(scripts)) if (name !== "build:win32") expect(script, name).not.toContain("node.exe");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it("puts the PATH's node at bin/node for a Mac's build by a copy renamed over it, never by writing over the one there", () => {
+  // On a Mac a signed program written over in place is killed at its next start, its bytes the same though they are.
+  const dir = mkdtempSync(join(tmpdir(), "mac-node-"));
+  try {
+    for (const name of ["scripts", "bin", "path"]) mkdirSync(join(dir, name));
+    copyFileSync(join(PACKAGE, "scripts", "mac-node.sh"), join(dir, "scripts", "mac-node.sh"));
+    writeFileSync(join(dir, "bin", "node"), "the node there\n");
+    // A second name for the file there: written over in place, it would show the new bytes too.
+    linkSync(join(dir, "bin", "node"), join(dir, "kept"));
+    writeFileSync(join(dir, "path", "node"), "the PATH's node\n", { mode: 0o755 });
+    execFileSync("bash", [join(dir, "scripts", "mac-node.sh")], { env: { PATH: `${join(dir, "path")}:/usr/bin:/bin` } });
+    expect([readFileSync(join(dir, "bin", "node"), "utf8"), readFileSync(join(dir, "kept"), "utf8")]).toEqual(["the PATH's node\n", "the node there\n"]);
+    expect(statSync(join(dir, "bin", "node")).mode & 0o777).toBe(0o755);
+    expect(readdirSync(join(dir, "bin"))).toEqual(["node"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -15,7 +15,6 @@ npm run electron:install
 npm run build:darwin
 native/build.sh
 native/fsat/build.sh
-mkdir -p bin
-cp "$(command -v node)" bin/node
+scripts/mac-node.sh
 scripts/rg.sh
 echo "mac-build.sh: the app, surogate-vm, surogate-spawn, fsat, rg and surogate-helper are built"
