@@ -148,7 +148,8 @@ switch ($Command) {
     $wrong = foreach ($file in $signed) {
       # The signature the file carries, which signtool checks: never one of Windows's catalogs, which a library of
       # Windows's own is in too, whatever signature it carries (Get-AuthenticodeSignature answers the catalog's).
-      $said = & $signtool verify /pa /all /tw @chained $file 2>&1 | Out-String
+      # In its words, the file's digest among them.
+      $said = & $signtool verify /pa /all /tw /v @chained $file 2>&1 | Out-String
       if ($LASTEXITCODE -ne 0) { "$file`: signtool verify exited $LASTEXITCODE`n$said"; continue }
       if ([IO.Path]::GetExtension($file) -eq '.msi') {
         $signature = Get-AuthenticodeSignature -LiteralPath $file
