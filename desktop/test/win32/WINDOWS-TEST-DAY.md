@@ -193,7 +193,7 @@ powershell -ExecutionPolicy Bypass -File dev-service.ps1
 
 It builds `surogate-service.exe` and `surogate-vm.exe` (`cargo build --locked --release`), installs the development service as LocalSystem on demand, lets interactive users start it, and grants the VM group read on `desktop\dist\agent.vhd`. Remove it afterwards with `-Remove`.
 
-- Get the guest image build's x64 image into `images\guest\out` (`gh run download` of the image, initrd and agent-disk artifacts), so nothing is built in a Linux container. Point the measurements at it: `$env:SUROGATE_VM_IMAGE = "<repo>\images\guest\out"`, and `$env:SUROGATE_VM_AGENT_DISK` at the agent disk with its VHD footer.
+- Get the guest image build's x64 image into `images\guest\out` (`gh run download` of the image, initrd and agent-disk artifacts), so nothing is built in a Linux container. Point the measurements at it: `$env:SUROGATE_VM_IMAGE = "<repo>\images\guest\out"`, and `$env:SUROGATE_VM_AGENT_DISK` at the agent disk. Each measurement gives the disks it copies into its data folder their VHD footer, the image's and the agent disk's, as Hyper-V opens a disk only as a VHD (`desktop\src\vm\vhd.ts`).
 
 ### The measurements, in order
 

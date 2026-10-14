@@ -42,6 +42,8 @@ export const WINDOWS = [
   "test/folders-held-win32.test.ts",
   // The native programs' one workspace, and the one script that builds the Windows app.
   "test/windows-native.test.ts",
+  // The guest's disks as Windows opens them, fixed VHDs: one mounted read-only.
+  "test/vhd-win32.test.ts",
   // Every folder and file the app shows its person, by its Windows path.
   "test/shown-paths.test.ts",
 ];

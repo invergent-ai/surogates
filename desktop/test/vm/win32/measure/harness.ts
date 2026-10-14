@@ -19,6 +19,8 @@ import { type BootVm, type Folder, Guest, type VmBackend, type VmOptions } from 
 import type { Egress } from "../../../../src/vm/proxy.js";
 import type { Start } from "../../../../src/vm/vm-helper.js";
 import { identityOf } from "../../../../src/files/identity.js";
+import { readManifest } from "../../../../src/vm/image.js";
+import { addFooter } from "../../../../src/vm/vhd.js";
 import { win32Boot } from "../../../../src/vm/win32.js";
 
 export const DESKTOP = realpathSync(fileURLToPath(new URL("../../../../", import.meta.url)));
@@ -34,28 +36,35 @@ export const DATA = join(realpathSync.native(tmpdir()), "surogate-measure");
 
 // The image, copied into the data folder unless the copy there is of the same build: its manifest
 // (images/guest/build.sh), copied last, marks a whole copy. Its 2.9 GB are copied here, never at a boot that is timed.
+// Its disk is a fixed VHD there, as Hyper-V opens a disk only as one: given its footer by the hash its manifest
+// names, as the app's delivery gives it on Windows (vm/image.ts).
 const IMAGE_COPY = join(DATA, "image");
 const manifest = readFileSync(join(IMAGE, "manifest.json"));
 if (!existsSync(join(IMAGE_COPY, "manifest.json")) || !readFileSync(join(IMAGE_COPY, "manifest.json")).equals(manifest)) {
   rmSync(IMAGE_COPY, { recursive: true, force: true });
   mkdirSync(IMAGE_COPY, { recursive: true });
   for (const name of ["initrd", "rootfs.img", "vmlinuz"]) copyFileSync(join(IMAGE, name), join(IMAGE_COPY, name));
+  const rootfs = readManifest(join(IMAGE, "manifest.json"), "amd64").files.find(({ name }) => name === "rootfs.img")!;
+  await addFooter(join(IMAGE_COPY, "rootfs.img"), rootfs.sha256);
   writeFileSync(join(IMAGE_COPY, "manifest.json"), manifest);
 }
 
-// The agent disk *from*, copied into the data folder's *folder*; none is, where *from* is not there, and the service
-// says so at the boot.
-function copied(from: string, folder: string): string {
+// The agent disk *from*, copied into the data folder's *folder*, and a fixed VHD there: given its footer, unless it
+// has it already (vm/vhd.ts). None is, where *from* is not there, and the service says so at the boot.
+async function copied(from: string, folder: string): Promise<string> {
   rmSync(join(DATA, folder), { recursive: true, force: true });
   mkdirSync(join(DATA, folder), { recursive: true });
   const to = join(DATA, folder, basename(from));
-  if (existsSync(from)) copyFileSync(from, to);
+  if (existsSync(from)) {
+    copyFileSync(from, to);
+    await addFooter(to);
+  }
   return to;
 }
 
 /** The agent disk as a fixed VHD, copied into the data folder: the app's, or the one whose init runs a measurement's probe as root. */
-export const AGENT_DISK = copied(process.env.SUROGATE_VM_AGENT_DISK ?? join(DESKTOP, "dist", "agent.vhd"), "agent");
-export const PROBING_DISK = copied(process.env.SUROGATE_VM_PROBING_DISK ?? join(DESKTOP, "dist", "agent-measure.vhd"), "probing");
+export const AGENT_DISK = await copied(process.env.SUROGATE_VM_AGENT_DISK ?? join(DESKTOP, "dist", "agent.vhd"), "agent");
+export const PROBING_DISK = await copied(process.env.SUROGATE_VM_PROBING_DISK ?? join(DESKTOP, "dist", "agent-measure.vhd"), "probing");
 /** surogate-vm.exe, the Cargo build's (native/windows/target/release). */
 export const PROGRAM = process.env.SUROGATE_VM_PROGRAM ?? join(DESKTOP, "native", "windows", "target", "release", "surogate-vm.exe");
 /** Where each measurement writes what it found. */
@@ -94,6 +103,15 @@ export interface Lab {
   stop(): Promise<void>;
 }
 
+// The last *lines* of the console log at *path*, or nothing where there is none.
+function tail(path: string, lines = 40): string {
+  try {
+    return readFileSync(path, "utf8").trim().split("\n").slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
 /** The guest booted for measurement *name*, its own folder in the data folder new; *extra* goes into its options. */
 export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?: Egress): Promise<Lab> {
   const data = join(DATA, name);
@@ -108,7 +126,11 @@ export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?:
   mkdirSync(options.run, { recursive: true });
   let vm: VmBackend | undefined;
   const capturing: BootVm = async (...args) => (vm = await win32Boot(start)(...args));
-  const guest = await Guest.boot(capturing, options, undefined, () => {}, egress);
+  // A boot that did not start says the console's last lines too, where the guest wrote any: its own words of why.
+  const guest = await Guest.boot(capturing, options, undefined, () => {}, egress).catch((error: unknown) => {
+    const said = tail(options.console);
+    throw new Error(said ? `${(error as Error).message}\nThe console's last lines:\n${said}` : (error as Error).message);
+  });
   return {
     guest, vm: vm!, options, data,
     async run(root, command, timeout = 60) {
