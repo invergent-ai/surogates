@@ -19,6 +19,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.db.models import EscalationRow, ProgramInvitationRow, Session as SessionRow
+from surogates.followup.missed import HANDLED_BY_AGENT
 from surogates.programs.inbound import MOST_RECENTLY_OPENED
 from surogates.tools.registry import ToolSchema
 
@@ -31,9 +32,6 @@ _DECIDE_WITHIN = timedelta(hours=24)
 
 _VALID_OUTCOMES = ("completed", "declined", "skipped")
 
-#: Set on a step's escalation axis when the agent, woken at its deadline,
-#: decided what to do itself: the platform's missed-reply alert stands down.
-HANDLED_BY_AGENT = "handled_by_agent"
 
 STEP_OUTCOME_SCHEMA = ToolSchema(
     name="step_outcome",

@@ -279,15 +279,24 @@ def make_step_waker(
                 "step_event": event,
             },
         )
-        if event == DUE:
-            async with session_factory() as db:
+        async with session_factory() as db:
+            if event == DUE:
                 await db.execute(
                     sa.update(ProgramInvitationRow)
                     .where(ProgramInvitationRow.id == invitation.id)
                     .where(ProgramInvitationRow.outbox_id.is_(None))
                     .values(session_id=session_id, woken_at=now)
                 )
-                await db.commit()
+            else:
+                # Where the agent decides, so what it then sends (a nudge)
+                # can be told apart from silence.
+                await db.execute(
+                    sa.update(ProgramInvitationRow)
+                    .where(ProgramInvitationRow.id == invitation.id)
+                    .where(ProgramInvitationRow.session_id.is_(None))
+                    .values(session_id=session_id)
+                )
+            await db.commit()
         await wake_session(invitation.org_id, invitation.agent_id, session_id)
         return session_id
 

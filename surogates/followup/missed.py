@@ -19,6 +19,8 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.db.models import (
+    DeliveryOutbox,
+    Event,
     ProgramInvitationRow,
     ProgramScheduleRow,
 )
@@ -43,10 +45,18 @@ __all__ = [
 #: not re-read the same silence all day.
 LOOKBACK = timedelta(hours=6)
 
-#: The agent is woken at each deadline and may handle the silence itself
-#: (escalate, or record its decision); the team's alert waits this long after
-#: the deadline, or after that wake, and stands down if it did.
+#: The agent is woken at each deadline and may handle the silence itself;
+#: the team's alert waits this long after that wake (however late quiet
+#: hours made it) and stands down if the agent acted (see :func:`_agent_acted`).
 AGENT_GRACE = timedelta(minutes=10)
+
+#: How long after its deadline a step's agent may still be woken.  A step
+#: never woken by then (no send pass ran) falls back to the platform's alert.
+DEADLINE_WAKE_WINDOW = timedelta(hours=12)
+
+#: Set on a step's escalation axis when the agent dealt with the silence
+#: itself; the platform's missed-reply alert then stands down.
+HANDLED_BY_AGENT = "handled_by_agent"
 
 #: Openers whose streak this process already judged, with their deadline.
 _JUDGED: dict[Any, datetime] = {}
@@ -101,12 +111,20 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
                 .where(ProgramInvitationRow.response_state == "no_reply_by_deadline")
                 .where(ProgramInvitationRow.escalation_state == "none")
                 .where(ProgramInvitationRow.deadline_at.isnot(None))
-                .where(ProgramInvitationRow.deadline_at >= now - LOOKBACK)
-                .where(
-                    sa.func.coalesce(
-                        ProgramInvitationRow.deadline_woken_at, ProgramInvitationRow.deadline_at,
-                    ) <= now - AGENT_GRACE
-                )
+                # Never before the agent's own deadline wake has had its
+                # turn, even when quiet hours put that wake off until morning.
+                .where(sa.or_(
+                    sa.and_(
+                        ProgramInvitationRow.deadline_woken_at.isnot(None),
+                        ProgramInvitationRow.deadline_woken_at <= now - AGENT_GRACE,
+                        ProgramInvitationRow.deadline_woken_at >= now - LOOKBACK,
+                    ),
+                    sa.and_(
+                        ProgramInvitationRow.deadline_woken_at.is_(None),
+                        ProgramInvitationRow.deadline_at <= now - DEADLINE_WAKE_WINDOW,
+                        ProgramInvitationRow.deadline_at >= now - DEADLINE_WAKE_WINDOW - LOOKBACK,
+                    ),
+                ))
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).scalars().all()
@@ -122,7 +140,7 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     # the lookback; a restart re-judges once, which is harmless because
     # alerts are deduplicated.
     for inv_id, deadline in list(_JUDGED.items()):
-        if deadline < now - LOOKBACK:
+        if deadline < now - LOOKBACK - DEADLINE_WAKE_WINDOW:
             del _JUDGED[inv_id]
 
     settings_cache: dict[tuple, Any] = {}
@@ -132,6 +150,9 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
             continue
         config = watched[inv.program_id]
         try:
+            if await _agent_acted(session_factory, inv, config):
+                _JUDGED[inv.id] = as_utc(inv.deadline_at)
+                continue
             queued += await _alert_if_streak(
                 session_factory, inv, config, threshold(config), settings_cache,
             )
@@ -143,6 +164,77 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
             continue
         _JUDGED[inv.id] = as_utc(inv.deadline_at)
     return queued
+
+
+async def _agent_acted(session_factory: Any, inv: Any, config: dict) -> bool:
+    """Whether the agent, woken at this step's deadline, dealt with it.
+
+    Escalating or recording the step already moved it off ``none``; here the
+    other two: a message it sent the person after that wake (a nudge), or the
+    person's journey paused or ended.  Either is marked on the step, so the
+    streak it would have completed is not reported.
+    """
+    if inv.deadline_woken_at is None:
+        return False
+    acted = False
+    protocol = _protocol(config)
+    if protocol:
+        found = await followup_store.enrollments(
+            session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
+            user_id=_person(inv), protocol=protocol,
+        )
+        acted = bool(found) and found[0].status != "active"
+    if not acted and inv.session_id is not None:
+        acted = await _nudged(session_factory, inv)
+    if acted:
+        async with session_factory() as db:
+            await db.execute(
+                sa.update(ProgramInvitationRow)
+                .where(ProgramInvitationRow.id == inv.id)
+                .where(ProgramInvitationRow.escalation_state == "none")
+                .values(escalation_state=HANDLED_BY_AGENT)
+            )
+            await db.commit()
+    return acted
+
+
+def _protocol(config: dict) -> str | None:
+    audience = (config or {}).get("audience") or {}
+    journey = (config or {}).get("journey") or {}
+    return (audience.get("protocol") if isinstance(audience, dict) else None) or journey.get("slug")
+
+
+async def _nudged(session_factory: Any, inv: Any) -> bool:
+    """A message reached the outbox in the step's conversation after the
+    agent's deadline wake: the wake's own event orders it, not a clock."""
+    async with session_factory() as db:
+        events = (
+            await db.execute(
+                sa.select(Event.id, Event.data)
+                .where(Event.session_id == inv.session_id)
+                .where(Event.type == "user.message")
+                .order_by(Event.id.desc())
+                .limit(50)
+            )
+        ).all()
+        wake = next(
+            (
+                eid for eid, data in events
+                if (data or {}).get("invitation_id") == str(inv.id)
+                and (data or {}).get("step_event") == "deadline"
+            ),
+            None,
+        )
+        if wake is None:
+            return False
+        return (
+            await db.execute(
+                sa.select(DeliveryOutbox.id)
+                .where(DeliveryOutbox.session_id == inv.session_id)
+                .where(DeliveryOutbox.event_id > wake)
+                .limit(1)
+            )
+        ).first() is not None
 
 
 def _person(inv: Any) -> Any:

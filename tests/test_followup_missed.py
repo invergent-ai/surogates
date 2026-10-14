@@ -65,7 +65,7 @@ async def _invitation(sf, program_id, patient, *, days_ago, response="no_reply_b
             agent_id=AGENT, user_id=patient, platform="whatsapp",
             platform_user_id="40700000001", delivery_state=delivery,
             response_state=response, escalation_state="none",
-            deadline_at=created, created_at=created,
+            deadline_at=created, deadline_woken_at=created, created_at=created,
         )
         db.add(row)
         await db.commit()

@@ -418,6 +418,80 @@ async def test_the_team_alert_gives_the_agent_time_and_stands_down_when_it_acted
     assert await alert_missed_checkins(sf, now=NOW + timedelta(minutes=20)) == 1
 
 
+async def _alerting(sf):
+    """A step that alerts the team after one missed reply, and a team to tell."""
+    from surogates.db.models import ChannelIdentity
+
+    program = await _program(sf, alert_after_missed=1)
+    team = uuid.uuid4()
+    await followup_store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, channel_identifier="pn1",
+        alert_recipient_user_ids=[team], alert_template_name="a", alert_template_language="ro",
+    )
+    async with sf() as db:
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=team, platform="whatsapp", platform_user_id="4079",
+            platform_meta={"contact_permission": {"status": "granted"}},
+        ))
+        await db.commit()
+    return program
+
+
+@pytest.mark.asyncio
+async def test_the_team_alert_waits_for_a_wake_quiet_hours_put_off(sf):
+    from surogates.followup.missed import alert_missed_checkins
+
+    program = await _alerting(sf)
+    await _invitation(
+        sf, program, await _person(sf), response_state="no_reply_by_deadline",
+        delivery_state="delivered", deadline_at=NOW - timedelta(hours=3),
+    )
+    # Not woken yet (held through the night): the agent goes first.
+    assert await alert_missed_checkins(sf, now=NOW) == 0
+    # A wake that never comes (no send pass for half a day) gives way.
+    assert await alert_missed_checkins(sf, now=NOW + timedelta(hours=10)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_nudge_after_the_deadline_wake_stands_the_alert_down(sf):
+    from surogates.followup.missed import alert_missed_checkins
+
+    program = await _alerting(sf)
+    nudged = await _invitation(
+        sf, program, await _person(sf), response_state="no_reply_by_deadline",
+        delivery_state="delivered", deadline_at=NOW - timedelta(hours=1),
+        deadline_woken_at=NOW - timedelta(minutes=30), session_id=SESSION,
+    )
+    async with sf() as db:
+        db.add(SessionRow(id=SESSION, org_id=ORG, agent_id=AGENT, channel="telegram", config={}))
+        db.add(Event(id=10, session_id=SESSION, type="user.message", data={
+            "content": "ctx", "synthetic": "checkin",
+            "invitation_id": str(nudged.id), "step_event": "deadline",
+        }))
+        db.add(Event(id=11, session_id=SESSION, type="llm.response", data={}))
+        db.add(DeliveryOutbox(
+            id=900, session_id=SESSION, event_id=11, channel="telegram", destination={},
+            payload={"content": "Just checking in"}, dedupe_key="telegram:11", status="pending",
+        ))
+        await db.commit()
+    assert await alert_missed_checkins(sf, now=NOW) == 0
+    assert (await _reload(sf, nudged.id)).escalation_state == "handled_by_agent"
+
+
+@pytest.mark.asyncio
+async def test_a_paused_journey_stands_the_alert_down(sf):
+    from surogates.followup.missed import alert_missed_checkins
+
+    program = await _alerting(sf)
+    paused = await _invitation(
+        sf, program, await _person(sf, status="paused"), response_state="no_reply_by_deadline",
+        delivery_state="delivered", deadline_at=NOW - timedelta(hours=1),
+        deadline_woken_at=NOW - timedelta(minutes=30),
+    )
+    assert await alert_missed_checkins(sf, now=NOW) == 0
+    assert (await _reload(sf, paused.id)).escalation_state == "handled_by_agent"
+
+
 # ---------------------------------------------------------------------------
 # step_outcome
 # ---------------------------------------------------------------------------

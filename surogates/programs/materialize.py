@@ -32,7 +32,7 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import Audience, as_utc, ineligibility
-from surogates.followup.missed import paused_by_silence, threshold
+from surogates.followup.missed import DEADLINE_WAKE_WINDOW, paused_by_silence, threshold
 from surogates.programs.journey import (
     choose_channel,
     fires_in,
@@ -468,11 +468,6 @@ async def send_queued_openers(
     return cancelled
 
 
-#: How long after its deadline a step's agent may still be woken.  Bounds the
-#: pass to recent silence, so rows from before agents were woken at deadlines
-#: are never woken all at once, and is long enough that someone whose
-#: deadline fell in their quiet hours is still thought of in the morning.
-DEADLINE_WAKE_WINDOW = timedelta(hours=12)
 
 
 async def wake_at_deadlines(session_factory: Any, *, now: datetime, wake: Any) -> int:
