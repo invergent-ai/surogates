@@ -63,10 +63,7 @@ async def step_funnel(
                 sa.select(
                     ProgramInvitationRow.program_id, ProgramInvitationRow.platform,
                     ProgramInvitationRow.delivery_state, ProgramInvitationRow.response_state,
-                    read, ProgramInvitationRow.outcome,
-                    sa.case(
-                        (ProgramInvitationRow.delivery_state.in_(_SKIPPED), ProgramInvitationRow.reason),
-                    ),
+                    read, ProgramInvitationRow.outcome, ProgramInvitationRow.reason,
                     sa.func.count(),
                 )
                 .where(ProgramInvitationRow.org_id == org_id)
@@ -76,10 +73,10 @@ async def step_funnel(
                 .group_by(
                     ProgramInvitationRow.program_id, ProgramInvitationRow.platform,
                     ProgramInvitationRow.delivery_state, ProgramInvitationRow.response_state,
-                    read, ProgramInvitationRow.outcome,
-                    sa.case(
-                        (ProgramInvitationRow.delivery_state.in_(_SKIPPED), ProgramInvitationRow.reason),
-                    ),
+                    # Grouped by the plain reason: a CASE with bound
+                    # parameters in both lists is not the same expression
+                    # to Postgres.  Only a skip's reason is read below.
+                    read, ProgramInvitationRow.outcome, ProgramInvitationRow.reason,
                 )
             )
         ).all()
