@@ -13,12 +13,18 @@ function inBundle(dir: string): string {
   return bundle ? posix.join(bundle, "Contents", "MacOS", "surogate-helper") : posix.join(dir, "..", "native", "helper", ".build", "surogate-helper");
 }
 
-// Windows's: in the installed app's bin folder, as its code lives in resources\app; in a development build, the
-// release build of the programs' Cargo workspace (native/windows).
-function inInstall(dir: string): string {
+/**
+ * Windows's native *program* of the app whose code is in *dir*, its dist folder: in the installed app's bin folder, as
+ * its code lives in resources\app (scripts/package-win.sh); in a development build, the release build of the
+ * programs' Cargo workspace (native/windows).
+ */
+export function windowsProgramAt(dir: string, program: string): string {
   const install = /^(.+)\\resources\\app\\dist$/.exec(dir)?.[1];
-  return install ? win32.join(install, "bin", "surogate-helper.exe") : win32.join(dir, "..", "native", "windows", "target", "release", "surogate-helper.exe");
+  return install ? win32.join(install, "bin", program) : win32.join(dir, "..", "native", "windows", "target", "release", program);
 }
+
+// Windows's helper, beside the other programs.
+const inInstall = (dir: string): string => windowsProgramAt(dir, "surogate-helper.exe");
 
 /** The helper of the app whose code is in *dir*, its dist folder, by this OS. */
 export const helperAt: (dir: string) => string = forThisOs({ linux: inBundle, darwin: inBundle, win32: inInstall })

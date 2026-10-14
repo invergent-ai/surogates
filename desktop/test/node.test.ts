@@ -74,7 +74,8 @@ it("refuses on Windows, fetching nothing, and names the Windows app's build, whi
     });
     expect(said).toBe("npm run build is the Linux app's build, with Linux's node: on Windows, build the app with npm run build:win32\n");
     expect([code, existsSync(join(dir, "fetched")), existsSync(join(dir, "bin"))]).toEqual([1, false, false]);
-    // The Windows build makes the node its hosts run on, bin/node.exe, itself: the one way that file is made.
+    // A development build for Windows makes the node its hosts run on, bin/node.exe, itself: no npm script fetches one.
+    // The Windows app's layout ships the pinned one (scripts/package-win.sh, scripts/node.sh win32-x64).
     const { scripts } = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8")) as { scripts: Record<string, string> };
     expect(scripts.build!.split(" && ")[0]).toBe("scripts/node.sh");
     expect(scripts["build:win32"]!.split(" && ")).not.toContain("scripts/node.sh");

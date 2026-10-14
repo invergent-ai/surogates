@@ -1,11 +1,12 @@
 # Surogate Desktop's native programs on Windows: the Surogate VM service (service/, surogate-service.exe), the
 # only part of the app that runs as LocalSystem and the only one that calls the Host Compute Service; the user's
 # side of one VM (vm/, surogate-vm.exe); the HCS document and calls (hcs/); the service's pipe protocol (pipe/);
-# and the app's own helper for what only Windows's libraries answer (helper/, surogate-helper.exe). Each crate's
+# and the app's own helper for what only Windows's libraries answer (helper/, surogate-helper.exe); and the MSI's own
+# custom action (msi/, surogate_msi.dll), which the app does not install. Each crate's
 # pure parts build and test on any OS; what calls Windows builds on Windows alone.
 [workspace]
 resolver = "2"
-members = ["hcs", "pipe", "service", "vm", "helper"]
+members = ["hcs", "pipe", "service", "vm", "helper", "msi"]
 
 [workspace.package]
 version = "0.0.0"

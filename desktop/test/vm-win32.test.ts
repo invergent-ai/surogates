@@ -73,6 +73,8 @@ describe("the Windows VM backend", () => {
     expect(win32.addresses(options.run, ANA)).toEqual(addressesWin32(options.run));
     // A VHDX, as Hyper-V attaches a disk; Linux and macOS keep their raw file.
     expect([win32.sessionsFile, backendFor("linux")!.sessionsFile, backendFor("darwin")!.sessionsFile]).toEqual(["sessions.vhdx", "sessions.img", "sessions.img"]);
+    // The installed agent disk as a fixed VHD, as the Windows layout gives it its footer; Linux and macOS keep it raw.
+    expect([win32.agentDiskFile, backendFor("linux")!.agentDiskFile, backendFor("darwin")!.agentDiskFile]).toEqual(["agent.vhd", "agent.img", "agent.img"]);
     expect(win32.runtimeFolder(ANA, { LOCALAPPDATA: "C:\\Users\\ana\\AppData\\Local" }, "C:\\Users\\ana\\AppData\\Local\\Surogate"))
       .toBe(runtimeFolderWin32({ LOCALAPPDATA: "C:\\Users\\ana\\AppData\\Local" }, "C:\\Users\\ana\\AppData\\Local\\Surogate"));
   });

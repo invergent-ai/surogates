@@ -355,6 +355,15 @@ jobs:
           path: out/desktop/surogate-desktop-*-linux-x64.tar.gz
           if-no-files-found: error
 
+      # The agent's disk, which package.sh leaves beside the tarball: the Windows app's build lays it out as its own,
+      # where no mke2fs makes one.
+      - name: Keep the agent disk for the other targets' builds
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-agent-disk
+          path: out/desktop/agent.img
+          if-no-files-found: error
+
   desktop-describe:
     needs: desktop-build
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -389,6 +398,387 @@ jobs:
         run: |
           desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/desktop
           echo "schema=$(jq -r .stateSchema out/desktop/manifest.json)" >>"$GITHUB_OUTPUT"
+
+  # Surogate Desktop for Windows (desktop/windows/msi): the layout built on Windows from this tag, its programs signed,
+  # the MSI made of the signed layout, and the MSI signed, each a job of its own, as each job's steps share its runner.
+  # The two that build run npm's and Cargo's install scripts and WiX, and hold no secret, no Environment and no token to
+  # sign with. The two that sign run no npm, node, cargo, dotnet or WiX: in the desktop-windows-signing Environment,
+  # which only a v* tag deploys to, they sign with Azure Artifact Signing's own action, through OpenID Connect and no
+  # stored secret, where desktop-signing-mode says the account signs; the Environment's
+  # variables name the rest (ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_CERTIFICATE_PROFILE, and AZURE_CLIENT_ID and
+  # AZURE_TENANT_ID, the federated credential's). Until it does, each signs with a certificate made in its run, issued by
+  # a root the runner trusts for that job alone, so that every check of the signatures runs as it will on the release's;
+  # what they sign is kept nowhere and published nowhere, and no job of Linux's, nor the cluster's rollout, waits for
+  # them: a trial that fails stops nothing of the release. The Environment has no required reviewers, as the release's
+  # has none: once signing is real, a reviewer on it would hold every release, Linux's rollout with it.
+  # How this release signs the Windows app, decided once for the whole run, when it starts, by the repository's
+  # ARTIFACT_SIGNING_ACCOUNT variable: `account`, by Artifact Signing's account that variable names, or `trial`, by a
+  # certificate of each signing job's own run; and the signer every program and the MSI must carry, the subject of the
+  # account's certificate as the repository's ARTIFACT_SIGNING_SUBJECT variable names it, or the trial's own. Each job
+  # that signs, makes the MSI, publishes or rolls out takes these from here and never reads the variables again: a job
+  # re-run after the variable changed signs, publishes and rolls out as the run began, with what the run's earlier jobs
+  # made. It reads nothing of the repository's and holds nothing.
+  desktop-signing-mode:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      signing: ${{ steps.mode.outputs.signing }}
+      account: ${{ steps.mode.outputs.account }}
+      signer: ${{ steps.mode.outputs.signer }}
+    steps:
+      - name: Decide how the Windows app is signed
+        id: mode
+        env:
+          ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          SUBJECT: ${{ vars.ARTIFACT_SIGNING_SUBJECT }}
+        run: |
+          if [ -n "$ACCOUNT" ]; then
+            printf 'signing=account\naccount=%s\nsigner=%s\n' "$ACCOUNT" "$SUBJECT" >>"$GITHUB_OUTPUT"
+          else
+            printf 'signing=trial\naccount=\nsigner=CN=Surogate trial signer\n' >>"$GITHUB_OUTPUT"
+          fi
+
+  desktop-win-build:
+    needs: desktop-build
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      # The repository's files as they are written: git for Windows would check each text file out with CRLF line ends.
+      - name: Keep the repository's line ends
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      # The scripts are a POSIX shell's: Git for Windows' bash, by its whole path, as no other bash is on the PATH.
+      - name: Install Electron
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run electron:install
+
+      - name: Build the app for Windows, with every native part of it
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: npm run build:win32
+
+      - name: Take the VM image's manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-vm-manifest
+          path: out/vm
+
+      - name: Take the agent disk
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-agent-disk
+          path: out/agent
+
+      - name: Lay out the app
+        shell: bash
+        run: scripts/package-win.sh "${GITHUB_REF_NAME#v}" ../out/vm/manifest.json ../out/agent/agent.img ../out/win
+
+      - name: Keep the layout for its signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-win-unsigned
+          path: out/win
+          if-no-files-found: error
+
+  desktop-win-sign:
+    needs:
+      - desktop-win-build
+      - desktop-signing-mode
+    runs-on: windows-2025
+    timeout-minutes: 30
+    environment: desktop-windows-signing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Keep the repository's line ends
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Take the layout
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-win-unsigned
+          path: out/win
+
+      - name: List the programs to sign
+        run: desktop/scripts/sign-win.ps1 list out/win out/programs.txt
+
+      - name: Sign in to Azure
+        if: needs.desktop-signing-mode.outputs.signing == 'account'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign the programs with Artifact Signing
+        if: needs.desktop-signing-mode.outputs.signing == 'account'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ needs.desktop-signing-mode.outputs.account }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files-catalog: ${{ github.workspace }}\out\programs.txt
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          cache-dependencies: false
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Sign the programs with this run's certificate
+        if: needs.desktop-signing-mode.outputs.signing == 'trial'
+        id: trial
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.signer }}
+        run: |
+          $root = desktop/scripts/sign-win.ps1 trial out/programs.txt $env:SIGNER
+          "root=$root" >> $env:GITHUB_OUTPUT
+
+      # By Windows's own trust, one signature each, by the run's signer alone: the account's under its public root, a
+      # trial's under its run's root, which the runner trusts no more once the job ends.
+      - name: Check every program's signature
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.signer }}
+          ROOT: ${{ needs.desktop-signing-mode.outputs.signing == 'account' && 'account' || steps.trial.outputs.root }}
+        run: desktop/scripts/sign-win.ps1 verify out/win $env:SIGNER $env:ROOT
+
+      - name: Trust this run's root no more
+        if: always() && steps.trial.outputs.root != ''
+        env:
+          TRIAL_ROOT: ${{ steps.trial.outputs.root }}
+        run: desktop/scripts/sign-win.ps1 untrust $env:TRIAL_ROOT
+
+      - name: Keep the signed layout for the MSI
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-win-signed
+          path: out/win
+          if-no-files-found: error
+
+  desktop-win-msi:
+    needs:
+      - desktop-win-sign
+      - desktop-signing-mode
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Keep the repository's line ends
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Take the signed layout
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-win-signed
+          path: out/win
+
+      # Each program the run's signer's alone, before WiX makes anything of them: this runner trusts no trial's root, so
+      # the signer is read from each signature, which its signing job checked by trust.
+      - name: Check that the run's signer signed the layout
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.signer }}
+        run: desktop/scripts/sign-win.ps1 signed-by out/win $env:SIGNER
+
+      - name: Make the MSI
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          desktop/scripts/msi-win.ps1 $version out/win/Surogate out/win/msi "out/msi/surogate-desktop-$version-win32-x64.msi"
+
+      - name: Keep the MSI for its signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-win-msi-unsigned
+          path: out/msi/surogate-desktop-*-win32-x64.msi
+          if-no-files-found: error
+
+  desktop-win-sign-msi:
+    needs:
+      - desktop-win-msi
+      - desktop-signing-mode
+    runs-on: windows-2025
+    timeout-minutes: 20
+    environment: desktop-windows-signing
+    permissions:
+      contents: read
+      id-token: write
+    # The MSI's hash and its size, which the publish job signs for and no others, as desktop-build's for its tarball.
+    outputs:
+      sha256: ${{ steps.msi.outputs.sha256 }}
+      size: ${{ steps.msi.outputs.size }}
+    steps:
+      - name: Keep the repository's line ends
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Take the MSI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-win-msi-unsigned
+          path: out/msi
+
+      - name: Take the signed layout, which the MSI must hold
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-win-signed
+          path: out/win
+
+      - name: List the MSI to sign
+        run: desktop/scripts/sign-win.ps1 list out/msi out/msis.txt
+
+      - name: Sign in to Azure
+        if: needs.desktop-signing-mode.outputs.signing == 'account'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign the MSI with Artifact Signing
+        if: needs.desktop-signing-mode.outputs.signing == 'account'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ needs.desktop-signing-mode.outputs.account }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files-catalog: ${{ github.workspace }}\out\msis.txt
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          cache-dependencies: false
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Sign the MSI with this run's certificate
+        if: needs.desktop-signing-mode.outputs.signing == 'trial'
+        id: trial
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.signer }}
+        run: |
+          $root = desktop/scripts/sign-win.ps1 trial out/msis.txt $env:SIGNER
+          "root=$root" >> $env:GITHUB_OUTPUT
+
+      - name: Check the MSI's signature
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.signer }}
+          ROOT: ${{ needs.desktop-signing-mode.outputs.signing == 'account' && 'account' || steps.trial.outputs.root }}
+        run: desktop/scripts/sign-win.ps1 verify out/msi $env:SIGNER $env:ROOT
+
+      # What the MSI holds, by Windows's own administrative extract: the signed layout, byte for byte, every program the
+      # same signer's as the MSI, and under the account each checked by trust again. An MSI of programs another signed,
+      # a trial's within the account's among them, goes no further.
+      - name: Check every program the MSI holds
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.signer }}
+          ROOT: ${{ needs.desktop-signing-mode.outputs.signing == 'account' && 'account' || steps.trial.outputs.root }}
+        run: desktop/scripts/sign-win.ps1 contents "out/msi/surogate-desktop-$($env:GITHUB_REF_NAME -replace '^v', '')-win32-x64.msi" out/win/Surogate $env:SIGNER $env:ROOT
+
+      - name: Trust this run's root no more
+        if: always() && steps.trial.outputs.root != ''
+        env:
+          TRIAL_ROOT: ${{ steps.trial.outputs.root }}
+        run: desktop/scripts/sign-win.ps1 untrust $env:TRIAL_ROOT
+
+      - name: Say the MSI's hash and size to the publish job
+        id: msi
+        run: |
+          $msi = Get-Item "out/msi/surogate-desktop-$($env:GITHUB_REF_NAME -replace '^v', '')-win32-x64.msi"
+          "sha256=$((Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "size=$($msi.Length)" >> $env:GITHUB_OUTPUT
+
+      # Only an MSI the signing account signed is handed on: a trial's goes nowhere.
+      - name: Keep the signed MSI for the publish job
+        if: needs.desktop-signing-mode.outputs.signing == 'account'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-win-msi
+          path: out/msi/surogate-desktop-*-win32-x64.msi
+          if-no-files-found: error
+
+  # The Windows layout the MSI is made of, read as desktop-describe reads the tarball, in a job with no secret: its
+  # app's state schema, which must be the Linux app's, and its release keys, install.sh's. Its one word handed on is
+  # that schema.
+  desktop-win-describe:
+    needs:
+      - desktop-describe
+      - desktop-win-sign-msi
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      schema: ${{ steps.manifest.outputs.schema }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the signed layout
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-win-signed
+          path: out/win
+
+      - name: Write its manifest, and say the app's state schema to the publish job
+        id: manifest
+        env:
+          DESKTOP_TARGET: win32-x64
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-win-sign-msi.outputs.sha256 }}
+          DESKTOP_TARBALL_SIZE: ${{ needs.desktop-win-sign-msi.outputs.size }}
+          LINUX_STATE_SCHEMA: ${{ needs.desktop-describe.outputs.schema }}
+        run: |
+          desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/win
+          schema="$(jq -r .stateSchema out/win/manifest.json)"
+          [ "$schema" = "$LINUX_STATE_SCHEMA" ] || { echo "::error::The Windows app keeps state of schema $schema, and the Linux app of $LINUX_STATE_SCHEMA"; exit 1; }
+          echo "schema=$schema" >>"$GITHUB_OUTPUT"
 
   desktop-publish:
     needs:
@@ -436,6 +826,52 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
 
+  # Windows's publish, as Linux's, in the same Environment and with the same steps, under Windows's names
+  # (release/publish.sh, target_files): the MSI the signing account signed, by its signing job's words for its hash and
+  # size, and of the schema the Windows describe read. Only where desktop-signing-mode says the account signs: else it is
+  # skipped, and the release publishes no Windows file. Linux's publish never waits for it.
+  desktop-win-publish:
+    needs:
+      - desktop-win-sign-msi
+      - desktop-win-describe
+      - desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.signing == 'account'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    environment: desktop-release
+    permissions:
+      contents: read
+    # One Windows release at a time, so its latest.json names the newest of tags pushed close together.
+    concurrency:
+      group: desktop-release-win32-x64
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the MSI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-win-msi
+          path: out/desktop
+
+      - name: Sign its manifest
+        env:
+          DESKTOP_TARGET: win32-x64
+          DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-win-sign-msi.outputs.sha256 }}
+          DESKTOP_TARBALL_SIZE: ${{ needs.desktop-win-sign-msi.outputs.size }}
+          DESKTOP_STATE_SCHEMA: ${{ needs.desktop-win-describe.outputs.schema }}
+        run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
+
+      - name: Publish the release
+        env:
+          DESKTOP_TARGET: win32-x64
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
+
   release:
     needs:
       - wheel
@@ -476,18 +912,40 @@ jobs:
           body_path: release-notes.md
 
   # The cluster's rollout (update-images.yml): the nodes update their agent images and the agent
-  # pods restart. It runs only once every other job of the run has succeeded: the cloud's release
+  # pods restart. It runs only once every other job of the release has succeeded: the cloud's release
   # (the images, the npm packages and the wheel), and the desktop's, from its VM image to its
   # publish and the image's manifest attached. Its needs reach each job, and a job that failed,
-  # was skipped or was cancelled keeps the cluster as it is (success(), the default, said here).
+  # was skipped or was cancelled keeps the cluster as it is: each of its two jobs runs only where all
+  # its needs succeeded (success(), which an if with no status check of its own adds), and only one
+  # of the two runs, by desktop-signing-mode's word for the run. While Windows publishes nothing (a
+  # trial), the Windows jobs are none of the release's: rollout needs none of them, and runs once
+  # Linux's desktop is published, whatever Windows's trial does. Where the account signs, Windows's
+  # publish is the release's too, and rollout-with-windows waits for it as for Linux's.
   rollout:
     needs:
       - release
       - npm
       - desktop-publish
       - desktop-vm-manifest
-    if: success()
+      - desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.signing == 'trial'
     # It holds the cluster's SSH key and reads nothing of the repository's.
+    permissions: {}
+    uses: ./.github/workflows/update-images.yml
+    secrets:
+      NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
+      MASTER_HOST: ${{ secrets.MASTER_HOST }}
+      SSH_KEY: ${{ secrets.SSH_KEY }}
+
+  rollout-with-windows:
+    needs:
+      - release
+      - npm
+      - desktop-publish
+      - desktop-vm-manifest
+      - desktop-win-publish
+      - desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.signing == 'account'
     permissions: {}
     uses: ./.github/workflows/update-images.yml
     secrets:

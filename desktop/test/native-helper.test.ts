@@ -15,6 +15,15 @@ it("is in the installed app's bin folder on Windows, and its build's own in a de
   expect(helperAt("C:\\Program Files\\Surogate\\resources\\other\\dist")).toBe("C:\\Program Files\\Surogate\\resources\\other\\native\\windows\\target\\release\\surogate-helper.exe");
 });
 
+it("has surogate-vm.exe beside it on Windows, where the installed app's code looks for it, and in its build's own folder in a development build", async () => {
+  const { windowsProgramAt } = await importedOn("win32", () => import("../src/helper-path.js"));
+  expect(windowsProgramAt("C:\\Program Files\\Surogate\\resources\\app\\dist", "surogate-vm.exe")).toBe("C:\\Program Files\\Surogate\\bin\\surogate-vm.exe");
+  expect(windowsProgramAt("C:\\Users\\ana\\surogates\\desktop\\dist", "surogate-vm.exe")).toBe("C:\\Users\\ana\\surogates\\desktop\\native\\windows\\target\\release\\surogate-vm.exe");
+  // The VM backend's program is that one, from its own folder of the app's code.
+  const { VM_PROGRAM } = await importedOn("win32", () => import("../src/vm/win32.js"));
+  expect(VM_PROGRAM.replaceAll("/", "\\").endsWith("\\native\\windows\\target\\release\\surogate-vm.exe")).toBe(true);
+});
+
 describe("a run of surogate-helper.exe on Windows", () => {
   // What the app hands child_process to start the helper with, as it is asked.
   async function windowsStart(run: (helper: typeof import("../src/native-helper.js")) => unknown) {
