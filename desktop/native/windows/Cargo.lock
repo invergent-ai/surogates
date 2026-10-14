@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "hcs"
 version = "0.0.0"
 dependencies = [
@@ -25,6 +31,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "msi"
+version = "0.0.0"
+dependencies = [
+ "owners",
+ "windows-sys",
+]
+
+[[package]]
+name = "owners"
 version = "0.0.0"
 dependencies = [
  "windows-sys",
@@ -107,6 +121,18 @@ dependencies = [
  "hcs",
  "pipe",
  "serde_json",
+ "windows-sys",
+]
+
+[[package]]
+name = "surogate-admin"
+version = "0.0.0"
+dependencies = [
+ "ed25519-compact",
+ "owners",
+ "serde",
+ "serde_json",
+ "surogate-helper",
  "windows-sys",
 ]
 

@@ -6,7 +6,7 @@
 # end), working under their own logon's token, makes Surogate's folders of ProgramData, as any user may, with files of
 # theirs in them; before another, they put a link to a folder in the folder's place. With -Newer, an MSI of a later version made from the same layout: it
 # upgrades the first in place, and the first, installed over it, takes its place again, each keeping what the install
-# before it was given.
+# before it was given, and the copies an update left in apply\, which the last uninstall removes.
 #
 #   pwsh -File desktop\test\msi.test.ps1 -Msi <msi> -Version <x.y.z> -Layout <its layout> [-Newer <msi> -NewerVersion <x.y.z>]
 param(
@@ -282,7 +282,7 @@ foreach ($pair in @(@($Rules[0], 'resources\app\bin\node.exe'), @($Rules[1], 're
 # SYSTEM write; and apply\, which only they reach. The folders the squatter made are gone with all they held, and the
 # install made its own in their place.
 $record = Join-Path $Data 'install.json'
-Check 'with no base or channel given, the record holds the public ones' ((Get-Record) -eq '{"base":"https://surogate.ai","channel":"stable"}') (Get-Record)
+Check 'with no base or channel given, the record holds the public ones, and the version installed' ((Get-Record) -eq "{`"base`":`"https://surogate.ai`",`"channel`":`"stable`",`"version`":`"$Version`"}") (Get-Record)
 Check 'the take-back removed the squatter''s folder whole, before the install made its own' ($install.Log -match "Surogate: $([regex]::Escape($Data)) was there before the install, and is removed: ")
 Check-Taken '%ProgramData%\Surogate, made where the squatter''s was,' $Data $DataRules
 Check-Taken '%ProgramData%\Surogate\apply, made where the squatter''s was,' (Join-Path $Data 'apply') $ApplyRules
@@ -327,7 +327,7 @@ $again = Msiexec 'install-given' "/i `"$Msi`" SUROGATE_VMP=0 SUROGATE_BASE=https
 $again.Log -split "\r?\n" | Where-Object { $_ -match 'Surogate: ' } | ForEach-Object { "      log: $($_.Trim())" }
 Check 'it installs with SUROGATE_VMP=0 and a base and channel of its own' ($again.Code -eq 0) "msiexec exited $($again.Code)"
 Check 'with SUROGATE_VMP=0 the custom action does not run' ($again.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $again.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
-Check 'the install record holds the base and channel given' ((Get-Record) -eq '{"base":"https://mirror.example.test","channel":"beta"}') (Get-Record)
+Check 'the install record holds the base and channel given' ((Get-Record) -eq "{`"base`":`"https://mirror.example.test`",`"channel`":`"beta`",`"version`":`"$Version`"}") (Get-Record)
 $made = Get-Item $Data -Force -ErrorAction SilentlyContinue
 Check 'a link in the data folder''s place is removed, as a link, and the folder is one' ($again.Log -match "Surogate: $([regex]::Escape($Data)) was there before the install, and is removed: $([regex]::Escape($Data)) \(a link\)" -and $made -and $made.PSIsContainer -and -not ($made.Attributes -band [IO.FileAttributes]::ReparsePoint)) "$(if ($made) { $made.Attributes } else { 'missing' })"
 Check 'the folder the link named is as it was, and holds nothing of the install''s' ((Get-Acl $Victim).Sddl -eq $victimSddl -and @(Get-ChildItem -Force $Victim).Count -eq 0) "$(Get-ChildItem -Force $Victim | ForEach-Object Name)"
@@ -336,18 +336,28 @@ $kept = Get-ItemProperty $Remembered -ErrorAction SilentlyContinue
 Check 'the base, the channel and SUROGATE_VMP are remembered' ($kept -and $kept.Base -eq 'https://mirror.example.test' -and $kept.Channel -eq 'beta' -and $kept.VirtualMachinePlatform -eq '0') "$($kept | Format-List Base, Channel, VirtualMachinePlatform | Out-String)"
 
 if ($Newer) {
+  # What an update leaves, as surogate-admin.exe makes it: a folder of apply\ the Administrators own, inheriting apply's
+  # rules, with the release's copies in it, from which the newer MSI runs. The install's own: each install keeps it.
+  $copies = Join-Path $Data "apply\$NewerVersion"
+  New-Item -ItemType Directory -Force $copies | Out-Null
+  Set-Content -Path (Join-Path $copies 'manifest.json') -Value 'a copy'
+  foreach ($made in $copies, (Join-Path $copies 'manifest.json')) { icacls $made /setowner '*S-1-5-32-544' | Out-Null }
   # Each with no property: what the install before it was given is kept, the feature's policy too.
   foreach ($step in @(@('upgrade', $Newer, $NewerVersion, 'a newer MSI upgrades it in place'), @('downgrade', $Msi, $Version, 'an older MSI replaces the newer'))) {
     $run = Msiexec $step[0] "/i `"$($step[1])`""
     $product = @(Get-Product)
     # The two are made of one layout: Installed apps, the service and the app's program say which is installed.
     Check $step[3] ($run.Code -eq 0 -and $product.Count -eq 1 -and $product[0].DisplayVersion -eq $step[2] -and (Get-Service SurogateVM -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $Installed 'Surogate.exe'))) "msiexec exited $($run.Code); $(@($product | ForEach-Object DisplayVersion) -join ', ')"
-    Check "the $($step[0]) keeps the base and channel given before" ((Get-Record) -eq '{"base":"https://mirror.example.test","channel":"beta"}') (Get-Record)
+    Check "the $($step[0]) keeps the base and channel given before, and records its version" ((Get-Record) -eq "{`"base`":`"https://mirror.example.test`",`"channel`":`"beta`",`"version`":`"$($step[2])`"}") (Get-Record)
     Check "the $($step[0]) keeps SUROGATE_VMP=0, and runs no DISM" ($run.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $run.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
+    Check "the $($step[0]) keeps the install's own folder, and the copies an update left in apply" ($run.Log -match "Surogate: $([regex]::Escape($Data)) is the install's own already, and is kept" -and (Test-Path (Join-Path $copies 'manifest.json'))) "$(Get-ChildItem -Force -Recurse $Data -ErrorAction SilentlyContinue | ForEach-Object FullName)"
   }
 }
 $last = Msiexec 'remove-again' "/x `"$Msi`""
 Check 'it uninstalls again' ($last.Code -eq 0) "msiexec exited $($last.Code)"
+if ($Newer) {
+  Check 'the uninstall removes what an update left in apply, with the folder' ($last.Log -match "Surogate: $([regex]::Escape($Data)) is removed at the uninstall: .*$([regex]::Escape("apply\$NewerVersion"))") ''
+}
 Check-Gone 'after the last uninstall'
 
 $SquatterLogon.Token.Dispose()

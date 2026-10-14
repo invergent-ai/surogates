@@ -1,10 +1,18 @@
-//! `TakeBackDataFolders`: `%ProgramData%\Surogate`, where it was there before the install, removed whole, so that the
-//! install makes its own (folders.rs). Its CustomActionData is `[DataFolder]`, `%ProgramData%\Surogate\`. As
-//! LocalSystem, with the privileges to take ownership, to restore and to back up enabled in its token, and read back
-//! from it as enabled, each entry is opened by a backup-semantics handle that follows no reparse point, so that a link
-//! is seen as a link and removed, never followed, and every entry is deleted through one, whatever its maker's access
-//! rules say: a folder is made SYSTEM's alone first, on that one handle, so that what it holds can be listed. Then
-//! nothing is there, and the install makes the folder itself. Any step that fails fails the install.
+//! `TakeBackDataFolders`: `%ProgramData%\Surogate`, where it was there before the install and is not the install's own,
+//! removed whole, so that the install makes its own (folders.rs); and `RemoveDataFolders`, the same removal at a full
+//! uninstall, with what updates left in its `apply`. Each one's CustomActionData is `[DataFolder]`,
+//! `%ProgramData%\Surogate\`. As LocalSystem, with the privileges to take ownership, to restore and to back up enabled
+//! in its token, and read back from it as enabled, each entry is opened by a backup-semantics handle that follows no
+//! reparse point, so that a link is seen as a link and removed, never followed, and every entry is deleted through one,
+//! whatever its maker's access rules say: a folder is made SYSTEM's alone first, on that one handle, so that what it
+//! holds can be listed. Then nothing is there, and the install makes the folder itself. Any step that fails fails the
+//! install.
+//!
+//! The install's own folder is kept with all it holds, as an update finds it, running this very MSI from its `apply`:
+//! a real folder, and every entry in it, owned by SYSTEM or the Administrators, with no one else let change any of
+//! them, and none a reparse point (the owners crate). A user of `%ProgramData%` may make the folder, and owns what they
+//! make, which no access list they set takes from them; nor can they put an entry in a folder only administrators
+//! change: so a folder of which all that holds is not one any user made.
 
 use std::ptr::{null, null_mut};
 
@@ -179,21 +187,63 @@ fn remove(path: &str, removed: &mut Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// The custom action: `%ProgramData%\Surogate` removed whole where it was there before the install.
-#[no_mangle]
-pub extern "system" fn TakeBackDataFolders(install: MSIHANDLE) -> u32 {
+/// Whether *path* and all it holds are the install's own: no reparse point, and each owned by SYSTEM or the
+/// Administrators with no one else let change it. Why not, where it is not, with the entry it found: one that cannot be
+/// read is not judged the install's own either.
+fn the_installs(path: &str) -> Result<(), String> {
+    let (handle, attributes) = open(path, READ_CONTROL | FILE_READ_ATTRIBUTES)?.ok_or_else(|| format!("{path} is not there"))?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(format!("{path} is a link"));
+    }
+    // SAFETY: the handle is open, with READ_CONTROL, until it is dropped at the end of this call.
+    if let Some(why) = unsafe { owners::of(handle.0) }.map_err(|why| format!("{path}: {why}"))?.refusal(path) {
+        return Err(why);
+    }
+    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        for name in entries(path)? {
+            the_installs(&format!("{path}\\{name}"))?;
+        }
+    }
+    Ok(())
+}
+
+// The deferred action's folder, `[DataFolder]`, without its last backslash; None, said in the log, where none was named.
+fn data_folder(install: MSIHANDLE) -> Option<String> {
     let data = custom_action_data(install);
-    let data = data.trim_end_matches('\\');
+    let data = data.trim_end_matches('\\').to_string();
     if data.is_empty() {
         log(install, "Surogate: the install's folder of ProgramData was not named");
-        return ERROR_INSTALL_FAILURE;
+        return None;
     }
+    Some(data)
+}
+
+// The privileges enabled, each said in the log as the token says it.
+fn privileged(install: MSIHANDLE) -> Result<(), String> {
+    for line in enable_privileges()? {
+        log(install, &format!("Surogate: {line}"));
+    }
+    Ok(())
+}
+
+/// The custom action: `%ProgramData%\Surogate` removed whole where it was there before the install and is not the
+/// install's own; the install's own kept.
+#[no_mangle]
+pub extern "system" fn TakeBackDataFolders(install: MSIHANDLE) -> u32 {
+    let Some(data) = data_folder(install) else { return ERROR_INSTALL_FAILURE };
+    let data = data.as_str();
     let mut removed = Vec::new();
-    let done = enable_privileges().and_then(|enabled| {
-        for line in enabled {
-            log(install, &format!("Surogate: {line}"));
+    let done = privileged(install).and_then(|()| match the_installs(data) {
+        Ok(()) => {
+            log(install, &format!("Surogate: {data} is the install's own already, and is kept with what it holds"));
+            Ok(())
         }
-        remove(data, &mut removed)
+        Err(why) => {
+            if open(data, FILE_READ_ATTRIBUTES)?.is_some() {
+                log(install, &format!("Surogate: {why}"));
+            }
+            remove(data, &mut removed)
+        }
     });
     match done {
         Ok(()) if removed.is_empty() => {
@@ -206,6 +256,27 @@ pub extern "system" fn TakeBackDataFolders(install: MSIHANDLE) -> u32 {
         }
         Err(why) => {
             log(install, &format!("Surogate: {data}, there before the install, could not be removed: {why}"));
+            ERROR_INSTALL_FAILURE
+        }
+    }
+}
+
+/// The custom action at a full uninstall: `%ProgramData%\Surogate` removed whole, with what updates left in its `apply`.
+#[no_mangle]
+pub extern "system" fn RemoveDataFolders(install: MSIHANDLE) -> u32 {
+    let Some(data) = data_folder(install) else { return ERROR_INSTALL_FAILURE };
+    let mut removed = Vec::new();
+    match privileged(install).and_then(|()| remove(&data, &mut removed)) {
+        Ok(()) if removed.is_empty() => {
+            log(install, &format!("Surogate: {data} was gone already at the uninstall"));
+            0
+        }
+        Ok(()) => {
+            log(install, &format!("Surogate: {data} is removed at the uninstall: {}", removed.join("; ")));
+            0
+        }
+        Err(why) => {
+            log(install, &format!("Surogate: {data} could not be removed at the uninstall: {why}"));
             ERROR_INSTALL_FAILURE
         }
     }

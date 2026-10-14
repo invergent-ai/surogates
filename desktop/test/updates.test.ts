@@ -505,6 +505,54 @@ describe("installing an update", () => {
     expect(found.state).toEqual({ state: "installed", version: "1.2.4" });
   });
 
+  it("on Windows, lets the app quit once an administrator approved, and says at the next check how the install ended, as its helper kept it", async () => {
+    const msi = Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]), randomBytes(300_000)]);
+    const manifest = Buffer.from(`${JSON.stringify({
+      version: "1.2.4", channel: "stable", platform: "win32", arch: "x64", url: "releases/1.2.4/win32-x64/surogate-desktop-1.2.4-win32-x64.msi",
+      sha256: sha256(msi), size: msi.length, stateSchema: 1,
+    })}\n`);
+    served.set("/desktop/win32-x64/latest.json", manifest);
+    served.set("/desktop/releases/1.2.4/win32-x64/manifest.json.sig", sign(null, manifest, keys.privateKey));
+    served.set("/desktop/releases/1.2.4/win32-x64/surogate-desktop-1.2.4-win32-x64.msi", msi);
+    let answer: Applied = { code: 0, said: "", restarts: true };
+    const app = () => updates({ target: "win32-x64", apply: () => Promise.resolve(answer) });
+    const first = app();
+    await first.check();
+    const { files } = first.state as { files: { tarball: string } };
+    expect(files.tarball).toBe(join(cache(), "1.2.4", "release.msi"));
+    await first.install();
+    expect(first.state).toEqual({ state: "restarting", version: "1.2.4" });
+    // Restarting, a check asks nothing more: the MSI runs once the app has quit.
+    heard = [];
+    await first.check();
+    expect(heard).toEqual([]);
+    // Started again at its old version: the helper kept how the install ended, said once and gone.
+    const kept = join(cache(), "1.2.4", "result.json");
+    for (const [code, state] of [
+      [4, { state: "failed", why: "Windows Installer could not install it, and nothing was changed" }],
+      [3, { state: "failed", why: "it is not a release of Surogate that this install takes, so nothing was installed" }],
+      [5, { state: "failed", why: "Surogate did not quit in time for it, and nothing was changed" }],
+      [9, { state: "failed", why: "its install ended 9" }],
+      [1223, { state: "refused" }],
+    ] as const) {
+      writeFileSync(kept, `${JSON.stringify({ version: "1.2.4", code })}\n`);
+      const again = app();
+      await again.check();
+      expect(again.state).toEqual({ version: "1.2.4", files, ...state });
+      expect(existsSync(kept)).toBe(false);
+    }
+    // A result of another version, or of none, is no one's: the update is offered as it is.
+    writeFileSync(kept, `${JSON.stringify({ version: "1.2.5", code: 4 })}\n`);
+    const later = app();
+    await later.check();
+    expect(later.state).toEqual({ state: "available", version: "1.2.4", files });
+    // Dismissed before any approval: UAC's ERROR_CANCELLED is a refusal, and the files stay.
+    answer = { code: 1223, said: "No administrator approved the update" };
+    await later.install();
+    expect(later.state).toEqual({ state: "refused", version: "1.2.4", files });
+    expect(existsSync(files.tarball)).toBe(true);
+  });
+
   it("says each state in the sidebar, with the button that acts on it", () => {
     const files = { manifest: "m", signature: "s", tarball: "t" };
     expect([
@@ -514,6 +562,7 @@ describe("installing an update", () => {
       updateLine({ state: "refused", version: "1.2.4", files }),
       updateLine({ state: "failed", version: "1.2.4", files, why: "the release's archive could not be unpacked" }),
       updateLine({ state: "installed", version: "1.2.4" }),
+      updateLine({ state: "restarting", version: "1.2.4" }),
     ]).toEqual([
       null,
       { text: "Update available: Surogate 1.2.4", button: "Restart to update" },
@@ -521,6 +570,7 @@ describe("installing an update", () => {
       { text: "An administrator needs to install this update.", button: "Try again" },
       { text: "Surogate could not install its update: the release's archive could not be unpacked", button: "Try again" },
       { text: "Surogate 1.2.4 is installed.", button: "Restart" },
+      { text: "Surogate restarts to install 1.2.4…", button: null },
     ]);
   });
 });

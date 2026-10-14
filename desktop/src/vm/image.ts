@@ -111,8 +111,13 @@ export function rootsOwn(path: string, run = false, found: Stats = lstatSync(pat
   if (run && (found.mode & 0o004) === 0) throw new Error(`${path} is not the install script's: its user cannot read it`);
 }
 
-// Whose word an installed app's record must be: an administrator's on Windows, root's elsewhere.
-const installersOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn }) ?? rootsOwn;
+// How the words for a record that is not there, or names a base no request may go to, say what put it there.
+const NOT_INSTALLED = forThisOs({ win32: "Surogate was not installed by its installer, so it does not know where it was installed from" })
+  ?? "Surogate was not installed by its install script, so it does not know where it was installed from";
+const ANOTHER_BASE = forThisOs({ win32: "install Surogate again with a SUROGATE_BASE that has none" }) ?? "run the install script again with a --base that has none";
+
+// Whose word an installed app's record, and its installed version's mark, must be: an administrator's on Windows, root's elsewhere.
+export const installersOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn }) ?? rootsOwn;
 
 /**
  * The base URL in the install record at *path*, which the install script writes:
@@ -130,7 +135,7 @@ export function installBase(path: string, rootOwned = false): string {
     const { code } = error as NodeJS.ErrnoException;
     if (code === undefined) throw error;
     if (code !== "ENOENT") throw new Error(`${path} could not be read: ${code}`);
-    throw new Error("Surogate was not installed by its install script, so it does not know where it was installed from");
+    throw new Error(NOT_INSTALLED);
   }
   let base: unknown;
   try {
@@ -143,7 +148,7 @@ export function installBase(path: string, rootOwned = false): string {
   // A user and a password in it would go out with every request, to every address a redirect names; and
   // the app's own fetch refuses such an address in words of the system's. Refused here, in the app's own.
   if (url.username !== "" || url.password !== "") {
-    throw new Error(`${path} names a web address with a user or a password in it, which Surogate does not send: run the install script again with a --base that has none`);
+    throw new Error(`${path} names a web address with a user or a password in it, which Surogate does not send: ${ANOTHER_BASE}`);
   }
   return url.href.replace(/\/+$/, "");
 }

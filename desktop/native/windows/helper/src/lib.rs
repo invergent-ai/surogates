@@ -8,5 +8,6 @@ pub mod answers;
 pub mod json;
 pub mod pem;
 pub mod spawn;
+pub mod update;
 #[cfg(windows)]
 pub mod windows;

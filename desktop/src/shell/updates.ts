@@ -13,8 +13,10 @@ import {
 import { basename, dirname, join } from "node:path";
 
 import { download, type Fetch, hashOf, sizeOf } from "../download.js";
-import { type Target, type TargetFiles, TARGETS, targetOf } from "../platform.js";
-import { installBase, rootsOwn } from "../vm/image.js";
+import { adminsOwn } from "../files/admins-own-win32.js";
+import { ntat } from "../files/ntat.js";
+import { forThisOs, type Target, type TargetFiles, TARGETS, targetOf } from "../platform.js";
+import { installBase, installersOwn, rootsOwn } from "../vm/image.js";
 
 export const CHECK_MS = 6 * 60 * 60 * 1000;
 // A check that failed is tried again sooner: after a minute, and each time it fails again after
@@ -56,6 +58,8 @@ export function keepChecked(updates: { check(): Promise<void> }, signal: AbortSi
 }
 // How a tarball begins: a gzip member's magic number.
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
+// Windows's payload, an MSI: a compound file's header.
+const MSI_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 // A manifest is one short line, and its signature Ed25519's 64 bytes: anything longer is not one.
 const MANIFEST_MAX = 4096;
 const SIGNATURE_MAX = 64;
@@ -87,7 +91,8 @@ export interface Release {
   stateSchema: number;
 }
 
-// A downloaded release's files, in the user's cache, as the root helper is handed them.
+// A downloaded release's files, in the user's cache, as the root helper is handed them. Its payload is
+// the tarball, or on Windows the MSI, release.msi, which surogate-admin.exe installs.
 export interface Staged {
   manifest: string;
   signature: string;
@@ -104,6 +109,8 @@ export type UpdateState =
   | { state: "failed"; version: string; files: Staged; why: string }
   // Installed for every user of this computer: the app runs it once it restarts.
   | { state: "installed"; version: string }
+  // Approved by an administrator on Windows: the app quits for the MSI to replace it, and is started again after.
+  | { state: "restarting"; version: string }
   // The helper pkexec would run is not one the app can take: nothing is installed until the
   // install script has put it right.
   | { state: "broken" }
@@ -112,10 +119,12 @@ export type UpdateState =
   | { state: "unsigned" };
 
 // What the root helper's run came to: its exit code, null when it did not run or a signal ended
-// it; and the last of what it said, with how it ended where no exit code says.
+// it; and the last of what it said, with how it ended where no exit code says. *restarts*: the
+// install goes on once the app has quit, as Windows's does, which starts the app again after.
 export interface Applied {
   code: number | null;
   said: string;
+  restarts?: boolean;
 }
 
 // pkexec's own answers where no administrator approved: 126, the prompt was dismissed; and 127
@@ -129,7 +138,11 @@ export interface Applied {
 const DISMISSED = 126;
 const NOT_AUTHORIZED = 127;
 const AS_ANOTHER_USER = "Error executing command as another user:";
-const refusal = (code: number | null, said: string) => code === DISMISSED || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
+// Windows's answer where UAC's prompt had no administrator's approval (ERROR_CANCELLED), which no
+// exit code on Linux can be.
+const UAC_DISMISSED = 1223;
+const refusal = (code: number | null, said: string) => code === DISMISSED || code === UAC_DISMISSED
+  || (code === NOT_AUTHORIZED && said.split("\n").some((line) => line.startsWith(AS_ANOTHER_USER)));
 // How the helper begins each line it says (fail and say in release/install.sh).
 const HELPER_SAYS = "Surogate Desktop: ";
 // The most of a failure's reason that the line shows, by the sidebar's own width: at its narrowest
@@ -184,6 +197,11 @@ export class Unsigned extends Error {}
 export const UNSIGNED_CHECKS = 8;
 export const UNSIGNED_MS = 24 * 60 * 60 * 1000;
 
+// What a person does on this OS: on Windows the next try asks UAC for an administrator itself, and an
+// install is put right by the MSI; elsewhere by the install script.
+const TRY_AGAIN = forThisOs({ win32: "Install as an administrator…" }) ?? "Try again";
+const BROKEN = forThisOs({ win32: "Surogate cannot update itself. Install Surogate again." }) ?? "Surogate cannot update itself. Run the install script again.";
+
 /** The sidebar's line for *state*, or null for none. */
 export function updateLine(state: UpdateState | null): UpdateLine | null {
   switch (state?.state) {
@@ -192,13 +210,15 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
     case "installing":
       return { text: `Installing Surogate ${state.version}…`, button: null };
     case "refused":
-      return { text: "An administrator needs to install this update.", button: "Try again" };
+      return { text: "An administrator needs to install this update.", button: TRY_AGAIN };
     case "failed":
       return { text: `Surogate could not install its update: ${state.why}`, button: "Try again" };
     case "installed":
       return { text: `Surogate ${state.version} is installed.`, button: "Restart" };
+    case "restarting":
+      return { text: `Surogate restarts to install ${state.version}…`, button: null };
     case "broken":
-      return { text: "Surogate cannot update itself. Run the install script again.", button: null };
+      return { text: BROKEN, button: null };
     case "unsigned":
       return { text: `Surogate's newest release${NOT_SIGNED}`, button: null };
     default:
@@ -222,11 +242,15 @@ export function newer(a: string, b: string): boolean {
  * (rootsOwn), is not read.
  */
 export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
-  if (rootOwned) rootsOwn(helper, true);
+  if (rootOwned) keysOwn(helper);
   const keys = listedKeys(readFileSync(helper, "utf8"));
   if (keys.length === 0) throw new Error(`${helper} trusts no release key`);
   return keys;
 }
+
+// Whose word the release keys must be: on Windows the install's resources\release-keys, an
+// administrator's (adminsOwn); elsewhere the helper pkexec runs, root's and a program.
+const keysOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn }) ?? ((path) => rootsOwn(path, true));
 
 const BEGIN_KEY = "-----BEGIN PUBLIC KEY-----";
 const END_KEY = "-----END PUBLIC KEY-----";
@@ -363,10 +387,15 @@ export function signedRelease(url: string, manifest: Buffer, signature: Buffer, 
 }
 
 // The channel the install script recorded beside the base: only its releases are taken. It is the
-// one *helper* installs, or nothing is asked of the base: the helper would refuse what came.
+// one *helper* installs, or nothing is asked of the base: the helper would refuse what came. On
+// Windows the MSI's record alone names it, and surogate-admin.exe reads the same.
+// Whether the helper names the channel it installs: Linux's root helper does; Windows's MSI writes it in the record alone.
+const HELPER_NAMES_CHANNEL = forThisOs({ win32: false }) ?? true;
+
 function channelOf(record: string, helper: string): string {
   const { channel } = JSON.parse(readFileSync(record, "utf8")) as { channel?: unknown };
   if (typeof channel !== "string" || channel === "") throw new Error(`${record} names no update channel`);
+  if (!HELPER_NAMES_CHANNEL) return channel;
   const installs = /^[ \t]*CHANNEL=([A-Za-z0-9_-]+)$/m.exec(readFileSync(helper, "utf8"))?.[1];
   if (channel !== installs) throw new Error(`${record} names the channel ${channel}, and ${helper} installs ${installs ?? "no channel it names"}`);
   return channel;
@@ -387,6 +416,10 @@ function regular(path: string): boolean {
 // and is not one is removed, a link by itself and never what it leads to; with *make*, the folder
 // is then made afresh.
 function ownFolder(path: string, make: boolean, said?: (words: string) => void): boolean {
+  return OWN_FOLDER(path, make, said);
+}
+
+function ownFolderPosix(path: string, make: boolean, said?: (words: string) => void): boolean {
   const found = lstatSync(path, { throwIfNoEntry: false });
   const own = found !== undefined && found.isDirectory() && found.uid === process.getuid?.();
   if (found && !own) {
@@ -406,6 +439,38 @@ function ownFolder(path: string, make: boolean, said?: (words: string) => void):
   }
   return true;
 }
+
+// The same on Windows: a real folder, no reparse point (Node's lstat takes a junction for a link), owned
+// by this user, as ntat reads it through no link; the user's profile already lets no other user in, so
+// no access list is set. What has its name and is not one goes as on Linux.
+function ownFolderWin32(path: string, make: boolean, said?: (words: string) => void): boolean {
+  const found = lstatSync(path, { throwIfNoEntry: false });
+  const mine = (): boolean => {
+    let fd: number | undefined;
+    let held: number | undefined;
+    try {
+      fd = ntat().openRoot(`\\\\?\\${path}`);
+      held = ntat().reopen(fd, ntat().constants.READ_CONTROL | ntat().constants.SYNCHRONIZE, ntat().constants.FILE_SHARE_READ | ntat().constants.FILE_SHARE_WRITE);
+      return ntat().owners(held).owner === ntat().userSid();
+    } catch {
+      return false; // a link, no folder, or one not to be read: not this user's own
+    } finally {
+      if (held !== undefined) closeSync(held);
+      if (fd !== undefined) closeSync(fd);
+    }
+  };
+  const own = found !== undefined && found.isDirectory() && !found.isSymbolicLink() && mine();
+  if (found && !own) {
+    if (found.isSymbolicLink()) said?.(`${path} was a link to ${readlinkSync(path)}, and Surogate keeps its updates in a folder of its own: the link is removed, and what it led to is left as it was`);
+    rmSync(path, { recursive: true, force: true });
+  }
+  if (!own && !make) return false;
+  if (!own) mkdirSync(path);
+  return own || mine();
+}
+
+// This OS's look at a folder of the cache.
+const OWN_FOLDER: (path: string, make: boolean, said?: (words: string) => void) => boolean = forThisOs({ win32: ownFolderWin32 }) ?? ownFolderPosix;
 
 // The updates folder that *cache* names, <cache home>/surogate/updates, by its real path; null when
 // it is not there and is not to be made. The cache home may be a link, as one moved to another
@@ -453,6 +518,39 @@ function staged(cache: string, files: Staged, took: { home: string | null }): bo
   const folder = dirname(files.tarball);
   return updates !== null && dirname(folder) === updates && ownFolder(folder, false) && [files.manifest, files.signature, files.tarball].every(regular);
 }
+
+// Where Windows's helper keeps how an install ended (surogate-helper update, native/windows/helper):
+// the app has quit by then, and reads it at its next start.
+export const RESULT = "result.json";
+
+// What surogate-admin.exe's exit says, as the helper kept it: 3, the release was not this app's; 4,
+// Windows Installer failed and rolled back; 5, the app did not quit within its minute.
+const ADMIN_SAYS: Readonly<Record<number, string>> = {
+  3: "it is not a release of Surogate that this install takes, so nothing was installed",
+  4: "Windows Installer could not install it, and nothing was changed",
+  5: "Surogate did not quit in time for it, and nothing was changed",
+};
+
+// How the install of *version* that the result file *path* keeps ended: refused, failed with why, or
+// null for none to say. Read once: the file goes. One that is no regular file is not read.
+function applied(path: string, version: string): { state: "refused" } | { state: "failed"; why: string } | null {
+  if (!regular(path)) return null;
+  let read: unknown;
+  try {
+    read = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    read = null;
+  } finally {
+    rmSync(path, { force: true });
+  }
+  const { version: of, code } = (typeof read === "object" && read !== null ? read : {}) as { version?: unknown; code?: unknown };
+  if (of !== version || !Number.isSafeInteger(code) || code === 0) return null;
+  if (code === UAC_DISMISSED) return { state: "refused" };
+  return { state: "failed", why: ADMIN_SAYS[code as number] ?? `its install ended ${code as number}` };
+}
+
+// How the installed version's mark is read: as the root helper reads one, or on Windows the MSI's record, JSON.
+const MARK: (bytes: Buffer) => Record<string, unknown> | null = forThisOs({ win32: (bytes: Buffer) => JSON.parse(bytes.toString("utf8")) as Record<string, unknown> | null }) ?? oneObject;
 
 export interface UpdatesOptions {
   version: string; // the running app's
@@ -511,8 +609,10 @@ export class Updates {
     this.set({ state: "installing", version });
     // A helper whose run could not even be begun is a failure with its reason: the line is never
     // left at Installing.
-    const { code, said } = await Promise.resolve().then(() => this.options.apply(files))
-      .catch((error: unknown) => ({ code: null, said: error instanceof Error ? error.message : String(error) }));
+    const { code, said, restarts } = await Promise.resolve().then(() => this.options.apply(files))
+      .catch((error: unknown): Applied => ({ code: null, said: error instanceof Error ? error.message : String(error) }));
+    // Approved, on Windows: the MSI installs it once the app has quit, and starts the app again.
+    if (code === 0 && restarts) return this.set({ state: "restarting", version });
     if (code === 0) {
       // Installed is what the installed version's mark says, where there is one to read. The helper
       // ends 0 for whichever release it was handed, and the files may have been changed after the
@@ -598,7 +698,11 @@ export class Updates {
     // In it, what is not a regular file goes before anything is read or written, as in the image's
     // folder: nothing there is taken by its name alone.
     for (const name of readdirSync(folder)) if (!regular(join(folder, name))) rmSync(join(folder, name), { recursive: true, force: true });
-    const files = { manifest: join(folder, "manifest.json"), signature: join(folder, "manifest.json.sig"), tarball: join(folder, "release.tar.gz") };
+    const windows = at.platform === "win32";
+    const files = { manifest: join(folder, "manifest.json"), signature: join(folder, "manifest.json.sig"), tarball: join(folder, windows ? "release.msi" : "release.tar.gz") };
+    // How an earlier install of it ended, as Windows's helper kept it once the app had quit for it: said
+    // once, at the first check after, and gone.
+    const ended = windows ? applied(join(folder, RESULT), release.version) : null;
     keep(files.manifest, manifest);
     keep(files.signature, signature);
     // One downloaded already is taken by its size and hash: the user's processes can change it.
@@ -619,7 +723,7 @@ export class Updates {
         stop.abort(replaced);
         throw replaced;
       };
-      await download({ url: `${base}/desktop/${release.url}`, name: `Surogate ${release.version}`, size: release.size, sha256: release.sha256, magic: GZIP_MAGIC },
+      await download({ url: `${base}/desktop/${release.url}`, name: `Surogate ${release.version}`, size: release.size, sha256: release.sha256, magic: windows ? MSI_MAGIC : GZIP_MAGIC },
         `${files.tarball}.partial`, { fetch: asked, signal: AbortSignal.any([this.options.signal, stop.signal]) });
     }
     // Its hash, or its download, took a while: again before anything in a folder is renamed or removed.
@@ -636,6 +740,8 @@ export class Updates {
     // again: its line stays until its user tries again, or a newer release is found.
     const shown = this.state;
     if ((shown.state === "refused" || shown.state === "failed") && shown.version === release.version) return;
+    if (ended?.state === "refused") return this.set({ state: "refused", version: release.version, files });
+    if (ended?.state === "failed") return this.set({ state: "failed", version: release.version, files, why: ended.why });
     this.set({ state: "available", version: release.version, files });
   }
 
@@ -675,7 +781,7 @@ export class Updates {
 
   // Whether an install runs, or is done: from then on a check changes neither the line nor the cache.
   private settled(): boolean {
-    return this.state.state === "installing" || this.state.state === "installed";
+    return this.state.state === "installing" || this.state.state === "installed" || this.state.state === "restarting";
   }
 
   // The version installed for every user now, as its root helper recorded it; null when none can be
@@ -684,8 +790,8 @@ export class Updates {
     const { installed, rootOwned } = this.options;
     if (!installed || !existsSync(installed)) return null;
     try {
-      if (rootOwned) rootsOwn(installed);
-      const version = oneObject(readFileSync(installed))?.version;
+      if (rootOwned) installersOwn(installed);
+      const version = MARK(readFileSync(installed))?.version;
       return typeof version === "string" && VERSION.test(version) ? version : null;
     } catch {
       return null;

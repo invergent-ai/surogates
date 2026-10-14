@@ -40,34 +40,53 @@ pub fn parsed(args: &[OsString]) -> Option<Spawn<'_>> {
 /// no escape; each argument as it is where it holds no blank and no quote, and else in quotes, each backslash that
 /// comes before a quote or before the closing one doubled, and each quote after a backslash.
 pub fn command_line(program: &[u16], args: &[Vec<u16>]) -> Vec<u16> {
-    const QUOTE: u16 = b'"' as u16;
-    const BACKSLASH: u16 = b'\\' as u16;
     let mut line = vec![QUOTE];
     line.extend_from_slice(program);
     line.push(QUOTE);
     for arg in args {
         line.push(b' ' as u16);
-        let plain = !arg.is_empty() && !arg.iter().any(|&unit| matches!(unit, 0x20 | 0x09 | 0x0a | 0x0b | QUOTE));
-        if plain {
-            line.extend_from_slice(arg);
-            continue;
-        }
-        line.push(QUOTE);
-        let mut backslashes = 0;
-        for &unit in arg {
-            if unit == BACKSLASH {
-                backslashes += 1;
-                continue;
-            }
-            let doubled = if unit == QUOTE { backslashes * 2 + 1 } else { backslashes };
-            line.extend(std::iter::repeat_n(BACKSLASH, doubled));
-            backslashes = 0;
-            line.push(unit);
-        }
-        line.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2));
-        line.push(QUOTE);
+        push_argument(&mut line, arg);
     }
     line
+}
+
+/// *args* alone, each as command_line writes one, between single blanks: a program's parameters, as ShellExecuteExW takes
+/// them apart from the program.
+pub fn arguments(args: &[Vec<u16>]) -> Vec<u16> {
+    let mut line = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        if at > 0 {
+            line.push(b' ' as u16);
+        }
+        push_argument(&mut line, arg);
+    }
+    line
+}
+
+const QUOTE: u16 = b'"' as u16;
+const BACKSLASH: u16 = b'\\' as u16;
+
+// One argument written onto *line*, as command_line says.
+fn push_argument(line: &mut Vec<u16>, arg: &[u16]) {
+    let plain = !arg.is_empty() && !arg.iter().any(|&unit| matches!(unit, 0x20 | 0x09 | 0x0a | 0x0b | QUOTE));
+    if plain {
+        line.extend_from_slice(arg);
+        return;
+    }
+    line.push(QUOTE);
+    let mut backslashes = 0;
+    for &unit in arg {
+        if unit == BACKSLASH {
+            backslashes += 1;
+            continue;
+        }
+        let doubled = if unit == QUOTE { backslashes * 2 + 1 } else { backslashes };
+        line.extend(std::iter::repeat_n(BACKSLASH, doubled));
+        backslashes = 0;
+        line.push(unit);
+    }
+    line.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2));
+    line.push(QUOTE);
 }
 
 /// What the program is given of the caller's table, *table* (lpReserved2's bytes): the table cut to its first

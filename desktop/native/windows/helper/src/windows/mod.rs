@@ -5,6 +5,7 @@ pub mod look;
 pub mod procs;
 pub mod spawn;
 pub mod trust;
+pub mod update;
 pub mod verify;
 pub mod version;
 

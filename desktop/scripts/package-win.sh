@@ -13,7 +13,8 @@
 #     resources\vm\                 agent.vhd, the agent disk given its VHD footer, where the service lets a VM read it
 #                                   and the app names it (src/vm/backends.ts), and the guest image's manifest
 #     resources\release-keys        install.sh's release keys, as the app reads them (scripts/release-keys.mjs)
-#     bin\                          surogate-vm.exe and surogate-helper.exe, the user's side of the VM and the app's helper
+#     bin\                          surogate-vm.exe, surogate-helper.exe and surogate-admin.exe: the user's side of the VM,
+#                                   the app's helper, and what installs an update once an administrator approved it
 #     service\                      surogate-service.exe, the Surogate VM service, LocalSystem, which the MSI installs
 #   msi\
 #     surogate_msi.dll              the MSI's own custom action (native/windows/msi), in the MSI and never installed
@@ -53,7 +54,7 @@ node -e 'const { arch } = JSON.parse(require("node:fs").readFileSync(process.arg
 # The app's own node, by its pin, in place of the one a development build copies from the PATH.
 scripts/node.sh win32-x64
 BUILT=native/windows/target/release
-for part in dist/native/ntat.node bin/node.exe bin/rg.exe "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$BUILT/surogate-service.exe" "$BUILT/surogate_msi.dll"; do
+for part in dist/native/ntat.node bin/node.exe bin/rg.exe "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$BUILT/surogate-admin.exe" "$BUILT/surogate-service.exe" "$BUILT/surogate_msi.dll"; do
   [ -f "$part" ] || { echo "package-win.sh: $part is missing: run npm run build:win32 first" >&2; exit 1; }
 done
 
@@ -83,7 +84,7 @@ cp package-lock.json "$app/"
 rm "$app/package-lock.json"
 rm -rf "$app/node_modules/@anthropic-ai/sandbox-runtime/vendor/srt-win"
 
-cp "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$top/bin/"
+cp "$BUILT/surogate-vm.exe" "$BUILT/surogate-helper.exe" "$BUILT/surogate-admin.exe" "$top/bin/"
 cp "$BUILT/surogate-service.exe" "$top/service/"
 cp "$AGENT_DISK" "$top/resources/vm/agent.vhd"
 node scripts/vhd-footer.mjs "$top/resources/vm/agent.vhd"

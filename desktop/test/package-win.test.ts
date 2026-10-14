@@ -208,9 +208,9 @@ describe.runIf(process.platform === "win32" && LAYOUT)("the Windows app's layout
 
   it("has the VM's programs in bin and the service in service, each as the workspace built it", () => {
     const built = join(DESKTOP, "native", "windows", "target", "release");
-    expect(readdirSync(at("bin")).sort()).toEqual(["surogate-helper.exe", "surogate-vm.exe"]);
+    expect(readdirSync(at("bin")).sort()).toEqual(["surogate-admin.exe", "surogate-helper.exe", "surogate-vm.exe"]);
     expect(readdirSync(at("service"))).toEqual(["surogate-service.exe"]);
-    for (const [folder, program] of [["bin", "surogate-helper.exe"], ["bin", "surogate-vm.exe"], ["service", "surogate-service.exe"]] as const) {
+    for (const [folder, program] of [["bin", "surogate-admin.exe"], ["bin", "surogate-helper.exe"], ["bin", "surogate-vm.exe"], ["service", "surogate-service.exe"]] as const) {
       expect(readFileSync(at(folder, program)).equals(readFileSync(join(built, program))), program).toBe(true);
     }
   });
@@ -233,7 +233,7 @@ describe.runIf(process.platform === "win32" && LAYOUT)("the Windows app's layout
   });
 
   it("has the app's own programs carry the C runtime in them, as a PC without Visual C++'s redistributable runs them", () => {
-    const ours = ["bin\\surogate-helper.exe", "bin\\surogate-vm.exe", "service\\surogate-service.exe", "resources\\app\\dist\\native\\ntat.node"].map((file) => at(file));
+    const ours = ["bin\\surogate-admin.exe", "bin\\surogate-helper.exe", "bin\\surogate-vm.exe", "service\\surogate-service.exe", "resources\\app\\dist\\native\\ntat.node"].map((file) => at(file));
     for (const program of [...ours, join(top, "..", "msi", "surogate_msi.dll")]) {
       const imports = importsOf(program);
       expect(imports.length, program).toBeGreaterThan(0);
@@ -249,7 +249,7 @@ describe.runIf(process.platform === "win32" && LAYOUT)("the Windows app's layout
   it("has no program but those the release signs and node.exe, which ships as nodejs.org signed it", () => {
     const programs = filesOf(top).filter((file) => portable(at(file)));
     expect(programs).toEqual([
-      "Surogate.exe", "bin\\surogate-helper.exe", "bin\\surogate-vm.exe", "d3dcompiler_47.dll", "dxcompiler.dll", "dxil.dll", "ffmpeg.dll",
+      "Surogate.exe", "bin\\surogate-admin.exe", "bin\\surogate-helper.exe", "bin\\surogate-vm.exe", "d3dcompiler_47.dll", "dxcompiler.dll", "dxil.dll", "ffmpeg.dll",
       "resources\\app\\bin\\node.exe", "resources\\app\\bin\\rg.exe", "resources\\app\\dist\\native\\ntat.node", "service\\surogate-service.exe",
       "vk_swiftshader.dll", "vulkan-1.dll",
     ]);

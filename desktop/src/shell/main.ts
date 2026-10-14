@@ -388,6 +388,8 @@ async function updateAction(): Promise<void> {
   // that cannot be found is said in the log, as a check's is.
   await updates.install().catch(report);
   if (updates.state.state === "installed") restart();
+  // Approved on Windows: the app quits for the MSI, and the helper starts it again once it has run.
+  if (updates.state.state === "restarting") app.quit();
 }
 
 // The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a

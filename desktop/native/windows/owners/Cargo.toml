@@ -1,0 +1,11 @@
+# Whether a file or folder of the install is an administrator's word, read from its handle: the MSI's custom actions
+# (msi/) and surogate-admin.exe (admin/) ask it as the app does (src/files/admins-own-win32.ts).
+[package]
+name = "owners"
+description = "Who owns a file or folder of the install, and who its access list lets change it"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }

@@ -1,11 +1,11 @@
-// How an update this app checked is put in place, by this OS (installer-linux.ts): where the
-// installed app's record of its install is, and the updates of an installed app, with how each one
-// is applied. Electron-free.
+// How an update this app checked is put in place, by this OS (installer-linux.ts, installer-win32.ts):
+// where the installed app's record of its install is, and the updates of an installed app, with how
+// each one is applied. Electron-free.
 
 import type { Fetch } from "../download.js";
 import { forThisOs, notBuilt } from "../platform.js";
 import * as linux from "./installer-linux.js";
-import { machineRecord } from "./installer-win32.js";
+import * as windows from "./installer-win32.js";
 import type { Applied, Staged, UpdatesOptions } from "./updates.js";
 
 export interface Installer {
@@ -19,5 +19,5 @@ export interface Installer {
 
 export const INSTALLER: Installer = forThisOs<Installer>({
   linux: { record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun },
-  win32: { record: () => machineRecord(), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") },
+  win32: { record: () => windows.machineRecord(), updates: windows.installedUpdates, helper: ([helper]) => windows.updateRun(helper!) },
 }) ?? { record: () => notBuilt("Surogate Desktop's install"), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") };
