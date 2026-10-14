@@ -29,7 +29,6 @@ from surogates.browser.control import BROWSER_HAND_BACK, RESUMES, TAKEN_OVER_FRO
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
-    outbound_dm,
 )
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
@@ -334,13 +333,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
 
 # The canonical-conversation stamp, as a SQL predicate.  The stamp is a
 # JSON boolean, so ``astext`` compares against the string form.
-_SINGLE_SESSION_MARKER = or_(
-    SessionRow.config["single_session"].astext == "true",
-    # The person's own web conversation the platform writes first into
-    # (surogates.channels.outbound) is the one a step waits in for their
-    # next visit, so it counts as their dedicated conversation too.
-    SessionRow.config["channel_session_key"].astext.startswith("agent:web:dm:"),
-)
+_SINGLE_SESSION_MARKER = SessionRow.config["single_session"].astext == "true"
 
 # Delivery-destination field per adapter channel and the session-config
 # key it is read from.  Used by both the cached destination build and
@@ -1645,7 +1638,7 @@ class SessionStore:
             # Everything else (web/website SSE, api/task/delegation/worker
             # consumers, ambient's gated mate_ambient_post path) has no claimer
             # — rows for those channels would sit "pending" forever.
-            if channel not in ADAPTER_CHANNELS and not outbound_dm(channel, config):
+            if channel not in ADAPTER_CHANNELS:
                 return
 
             # Build channel-specific destination from session config.
