@@ -82,8 +82,9 @@ const connected = await new Promise((resolve) => {
 });
 
 let state = "waiting";
-// Its eight devices, as surogate-vm's ShareBook keeps them: free, the name of the folder each holds, or retired.
-const slots = Array(8).fill("free");
+// Its eight devices, as surogate-vm's ShareBook keeps them: unused, free once released, the name of the folder each
+// holds, or retired. One never used is given before one released.
+const slots = Array(8).fill("unused");
 const stop = (reason, why) => {
   say(why === undefined ? { type: "stopped", reason } : { type: "stopped", reason, why });
   process.exit(0);
@@ -128,7 +129,7 @@ createInterface({ input: process.stdin }).on("line", (text) => {
     if (state !== "running") return say({ type: "refused", id: line.id, why: "the guest is not running" });
     if (env.FAKE_VM_SHARE === "silent") return;
     if (env.FAKE_VM_SHARE === "refuse") return say({ type: "refused", id: line.id, why: "the fake refuses every folder" });
-    const free = env.FAKE_VM_REUSE === "1" ? 0 : slots.indexOf("free");
+    const free = env.FAKE_VM_REUSE === "1" ? 0 : slots.includes("unused") ? slots.indexOf("unused") : slots.indexOf("free");
     if (free < 0) return say({ type: "refused", id: line.id, why: "the VM holds as many folders as it has room for, 8" });
     slots[free] = line.name;
     return say({ type: "shared", id: line.id, tag: `s${free + 1}` });

@@ -4,6 +4,7 @@
 // A device takes another folder only once the guest has said that nothing of it is mounted any more,
 // in any root's namespace (released): a root that still held its mount would be served the next
 // folder. One the guest has not said so of is retired, and holds the empty folder until the VM stops.
+// A device never used in this boot is given before one released, which is given only once none is left.
 
 import Foundation
 
@@ -20,8 +21,10 @@ public struct ShareChange: Equatable {
   public let folder: SharedFolder?
 }
 
-// A device of the eight: free for the next folder, holding the folder shared under a name, or retired.
+// A device of the eight: never used in this boot, released for the next folder, holding the folder shared under a
+// name, or retired.
 enum Slot: Equatable {
+  case unused
   case free
   case holding(String)
   case retired
@@ -29,24 +32,29 @@ enum Slot: Equatable {
 
 public struct ShareBook {
   private var named = Set<String>()
-  private var slots = [Slot](repeating: .free, count: MAX_SHARES)
+  private var slots = [Slot](repeating: .unused, count: MAX_SHARES)
 
   public init() {}
 
   /// How many folders are shared now.
-  public var count: Int { slots.filter { $0 != .free && $0 != .retired }.count }
+  public var count: Int {
+    slots.filter { slot in
+      if case .holding = slot { return true }
+      return false
+    }.count
+  }
   /// How many devices are retired: each holds the empty folder until the VM stops.
   public var retired: Int { slots.filter { $0 == .retired }.count }
 
   /// The change that shares *folder* under *name*, and the device's tag the agent finds it by. Throws for a name
-  /// given before in this boot, or that is not r and a number, and where no device is free. Nothing changes
-  /// until it is committed (commit), once the VM has taken it.
+  /// given before in this boot, or that is not r and a number, and where no device is free: one never used in
+  /// this boot first, then one released. Nothing changes until it is committed (commit), once the VM has taken it.
   public func sharing(_ name: String, _ folder: SharedFolder) throws -> (change: ShareChange, tag: String) {
     guard name.utf8.count <= 10, name.hasPrefix("r"), let number = Int(name.dropFirst()), number >= 1, "r\(number)" == name else {
       throw Refusal("not a share's name: \(name.prefix(32))")
     }
     guard !named.contains(name) else { throw Refusal("the name \(name) was given before in this boot") }
-    guard let free = slots.firstIndex(of: .free) else {
+    guard let free = slots.firstIndex(of: .unused) ?? slots.firstIndex(of: .free) else {
       let kept = retired > 0 ? ", \(retired) of its devices kept empty until it stops" : ""
       throw Refusal("the VM holds as many folders as it has room for, \(MAX_SHARES)\(kept)")
     }

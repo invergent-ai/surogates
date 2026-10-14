@@ -160,10 +160,14 @@ describe("folders shared into the guest on macOS", () => {
     await vm.unshare(one!, soon(), { released: true });
     await vm.unshare(two!, soon());
     expect(linesOf(log, "unshare")).toEqual([{ type: "unshare", id: 3, name: "r1", released: true }, { type: "unshare", id: 4, name: "r2", released: false }]);
-    // The first's device takes the next folder; the second's, which a root may still hold, none until the VM restarts.
-    expect(await vm.share(work, 10_002, soon())).toEqual({ kind: "vz", tag: "s1" });
-    expect(await vm.share(work, 10_003, soon())).toEqual({ kind: "vz", tag: "s3" });
-    expect(linesOf(log, "share").map(({ name }) => name)).toEqual(["r1", "r2", "r3", "r4"]);
+    // Each device never used in this boot first, then the first's; the second's, which a root may still hold, none until the VM restarts.
+    const tags: string[] = [];
+    for (let n = 0; n < 7; n += 1) tags.push((await vm.share(work, 10_002 + n, soon())).tag);
+    expect(tags).toEqual(["s3", "s4", "s5", "s6", "s7", "s8", "s1"]);
+    await expect(vm.share(work, 10_009, soon())).rejects.toThrow(
+      "it holds as many folders as it has room for, 8: the folders of 7 chats, and 1 kept empty until it restarts, since what ran there may not have let go of it",
+    );
+    expect(linesOf(log, "share").map(({ name }) => name)).toEqual(["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"]);
   });
 
   it("says why a folder was not shared, and why no ninth one is: what holds each device, the folders and those kept empty", async () => {

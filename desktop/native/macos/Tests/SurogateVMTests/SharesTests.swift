@@ -28,20 +28,21 @@ final class SharesTests: XCTestCase {
     XCTAssertEqual(refusal { try book.sharing("r1", work) }, "the name r1 was given before in this boot")
   }
 
-  func testGivesADeviceAgainOnlyOnceTheGuestReleasedItAndNeverOneARootMayStillHold() throws {
+  func testGivesADeviceNeverUsedFirstThenOneTheGuestReleasedAndNeverOneARootMayStillHold() throws {
     var book = ShareBook()
     for n in 1...3 { _ = try shared(&book, "r\(n)", work) }
-    // r1's root is gone, every mount of it with it: its device takes the next folder.
+    // r1's root is gone, every mount of it with it; r2's root may still hold its mount.
     letGo(&book, "r1", released: true)
-    XCTAssertEqual(try shared(&book, "r4", work).1, "s1")
-    // r2's root may still hold its mount: its device holds the empty folder, and the next folder takes another.
     letGo(&book, "r2", released: false)
-    XCTAssertEqual(try shared(&book, "r5", work).1, "s4")
-    XCTAssertEqual([book.count, book.retired], [3, 1])
-    // A device retired is never given again in this boot, whatever is let go after it.
-    letGo(&book, "r3", released: true)
-    XCTAssertEqual(try shared(&book, "r6", work).1, "s3")
-    XCTAssertEqual(try shared(&book, "r7", work).1, "s5")
+    // Each device never used in this boot first, then the one released; the retired one never.
+    var tags: [String] = []
+    for n in 4...9 { tags.append(try shared(&book, "r\(n)", work).1) }
+    XCTAssertEqual(tags, ["s4", "s5", "s6", "s7", "s8", "s1"])
+    XCTAssertEqual([book.count, book.retired], [7, 1])
+    XCTAssertEqual(refusal { try book.sharing("r10", work) }, "the VM holds as many folders as it has room for, 8, 1 of its devices kept empty until it stops")
+    // A device released again goes behind none never used: there are none left, so it is the next.
+    letGo(&book, "r5", released: true)
+    XCTAssertEqual(try shared(&book, "r10", work).1, "s5")
     XCTAssertNil(book.unsharing("r2"))
   }
 

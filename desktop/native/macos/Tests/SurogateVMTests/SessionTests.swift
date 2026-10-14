@@ -124,7 +124,7 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(stand.applied, [ShareChange(slot: 0, folder: SharedFolder(path: work, readOnly: false)), ShareChange(slot: 0, folder: nil)])
   }
 
-  func testGivesADeviceTheNextFolderOnlyOnceTheGuestReleasedItAndKeepsOneItDidNotEmptyUntilTheVMStops() throws {
+  func testGivesADeviceAFolderOnlyOnceTheGuestReleasedItAndKeepsOneItDidNotEmptyUntilTheVMStops() throws {
     let laid = try Laid(self)
     let work = (laid.places.run as NSString).deletingLastPathComponent + "/work"
     dir(work)
@@ -134,11 +134,11 @@ final class SessionTests: XCTestCase {
     // r1's root may still hold its mount: its device is emptied, and given no other folder.
     run.receive(.success(.unshare(id: 3, name: "r1", released: false)))
     run.receive(.success(.share(id: 4, name: "r3", path: work, readOnly: false)))
-    // r2's root is gone, every mount of it with it: its device is the next folder's.
+    // r2's root is gone, every mount of it with it: its device may take a folder, once none never used is left.
     run.receive(.success(.unshare(id: 5, name: "r2", released: true)))
     run.receive(.success(.share(id: 6, name: "r4", path: work, readOnly: false)))
-    XCTAssertEqual(said, [STARTED, .shared(id: 1, tag: "s1"), .shared(id: 2, tag: "s2"), .unshared(id: 3), .shared(id: 4, tag: "s3"), .unshared(id: 5), .shared(id: 6, tag: "s2")])
-    XCTAssertEqual(stand.applied.map(\.slot), [0, 1, 0, 2, 1, 1])
+    XCTAssertEqual(said, [STARTED, .shared(id: 1, tag: "s1"), .shared(id: 2, tag: "s2"), .unshared(id: 3), .shared(id: 4, tag: "s3"), .unshared(id: 5), .shared(id: 6, tag: "s4")])
+    XCTAssertEqual(stand.applied.map(\.slot), [0, 1, 0, 2, 1, 3])
     XCTAssertNil(stand.applied[2].folder)
   }
 
