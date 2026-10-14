@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
 from uuid import UUID
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
 from surogates.db.models import DeliveryOutbox
 
@@ -307,6 +307,19 @@ class DeliveryService:
             payload=payload,
         )
 
+    async def mark_delivered_many(self, outbox_ids: list[int]) -> None:
+        """Mark narration rows delivered in one statement.  Narration carries
+        no opener or outreach text, so there is nothing to report."""
+        if not outbox_ids:
+            return
+        async with self._sf() as db:
+            await db.execute(
+                update(DeliveryOutbox)
+                .where(DeliveryOutbox.id.in_(outbox_ids))
+                .values(status="delivered")
+            )
+            await db.commit()
+
     async def _report_unprompted(
         self,
         outbox_id: int,
@@ -357,20 +370,23 @@ class DeliveryService:
         The row returns to ``'pending'`` status with ``available_at``
         pushed 30 seconds into the future for retry backoff.
         """
+        await self.mark_failed_many([outbox_id], error)
+
+    async def mark_failed_many(self, outbox_ids: list[int], error: str) -> None:
+        """:meth:`mark_failed` for several rows in one statement."""
+        if not outbox_ids:
+            return
         async with self._sf() as db:
             await db.execute(
-                text(
-                    """
-                    UPDATE delivery_outbox
-                    SET status = 'pending',
-                        available_at = now() + interval '30 seconds'
-                    WHERE id = :id
-                    """
-                ),
-                {"id": outbox_id},
+                update(DeliveryOutbox)
+                .where(DeliveryOutbox.id.in_(outbox_ids))
+                .values(
+                    status="pending",
+                    available_at=func.now() + text("interval '30 seconds'"),
+                )
             )
             await db.commit()
-        logger.warning("Outbox %d failed: %s (will retry)", outbox_id, error)
+        logger.warning("Outbox %s failed: %s (will retry)", ", ".join(map(str, outbox_ids)), error)
 
     async def mark_dead(
         self, outbox_id: int, error: str, *, payload: dict | None = None,

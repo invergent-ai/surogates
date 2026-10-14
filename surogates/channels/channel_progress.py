@@ -42,12 +42,12 @@ async def clear_placeholder(redis, kind: str, session_id) -> None:
     await redis.delete(progress_key(kind, session_id))
 
 
-async def take_progress_update(redis, kind: str, session_id, channel_id: str) -> str | None:
-    """The placeholder ts to edit for this send, or None.
+async def take_progress_update(redis, kind: str, session_id, channel_id: str) -> dict | None:
+    """The placeholder record to edit for this send, or None.
 
-    Same-channel placeholder → its ts (left in Redis; caller clears after a
-    successful send). Different-channel placeholder → stale: clear it, return
-    None. No placeholder → None.
+    Same-channel placeholder with a ts → the record (left in Redis; caller
+    clears after a successful send). Different-channel placeholder → stale:
+    clear it, return None. No placeholder → None.
     """
     ph = await read_placeholder(redis, kind, session_id)
     if not ph:
@@ -55,7 +55,7 @@ async def take_progress_update(redis, kind: str, session_id, channel_id: str) ->
     if ph.get("channel") != channel_id:
         await clear_placeholder(redis, kind, session_id)
         return None
-    return ph.get("ts") or None
+    return ph if ph.get("ts") else None
 
 
 def code_run_key(kind: str, session_id, run_id: str) -> str:

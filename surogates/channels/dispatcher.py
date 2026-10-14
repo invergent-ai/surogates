@@ -736,16 +736,17 @@ class ChannelDeliveryDispatcher:
                     pass
             # Their text went out in *item*; if it did not, they are retried
             # on their own, so none of it is lost.
-            for other in absorbed:
+            if absorbed:
+                ids = [other.id for other in absorbed]
                 try:
                     if delivered:
-                        await self._delivery.mark_delivered(other.id, payload=other.payload)
+                        await self._delivery.mark_delivered_many(ids)
                     else:
-                        await self._delivery.mark_failed(
-                            other.id, f"sent with outbox {item.id}, which failed",
+                        await self._delivery.mark_failed_many(
+                            ids, f"sent with outbox {item.id}, which failed",
                         )
                 except Exception:
-                    logger.exception("[delivery] settling outbox %d failed", other.id)
+                    logger.exception("[delivery] settling outboxes %s failed", ids)
 
         return len(items)
 
@@ -859,19 +860,15 @@ class ChannelDeliveryDispatcher:
         # coding-run heartbeats so they never hijack the turn's placeholder.
         elif not code_run_id and self._redis is not None:
             from surogates.channels.channel_progress import take_progress_update
-            from surogates.channels.channel_progress import read_placeholder
-            update_ts = await take_progress_update(
+            placeholder = await take_progress_update(
                 self._redis, platform.kind, item.session_id,
                 item.destination.get("channel_id", ""),
             )
-            if update_ts is not None:
-                narration = (
-                    await read_placeholder(self._redis, platform.kind, item.session_id) or {}
-                ).get("text")
+            update_ts = placeholder["ts"] if placeholder else None
+            narration = (placeholder or {}).get("text")
             content = item.payload.get("content") or ""
             if narration and not (
-                intermediate
-                and "MEDIA:" not in content
+                _narration_only(item)
                 and len(narration) + 2 + len(content) <= _progress_chars(platform)
             ):
                 update_ts = None

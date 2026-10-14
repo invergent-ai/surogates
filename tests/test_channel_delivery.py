@@ -51,6 +51,12 @@ class _FakeDeliveryService:
     async def mark_failed(self, outbox_id: int, error: str) -> None:
         self.failed.append((outbox_id, error))
 
+    async def mark_delivered_many(self, outbox_ids: list[int]) -> None:
+        self.delivered.extend((i, None) for i in outbox_ids)
+
+    async def mark_failed_many(self, outbox_ids: list[int], error: str) -> None:
+        self.failed.extend((i, error) for i in outbox_ids)
+
     async def mark_dead(
         self, outbox_id: int, error: str, *, payload: dict | None = None,
     ) -> None:
