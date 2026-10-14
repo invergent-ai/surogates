@@ -171,7 +171,7 @@ async def push_to_person(session_factory: Any, http: Any, settings: Any, session
             .where(WebPushSubscription.agent_id == session.agent_id)
         )).scalars().all()
     payload = {"title": "New message", "body": text[:240],
-               "session_id": str(session.id), "agent_id": session.agent_id, "url": f"/?session={session.id}"}
+               "session_id": str(session.id), "agent_id": session.agent_id, "url": f"/chat/{session.id}"}
     sent, gone = 0, []
     for sub in subs:
         try:
