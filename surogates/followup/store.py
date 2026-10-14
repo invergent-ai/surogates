@@ -10,6 +10,7 @@ import logging
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -23,6 +24,7 @@ from surogates.db.models import (
     FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
+    ProgramInvitationRow,
     ProgramScheduleRow,
 )
 from surogates.followup.eligibility import Audience
@@ -38,6 +40,7 @@ __all__ = [
     "SETTINGS_FIELDS",
     "ALERT_SEVERITIES",
     "active_program_configs",
+    "claim_escalation",
     "enrollments",
     "get_settings",
     "grant_contact_permission",
@@ -55,6 +58,7 @@ __all__ = [
     "queue_outreach",
     "record_inbound",
     "render_text",
+    "resolve_escalation",
     "senders_of",
     "update_enrollment",
     "update_settings",
@@ -169,6 +173,8 @@ async def upsert_enrollment(
     patient_name: str | None = None,
     answered_by: str | None = None,
     start_date_approximate: bool | None = None,
+    timezone: str | None = None,
+    preferred_channel: str | None = None,
 ) -> FollowupEnrollmentRow:
     """Enrol a person, or refresh and reactivate their existing enrollment.
 
@@ -188,6 +194,8 @@ async def upsert_enrollment(
     if is_team_member(settings, user_id):
         raise TeamMember("this person is on the team, not someone followed")
     protocol = protocol.strip()
+    timezone = _zone(timezone)
+    preferred_channel = _channel(preferred_channel)
     patient_name = (patient_name or "").strip() or None
     answered_by = (answered_by or "").strip() or None
     if start_date_approximate is None and start_date is not None:
@@ -205,6 +213,7 @@ async def upsert_enrollment(
                     payer_user_id=payer_user_id, source_ref=source_ref,
                     patient_name=patient_name, answered_by=answered_by,
                     start_date_approximate=bool(start_date_approximate),
+                    timezone=timezone, preferred_channel=preferred_channel,
                 )
                 db.add(row)
             else:
@@ -222,6 +231,10 @@ async def upsert_enrollment(
                     row.answered_by = answered_by
                 if start_date_approximate is not None:
                     row.start_date_approximate = start_date_approximate
+                if timezone is not None:
+                    row.timezone = timezone
+                if preferred_channel is not None:
+                    row.preferred_channel = preferred_channel
                 row.status = "active"
                 row.status_reason = None
                 row.updated_at = _utcnow()
@@ -242,6 +255,25 @@ async def upsert_enrollment(
 _UNSET: Any = object()
 
 
+def _zone(value: str | None) -> str | None:
+    """A zone this server's tzdata knows, or ValueError; blank is none."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"unknown timezone {value!r}") from exc
+    return value
+
+
+def _channel(value: str | None) -> str | None:
+    value = (value or "").strip()
+    if value:
+        _known_platforms([value])
+    return value or None
+
+
 async def update_enrollment(
     session_factory: Any,
     *,
@@ -256,6 +288,8 @@ async def update_enrollment(
     patient_name: Any = _UNSET,
     answered_by: Any = _UNSET,
     start_date_approximate: Any = _UNSET,
+    timezone: Any = _UNSET,
+    preferred_channel: Any = _UNSET,
 ) -> FollowupEnrollmentRow | None:
     """Change an enrollment's fields; only the arguments passed are touched.
 
@@ -265,12 +299,20 @@ async def update_enrollment(
     """
     if status is not _UNSET and status not in ENROLLMENT_STATUSES:
         raise ValueError(f"status must be one of {', '.join(ENROLLMENT_STATUSES)}")
+    if timezone is not _UNSET:
+        timezone = _zone(timezone)
+    if preferred_channel is not _UNSET:
+        preferred_channel = _channel(preferred_channel)
     async with session_factory() as db:
         row = (
             await db.execute(_one_enrollment(org_id, agent_id, user_id, protocol))
         ).scalar_one_or_none()
         if row is None:
             return None
+        if timezone is not _UNSET:
+            row.timezone = timezone
+        if preferred_channel is not _UNSET:
+            row.preferred_channel = preferred_channel
         if start_date is not _UNSET:
             row.start_date = start_date
             # A restated date is exact unless the caller says otherwise.
@@ -757,6 +799,54 @@ async def queue_outreach(
             ).scalar_one()
         await db.refresh(row)
         return row
+
+
+# ---------------------------------------------------------------------------
+# Escalations
+# ---------------------------------------------------------------------------
+
+
+async def _escalation(
+    session_factory: Any, org_id: uuid.UUID, agent_id: str, invitation_id: uuid.UUID, **values: Any,
+) -> ProgramInvitationRow | None:
+    """Set *values* on one of the agent's escalated invitations; ``None``
+    when there is no such escalation."""
+    async with session_factory() as db:
+        row = await db.get(ProgramInvitationRow, invitation_id)
+        if (
+            row is None or row.org_id != org_id or row.agent_id != agent_id
+            or row.escalation_state == "none"
+        ):
+            return None
+        for field, value in values.items():
+            setattr(row, field, value)
+        await db.commit()
+        await db.refresh(row)
+        return row
+
+
+async def claim_escalation(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
+    invitation_id: uuid.UUID, owner: str,
+) -> ProgramInvitationRow | None:
+    """Make *owner* (a team member's id or name) the one dealing with it."""
+    owner = (owner or "").strip()
+    if not owner:
+        raise ValueError("an escalation needs an owner")
+    return await _escalation(
+        session_factory, org_id, agent_id, invitation_id, escalation_owner=owner,
+    )
+
+
+async def resolve_escalation(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
+    invitation_id: uuid.UUID, resolved: bool = True,
+) -> ProgramInvitationRow | None:
+    """Mark it dealt with, or open it again with ``resolved=False``."""
+    return await _escalation(
+        session_factory, org_id, agent_id, invitation_id,
+        resolved_at=_utcnow() if resolved else None,
+    )
 
 
 # The names ops imports from a pinned runtime wheel; kept until ops moves.

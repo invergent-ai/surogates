@@ -296,3 +296,46 @@ async def test_a_team_enrolment_is_recorded_as_team(sf):
         start_date=None, phase=None, enrolled_by="team",
     )
     assert row.enrolled_by == "team"
+
+
+@pytest.mark.asyncio
+async def test_a_persons_zone_and_channel_are_validated_and_kept(sf):
+    user = uuid.uuid4()
+    row = await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", start_date=None,
+        phase=None, enrolled_by="agent", timezone="America/New_York", preferred_channel="telegram",
+    )
+    assert (row.timezone, row.preferred_channel) == ("America/New_York", "telegram")
+    with pytest.raises(ValueError):
+        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", timezone="Mars/Base")
+    with pytest.raises(ValueError):
+        await store.update_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", preferred_channel="web")
+    row = await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user, protocol="p", timezone=None,
+    )
+    assert (row.timezone, row.preferred_channel) == (None, "telegram")
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_is_claimed_and_resolved(sf, make_invitation):
+    from surogates.db.models import ProgramInvitationRow
+
+    quiet = await make_invitation(delivery_state="delivered", response_state="completed")
+    raised = await make_invitation(delivery_state="delivered", response_state="replied")
+    async with sf() as db:
+        raised_row = await db.get(ProgramInvitationRow, raised.id)
+        raised_row.escalation_state = "raised"
+        org = raised_row.org_id
+        await db.commit()
+    assert await store.claim_escalation(
+        sf, org_id=quiet.org_id, agent_id="a1", invitation_id=quiet.id, owner="ana",
+    ) is None
+    assert await store.claim_escalation(
+        sf, org_id=uuid.uuid4(), agent_id="a1", invitation_id=raised.id, owner="ana",
+    ) is None
+    row = await store.claim_escalation(sf, org_id=org, agent_id="a1", invitation_id=raised.id, owner="ana")
+    assert row.escalation_owner == "ana" and row.resolved_at is None
+    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", invitation_id=raised.id)
+    assert row.resolved_at is not None
+    row = await store.resolve_escalation(sf, org_id=org, agent_id="a1", invitation_id=raised.id, resolved=False)
+    assert row.resolved_at is None
