@@ -38,6 +38,7 @@ from surogates.channels.base import SendResult
 from surogates.channels.constants import outbound_dm
 from surogates.channels.delivery import delivery_exhausted, is_permanent_delivery_error
 from surogates.db.models import DeliveryOutbox
+from surogates.followup.eligibility import as_utc
 from surogates.session.events import (
     CHECKIN_OPENER_MARKER,
     OPENER_SYNTHETIC_MARKERS,
@@ -104,10 +105,9 @@ def provider_ids(base: str, outbox_ids: Any) -> list[str]:
 async def _retry_later(session_factory: Any, item: Any, error: str, *, max_age: timedelta) -> bool:
     """Back off a failed row, its wait doubling with its age. False once it is too old."""
     now = datetime.now(timezone.utc)
-    age = now - (item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=timezone.utc))
-    if age > max_age:
+    if delivery_exhausted(item.created_at, now=now, max_age=max_age):
         return False
-    wait = min(max(age, RETRY_MIN), RETRY_MAX)
+    wait = min(max(now - as_utc(item.created_at), RETRY_MIN), RETRY_MAX)
     async with session_factory() as db:
         await db.execute(
             sa.update(DeliveryOutbox).where(DeliveryOutbox.id == item.id)

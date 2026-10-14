@@ -111,13 +111,16 @@ def is_permanent_delivery_error(error: str | None) -> bool:
     return any(code in low for code in _PERMANENT_DELIVERY_ERRORS)
 
 
-def delivery_exhausted(created_at: datetime | None, *, now: datetime | None = None) -> bool:
-    """True when an item has been retried past :data:`MAX_DELIVERY_AGE`."""
+def delivery_exhausted(
+    created_at: datetime | None, *, now: datetime | None = None,
+    max_age: timedelta = MAX_DELIVERY_AGE,
+) -> bool:
+    """True when an item has been retried past *max_age*."""
     if created_at is None:
         return False
     ref = now or datetime.now(timezone.utc)
     at = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
-    return (ref - at) > MAX_DELIVERY_AGE
+    return (ref - at) > max_age
 
 
 # ---------------------------------------------------------------------------
