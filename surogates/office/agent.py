@@ -19,11 +19,13 @@ from surogates.office.runtime_office import RuntimeOffice
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.session.files import ComputerAway, session_files
 from surogates.storage.tenant import boundary_workspace_prefix
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, refuse_nul
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
 from surogates.workstreams import is_project_thread
 
 BLANK_DOCX = Path(__file__).with_name("templates") / "blank.docx"
+# How a path names its user's home folder.
+_HOMES = ("~", "$HOME", "${HOME}")
 
 
 class AgentDocumentError(Exception):
@@ -50,7 +52,7 @@ def relative_path(path: str, session: Any) -> str:
     for the workspace to refuse.  On a computer ``~`` and ``$HOME`` are its user's home, not the folder: they are kept
     as given, and ``within_folder`` refuses them."""
     root = str(session.config.get("workspace_path") or "/workspace").rstrip("/")
-    homes = () if device_of(session.config) is not None else ("~", "$HOME", "${HOME}")
+    homes = () if device_of(session.config) is not None else _HOMES
     for prefix in (*homes, "__WORKSPACE__", root):
         if path == prefix or path.startswith(prefix + "/"):
             path = path[len(prefix):].lstrip("/")
@@ -60,8 +62,10 @@ def relative_path(path: str, session: Any) -> str:
 
 def within_folder(path: str) -> bool:
     """Whether *path*, as ``relative_path`` gives it, names a file inside the workspace: not an absolute path outside
-    it, a home folder's, or a way out."""
-    return not path.startswith(("/", "~", "$")) and path != ".." and not path.startswith("../")
+    it, a home folder's, or a way out.  A file whose name only begins like one (``~draft.docx``) is inside."""
+    if path.startswith("/") or path == ".." or path.startswith("../"):
+        return False
+    return not any(path == home or path.startswith(home + "/") for home in _HOMES)
 
 
 def location_of(session: Any, path: str) -> str:
@@ -91,24 +95,31 @@ async def open_for_agent(
     kind = office_kind(path)
     if kind is None or kind.file_type != "docx":
         raise AgentDocumentError("office_read and office_edit work on Word documents (.docx) for now.")
+    try:
+        refuse_nul(path)  # before the open rows are looked up by it
+    except ValueError as exc:
+        raise AgentDocumentError(str(exc)) from None
     created = False
     try:
         target = await document_session(session, session_factory=session_factory)
-        async with session_files(target, storage=storage, session_factory=session_factory, redis=redis) as files:
-            if not isinstance(files, DOCUMENT_FILES):
-                raise AgentDocumentError("This workspace cannot be edited live yet.")
-            try:
-                key = await files.resolve(path)
-            except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
-                raise AgentDocumentError(str(exc)) from None
-            missing = await files.etag(key) is None
-        if missing:
-            if not create:
-                raise AgentDocumentError(
-                    f"No document at {path} in the project's files: one this thread made this turn reaches them when the turn ends."
-                    if is_project_thread(session.config) else f"No document at {path}."
-                )
-            created = await _make_blank(target, path, storage=storage, session_factory=session_factory, redis=redis)
+        location = location_of(target, path)
+        # The editor has it open, so it exists: asking the computer on every call would keep its folder busy.
+        if await office_sessions.open_at(session_factory, location) is None:
+            async with session_files(target, storage=storage, session_factory=session_factory, redis=redis) as files:
+                if not isinstance(files, DOCUMENT_FILES):
+                    raise AgentDocumentError("This workspace cannot be edited live yet.")
+                try:
+                    key = await files.resolve(path)
+                except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
+                    raise AgentDocumentError(str(exc)) from None
+                missing = await files.etag(key) is None
+            if missing:
+                if not create:
+                    raise AgentDocumentError(
+                        f"No document at {path} in the project's files: one this thread made this turn reaches them when the turn ends."
+                        if is_project_thread(session.config) else f"No document at {path}."
+                    )
+                created = await _make_blank(target, path, storage=storage, session_factory=session_factory, redis=redis)
     except FolderNotReady as exc:
         raise AgentDocumentError(str(exc)) from None
     except ComputerAway as exc:
@@ -117,7 +128,6 @@ async def open_for_agent(
         if isinstance(exc, PermissionError) and DENIED_ON_COMPUTER in said(exc):
             raise AgentDocumentError(f"{path} was not made: the computer's user declined it.") from None
         raise AgentDocumentError(said(exc)) from None
-    location = location_of(target, path)
     user_id = agent_user_id(agent_id, session.id)
     try:
         document = await office_sessions.open_waiting(

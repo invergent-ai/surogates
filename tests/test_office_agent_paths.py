@@ -39,9 +39,9 @@ def test_on_a_computer_home_is_its_users_not_the_folder():
 
 
 def test_within_folder_is_a_relative_path_that_stays_in():
-    for path in ("a.docx", "docs/a.docx"):
+    for path in ("a.docx", "docs/a.docx", "~draft.docx", "$budget.docx", "$HOMEx/a.docx"):
         assert within_folder(path), path
-    for path in ("~/a.docx", "$HOME/a.docx", "/etc/a.docx", "..", "../a.docx"):
+    for path in ("~", "~/a.docx", "$HOME", "$HOME/a.docx", "${HOME}", "${HOME}/a.docx", "/etc/a.docx", "..", "../a.docx"):
         assert not within_folder(path), path
 
 

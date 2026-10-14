@@ -144,6 +144,18 @@ async def test_a_document_on_the_computer_opens_in_the_agents_editor(session_fac
     assert opened.created is False and len(runtime.opened) == 1
 
 
+async def test_a_document_open_in_the_editor_is_not_looked_up_on_the_computer_again(session_factory, redis_client, storage,
+                                                                                      monkeypatch):
+    device_id = str(uuid4())
+    _, asked = _computer(monkeypatch, {"a.docx": b"PK"}, device_id)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    runtime = FakeRuntime()
+    await _open(session, storage, session_factory, redis_client, runtime, "a.docx")
+    assert len(asked) == 1
+    await _open(session, storage, session_factory, redis_client, runtime, "a.docx")
+    assert len(asked) == 1 and len(runtime.opened) == 2
+
+
 async def test_a_new_document_on_the_computer_is_made_through_the_editors_own_request(session_factory, redis_client, storage, monkeypatch):
     device_id = str(uuid4())
     io, asked = _computer(monkeypatch, {}, device_id)
