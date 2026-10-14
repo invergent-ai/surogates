@@ -1,9 +1,10 @@
-"""A conversation revived for a message that never arrived runs no turn.
+"""A message refused for want of a plan wakes no turn.
 
-The inbound pipeline revives an idle channel conversation (``session.resume``
-with source ``channel_message``) and shows the AI disclosure before its plan
-gate can drop the message.  Woken on that alone, the model had no words to
-answer and wrote from its instructions, which the channel sent the person.
+The inbound pipeline used to revive an idle channel conversation before its
+plan gate dropped the message.  Woken on that revival alone, the model had no
+words to answer and wrote from its instructions, which the channel sent the
+person.  The conversation is now revived only once the gate lets the message
+through, and a wake that finds only held messages runs no model.
 """
 
 from __future__ import annotations
@@ -27,18 +28,18 @@ def _event(event_id: int, kind: EventType, **data: Any) -> Any:
     return SimpleNamespace(id=event_id, type=kind.value, data=data)
 
 
-REVIVED = [
-    _event(11, EventType.SESSION_RESUME, source="channel_message"),
-    _event(12, EventType.DISCLOSURE_PRESENTED, level="first"),
+HELD = [
+    _event(11, EventType.DISCLOSURE_PRESENTED, level="first"),
+    _event(12, EventType.USER_MESSAGE, content="Bună", held="subscription_required"),
 ]
 
 
-def test_a_revival_and_a_disclosure_are_nothing_to_answer():
-    assert _nothing_to_answer(REVIVED)
+def test_a_held_message_and_a_disclosure_are_nothing_to_answer():
+    assert _nothing_to_answer(HELD)
     assert not _nothing_to_answer([])
-    assert not _nothing_to_answer([*REVIVED, _event(13, EventType.USER_MESSAGE, content="hi")])
-    # A retry the user asked for is work.
-    assert not _nothing_to_answer([_event(11, EventType.SESSION_RESUME, source="user_retry")])
+    assert not _nothing_to_answer([*HELD, _event(13, EventType.USER_MESSAGE, content="hi")])
+    # A revival is work: only a message the gate let through revives a conversation.
+    assert not _nothing_to_answer([_event(11, EventType.SESSION_RESUME, source="channel_message")])
 
 
 @pytest.mark.asyncio
@@ -51,7 +52,7 @@ async def test_a_wake_with_nothing_to_answer_runs_no_model(monkeypatch):
     history = [
         _event(5, EventType.USER_MESSAGE, content="Am cumpărat pastilele"),
         _event(6, EventType.LLM_RESPONSE, message={"role": "assistant", "content": "Am notat."}),
-        *REVIVED,
+        *HELD,
     ]
     store = AsyncMock()
     store.get_session.return_value = session
@@ -73,7 +74,47 @@ async def test_a_wake_with_nothing_to_answer_runs_no_model(monkeypatch):
 
 
 def test_a_message_refused_for_want_of_a_plan_is_nothing_to_answer_alone():
-    held = _event(13, EventType.USER_MESSAGE, content="Bună", held="subscription_required")
-    assert _nothing_to_answer([*REVIVED, held])
+    held = HELD[1]
+    assert _nothing_to_answer([held])
     # Let through later, the next message brings the held one along.
     assert not _nothing_to_answer([held, _event(14, EventType.USER_MESSAGE, content="Am plătit")])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused", [True, False])
+async def test_an_idle_conversation_is_revived_only_for_a_message_let_through(refused):
+    from surogates.channels.inbound import ChannelInboundPipeline, InboundOutcome
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+    from tests.test_channel_pipeline import (
+        _FakeAllowanceClient,
+        _capped_config,
+        _make_config,
+        _make_deps,
+        _make_msg,
+        _make_routing,
+    )
+
+    deps = _make_deps()
+    deps.platform_client = _FakeAllowanceClient(
+        error=AllowanceExhaustedError("allowance_exhausted") if refused else None,
+        receipt=None if refused else {},
+    )
+    deps.runtime_config = _capped_config()
+    revived: list = []
+
+    async def _revive(store, session_id):
+        revived.append(session_id)
+
+    deps.revive_session = _revive
+
+    result = await ChannelInboundPipeline().handle(
+        _make_msg(is_dm=True, ts=f"revive.{refused}"), routing=_make_routing(),
+        config=_make_config(), deps=deps,
+    )
+
+    if refused:
+        assert result == InboundOutcome.DROPPED
+        assert revived == [] and deps._enqueued == []
+    else:
+        assert result == InboundOutcome.PROCESSED
+        assert len(revived) == 1 and deps._enqueued

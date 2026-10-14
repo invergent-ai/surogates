@@ -72,17 +72,9 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     return pending
 
 
-#: ``session.resume`` sources written by a writer that revives a conversation
-#: only to append a message to it next (an inbound channel message, an API
-#: message, a journey step).  When that message never came (a plan gate
-#: dropped it), the revival alone is nothing to answer.
-_REVIVALS_BEFORE_A_MESSAGE = frozenset({"channel_message", "api", "program_step"})
-
-
 def _nothing_to_answer(pending: list[Any]) -> bool:
-    """Whether every pending event is a revival whose message never came, the
-    AI disclosure shown to its sender, or a message kept but refused for want
-    of a plan (``held``).
+    """Whether every pending event is the AI disclosure shown to a sender or a
+    message kept but refused for want of a plan (``held``).
 
     Run on that, the model has no new words to answer and writes from its
     instructions alone, which a channel delivers to the person verbatim.  A
@@ -93,10 +85,6 @@ def _nothing_to_answer(pending: list[Any]) -> bool:
         or (
             _event_type(event) == EventType.USER_MESSAGE.value
             and bool((getattr(event, "data", None) or {}).get("held"))
-        )
-        or (
-            _event_type(event) == EventType.SESSION_RESUME.value
-            and (getattr(event, "data", None) or {}).get("source") in _REVIVALS_BEFORE_A_MESSAGE
         )
         for event in pending
     )

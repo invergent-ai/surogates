@@ -451,6 +451,16 @@ def make_cached_identity_resolver(
 _RESUMABLE_STATUSES = REUSABLE_SESSION_STATUSES
 
 
+async def revive_channel_session(session_store: SessionStore, session_id: UUID) -> None:
+    """Re-activate an idle (completed/paused) conversation a message is about
+    to be added to.  Called once the message may run a turn: a revival whose
+    message a gate then refused would wake the agent with nothing to answer."""
+    session = await session_store.get_session(session_id)
+    if session.status in ("completed", "paused"):
+        await session_store.resume_session(session_id, source="channel_message")
+        logger.info("Resuming %s session %s (status=%s)", session.channel, session_id, session.status)
+
+
 async def get_or_create_channel_session(
     session_store: SessionStore,
     redis: object,

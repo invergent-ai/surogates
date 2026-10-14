@@ -327,6 +327,11 @@ class PipelineDeps:
     # behave exactly as before until this is wired.
     platform_client: Any = None
     runtime_config: _RuntimeConfig | None = None
+    # Re-activates an idle conversation once the plan gate lets the message
+    # through; ``get_or_create_session`` must then leave it idle
+    # (``resume=False``), or a refused message wakes the agent with nothing
+    # to answer.  ``None``: ``get_or_create_session`` revives it itself.
+    revive_session: Callable[[Any, Any], Awaitable[None]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +938,9 @@ class ChannelInboundPipeline:
                             exc_info=True,
                         )
                 return InboundOutcome.DROPPED
+
+        if deps.revive_session is not None:
+            await deps.revive_session(deps.session_store, session_id)
 
         # AI disclosure (EU AI Act Art. 50): on the first contact of a
         # conversation with a disclosure-enabled agent, the channel user

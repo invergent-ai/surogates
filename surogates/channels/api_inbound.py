@@ -88,8 +88,6 @@ async def receive(session_factory: Any, redis: Any, *, org_id: Any, agent_id: st
         agent_id=agent_id, user_id=user_id, platform="api", session_key=target.session_key,
         channel_id=target.channel_id, sender=agent_id,
     )
-    if (await store.get_session(session_id)).status in ("completed", "paused", "failed"):
-        await store.resume_session(session_id, source="api")
     await honour_stop(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
                       platform="api", platform_user_id=external_id, text=text)
     if platform_client is not None and runtime_payload is not None:
@@ -100,6 +98,10 @@ async def receive(session_factory: Any, redis: Any, *, org_id: Any, agent_id: st
         )
         if refused is not None:
             return {"session_id": str(session_id), "refused": refused[0], "notice": refused[1]}
+    # Only once the message may run a turn: a revival alone wakes the agent
+    # with nothing to answer.
+    if (await store.get_session(session_id)).status in ("completed", "paused", "failed"):
+        await store.resume_session(session_id, source="api")
     # A question the agent asked waits: this is its answer, or dismisses it,
     # exactly as on any other channel.
     message = InboundMessage(

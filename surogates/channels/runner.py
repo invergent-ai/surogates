@@ -32,6 +32,7 @@ from surogates.channels.dispatcher import (
 from surogates.channels.identity import (
     get_or_create_channel_session,
     make_cached_identity_resolver,
+    revive_channel_session,
     resolve_real_identity,
 )
 from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
@@ -141,7 +142,7 @@ def _make_deps_factory(
         /workspace and inbound attachments are skipped.
         """
         return await get_or_create_channel_session(
-            *args, storage=storage, settings=settings, **kwargs
+            *args, storage=storage, settings=settings, resume=False, **kwargs
         )
 
     def _link_prompt(code: str, base: str = "") -> str:
@@ -369,6 +370,7 @@ def _make_deps_factory(
             keep_typing=_keep_typing,
             platform_client=platform_client,
             runtime_config=runtime_config,
+            revive_session=revive_channel_session,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into
