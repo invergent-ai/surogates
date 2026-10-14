@@ -17,6 +17,7 @@ from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
 from surogates.devices.binding import Binding
 from surogates.devices.operations import DeviceOperations, TooManyRequests
+from surogates.devices.presence import DevicePresence
 from surogates.office import files as office_files
 from surogates.office import saves as office_saves
 from surogates.office import sessions as office_sessions
@@ -56,6 +57,7 @@ class Desk:
         self.io = computer_io(FOLDER, files, device_id=str(uuid4()))
         self.requests: list[dict] = []
         self.away: ComputerAway | None = None
+        self.online = True
         self.hold = False  # the computer answers nothing: the user has not answered its prompt
         self.deny = False
 
@@ -69,6 +71,9 @@ class Desk:
         async def bound(_db, _root):
             return Binding("bound")
 
+        async def online(_presence, device_ids):
+            return set(device_ids) if self.online else set()
+
         original_run = self.io.runner.run
 
         async def run(kind, args, payload=None):
@@ -81,6 +86,7 @@ class Desk:
         self.io.runner.run = run
         monkeypatch.setattr(office_files, "session_files", fake_session_files)
         monkeypatch.setattr(office_files, "binding_of", bound)
+        monkeypatch.setattr(DevicePresence, "online", online)
         monkeypatch.setattr(office_saves, "COMPUTER_WAIT_S", 0.2)
 
 
@@ -167,6 +173,30 @@ async def test_a_save_waits_for_an_offline_computer_without_failing(session_fact
     assert await _land(session_factory, redis_client, storage, store) == 1
     assert desk.io.runner.files[key][0] == b"v2"
     assert EventType.OFFICE_SAVED.value in await _types(store, session.id)
+
+
+async def test_an_offline_computer_is_not_asked_and_the_save_not_read(session_factory, redis_client, storage, monkeypatch):
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, session, key, document = await _computer_document(session_factory, storage, desk)
+    await _pend(session_factory, storage, document, b"v2")
+    desk.online = False
+    reads: list = []
+    read = storage.read
+
+    async def recording_read(*args):
+        reads.append(args)
+        return await read(*args)
+
+    monkeypatch.setattr(storage, "read", recording_read)
+    for _ in range(3):
+        assert await _land(session_factory, redis_client, storage, store) == 0
+    assert desk.requests == [] and reads == []
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["attempts"] == 0 and pending["waiting"] == "offline"
+    assert (await _types(store, session.id)).count(EventType.OFFICE_SAVE_WAITING.value) == 1
+    desk.online = True
+    assert await _land(session_factory, redis_client, storage, store) == 1
+    assert desk.io.runner.files[key][0] == b"v2"
 
 
 async def test_a_save_waiting_for_its_users_ok_joins_the_same_request_again(session_factory, redis_client, storage, monkeypatch):
@@ -289,6 +319,22 @@ async def test_a_changed_file_on_the_computer_lands_as_a_copy_beside_it(session_
     assert desk.io.runner.files[key][0] == b"someone else"
     copies = [k for k in desk.io.runner.files if k.startswith(f"{FOLDER}/a (edited ")]
     assert len(copies) == 1 and desk.io.runner.files[copies[0]][0] == b"mine"
+
+
+async def test_a_waiting_save_that_lands_as_a_copy_is_said_as_a_conflict_not_as_saved(session_factory, redis_client, storage,
+                                                                                         monkeypatch):
+    monkeypatch.setattr(office_saves, "drop_editors", _nothing)
+    monkeypatch.setattr(office_saves, "close_pages", _nothing)
+    desk = Desk(monkeypatch, {"a.docx": b"v1"})
+    store, session, key, document = await _computer_document(session_factory, storage, desk)
+    await _pend(session_factory, storage, document, b"mine")
+    desk.hold = True
+    assert await _land(session_factory, redis_client, storage, store) == 0
+    desk.hold = False
+    await desk.io.write(key, b"someone else")
+    assert await _land(session_factory, redis_client, storage, store) == 1
+    types = await _types(store, session.id)
+    assert EventType.OFFICE_CONFLICT.value in types and EventType.OFFICE_SAVED.value not in types
 
 
 async def test_a_conflict_copy_is_named_by_the_saves_own_time(session_factory, redis_client, storage, monkeypatch):

@@ -163,9 +163,22 @@ async def test_a_save_replacing_one_waiting_on_its_computer_records_its_write_ab
         row.pending_save = {**row.pending_save, "waiting": "waiting", "try": 2}
     await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k3", close=False)
     assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [{"key": "k2", "try": 2}]
-    # Kept by the saves after it until a pass cancels it.
+    # Kept by the saves after it until a pass cancels it. k3 still reads as waiting, so its write is recorded too:
+    # cancelling one never asked does nothing.
     await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k4", close=False)
-    assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [{"key": "k2", "try": 2}]
+    assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [
+        {"key": "k2", "try": 2}, {"key": "k3", "try": 0},
+    ]
+
+
+async def test_a_save_replacing_a_waiting_one_still_waits(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k1", close=False)
+    async with office_sessions.claim_pending(session_factory) as row:
+        office_sessions.mark_waiting(row, "waiting")
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False)
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["key"] == "k2" and pending["waiting"] == "waiting"
 
 
 async def test_leaving_a_waiting_try_records_its_request_abandoned(session_factory):

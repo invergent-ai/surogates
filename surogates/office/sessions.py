@@ -198,6 +198,9 @@ async def set_pending(
             "authors": authors,
             "changes": changes,
         }
+        if previous.get("waiting"):
+            # The chats were told the save waits: still so until this one lands, which says it.
+            pending["waiting"] = previous["waiting"]
         abandoned = list(previous.get("abandoned") or [])
         if previous.get("waiting") == "waiting":
             # Its write may still be open on the computer: landing later, it would make this save a conflict copy.

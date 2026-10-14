@@ -15,6 +15,7 @@ from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession, Workstream
 from surogates.devices.binding import device_of
 from surogates.devices.operations import DeviceOperations, TooManyRequests
+from surogates.devices.presence import DevicePresence
 from surogates.devices.workspace import said
 from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
@@ -53,7 +54,7 @@ class SaveWaiting(Exception):
 
 
 class SaveDeclined(Exception):
-    """The computer's user declined the save, or let its prompt go unanswered."""
+    """The computer's user explicitly denied the save: only that, never a prompt left unanswered."""
 
     def __init__(self, computer: str) -> None:
         super().__init__(computer)
@@ -88,10 +89,11 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
             tried.add(row.id)
             waited = bool((row.pending_save or {}).get("waiting"))
             try:
-                blob = await _land(row, session_factory=session_factory, session_store=session_store,
-                                   storage=storage, redis=redis, office=office, settings=settings)
+                blob, in_place = await _land(row, session_factory=session_factory, session_store=session_store,
+                                             storage=storage, redis=redis, office=office, settings=settings)
                 landed += 1
-                if waited:
+                # A conflict copy said so itself, and gone chats hear nothing.
+                if waited and in_place:
                     await _announce(session_store, row.session_ids, EventType.OFFICE_SAVED, {"path": row.path})
             except SaveWaiting as waiting:
                 # Not a failed try. Its new updated_at moves the row behind the others.
@@ -131,8 +133,9 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
 
 
 async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any, storage: Any, redis: Any, office: OfficeSettings,
-                settings: Any = None) -> tuple[str, str]:
-    """Land *row*'s pending save; the (bucket, key) of the save, consumed, to delete once the row commits.
+                settings: Any = None) -> tuple[tuple[str, str], bool]:
+    """Land *row*'s pending save; the (bucket, key) of the save, consumed, to delete once the row commits, and whether
+    it landed over the file (not as a conflict copy, nor dropped with every chat gone).
 
     *settings* are the runtime's settings, whose history and saga sections land a project's saves.
     """
@@ -141,12 +144,16 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
     session = await live_session(session_store, row.session_ids)
     if session is None:  # every chat is gone: nothing to save into
         office_sessions.mark_closed(row)
-        return blob
-    data = await storage.read(*blob)
+        return blob, False
     target = await document_session(session, session_factory=session_factory)
     computer = _computer_of(target)
     if computer is not None:
         await _cancel_abandoned(row, target, session_factory=session_factory, redis=redis)
+        device_id = device_of(target.config)
+        # Asking an offline computer would only claim a request to cancel it, after reading the save for nothing.
+        if device_id not in await DevicePresence(redis).online([device_id]):
+            raise SaveWaiting("offline", computer)
+    data = await storage.read(*blob)
     deadline = None
     try:
         async with editor_files(target, storage=storage, session_factory=session_factory, redis=redis,
@@ -183,7 +190,7 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
         await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
         await close_pages(office, row.doc_key, row.session_ids)
         office_sessions.mark_closed(row)
-    return blob
+    return blob, copy_path is None
 
 
 async def _cancel_abandoned(row: OfficeSession, target: Any, *, session_factory: Any, redis: Any) -> None:
