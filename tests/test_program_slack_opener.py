@@ -232,7 +232,7 @@ async def test_a_channel_that_cannot_write_first_is_undeliverable():
     from surogates.programs.opener import resolve_dm
 
     with pytest.raises(OpenerUndeliverable):
-        await resolve_dm("web", "u1", "s1")
+        await resolve_dm("website", "u1", "s1")
     target = await resolve_dm("whatsapp", "40700", "pn1")
     assert target.session_key == "agent:whatsapp:dm:40700"
     assert target.destination == {

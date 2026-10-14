@@ -612,6 +612,14 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         )
         tasks.append(task)
 
+    # Web chat and integrators' apps: no platform webhook, written first all the same.
+    from surogates.channels.outbound import start_loops
+    tasks += start_loops(
+        settings=settings, session_factory=sf, session_store=session_store,
+        delivery=delivery_service,
+        kinds=("web", "api") if kind is None else (kind,),
+    )
+
     reconciler_task = asyncio.create_task(
         reconciler.run(redis),
         name="channel-reconciler",

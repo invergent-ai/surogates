@@ -19,7 +19,18 @@ def test_slack_and_telegram_open_with_text_and_telegram_needs_prior_contact():
     assert telegram.needs_prior_contact and not slack.needs_prior_contact
 
 
-def test_channels_without_an_adapter_cannot_write_first():
-    for kind in ("web", "website", "voice", None, ""):
+def test_anonymous_website_visitors_cannot_be_written_to_first():
+    for kind in ("website", "teams", None, ""):
         assert not capabilities_for(kind).can_initiate
-    assert set(initiating_platforms()) == {"whatsapp", "slack", "telegram"}
+
+
+def test_voice_web_and_api_write_first_into_the_persons_own_conversation():
+    voice, web, api = capabilities_for("voice"), capabilities_for("web"), capabilities_for("api")
+    assert voice.can_initiate and web.can_initiate and api.can_initiate
+    assert voice.opener == web.opener == api.opener == "text"
+    assert voice.window_hours is web.window_hours is api.window_hours is None
+    # answered is delivered at once; only an acknowledged alert is read
+    assert voice.identity == "phone" and voice.receipts == {"read"}
+    assert web.identity == "user" and web.receipts == frozenset()
+    assert api.identity == "external" and api.receipts == {"delivered", "read"}
+    assert set(initiating_platforms()) == {"whatsapp", "slack", "telegram", "voice", "web", "api"}

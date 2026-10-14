@@ -715,6 +715,7 @@ def create_app() -> FastAPI:
         oauth,
         openai,
         prompts,
+        reach,
         scheduled_work,
         sessions,
         skills,
@@ -782,6 +783,7 @@ def create_app() -> FastAPI:
     app.include_router(scheduled_work.router, prefix="/v1", tags=["scheduled-work"])
     app.include_router(transparency.router, prefix="/v1", tags=["transparency"])
     app.include_router(website.router, prefix="/v1", tags=["website"])
+    app.include_router(reach.router, prefix="/v1", tags=["reach"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
     app.include_router(channel_files.router, prefix="/v1", tags=["channel-files"])

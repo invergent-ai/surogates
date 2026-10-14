@@ -322,7 +322,7 @@ async def test_queue_refuses_channels_without_outreach(sf):
     with pytest.raises(ValueError):
         await store.queue_outreach(
             sf, org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(),
-            platform="web", channel_identifier="A1", kind="alert",
+            platform="website", channel_identifier="A1", kind="alert",
             text="x", template_name=None, template_language=None,
         )
 
