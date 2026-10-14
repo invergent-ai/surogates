@@ -464,10 +464,6 @@ def _senders(ctx: Any, settings: Any) -> dict[str, str]:
     return {**own, **followup_store.senders_of(settings)}
 
 
-def _sender(ctx: Any, settings: Any) -> str | None:
-    return _senders(ctx, settings).get("whatsapp")
-
-
 async def _last_wrote(sf: Any, ctx: Any, settings: Any, people: list) -> dict[uuid.UUID, datetime]:
     """When each person last wrote to any of the agent's senders."""
     owner = {
@@ -548,6 +544,23 @@ def _not_allowed(settings: Any, ctx: Any, ability: str) -> str | None:
 
 def _member(ctx: Any) -> str:
     return ctx.display_name or f"user {ctx.user_id}"
+
+
+async def _team(kwargs: dict, ability: str | None = None) -> tuple[Any, Any, str | None]:
+    """``(ctx, settings, refusal)``: the refusal when the conversation is not
+    with a team member, or one who may not do *ability*."""
+    ctx, settings = await load_context(kwargs)
+    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
+        return ctx, settings, NOT_TEAM
+    return ctx, settings, _not_allowed(settings, ctx, ability) if ability else None
+
+
+async def _tell_team(sf: Any, ctx: Any, settings: Any, **kwargs: Any) -> tuple[int, str | None]:
+    """:func:`followup_store.notify_team` on behalf of the team member in *ctx*."""
+    return await followup_store.notify_team(
+        sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        created_by=f"team:{ctx.user_id}", fallback_senders={ctx.channel: ctx.sender}, **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -806,10 +819,7 @@ def _memory_lines(entries: list[str] | None) -> list[str]:
 
 async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await load_context(kwargs)
-    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
-        return NOT_TEAM
-    refused = _not_allowed(settings, ctx, "see_people")
+    ctx, settings, refused = await _team(kwargs, "see_people")
     if refused:
         return refused
     try:
@@ -1019,9 +1029,9 @@ async def _unconfirmed(
 
 async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await load_context(kwargs)
-    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
-        return NOT_TEAM
+    ctx, settings, refused = await _team(kwargs)
+    if refused:
+        return refused
     fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
     text = str(arguments.get("text") or "").strip()
     if not fragment:
@@ -1150,9 +1160,9 @@ def _enrollment_of(person: _Person, protocol: str) -> Any:
 
 async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await load_context(kwargs)
-    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
-        return NOT_TEAM
+    ctx, settings, refused = await _team(kwargs)
+    if refused:
+        return refused
     fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
     if not fragment:
         return "Nothing changed: say which person, by name or phone number."
@@ -1251,15 +1261,9 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
         notice = followup_store.wording(
             settings, f"notice_{status}_by", journey=row.protocol, member=_member(ctx), reason=reason,
         )
-        queued, why_not = await followup_store.notify_team(
-            sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="alert",
-            text=(
-                f"{notice}"
-                f"\n\n— {label or person.label}"
-            ),
-            reason=notice,
-            created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
-            exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
+        queued, why_not = await _tell_team(
+            sf, ctx, settings, kind="alert", text=f"{notice}\n\n— {label or person.label}",
+            reason=notice, subject_user_id=person.user_id, exclude_user_id=ctx.user_id,
             topic="attention",
         )
         result += " " + told(queued, why_not)
@@ -1303,10 +1307,7 @@ async def _existing(sf: Any, ctx: Any, settings: Any, fragment: str) -> Any:
 
 async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await load_context(kwargs)
-    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
-        return NOT_TEAM
-    refused = _not_allowed(settings, ctx, "enroll")
+    ctx, settings, refused = await _team(kwargs, "enroll")
     if refused:
         return refused
     phone_raw = str(arguments.get("phone") or "").strip()
@@ -1368,8 +1369,9 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         person = await _existing(sf, ctx, settings, existing)
         if isinstance(person, str):
             return f"Not enrolled: {person}"
-        name = name or getattr(person, "label", None) or person.display_name
-        shown = getattr(person, "contact", None) or "their existing account"
+        followed = isinstance(person, _Person)
+        name = name or (person.label if followed else person.display_name)
+        shown = (person.contact if followed else None) or "their existing account"
     bot = os.environ.get("SUROGATES_TELEGRAM_USERNAME", "").strip().lstrip("@")
     if telegram:
         if not bot or kwargs.get("redis") is None:
@@ -1382,12 +1384,12 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         f"from {start}" + (" (approximate)" if approximate else "")
         if start else "with no start date, so no Program reaches them until one is set"
     )
-    how = {
-        "whatsapp": "; record their permission to be messaged on your say-so",
-        "slack": "; record their permission to be messaged on your say-so",
-    }.get(platform or "", "")
     if telegram:
         how = "; give you a one-use link for them to open and press Start, which asks whether they are the person and links only on yes"
+    elif platform:
+        how = "; record their permission to be messaged on your say-so"
+    else:
+        how = ""
     refused = await _unconfirmed(
         kwargs, "team_enroll_person", arguments,
         f"Will enrol {name} ({shown}) in {protocol} {when}"
@@ -1460,8 +1462,8 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         result += f" Welcome message queued (state {welcome.state})."
     elif platform:
         result += f" No welcome sent: {channel_names([platform])} is not switched on for this business."
-    queued, why_not = await followup_store.notify_team(
-        sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="enrolment",
+    queued, why_not = await _tell_team(
+        sf, ctx, settings, kind="enrolment",
         text=(
             followup_store.wording(
                 settings, "notice_enrolled_by", name=name, journey=protocol, member=_member(ctx),
@@ -1469,9 +1471,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             + f"\n\n— {followup_store.person_label(name, row, settings)}"
             + (f" · {readable_phone(handle)}" if platform == "whatsapp" else "")
         ),
-        created_by=f"team:{ctx.user_id}", subject_user_id=user_id,
-        exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
-        topic="new_enrolments",
+        subject_user_id=user_id, exclude_user_id=ctx.user_id, topic="new_enrolments",
     )
     return result + " " + told(queued, why_not)
 
@@ -1540,10 +1540,7 @@ async def _alerted_with(sf: Any, escalation: Any) -> set[uuid.UUID]:
 
 async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
-    ctx, settings = await load_context(kwargs)
-    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
-        return NOT_TEAM
-    refused = _not_allowed(settings, ctx, "handle_escalations")
+    ctx, settings, refused = await _team(kwargs, "handle_escalations")
     if refused:
         return refused
     action = str(arguments.get("action") or "").strip()
@@ -1577,17 +1574,13 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
     if escalation is None:
         return f"Nothing changed: {label} has no open escalation."
     member = _member(ctx)
-    if action == "claim":
+    # A case resolved before anyone took it is the resolver's.
+    if action == "claim" or not escalation.owner:
         await followup_store.claim_escalation(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
             escalation_id=escalation.id, owner=member,
         )
-    else:
-        if not escalation.owner:
-            await followup_store.claim_escalation(
-                sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
-                escalation_id=escalation.id, owner=member,
-            )
+    if action == "resolve":
         await followup_store.resolve_escalation(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=escalation.id,
         )
@@ -1596,19 +1589,20 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
         ((settings.texts or {}) if settings else {}).get(key), ESCALATION_TEXTS[key],
         member=member, name=label, reason=escalation.reason[:300],
     )
-    told = 0
+    colleagues_told = 0
     for colleague in sorted(await _alerted_with(sf, escalation) - {ctx.user_id}, key=str):
-        queued, _ = await followup_store.notify_team(
-            sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="notice", text=text,
-            created_by=f"team:{ctx.user_id}", subject_user_id=subject,
+        queued, _ = await _tell_team(
+            sf, ctx, settings, kind="notice", text=text, subject_user_id=subject,
             only_user_id=colleague, dedupe_prefix=f"{key}:{escalation.id}",
-            fallback_senders={ctx.channel: ctx.sender},
         )
-        told += queued
+        colleagues_told += queued
     done = "taken by you" if action == "claim" else "resolved"
     return (
         f"{label}'s escalation is {done} (\u201c{escalation.reason[:200]}\u201d). "
-        + (f"{told} colleague(s) who got the alert were told." if told else "Nobody else got that alert.")
+        + (
+            f"{colleagues_told} colleague(s) who got the alert were told." if colleagues_told
+            else "Nobody else got that alert."
+        )
     )
 
 
