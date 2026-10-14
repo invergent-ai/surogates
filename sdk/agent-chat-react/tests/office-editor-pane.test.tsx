@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { WorkspaceFileDrawer } from "../src/components/workspace/workspace-file-drawer";
-import type { AgentChatAdapter } from "../src/types";
+import type { AgentChatAdapter, AgentChatOfficeEvent } from "../src/types";
 
 vi.mock("../src/lib/office", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/office")>()),
@@ -168,6 +168,25 @@ describe("save notices in the editor pane", () => {
     );
     expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(1);
     expect(view.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it.each([
+    [{ type: "office.save_waiting", eventId: 13, computer: "Mac", reason: "offline" }, "Saving to Mac once it is back online."],
+    [{ type: "office.save_waiting", eventId: 13, computer: "Mac", reason: "waiting" }, "Saving to Mac: waiting for it to allow the save."],
+    [{ type: "office.save_failed", eventId: 13, computer: "Mac", reason: "declined" },
+      "Mac declined the save. Your changes are still here; the next save asks again."],
+  ] as const)("says where a save on the computer is: %o", async (officeEvent, said) => {
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config: {} });
+    const host = adapter({ getWorkspaceEditorConfig });
+    const pane = (event?: AgentChatOfficeEvent) => (
+      <WorkspaceFileDrawer adapter={host} sessionId="s-1" path="a.docx" officeEvent={event} onClose={() => {}} />
+    );
+    const view = await mount(pane());
+    await rerender(pane(officeEvent as AgentChatOfficeEvent));
+    expect(view.querySelector('[role="status"]')?.textContent).toBe(said);
+    await rerender(pane({ type: "office.saved", eventId: 14 }));
+    expect(view.querySelector('[role="status"]')).toBeNull();
+    expect(getWorkspaceEditorConfig).toHaveBeenCalledTimes(1);
   });
 });
 

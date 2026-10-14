@@ -38,6 +38,18 @@ describe("office save events", () => {
     expect(next.officeEvents["a.xlsx"]?.type).toBe("office.conflict");
     expect(next.workspaceRefreshKey).toBe(state.workspaceRefreshKey);
   });
+
+  it("records a save waiting on the computer, and the save that landed after it", () => {
+    expect(AGENT_CHAT_LISTENED_EVENTS).toEqual(expect.arrayContaining(["office.save_waiting", "office.saved"]));
+    const state = createInitialAgentChatState();
+    const waiting = applyAgentChatEvent(state, {
+      type: "office.save_waiting", eventId: 3, data: { path: "a.docx", computer: "Mac", reason: "offline" },
+    });
+    expect(waiting.officeEvents["a.docx"]).toEqual({ type: "office.save_waiting", eventId: 3, computer: "Mac", reason: "offline" });
+    const saved = applyAgentChatEvent(waiting, { type: "office.saved", eventId: 4, data: { path: "a.docx" } });
+    expect(saved.officeEvents["a.docx"]).toEqual({ type: "office.saved", eventId: 4 });
+    expect(saved.workspaceRefreshKey).toBe(state.workspaceRefreshKey);
+  });
 });
 
 describe("live office edits", () => {
