@@ -3,7 +3,7 @@
 // is applied. Electron-free.
 
 import type { Fetch } from "../download.js";
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import * as linux from "./installer-linux.js";
 import type { Applied, Staged, UpdatesOptions } from "./updates.js";
 
@@ -16,6 +16,5 @@ export interface Installer {
   helper(command: string[]): (files: Staged) => Promise<Applied>;
 }
 
-export const INSTALLER: Installer = process.platform === "linux"
-  ? { record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun }
-  : { record: () => notBuilt("Surogate Desktop's install"), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") };
+export const INSTALLER: Installer = forThisOs<Installer>({ linux: { record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun } })
+  ?? { record: () => notBuilt("Surogate Desktop's install"), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates") };

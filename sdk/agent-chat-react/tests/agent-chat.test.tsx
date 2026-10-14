@@ -833,181 +833,6 @@ describe("AgentChat", () => {
     expect(browserPanel?.className).not.toContain("md:h-1/2");
   });
 
-  it("renders PDF workspace files without using the image preview", async () => {
-    const stream = new FakeEventStream();
-    const adapter: AgentChatAdapter = {
-      ...createAdapter(stream),
-      async getWorkspaceTree() {
-        return {
-          root: "workspace",
-          entries: [
-            {
-              name: "report.pdf",
-              path: "report.pdf",
-              kind: "file" as const,
-              size: 128,
-            },
-          ],
-          truncated: false,
-        };
-      },
-      async getWorkspaceFile() {
-        return {
-          path: "report.pdf",
-          content: "JVBERi0xLjQKJcOkw7zDtsOfCg==",
-          size: 18,
-          mime_type: "application/pdf",
-          encoding: "base64",
-          truncated: false,
-        };
-      },
-    };
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
-      await Promise.resolve();
-    });
-
-    await openPane(container, "files");
-    const fileButton = Array.from(
-      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
-    ).find((element) => element.textContent?.includes("report.pdf"));
-    expect(fileButton).toBeDefined();
-
-    await act(async () => {
-      fileButton!.click();
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("report.pdf");
-    expect(
-      container.querySelector('div[aria-label="PDF viewer for report.pdf"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('button[aria-label="Previous PDF page"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('input[aria-label="Find in PDF"]'),
-    ).not.toBeNull();
-    expect(container.querySelector("img")).toBeNull();
-  });
-
-  it("shows a clear error when a PDF workspace file is not base64 encoded", async () => {
-    const stream = new FakeEventStream();
-    const adapter: AgentChatAdapter = {
-      ...createAdapter(stream),
-      async getWorkspaceTree() {
-        return {
-          root: "workspace",
-          entries: [
-            {
-              name: "broken.pdf",
-              path: "broken.pdf",
-              kind: "file" as const,
-              size: 12,
-            },
-          ],
-          truncated: false,
-        };
-      },
-      async getWorkspaceFile() {
-        return {
-          path: "broken.pdf",
-          content: "%PDF-\ufffd\n",
-          size: 12,
-          mime_type: "application/pdf",
-          encoding: "utf-8",
-          truncated: false,
-        };
-      },
-    };
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
-      await Promise.resolve();
-    });
-
-    await openPane(container, "files");
-    const fileButton = Array.from(
-      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
-    ).find((element) => element.textContent?.includes("broken.pdf"));
-    expect(fileButton).toBeDefined();
-
-    await act(async () => {
-      fileButton!.click();
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain(
-      "PDF preview requires base64 file content.",
-    );
-    expect(
-      container.querySelector('div[aria-label="PDF viewer for broken.pdf"]'),
-    ).toBeNull();
-  });
-
-  it("does not show a blank PDF canvas when base64 content is invalid", async () => {
-    const stream = new FakeEventStream();
-    const adapter: AgentChatAdapter = {
-      ...createAdapter(stream),
-      async getWorkspaceTree() {
-        return {
-          root: "workspace",
-          entries: [
-            {
-              name: "broken.pdf",
-              path: "broken.pdf",
-              kind: "file" as const,
-              size: 12,
-            },
-          ],
-          truncated: false,
-        };
-      },
-      async getWorkspaceFile() {
-        return {
-          path: "broken.pdf",
-          content: "%PDF-\ufffd\n",
-          size: 12,
-          mime_type: "application/pdf",
-          encoding: "base64",
-          truncated: false,
-        };
-      },
-    };
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
-      await Promise.resolve();
-    });
-
-    await openPane(container, "files");
-    const fileButton = Array.from(
-      container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
-    ).find((element) => element.textContent?.includes("broken.pdf"));
-    expect(fileButton).toBeDefined();
-
-    await act(async () => {
-      fileButton!.click();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("PDF preview data is not valid base64.");
-    expect(
-      container.querySelector('div[aria-label="PDF viewer for broken.pdf"]'),
-    ).toBeNull();
-  });
-
   it("opens the file preview as a full drawer, sized like the browser pane", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
@@ -1172,6 +997,123 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
     expect(container.textContent).toContain("content of src/b.py");
+  });
+
+  it("opens a document the agent edits live once the edit has run, once, and leaves replayed edits alone", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    const editPlan = (eventId: number) => {
+      stream.emit("tool.call", eventId, {
+        tool_call_id: `tc${eventId}`,
+        name: "office_edit",
+        arguments: { path: "docs/Plan.docx", ops: [] },
+      });
+      stream.emit("tool.result", eventId + 1, { tool_call_id: `tc${eventId}`, name: "office_edit", content: "{}" });
+    };
+    const panel = () => container!.querySelector('[data-testid="file-preview-panel"]');
+
+    await act(async () => {
+      editPlan(3);
+      await Promise.resolve();
+    });
+    expect(panel()).toBeNull();
+
+    await act(async () => {
+      // An SSE event without an id repeats the last one the stream sent.
+      stream.emit("stream.live", 4, {});
+      editPlan(5);
+      await Promise.resolve();
+    });
+    expect(panel()?.textContent).toContain("Plan.docx");
+
+    // Closed, it stays closed while the agent goes on editing it.
+    await act(async () => {
+      container!.querySelector<HTMLButtonElement>('button[aria-label="Close file"]')!.click();
+      await Promise.resolve();
+    });
+    expect(panel()).toBeNull();
+    await act(async () => {
+      editPlan(7);
+      await Promise.resolve();
+    });
+    expect(panel()).toBeNull();
+  });
+
+  it("auto-opens each document once, however many others it has opened since", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    const edit = async (eventId: number, path: string) => {
+      await act(async () => {
+        stream.emit("tool.call", eventId, { tool_call_id: `tc${eventId}`, name: "office_edit", arguments: { path, ops: [] } });
+        stream.emit("tool.result", eventId + 1, { tool_call_id: `tc${eventId}`, name: "office_edit", content: "{}" });
+        await Promise.resolve();
+      });
+    };
+    const close = async () => {
+      await act(async () => {
+        container!.querySelector<HTMLButtonElement>('button[aria-label="Close file"]')!.click();
+        await Promise.resolve();
+      });
+    };
+    const panel = () => container!.querySelector('[data-testid="file-preview-panel"]');
+    await act(async () => {
+      stream.emit("stream.live", 0, {});
+      await Promise.resolve();
+    });
+
+    await edit(1, "docs/A.docx");
+    expect(panel()?.textContent).toContain("A.docx");
+    await close();
+    await edit(3, "docs/B.docx");
+    expect(panel()?.textContent).toContain("B.docx");
+    await close();
+    await edit(5, "docs/A.docx");
+    expect(panel()).toBeNull();
+    await edit(7, "docs/C.docx");
+    expect(panel()?.textContent).toContain("C.docx");
+  });
+
+  it("keeps the file the user is looking at when the agent edits another", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    await openPane(container, "files");
+    const fileButton = Array.from(container.querySelectorAll<HTMLElement>('[role="treeitem"]'))
+      .reverse()
+      .find((element) => element.textContent?.includes("main.py"));
+    await act(async () => {
+      fileButton!.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stream.emit("stream.live", 0, {});
+      stream.emit("tool.call", 4, { tool_call_id: "tc4", name: "office_edit", arguments: { path: "docs/Plan.docx", ops: [] } });
+      stream.emit("tool.result", 5, { tool_call_id: "tc4", name: "office_edit", content: "{}" });
+      await Promise.resolve();
+    });
+    const panel = container.querySelector('[data-testid="file-preview-panel"]');
+    expect(panel?.textContent).toContain("main.py");
+    expect(panel?.textContent).not.toContain("Plan.docx");
   });
 
   it("reinitializes the files accordion when the session changes", async () => {

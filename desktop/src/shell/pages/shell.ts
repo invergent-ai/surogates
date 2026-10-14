@@ -566,6 +566,9 @@ function draw(state: State): void {
   // The Projects page fills the centre and the Overview's column, under the header's bare strip.
   const onPage = state.view.kind === "projects";
   document.body.classList.toggle("projects-view", onPage);
+  // The Overview and its button are a project's alone.
+  document.body.classList.toggle("no-project", state.view.kind === "web");
+  byId("overview").hidden = !open;
   byId("open-projects").classList.toggle("selected", onPage);
   if (onPage) byId("open-projects").setAttribute("aria-current", "page");
   else byId("open-projects").removeAttribute("aria-current");

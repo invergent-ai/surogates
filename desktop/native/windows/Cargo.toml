@@ -1,0 +1,26 @@
+# Surogate Desktop's native programs on Windows: the Surogate VM service (service/, surogate-service.exe), the
+# only part of the app that runs as LocalSystem and the only one that calls the Host Compute Service; the user's
+# side of one VM (vm/, surogate-vm.exe); the HCS document and calls (hcs/); the service's pipe protocol (pipe/);
+# and the app's own helper for what only Windows's libraries answer (helper/, surogate-helper.exe); and the MSI's own
+# custom action (msi/, surogate_msi.dll), which the app does not install. Each crate's
+# pure parts build and test on any OS; what calls Windows builds on Windows alone.
+[workspace]
+resolver = "2"
+members = ["hcs", "pipe", "service", "vm", "helper", "msi"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Every crate pinned by Cargo.lock, built with --locked; none from git.
+[workspace.dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+windows-sys = "=0.61.2"
+hcs = { path = "hcs" }
+pipe = { path = "pipe" }
+
+[profile.release]
+# A panic ends the process: the service's VMs end with its handles, as when it is killed.
+panic = "abort"

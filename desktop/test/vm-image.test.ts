@@ -29,6 +29,7 @@ let answer: (request: IncomingMessage, response: ServerResponse, body: Buffer) =
 let manifest: ImageManifest;
 let rootfs: Buffer;
 let kernel: Buffer;
+let initrd: Buffer;
 
 const ranged = (request: IncomingMessage, response: ServerResponse, body: Buffer) => {
   const from = Number(/^bytes=(\d+)-$/.exec(request.headers.range ?? "")?.[1] ?? 0);
@@ -53,10 +54,12 @@ beforeEach(async () => {
   served = new Map();
   heard = [];
   answer = ranged;
-  // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away.
-  rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300_000)]);
+  // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away: in
+  // whole sectors, as a disk is.
+  rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300 * 1024)]);
   kernel = randomBytes(200_000);
-  manifest = { key: KEY, arch: "amd64", files: [publish("rootfs.img", rootfs), publish("vmlinuz", kernel)] };
+  initrd = randomBytes(50_000);
+  manifest = { key: KEY, arch: "amd64", files: [publish("rootfs.img", rootfs), publish("vmlinuz", kernel), publish("initrd", initrd)] };
   server = createServer((request, response) => {
     heard.push({ url: request.url ?? "", range: request.headers.range });
     const body = served.get(request.url ?? "");
@@ -85,9 +88,10 @@ describe("the guest image's delivery", () => {
     expect(folder).toBe(join(images(), KEY));
     expect(readFileSync(join(folder, "rootfs.img")).equals(rootfs)).toBe(true);
     expect(readFileSync(join(folder, "vmlinuz")).equals(kernel)).toBe(true);
+    expect(readFileSync(join(folder, "initrd")).equals(initrd)).toBe(true);
     // Only the unpacked files are kept, nothing partial, and the mark of a whole image, written last.
     expect(readdirSync(images())).toEqual([KEY]);
-    expect(readdirSync(folder).sort()).toEqual(["complete", "rootfs.img", "vmlinuz"]);
+    expect(readdirSync(folder).sort()).toEqual(["complete", "initrd", "rootfs.img", "vmlinuz"]);
     expect(statSync(join(folder, "rootfs.img")).blocks * 512).toBeLessThan(rootfs.length / 2);
     const total = manifest.files.reduce((sum, file) => sum + file.downloadSize, 0);
     expect(told.at(-1)).toEqual([total, total]);
@@ -108,7 +112,7 @@ describe("the guest image's delivery", () => {
       heard = [];
       expect(await deliver(options())).toBe(folder);
       expect(readFileSync(join(folder, "rootfs.img")).equals(rootfs)).toBe(true);
-      expect(heard.map(({ url }) => url).sort()).toEqual([`/desktop/vm/${KEY}/rootfs.img.zst`, `/desktop/vm/${KEY}/vmlinuz.zst`]);
+      expect(heard.map(({ url }) => url).sort()).toEqual([`/desktop/vm/${KEY}/initrd.zst`, `/desktop/vm/${KEY}/rootfs.img.zst`, `/desktop/vm/${KEY}/vmlinuz.zst`]);
     }
   });
 
@@ -119,8 +123,8 @@ describe("the guest image's delivery", () => {
     writeFileSync(join(work, "rootfs.img"), rootfs);
     writeFileSync(join(work, "rootfs.img.zst"), served.get(`/desktop/vm/${KEY}/rootfs.img.zst`)!);
     const folder = await deliver(options());
-    expect(readdirSync(folder).sort()).toEqual(["complete", "rootfs.img", "vmlinuz"]);
-    expect(heard.map(({ url }) => url)).toEqual([`/desktop/vm/${KEY}/vmlinuz.zst`]);
+    expect(readdirSync(folder).sort()).toEqual(["complete", "initrd", "rootfs.img", "vmlinuz"]);
+    expect(heard.map(({ url }) => url)).toEqual([`/desktop/vm/${KEY}/vmlinuz.zst`, `/desktop/vm/${KEY}/initrd.zst`]);
   });
 
   it("resumes a download that stopped from its .partial, with a Range", async () => {
@@ -295,7 +299,7 @@ describe("the guest image's delivery", () => {
     }
     expect(existsSync(join(work, "rootfs.img.zst"))).toBe(true);
     expect(readFileSync(join(await deliver(options()), "rootfs.img")).equals(rootfs)).toBe(true);
-    expect(heard.map(({ url }) => url)).toEqual([`/desktop/vm/${KEY}/vmlinuz.zst`]);
+    expect(heard.map(({ url }) => url)).toEqual([`/desktop/vm/${KEY}/vmlinuz.zst`, `/desktop/vm/${KEY}/initrd.zst`]);
     // One that is no longer the download, as after bit rot, goes, and the next try downloads it again.
     rmSync(join(images(), KEY), { recursive: true });
     mkdirSync(work);
@@ -315,7 +319,7 @@ describe("the guest image's delivery", () => {
     served.set(`/desktop/vm/${KEY}/rootfs.img.zst`, download);
     manifest = { ...manifest, files: [
       { name: "rootfs.img", size: 4 * 1024 ** 3, sha256: "0".repeat(64), download: "rootfs.img.zst", downloadSize: download.length, downloadSha256: sha256(download) },
-      manifest.files[1]!,
+      manifest.files[1]!, manifest.files[2]!,
     ] };
     const stop = new AbortController();
     const delivered = deliver({ ...options(), signal: stop.signal });
@@ -361,8 +365,8 @@ describe("the guest image's delivery", () => {
     writeFileSync(join(older, "rootfs.img"), randomBytes(64 * 1024 * 1024));
     // Needed: 32 MiB more than is free, which the older image's room covers. Its size is not the disk's, so the unpack then refuses it.
     const { bavail, bsize } = await statfs(images());
-    const others = manifest.files.reduce((sum, file) => sum + file.downloadSize, 0) + manifest.files[1]!.size;
-    manifest = { ...manifest, files: [{ ...manifest.files[0]!, size: bavail * bsize + 32 * 1024 * 1024 - others }, manifest.files[1]!] };
+    const others = manifest.files.reduce((sum, file) => sum + file.downloadSize, 0) + manifest.files[1]!.size + manifest.files[2]!.size;
+    manifest = { ...manifest, files: [{ ...manifest.files[0]!, size: bavail * bsize + 32 * 1024 * 1024 - others }, manifest.files[1]!, manifest.files[2]!] };
     await expect(deliver(options())).rejects.toThrow("rootfs.img was not the file the app expects");
     expect(existsSync(older)).toBe(false);
   });
@@ -460,8 +464,8 @@ describe("ImageDelivery", () => {
     const delivery: ImageDelivery = new ImageDelivery(delivering(), () => states.push(delivery.state.state));
     delivery.start();
     await delivery.wait(new AbortController().signal);
-    // rootfs.img's unpack, vmlinuz's download, then its unpack.
-    expect(states.filter((state, n) => state !== states[n - 1])).toEqual(["downloading", "unpacking", "downloading", "unpacking", "ready"]);
+    // rootfs.img's unpack, vmlinuz's download, then its unpack, and the initrd's.
+    expect(states.filter((state, n) => state !== states[n - 1])).toEqual(["downloading", "unpacking", "downloading", "unpacking", "downloading", "unpacking", "ready"]);
   });
 
   it("checks the image's files by their hashes again when asked, as after a boot of it did not start, and downloads it again once one differs", async () => {
@@ -483,7 +487,7 @@ describe("ImageDelivery", () => {
     await delivery.wait(new AbortController().signal);
     expect(delivery.state.state).toBe("ready");
     expect(readFileSync(join(delivery.folder, "vmlinuz")).equals(kernel)).toBe(true);
-    expect(heard.map(({ url }) => url).sort()).toEqual([`/desktop/vm/${KEY}/rootfs.img.zst`, `/desktop/vm/${KEY}/vmlinuz.zst`]);
+    expect(heard.map(({ url }) => url).sort()).toEqual([`/desktop/vm/${KEY}/initrd.zst`, `/desktop/vm/${KEY}/rootfs.img.zst`, `/desktop/vm/${KEY}/vmlinuz.zst`]);
   });
 
   // Each of the agent's operations waits on it before it goes to the VM.
@@ -548,7 +552,7 @@ describe("ImageDelivery", () => {
     expect(delivery.state).toMatchObject({ state: "failed" });
     // Asked while it has failed: at once.
     await expect(delivery.wait(new AbortController().signal)).rejects.toThrow("answered 404");
-    manifest.files.forEach((file) => publish(file.name, file.name === "vmlinuz" ? kernel : rootfs));
+    manifest.files.forEach((file) => publish(file.name, { vmlinuz: kernel, initrd }[file.name] ?? rootfs));
     delivery.start();
     expect(delivery.state).toMatchObject({ state: "downloading" });
     await delivery.wait(new AbortController().signal);

@@ -170,6 +170,24 @@ describe("the agent's control port", () => {
     ]);
   });
 
+  it("takes the host's Plan 9 share at its server's port, with its owner in its one form, and refuses any other", async () => {
+    const { sent, calls, tell, settle } = control();
+    tell({ type: "done", id: 0, user: USER });
+    const setup = (id: number, share: unknown) => tell({ type: "setup", id, root: `root-${id}`, folder: "/mnt/c/Users/someone/project", share, ended: [] });
+    setup(1, { kind: "p9", tag: "r1", port: 564, aname: "uid=10000;gid=10000" });
+    setup(2, { kind: "p9", tag: "r2", port: 564 });
+    for (const [id, share] of [
+      [3, { kind: "p9", tag: "r3", port: 5000 }], [4, { kind: "p9", tag: "r4" }], [5, { kind: "p9", tag: "r5", port: 564, aname: "uid=1" }],
+      [6, { kind: "p9", tag: "r6", port: 564, aname: 1 }], [7, { kind: "p9", tag: "r7", port: "564" }],
+    ] as const) setup(id, share);
+    await settle();
+    expect(sent.filter(({ type }) => type === "failed")).toEqual([3, 4, 5, 6, 7].map((id) => ({ type: "failed", id, message: "The agent cannot take this setup request" })));
+    expect(calls).toEqual([
+      ["setup", "root-1", "/mnt/c/Users/someone/project", { kind: "p9", tag: "r1", port: 564, aname: "uid=10000;gid=10000" }, USER, []],
+      ["setup", "root-2", "/mnt/c/Users/someone/project", { kind: "p9", tag: "r2", port: 564 }, USER, []],
+    ]);
+  });
+
   it("takes the host's user from hello's answer only, once, and in its shape", async () => {
     const { agent, sent, calls, tell, settle } = control();
     agent.hello();

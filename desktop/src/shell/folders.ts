@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { ProcessHandle } from "../guest/processes.js";
 import type { Bindings, Mode } from "../journal/bindings.js";
 import type { Operation } from "../link/protocol.js";
+import { shownPath } from "../session-path.js";
 import type { ProcessesChange } from "../vm/manager.js";
 
 export interface ChatRow {
@@ -71,5 +72,6 @@ export async function listFolders(
     });
     folders.set(binding.folder, chats);
   });
-  return [...folders].map(([folder, chats]) => ({ folder, chats }));
+  // Each by its path as the person reads it (session-path.ts): this computer's own.
+  return [...folders].map(([folder, chats]) => ({ folder: shownPath(folder), chats }));
 }

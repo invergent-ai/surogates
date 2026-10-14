@@ -1,11 +1,12 @@
 // What the app knows about a folder a tool host works in, and the lock that gives
 // a folder one host at a time. Both are outside every sandbox: the record in the
-// app's data, the lock in the kernel.
+// app's data, the lock in the kernel (on macOS, a file of the app's data the kernel locks).
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 
 import type { ProcessHandle } from "../guest/processes.js";
+import { dirname } from "../host-path.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { type FolderLock, takeLock } from "./folder-lock.js";
 
 // How long a host waits for another host on the same folder to let it go.
@@ -28,12 +29,13 @@ export interface FolderRecord {
 }
 
 // One host per folder, by device and inode however it is spelled: the lock as this OS
-// takes it (folder-lock.ts), tried again until *waitMs* have passed.
-export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS): Promise<FolderLock> {
+// takes it (folder-lock.ts), in the app's data folder *dataDir* where it takes one there,
+// tried again until *waitMs* have passed.
+export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS, dataDir?: string): Promise<FolderLock> {
   const uid = process.getuid?.() ?? 0;
   const deadline = Date.now() + waitMs;
   for (;;) {
-    const lock = await takeLock(uid, dev, ino);
+    const lock = await takeLock(uid, dev, ino, dataDir);
     if (lock !== null) return lock;
     if (Date.now() >= deadline) throw new FolderBusy();
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -70,14 +72,18 @@ export function isHandle(value: unknown): value is ProcessHandle {
       && short(handle.ended.output) && (handle.ended.note === null || short(handle.ended.note))));
 }
 
-// Whole or not at all, and on disk before it returns: a crash right after must find it.
+// Whether this OS syncs a folder: Linux and macOS do, by fsync on it; Windows does not, flushing no folder's handle
+// (FlushFileBuffers on a folder opened to read fails), and journals each rename on NTFS itself.
+const SYNCS_FOLDERS = forThisOs({ linux: true, darwin: true, win32: false });
+
+// Whole or not at all, and on disk before it returns where this OS syncs a folder: a crash right after must find it.
 export function writeRecord(path: string, record: FolderRecord): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.${process.pid}`;
   syncFile(temp, "w", (fd) => writeFileSync(fd, JSON.stringify(record)));
   renameSync(temp, path);
   // The rename is on disk only once its folder is.
-  syncFile(dirname(path), "r", () => {});
+  if (SYNCS_FOLDERS ?? notBuilt("A folder's record")) syncFile(dirname(path), "r", () => {});
 }
 
 function syncFile(path: string, flags: string, write: (fd: number) => void): void {

@@ -713,6 +713,7 @@ def create_app() -> FastAPI:
         memory,
         missions,
         oauth,
+        office,
         openai,
         prompts,
         reach,
@@ -785,6 +786,7 @@ def create_app() -> FastAPI:
     app.include_router(website.router, prefix="/v1", tags=["website"])
     app.include_router(reach.router, prefix="/v1", tags=["reach"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
+    app.include_router(office.router, prefix="/v1", tags=["office"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
     app.include_router(channel_files.router, prefix="/v1", tags=["channel-files"])
     app.include_router(browser.router, prefix="/v1", tags=["browser"])

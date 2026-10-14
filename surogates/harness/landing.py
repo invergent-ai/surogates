@@ -824,6 +824,10 @@ async def _land(
         # Who changed a file it leaves out: you, by the pickup, or main's history.
         commit = step("commit", author=thread, trailers=[*audit, ["Surogate-Kind", "turn"]], pickup=picked["commit"])
         turn = await execute(commit)
+        # A document open in the editor has the editor as its only writer: the thread's copy of it does not land.
+        from surogates.office.guard import hold_open_documents
+
+        await hold_open_documents(session_factory, session, turn)
         changes = turn["changes"]
         outcome.update(
             overlapped=turn["overlapped"], excluded=turn["excluded"], repositories=turn["repositories"],

@@ -13,7 +13,7 @@ import { imageArch, type ImageManifest, readManifest } from "../src/vm/image.js"
 const manifest: ImageManifest = {
   key: "a".repeat(64),
   arch: "amd64",
-  files: ["rootfs.img", "vmlinuz"].map((name, n) => ({
+  files: ["initrd", "rootfs.img", "vmlinuz"].map((name, n) => ({
     name, size: 3_000_000 + n, sha256: String(n).repeat(64), download: `${name}.zst`, downloadSize: 1_000_000 + n, downloadSha256: String(n + 2).repeat(64),
   })),
 };
@@ -36,6 +36,8 @@ describe("the image's manifest", () => {
       { ...manifest, arch: "x86_64" },
       { key: manifest.key, files: manifest.files },
       { ...manifest, files: [manifest.files[0]] },
+      // The image as it was before it had Hyper-V's initrd.
+      { ...manifest, files: manifest.files.filter((file) => file.name !== "initrd") },
       { ...manifest, files: manifest.files.map((file) => ({ ...file, download: "../../.bashrc" })) },
       { ...manifest, files: manifest.files.map((file) => (file.name === "vmlinuz" ? { ...file, name: "../vmlinuz" } : file)) },
       { ...manifest, files: manifest.files.map((file) => ({ ...file, size: -1 })) },

@@ -33,6 +33,27 @@ export const HELD = "What this chat ran is waiting on its folder, which does not
 // stream on it for each connection the agent's browser makes to a server of a root's own (inbound.ts).
 export const INBOUND_PORT = "ai.surogate.inbound";
 
+// What the guest's kernel line names of the machine it runs on, so that no part of the guest guesses
+// (vm/qemu.ts, kernelLine): the bus of its disks, virtio's or SCSI's (Hyper-V's); how its ports reach
+// the host, as virtio-serial ports or as vsock streams (Hyper-V's sockets); and the set of names the
+// guest's rule refuses a session besides the protected ones (vm/rule.bpf.c): none more on posix, and on
+// windows those Windows's Explorer acts on (files/explorer-names.ts).
+export type DiskBus = "virtio" | "scsi";
+export type Transport = "virtio-serial" | "vsock";
+export type NameSet = "posix" | "windows";
+export interface GuestDevices {
+  disks: DiskBus;
+  transport: Transport;
+  names: NameSet;
+}
+
+// Each of the agent's ports on vsock: the host's port it is a stream to, at the host's CID, 2. The host
+// listens and the guest connects (vm/init); the host's side reads them from here too.
+export const VSOCK_PORTS = { "ai.surogate.control": 5000, "ai.surogate.net": 5001, [INBOUND_PORT]: 5002 } as const;
+// The host's Plan 9 server's vsock port, which a p9 share is mounted from (root.ts): the one Hyper-V's guests
+// dial for it (hcsshim's internal/guest/storage/plan9).
+export const PLAN9_PORT = 564;
+
 // What a root's runner sends on the root's socket for a connection the agent asked it for (ToRunner's
 // dial): "/in/<id>", then the connection's bytes, or "/in/<id> <errno>" when nothing took it. No
 // destination a command names starts with '/' (network.ts).
@@ -47,8 +68,17 @@ export const MAX_INBOUND = 160;
 // server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
 // vz: Apple's (macOS's Virtualization framework), which maps no owner. Its tag is one of
 // the VM's fixed devices (VZ_TAG); *name*, the folder's directory in a device that holds several.
+// p9: a share of the host's Plan 9 server (Hyper-V's), on its vsock *port*, PLAN9_PORT. Its *tag* is its name
+// there, given once in a boot as Linux's tags are; *aname*, what the server takes at the mount after that name:
+// "uid=<n>;gid=<n>", the owner the folder's files show as, the root's guest uid, so each root's are its own.
 // A backend whose share maps no owner, or maps them at the mount, adds its own kind.
-export type Share = { kind: "virtiofs"; tag: string } | { kind: "vz"; tag: string; name?: string };
+export type Share =
+  | { kind: "virtiofs"; tag: string }
+  | { kind: "vz"; tag: string; name?: string }
+  | { kind: "p9"; tag: string; port: number; aname?: string };
+
+// A p9 share's options at the mount, in their one form.
+export const P9_ANAME = /^uid=(0|[1-9][0-9]{0,9});gid=(0|[1-9][0-9]{0,9})$/;
 
 // Apple's share's devices: one that holds every folder, or one of MAX_SHARES of a folder each.
 export const VZ_TAG = /^(?:surogate|s[1-8])$/;

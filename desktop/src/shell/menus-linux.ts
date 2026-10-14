@@ -1,5 +1,5 @@
 // What of the app's menus is Linux's own: the first, File, which holds the app's own items, Settings
-// and Quit, beside the chat's and the window's; and the tray's icon.
+// and Quit, beside the chat's and the window's; the last, Help, which holds About; and the tray's icon.
 
 import type { MenuItemConstructorOptions } from "electron";
 
@@ -16,6 +16,20 @@ export function firstMenus(act: MenuActions): MenuItemConstructorOptions[] {
         { type: "separator" },
         { label: "Close window", role: "close" },
         { id: "quit", label: "Quit Surogate", accelerator: "CmdOrCtrl+Q", click: () => act.quit() },
+      ],
+    },
+  ];
+}
+
+/** The menus after View and Developer: Help. */
+export function lastMenus(act: MenuActions): MenuItemConstructorOptions[] {
+  return [
+    {
+      label: "Help",
+      submenu: [
+        { id: "documentation", label: "Documentation", click: () => act.documentation() },
+        { type: "separator" },
+        { id: "about", label: "About Surogate", click: () => act.about() },
       ],
     },
   ];

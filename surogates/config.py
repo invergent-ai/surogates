@@ -841,6 +841,55 @@ class VapidSettings(BaseSettings):
     subject: str = "mailto:support@surogate.ai"  # who push services contact about our pushes
 
 
+class OfficeSettings(BaseSettings):
+    """Office documents opened in the Euro-Office document server.
+
+    An empty ``public_url`` means there is no document server: the editor route
+    answers 503 and nothing offers office editing.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_OFFICE_"}
+
+    # Browsers load the editor from here.
+    public_url: str = ""
+    # The runtime reaches the document server here (saved files, Command Service).
+    internal_url: str = ""
+    # The document server reaches the runtime API here: file fetches and save callbacks.
+    callback_base_url: str = ""
+    # Shared with the document server: signs editor configs, checks its callbacks.
+    jwt_secret: str = ""
+    # The runtime's own: signs the file and callback URLs it hands the document server.
+    token_secret: str = ""
+    # The worker reaches runtime-office, where the agent's editor sessions run, here.
+    runtime_office_url: str = ""
+    # The bearer token the worker shows runtime-office.
+    runtime_office_token: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.public_url)
+
+    @property
+    def agent_editing(self) -> bool:
+        """Whether the agent edits documents live: a document server, and runtime-office beside it."""
+        return self.enabled and bool(self.runtime_office_url)
+
+    @model_validator(mode="after")
+    def _whole_when_on(self) -> "OfficeSettings":
+        if not self.enabled:
+            return self
+        missing = [name for name in ("internal_url", "callback_base_url") if not getattr(self, name)]
+        if missing:
+            raise ValueError(f"office.{', office.'.join(missing)} must be set when office.public_url is")
+        for name in ("jwt_secret", "token_secret"):
+            if len(getattr(self, name)) < 32:
+                raise ValueError(f"office.{name} must be at least 32 characters")
+        # runtime-office is optional (an environment can run the document server before it), but whole when set.
+        if self.runtime_office_url and len(self.runtime_office_token) < 32:
+            raise ValueError("office.runtime_office_token must be at least 32 characters when office.runtime_office_url is set")
+        return self
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -869,6 +918,7 @@ class Settings(BaseSettings):
     channels: ChannelsSettings = Field(default_factory=ChannelsSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     vapid: VapidSettings = Field(default_factory=VapidSettings)
+    office: OfficeSettings = Field(default_factory=OfficeSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem

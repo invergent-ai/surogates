@@ -1,6 +1,6 @@
 // Launching the built shell under Playwright, with its state in a folder of the test's own.
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -15,8 +15,9 @@ import { afterAll, expect } from "vitest";
 export const ELECTRON = createRequire(import.meta.url)("electron") as string;
 export const MAIN = join(import.meta.dirname, "..", "..", "dist", "shell", "main.js");
 
-// Short, under /tmp: a tool host's socket path under the state root must stay within 107 bytes.
-export const dataHome = (): string => mkdtempSync("/tmp/sd-");
+// Short, under /tmp: a tool host's socket path under the state root must stay within 107 bytes. Windows has no /tmp,
+// and no socket path: the runner's own temporary folder.
+export const dataHome = (): string => mkdtempSync(process.platform === "win32" ? join(tmpdir(), "sd-") : "/tmp/sd-");
 
 // Each data home's runtime folder, made once: short, under /tmp, as QEMU's control socket under it must
 // stay within 108 bytes. They go with the test file, once its apps have quit.
@@ -32,12 +33,56 @@ afterAll(() => {
 const TAKEN = ["PATH", "DISPLAY", "XAUTHORITY", "SUROGATE_VM_IMAGE"];
 
 /**
+ * The environment of an app a test launches on a Mac: its own home, under *home*, which its data, Electron's
+ * own and its Library's are in, and its own temp folder; no window server of its own, the runner's being
+ * the one there is.
+ */
+function macEnv(home: string): Record<string, string> {
+  const env: Record<string, string> = { LANG: process.env.LANG || "en_US.UTF-8" };
+  for (const name of ["PATH", "SUROGATE_VM_IMAGE"]) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  const [own, temp] = ["h", "t"].map((name) => join(home, name));
+  for (const folder of [own, temp]) mkdirSync(folder!, { recursive: true, mode: 0o700 });
+  return { ...env, HOME: own!, TMPDIR: temp! };
+}
+
+/**
+ * The environment of an app a test launches on Windows: its own local application data under *home*, which its data
+ * and Electron's own are in, and its own temporary folder; Windows's own folders as the runner names them, which its
+ * libraries read.
+ */
+function windowsEnv(home: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of ["PATH", "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "USERPROFILE", "USERNAME", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SUROGATE_VM_IMAGE"]) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  const [local, temp] = ["l", "t"].map((name) => join(home, name));
+  for (const folder of [local, temp]) mkdirSync(folder!, { recursive: true });
+  return { ...env, LOCALAPPDATA: local!, TEMP: temp!, TMP: temp! };
+}
+
+/** Where the app launched with its data home at *home* keeps what it keeps (src/shell/places.ts). */
+export const dataRoot = (home: string): string =>
+  process.platform === "darwin" ? join(home, "h", "Library", "Application Support", "Surogate")
+    : process.platform === "win32" ? join(home, "l", "Surogate") : join(home, "surogate");
+
+// Each launch's own secret store: Linux's basic store, and on a Mac Chromium's mock Keychain, so that no
+// test leaves an item in the keyring of the account it runs in. Windows's DPAPI keeps no item of its own:
+// the key it seals is in the launch's own data.
+const STORE = process.platform === "darwin" ? ["--use-mock-keychain"] : process.platform === "win32" ? [] : ["--password-store=basic"];
+
+/**
  * The environment of every app a test launches: a session of its own under *home*, the test's
  * data home. It has no session bus, so it reaches and starts no keyring daemon, portal, gvfsd or
  * at-spi; its own home, runtime, config, cache, state and temp folders; and X11, on xvfb's display.
  * It throws on any other display, before anything is made or started.
  */
 export function shellEnv(home: string): Record<string, string> {
+  if (process.platform === "darwin") return macEnv(home);
+  if (process.platform === "win32") return windowsEnv(home);
   // xvfb-run -a sets both: its display, never the desktop's :0, and an authority in a folder of its own.
   const { DISPLAY: display, XAUTHORITY: authority } = process.env;
   if (!display || display === ":0" || !/^:\d+$/.test(display) || !authority?.startsWith(join(tmpdir(), "xvfb-run."))) {
@@ -63,13 +108,13 @@ export function shellEnv(home: string): Record<string, string> {
 
 /**
  * A second launch with *args*, as the system's link handler starts one: in the test's session,
- * with the basic store, it hands the running app its arguments and exits. Its exit code. One that
+ * with its own secret store, it hands the running app its arguments and exits. Its exit code. One that
  * has not exited within 10 s found no app to hand them to, and became the app: it is killed, and
  * the test is told.
  */
 export async function secondLaunch(home: string, ...args: string[]): Promise<number | null> {
   await appsElectron();
-  const second = spawn(ELECTRON, [MAIN, "--password-store=basic", ...args], { env: shellEnv(home), stdio: "ignore", detached: true });
+  const second = spawn(ELECTRON, [MAIN, ...STORE, ...args], { env: shellEnv(home), stdio: "ignore", detached: true });
   let late: NodeJS.Timeout | undefined;
   const code = await Promise.race([
     once(second, "exit").then(([exited]) => exited as number | null),
@@ -78,23 +123,34 @@ export async function secondLaunch(home: string, ...args: string[]): Promise<num
     }),
   ]);
   clearTimeout(late);
-  if (code === "running") process.kill(-second.pid!, "SIGKILL");
+  if (code === "running") killAll(second.pid!);
   await gone(second.pid);
   if (code === "running") throw new Error("A second launch found no app to hand its arguments to, and was killed after 10 s");
   return code;
 }
 
+// The process *pid* and every process it started, killed: its process group; on Windows, which has none, its tree.
+function killAll(pid: number): void {
+  if (process.platform === "win32") spawnSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"), ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+  else process.kill(-pid, "SIGKILL");
+}
+
 /**
  * Wait for the process group *pid* leads to end: an app a test started, with Electron's own children,
  * which can write to its data home for a moment after it has exited. What is left of it after 10 s is
- * killed, so no test leaves a process running, or a data home made again once it was removed.
+ * killed, so no test leaves a process running, or a data home made again once it was removed. On
+ * Windows, the process itself, its tree killed at the end.
  */
 export async function gone(pid: number | undefined): Promise<void> {
   if (pid === undefined) return;
   const killAt = Date.now() + 10_000;
   for (;;) {
     try {
-      process.kill(-pid, Date.now() < killAt ? 0 : "SIGKILL");
+      if (process.platform !== "win32") process.kill(-pid, Date.now() < killAt ? 0 : "SIGKILL");
+      else {
+        if (Date.now() >= killAt) killAll(pid);
+        process.kill(pid, 0);
+      }
     } catch {
       // ESRCH: nothing of it is left.
       return;
@@ -133,8 +189,8 @@ export async function launch(home: string, env: Record<string, string> = {}, arg
   await appsElectron();
   const app = await _electron.launch({
     executablePath: ELECTRON,
-    // The basic store: no test leaves an item in the user's keyring.
-    args: [...requires.flatMap((script) => ["-r", script]), MAIN, "--password-store=basic", ...args],
+    // Its own secret store (STORE): no test leaves an item in the user's keyring.
+    args: [...requires.flatMap((script) => ["-r", script]), MAIN, ...STORE, ...args],
     env: { ...shellEnv(home), ...env },
     // Playwright adds --no-sandbox unless told: the app never runs without its sandbox.
     chromiumSandbox: true,

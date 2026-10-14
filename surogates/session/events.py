@@ -253,6 +253,13 @@ class EventType(str, Enum):
     ARTIFACT_CREATED = "artifact.created"
     ARTIFACT_UPDATED = "artifact.updated"
 
+    # A save from the document editor found the file changed outside it: the
+    # save landed as a sibling copy (data: path, conflict_path) and the editors
+    # were sent to reload.
+    OFFICE_CONFLICT = "office.conflict"
+    # A save from the document editor failed (data: path, and status or attempts).
+    OFFICE_SAVE_FAILED = "office.save_failed"
+
     # ask_user_question — user's response to an `ask_user_question` tool
     # call.  Emitted by the ask_user_question response endpoint when the
     # user submits answers through the web widget.  The worker's

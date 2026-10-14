@@ -4,6 +4,15 @@
 import type { ChildProcess } from "node:child_process";
 import { connect, type Socket } from "node:net";
 
+import { join } from "../host-path.js";
+import type { Addresses } from "./backends.js";
+import { DOOR } from "./inbound.js";
+
+/** Linux's and macOS's addresses: the guest's three ports and the browser's door, each a Unix socket in the runtime folder *run*. */
+export const socketsIn = (run: string): Addresses => ({
+  control: join(run, "control.sock"), net: join(run, "net.sock"), inbound: join(run, "inbound.sock"), door: join(run, DOOR),
+});
+
 // How long a socket that is not there yet is waited for before it is tried again.
 export const RETRY_MS = 5;
 

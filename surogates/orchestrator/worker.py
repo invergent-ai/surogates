@@ -23,6 +23,7 @@ from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
+from surogates.harness.tool_schemas import has_file_pane
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
@@ -355,6 +356,10 @@ def _filter_effective_tools(
     )
     if not is_research_coordinator:
         result -= RESEARCH_SPINE_TOOLS
+
+    # The office tools edit a document that opens beside the chat: the same rule the schemas keep.
+    if not has_file_pane(session):
+        result -= {"office_read", "office_edit"}
 
     return result
 
@@ -1032,18 +1037,22 @@ async def _load_prompt_catalogs_entitled(
 
     A restricted ``skills`` dimension hides non-included skills from
     the system prompt; the skill tool and the API listing apply the
-    same allowlist per call, so a remembered name still refuses.
+    same allowlist per call, so a remembered name still refuses.  A
+    project's master has no skill that makes a document either: the skill
+    tools leave the same ones out.
     """
     from surogates.runtime.entitlements import (
         entitled_skills,
         filter_entitled_skills,
     )
+    from surogates.workstreams import skills_left_out
 
     agents_catalog, skills_catalog = await _load_prompt_catalogs(**kwargs)
     skills_catalog = filter_entitled_skills(
         skills_catalog, entitled_skills(session_config),
     )
-    return agents_catalog, skills_catalog
+    left_out = skills_left_out(session_config)
+    return agents_catalog, [s for s in skills_catalog if s.name not in left_out]
 
 
 def build_agent_principal_resolver(*, session_factory: Any):
@@ -2267,6 +2276,19 @@ async def run_worker(settings: Settings) -> None:
         name="browser-registry-reaper",
     )
 
+    # Saves from the document editor, landed in the workspace; stale editing sessions closed.
+    from surogates.jobs.office_saves import run_office_loop
+    office_task = asyncio.create_task(
+        run_office_loop(
+            session_factory=session_factory,
+            session_store=session_store,
+            storage=storage_backend,
+            redis=redis_client,
+            settings=settings,
+        ),
+        name="office-saves",
+    )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -2312,6 +2334,11 @@ async def run_worker(settings: Settings) -> None:
         browser_reaper_task.cancel()
         try:
             await browser_reaper_task
+        except asyncio.CancelledError:
+            pass
+        office_task.cancel()
+        try:
+            await office_task
         except asyncio.CancelledError:
             pass
         await health_server.stop()

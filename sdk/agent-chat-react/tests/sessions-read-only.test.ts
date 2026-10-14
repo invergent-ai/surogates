@@ -113,4 +113,22 @@ describe("readOnlyReasonForSession", () => {
     expect(out.readOnly).toBe(false);
     expect(out.reason).toBeUndefined();
   });
+
+  it("leaves a project's thread writable, though its coordinator started it", () => {
+    // The server makes each thread a ``worker`` child of the project's
+    // master and stamps its role; the user reads it and writes to it.
+    const out = readOnlyReasonForSession(
+      makeSession({ channel: "worker", parentId: "master-1", config: { workstream_role: "thread" } }),
+    );
+    expect(out.readOnly).toBe(false);
+    expect(out.reason).toBeUndefined();
+  });
+
+  it("keeps a thread's own helper read-only", () => {
+    const out = readOnlyReasonForSession(
+      makeSession({ channel: "delegation", parentId: "thread-1", config: { under_thread: "thread-1" } }),
+    );
+    expect(out.readOnly).toBe(true);
+    expect(out.reason).toContain("Sub-task");
+  });
 });

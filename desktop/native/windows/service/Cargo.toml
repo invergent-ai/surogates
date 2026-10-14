@@ -1,0 +1,22 @@
+[package]
+name = "service"
+description = "The Surogate VM service, surogate-service.exe: the one part of the app that runs as LocalSystem and calls the Host Compute Service"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "surogate-service"
+path = "src/main.rs"
+
+[dependencies]
+hcs.workspace = true
+pipe.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem",
+  "Win32_System_Com", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Services",
+  "Win32_System_Threading", "Win32_UI_Shell",
+] }

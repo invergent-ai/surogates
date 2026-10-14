@@ -12,6 +12,7 @@ import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspaceFileDrawer } from "./components/workspace/workspace-file-drawer";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
+import { isOfficeDocument } from "./lib/office";
 import { cn } from "./lib/utils";
 import {
   isSubAgentSession,
@@ -236,6 +237,9 @@ export function AgentChat({
     setFilesOpen(false);
   }, [runtime.viewMode]);
 
+  // The documents the agent's live edits have opened in the file pane.
+  const officeAutoOpened = useRef(new Set<string>());
+
   // A different session is a different workspace: fold the accordion and
   // drop the old session's selection and preview rather than carrying them
   // where they refer to nothing.
@@ -244,6 +248,7 @@ export function AgentChat({
     setWorkspacePath(null);
     setPreviewPath(null);
     setOpenPane(null);
+    officeAutoOpened.current.clear();
   }, [sessionId]);
   const readOnly = readOnlyReasonForSession(runtime.session);
   // The canvas view is offered only on a session that was created as a
@@ -389,6 +394,22 @@ export function AgentChat({
     setOpenPane("file");
     setMobileView("file");
   }, []);
+
+  // A live office_edit opens its document beside the chat, once per document and unless the user is
+  // looking at another file; the phone's chat stays in view.
+  const officeAutoOpen = runtime.state.officeAutoOpen;
+  useEffect(() => {
+    if (!officeAutoOpen || !isOfficeDocument(officeAutoOpen.path)) return;
+    if (openPane === "file" && previewPath !== null && previewPath !== officeAutoOpen.path) return;
+    // A document the user closed stays closed while the agent goes on editing it.
+    if (officeAutoOpened.current.has(officeAutoOpen.path)) return;
+    officeAutoOpened.current.add(officeAutoOpen.path);
+    setWorkspacePath(officeAutoOpen.path);
+    setPreviewPath(officeAutoOpen.path);
+    setOpenPane("file");
+    // Only a new edit opens the pane.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officeAutoOpen?.eventId]);
 
   // The panel clears the selection when the selected file is deleted or the
   // session goes away — moments when the preview must not linger either.
@@ -643,6 +664,8 @@ export function AgentChat({
                   adapter={adapter}
                   sessionId={sessionId}
                   path={previewPath}
+                  view={effectiveDisabled}
+                  officeEvent={runtime.state.officeEvents[previewPath]}
                   onClose={() => setOpenPane(null)}
                 />
               )}

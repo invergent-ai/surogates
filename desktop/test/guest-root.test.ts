@@ -9,8 +9,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NUL_REFUSED } from "../src/files/answers.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
-import type { HostUser, Share } from "../src/guest/protocol.js";
-import { admit, boundsFor, enter, NOT_SET_UP, rootEnvironment, Roots, slowerFor, UNMOUNTABLE } from "../src/guest/root.js";
+import { type HostUser, PLAN9_PORT, type Share } from "../src/guest/protocol.js";
+import {
+  admit, boundsFor, checkOwner, checkShare, enter, NOT_SET_UP, OTHER_UID, ownedBy, p9Mount, rootEnvironment, Roots, sharePath, slowerFor,
+} from "../src/guest/root.js";
 import { WAITS } from "../src/vm/manager.js";
 import { qemuArgs } from "../src/vm/qemu.js";
 
@@ -764,13 +766,75 @@ describe("a root's inputs", () => {
     await expect(enter(root, at, { kind: "virtiofs", tag }, user)).rejects.toThrow(message);
   });
 
-  it.each([{ kind: "vz", tag: "surogate", name: "r1" }, { kind: "vz", tag: "s1" }] as const)(
-    "refuses Apple's share %j, which it cannot mount yet, before anything is given",
-    async (share) => {
-      await expect(enter("root-1", place, share, ana)).rejects.toThrow(new Error(UNMOUNTABLE));
-      expect(UNMOUNTABLE).toBe("This computer's sandbox cannot mount this kind of share yet");
-    },
-  );
+  it.each([
+    [{ kind: "vz", tag: "surogate" }], [{ kind: "vz", tag: "surogate", name: "../r1" }], [{ kind: "vz", tag: "s1", name: "r1" }],
+    [{ kind: "vz", tag: "s9" }], [{ kind: "vz", tag: "r1" }], [{ kind: "other", tag: "r1" }],
+  ] as unknown as Array<[Share]>)("refuses %j, which is none of the shares it mounts, before anything is given", async (share) => {
+    await expect(enter("root-1", place, share, ana)).rejects.toThrow(/^not one of Apple's shares|^This computer's sandbox cannot mount this kind of share$/);
+  });
+});
+
+describe("a root on the host's Plan 9 share", () => {
+  it("takes a share by its tag, at the Plan 9 server's port, with the owner it shows in its one form, and refuses any other", () => {
+    for (const share of [
+      { kind: "p9", tag: "r1", port: PLAN9_PORT }, { kind: "p9", tag: "r12", port: PLAN9_PORT, aname: "uid=10000;gid=10000" }, { kind: "p9", tag: "r3", port: 564, aname: "uid=0;gid=0" },
+    ] as Share[]) expect(() => checkShare(share)).not.toThrow();
+    for (const share of [
+      { kind: "p9", tag: "../r1", port: PLAN9_PORT }, { kind: "p9", tag: "r0", port: PLAN9_PORT }, { kind: "p9", tag: "r1", port: 5000 },
+      { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=10000" }, { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "gid=1;uid=1" },
+      { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=10000;gid=10000;path=/" }, { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=010;gid=10" },
+      { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=1;gid=1,ro" }, { kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=-1;gid=1" },
+    ] as Share[]) expect(() => checkShare(share), JSON.stringify(share)).toThrow("not one of the host's Plan 9 shares");
+  });
+
+  it("mounts it through surogate-vsock, its stream at descriptor 3, with exactly the 9P client's options, its name and owner after them, and ro where asked", () => {
+    expect(p9Mount({ kind: "p9", tag: "r4", port: PLAN9_PORT, aname: "uid=10001;gid=10001" }, "nosuid,nodev", "/run/surogate/shares/r4")).toEqual([
+      "2:564:3", "--", "/usr/bin/mount", "-t", "9p",
+      "-o", "trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client,nosuid,nodev,aname=r4;uid=10001;gid=10001", "r4", "/run/surogate/shares/r4",
+    ]);
+    expect(p9Mount({ kind: "p9", tag: "r5", port: PLAN9_PORT }, "ro,nosuid,nodev,noexec", "/p")[6]).toBe(
+      "trans=fd,rfdno=3,wfdno=3,msize=65536,version=9p2000.L,cache=none,access=client,ro,nosuid,nodev,noexec,aname=r5",
+    );
+    expect(sharePath({ kind: "p9", tag: "r4", port: PLAN9_PORT })).toBe("/run/surogate/shares/r4");
+  });
+
+  it("refuses a share made for another uid than its root's", () => {
+    expect(() => ownedBy({ kind: "p9", tag: "r1", port: PLAN9_PORT, aname: "uid=10000;gid=10000" }, 10_000)).not.toThrow();
+    expect(() => ownedBy({ kind: "p9", tag: "r1", port: PLAN9_PORT }, 10_000)).not.toThrow();
+    for (const aname of ["uid=10001;gid=10001", "uid=10000;gid=0", "uid=0;gid=0"]) {
+      expect(() => ownedBy({ kind: "p9", tag: "r1", port: PLAN9_PORT, aname }, 10_000), aname).toThrow(new Error(OTHER_UID));
+    }
+  });
+});
+
+describe("a root on Apple's share, which shows each file as the asking uid's", () => {
+  it("runs only where its folder, asked as the root's own uid, shows that uid, and never where it shows root's or another's", () => {
+    expect(() => checkOwner(10_000, 10_000)).not.toThrow();
+    expect(() => checkOwner(10_007, 10_007)).not.toThrow();
+    expect(() => checkOwner(0, 10_000)).toThrow(new Error("This chat's folder shows as root's in the sandbox, so no command runs in it"));
+    expect(() => checkOwner(501, 10_000)).toThrow(new Error("This chat's folder shows as another user's in the sandbox, so no command runs in it"));
+    expect(() => checkOwner(10_001, 10_000)).toThrow(new Error("This chat's folder shows as another user's in the sandbox, so no command runs in it"));
+    // A root is never given uid 0, and a folder that shows it is refused even then.
+    expect(() => checkOwner(0, 0)).toThrow("shows as root's");
+  });
+
+  // Here, where no share mounts, the setup's order is read from its source: the root's own uid given, its share
+  // mounted, then its owner asked as that uid and checked, before anything of the root is made or run.
+  it("asks Apple's share its folder's owner as the root's own uid, and checks it, before anything of the root is made", () => {
+    const source = readFileSync(new URL("../src/guest/root.ts", import.meta.url), "utf8");
+    const body = /^export async function enter\([\s\S]*?\n\}\n/m.exec(source)?.[0] ?? "";
+    const at = (text: string) => body.indexOf(text);
+    const steps = ["const uid = uidOf(root);", "const mount = await mountShare(share);", 'if (share.kind === "vz") {',
+      "const shown = await shownTo(mount, uid, MOUNT_MS);", "checkOwner(shown, uid);", "const cgroup = join(CGROUPS, root);"];
+    for (const step of steps) expect(at(step), step).toBeGreaterThan(0);
+    expect(steps.map(at)).toEqual(steps.map(at).sort((a, b) => a - b));
+  });
+
+  it("finds a folder of the one device for every folder by its name, and one of the eight by its tag", () => {
+    expect(sharePath({ kind: "vz", tag: "surogate", name: "r3" })).toBe("/run/surogate/shares/surogate/r3");
+    expect(sharePath({ kind: "vz", tag: "s2" })).toBe("/run/surogate/shares/s2");
+    expect(sharePath({ kind: "virtiofs", tag: "r2" })).toBe("/run/surogate/shares/r2");
+  });
 });
 
 describe("a command's shell, moved into its cgroup by the agent", () => {

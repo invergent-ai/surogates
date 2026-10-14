@@ -18,6 +18,7 @@ interface State {
   appearance: Appearance;
   preferences: Record<string, "on" | "off">;
   startAtLoginRefused: string | null;
+  quickEntryUnheld: string | null;
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
   links: { usage: boolean };
@@ -232,6 +233,9 @@ async function render(): Promise<void> {
   refused.textContent = state.startAtLoginRefused ?? "";
   refused.hidden = state.startAtLoginRefused === null;
   document.querySelector<HTMLButtonElement>('[data-setting="startAtLogin"] [data-value="on"]')!.disabled = !refused.hidden;
+  // Another app holds quick entry's keys, where this OS's Settings says so.
+  byId("quick-entry-unheld").textContent = state.quickEntryUnheld ?? "";
+  byId("quick-entry").classList.toggle("absent", state.quickEntryUnheld === null);
   byId("email").textContent = state.account?.email ?? "Not signed in";
   byId("name").textContent = state.account?.name ?? "";
   byId("organisation").textContent = state.computer.organisation ?? "";

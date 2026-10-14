@@ -252,6 +252,8 @@ export class BrowserProxy {
   private async toChat(port: number, first: 4 | 6, gone: AbortSignal): Promise<Socket | NotCarried> {
     const chats = this.chats;
     if (!chats?.ports.has(port)) return "refused";
+    // A closed door ("" address): the host could not listen as ours, so the key is never knocked anywhere.
+    if (!chats.door) return "unreachable";
     const opened = await knock(chats.door, `${chats.key} ${port}${first === 6 ? " 6" : ""}`, gone);
     if ("status" in opened) return opened.status === 403 ? "refused" : opened.status === 502 && FULL.has(opened.reason) ? "busy" : "unreachable";
     // Taken back, or its browser gone, while the door answered.

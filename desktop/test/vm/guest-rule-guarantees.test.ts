@@ -14,13 +14,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
-import { agentDiskWith, altered, ARCH, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, USER } from "./guest-support.js";
+import { agentDiskWith, altered, ARCH, folderOf, IMAGE, KVM, needsKvm, ROOT, signal, STANDIN, USER } from "./guest-support.js";
 
 // The rule's own numbers, from its source: the first user it judges, and the one filesystem it judges on.
 const RULE = readFileSync(new URL("../../vm/rule.bpf.c", import.meta.url), "utf8");
 const defined = (name: string) => Number(new RegExp(`^#define ${name} (0x[0-9a-fA-F]+|\\d+)`, "m").exec(RULE)?.[1]);
 const FIRST_UID = defined("FIRST_UID");
-const SHARE_MAGIC = defined("FUSE_SUPER_MAGIC");
+// A folder's filesystem: virtio-fs, or on the stand-in for Hyper-V's devices 9p, its folders' Plan 9 shares.
+const SHARE_TYPE = STANDIN ? "9p" : "virtiofs";
+const SHARE_MAGIC = defined(STANDIN ? "V9FS_MAGIC" : "FUSE_SUPER_MAGIC");
 
 // The one guarantee no session can read: the kernel shows net.core.bpf_jit_harden to root, in the
 // first network namespace, and a session is neither. The guest's init says it on the console, as
@@ -38,6 +40,7 @@ const READS = [
   `echo "set-id: $(find / -xdev -type d ! -readable -prune -o -type f -perm /6000 -print 2>&1 | head -5 | tr '\\n' ' ')"`,
   `echo "capabilities: $(find / -xdev -type d ! -readable -prune -o -type f -exec getcap {} + 2>&1 | head -5 | tr '\\n' ' ')"`,
   'echo "magic: $(stat -f -c %t . 2>&1)"',
+  `echo "vsock: $(python3 -c 'import socket; socket.socket(40, socket.SOCK_STREAM); print("made")' 2>&1 | tail -1)"`,
 ].join("\n");
 
 // A mount point of /proc/self/mountinfo, which writes a space as \040, and the like.
@@ -73,7 +76,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("what the protected-names
   });
 
   it("gives a session no way round the protected-names rule: no io_uring, user namespace, BPF or kernel module, no user but its own from the rule's first up, no capability and no set-id program, in a folder on the share the rule guards", async () => {
-    expect([FIRST_UID, SHARE_MAGIC].every(Number.isInteger), "vm/rule.bpf.c defines FIRST_UID and FUSE_SUPER_MAGIC, which say whose writes the rule judges, and where").toBe(true);
+    expect([FIRST_UID, SHARE_MAGIC].every(Number.isInteger), "vm/rule.bpf.c defines FIRST_UID and the share's magic, which say whose writes the rule judges, and where").toBe(true);
     const ran = await guest.op(ROOT, "run", { command: READS, workdir: null, timeout: 30 }, signal());
     expect(ran, "a session's command reads what the protected-names rule depends on, and it did not run").toMatchObject({ ok: { returncode: 0, timed_out: false } });
     const lines = (ran as { ok: { output: string } }).ok.output.split("\n");
@@ -152,9 +155,16 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("what the protected-names
     const share = mounts.findLast((mount) => mount.at === folder);
     const [magic] = said("magic");
     holds(
-      `A session's folder is a virtiofs mount, of the filesystem the rule judges on (0x${SHARE_MAGIC.toString(16)})`,
-      share?.type === "virtiofs" && Number.parseInt(magic ?? "", 16) === SHARE_MAGIC, `a mount of ${share?.type ?? "none"} there, and the filesystem 0x${magic}`,
+      `A session's folder is a ${SHARE_TYPE} mount, of the filesystem the rule judges on (0x${SHARE_MAGIC.toString(16)})`,
+      share?.type === SHARE_TYPE && Number.parseInt(magic ?? "", 16) === SHARE_MAGIC, `a mount of ${share?.type ?? "none"} there, and the filesystem 0x${magic}`,
       "the rule judges writes to that filesystem alone, and a folder on any other is unguarded",
+    );
+
+    // No way to the host's vsock ports, which the agent alone dials, where the guest's ports are on vsock (vm/rule.bpf.c).
+    const [vsock] = said("vsock");
+    holds(
+      "A session's socket of vsock's family is refused by the rule (EPERM)", /^PermissionError: \[Errno 1\]/.test(vsock ?? ""), vsock,
+      "a session's connection to a host's vsock port would be the agent's, or another root's share's",
     );
 
     // Each on a line of its own in the failure.

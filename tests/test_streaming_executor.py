@@ -1024,6 +1024,23 @@ class TestNoEarlyStart:
         await executor.get_all_results()
         assert dispatched == ["read_file"]
 
+    @pytest.mark.asyncio
+    async def test_an_office_edit_waits_for_the_response_that_calls_it(self) -> None:
+        dispatched: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            dispatched.append(name)
+            return '{"applied": true}'
+
+        tools = _make_registry("office_edit")
+        tools.dispatch = mock_dispatch
+        executor = _make_executor(tools=tools)
+        executor.add_tool(_make_tool_call("office_edit", {"path": "a.docx", "ops": []}, call_id="tc_1"))
+        await asyncio.sleep(0.05)
+        assert dispatched == []
+        await executor.get_all_results()
+        assert dispatched == ["office_edit"]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["ask_user_question", "send_form"])

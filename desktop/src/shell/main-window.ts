@@ -6,21 +6,37 @@
 // fills the pane's hole, in a second view of the same partition that has no bridge and stays
 // on its transcript.
 
-import { app, BrowserWindow, net, screen, shell, type TitleBarOverlay, type WebContents, WebContentsView, webContents } from "electron";
+import {
+  app, BrowserWindow, type BrowserWindowConstructorOptions, net, screen, shell, type TitleBarOverlay, type WebContents, WebContentsView, webContents,
+} from "electron";
 
 import { reconnectDelayMs } from "../link/backoff.js";
-import { notBuilt } from "../platform.js";
+import { forThisOs, notBuilt } from "../platform.js";
 import { type Agent, partitionFor } from "./agents.js";
 import { chrome } from "./appearance.js";
-import { windowControls } from "./main-window-linux.js";
+import * as darwin from "./main-window-darwin.js";
+import * as linux from "./main-window-linux.js";
+import * as win32 from "./main-window-win32.js";
 import { external, permitted, sameOrigin, windowOpen } from "./window-policy.js";
 import type { Bounds, WindowStates } from "./window-state.js";
 
-// The window's controls, by this OS: drawn at its making, and painted again at each change of theme.
-const CONTROLS = process.platform === "linux" ? windowControls : {
-  options: (): { titleBarStyle: "hidden"; titleBarOverlay: TitleBarOverlay } => notBuilt("Surogate Desktop's window controls"),
-  paint: (): void => notBuilt("Surogate Desktop's window controls"),
+// The window's controls, by this OS (main-window-linux.ts, main-window-darwin.ts, main-window-win32.ts): drawn at
+// its making, and painted again at each change of theme; and whether the app's other windows drop the menu.
+interface WindowControls {
+  options(overlay: TitleBarOverlay): BrowserWindowConstructorOptions;
+  paint(window: BrowserWindow, overlay: TitleBarOverlay): void;
+  dropMenu(window: BrowserWindow): void;
+}
+const CONTROLS: WindowControls = forThisOs<WindowControls>({
+  linux: linux.windowControls, darwin: darwin.windowControls, win32: win32.windowControls,
+}) ?? {
+  options: () => notBuilt("Surogate Desktop's window controls"),
+  paint: () => notBuilt("Surogate Desktop's window controls"),
+  dropMenu: () => notBuilt("Surogate Desktop's window controls"),
 };
+
+/** *window*, one of the app's own beside the main one, without a menu of its own where this OS gives it one. */
+export const dropMenu = (window: BrowserWindow): void => CONTROLS.dropMenu(window);
 
 let closing = false;
 
@@ -74,7 +90,7 @@ function confine(contents: WebContents, origin: string, onRefused: (url: string)
   });
   contents.on("did-create-window", (popup) => {
     // Linux gives every window the app's menu: its keys would act on the agent's page behind this one.
-    popup.removeMenu();
+    dropMenu(popup);
     popup.webContents.setWindowOpenHandler(({ url }) => {
       openOutside(url);
       return { action: "deny" };
@@ -131,6 +147,8 @@ export class MainWindow {
   private paneHole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   // Settings, over everything: a transparent view whose page dims the window beneath it.
   private settingsView: WebContentsView | null = null;
+  // While it is open, the style that keeps the window's own page from dragging the window, once that page has it.
+  private undragged: Promise<string> | null = null;
   private opener: WebContents | null = null; // what had the keyboard when Settings opened
   private dark: boolean;
 
@@ -292,6 +310,12 @@ export class MainWindow {
     lockPage(view.webContents);
     wire(view.webContents);
     this.settingsView = view;
+    // A window asks each of its views whether a point drags it in the order the views were added, not the order
+    // they are drawn in (Electron, NativeWindow::NonClientHitTest, on every OS): a strip of the window's own page
+    // beneath the dialog, as its header, took the click meant for the dialog's close button. The page drags
+    // nothing while the dialog is open.
+    this.undragged = this.window.webContents.insertCSS("* { -webkit-app-region: no-drag !important; }");
+    this.undragged.catch(() => {});
     this.paint(this.dark);
     // Closed while its page still loads, the load ends with it, and nothing is left to say.
     void view.webContents.loadFile(page, { hash }).then(() => {
@@ -306,6 +330,9 @@ export class MainWindow {
     const view = this.settingsView;
     if (!view) return;
     this.settingsView = null;
+    const undragged = this.undragged;
+    this.undragged = null;
+    void undragged?.then((key) => this.window.webContents.removeInsertedCSS(key)).catch(() => {});
     this.paint(this.dark);
     this.window.contentView.removeChildView(view);
     view.webContents.close();

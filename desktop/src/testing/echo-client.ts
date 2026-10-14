@@ -23,13 +23,15 @@
 // the file only after it quits.
 
 import { statSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
+import { identityOf } from "../files/identity.js";
+import { hostUser } from "../host-user.js";
 import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -78,7 +80,7 @@ const env: Record<string, string> = { HOME: homedir(), LANG: process.env.LANG ||
 // With --folder, every session works on that folder, as if each had been bound to it there.
 let everyRoot: { folder: string; dev: number; ino: number; boot: string } | undefined;
 if (values.folder) {
-  const { dev, ino } = statSync(values.folder);
+  const { dev, ino } = identityOf(statSync(values.folder));
   everyRoot = { folder: values.folder, dev, ino, boot: BOOT_ID };
 }
 // The binder's approvals decide the network as they decide operations; a host asks
@@ -88,10 +90,11 @@ const network: NetworkApprovals = {
   askNetwork: (root, asked, signal) => binder?.approvals.askNetwork(root, asked, signal) ?? Promise.resolve("deny"),
 };
 const bindingOf = (root: string) => everyRoot ?? journal.bindings.get(root);
-const host = userInfo();
-const vm = values.folder || values.confirm ? new VmClient({ vm: vmOptions(dataDir, { uid: host.uid, gid: host.gid, name: host.username, home: env.HOME ?? host.homedir }) }) : null;
+// This computer's user, as the app gives the guest's roots one (host-user.ts).
+const host = hostUser();
+const vm = values.folder || values.confirm ? new VmClient({ vm: vmOptions(dataDir, host) }) : null;
 // Its threads' histories are made in this computer's user's name: the echo client has no account's.
-const hosts = vm ? new VmExecutor({ bindingOf, dataDir, cacheDir: join(homedir(), ".cache", "surogate"), env, network, vm, user: host.username }) : null;
+const hosts = vm ? new VmExecutor({ bindingOf, dataDir, cacheDir: join(homedir(), ".cache", "surogate"), env, network, vm, user: host.name }) : null;
 const { confirm, ask } = values;
 let refusal: string | null = null;
 const binder = confirm && hosts

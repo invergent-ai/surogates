@@ -131,15 +131,18 @@ body.main.no-sidebar {
 }
 
 /* The Projects page fills the window right of the sidebar: no Overview beside it, and of the
-   project's header only the strip the window is dragged by. */
+   project's header only the strip the window is dragged by. A chat of no project has no Overview
+   either: its threads, files and routines are a project's. */
 body.main.no-panel,
-body.main.projects-view {
+body.main.projects-view,
+body.main.no-project {
   --panel-width: 0px;
 }
 
 .no-sidebar .sidebar,
 .no-panel .panel,
 .projects-view .panel,
+.no-project .panel,
 .projects-view .centre .head > * {
   visibility: hidden;
 }
@@ -163,6 +166,12 @@ body.main.first {
   gap: 2px;
   padding: 0 8px;
   -webkit-app-region: drag;
+}
+
+/* On macOS the window's own buttons sit over the left end of the leftmost strip (pages-preload.cts): keep it clear of them. */
+.sidebar .top,
+.no-sidebar .centre .top {
+  padding-left: calc(8px + var(--window-buttons, 0px));
 }
 
 /* The system's controls sit over the panel's strip: keep its right end clear of them. */
@@ -1275,6 +1284,11 @@ body.settings-page {
   min-height: 64px;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
+}
+
+/* A row this computer has nothing to say in: not shown, whatever the search finds. */
+.row.absent {
+  display: none;
 }
 
 .row .label {

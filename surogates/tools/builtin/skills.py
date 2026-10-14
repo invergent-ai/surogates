@@ -21,6 +21,7 @@ from surogates.storage.skill_staging import stage_in_folder, staging_preamble
 from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.workstreams import master_skill_refusal, skills_left_out
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,8 @@ async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
     ``skills`` dimension on ``session_config["entitlements"]`` hides
     non-included skills from the tool and slash surfaces (built-in
     platform skills always pass — they are runtime plumbing, not
-    sellable content).
+    sellable content).  A project's master has no skill that makes a
+    document.
     """
     from surogates.runtime.entitlements import (
         entitled_skills,
@@ -221,9 +223,12 @@ async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
             )
     else:
         skills = await loader.load_skills(tenant, overrides=overrides)
-    return filter_entitled_skills(
-        skills, entitled_skills(kwargs.get("session_config")),
-    )
+    session_config = kwargs.get("session_config")
+    left_out = skills_left_out(session_config)
+    return [
+        s for s in filter_entitled_skills(skills, entitled_skills(session_config))
+        if s.name not in left_out
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +249,9 @@ async def _skills_list_handler(
     api_client = kwargs.get("api_client")
     if api_client is not None:
         category = arguments.get("category")
-        return await api_client.list_skills(category)
+        return await api_client.list_skills(
+            category, leave_out=skills_left_out(kwargs.get("session_config")),
+        )
 
     tenant = kwargs.get("tenant")
     if tenant is None:
@@ -428,6 +435,12 @@ async def _skill_view_handler(
     if not name or not name.strip():
         return json.dumps(
             {"success": False, "error": "Skill name is required."},
+            ensure_ascii=False,
+        )
+    # Before either path, so none of the skill is read or staged for the session.
+    if name in skills_left_out(kwargs.get("session_config")):
+        return json.dumps(
+            {"success": False, "error": master_skill_refusal(name)},
             ensure_ascii=False,
         )
 

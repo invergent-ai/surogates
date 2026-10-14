@@ -14,3 +14,11 @@ it("takes Ctrl+Alt+Space in an X11 session, and no keys in a Wayland session, as
   // The session's type, where it says one, over a display a program left behind.
   expect(quickEntryKeys({ XDG_SESSION_TYPE: "x11", WAYLAND_DISPLAY: "wayland-0" })).toBe("Ctrl+Alt+Space");
 });
+
+it("says nothing in Settings while another app holds the keys, and shows its window with the keyboard", async () => {
+  const { present, unheld } = await import("../src/shell/quick-entry-linux.js");
+  expect(unheld("Ctrl+Alt+Space")).toBeNull();
+  const done: string[] = [];
+  present({ focus: () => done.push("app") } as never, { show: () => done.push("show"), focus: () => done.push("focus") } as never);
+  expect(done).toEqual(["show", "focus"]);
+});

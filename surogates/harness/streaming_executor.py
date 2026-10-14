@@ -223,8 +223,9 @@ class StreamingToolExecutor:
         from within a running event loop (which is guaranteed when called
         from an async streaming context).  An executor that does not start
         early only queues it: ``get_all_results`` starts it once the response
-        is saved.  Every executor holds a call that starts another session
-        that way (``HELD_UNTIL_SAVED_TOOLS``).
+        is saved.  Every executor holds a call that starts another session,
+        asks the user, or edits a document a user watches, that way
+        (``HELD_UNTIL_SAVED_TOOLS``).
         """
         if self._discarded:
             return
@@ -356,7 +357,7 @@ class StreamingToolExecutor:
 
         Rules:
         - Aborted/discarded/interrupted → no.
-        - Held until saved (starts a session, asks the user) and the response is not saved yet → no.
+        - Held until saved (starts a session, asks the user, edits a watched document) and the response is not saved yet → no.
         - No tools currently executing → yes.
         - Tool is concurrent-safe AND all executing tools are concurrent-safe → yes.
         - Otherwise → no (must wait for executing tools to finish).

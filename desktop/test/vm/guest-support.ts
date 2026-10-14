@@ -18,6 +18,8 @@ export const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../
 // The image's arch, as the manifest images/guest/build.sh writes beside it names it: x86_64's,
 // the Linux app's, where none is. Each boot is given it.
 export const ARCH = GUEST_ARCH[imageArchOf(IMAGE) ?? "amd64"];
+// Whether the suite runs on the stand-in for Hyper-V's devices (hyperv/standin.ts), whose folders are Plan 9 shares.
+export const STANDIN = process.env.SUROGATE_VM_STANDIN === "hyperv";
 // The device each guest opens for KVM: /dev/kvm, unless the job hides it.
 export const KVM = process.env.SUROGATE_VM_KVM;
 // Each folder's daemon, where a job names another than Ubuntu's: another release's, say.

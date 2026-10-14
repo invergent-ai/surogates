@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 
 import { sandboxLine } from "../src/shell/sandbox.js";
+import { importedOn } from "./platforms.js";
 
 const ready = { state: "ready", folder: "/d/vm/images/k" } as const;
 
@@ -48,4 +49,13 @@ it("is ready with KVM, before any boot, and in a build that boots the repository
       text: "Ready", said: "The sandbox for the agent's commands is ready", actions: [], ready: true,
     });
   }
+});
+
+it("says on a Mac that cannot run the VM why, in its own words, and the tools it lacks after them", async () => {
+  const mac = await importedOn("darwin", () => import("../src/shell/sandbox.js"));
+  const cannot = "This Mac cannot run Surogate's sandbox: this Mac does not support virtualization";
+  expect(mac.sandboxLine([cannot], null, null)).toEqual({ text: cannot, said: cannot, actions: ["check"], ready: false });
+  expect(mac.sandboxLine(["ripgrep", cannot], null, null).text)
+    .toBe(`${cannot}. Surogate's sandbox tools are missing. Install Surogate again. It lacks ripgrep`);
+  expect(mac.sandboxLine(["ripgrep"], null, null).text).toBe("Surogate's sandbox tools are missing. Install Surogate again. It lacks ripgrep");
 });

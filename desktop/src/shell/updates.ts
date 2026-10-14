@@ -355,7 +355,7 @@ export function signedRelease(url: string, manifest: Buffer, signature: Buffer, 
   const { version } = release;
   const files = target === null ? null : TARGETS[target];
   if (!(files !== null && typeof version === "string" && VERSION.test(version) && release.channel === channel && release.platform === files.platform && release.arch === files.arch
-    && release.url === `${files.releaseDir(version)}/${files.tarball(version)}`
+    && release.url === `${files.releaseDir(version)}/${files.archive(version)}`
     && typeof release.sha256 === "string" && /^[0-9a-f]{64}$/.test(release.sha256) && counted(release.size, 1) && counted(release.stateSchema, 1))) {
     throw new Error(`${url} is not a release of Surogate Desktop for this computer`);
   }

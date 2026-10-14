@@ -4,8 +4,22 @@
 // So the user is told before the folder is bound. The file helper refuses
 // writes through such files itself: this is about commands.
 
+import type { BigIntStats } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+
+import { identityOf } from "../files/identity.js";
+import { join, relative } from "../host-path.js";
+import { hostLstat } from "../host-stat.js";
+import { forThisOs, notBuilt } from "../platform.js";
+import { hostPathOf } from "../session-path.js";
+
+// A file's identity, of its stats as Node gave them, at *path*: Node's numbers on Linux and macOS; on Windows, where
+// Node's do not hold a file's ID, read again through ntat (host-stat.ts).
+const identityAt = forThisOs<(path: string, stats: BigIntStats) => { dev: number | bigint; ino: number | bigint }>({
+  linux: (_path, stats) => identityOf(stats),
+  darwin: (_path, stats) => identityOf(stats),
+  win32: (path) => identityOf(hostLstat(path)),
+});
 
 // ponytail: walked in the main process through fs/promises, two requests at a time. A child
 // process killed at the deadline is the robust upgrade: worker threads share the same libuv pool.
@@ -39,9 +53,11 @@ export interface LinkScanOptions {
 // the repository it came from, and git never writes an object in place, so those
 // links carry no write out of the folder. An inode counts only when some of its links
 // lie outside the walk, so two links that are both in the folder are not "linked from
-// elsewhere". Null: none found in a whole look.
-export async function scanLinks(folder: string, options: LinkScanOptions = {}): Promise<LinkSummary | null> {
+// elsewhere". Null: none found in a whole look. *folder* is named by the session's path, and walked by this computer's.
+export async function scanLinks(session: string, options: LinkScanOptions = {}): Promise<LinkSummary | null> {
   if (walking) return { count: 0, examples: [], complete: false };
+  const folder = hostPathOf(session);
+  const identity = identityAt ?? notBuilt("A folder's look");
   const deadlineMs = options.deadlineMs ?? LINK_SCAN_MS;
   const deadline = performance.now() + deadlineMs;
   const maxEntries = options.maxEntries ?? LINK_SCAN_ENTRIES;
@@ -100,7 +116,8 @@ export async function scanLinks(folder: string, options: LinkScanOptions = {}): 
               && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
             if (name.toLowerCase() !== "node_modules" && !store) folders.push({ dir: path, inGit: inGit || name === ".git" });
           } else if (stats.isFile() && stats.nlink >= 2n) {
-            const key = `${stats.dev}:${stats.ino}`;
+            const { dev, ino } = identity(path, stats);
+            const key = `${dev}:${ino}`;
             const file = files.get(key) ?? { nlink: stats.nlink, paths: [] };
             file.paths.push(path);
             files.set(key, file);
