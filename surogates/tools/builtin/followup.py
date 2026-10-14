@@ -27,6 +27,8 @@ from surogates.db.models import (
 from surogates.followup import store as followup_store
 from surogates.followup.context import (
     Context,
+    channel_names,
+    in_person_zone,
     load_context,
     local_time,
     parse_start_date,
@@ -50,7 +52,7 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
     name="followup_enroll",
     description=(
         "Enrol the person you are talking to in a follow-up protocol, so the "
-        "business's scheduled check-ins start reaching them. Only call this "
+        "business's scheduled messages start reaching them. Only call this "
         "after the person has clearly agreed to be contacted on this channel; "
         "pass consent=true to record that agreement. Enrolling again updates "
         "the start date or phase and reactivates a paused or ended enrolment. "
@@ -126,7 +128,7 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who will answer the check-ins when it is not the person followed, "
+                    "Who will answer the scheduled messages when it is not the person followed, "
                     "with their relation, e.g. \"Ana, daughter\". Omit when "
                     "the person answers themselves."
                 ),
@@ -183,7 +185,7 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who now answers the check-ins for the person, with their "
+                    "Who now answers the scheduled messages for the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
@@ -221,7 +223,7 @@ ESCALATE_SCHEMA = ToolSchema(
         "person says needs a human: something the protocol lists, "
         "something the protocol does not cover, distress, or a request only "
         "the business can answer. It reaches the responsible operator's inbox "
-        "and the team. It does not end a check-in; record the "
+        "and the team. It does not end a scheduled step; record the "
         "outcome separately."
     ),
     parameters={
@@ -282,7 +284,7 @@ def _next_contact_text(row: Any, configs: list[dict], last: datetime | None) -> 
     if row.status != "active":
         return f"No scheduled message: the enrolment is {row.status}."
     found = next_contact(
-        configs, protocol=row.protocol, start_date=row.start_date,
+        in_person_zone(configs, row), protocol=row.protocol, start_date=row.start_date,
         phase=row.phase, enrolled_at=row.created_at, last_inbound_at=last,
         now=datetime.now(timezone.utc),
     )
@@ -318,7 +320,7 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     if ctx is None or ctx.user_id is None:
         return "Enrolment needs a conversation with a known person."
     if not ctx.can_write_first:
-        channels = ", ".join(p.capitalize() for p in sorted(initiating_platforms()))
+        channels = channel_names(sorted(initiating_platforms()))
         return (
             "Enrolment happens in the person's own conversation on a channel "
             f"the business can message first ({channels}), where the scheduled "
@@ -527,7 +529,7 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         lines.append(
             "This person is on the team: they receive the alerts and "
             "the business's notices here. They are not someone followed — do not "
-            "enrol them or ask them check-in questions."
+            "enrol them or ask them a step's questions."
         )
     rows = await followup_store.enrollments(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
@@ -536,7 +538,7 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
         lines.append("This person is not enrolled in any protocol.")
     last = await _last_inbound(sf, ctx) if rows else None
     for row in rows:
-        today = datetime.now(ZoneInfo(zones.get(row.protocol, "UTC"))).date()
+        today = datetime.now(ZoneInfo(row.timezone or zones.get(row.protocol, "UTC"))).date()
         index = day_index(row.start_date, today)
         detail = [f"{row.protocol}: {row.status}"]
         detail.append(
@@ -720,6 +722,27 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     return "Escalated to " + " and ".join(told) + "."
 
 
+def _retryable(name: str, handler: Any) -> Any:
+    """*handler*, answering an unexpected failure in words the model acts on.
+
+    A raw exception reads as final: a model that saw a request to stop
+    fail once concluded the person was still enrolled and never tried
+    again, so the person kept getting messages.
+    """
+    async def run(arguments: dict, **kwargs: Any) -> str:
+        try:
+            return await handler(arguments, **kwargs)
+        except Exception:
+            logger.exception("[followup] %s failed", name)
+            return (
+                f"Not done: {name} failed on the business's side and nothing was "
+                "saved. The person's request still stands: call it again now. "
+                "If it fails again, call escalate with what the person asked, "
+                "so the team does it, and tell the person it will be handled."
+            )
+    return run
+
+
 def register(registry: Any) -> None:
     """Register the follow-up and escalation tools."""
     for name, schema, handler in (
@@ -729,5 +752,5 @@ def register(registry: Any) -> None:
         ("escalate", ESCALATE_SCHEMA, handle_escalate),
     ):
         registry.register(
-            name=name, schema=schema, handler=handler, toolset="followup",
+            name=name, schema=schema, handler=_retryable(name, handler), toolset="followup",
         )

@@ -216,6 +216,7 @@ async def test_enrol_only_where_the_business_can_write_first(sf, patient):
         **_kw(sf, session_id),
     )
     assert "channel the business can message first" in result
+    assert "WhatsApp" in result and "Whatsapp" not in result
 
 
 @pytest.mark.asyncio
@@ -624,6 +625,23 @@ async def test_enrol_and_status_say_when_the_next_message_comes(sf, patient):
 
 
 @pytest.mark.asyncio
+async def test_the_next_message_is_promised_in_the_persons_own_zone(sf, patient):
+    user_id, session_id = patient
+    await _morning_program(sf)
+    await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x", "days_ago": 2,
+         "name_unknown": True},
+        **_kw(sf, session_id),
+    )
+    await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=user_id, protocol="post-op",
+        timezone="America/New_York",
+    )
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "08:30 America/New_York (Program 'Prima lună')" in status
+
+
+@pytest.mark.asyncio
 async def test_someone_past_every_program_is_promised_no_time(sf, patient):
     _, session_id = patient
     await _morning_program(sf)
@@ -685,3 +703,41 @@ async def test_no_enrolment_in_a_shared_channel(sf, patient):
         {"protocol": "post-op", "consent": True, "summary": "x"}, **_kw(sf, session_id),
     )
     assert "own conversation" in result
+
+
+def test_no_tool_speaks_of_check_ins_or_a_procedure():
+    # Platform tools serve any business; a clinic's words belong in its own
+    # skills, never in what the model reads from the platform.
+    import json
+
+    from surogates.tools.builtin import checkin, team
+
+    texts = [
+        schema.description + json.dumps(schema.parameters, ensure_ascii=False)
+        for module in (followup, checkin, team)
+        for schema in vars(module).values() if isinstance(schema, followup.ToolSchema)
+    ]
+    texts.append(team.WELCOME_TEXT)
+    assert texts and not [t for t in texts if "check-in" in t.lower() or "procedure" in t]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_change_tells_the_model_to_try_again(sf, patient, monkeypatch):
+    # A stop request that failed once read as final, and the person kept
+    # being messaged.
+    from surogates.tools.registry import ToolRegistry
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("column followup_enrollments.timezone does not exist")
+
+    monkeypatch.setattr(store, "update_enrollment", broken)
+    registry = ToolRegistry()
+    followup.register(registry)
+    _, session_id = patient
+    result = await registry.get("followup_update").handler(
+        {"protocol": "post-op", "status": "ended", "reason": "asked to stop"},
+        **_kw(sf, session_id),
+    )
+    assert result.startswith("Not done: followup_update failed")
+    assert "call it again now" in result and "escalate" in result
+    assert "column" not in result

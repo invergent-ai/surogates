@@ -114,7 +114,8 @@ async def test_checkin_outcome_records_completion(sf, awaiting_invitation):
     )
     saved = await _reload(sf, awaiting_invitation.id)
     assert saved.response_state == "completed"
-    assert saved.outcome == "completed"
+    # The status is the response state; the outcome holds only a label.
+    assert saved.outcome is None
 
 
 @pytest.mark.asyncio
@@ -125,6 +126,33 @@ async def test_checkin_outcome_keeps_the_result_a_branch_reads(sf, awaiting_invi
         {"outcome": "completed", "result": " red "}, **_kwargs(sf, awaiting_invitation),
     )
     assert (await _reload(sf, awaiting_invitation.id)).outcome == "red"
+
+
+@pytest.mark.asyncio
+async def test_checkin_outcome_records_the_label_apart_from_the_status(sf, awaiting_invitation):
+    from surogates.tools.builtin.checkin import handle_checkin_outcome
+
+    result = await handle_checkin_outcome(
+        {"outcome": "completed", "label": "Hot"}, **_kwargs(sf, awaiting_invitation),
+    )
+    saved = await _reload(sf, awaiting_invitation.id)
+    assert (saved.response_state, saved.outcome) == ("completed", "hot")
+    assert result == "Step recorded as completed, label hot."
+
+
+@pytest.mark.asyncio
+async def test_an_escalated_step_without_a_label_records_its_severity(sf, awaiting_invitation):
+    from surogates.followup import store
+    from surogates.tools.builtin.checkin import handle_checkin_outcome
+
+    inv = awaiting_invitation
+    for severity in ("yellow", "red"):
+        await store.record_escalation(
+            sf, org_id=inv.org_id, agent_id="a1", user_id=inv.user_id, kind="alert",
+            reason="x", severity=severity, invitation_id=inv.id,
+        )
+    await handle_checkin_outcome({"outcome": "completed"}, **_kwargs(sf, inv))
+    assert (await _reload(sf, inv.id)).outcome == "red"
 
 
 @pytest.mark.asyncio
@@ -149,7 +177,7 @@ async def test_checkin_outcome_outside_a_check_in_writes_nothing(
     kwargs = _kwargs(sf, awaiting_invitation)
     kwargs["session_id"] = uuid.uuid4()
     result = await handle_checkin_outcome({"outcome": "completed"}, **kwargs)
-    assert "no check-in" in result.lower()
+    assert "no scheduled step is open" in result.lower()
     assert (await _reload(sf, awaiting_invitation.id)).response_state == "replied"
 
 

@@ -21,6 +21,8 @@ from surogates.followup.eligibility import start_date_problem
 
 __all__ = [
     "Context",
+    "channel_names",
+    "in_person_zone",
     "load_context",
     "local_time",
     "parse_start_date",
@@ -28,6 +30,14 @@ __all__ = [
     "start_text",
     "told",
 ]
+
+
+_PLATFORM_NAMES = {"whatsapp": "WhatsApp", "slack": "Slack", "telegram": "Telegram"}
+
+
+def channel_names(platforms: Any) -> str:
+    """Channels as people write them: "WhatsApp or Telegram"."""
+    return " or ".join(_PLATFORM_NAMES.get(p, p) for p in platforms)
 
 
 class Context:
@@ -153,6 +163,13 @@ def start_text(row: Any) -> str:
             f"a rough period; confirm the date when you can)"
         )
     return row.start_date.isoformat()
+
+
+def in_person_zone(configs: list[dict], enrollment: Any) -> list[dict]:
+    """*configs* as they fire for this person: in their own zone, when
+    they have one, as materialize asks them."""
+    zone = getattr(enrollment, "timezone", None)
+    return [{**c, "timezone": zone} for c in configs] if zone else configs
 
 
 def local_time(at: datetime, config: dict) -> str:

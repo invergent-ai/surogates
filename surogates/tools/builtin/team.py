@@ -38,7 +38,15 @@ from surogates.db.models import (
     User,
 )
 from surogates.followup import store as followup_store
-from surogates.followup.context import load_context, local_time, start_date_from, start_text, told
+from surogates.followup.context import (
+    channel_names,
+    in_person_zone,
+    load_context,
+    local_time,
+    start_date_from,
+    start_text,
+    told,
+)
 from surogates.followup.eligibility import as_utc, day_index, next_contact
 from surogates.followup.outreach import (
     Described,
@@ -77,7 +85,7 @@ MEMORY_CHARS = 3000
 MAX_MESSAGE = 4000
 #: ops' default ``texts.welcome_text``, used when the business set none.
 WELCOME_TEXT = (
-    "Thank you. To start your follow-up, could you tell me the date of your procedure?"
+    "Thank you. To get started, could you tell me your start date?"
 )
 
 #: Phone numbers never reach the model whole; the platform sends them.
@@ -91,8 +99,8 @@ TEAM_OVERVIEW_SCHEMA = ToolSchema(
     description=(
         "Team only. A digest of everyone enrolled with this business's "
         "follow-up: protocol, day, status, when they last wrote, their last "
-        "check-in and its outcome, alerts in the last 72 hours, unanswered "
-        "check-ins in a row and the next scheduled message, with a header of "
+        "scheduled step and its outcome, alerts in the last 72 hours, unanswered "
+        "messages in a row and the next scheduled message, with a header of "
         "recent enrolments, pauses and people silent for 3 days or more. "
         "Summarise it for the team member using only what it says; never rank or "
         "interpret values."
@@ -223,7 +231,7 @@ TEAM_UPDATE_PERSON_SCHEMA = ToolSchema(
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who now answers the check-ins for the person, with their "
+                    "Who now answers the scheduled messages for the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
@@ -285,7 +293,7 @@ TEAM_ENROLL_PERSON_SCHEMA = ToolSchema(
             "answered_by": {
                 "type": "string",
                 "description": (
-                    "Who answers the check-ins when not the person, with their "
+                    "Who answers the scheduled messages when not the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
@@ -741,7 +749,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         head += f" · {person.contact}"
         lines = [f"• {head}"]
         for row in person.rows:
-            zone = zones.get(row.protocol, "UTC")
+            zone = row.timezone or zones.get(row.protocol, "UTC")
             index = day_index(row.start_date, datetime.now(ZoneInfo(zone)).date())
             text = f"  {row.protocol}: " + (f"day {index}" if index is not None else "no start date")
             if row.phase:
@@ -751,7 +759,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
                 text += f" ({row.status_reason})"
             if row.status == "active":
                 found = next_contact(
-                    configs, protocol=row.protocol, start_date=row.start_date,
+                    in_person_zone(configs, row), protocol=row.protocol, start_date=row.start_date,
                     phase=row.phase, enrolled_at=row.created_at,
                     last_inbound_at=wrote, now=now,
                 )
@@ -759,8 +767,8 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             lines.append(text)
         invs = invitations.get(person.user_id, [])
         lines.append(
-            f"  last wrote {_ago(wrote, now)}; last check-in {_last_checkin(invs)}; "
-            f"unanswered check-ins in a row: {_unanswered_streak(invs)}"
+            f"  last wrote {_ago(wrote, now)}; last step {_last_checkin(invs)}; "
+            f"unanswered messages in a row: {_unanswered_streak(invs)}"
         )
         for at, reason, was_reminded in alerts.get(person.user_id, []):
             lines.append(
@@ -939,11 +947,11 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     if not granted:
         return (
             f"Nothing sent: {person.label} has not given permission to be "
-            f"messaged on {_names(identities)}. {call}"
+            f"messaged on {channel_names(identities)}. {call}"
         )
     senders = _senders(ctx, settings)
     if not any(p in senders for p in granted):
-        return f"Nothing sent: {_names(granted)} is not switched on for this business. {call}"
+        return f"Nothing sent: {channel_names(granted)} is not switched on for this business. {call}"
     now = datetime.now(timezone.utc)
     last: dict[str, datetime | None] = {}
     for p in granted:
@@ -955,7 +963,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     # A bot cannot write first to someone who never wrote to it.
     usable = [p for p in last if last[p] is not None or not capabilities_for(p).needs_prior_contact]
     if not usable:
-        return f"Nothing sent: {person.label} has never written to the business on {_names(last)}. {call}"
+        return f"Nothing sent: {person.label} has never written to the business on {channel_names(last)}. {call}"
     preferred = next(
         (r.preferred_channel for r in person.rows if r.status == "active" and r.preferred_channel in usable),
         None,
@@ -965,7 +973,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         max(wrote, key=lambda p: as_utc(last[p])) if wrote
         else "whatsapp" if "whatsapp" in usable else usable[0]
     )
-    name = _names([platform])
+    name = channel_names([platform])
     windowed = bool(capabilities_for(platform).window_hours)
     template = (settings.message_template_name if settings else None) if windowed else None
     is_open = not windowed or window_open(last[platform], now)
@@ -1009,11 +1017,6 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     )
 
 
-_PLATFORM_NAMES = {"whatsapp": "WhatsApp", "slack": "Slack", "telegram": "Telegram"}
-
-
-def _names(platforms: Any) -> str:
-    return " or ".join(_PLATFORM_NAMES.get(p, p) for p in platforms)
 
 
 # ---------------------------------------------------------------------------

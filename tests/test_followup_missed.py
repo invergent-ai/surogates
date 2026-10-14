@@ -310,3 +310,16 @@ async def test_a_missed_streak_nobody_hears_is_a_failed_escalation(sf):
     async with sf() as db:
         [esc] = (await db.execute(sa.select(EscalationRow))).scalars().all()
     assert esc.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_telegram_chat_id_is_never_shown_as_a_phone(sf):
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    async with sf() as db:
+        row = await db.get(ProgramInvitationRow, inv)
+        row.platform, row.platform_user_id = "telegram", "123456789"
+        await db.commit()
+    await alert_missed_checkins(sf, now=NOW)
+    [alert] = await _alerts(sf)
+    assert alert.text.startswith("Ion Pop (?) has not answered")

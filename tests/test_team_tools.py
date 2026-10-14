@@ -194,7 +194,7 @@ async def test_overview_lists_this_agents_people_and_nobody_elses(sf, practice):
     assert "Other Agent" not in out and "Other Org" not in out
     assert "Dr. Ionescu" not in out  # the care team is not a patient
     assert "post-op: day 5" in out
-    assert "unanswered check-ins in a row: 1" in out
+    assert "unanswered messages in a row: 1" in out
     assert out.count("Durere în piept") == 1
     assert "New enrolments (last 24h): " in out and "Ion Popescu (post-op)" in out
     assert "Silent 3 days or more: Ioana Popa (wrote 4d ago)" in out

@@ -12,7 +12,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from surogates.db.models import ProgramInvitationRow
+from surogates.db.models import EscalationRow, ProgramInvitationRow
 from surogates.tools.registry import ToolSchema
 
 #: Response states a check-in can still be closed or escalated from.
@@ -23,11 +23,16 @@ _VALID_OUTCOMES = ("completed", "declined")
 CHECKIN_OUTCOME_SCHEMA = ToolSchema(
     name="checkin_outcome",
     description=(
-        "Record how a scheduled check-in ended. Call this once the person has "
-        "answered the check-in questions, or has clearly declined to. Use "
-        "'completed' when you got the answers, 'declined' when the person "
-        "refused or asked to be left alone. This closes the check-in; it does "
-        "not message anyone."
+        "Record how a scheduled step ended, once the person has answered its "
+        "questions or has clearly declined to. Two separate things: "
+        "'outcome' is the status ('completed' when you got the answers, even "
+        "partly; 'declined' when the person refused or asked to be left "
+        "alone); 'label' is a short category for what the answers showed, in "
+        "the business's own words as the step's instructions define them "
+        "(e.g. green, yellow or red; hot, warm or cold). Pass a label whenever "
+        "the instructions name such categories. This closes the step; it "
+        "does not message anyone and does not alert the team (use escalate "
+        "for that)."
     ),
     parameters={
         "type": "object",
@@ -35,20 +40,21 @@ CHECKIN_OUTCOME_SCHEMA = ToolSchema(
             "outcome": {
                 "type": "string",
                 "enum": list(_VALID_OUTCOMES),
-                "description": "Whether the check-in was completed or declined.",
+                "description": "The status: whether the step was completed or declined.",
+            },
+            "label": {
+                "type": "string",
+                "description": (
+                    "One or two words from the categories the step's "
+                    "instructions define, e.g. green. Not the status. When "
+                    "omitted and you escalated during this step, the "
+                    "escalation's severity is recorded instead."
+                ),
             },
             "note": {
                 "type": "string",
                 "description": (
                     "Optional short note for the operator's run history."
-                ),
-            },
-            "result": {
-                "type": "string",
-                "description": (
-                    "Optional value the step's instructions ask you to record, "
-                    "e.g. a level such as green, yellow or red; later steps "
-                    "can follow it. Omit when the instructions name none."
                 ),
             },
         },
@@ -77,16 +83,25 @@ async def handle_checkin_outcome(arguments: dict, **kwargs: Any) -> str:
     sf = kwargs["session_factory"]
     inv = await _open_invitation_for_session(sf, kwargs["session_id"])
     if inv is None:
-        return "No check-in is open in this conversation."
+        return "No scheduled step is open in this conversation."
 
+    # ``result`` is the label's older name.
+    label = str(arguments.get("label") or arguments.get("result") or "").strip().lower()[:100]
     async with sf() as db:
+        if not label:
+            severities = set((await db.execute(
+                sa.select(EscalationRow.severity)
+                .where(EscalationRow.invitation_id == inv.id)
+                .where(EscalationRow.severity.isnot(None))
+            )).scalars())
+            label = "red" if "red" in severities else "yellow" if severities else ""
         row = await db.get(ProgramInvitationRow, inv.id)
         row.response_state = outcome
-        row.outcome = str(arguments.get("result") or "").strip()[:100] or outcome
+        row.outcome = label or None
         if arguments.get("note"):
             row.reason = str(arguments["note"])[:500]
         await db.commit()
-    return f"Check-in recorded as {outcome}."
+    return f"Step recorded as {outcome}" + (f", label {label}." if label else ".")
 
 
 def register(registry: Any) -> None:

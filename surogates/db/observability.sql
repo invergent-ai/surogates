@@ -1189,3 +1189,6 @@ ON CONFLICT (id) DO NOTHING;
 -- ── a step's fallbacks and attempts: none is SQL NULL, not JSON null ─
 UPDATE program_invitations SET fallback_platforms = NULL WHERE fallback_platforms = 'null'::jsonb;
 UPDATE program_invitations SET attempts = NULL WHERE attempts = 'null'::jsonb;
+
+-- ── a step's outcome is the agent's label, never its status ──────────
+UPDATE program_invitations SET outcome = NULL WHERE outcome IN ('completed', 'declined');

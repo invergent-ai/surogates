@@ -22,6 +22,7 @@ from surogates.db.models import (
     ProgramInvitationRow,
     ProgramScheduleRow,
 )
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import readable_phone
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
@@ -168,12 +169,18 @@ async def _alert_if_streak(
     [person] = (await describe_people(
         session_factory, org_id=inv.org_id, agent_id=inv.agent_id, user_ids=[inv.user_id],
     )).values()
+    # A Slack member id or a Telegram chat id is no phone: then the
+    # person's WhatsApp number, if they have one.
+    phone = (
+        inv.platform_user_id if capabilities_for(inv.platform).identity == "phone"
+        else person.wa_id
+    )
     text = render_missed_text(
         config.get("missed_alert_text"),
         name=person.name or "?",
-        phone=readable_phone(inv.platform_user_id) if inv.platform_user_id else "?",
+        phone=readable_phone(phone) if phone else "?",
         count=threshold,
-        program=str(config.get("name") or "check-in"),
+        program=str(config.get("name") or "step"),
     )
     queued, _why_not = await followup_store.notify_team(
         session_factory, settings_cache[key], org_id=inv.org_id,
