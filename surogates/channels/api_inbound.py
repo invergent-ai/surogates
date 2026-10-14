@@ -52,7 +52,8 @@ async def receive(session_factory: Any, redis: Any, *, org_id: Any, agent_id: st
     from surogates.channels.whatsapp_flows import form_reply_text
     from surogates.followup.people import honour_stop
     from surogates.session.interactive_input import pending_input_for_session
-    from surogates.channels.outbound import begin_step_reply, dm_target
+    from surogates.channels.dm import dm_target
+    from surogates.channels.outbound import begin_step_reply
     from surogates.config import enqueue_session
     from surogates.db.models import ChannelIdentity
     from surogates.programs.opener import dm_session

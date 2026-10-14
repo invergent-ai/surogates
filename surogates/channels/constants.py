@@ -11,6 +11,8 @@ of literals scattered per file.
 
 from __future__ import annotations
 
+from surogates.channels.capabilities import BUILTIN
+
 __all__ = [
     "ADAPTER_CHANNELS",
     "API_CHANNEL",
@@ -74,7 +76,7 @@ ADAPTER_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 #: own conversation on them, ``agent:<kind>:dm:<id>``, gets outbox rows: a
 #: live inbound call, an ordinary web chat or an integrator's API session
 #: is answered where it happens.
-OUTBOUND_DM_CHANNELS = frozenset({"voice", "web", "api"})
+OUTBOUND_DM_CHANNELS = frozenset(BUILTIN)
 
 
 def outbound_dm(channel: str | None, config: dict | None) -> bool:

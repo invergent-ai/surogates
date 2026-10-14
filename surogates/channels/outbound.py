@@ -1,7 +1,7 @@
 """Writing first on channels with no inbound webhook: voice, web, api.
 
 The platform reaches a person on these through their own conversation,
-``agent:<kind>:dm:<id>`` (:func:`dm_target`, used by ``resolve_dm``).  Whatever
+``agent:<kind>:dm:<id>`` (:func:`surogates.channels.dm.dm_target`).  Whatever
 lands there for them, a step the agent wrote, an alert, an opener, gets an
 outbox row (``constants.outbound_dm``), and a loop here delivers it the
 channel's way:
@@ -54,38 +54,6 @@ RETRY_MIN, RETRY_MAX = timedelta(seconds=30), timedelta(minutes=30)
 
 #: Handles the rows of one conversation claimed together.
 Handler = Callable[[list[Any]], Awaitable[SendResult]]
-
-
-# ---------------------------------------------------------------------------
-# Where the person's own conversation is
-# ---------------------------------------------------------------------------
-
-
-def dm_target(platform: str, user: str, sender: str):
-    """The DM a first message to *user* goes into on voice, web or api; ``None`` elsewhere.
-
-    *user* is the identity's ``platform_user_id``: digits for voice (the
-    WhatsApp ``wa_id`` form), the person's user id for web, the
-    integrator's own id for api.  *sender* is the agent's: its number for
-    voice, its webhook identifier for api; web needs none.
-    """
-    from surogates.programs.opener import DmTarget, OpenerUndeliverable, _dm_key
-
-    if platform == "voice":
-        digits = "".join(c for c in user if c.isdigit())
-        if not sender:
-            raise OpenerUndeliverable("This agent has no phone number that can call out")
-        return DmTarget(_dm_key("voice", digits, digits), digits,
-                        {"to": f"+{digits}", "channel_identifier": sender})
-    if platform == "web":
-        return DmTarget(_dm_key("web", user, user), user,
-                        {"user_id": user, "channel_identifier": sender or "web"})
-    if platform == "api":
-        if not sender:
-            raise OpenerUndeliverable("This agent has no webhook to deliver to")
-        return DmTarget(_dm_key("api", user, user), user,
-                        {"external_id": user, "channel_identifier": sender})
-    return None
 
 
 # ---------------------------------------------------------------------------

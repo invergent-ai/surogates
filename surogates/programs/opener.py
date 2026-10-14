@@ -38,9 +38,9 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
+from surogates.channels.dm import DmTarget, OpenerUndeliverable, dm_key, dm_target
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.memory_boundary import boundary_token
-from surogates.channels.source import SessionSource, build_session_key
 from surogates.channels.whatsapp_flows import new_flow_token
 from surogates.db.models import ProgramInvitationRow, Session as SessionRow
 from surogates.followup.store import last_inbound, shared_memory_boundary
@@ -48,19 +48,6 @@ from surogates.session.events import CHECKIN_OPENER_MARKER
 from surogates.session.models import REUSABLE_SESSION_STATUSES
 
 logger = logging.getLogger(__name__)
-
-
-class OpenerUndeliverable(Exception):
-    """This opener cannot be handed over, and retrying will not change that.
-
-    The send pass records it on the invitation as a failed delivery with
-    ``reason`` as the error, so the operator sees one user missed rather than
-    a row that stays queued and is retried every tick.
-    """
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 def _opener_text(config: dict) -> str:
@@ -121,30 +108,6 @@ async def dm_session(
     )
 
 
-def whatsapp_session_key(wa_id: str) -> str:
-    """The session key the inbound pipeline computes for a WhatsApp DM."""
-    return build_session_key(SessionSource(
-        platform="whatsapp", chat_id=wa_id, chat_type="dm", user_id=wa_id,
-        user_name="", thread_id=None, chat_name=wa_id,
-    ))
-
-
-@dataclass(frozen=True)
-class DmTarget:
-    """Where a person's one-to-one conversation is, as the inbound path keys it."""
-
-    session_key: str
-    channel_id: str
-    destination: dict
-
-
-def _dm_key(platform: str, chat_id: str, user_id: str) -> str:
-    return build_session_key(SessionSource(
-        platform=platform, chat_id=chat_id, chat_type="dm", user_id=user_id,
-        user_name="", thread_id=None, chat_name=chat_id,
-    ))
-
-
 async def resolve_dm(
     platform: str,
     identity: Any,
@@ -164,17 +127,6 @@ async def resolve_dm(
     user = str(getattr(identity, "platform_user_id", identity) or "")
     if not user:
         raise OpenerUndeliverable(f"No {platform} identity for this person")
-    if platform == "whatsapp":
-        return DmTarget(
-            whatsapp_session_key(user), user,
-            {"wa_id": user, "phone_number_id": sender, "channel_identifier": sender},
-        )
-    if platform == "telegram":
-        # A private chat's id is the user's id.
-        return DmTarget(
-            _dm_key("telegram", user, user), user,
-            {"chat_id": user, "channel_identifier": sender},
-        )
     if platform == "slack":
         if credentials_for is None:
             raise OpenerUndeliverable("No credential vault in this process")
@@ -192,11 +144,9 @@ async def resolve_dm(
         if not dm_id:
             raise OpenerUndeliverable("Slack opened no direct message for this member")
         return DmTarget(
-            _dm_key("slack", dm_id, user), dm_id,
+            dm_key("slack", dm_id, user), dm_id,
             {"channel_id": dm_id, "thread_ts": None, "channel_identifier": sender},
         )
-    from surogates.channels.outbound import dm_target
-
     if (target := dm_target(platform, user, sender)) is not None:
         return target
     raise OpenerUndeliverable(f"The platform cannot write first on {platform}")
