@@ -1,6 +1,6 @@
 //! `TakeBackDataFolders`: the install's folders of `%ProgramData%` that were there before it, taken back by handle
 //! (folders.rs). Its CustomActionData is `[DataFolder]`, `%ProgramData%\Surogate\`. As LocalSystem, with the privileges
-//! to take ownership and to restore, each entry is opened by a backup-semantics handle that follows no reparse point, so
+//! to take ownership, to restore and to back up enabled in its token, and read back from it as enabled, each entry is opened by a backup-semantics handle that follows no reparse point, so
 //! a link is seen as a link and removed, never followed: its folder's owner and access list are set on that handle, and
 //! every other entry is deleted through one. Each descriptor is set whole, as it is written, on that one entry: none is
 //! carried to what a folder holds, which its maker's access rules may keep the install from reading, nor read from the
@@ -12,8 +12,8 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, LUID};
 use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, SetKernelObjectSecurity, TokenPrivileges, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle, SetFileInformationByHandle, FileBasicInfo, FileDispositionInfoEx,
@@ -25,7 +25,7 @@ use windows_sys::Win32::System::ApplicationInstallationAndServicing::{MsiGetProp
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::action::{log, wide};
-use crate::folders::{found, Found, APPLY_SDDL, DATA_SDDL, RECORD_SDDL};
+use crate::folders::{enabled, found, Found, APPLY_SDDL, DATA_SDDL, PRIVILEGES, RECORD_SDDL};
 
 // What is removed is SYSTEM's first, so that what it holds can be listed whatever its access rules said.
 const SYSTEM_ALONE: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)";
@@ -56,24 +56,42 @@ fn custom_action_data(install: MSIHANDLE) -> String {
     String::from_utf16_lossy(&buffer[..length as usize])
 }
 
-/// The privileges a backup-semantics handle needs to be given any right, and an owner to be set to SYSTEM.
-fn enable_privileges() -> Result<(), String> {
+/// The privileges a backup-semantics handle needs to be given any right, and an owner to be set to SYSTEM, enabled in
+/// the action's token, and each read back from the token as enabled: what was read, a line each.
+fn enable_privileges() -> Result<Vec<String>, String> {
     let mut token: HANDLE = null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) } == 0 {
         return Err(last_error("the action's token could not be opened"));
     }
     let token = Handle(token);
-    for name in ["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"] {
+    let mut luids = Vec::new();
+    for name in PRIVILEGES {
         let mut luid = LUID { LowPart: 0, HighPart: 0 };
         if unsafe { LookupPrivilegeValueW(null(), wide(name).as_ptr(), &mut luid) } == 0 {
             return Err(last_error(name));
         }
         let privileges = TOKEN_PRIVILEGES { PrivilegeCount: 1, Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }] };
+        // ERROR_NOT_ALL_ASSIGNED where the token does not hold it: AdjustTokenPrivileges succeeds all the same.
         if unsafe { AdjustTokenPrivileges(token.0, 0, &privileges, 0, null_mut(), null_mut()) } == 0 || unsafe { GetLastError() } != 0 {
-            return Err(last_error(name));
+            return Err(last_error(&format!("{name} could not be enabled")));
         }
+        luids.push((name, luid));
     }
-    Ok(())
+    // The token's own list, in u32s: TOKEN_PRIVILEGES's alignment.
+    let mut length = 0u32;
+    unsafe { GetTokenInformation(token.0, TokenPrivileges, null_mut(), 0, &mut length) };
+    let mut list = vec![0u32; (length as usize).div_ceil(4)];
+    if unsafe { GetTokenInformation(token.0, TokenPrivileges, list.as_mut_ptr().cast(), (list.len() * 4) as u32, &mut length) } == 0 {
+        return Err(last_error("the action's token's privileges could not be read"));
+    }
+    luids
+        .into_iter()
+        .map(|(name, luid)| match enabled(&list, luid.LowPart, luid.HighPart) {
+            Some(true) => Ok(format!("{name} is enabled in the action's token")),
+            Some(false) => Err(format!("{name} is not enabled in the action's token")),
+            None => Err(format!("the action's token does not hold {name}")),
+        })
+        .collect()
 }
 
 /// *path* opened for *access*, by a handle that follows no reparse point, with its attributes; None where nothing is there.
@@ -206,7 +224,12 @@ pub extern "system" fn TakeBackDataFolders(install: MSIHANDLE) -> u32 {
         return ERROR_INSTALL_FAILURE;
     }
     // An apply that is not there, or that was a link and is removed, is the install's to make.
-    let done = enable_privileges().and_then(|()| take_back_folder(data, DATA_SDDL, false));
+    let done = enable_privileges().and_then(|enabled| {
+        for line in enabled {
+            log(install, &format!("Surogate: {line}"));
+        }
+        take_back_folder(data, DATA_SDDL, false)
+    });
     match done {
         Ok(said) => {
             log(install, &format!("Surogate: {said}"));

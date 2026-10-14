@@ -21,6 +21,20 @@ pub const RECORD_SDDL: &str = "O:SYG:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1
 pub const RECORD: &str = "install.json";
 pub const APPLY: &str = "apply";
 
+/// The privileges the take-back enables in its token, each named as Windows names it: to set SYSTEM as an owner, and to
+/// open by a backup-semantics handle what its maker's access rules give SYSTEM no right to.
+pub const PRIVILEGES: [&str; 3] = ["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"];
+
+const SE_PRIVILEGE_ENABLED: u32 = 0x2;
+
+/// Whether the privilege of LUID *low*, *high* is enabled, by the *token*'s own list as `GetTokenInformation` writes it
+/// (`TOKEN_PRIVILEGES`: its count, then each privilege's LUID parts and attributes), or None where the token lacks it.
+pub fn enabled(token: &[u32], low: u32, high: i32) -> Option<bool> {
+    let count = token.first().copied().unwrap_or(0) as usize;
+    let (entries, _) = token.get(1..).unwrap_or(&[]).as_chunks::<3>();
+    entries.iter().take(count).find(|[l, h, _]| *l == low && *h as i32 == high).map(|[_, _, attributes]| attributes & SE_PRIVILEGE_ENABLED != 0)
+}
+
 /// What the install does with an entry it finds in a folder of its own that was there before it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Found {
@@ -49,6 +63,20 @@ pub fn found(name: &str, in_apply: bool, folder: bool, link: bool) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_whether_each_privilege_is_enabled_from_the_token_s_own_list() {
+        // TOKEN_PRIVILEGES as GetTokenInformation writes it: a count, then each LUID's low and high parts and attributes.
+        let token = [3, 9, 0, 0x3, 17, 0, 0x0, 18, 0, 0x2];
+        assert_eq!(enabled(&token, 9, 0), Some(true));
+        assert_eq!(enabled(&token, 17, 0), Some(false));
+        assert_eq!(enabled(&token, 18, 0), Some(true));
+        assert_eq!(enabled(&token, 20, 0), None);
+        assert_eq!(enabled(&token, 9, 1), None);
+        assert_eq!(enabled(&[5, 9, 0, 2], 9, 0), Some(true), "a count past the list reads what is there");
+        assert_eq!(enabled(&[], 9, 0), None);
+        assert_eq!(PRIVILEGES, ["SeTakeOwnershipPrivilege", "SeRestorePrivilege", "SeBackupPrivilege"]);
+    }
 
     #[test]
     fn keeps_of_surogate_the_apply_folder_and_the_record_alone_and_nothing_of_apply() {

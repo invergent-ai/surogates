@@ -3,8 +3,8 @@
 # leaves the feature on and asks for no restart. What a computer without the feature does, its restart among it, is
 # measured by hand, on a PC without the feature, at the test day. Each check says ok or FAIL; the script fails once all
 # have run if any failed. Before the first install, a standard user of this computer (made here, and removed at the
-# end) makes Surogate's folders of ProgramData, as any user may, with files of theirs in them; before another, a link to
-# a folder of theirs stands in the folder's place. With -Newer, an MSI of a later version made from the same layout: it
+# end), working under their own logon's token, makes Surogate's folders of ProgramData, as any user may, with files of
+# theirs in them; before another, they put a link to a folder in the folder's place. With -Newer, an MSI of a later version made from the same layout: it
 # upgrades the first in place, and the first, installed over it, takes its place again, each keeping what the install
 # before it was given.
 #
@@ -123,19 +123,45 @@ function Get-Rules([string] $Path) {
   @((Get-Acl $Path).Access | ForEach-Object { if ($_.IsInherited) { 'inherited' } else { "$($_.IdentityReference) $($_.AccessControlType) $($_.FileSystemRights) $($_.InheritanceFlags)" } } | Sort-Object)
 }
 
-# A folder made as the squatter makes one in ProgramData: theirs, with every right of theirs, and *files* of theirs in it,
-# each read-only and then theirs alone, so that only its owner may touch it.
-function Squat([string] $Path, [string[]] $Files) {
-  New-Item -ItemType Directory -Force $Path | Out-Null
-  icacls $Path /setowner $Squatter | Out-Null
-  icacls $Path /grant "${Squatter}:(OI)(CI)F" | Out-Null
-  foreach ($file in $Files) {
-    $at = Join-Path $Path $file
-    Set-Content -Path $at -Value '{"base":"https://squatter.example.test","channel":"squatted"}'
-    (Get-Item $at).Attributes = 'ReadOnly'
-    icacls $at /setowner $Squatter | Out-Null
-    icacls $at /inheritance:r /grant:r "${Squatter}:F" | Out-Null
+# The squatter's logon, by their password: a network logon, as a standard user's is granted on a server, or else a
+# local one. Its token, and the logon's type.
+Add-Type -Namespace SurogateTest -Name Logon -MemberDefinition @'
+[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern bool LogonUserW(string user, string domain, string password, int type, int provider, out IntPtr token);
+'@
+function Get-Logon([string] $User, [string] $Password) {
+  $refused = [Collections.Generic.List[string]]::new()
+  foreach ($type in @(@(3, 'network'), @(2, 'local'))) {
+    $token = [IntPtr]::Zero
+    if ([SurogateTest.Logon]::LogonUserW($User, '.', $Password, $type[0], 0, [ref]$token)) {
+      return [pscustomobject]@{ Token = [Microsoft.Win32.SafeHandles.SafeAccessTokenHandle]::new($token); Type = $type[1] }
+    }
+    $refused.Add("$($type[1]): Windows error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())")
   }
+  throw "msi.test.ps1: $User could not log on: $($refused -join '; ')"
+}
+
+# *do* run as the squatter, on this thread, under their logon's token: what it makes is theirs, as they make it.
+function As-Squatter([scriptblock] $Do) { [Security.Principal.WindowsIdentity]::RunImpersonated($SquatterLogon.Token, [Action]$Do) }
+
+# A folder the squatter makes in ProgramData, theirs as its maker's, and *files* of theirs in it, each read-only and then
+# theirs alone, so that only they may touch it.
+function Squat([string] $Path, [string[]] $Files) {
+  As-Squatter {
+    $ErrorActionPreference = 'Stop'
+    New-Item -ItemType Directory -Path $Path | Out-Null
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    foreach ($file in $Files) {
+      $at = Join-Path $Path $file
+      Set-Content -Path $at -Value '{"base":"https://squatter.example.test","channel":"squatted"}'
+      $item = Get-Item $at
+      $item.Attributes = 'ReadOnly'
+      $alone = [Security.AccessControl.FileSecurity]::new()
+      $alone.SetAccessRuleProtection($true, $false)
+      $alone.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'FullControl', 'Allow'))
+      [IO.FileSystemAclExtensions]::SetAccessControl($item, $alone)
+    }
+  }.GetNewClosure()
 }
 
 # The folder *path* as the install leaves it: SYSTEM's or administrators', with exactly *rules* of its own and none
@@ -167,13 +193,31 @@ Check-Gone 'before the install'
 $password = "$([Guid]::NewGuid().ToString('N').Substring(0, 10))aA1!"
 net user $Squatter $password /add | Out-Null
 Check 'a standard user is made to squat the folders' ($LASTEXITCODE -eq 0) "net user exited $LASTEXITCODE"
+$SquatterLogon = Get-Logon $Squatter $password
+$seen = [Collections.Generic.List[object]]::new()
+As-Squatter {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $seen.Add([pscustomobject]@{ Name = $id.Name; Administrator = [Security.Principal.WindowsPrincipal]::new($id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); Groups = @($id.Groups | ForEach-Object Value) })
+}.GetNewClosure()
+$squatting = $seen[0]
+"squatting as $($squatting.Name), by a $($SquatterLogon.Type) logon"
+Check "the squatter, $($squatting.Name), works as a standard user, not an administrator" ($squatting.Name -like "*\$Squatter" -and -not $squatting.Administrator -and $squatting.Groups -notcontains 'S-1-5-32-544') ($squatting.Groups -join ', ')
 Squat $Data @('planted.txt', 'install.json')
 Squat (Join-Path $Data 'apply') @('wintrust.dll')
 Check 'the squatter owns both folders before the install' ((Get-Acl $Data).Owner -like "*\$Squatter" -and (Get-Acl (Join-Path $Data 'apply')).Owner -like "*\$Squatter") "$((Get-Acl $Data).Owner)"
+$planted = 'planted.txt', 'install.json', 'apply\wintrust.dll'
+$readable = @(foreach ($file in $planted) { try { [IO.File]::ReadAllBytes((Join-Path $Data $file)) | Out-Null; $file } catch { } })
+$there = @($planted | Where-Object { Test-Path (Join-Path $Data $_) })
+Check 'what the squatter put there is theirs alone: this administrator reads none of it' ($there.Count -eq $planted.Count -and $readable.Count -eq 0) "there: $($there -join ', '); read: $($readable -join ', ')"
 
 $install = Msiexec 'install' "/i `"$Msi`""
 Check 'it installs, and asks for no restart' ($install.Code -eq 0) "msiexec exited $($install.Code)"
 Check 'its custom action left Virtual Machine Platform on' ($install.Log -match "Surogate: Windows's Virtual Machine Platform is on" -and (Get-Vmp) -eq 'Enabled') (Get-Vmp)
+# What the custom actions said, as the install's log has it.
+$install.Log -split "\r?\n" | Where-Object { $_ -match 'Surogate: ' } | ForEach-Object { "      log: $($_.Trim())" }
+foreach ($privilege in 'SeTakeOwnershipPrivilege', 'SeRestorePrivilege', 'SeBackupPrivilege') {
+  Check "the take-back enabled $privilege in its token, as the token says" ($install.Log -match "Surogate: $privilege is enabled in the action's token")
+}
 
 # The app, every file of its layout as it is there, in %ProgramFiles%\Surogate, which only administrators write.
 $theirs = @(Get-Files $Layout)
@@ -275,7 +319,8 @@ foreach ($given in "INSTALLFOLDER=`"$Elsewhere\`"", "TARGETDIR=`"$Elsewhere\`"")
 New-Item -ItemType Directory -Force $Victim | Out-Null
 icacls $Victim /setowner $Squatter | Out-Null
 $victimSddl = (Get-Acl $Victim).Sddl
-New-Item -ItemType Junction -Path $Data -Target $Victim | Out-Null
+As-Squatter { $ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $Data -Target $Victim | Out-Null }.GetNewClosure()
+Check 'the squatter put a link in the data folder''s place' ((Get-Item $Data -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -and (Get-Acl $Data).Owner -like "*\$Squatter") "$((Get-Acl $Data).Owner)"
 $again = Msiexec 'install-given' "/i `"$Msi`" SUROGATE_VMP=0 SUROGATE_BASE=https://mirror.example.test SUROGATE_CHANNEL=beta"
 Check 'it installs with SUROGATE_VMP=0 and a base and channel of its own' ($again.Code -eq 0) "msiexec exited $($again.Code)"
 Check 'with SUROGATE_VMP=0 the custom action does not run' ($again.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $again.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
@@ -302,6 +347,7 @@ $last = Msiexec 'remove-again' "/x `"$Msi`""
 Check 'it uninstalls again' ($last.Code -eq 0) "msiexec exited $($last.Code)"
 Check-Gone 'after the last uninstall'
 
+$SquatterLogon.Token.Dispose()
 net user $Squatter /delete | Out-Null
 Remove-Item -Recurse -Force $Victim -ErrorAction SilentlyContinue
 "msiexec's logs: $Logs"
