@@ -236,7 +236,6 @@ interface Root {
   setup: Promise<Outcome | null> | null; // null once set up, or why not
   folder: Folder; // what it shares, by its identity
   at: string; // where the root's commands see it
-  down?: Promise<void>; // its teardown, once one is asked: asked again, the same
 }
 
 // A place's two shares, once the agent has mounted them, and the folder its history's share serves.
@@ -325,6 +324,8 @@ export class Guest {
   private leave: () => void = () => {};
   private left = false;
   private readonly roots = new Map<string, Root>();
+  // Each root's teardown under way, its entry out of roots already: asked again, the same; a setup of the root waits for it.
+  private readonly going = new Map<string, Promise<void>>();
   // Each folder's place in this guest, by its key, from when it is asked for: what was asked, and its shares.
   private readonly places = new Map<string, { place: Place; placed: Promise<Placed> }>();
   private keepalive: NodeJS.Timeout | undefined;
@@ -458,6 +459,14 @@ export class Guest {
    */
   async ready(root: string, folder: Folder, ended: ProcessHandle[] = [], at = folder.path): Promise<Outcome | null> {
     for (let turn = 0; turn < SHARINGS; turn += 1) {
+      // Nothing is set up on the share of a root being torn down: the teardown lets it go, and a device given again
+      // (darwin.ts) would serve the root the next folder. Its setup waits, and shares the folder anew.
+      const going = this.going.get(root);
+      if (going) {
+        await going;
+        if (this.left) return SANDBOX_STOPPED;
+        continue;
+      }
       const known = this.roots.get(root);
       // Another folder is shared for the root than this operation names, as a thread's copy made again leaves it:
       // that share goes first, with what runs in it, and the named folder is shared in its place. A chat's folder
@@ -664,11 +673,18 @@ export class Guest {
    * the folder go, is lost, the root's processes with it.
    */
   teardown(root: string): Promise<void> {
+    // Asked again while it is let go, as by an operation that names another folder: the same teardown.
+    const going = this.going.get(root);
+    if (going) return going;
     const entry = this.roots.get(root);
     if (!entry) return Promise.resolve();
-    // Asked again while it is let go, as by an operation that names another folder: the same teardown.
-    entry.down ??= this.takeDown(root, entry);
-    return entry.down;
+    // Out of the list in this tick, before anything is waited for: nothing finds it to set up again.
+    this.roots.delete(root);
+    const down: Promise<void> = this.takeDown(root, entry).finally(() => {
+      if (this.going.get(root) === down) this.going.delete(root);
+    });
+    this.going.set(root, down);
+    return down;
   }
 
   private async takeDown(root: string, entry: Root): Promise<void> {
@@ -679,7 +695,6 @@ export class Guest {
     this.up.delete(root);
     // One that could not be added has left already.
     const share = await entry.share.catch(() => null);
-    if (this.roots.get(root) === entry) this.roots.delete(root);
     this.proxy.forget(root);
     if (!share) return;
     const answer = await this.request({ type: "teardown", root, share }, this.setupMs);

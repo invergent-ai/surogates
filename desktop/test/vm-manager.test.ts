@@ -531,6 +531,84 @@ describe("a root torn down", () => {
     await manager.stop();
   });
 
+  // A device given again (darwin.ts) would serve the root that came back on it the next chat's folder.
+  it("sets a root up on no share its teardown is letting go: a ready that lands with the teardown waits for it, and shares the folder anew", async () => {
+    const asked: unknown[] = [];
+    let made = 0;
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async (root, _folder, share) => void asked.push(["setup", root, share.tag]),
+      teardown: async (root, share) => {
+        asked.push(["teardown", root, share.tag]);
+        return true;
+      },
+      perform: async () => ({ ok: true }),
+    };
+    const boot: BootVm = async (...args) => ({
+      ...(await fakeVm(roots)(...args)),
+      share: async () => ({ kind: "virtiofs", tag: `r${(made += 1)}` }),
+      unshare: async (share, _deadline, as) => void asked.push(["unshare", share.tag, as?.released === true]),
+    });
+    const guest = await Guest.boot(boot, options());
+    const folder = { path: dir, ...statSync(dir) };
+    try {
+      expect(await guest.ready("root-1", folder)).toBeNull();
+      // In one tick, as a chat's file host lets its folder go and a command for the chat comes.
+      const [, again] = await Promise.all([guest.teardown("root-1"), guest.ready("root-1", folder)]);
+      expect(again).toBeNull();
+      expect(asked).toEqual([["setup", "root-1", "r1"], ["teardown", "root-1", "r1"], ["unshare", "r1", true], ["setup", "root-1", "r2"]]);
+      // Asked again while it is under way, a teardown is the one under way.
+      const tearing = guest.teardown("root-1");
+      expect(guest.teardown("root-1")).toBe(tearing);
+      await tearing;
+    } finally {
+      await guest.stop();
+    }
+  });
+
+  it("sets a root up again only once its teardown has ended, though that waits for a setup still under way", async () => {
+    const asked: unknown[] = [];
+    let made = 0;
+    let land = () => {};
+    // As the agent's roots: a second setup of a root that is set up, or being set up, is refused.
+    const held = new Set<string>();
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async (root, _folder, share) => {
+        if (held.has(root)) throw new Error("This chat's sandbox is already set up");
+        held.add(root);
+        asked.push(["setup", root, share.tag]);
+        if (share.tag === "r1") await new Promise<void>((resolve) => (land = resolve));
+      },
+      teardown: async (root, share) => {
+        held.delete(root);
+        asked.push(["teardown", root, share.tag]);
+        return true;
+      },
+      perform: async () => ({ ok: true }),
+    };
+    const boot: BootVm = async (...args) => ({
+      ...(await fakeVm(roots)(...args)),
+      share: async () => ({ kind: "virtiofs", tag: `r${(made += 1)}` }),
+      unshare: async (share) => void asked.push(["unshare", share.tag]),
+    });
+    const guest = await Guest.boot(boot, options());
+    const folder = { path: dir, ...statSync(dir) };
+    try {
+      const first = guest.ready("root-1", folder);
+      await vi.waitFor(() => expect(asked).toEqual([["setup", "root-1", "r1"]]));
+      const tearing = guest.teardown("root-1");
+      const again = guest.ready("root-1", folder);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      land();
+      expect([await first, await again]).toEqual([null, null]);
+      await tearing;
+      expect(asked).toEqual([["setup", "root-1", "r1"], ["teardown", "root-1", "r1"], ["unshare", "r1"], ["setup", "root-1", "r2"]]);
+    } finally {
+      await guest.stop();
+    }
+  });
+
   it("keeps the share of a root whose processes would not end in the guest, and loses no guest for it", async () => {
     const asked: unknown[] = [];
     const roots: ControlRoots = {
