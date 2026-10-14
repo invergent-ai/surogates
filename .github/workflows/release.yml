@@ -408,7 +408,9 @@ jobs:
   # variables name the rest (ARTIFACT_SIGNING_ENDPOINT, ARTIFACT_SIGNING_CERTIFICATE_PROFILE, and AZURE_CLIENT_ID and
   # AZURE_TENANT_ID, the federated credential's). Until it does, each signs with a certificate made in its run, issued by
   # a root the runner trusts for that job alone, so that every check of the signatures runs as it will on the release's;
-  # and what they sign is kept nowhere, and published nowhere: no MSI is handed on, and the publish has no Windows leg.
+  # what they sign is kept nowhere and published nowhere, and no job of Linux's, nor the cluster's rollout, waits for
+  # them: a trial that fails stops nothing of the release. The Environment has no required reviewers, as the release's
+  # has none: once signing is real, a reviewer on it would hold every release, Linux's rollout with it.
   desktop-win-build:
     needs: desktop-build
     runs-on: windows-2025
@@ -715,28 +717,18 @@ jobs:
           [ "$schema" = "$LINUX_STATE_SCHEMA" ] || { echo "::error::The Windows app keeps state of schema $schema, and the Linux app of $LINUX_STATE_SCHEMA"; exit 1; }
           echo "schema=$schema" >>"$GITHUB_OUTPUT"
 
-  # A leg per target, each its own steps: Linux's as they were before Windows had any. Windows's only once the
-  # repository's ARTIFACT_SIGNING_ACCOUNT variable names the signing account that signed its MSI: until then the
-  # release has no Windows leg, and publishes no Windows file.
   desktop-publish:
     needs:
       - desktop-build
       - desktop-describe
-      - desktop-win-sign-msi
-      - desktop-win-describe
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: desktop-release
     permissions:
       contents: read
-    # Each leg to its end, whatever another's does: one cut short would leave its target's release half sent.
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(vars.ARTIFACT_SIGNING_ACCOUNT != '' && '["linux-x64", "win32-x64"]' || '["linux-x64"]') }}
-    # One release of a target at a time, so its latest.json names the newest of tags pushed close together.
+    # One release at a time, so latest.json names the newest of tags pushed close together.
     concurrency:
-      group: desktop-release-${{ matrix.target }}
+      group: desktop-release
       cancel-in-progress: false
     steps:
       # publish.sh, and the install script it trusts and sends, from the tag; the tarball from the
@@ -745,7 +737,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Take the tarball
-        if: matrix.target == 'linux-x64'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: desktop-tarball
@@ -755,7 +746,6 @@ jobs:
       # this tag, of the tarball the build made, by the build's own words for its hash and its
       # size, and of the state schema the describe job read, and signs it.
       - name: Sign its manifest
-        if: matrix.target == 'linux-x64'
         env:
           DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
           DESKTOP_TARBALL_SHA256: ${{ needs.desktop-build.outputs.sha256 }}
@@ -766,7 +756,6 @@ jobs:
       # The manifest and its signature are sent only as a pair by the install script's keys, and
       # the tarball only as the one that the manifest names, by its hash.
       - name: Publish the release
-        if: matrix.target == 'linux-x64'
         env:
           S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           S3_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -774,17 +763,34 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
 
-      # Windows's, as Linux's: the MSI the signing account signed, by its signing job's words for its hash and size,
-      # and of the schema the Windows describe read, under Windows's names (release/publish.sh, target_files).
+  # Windows's publish, as Linux's, in the same Environment and with the same steps, under Windows's names
+  # (release/publish.sh, target_files): the MSI the signing account signed, by its signing job's words for its hash and
+  # size, and of the schema the Windows describe read. Only once the repository's ARTIFACT_SIGNING_ACCOUNT variable names
+  # the account: until then it is skipped, and the release publishes no Windows file. Linux's publish never waits for it.
+  desktop-win-publish:
+    needs:
+      - desktop-win-sign-msi
+      - desktop-win-describe
+    if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    environment: desktop-release
+    permissions:
+      contents: read
+    # One Windows release at a time, so its latest.json names the newest of tags pushed close together.
+    concurrency:
+      group: desktop-release-win32-x64
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
       - name: Take the MSI
-        if: matrix.target == 'win32-x64'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: desktop-win-msi
           path: out/desktop
 
-      - name: Sign the Windows release's manifest
-        if: matrix.target == 'win32-x64'
+      - name: Sign its manifest
         env:
           DESKTOP_TARGET: win32-x64
           DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
@@ -793,8 +799,7 @@ jobs:
           DESKTOP_STATE_SCHEMA: ${{ needs.desktop-win-describe.outputs.schema }}
         run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
 
-      - name: Publish the Windows release
-        if: matrix.target == 'win32-x64'
+      - name: Publish the release
         env:
           DESKTOP_TARGET: win32-x64
           S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
@@ -843,18 +848,38 @@ jobs:
           body_path: release-notes.md
 
   # The cluster's rollout (update-images.yml): the nodes update their agent images and the agent
-  # pods restart. It runs only once every other job of the run has succeeded: the cloud's release
+  # pods restart. It runs only once every other job of the release has succeeded: the cloud's release
   # (the images, the npm packages and the wheel), and the desktop's, from its VM image to its
   # publish and the image's manifest attached. Its needs reach each job, and a job that failed,
-  # was skipped or was cancelled keeps the cluster as it is (success(), the default, said here).
+  # was skipped or was cancelled keeps the cluster as it is: each of its two jobs runs only where all
+  # its needs succeeded (success(), which an if with no status check of its own adds), and only one
+  # of the two runs. While Windows publishes nothing (no ARTIFACT_SIGNING_ACCOUNT variable), the
+  # Windows jobs are none of the release's: rollout needs none of them, and runs once Linux's desktop
+  # is published, whatever Windows's trial does. Once the variable names the account, Windows's
+  # publish is the release's too, and rollout-with-windows waits for it as for Linux's.
   rollout:
     needs:
       - release
       - npm
       - desktop-publish
       - desktop-vm-manifest
-    if: success()
+    if: vars.ARTIFACT_SIGNING_ACCOUNT == ''
     # It holds the cluster's SSH key and reads nothing of the repository's.
+    permissions: {}
+    uses: ./.github/workflows/update-images.yml
+    secrets:
+      NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
+      MASTER_HOST: ${{ secrets.MASTER_HOST }}
+      SSH_KEY: ${{ secrets.SSH_KEY }}
+
+  rollout-with-windows:
+    needs:
+      - release
+      - npm
+      - desktop-publish
+      - desktop-vm-manifest
+      - desktop-win-publish
+    if: vars.ARTIFACT_SIGNING_ACCOUNT != ''
     permissions: {}
     uses: ./.github/workflows/update-images.yml
     secrets:
