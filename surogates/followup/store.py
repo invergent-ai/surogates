@@ -795,20 +795,15 @@ async def notify_team(
         except ValueError:
             logger.warning("[followup] ignoring malformed alert recipient %r", recipient)
     ids = [i for i in ids if i != exclude_user_id]  # the team member talking knows
-    reachable = await _granted_platforms(session_factory, org_id=org_id, user_ids=ids)
-    team_channels = (getattr(settings, "team_channels", None) or {}) if settings else {}
-    default_order = ["whatsapp", *(p for p in initiating_platforms() if p != "whatsapp")]
+    reachable = await granted_platforms(session_factory, org_id=org_id, user_ids=ids)
     queued, unreached = 0, 0
     for recipient_id in ids:
-        # Their own order first, then every other channel: a member whose
-        # chosen channel has no sender is still told on another.
-        order = list(dict.fromkeys([*(team_channels.get(str(recipient_id)) or ()), *default_order]))
+        order = team_order(settings, recipient_id)
         # Unreachable everywhere still queues on the first channel with a
         # sender: the send pass fails it visibly instead of nobody knowing.
-        platform = next(
-            (p for p in order if p in senders and p in reachable.get(recipient_id, ())),
-            next((p for p in order if p in senders), None),
-        )
+        platform = team_channel_for(
+            settings, recipient_id, senders, reachable.get(recipient_id, ()),
+        ) or next((p for p in order if p in senders), None)
         if platform is None:
             # No channel of theirs has a sender: recorded as failed, so the
             # history and Studio say which member was not told.
@@ -860,7 +855,30 @@ async def notify_team(
     return 0, "the only configured recipient is this person"
 
 
-async def _granted_platforms(
+def default_team_order() -> list[str]:
+    """Where a team member is told when they did not choose: WhatsApp, then any."""
+    return ["whatsapp", *(p for p in initiating_platforms() if p != "whatsapp")]
+
+
+def team_order(settings: Any, user_id: Any) -> list[str]:
+    """A team member's channels, best first: their own ``team_channels``,
+    then every other, so a member whose chosen channel has no sender is
+    still told on another."""
+    own = ((getattr(settings, "team_channels", None) or {}) if settings else {}).get(str(user_id))
+    return list(dict.fromkeys([*(own or ()), *default_team_order()]))
+
+
+def team_channel_for(
+    settings: Any, user_id: Any, senders: dict[str, str], reachable: Iterable[str],
+) -> str | None:
+    """The channel a team member is told on: the first of :func:`team_order`
+    with a sender of the agent's that they can be reached on (*reachable*,
+    see :func:`granted_platforms`)."""
+    reachable = set(reachable)
+    return next((p for p in team_order(settings, user_id) if p in senders and p in reachable), None)
+
+
+async def granted_platforms(
     session_factory: Any, *, org_id: uuid.UUID, user_ids: list[uuid.UUID],
 ) -> dict[uuid.UUID, set[str]]:
     """Each person's channels where they may be messaged first."""

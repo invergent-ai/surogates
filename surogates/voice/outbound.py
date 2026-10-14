@@ -203,7 +203,7 @@ async def alert_elsewhere(session_factory: Any, outbox_ids: Any, *, why: str) ->
 
     import sqlalchemy as sa
 
-    from surogates.channels.capabilities import capabilities_for, initiating_platforms
+    from surogates.channels.capabilities import capabilities_for
     from surogates.db.models import DeliveryOutbox, Event, OutreachMessageRow
     from surogates.followup import store as followup_store
 
@@ -221,11 +221,9 @@ async def alert_elsewhere(session_factory: Any, outbox_ids: Any, *, why: str) ->
         settings = await followup_store.get_settings(session_factory, org_id=row.org_id, agent_id=row.agent_id)
         senders = {p: s for p, s in followup_store.senders_of(settings).items()
                    if p != "voice" and capabilities_for(p).can_initiate}
-        reachable = (await followup_store._granted_platforms(  # noqa: SLF001 — notify_team's own rule
+        reachable = (await followup_store.granted_platforms(
             session_factory, org_id=row.org_id, user_ids=[row.user_id])).get(row.user_id, set())
-        order = ((getattr(settings, "team_channels", None) or {}).get(str(row.user_id))
-                 or ["whatsapp", *(p for p in initiating_platforms() if p != "whatsapp")])
-        platform = next((p for p in order if p in senders and p in reachable), None)
+        platform = followup_store.team_channel_for(settings, row.user_id, senders, reachable)
         if platform is None:
             log.info("alert %s: unanswered call, and no other channel reaches the member", row.id)
             continue
