@@ -405,6 +405,9 @@ async def stream_events(
             yield {"comment": "connected"}
             if watch:
                 yield {"id": str(cursor), "event": "stream.start", "data": "{}"}
+            if from_now:
+                # Nothing to replay: everything on this stream happens now.
+                yield {"event": "stream.live", "data": "{}"}
             # Last time any byte was sent to the client. A research/mission
             # coordinator goes idle for minutes between wakes (dispatch ->
             # wait for executors -> harvest); without a periodic keepalive
@@ -447,6 +450,9 @@ async def stream_events(
                     last_emit = asyncio.get_event_loop().time()
 
                 if not events:
+                    if in_replay:
+                        # The backlog is all sent: what follows happens now. The SDK opens a document only on a live edit.
+                        yield {"event": "stream.live", "data": "{}"}
                     in_replay = False
                     # No new events -- check if the session has terminated.
                     try:

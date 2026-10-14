@@ -156,3 +156,112 @@ async def test_a_save_already_written_lands_without_a_copy(session_factory, redi
     assert copies == []
     assert dropped == []
     assert not any(e.type == "office.conflict" for e in await store.get_events(session.id))
+
+
+async def test_a_conflict_closes_the_agents_pages(session_factory, redis_client, storage, monkeypatch):
+    closed: list[tuple[str, list[str]]] = []
+
+    async def close_pages(office, doc_key, session_ids):
+        closed.append((doc_key, [str(s) for s in session_ids]))
+
+    async def drop_editors(office, doc_key, users):
+        return None
+
+    monkeypatch.setattr(office_saves, "close_pages", close_pages)
+    monkeypatch.setattr(office_saves, "drop_editors", drop_editors)
+    store, session, key, document = await _chat_with_document(session_factory, storage)
+    await storage.write("b", key, b"changed outside the editor")
+    await _pend(session_factory, storage, document, b"v2")
+    await _land(session_factory, redis_client, storage, store)
+    assert closed == [(document.doc_key, [str(session.id)])]
+
+
+async def test_a_projects_save_goes_through_history_with_its_author(session_factory, redis_client, storage, monkeypatch):
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    store, session, key, document = await _chat_with_document(session_factory, storage)
+    project = SimpleNamespace(id=uuid4(), user_id=uuid4(), master_session_id=uuid4(), agent_id="writer")
+    landed: list[tuple[str, dict]] = []
+
+    async def project_of(session_factory, session):
+        return project
+
+    async def land_editor_save(state, project, *, path, author, write):
+        await write()
+        landed.append((path, author))
+
+    monkeypatch.setattr(office_saves, "_project_of", project_of)
+    monkeypatch.setattr(office_saves, "land_editor_save", land_editor_save)
+    pending_key = f"_office/pending/{document.doc_key}/{uuid4().hex}"
+    await storage.write("b", pending_key, b"v2")
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key=pending_key, close=False,
+                                      authors=[f"agent:writer:{session.id}"])
+    assert await office_saves.land_pending_saves(session_factory=session_factory, session_store=store, storage=storage,
+                                                 redis=redis_client, office=OFFICE, settings=SimpleNamespace()) == 1
+    assert await storage.read("b", key) == b"v2"
+    # The chat is not one of the project's threads, so the save is yours.
+    assert landed == [("a.docx", {"name": str(project.user_id), "email": f"user:{project.user_id}@surogate"})]
+
+
+async def test_the_author_is_you_unless_one_threads_agent_alone_edited(session_factory, storage):
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    store, session, _, _ = await _chat_with_document(session_factory, storage)
+    project = SimpleNamespace(id=uuid4(), user_id=uuid4())
+    one_of_its_threads = await store.create_session(
+        user_id=session.user_id, org_id=session.org_id, agent_id="writer", channel="worker",
+        config={"storage_bucket": "b", "workstream_id": str(project.id), "workstream_role": "thread"},
+    )
+    its_master = await store.create_session(
+        user_id=session.user_id, org_id=session.org_id, agent_id="writer", channel="web",
+        config={"storage_bucket": "b", "workstream_id": str(project.id), "workstream_role": "coordinator"},
+    )
+    you = {"name": str(project.user_id), "email": f"user:{project.user_id}@surogate"}
+    thread = {"name": one_of_its_threads.title or "Thread", "email": f"thread:{one_of_its_threads.id}@surogate"}
+    agent = f"agent:writer:{one_of_its_threads.id}"
+    assert await office_saves.editor_author(store, project, [agent]) == thread
+    assert await office_saves.editor_author(store, project, [agent, "user:1"]) == you
+    assert await office_saves.editor_author(store, project, []) == you
+    assert await office_saves.editor_author(store, project, [agent, f"agent:writer:{uuid4()}"]) == you
+    assert await office_saves.editor_author(store, project, [f"agent:writer:{session.id}"]) == you
+    # The master is the project's, not one of its threads: its agent's save is yours.
+    assert await office_saves.editor_author(store, project, [f"agent:writer:{its_master.id}"]) == you
+
+
+async def test_a_busy_project_is_no_failed_attempt_and_its_save_waits_behind_the_others(session_factory, redis_client, storage,
+                                                                                       monkeypatch):
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from surogates.workstreams.undo import BUSY, Refused
+
+    store, busy_session, busy_key, busy = await _chat_with_document(session_factory, storage, path="busy.docx")
+    project = SimpleNamespace(id=uuid4(), user_id=uuid4(), master_session_id=uuid4(), agent_id="writer")
+
+    async def project_of(session_factory, session):
+        return project if session.id == busy_session.id else None
+
+    async def land_editor_save(state, project, *, path, author, write):
+        raise Refused(BUSY)
+
+    monkeypatch.setattr(office_saves, "_project_of", project_of)
+    monkeypatch.setattr(office_saves, "land_editor_save", land_editor_save)
+    await _pend(session_factory, storage, busy, b"v2")
+    _, _, key, document = await _chat_with_document(session_factory, storage)
+    await _pend(session_factory, storage, document, b"v2")
+
+    async def land() -> int:
+        return await office_saves.land_pending_saves(session_factory=session_factory, session_store=store, storage=storage,
+                                                     redis=redis_client, office=OFFICE, settings=SimpleNamespace())
+
+    # The busy save, the older, moves behind the other, which lands in the same pass.
+    assert await land() == 1
+    assert await storage.read("b", key) == b"v2"
+    for _ in range(office_saves.SAVE_FAILED_AFTER + 2):
+        assert await land() == 0
+    waiting = await office_sessions.get_open(session_factory, busy.id)
+    assert waiting.pending_save is not None and waiting.pending_save["attempts"] == 0
+    assert await storage.read("b", busy_key) == b"v1"
+    assert not any(e.type == "office.save_failed" for e in await store.get_events(busy_session.id))

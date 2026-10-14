@@ -201,9 +201,9 @@ export function useAgentChatRuntime({
         stream.addEventListener(eventType, (messageEvent) => {
           if (streamRef.current !== stream) return;
           const data = parseEventData(messageEvent.data);
-          const eventId = messageEvent.lastEventId
-            ? Number(messageEvent.lastEventId)
-            : 0;
+          // stream.live carries no id of its own, and an SSE event without one repeats the last id seen.
+          const eventId =
+            eventType === "stream.live" ? 0 : messageEvent.lastEventId ? Number(messageEvent.lastEventId) : 0;
           setState((prev) =>
             applyRuntimeEvent(prev, {
               type: eventType,

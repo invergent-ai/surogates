@@ -748,7 +748,7 @@ class ReleaseWorkflowTest < Minitest::Test
       },
       "release.yml" => {
         "wheel" => ["4cd0d0e26258996d", %w[dc15019acb8b0420 3f2828c5b55668e8 030b48177ef387aa c1168eec9dd8980f d127b8914f9e2775 89676bc6c688a2df]],
-        "images" => ["8ebea57277fdbb89", %w[87fcdec176307d16 0619e48968c28792 617ad6a92e3fd6a0 73c45f0486d37ee1 24a2521493be90fe d971c94aab8fd2bb]],
+        "images" => ["7e679b02fe3678a5", %w[87fcdec176307d16 0619e48968c28792 617ad6a92e3fd6a0 73c45f0486d37ee1 24a2521493be90fe d971c94aab8fd2bb]],
         "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
         "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 4c034b1990bdc512 c7898d9ce9c764f9 04f76870922f0e0c b7eef4a1402a3c44 84bb50f2712c5cd6 b71b78b7115f448e]],
         "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],

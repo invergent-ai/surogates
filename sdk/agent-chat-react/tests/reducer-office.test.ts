@@ -39,3 +39,50 @@ describe("office save events", () => {
     expect(next.workspaceRefreshKey).toBe(state.workspaceRefreshKey);
   });
 });
+
+describe("live office edits", () => {
+  const call = (eventId: number, path: string, name = "office_edit") => ({
+    type: "tool.call" as const,
+    eventId,
+    data: { tool_call_id: `tc${eventId}`, name, arguments: { path, ops: [] } },
+  });
+  const result = (eventId: number, callEventId: number, name = "office_edit", content = "{}") => ({
+    type: "tool.result" as const,
+    eventId,
+    data: { tool_call_id: `tc${callEventId}`, name, content, elapsed_ms: 900 },
+  });
+
+  it("are listened to", () => {
+    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("stream.live");
+  });
+
+  it("open nothing from the replayed backlog, and the document of a live edit once it has run", () => {
+    let state = applyAgentChatEvent(createInitialAgentChatState(), call(5, "docs/Old.docx"));
+    state = applyAgentChatEvent(state, result(6, 5));
+    expect(state.live).toBe(false);
+    expect(state.officeAutoOpen).toBeNull();
+    state = applyAgentChatEvent(state, { type: "stream.live", eventId: 0, data: {} });
+    expect(state.live).toBe(true);
+    state = applyAgentChatEvent(state, call(9, "__WORKSPACE__/docs/Plan.docx"));
+    // The call comes before the edit runs: a document the edit creates is not there yet.
+    expect(state.officeAutoOpen).toBeNull();
+    state = applyAgentChatEvent(state, result(10, 9));
+    expect(state.officeAutoOpen).toEqual({ path: "docs/Plan.docx", eventId: 10 });
+    state = applyAgentChatEvent(state, call(11, "docs/notes.md", "write_file"));
+    state = applyAgentChatEvent(state, result(12, 11, "write_file"));
+    expect(state.officeAutoOpen).toEqual({ path: "docs/Plan.docx", eventId: 10 });
+  });
+
+  it("open nothing for an edit that failed", () => {
+    let state = applyAgentChatEvent(createInitialAgentChatState(), { type: "stream.live", eventId: 0, data: {} });
+    state = applyAgentChatEvent(state, call(5, "docs/New.docx"));
+    state = applyAgentChatEvent(state, result(6, 5, "office_edit", JSON.stringify({ error: "The editor could not do that" })));
+    expect(state.officeAutoOpen).toBeNull();
+  });
+
+  it("refresh the file tree when an edit finishes", () => {
+    const state = applyAgentChatEvent(createInitialAgentChatState(), call(5, "docs/Plan.docx"));
+    const next = applyAgentChatEvent(state, result(6, 5));
+    expect(next.workspaceRefreshKey).toBe(state.workspaceRefreshKey + 1);
+  });
+});

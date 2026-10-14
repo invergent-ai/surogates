@@ -840,10 +840,19 @@ class OfficeSettings(BaseSettings):
     jwt_secret: str = ""
     # The runtime's own: signs the file and callback URLs it hands the document server.
     token_secret: str = ""
+    # The worker reaches runtime-office, where the agent's editor sessions run, here.
+    runtime_office_url: str = ""
+    # The bearer token the worker shows runtime-office.
+    runtime_office_token: str = ""
 
     @property
     def enabled(self) -> bool:
         return bool(self.public_url)
+
+    @property
+    def agent_editing(self) -> bool:
+        """Whether the agent edits documents live: a document server, and runtime-office beside it."""
+        return self.enabled and bool(self.runtime_office_url)
 
     @model_validator(mode="after")
     def _whole_when_on(self) -> "OfficeSettings":
@@ -855,6 +864,9 @@ class OfficeSettings(BaseSettings):
         for name in ("jwt_secret", "token_secret"):
             if len(getattr(self, name)) < 32:
                 raise ValueError(f"office.{name} must be at least 32 characters")
+        # runtime-office is optional (an environment can run the document server before it), but whole when set.
+        if self.runtime_office_url and len(self.runtime_office_token) < 32:
+            raise ValueError("office.runtime_office_token must be at least 32 characters when office.runtime_office_url is set")
         return self
 
 

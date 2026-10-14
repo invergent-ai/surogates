@@ -60,7 +60,7 @@ from surogates.harness.landing import _call, _fence, _orchestrator, _Row, _row_f
 from surogates.sandbox.history import YOU
 from surogates.session.store import SessionNotFoundError
 from surogates.workstreams import stream as project_stream
-from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, said
+from surogates.workstreams.bucket import NOT_KEPT, BucketHistory, landable, said
 from surogates.workstreams.history import (
     HISTORY_OFF,
     LOCK_POLL,
@@ -540,6 +540,50 @@ async def _pick_up(
             raise
     picked.extend(change["path"] for change in pickup.arguments["picked_up"])
     return pushed
+
+
+async def land_editor_save(
+    state: Any, project: Any, *, path: str, author: dict, write: Callable[[], Awaitable[Any]],
+) -> None:
+    """A document editor's save of *path* in a project: written by *write* under the project's lock, and
+    recorded on ``main`` as one pickup entry by *author* (the thread whose agent alone edited it, or you).
+    Your edits to it not yet recorded are picked up first, by you, as every landing does.
+
+    Outside history (a name history leaves out, a project over its history's cap) it is only written.
+    Raises :class:`Refused` (:data:`BUSY`) at once when the project is busy, since the save job holds the
+    document's row meanwhile, and whatever *write* raises (a changed file's RevisionConflict): the save job
+    tries again later, or lands a copy.
+    """
+    session_factory, saga_settings = state.session_factory, state.settings.saga
+    master = await state.session_store.get_session(project.master_session_id)
+    if not landable(path) or await over_history_cap(state.storage, master):
+        await write()
+        return
+    place = BucketHistory.of(state.storage, master, state.settings.history, within=saga_settings.default_step_timeout)
+    audit = [["Surogate-Project", str(project.id)], ["Surogate-Agent", str(project.agent_id)], ["Surogate-User", str(project.user_id)]]
+    picked: list[str] = []
+    # One try of the lock: the job tries again in a moment.
+    until = time.monotonic()
+    try:
+        async with _locked(session_factory, project.id, until) as held:
+            with place.steady():
+                if any(quiet < _fence(saga_settings) for _, quiet in await running_landings(session_factory, project.id)):
+                    raise Refused(BUSY)
+                await settle_running(
+                    session_factory, place, API, project.id, saga_settings, held, redis=state.redis, master=project.master_session_id,
+                )
+                # Your edits first, as every landing records them: the version the editor replaces is one in History.
+                you = {"name": str(project.user_id), "email": f"user:{project.user_id}@surogate"}
+                await _pick_up(session_factory, place, project, project.user_id, you, audit, [path], saga_settings, held, picked)
+                # Inside the lock: a thread's landing would otherwise pick the save up first, as yours.
+                # A lock lost unseen frees the project: the save is not written outside it.
+                await held()
+                await write()
+                await _pick_up(session_factory, place, project, project.user_id, author, audit, [path], saga_settings, held, picked)
+    except ProjectBusy as exc:
+        raise Refused(BUSY) from exc
+    if picked:
+        await project_stream.publish(state.redis, project.id, project.master_session_id, project_stream.LANDED)
 
 
 async def _land(

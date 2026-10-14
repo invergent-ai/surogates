@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,6 +18,9 @@ from surogates.db.models import OfficeSession
 
 OPEN = "open"
 CLOSED = "closed"
+# How long an open waits for a closing document's last save to land, and how often it looks.
+CLOSING_WAIT_S = 10.0
+CLOSING_POLL_S = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +32,9 @@ class OpenDocument:
     base_version: str | None
     editors: tuple[str, ...]
     pending_save: dict[str, Any] | None
+    user_names: dict[str, str]
+    changes_seen: int
+    connected_at: datetime | None
 
 
 def _snapshot(row: OfficeSession) -> OpenDocument:
@@ -38,6 +46,9 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
         base_version=row.base_version,
         editors=tuple(str(value) for value in row.editors),
         pending_save=dict(row.pending_save) if row.pending_save is not None else None,
+        user_names={str(key): str(value) for key, value in (row.user_names or {}).items()},
+        changes_seen=row.changes_seen or 0,
+        connected_at=row.connected_at,
     )
 
 
@@ -45,8 +56,11 @@ class DocumentClosing(Exception):
     """The file's open row only waits for its last save to land; open the file again once it has."""
 
 
-async def open_or_reuse(session_factory: Any, *, location: str, path: str, session_id: UUID) -> OpenDocument:
-    """The open row for *location*, created when there is none; *session_id* joins its chats.
+async def open_or_reuse(
+    session_factory: Any, *, location: str, path: str, session_id: UUID, user: tuple[str, str] | None = None,
+) -> OpenDocument:
+    """The open row for *location*, created when there is none; *session_id* joins its chats,
+    and *user* (editor user id, name) its names.
 
     Raises :class:`DocumentClosing` for a row whose pending save closes it: the document
     server ended that key's session, so edits made under the key would be lost.
@@ -59,10 +73,27 @@ async def open_or_reuse(session_factory: Any, *, location: str, path: str, sessi
             raise DocumentClosing(location)
         if str(session_id) not in row.session_ids:
             row.session_ids = [*row.session_ids, str(session_id)]
+        if user is not None and (row.user_names or {}).get(user[0]) != user[1]:
+            row.user_names = {**(row.user_names or {}), user[0]: user[1]}
         # Every open moves the clock close_never_opened measures from.
         row.updated_at = datetime.now(timezone.utc)
         await db.flush()
         return _snapshot(row)
+
+
+async def open_waiting(
+    session_factory: Any, *, location: str, path: str, session_id: UUID, user: tuple[str, str] | None = None,
+) -> OpenDocument:
+    """:func:`open_or_reuse`, waiting up to CLOSING_WAIT_S for a closing row's last save to land;
+    raises :class:`DocumentClosing` once the wait is over."""
+    deadline = time.monotonic() + CLOSING_WAIT_S
+    while True:
+        try:
+            return await open_or_reuse(session_factory, location=location, path=path, session_id=session_id, user=user)
+        except DocumentClosing:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(CLOSING_POLL_S)
 
 
 async def _insert_and_lock(db: Any, *, location: str, path: str, session_id: UUID) -> OfficeSession | None:
@@ -88,6 +119,24 @@ async def get_open(session_factory: Any, row_id: UUID) -> OpenDocument | None:
         return _snapshot(row) if row is not None else None
 
 
+async def open_at(session_factory: Any, location: str) -> OpenDocument | None:
+    """The open row of the file at *location*, or None."""
+    async with session_factory() as db:
+        row = await db.scalar(select(OfficeSession).where(OfficeSession.location == location, OfficeSession.status == OPEN))
+        return _snapshot(row) if row is not None else None
+
+
+async def open_locations(session_factory: Any, locations: list[str]) -> set[str]:
+    """Those of *locations* whose file is open in the editor."""
+    if not locations:
+        return set()
+    async with session_factory() as db:
+        found = await db.scalars(
+            select(OfficeSession.location).where(OfficeSession.location.in_(locations), OfficeSession.status == OPEN)
+        )
+        return set(found.all())
+
+
 async def open_documents(session_factory: Any) -> list[OpenDocument]:
     async with session_factory() as db:
         rows = (await db.scalars(select(OfficeSession).where(OfficeSession.status == OPEN))).all()
@@ -111,6 +160,7 @@ async def record_editors(session_factory: Any, row_id: UUID, users: list[str]) -
 
 async def set_pending(
     session_factory: Any, row_id: UUID, *, bucket: str, key: str, close: bool, lastsave: datetime | None = None,
+    marks: list[str] | None = None, authors: list[str] | None = None, changes: int | None = None,
 ) -> str | None:
     """Record a save waiting to land, made at *lastsave* (now when None); returns the key
     of the save that lost, to delete.
@@ -129,8 +179,12 @@ async def set_pending(
             row.connected_at = datetime.now(timezone.utc)
         previous = dict(row.pending_save or {})
         close = close or bool(previous.get("close"))
+        # The newer save holds both saves' edits: everyone who made either, and every forced save either answers.
+        marks = _union(previous.get("marks"), marks)
+        authors = _union(previous.get("authors"), authors)
+        changes = max(int(previous.get("changes") or 0), int(changes or 0))
         if previous and datetime.fromisoformat(previous["lastsave"]) > lastsave:
-            row.pending_save = {**previous, "close": close}
+            row.pending_save = {**previous, "close": close, "marks": marks, "authors": authors, "changes": changes}
             return key
         row.pending_save = {
             "bucket": bucket,
@@ -138,9 +192,20 @@ async def set_pending(
             "lastsave": lastsave.isoformat(),
             "close": close,
             "attempts": 0,
+            "marks": marks,
+            "authors": authors,
+            "changes": changes,
         }
         replaced = previous.get("key")
         return str(replaced) if replaced and replaced != key else None
+
+
+def _union(first: Any, second: Any) -> list[str]:
+    out: list[str] = []
+    for value in [*(first or []), *(second or [])]:
+        if str(value) not in out:
+            out.append(str(value))
+    return out
 
 
 async def close_when_saved(session_factory: Any, row_id: UUID) -> None:
@@ -186,10 +251,12 @@ async def claim_pending(session_factory: Any) -> AsyncIterator[OfficeSession | N
 
 
 def mark_landed(row: OfficeSession, version: str | None) -> None:
-    close_after = bool((row.pending_save or {}).get("close"))
+    pending = row.pending_save or {}
     row.base_version = version
+    # The changes this save covered are history now: the next save's authors start after them.
+    row.changes_seen = max(row.changes_seen or 0, int(pending.get("changes") or 0))
     row.pending_save = None
-    if close_after:
+    if pending.get("close"):
         _close(row)
 
 
