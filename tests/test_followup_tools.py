@@ -205,7 +205,7 @@ async def test_enrol_refuses_a_bad_days_ago(sf, patient, arguments, error):
 
 
 @pytest.mark.asyncio
-async def test_enrol_only_in_a_whatsapp_conversation(sf, patient):
+async def test_enrol_only_where_the_business_can_write_first(sf, patient):
     _, session_id = patient
     async with sf() as db:
         row = await db.get(SessionRow, session_id)
@@ -215,7 +215,7 @@ async def test_enrol_only_in_a_whatsapp_conversation(sf, patient):
         {"protocol": "post-op", "consent": True, "summary": "x"},
         **_kw(sf, session_id),
     )
-    assert "WhatsApp conversation" in result
+    assert "channel the business can message first" in result
 
 
 @pytest.mark.asyncio
@@ -330,7 +330,7 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
         {"reason": "Spune că a leșinat azi-dimineață."}, **_kw(sf, session_id),
     )
     assert result == (
-        "Escalated to the responsible operator's inbox and 1 team phone(s)."
+        "Escalated to the responsible operator's inbox and 1 team member(s)."
     )
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
@@ -610,3 +610,47 @@ async def test_someone_past_every_program_is_promised_no_time(sf, patient):
     assert "status paused" in paused
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert "No scheduled message: the enrolment is paused." in status
+
+
+@pytest.mark.asyncio
+async def test_enrol_on_slack_records_permission_on_the_member_id(sf):
+    # A Slack DM's chat id is not the member: permission must land on the
+    # identity the Programs will look up.
+    user_id, session_id = uuid.uuid4(), uuid.uuid4()
+    async with sf() as db:
+        db.add(User(id=user_id, org_id=ORG, email=f"{user_id}@x", display_name="Dana"))
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=user_id, platform="slack", platform_user_id="U42",
+            platform_meta={},
+        ))
+        db.add(SessionRow(
+            id=session_id, org_id=ORG, agent_id=AGENT, channel="slack", user_id=user_id,
+            config={"slack_channel_id": "D9", "channel_identifier": "A1", "multi_party": False},
+        ))
+        db.add(ProgramScheduleRow(
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=True,
+            config={"audience": {"protocol": "onboarding"}, "timezone": "UTC"},
+        ))
+        await db.commit()
+    result = await followup.handle_followup_enroll(
+        {"protocol": "onboarding", "consent": True, "summary": "x",
+         "date_unknown": True, "name_unknown": True},
+        **_kw(sf, session_id),
+    )
+    assert "Enrolled in onboarding" in result
+    async with sf() as db:
+        identity = (await db.execute(sa.select(ChannelIdentity).where(ChannelIdentity.user_id == user_id))).scalar_one()
+    assert store.permission_status(identity) == "granted"
+
+
+@pytest.mark.asyncio
+async def test_no_enrolment_in_a_shared_channel(sf, patient):
+    _, session_id = patient
+    async with sf() as db:
+        row = await db.get(SessionRow, session_id)
+        row.config = {**row.config, "multi_party": True}
+        await db.commit()
+    result = await followup.handle_followup_enroll(
+        {"protocol": "post-op", "consent": True, "summary": "x"}, **_kw(sf, session_id),
+    )
+    assert "own conversation" in result

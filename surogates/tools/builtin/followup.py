@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
+from surogates.channels.capabilities import initiating_platforms
 from surogates.db.models import (
     Event,
     InboxItem,
@@ -110,7 +111,7 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                 "description": (
                     "The followed person's full name, as they or whoever "
                     "writes for them gave "
-                    "it. Ask for it: the WhatsApp profile name is whoever is "
+                    "it. Ask for it: the profile name on the channel is whoever is "
                     "writing, which may be a relative. Required unless "
                     "name_unknown is true."
                 ),
@@ -220,7 +221,7 @@ ESCALATE_SCHEMA = ToolSchema(
         "person says needs a human: something the protocol lists, "
         "something the protocol does not cover, distress, or a request only "
         "the business can answer. It reaches the responsible operator's inbox "
-        "and the team's phones. It does not end a check-in; record the "
+        "and the team. It does not end a check-in; record the "
         "outcome separately."
     ),
     parameters={
@@ -251,7 +252,7 @@ ESCALATE_SCHEMA = ToolSchema(
 async def _tell_team(
     sf: Any, ctx: Context, settings: Any, *, kind: str, text: str, **extra: Any,
 ):
-    """The team's phones, with who it is about, never the person talking."""
+    """The team, with who it is about, never the person talking."""
     extra.setdefault("reason", text)
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
@@ -263,11 +264,11 @@ async def _tell_team(
 
 
 async def _last_inbound(sf: Any, ctx: Context) -> datetime | None:
-    """When the person last wrote in this conversation's WhatsApp window."""
-    if ctx.channel == "whatsapp" and ctx.platform_user_id and ctx.sender:
+    """When the person last wrote to this conversation's sender."""
+    if ctx.can_write_first:
         return await followup_store.last_inbound(
-            sf, org_id=ctx.org_id, platform="whatsapp",
-            platform_user_id=ctx.platform_user_id, channel_identifier=ctx.sender,
+            sf, org_id=ctx.org_id, platform=ctx.channel,
+            platform_user_id=await ctx.person_id(sf), channel_identifier=ctx.sender,
         )
     return None
 
@@ -316,11 +317,12 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     ctx, settings = await load_context(kwargs)
     if ctx is None or ctx.user_id is None:
         return "Enrolment needs a conversation with a known person."
-    if ctx.channel != "whatsapp" or not ctx.platform_user_id:
+    if not ctx.can_write_first:
+        channels = ", ".join(p.capitalize() for p in sorted(initiating_platforms()))
         return (
-            "Enrolment happens in the person's WhatsApp conversation, where "
-            "the check-ins will reach them. Ask them to message the business "
-            "there."
+            "Enrolment happens in the person's own conversation on a channel "
+            f"the business can message first ({channels}), where the scheduled "
+            "messages will reach them. Ask them to message the business there."
         )
     if followup_store.is_team_member(settings, ctx.user_id):
         return (
@@ -372,11 +374,11 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     answered_by = str(arguments.get("answered_by") or "").strip() or None
 
     granted = await followup_store.grant_contact_permission(
-        sf, org_id=ctx.org_id, platform="whatsapp",
-        platform_user_id=ctx.platform_user_id, recorded_by="agent",
+        sf, org_id=ctx.org_id, platform=ctx.channel,
+        platform_user_id=await ctx.person_id(sf), recorded_by="agent",
     )
     if not granted:
-        return "Not enrolled: this person has no WhatsApp identity on record."
+        return f"Not enrolled: this person has no {ctx.channel} identity on record."
     enrollment = await followup_store.upsert_enrollment(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
         protocol=protocol, start_date=start, phase=phase, enrolled_by="agent",
@@ -680,13 +682,13 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         elif queued:
             state = "raised"
             note = (
-                "Inbox target is not a valid service account; team phones notified"
-                if target_id is not None else "No inbox target; team phones notified"
+                "Inbox target is not a valid service account; team notified"
+                if target_id is not None else "No inbox target; team notified"
             )
         else:
             # A visible failure, never a silent one: the agent saying it
             # escalated is not evidence that anyone was told.
-            state, note = "failed", "No escalation target or team phone configured"
+            state, note = "failed", "No escalation target or team member configured"
         async with sf() as db:
             row = await db.get(ProgramInvitationRow, invitation.id)
             row.escalation_state = state
@@ -703,7 +705,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     if inboxed:
         told.append("the responsible operator's inbox")
     if queued:
-        told.append(f"{queued} team phone(s)")
+        told.append(f"{queued} team member(s)")
     return "Escalated to " + " and ".join(told) + "."
 
 

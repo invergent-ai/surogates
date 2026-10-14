@@ -11,8 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import sqlalchemy as sa
+
+from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import readable_phone
-from surogates.db.models import Session as SessionRow, User
+from surogates.db.models import ChannelIdentity, Session as SessionRow, User
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import start_date_problem
 
@@ -41,11 +44,40 @@ class Context:
         self.platform_user_id: str = str(
             config.get(f"{self.channel}_channel_id") or ""
         )
+        self.multi_party: bool = bool(config.get("multi_party"))
         self.display_name: str = (user.display_name if user else "") or ""
         #: The enrollment that names the person; read on first use, since
         #: most calls never name anyone.
         self.enrollment: Any = None
         self._named = False
+
+    @property
+    def can_write_first(self) -> bool:
+        """A one-to-one conversation on a channel the platform may write
+        first on, with a sender to write from."""
+        return (
+            capabilities_for(self.channel).can_initiate
+            and not self.multi_party and bool(self.sender) and bool(self.platform_user_id)
+        )
+
+    async def person_id(self, session_factory: Any) -> str:
+        """The person's own id on this channel.  Not the chat id on Slack,
+        where a direct message has an id of its own."""
+        if self.user_id is not None:
+            async with session_factory() as db:
+                found = (
+                    await db.execute(
+                        sa.select(ChannelIdentity.platform_user_id)
+                        .where(ChannelIdentity.org_id == self.org_id)
+                        .where(ChannelIdentity.platform == self.channel)
+                        .where(ChannelIdentity.user_id == self.user_id)
+                        .order_by(ChannelIdentity.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if found:
+                return found
+        return self.platform_user_id
 
     def named_by(self, enrollment: Any) -> None:
         self.enrollment, self._named = enrollment, True
