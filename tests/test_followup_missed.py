@@ -65,7 +65,7 @@ async def _invitation(sf, program_id, patient, *, days_ago, response="no_reply_b
             agent_id=AGENT, user_id=patient, platform="whatsapp",
             platform_user_id="40700000001", delivery_state=delivery,
             response_state=response, escalation_state="none",
-            deadline_at=created + timedelta(hours=10), created_at=created,
+            deadline_at=created, deadline_woken_at=created, created_at=created,
         )
         db.add(row)
         await db.commit()
@@ -95,7 +95,7 @@ async def test_three_unanswered_in_a_row_alert_the_care_team(sf):
     assert alert.user_id == doctor
     assert alert.subject_user_id == patient
     assert alert.text == (
-        "Ion Pop (+40700000001) has not answered the last 3 messages of "
+        "Ion Pop (+40 700 000 001) has not answered the last 3 messages of "
         "“Prima lună”."
     )
     assert await _state(sf, third) == "raised"
@@ -158,7 +158,7 @@ async def test_the_operators_wording_is_used(sf):
     await _invitation(sf, program_id, patient, days_ago=0.10)
     await alert_missed_checkins(sf, now=NOW)
     [alert] = await _alerts(sf)
-    assert alert.text == "Ion Pop (+40700000001) nu a răspuns de 1 ori."
+    assert alert.text == "Ion Pop (+40 700 000 001) nu a răspuns de 1 ori."
 
 
 def test_a_broken_template_falls_back_to_the_default():
@@ -224,3 +224,102 @@ async def test_a_streak_is_judged_once_not_every_pass(sf, monkeypatch):
     await alert_missed_checkins(sf, now=NOW)
     await alert_missed_checkins(sf, now=NOW + timedelta(minutes=1))
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_slack_programs_alert_goes_out_on_slack_never_whatsapp(sf):
+    # The Slack team id is not a WhatsApp sender: queuing it as one sent the
+    # alert nowhere.  The Program's own channel and sender carry it instead.
+    from surogates.db.models import ChannelIdentity
+
+    program_id, patient, doctor = await _setup(sf, threshold=1, recipients=False)
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[doctor],
+    )
+    async with sf() as db:
+        sched = (await db.execute(
+            sa.select(ProgramScheduleRow).where(ProgramScheduleRow.program_id == program_id)
+        )).scalar_one()
+        sched.config = {**sched.config, "channel": "slack", "channel_identifier": "T0SLACK"}
+        db.add(ChannelIdentity(
+            org_id=ORG, user_id=doctor, platform="slack", platform_user_id="U9",
+            platform_meta={"contact_permission": {"status": "granted"}},
+        ))
+        await db.commit()
+    await _invitation(sf, program_id, patient, days_ago=0.01)
+
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    [alert] = await _alerts(sf)
+    assert (alert.platform, alert.channel_identifier) == ("slack", "T0SLACK")
+    assert alert.user_id == doctor and alert.template_name is None
+
+
+@pytest.mark.asyncio
+async def test_each_team_member_is_told_on_their_own_channel(sf):
+    from surogates.db.models import ChannelIdentity
+
+    a, b = uuid.uuid4(), uuid.uuid4()
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[a, b],
+        channel_identifier="pn1", senders={"slack": "T1"},
+        team_channels={str(b): ["slack", "whatsapp"]},
+        alert_template_name="alerta", alert_template_language="ro",
+    )
+    async with sf() as db:
+        for user, platform, pid in ((a, "whatsapp", "4070"), (b, "whatsapp", "4071"), (b, "slack", "U1")):
+            db.add(ChannelIdentity(
+                org_id=ORG, user_id=user, platform=platform, platform_user_id=pid,
+                platform_meta={"contact_permission": {"status": "granted"}},
+            ))
+        await db.commit()
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    queued, _ = await store.notify_team(
+        sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="x", created_by="t",
+    )
+    assert queued == 2
+    by_user = {r.user_id: r for r in await _alerts(sf)}
+    assert (by_user[a].platform, by_user[a].channel_identifier) == ("whatsapp", "pn1")
+    assert by_user[a].template_name == "alerta"
+    assert (by_user[b].platform, by_user[b].channel_identifier) == ("slack", "T1")
+    assert by_user[b].template_name is None
+    with pytest.raises(ValueError):
+        await store.update_settings(sf, org_id=ORG, agent_id=AGENT, senders={"website": "x"})
+
+
+@pytest.mark.asyncio
+async def test_a_missed_streak_is_an_escalation_the_team_can_take(sf):
+    from surogates.db.models import EscalationRow
+
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    async with sf() as db:
+        [esc] = (await db.execute(sa.select(EscalationRow))).scalars().all()
+    assert (esc.id, esc.kind, esc.state, esc.user_id) == (inv, "missed_replies", "raised", patient)
+    assert (esc.invitation_id, esc.program_id, esc.platform) == (inv, program_id, "whatsapp")
+    assert esc.reason.startswith("Ion Pop")
+
+
+@pytest.mark.asyncio
+async def test_a_missed_streak_nobody_hears_is_a_failed_escalation(sf):
+    from surogates.db.models import EscalationRow
+
+    program_id, patient, _ = await _setup(sf, threshold=1, recipients=False)
+    await _invitation(sf, program_id, patient, days_ago=0.10)
+    await alert_missed_checkins(sf, now=NOW)
+    async with sf() as db:
+        [esc] = (await db.execute(sa.select(EscalationRow))).scalars().all()
+    assert esc.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_telegram_chat_id_is_never_shown_as_a_phone(sf):
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    async with sf() as db:
+        row = await db.get(ProgramInvitationRow, inv)
+        row.platform, row.platform_user_id = "telegram", "123456789"
+        await db.commit()
+    await alert_missed_checkins(sf, now=NOW)
+    [alert] = await _alerts(sf)
+    assert alert.text.startswith("Ion Pop (?) has not answered")

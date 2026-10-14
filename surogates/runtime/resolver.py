@@ -18,6 +18,7 @@ import logging
 
 from fastapi import HTTPException, Request
 
+from surogates.channels.whatsapp_flows import forms_from_payload
 from surogates.runtime.context import (
     AgentRuntimeContext,
     LLMEndpoint,
@@ -133,6 +134,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         # describes an agent that never had one.
         whiteboard_enabled=bool(payload.get("whiteboard_enabled", False)),
         programs_enabled=bool(payload.get("programs_enabled", False)),
+        whatsapp_forms=forms_from_payload(payload.get("whatsapp_forms")),
         multi_session=multi_session_from_payload(payload),
         linkable_channels=tuple(payload.get("linkable_channels") or ()),
         end_user_token_allowance=payload.get("end_user_token_allowance"),

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
 from uuid import UUID
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
 from surogates.db.models import DeliveryOutbox
 
@@ -111,13 +111,16 @@ def is_permanent_delivery_error(error: str | None) -> bool:
     return any(code in low for code in _PERMANENT_DELIVERY_ERRORS)
 
 
-def delivery_exhausted(created_at: datetime | None, *, now: datetime | None = None) -> bool:
-    """True when an item has been retried past :data:`MAX_DELIVERY_AGE`."""
+def delivery_exhausted(
+    created_at: datetime | None, *, now: datetime | None = None,
+    max_age: timedelta = MAX_DELIVERY_AGE,
+) -> bool:
+    """True when an item has been retried past *max_age*."""
     if created_at is None:
         return False
     ref = now or datetime.now(timezone.utc)
     at = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
-    return (ref - at) > MAX_DELIVERY_AGE
+    return (ref - at) > max_age
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +310,19 @@ class DeliveryService:
             payload=payload,
         )
 
+    async def mark_delivered_many(self, outbox_ids: list[int]) -> None:
+        """Mark narration rows delivered in one statement.  Narration carries
+        no opener or outreach text, so there is nothing to report."""
+        if not outbox_ids:
+            return
+        async with self._sf() as db:
+            await db.execute(
+                update(DeliveryOutbox)
+                .where(DeliveryOutbox.id.in_(outbox_ids))
+                .values(status="delivered")
+            )
+            await db.commit()
+
     async def _report_unprompted(
         self,
         outbox_id: int,
@@ -326,7 +342,7 @@ class DeliveryService:
         outreach row.  Best-effort: a bookkeeping failure must not fail the
         delivery that already happened.
         """
-        from surogates.followup.outreach import record_outreach_delivery
+        from surogates.followup.outreach import record_outreach_delivery, record_outreach_text
         from surogates.programs.delivery import record_outbox_result
 
         try:
@@ -339,6 +355,10 @@ class DeliveryService:
                 await record_outreach_delivery(
                     self._sf, outbox_id,
                     provider_message_id=provider_message_id, error=error,
+                )
+            elif provider_message_id and not error:
+                await record_outreach_text(
+                    self._sf, outbox_id, provider_message_id=provider_message_id,
                 )
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -353,20 +373,23 @@ class DeliveryService:
         The row returns to ``'pending'`` status with ``available_at``
         pushed 30 seconds into the future for retry backoff.
         """
+        await self.mark_failed_many([outbox_id], error)
+
+    async def mark_failed_many(self, outbox_ids: list[int], error: str) -> None:
+        """:meth:`mark_failed` for several rows in one statement."""
+        if not outbox_ids:
+            return
         async with self._sf() as db:
             await db.execute(
-                text(
-                    """
-                    UPDATE delivery_outbox
-                    SET status = 'pending',
-                        available_at = now() + interval '30 seconds'
-                    WHERE id = :id
-                    """
-                ),
-                {"id": outbox_id},
+                update(DeliveryOutbox)
+                .where(DeliveryOutbox.id.in_(outbox_ids))
+                .values(
+                    status="pending",
+                    available_at=func.now() + text("interval '30 seconds'"),
+                )
             )
             await db.commit()
-        logger.warning("Outbox %d failed: %s (will retry)", outbox_id, error)
+        logger.warning("Outbox %s failed: %s (will retry)", ", ".join(map(str, outbox_ids)), error)
 
     async def mark_dead(
         self, outbox_id: int, error: str, *, payload: dict | None = None,

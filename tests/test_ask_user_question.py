@@ -298,6 +298,26 @@ async def test_only_a_command_its_user_typed_dismisses_the_question(looks_often,
     assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
 
 
+@pytest.mark.asyncio
+async def test_a_channel_message_that_is_not_the_answer_dismisses_it(looks_often):
+    result = await _asked_while(
+        FakeSessionStore(), {"content": "Pot să opresc aspirina?", "dismisses_question": "tc"},
+    )
+    assert result == {
+        "cancelled": True, "reason": ask_module.WROTE_SOMETHING_ELSE,
+        "detail": ask_module.WROTE_SOMETHING_ELSE_DETAIL,
+        "questions_asked": [{"prompt": "Which quarter?", "allow_other": True}],
+    }
+    # A reply to several questions comes this way too: it may be the answer.
+    assert "may answer the question" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_dismissed_another_question_does_not_dismiss_this_one(looks_often):
+    result = await _asked_while(FakeSessionStore(), {"content": "x", "dismisses_question": "older"})
+    assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
+
+
 class LandsAfterARead(FakeSessionStore):
     """A store in which *then*, each an event's type and data, is written right after the wait's first look at the log."""
 
@@ -491,3 +511,76 @@ async def test_a_cancel_during_subscribe_closes_the_pubsub():
     with pytest.raises(asyncio.CancelledError):
         await wait
     assert pubsub.closed
+
+
+@pytest.mark.asyncio
+async def test_a_rescued_reply_reaches_the_person_word_for_word():
+    """The judge's own context ("Asistentul") reached a patient in place of the reply it rescued."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from surogates.harness.loop import AgentHarness
+
+    reply = "Am notat: TAVI acum 5 zile. Sunteți de acord să vă înscriu în urmărire?"
+    harness = SimpleNamespace(
+        _judge_final_response_user_action=AsyncMock(return_value={
+            "action_kind": "ask_user_question", "question": "Sunteți de acord?", "context": "Asistentul",
+        }),
+        _can_ask_user_question=lambda: True,
+    )
+    session = SimpleNamespace(channel="whatsapp", user_id=uuid4(), service_account_id=None, parent_id=None, id=uuid4())
+    message = {"role": "assistant", "content": reply}
+    out = await AgentHarness._maybe_route_final_response_to_inbox(
+        harness, session=session, messages=[], assistant_message=message, model="m", tool_filter=None)
+    assert out == "ask_user_question"
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"])["context"] == reply
+
+
+_SIX = [{"label": f"Opțiunea {i}"} for i in range(6)]
+
+
+@pytest.mark.asyncio
+async def test_the_web_widget_keeps_four_choices():
+    from surogates.tools.builtin.ask_user_question import _ask_user_question_handler
+
+    result = json.loads(await _ask_user_question_handler(
+        {"questions": [{"prompt": "Care?", "choices": _SIX}]},
+        session_store=FakeSessionStore(), session_id=uuid4(), tool_call_id="c1",
+    ))
+    assert result == {"error": "questions[0].choices supports at most 4 entries."}
+
+
+def test_the_limit_follows_the_channel_the_harness_passes():
+    from surogates.tools.builtin.ask_user_question import max_choices
+
+    assert (max_choices("whatsapp"), max_choices("web"), max_choices(None)) == (10, 4, 4)
+
+
+def test_a_channel_conversation_takes_up_to_ten_choices():
+    from surogates.tools.builtin.ask_user_question import (
+        AskUserQuestionSchemaError,
+        MAX_CHANNEL_CHOICES_PER_QUESTION,
+        _validate_questions,
+    )
+
+    [q] = _validate_questions([{"prompt": "Care?", "choices": _SIX}], max_choices=MAX_CHANNEL_CHOICES_PER_QUESTION)
+    assert len(q["choices"]) == 6
+    with pytest.raises(AskUserQuestionSchemaError):
+        _validate_questions(
+            [{"prompt": "Care?", "choices": [{"label": str(i)} for i in range(11)]}],
+            max_choices=MAX_CHANNEL_CHOICES_PER_QUESTION,
+        )
+
+
+def test_the_channel_schema_offers_ten_choices_without_touching_the_original():
+    from surogates.tools.builtin import ask_user_question
+    from surogates.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    ask_user_question.register(registry)
+    [schema] = registry.get_schemas()
+    wide = ask_user_question.widen_for_channel(schema, "whatsapp")
+    assert ask_user_question.widen_for_channel(schema, "web") is schema
+    choices = lambda s: s["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]  # noqa: E731
+    assert choices(wide)["maxItems"] == 10 and choices(schema)["maxItems"] == 4
+    assert "up to 10 labeled options" in wide["function"]["description"]

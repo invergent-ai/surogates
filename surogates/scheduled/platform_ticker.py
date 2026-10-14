@@ -185,20 +185,6 @@ def _program_now():
     return datetime.now(timezone.utc)
 
 
-def _next_occurrences_for(row):
-    """The next fire instant for a claimed schedule, from its own config."""
-    from surogates.programs.cadence import next_occurrences
-
-    config = getattr(row, "config", None) or {}
-    return next_occurrences(
-        _program_now(),
-        weekdays=config.get("weekdays") or [],
-        times_local=config.get("times_local") or [],
-        timezone=config.get("timezone") or "UTC",
-        count=1,
-    )
-
-
 async def main(
     *,
     settings: Any,
@@ -369,8 +355,10 @@ async def main(
             identity_lookup_from,
             materialize_occurrence,
             send_queued_openers,
+            wake_at_deadlines,
         )
-        from surogates.programs.opener import make_opener_enqueue
+        from surogates.programs.journey import next_run_at
+        from surogates.programs.opener import make_opener_enqueue, make_step_waker
         from surogates.programs.store import ProgramScheduleStore
         from surogates.programs.ticker import ProgramTicker
 
@@ -420,6 +408,26 @@ async def main(
                 "from this process",
             )
 
+        from surogates.config import enqueue_session
+
+        async def _wake_session(org_id, agent_id, session_id):  # pragma: no cover - prod
+            await enqueue_session(
+                redis, org_id=str(org_id), agent_id=agent_id, session_id=session_id,
+            )
+
+        # The agent writes each step where the channel lets it, and decides
+        # what to do when a step's deadline passes unanswered.
+        _step_waker = make_step_waker(
+            session_store=session_store,
+            redis=redis,
+            session_factory=_session_factory(),
+            wake_session=_wake_session,
+            config_for_program=_config_for_program,
+            storage=storage,
+            settings=settings,
+            credentials_for=_credentials_for,
+        )
+
         _opener_enqueue = make_opener_enqueue(
             session_store=session_store,
             redis=redis,
@@ -431,6 +439,7 @@ async def main(
             settings=settings,
             config_for_program=_config_for_program,
             credentials_for=_credentials_for,
+            waker=_step_waker,
         )
 
         async def _program_run_one(row):  # pragma: no cover - prod path
@@ -451,9 +460,8 @@ async def main(
             # burst of six openers after a three-day outage is worse than a
             # gap; if catch-up is ever wanted, compute from row.next_run_at
             # and cap the burst.
-            upcoming = _next_occurrences_for(row)
             await program_store.mark_fired(
-                row, next_run_at=upcoming[0] if upcoming else None,
+                row, next_run_at=await next_run_at(_session_factory(), row, _program_now()),
             )
 
         from surogates.followup.outreach import send_queued_outreach
@@ -469,6 +477,12 @@ async def main(
                 now=_program_now(),
                 enqueue=_opener_enqueue,
             )
+            try:
+                await wake_at_deadlines(
+                    _session_factory(), now=_program_now(), wake=_step_waker,
+                )
+            except Exception:
+                logger.exception("[programs] deadline wake pass failed")
             # Alerts and operator messages ride the same leader-checked send
             # phase as the openers: a second replica must never send them too.
             try:
@@ -478,6 +492,7 @@ async def main(
                     delivery_service=_outreach_delivery,
                     identity_lookup=_identity_lookup, now=_program_now(),
                     storage=storage, settings=settings,
+                    credentials_for=_credentials_for,
                 )
             except Exception:
                 logger.exception("[outreach] send pass failed")

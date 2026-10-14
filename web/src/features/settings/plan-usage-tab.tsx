@@ -12,12 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "@/api/auth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { approxMessagesLabel } from "@/lib/usage-units";
 
 interface CommerceOffer {
@@ -33,6 +28,8 @@ interface CommerceOffer {
   /** Metered media the offer sells, in media cents (0 = none). */
   media_credits_amount?: number;
   description?: string | null;
+  /** No-card trial days on a paid plan (0/absent = none). */
+  trial_days?: number;
   /** Buyer-facing labels for a custom package; [] or absent = full
    * access (subscriptions) / pure extra usage (packs). */
   included?: string[];
@@ -58,11 +55,35 @@ interface CommerceOverview {
       topup_remaining: number;
     };
     included?: string[];
+    /** The plan held (paid, trialing, or Free) and plans already trialed. */
+    subscription_offer_id?: string | null;
+    trial_used_offer_ids?: string[];
   } | null;
   purchasable: boolean;
 }
 
-const ACTIVE_SUB = new Set(["active", "trialing"]);
+// Statuses that hold a plan; "free" is the agent's Free plan.
+const PLAN_STATUSES = new Set(["active", "trialing", "free"]);
+
+/** A plan priced at zero is the agent's Free plan: no checkout. */
+function isFreeOffer(offer: CommerceOffer): boolean {
+  return offer.kind === "subscription" && offer.amount_cents === 0;
+}
+
+// The Free plan renews like a paid one; a trial ends on its own date.
+function subscriptionLabel(status: string, periodEnd?: string | null): string {
+  const date = periodEnd ? new Date(periodEnd).toLocaleDateString() : null;
+  if (status === "trialing") {
+    return `Free trial${date ? ` · ends ${date}` : ""}`;
+  }
+  if (status === "free") {
+    return `Free plan${date ? ` · renews ${date}` : ""}`;
+  }
+  if (status === "active") {
+    return `Active${date ? ` · renews ${date}` : ""}`;
+  }
+  return "None";
+}
 
 const errorMessage = (e: unknown, fallback: string): string =>
   e instanceof Error ? e.message : fallback;
@@ -89,15 +110,38 @@ export function PlanUsageTab() {
       }
       setOverview((await r.json()) as CommerceOverview);
     } catch (e) {
-      setError(
-        errorMessage(e, "Plan information is temporarily unavailable."),
-      );
+      setError(errorMessage(e, "Plan information is temporarily unavailable."));
     }
   }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const startFree = async (offerId: string) => {
+    setBusyOfferId(offerId);
+    setError(null);
+    try {
+      const r = await authFetch("/api/v1/commerce/free-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offer_id: offerId }),
+      });
+      const body = (await r.json().catch(() => null)) as {
+        detail?: string;
+      } | null;
+      if (!r.ok) {
+        throw new Error(
+          body?.detail ?? "The Free plan is unavailable right now.",
+        );
+      }
+      await load();
+    } catch (e) {
+      setError(errorMessage(e, "The Free plan is unavailable right now."));
+    } finally {
+      setBusyOfferId(null);
+    }
+  };
 
   const buy = async (offerId: string) => {
     setBusyOfferId(offerId);
@@ -113,7 +157,11 @@ export function PlanUsageTab() {
         detail?: string;
       } | null;
       if (!r.ok || !body?.url) {
-        throw new Error(body?.detail ?? "Checkout is unavailable right now.");
+        throw new Error(
+          body?.detail === "plan_required"
+            ? "Packs add usage on top of a plan. Pick a plan first, the Free plan counts."
+            : (body?.detail ?? "Checkout is unavailable right now."),
+        );
       }
       window.location.assign(body.url);
     } catch (e) {
@@ -131,7 +179,10 @@ export function PlanUsageTab() {
   }
   if (overview === null) {
     return (
-      <p className="text-sm text-muted-foreground" data-testid="plan-tab-loading">
+      <p
+        className="text-sm text-muted-foreground"
+        data-testid="plan-tab-loading"
+      >
         Loading…
       </p>
     );
@@ -149,6 +200,11 @@ export function PlanUsageTab() {
     (o) => o.kind === "subscription",
   );
   const packs = overview.offers.filter((o) => o.kind === "token_pack");
+  const holdsPlan = PLAN_STATUSES.has(ent?.subscription_status ?? "none");
+  const currentPlanId = holdsPlan ? (ent?.subscription_offer_id ?? null) : null;
+  const trialsUsed = new Set(ent?.trial_used_offer_ids ?? []);
+  // Selling both, a pack tops up a plan: no plan, no pack.
+  const packsLocked = overview.mode === "subscription_plus_packs" && !holdsPlan;
 
   return (
     <div className="flex max-w-[680px] flex-col gap-6" data-testid="plan-tab">
@@ -166,23 +222,18 @@ export function PlanUsageTab() {
         <CardContent className="flex flex-col gap-2 text-sm">
           {ent === null ? (
             <p className="text-muted-foreground">
-              Purchases aren't available for this account — it was created
-              by the agent's operator, so your access is managed for you.
+              Purchases aren't available for this account — it was created by
+              the agent's operator, so your access is managed for you.
             </p>
           ) : (
             <>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Subscription</span>
                 <span className="shrink-0 text-right font-medium">
-                  {ACTIVE_SUB.has(ent.subscription_status)
-                    ? `Active${
-                        ent.current_period_end
-                          ? ` · renews ${new Date(
-                              ent.current_period_end,
-                            ).toLocaleDateString()}`
-                          : ""
-                      }`
-                    : "None"}
+                  {subscriptionLabel(
+                    ent.subscription_status,
+                    ent.current_period_end,
+                  )}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
@@ -253,8 +304,18 @@ export function PlanUsageTab() {
       {[
         // highlightFirst: the lead plan is the recommended one and gets
         // the brand beam; selection is a data flag, not display copy.
-        { label: "Plans", items: subscriptions, verb: "Subscribe", highlightFirst: true },
-        { label: "One-time packs", items: packs, verb: "Buy", highlightFirst: false },
+        {
+          label: "Plans",
+          items: subscriptions,
+          verb: "Subscribe",
+          highlightFirst: true,
+        },
+        {
+          label: "One-time packs",
+          items: packs,
+          verb: "Buy",
+          highlightFirst: false,
+        },
       ]
         .filter((s) => s.items.length > 0)
         .map((section) => (
@@ -262,6 +323,14 @@ export function PlanUsageTab() {
             <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
               {section.label}
             </p>
+            {section.items === packs && packsLocked ? (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="plan-tab-packs-need-plan"
+              >
+                Packs add usage on top of a plan. Pick a plan above first.
+              </p>
+            ) : null}
             {section.items.map((offer, offerIndex) => (
               <BrandBeam
                 key={offer.id}
@@ -313,17 +382,44 @@ export function PlanUsageTab() {
                     ) : null}
                   </div>
                   <span className="shrink-0 text-sm font-semibold tabular-nums">
-                    {formatPrice(offer.amount_cents, offer.currency)}
-                    {offer.kind === "subscription" && offer.billing_interval
+                    {isFreeOffer(offer)
+                      ? "Free"
+                      : formatPrice(offer.amount_cents, offer.currency)}
+                    {offer.kind === "subscription" &&
+                    offer.billing_interval &&
+                    !isFreeOffer(offer)
                       ? `/${offer.billing_interval}`
                       : ""}
                   </span>
                   <Button
                     size="sm"
-                    disabled={!overview.purchasable || busyOfferId !== null}
-                    onClick={() => void buy(offer.id)}
+                    data-testid={`plan-offer-cta-${offer.id}`}
+                    variant={offer.id === currentPlanId ? "outline" : "default"}
+                    disabled={
+                      !overview.purchasable ||
+                      busyOfferId !== null ||
+                      offer.id === currentPlanId ||
+                      (offer.kind === "token_pack" && packsLocked)
+                    }
+                    onClick={() =>
+                      void (isFreeOffer(offer)
+                        ? startFree(offer.id)
+                        : buy(offer.id))
+                    }
                   >
-                    {busyOfferId === offer.id ? "Redirecting…" : section.verb}
+                    {busyOfferId === offer.id
+                      ? isFreeOffer(offer)
+                        ? "Starting…"
+                        : "Redirecting…"
+                      : offer.id === currentPlanId
+                        ? "Your plan"
+                        : isFreeOffer(offer)
+                          ? "Start free"
+                          : offer.kind === "subscription" &&
+                              (offer.trial_days ?? 0) > 0 &&
+                              !trialsUsed.has(offer.id)
+                            ? `${offer.trial_days} days free`
+                            : section.verb}
                   </Button>
                 </div>
               </BrandBeam>

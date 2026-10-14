@@ -63,7 +63,10 @@ genuinely reachable. An explicitly denied tool is never approvable —
 ### AI disclosure (EU AI Act Art. 50)
 
 Per-agent disclosure is part of the agent policy
-(`policy.transparency`, levels `none|basic|enhanced|full`):
+(`policy.transparency`, levels `none|basic|enhanced|full`). The text is
+the block's own `text` when set, else the level's built-in copy in its
+`language` (`en`, `ro`, `hu`, `de`, `fr`, `it`, `es`; anything else is
+English):
 
 - the public `GET /v1/transparency` endpoint serves the per-agent
   config (query param or Host-subdomain resolution) with a

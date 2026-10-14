@@ -21,6 +21,11 @@ import sqlalchemy as sa
 
 from surogates.db.models import ProgramInvitationRow
 from surogates.followup.missed import alert_missed_checkins
+from surogates.programs.journey import (
+    advance_fallbacks,
+    finish_journeys,
+    pull_forward_for_new_zones,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,18 +90,25 @@ async def sweep_deadlines(session_factory: Any, *, now: datetime | None = None) 
         # report at all (the outbox row was lost, or the process died between
         # claiming and handing over): record the delivery failure so the
         # operator sees it, rather than leaving a row that looks in flight.
-        unreported = await db.execute(
-            sa.update(ProgramInvitationRow)
-            .where(ProgramInvitationRow.response_state == "awaiting_reply")
-            .where(ProgramInvitationRow.delivery_state == "queued")
-            .where(ProgramInvitationRow.deadline_at.isnot(None))
-            .where(ProgramInvitationRow.deadline_at <= now)
-            .values(
-                delivery_state="failed",
-                delivery_error="No delivery report by the deadline",
+        # A step the agent was woken to write and wrote nothing for (and did
+        # not skip) says so, apart from a send that was lost.
+        for woken, error in (
+            (True, "The agent wrote no message for this step"),
+            (False, "No delivery report by the deadline"),
+        ):
+            unreported = await db.execute(
+                sa.update(ProgramInvitationRow)
+                .where(ProgramInvitationRow.response_state == "awaiting_reply")
+                .where(ProgramInvitationRow.delivery_state == "queued")
+                .where(ProgramInvitationRow.deadline_at.isnot(None))
+                .where(ProgramInvitationRow.deadline_at <= now)
+                .where(
+                    ProgramInvitationRow.woken_at.isnot(None) if woken
+                    else ProgramInvitationRow.woken_at.is_(None)
+                )
+                .values(delivery_state="failed", delivery_error=error)
             )
-        )
-        swept += int(unreported.rowcount or 0)
+            swept += int(unreported.rowcount or 0)
 
         # Whatever the delivery failure was, an ``awaiting_reply`` that was
         # never delivered is not an open check-in.  Left as is it suppresses
@@ -156,13 +168,21 @@ class ProgramTicker:
             except Exception:
                 logger.exception("program ticker failed to reconcile from ops")
 
+        # Before the sweep: a step that did not arrive moves to its next
+        # channel rather than expiring as a non-reply.
+        for journey_pass in (advance_fallbacks, finish_journeys, pull_forward_for_new_zones):
+            try:
+                await journey_pass(self._sf, now=_utcnow())
+            except Exception:
+                logger.exception("program ticker failed to %s", journey_pass.__name__)
+
         # First, so the roster check below sees expired invitations as closed.
         try:
             await sweep_deadlines(self._sf, now=_utcnow())
         except Exception:
             logger.exception("program ticker failed to sweep deadlines")
         # Straight after the sweep: it is what turns silence into
-        # "no reply", and a streak of those is what the care team must hear.
+        # "no reply", and a streak of those is what the team must hear.
         try:
             await alert_missed_checkins(self._sf, now=_utcnow())
         except Exception:

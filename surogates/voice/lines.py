@@ -23,6 +23,7 @@ class Lines:
     unavailable: str  # the number has no agent
     busy: str  # every line is taken
     choices: str  # how an ask_user_question's choices are read out; {} is the list
+    acknowledge: str  # after an alert read out on an outbound call: how to confirm it was heard
 
 
 DEFAULTS: dict[str, Lines] = {
@@ -36,6 +37,7 @@ DEFAULTS: dict[str, Lines] = {
         unavailable="Acest număr nu este disponibil momentan.",
         busy="Toate liniile sunt ocupate. Vă rog să reveniți în câteva minute.",
         choices="Variante: {}.",
+        acknowledge="Vă rog să spuneți «da» sau să apăsați tasta 1 ca să confirmați.",
     ),
     "en": Lines(
         greeting="Hello! I'm the virtual assistant. How can I help you?",
@@ -47,6 +49,7 @@ DEFAULTS: dict[str, Lines] = {
         unavailable="This number is not available at the moment.",
         busy="All our lines are busy. Please call again in a few minutes.",
         choices="The options are: {}.",
+        acknowledge="Please say yes, or press 1, to confirm you got this.",
     ),
 }
 FALLBACK = "en"  # a language with no defaults: the owner's own lines, else English ones

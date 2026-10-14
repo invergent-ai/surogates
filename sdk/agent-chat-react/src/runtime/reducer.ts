@@ -81,6 +81,12 @@ export function applyAgentChatEvent(
     case "user.message":
     // A project coordinator's follow-up to its thread: shown as the thread reads it, its header saying whose it is.
     case "coordinator.message":
+      if (
+        event.type === "user.message" &&
+        PLATFORM_NOTES.has(stringValue(event.data.synthetic))
+      ) {
+        return nextState;
+      }
       // A new user message means the session is about to run a new turn.
       // Clear ``terminal`` so any out-of-order ``session.pause`` that
       // landed between the ``/messages`` route's RESUME and USER_MESSAGE
@@ -523,6 +529,11 @@ function typedBehindTheClear(
   }
   return messages.slice(first);
 }
+
+// What the platform writes into a conversation for the agent, never the
+// person's words: a journey step's context, the record of a message it sent
+// first. The person sees what the agent then writes, not these.
+const PLATFORM_NOTES = new Set(["checkin", "checkin_opener", "outreach_opener"]);
 
 function applyUserMessage(
   messages: AgentChatMessage[],

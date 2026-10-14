@@ -28,6 +28,14 @@ from surogates.config import load_settings
 from surogates.voice.agent import CallConfig, VoiceAgent
 from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
+from surogates.voice.outbound import (
+    LIVE_GRACE_SECONDS,
+    Outbound,
+    acknowledges,
+    alert_elsewhere,
+    dial_forever,
+    mark_live,
+)
 from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
 from surogates.voice.sessions import CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.text import asks_for_details
@@ -35,6 +43,7 @@ from surogates.voice.speech import Slot, build_stt, build_tts, phrase_scope, tur
 from surogates.voice.tts import PhraseCache, RoTTS
 
 log = logging.getLogger("surogates.voice")
+_pending: set[asyncio.Future] = set()
 NO_LINE = CallConfig().lines  # before a number's agent is known, its lines are too: the platform default
 
 
@@ -244,6 +253,9 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
+    outbound = Outbound.from_metadata(getattr(ctx.job, "metadata", None))  # a call we placed
+    if outbound is not None:
+        info = CallInfo(call_id=outbound.call_id, called=outbound.number, caller=outbound.to)
     call, tasks, tts, heard, slots, tenant, background = None, set(), None, None, None, None, None
     outcome = "completed"
     started = datetime.now(timezone.utc)
@@ -266,6 +278,12 @@ async def entrypoint(ctx: JobContext) -> None:
             task.cancel()
         await run_all(
             ("end the session", call and call.end()),
+            ("let the conversation be called again", call and outbound and mark_live(
+                rt.redis, call.session_id, LIVE_GRACE_SECONDS)),
+            # an urgent alert heard without a yes is not read: it goes on to the member's next channel
+            ("send an unacknowledged alert elsewhere", alert_elsewhere(
+                rt.sessions._sf, outbound.outbox_ids, why="answered without an acknowledgement",  # noqa: SLF001
+            ) if outbound is not None and outbound.kind == "alert" else None),
             ("report the call", call and report(outcome)),
             ("release the line", slots and slots.release(info.call_id)),
             ("stop the background", background and background.aclose()),
@@ -306,20 +324,32 @@ async def entrypoint(ctx: JobContext) -> None:
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
         await report("busy")
         return await apologize(ctx, tts, config.lines.busy, phrases)
+    greeting = config.lines.greeting
+    if outbound is not None:  # what the call was placed to say, and for an alert, how to confirm it
+        greeting = outbound.text + (f" {config.lines.acknowledge}" if outbound.kind == "alert" else "")
     try:
-        call = await rt.sessions.open_call(
-            CallTarget(org_id=org_id, agent_id=tenant["agent_id"],
-                       remember_callers=config.remember_callers),
-            call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.lines.greeting,
-            language=config.language, lines=config.lines)
+        if outbound is not None:
+            call = await rt.sessions.join_call(
+                UUID(outbound.session_id), call_id=info.call_id, callee=outbound.to, said=greeting,
+                language=config.language, lines=config.lines)
+            await mark_live(rt.redis, call.session_id, config.max_call_seconds + 60)
+        else:
+            call = await rt.sessions.open_call(
+                CallTarget(org_id=org_id, agent_id=tenant["agent_id"],
+                           remember_callers=config.remember_callers),
+                call_id=info.call_id, called=info.called, caller=info.caller, greeting=greeting,
+                language=config.language, lines=config.lines)
     except Exception:
         log.exception("could not open a session for call %s", info.call_id)
         await report("error")
         return await apologize(ctx, tts, config.lines.sorry, phrases)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
+    if outbound is not None and outbound.kind == "alert":
+        acknowledge_on(ctx, call, outbound, rt.sessions._sf)  # noqa: SLF001 — the worker's own factory
     try:  # how the call reads in Studio's session list; cosmetic, never worth failing a call over
-        await call.store.update_session_title_if_empty(call.session_id, f"Call from {call.caller}")
+        await call.store.update_session_title_if_empty(
+            call.session_id, f"Call to {outbound.to}" if outbound else f"Call from {call.caller}")
     except Exception:
         log.debug("could not title call %s", info.call_id, exc_info=True)
 
@@ -378,7 +408,10 @@ async def entrypoint(ctx: JobContext) -> None:
         await say_and_hang_up(ctx, session, config.lines.goodbye, phrases)
 
     await session.start(agent=agent, room=ctx.room)
-    fixed(session, phrases, config.lines.greeting)
+    if outbound is not None:
+        session.say(greeting)  # this call's own words: never cached as a phrase
+    else:
+        fixed(session, phrases, greeting)
 
     async def _background() -> None:  # alongside the greeting: a slow download never delays the call
         nonlocal background
@@ -386,6 +419,35 @@ async def entrypoint(ctx: JobContext) -> None:
 
     spawn(_background())
     spawn(time_limit())
+
+
+def acknowledge_on(ctx: JobContext, call: Any, outbound: Outbound, session_factory: Any) -> None:
+    """An alert call is read once the callee says yes or presses 1: the alert is marked read."""
+    from surogates.channels.outbound import record_status
+
+    done = False
+
+    async def acknowledge() -> None:
+        nonlocal done
+        if done:
+            return
+        done = True
+        for pid in outbound.provider_ids():
+            await record_status(session_factory, provider_message_id=pid, status="read")
+        log.info("call %s: alert acknowledged", outbound.call_id)
+
+    async def heard(text: str) -> None:
+        if acknowledges(text):
+            await acknowledge()
+
+    call.on_heard = heard
+
+    @ctx.room.on("sip_dtmf_received")
+    def _dtmf(ev) -> None:
+        if ev.digit == "1":
+            task = asyncio.ensure_future(acknowledge())
+            _pending.add(task)  # asyncio keeps only a weak reference to a running task
+            task.add_done_callback(_pending.discard)
 
 
 async def run_voice(settings: Any) -> None:
@@ -396,4 +458,10 @@ async def run_voice(settings: Any) -> None:
                          load_threshold=1.0,
                          load_fnc=lambda s: len(s.active_jobs) / max(vs.max_calls, 1))
     server.rtc_session(entrypoint, agent_name=vs.agent_name)
-    await server.run()
+    # Calls placed for steps and alerts; without LiveKit credentials there is nothing to dial with.
+    dialer = asyncio.create_task(dial_forever(settings)) if vs.outbound_calls and vs.livekit_api_key else None
+    try:
+        await server.run()
+    finally:
+        if dialer is not None:
+            dialer.cancel()

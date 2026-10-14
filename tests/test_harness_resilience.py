@@ -274,3 +274,20 @@ def test_a_policy_naming_the_old_escalation_tool_still_allows_it() -> None:
         {"require_approval": ["checkin_escalate"]},
     ).check("escalate", {})
     assert not needs_approval.allowed and needs_approval.overridable
+
+
+@pytest.mark.parametrize("old, new", [
+    ("care_team_overview", "team_overview"),
+    ("care_team_message_patient", "team_message_person"),
+    ("care_team_update_patient", "team_update_person"),
+    ("care_team_enroll_patient", "team_enroll_person"),
+])
+def test_the_old_team_tool_names_still_mean_the_new_tools(old, new) -> None:
+    from surogates.harness.sanitize import sanitize_response_message
+    from surogates.runtime.governance import build_governance_gate
+
+    assert not build_governance_gate({"denied_tools": [old]}).check(new, {}).allowed
+    assert build_governance_gate({"allowed_tools": [old]}).check(new, {}).allowed
+
+    message = {"role": "assistant", "tool_calls": [{"function": {"name": old, "arguments": "{}"}}]}
+    assert sanitize_response_message(message)["tool_calls"][0]["function"]["name"] == new

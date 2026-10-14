@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from enum import Enum
 from typing import Any, Awaitable, Callable
@@ -36,6 +37,8 @@ from uuid import UUID
 
 from sqlalchemy.exc import InterfaceError, OperationalError
 
+from surogates.channels.capabilities import capabilities_for
+from surogates.channels import person_link
 from surogates.channels.dedup import MessageDeduplicator
 from surogates.channels.constants import multi_session_disabled
 from surogates.channels.source import (
@@ -43,6 +46,7 @@ from surogates.channels.source import (
     build_session_key_for_config,
 )
 from surogates.followup import store as followup_store
+from surogates.followup.people import honour_stop
 from surogates.followup.outreach import deliver_pending
 from surogates.session.events import EventType
 
@@ -169,6 +173,15 @@ class InboundOutcome(str, Enum):
     session message was emitted or enqueued."""
 
 
+async def _keep_typing(deps: PipelineDeps, session_id: Any, msg: InboundMessage) -> None:
+    if deps.keep_typing is None:
+        return
+    try:
+        await deps.keep_typing(session_id, msg)
+    except Exception:
+        logger.warning("[channels] typing indicator failed — ignoring", exc_info=True)
+
+
 @lru_cache(maxsize=256)
 def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     """Compile a routing config's ``mention_patterns`` CSV into one regex.
@@ -230,6 +243,10 @@ _PendingInput = Callable[[Any], Awaitable[dict | None]]
 
 #: Async callable: (session_id, msg, text) -> None. Posts a nudge to the channel/thread.
 _InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[None]]
+
+#: Async callable: (session_id, msg) -> None. Shows the sender the agent is
+#: working on *msg* for as long as its turn runs; returns at once.
+_KeepTyping = Callable[[Any, "InboundMessage"], Awaitable[None]]
 
 #: Async callable: (agent_id) -> runtime-config payload dict (for the
 #: projected ``end_user_token_allowance``).
@@ -294,11 +311,15 @@ class PipelineDeps:
     # mode, so Mate constructs neither.
     pairing: Any = None
     pairing_sender: Any = None
+    # Privately asks the sender something with one-tap answers:
+    # ``async (msg, text, buttons) -> bool``.  A start link asks "Are you …?".
+    private_sender: Any = None
     backfill: _Backfill | None = None
     progress: _Progress | None = None
     attachments: _Attachments | None = None
     pending_input: _PendingInput | None = None
     input_nudge: _InputNudge | None = None
+    keep_typing: _KeepTyping | None = None
     # Per-user token allowance enforcement (a slice of the operator's
     # subscription). ``platform_client`` reserves against ops;
     # ``runtime_config`` resolves the agent's projected allowance. Both
@@ -306,6 +327,11 @@ class PipelineDeps:
     # behave exactly as before until this is wired.
     platform_client: Any = None
     runtime_config: _RuntimeConfig | None = None
+    # Re-activates an idle conversation once the plan gate lets the message
+    # through; ``get_or_create_session`` must then leave it idle
+    # (``resume=False``), or a refused message wakes the agent with nothing
+    # to answer.  ``None``: ``get_or_create_session`` revives it itself.
+    revive_session: Callable[[Any, Any], Awaitable[None]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +368,108 @@ def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
         "thread_id": msg.thread_key,
         "ts": msg.ts,
     }
+
+
+async def gate_turn(
+    *,
+    platform_client: Any,
+    runtime_payload: dict,
+    session_store: Any,
+    session_factory: Any,
+    session_id: Any,
+    org_id: Any,
+    agent_id: str,
+    user_id: Any,
+    content: str,
+    channel: str,
+    source: dict,
+) -> tuple[str, str] | None:
+    """Gate 7.5 for any channel: reserve this turn against the sender's plan.
+
+    ``None`` when the turn may run.  On a refusal (no plan, plan spent,
+    channel not in the package, the operator's plan spent) the message is
+    kept, marked held, so the conversation reads on from it once they have
+    access, and ``(code, notice)`` comes back: the notice in the business's
+    wording, for the caller to give the sender.  Raises
+    ``AllowanceReserveError`` when the allowance plane is unreachable
+    (callers fail closed).  The people the business brought in are never
+    refused: ops covers them (``followup_store.covered_by_business``).
+    """
+    from surogates.api.routes._commerce_turn import (
+        limit_notice,
+        limit_texts,
+        reserve_allowance,
+    )
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+
+    try:
+        await reserve_allowance(
+            platform_client=platform_client,
+            runtime_payload=runtime_payload,
+            session_store=session_store,
+            session_id=session_id,
+            agent_id=agent_id,
+            content=content,
+            end_user_id=str(user_id),
+            channel=channel,
+        )
+        return None
+    except AllowanceExhaustedError as exc:
+        logger.info("[channels] allowance gate blocked session %s (%s)", session_id, exc.detail)
+        code = exc.detail or "allowance_exhausted"
+    notice = limit_notice(
+        code, runtime_payload.get("commerce_buy_url"),
+        await limit_texts(session_factory, org_id=org_id, agent_id=agent_id),
+    )
+    # Kept, not dropped: nothing is enqueued, so no turn answers it before
+    # they have access (see _nothing_to_answer).
+    try:
+        await session_store.emit_event(
+            session_id,
+            EventType.USER_MESSAGE,
+            {
+                "content": content,
+                "source": source,
+                "held": code,
+                **build_principal_stamp(user_id=user_id, service_account_id=None),
+            },
+        )
+    except Exception:  # noqa: BLE001 — the refusal still stands
+        logger.warning(
+            "[channels] could not keep a refused message for %s", session_id, exc_info=True,
+        )
+    return code, notice
+
+
+async def _form_reply(msg, *, deps, agent_id, session_id, runtime_payload) -> str | None:
+    """A submitted WhatsApp Flow under its form's title and field labels.
+
+    Only for a ``flow_token`` this conversation sent; any other reply keeps
+    the adapter's plain ``key: value`` text.
+    """
+    from surogates.channels.whatsapp_flows import (
+        form_by_token_ref,
+        form_reply_text,
+        forms_from_payload,
+        sent_in_session,
+    )
+
+    source = msg.source or {}
+    try:
+        name = await sent_in_session(
+            deps.session_factory, session_id, str(source.get("flow_token") or ""),
+        )
+        if name is None:
+            return None
+        if runtime_payload is None and deps.runtime_config is not None:
+            runtime_payload = await deps.runtime_config(agent_id) or {}
+        form = form_by_token_ref(
+            forms_from_payload((runtime_payload or {}).get("whatsapp_forms")), name,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[channels] form reply lookup failed", exc_info=True)
+        return None
+    return form_reply_text(form or {"name": name}, source.get("flow_fields") or {})
 
 
 def build_principal_stamp(*, user_id=None, service_account_id=None) -> dict:
@@ -495,6 +623,40 @@ class ChannelInboundPipeline:
             await deps.state.mark_mentioned_thread(msg.thread_key)
 
         # ------------------------------------------------------------------
+        # Gate 4b: a start link made for a known person.  Its opener is first
+        # asked whether they are that person, and linked only on yes, before
+        # identity resolution, so the turn after is already theirs.  Neither
+        # the code nor the answer reaches the agent or the transcript.
+        # ------------------------------------------------------------------
+        code = person_link.start_code(msg.text) if msg.is_dm else None
+        if code is not None:
+            try:
+                asked = await person_link.start(
+                    deps.redis, deps.session_factory, code=code,
+                    org_id=routing.org_id, agent_id=routing.agent_id,
+                    platform=routing.platform, platform_user_id=msg.platform_user_id,
+                )
+                if asked is not None and deps.private_sender is not None:
+                    await deps.private_sender(msg, *asked)
+                    return InboundOutcome.PAIRING_PROMPTED
+            except Exception:  # noqa: BLE001 — a failed link must not drop the message
+                logger.warning("[inbound] start link failed", exc_info=True)
+            msg = replace(msg, text="/start")
+        elif msg.is_dm and routing.platform == "telegram" and deps.redis is not None:
+            try:
+                reply = await person_link.answer(
+                    deps.redis, deps.session_factory, org_id=routing.org_id,
+                    agent_id=routing.agent_id, platform=routing.platform,
+                    platform_user_id=msg.platform_user_id, display_name=msg.user_name,
+                    text=msg.text,
+                )
+                if reply is not None and deps.private_sender is not None:
+                    await deps.private_sender(msg, reply, [])
+                    return InboundOutcome.PAIRING_PROMPTED
+            except Exception:  # noqa: BLE001 — a failed link must not drop the message
+                logger.warning("[inbound] start link answer failed", exc_info=True)
+
+        # ------------------------------------------------------------------
         # Gate 5: Identity resolution.
         # ------------------------------------------------------------------
         # ``deps.resolve_identity`` is policy-aware (see the deps factory): in
@@ -596,6 +758,16 @@ class ChannelInboundPipeline:
             source=msg.source,
             fallback_id=session_key,
         )
+        # A followed person's own conversations and their contacts' share
+        # one record: the person's memory partition.
+        if deps.session_factory is not None and chat_type not in ("group", "channel"):
+            try:
+                memory_boundary = await followup_store.shared_memory_boundary(
+                    deps.session_factory, org_id=UUID(str(routing.org_id)),
+                    agent_id=routing.agent_id, user_id=identity.user_id,
+                ) or memory_boundary
+            except Exception:  # noqa: BLE001 — the conversation's own partition
+                logger.warning("[inbound] shared memory partition lookup failed", exc_info=True)
 
         session_id = await deps.get_or_create_session(
             deps.session_store,
@@ -639,9 +811,9 @@ class ChannelInboundPipeline:
                     platform_user_id=msg.platform_user_id,
                     channel_identifier=routing.identifier,
                 )
-                # Outreach is only ever queued on its platforms, so other
-                # channels have nothing held to look for.
-                if routing.platform in followup_store.OUTREACH_PLATFORMS:
+                # Outreach is only ever queued where we may write first, so
+                # other channels have nothing held to look for.
+                if capabilities_for(routing.platform).can_initiate:
                     await deliver_pending(
                         deps.session_factory,
                         deps.session_store,
@@ -651,6 +823,14 @@ class ChannelInboundPipeline:
                         platform=routing.platform,
                         channel_identifier=routing.identifier,
                         session_id=session_id,
+                    )
+                # "STOP" is honoured before the agent reads it: nothing more
+                # goes out on this channel whatever the agent then does.
+                if msg.is_dm:
+                    await honour_stop(
+                        deps.session_factory, org_id=_org, agent_id=routing.agent_id,
+                        user_id=identity.user_id, platform=routing.platform,
+                        platform_user_id=msg.platform_user_id, text=msg.text,
                     )
             except Exception:  # noqa: BLE001
                 # The person's own message must reach the agent whatever
@@ -710,6 +890,58 @@ class ChannelInboundPipeline:
                 )
                 runtime_payload = {}
 
+        # ------------------------------------------------------------------
+        # Gate 7.5: per-user token allowance (a slice of the operator's
+        # subscription). Reserve this turn against the sender's cap before
+        # anything speaks to the sender (the AI disclosure) or reads the
+        # message; a refusal (no plan, plan spent, operator plan spent)
+        # answers with a notice and keeps the message, held, unanswered.
+        # No-op unless ops projects a positive cap for this agent, so
+        # free/uncapped agents are unaffected; an unreachable allowance
+        # plane fails closed (a capped agent must not serve unmetered).
+        # ------------------------------------------------------------------
+        if (
+            identity.user_id is not None
+            and deps.platform_client is not None
+            and deps.runtime_config is not None
+        ):
+            from surogates.api.routes._commerce_turn import AllowanceReserveError
+
+            try:
+                refused = await gate_turn(
+                    platform_client=deps.platform_client,
+                    runtime_payload=runtime_payload or {},
+                    session_store=deps.session_store,
+                    session_factory=deps.session_factory,
+                    session_id=session_id, org_id=routing.org_id,
+                    agent_id=routing.agent_id, user_id=identity.user_id,
+                    content=msg.text or "", channel=routing.platform,
+                    source=build_message_source(
+                        msg, platform=routing.platform, chat_type=resolve_chat_type(msg),
+                    ),
+                )
+            except AllowanceReserveError:
+                logger.warning(
+                    "[channels] allowance plane unreachable — failing closed "
+                    "for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                return InboundOutcome.DROPPED
+            if refused is not None:
+                if deps.input_nudge is not None:
+                    try:
+                        await deps.input_nudge(session_id, msg, refused[1])
+                    except Exception:
+                        logger.warning(
+                            "[channels] allowance-limit notice failed",
+                            exc_info=True,
+                        )
+                return InboundOutcome.DROPPED
+
+        if deps.revive_session is not None:
+            await deps.revive_session(deps.session_store, session_id)
+
         # AI disclosure (EU AI Act Art. 50): on the first contact of a
         # conversation with a disclosure-enabled agent, the channel user
         # gets the notice as its own message before any agent output.
@@ -720,16 +952,19 @@ class ChannelInboundPipeline:
             runtime_payload=runtime_payload,
         )
 
-        # While a question is pending, the platforms diverge on what a plain
-        # reply means — see _intercept_pending_input.
+        # While a question is pending, a message is its answer or dismisses it
+        # — see _intercept_pending_input.
         if deps.pending_input is not None and routing.platform in (
             "slack", "telegram", "whatsapp",
         ):
-            intercepted = await self._intercept_pending_input(
+            intercepted, _unanswered = await self._intercept_pending_input(
                 msg, routing=routing, deps=deps, session_id=session_id,
+                sender_user_id=identity.user_id,
             )
             if intercepted is not None:
                 return intercepted
+        else:
+            _unanswered = None
 
         # Seed channel history on the first message of a Slack channel session
         # (lazy fallback for channels where the join event was missed). Best
@@ -778,6 +1013,7 @@ class ChannelInboundPipeline:
                 agent_id=routing.agent_id,
                 platform=routing.platform,
                 platform_user_id=msg.platform_user_id,
+                user_id=identity.user_id,
             )
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -785,17 +1021,26 @@ class ChannelInboundPipeline:
                 msg.platform_user_id, routing.agent_id, exc_info=True,
             )
 
+        if (msg.source or {}).get("flow_reply"):
+            _content = await _form_reply(
+                msg, deps=deps, agent_id=routing.agent_id, session_id=session_id,
+                runtime_payload=runtime_payload,
+            ) or _content
+
         # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.
         # ------------------------------------------------------------------
+        _source = build_message_source(msg, platform=routing.platform, chat_type=chat_type)
+        _source.pop("flow_token", None)
         event_data: dict = {
             "content": _content,
             "media_urls": msg.media_urls,
             "media_types": msg.media_types,
-            "source": build_message_source(
-                msg, platform=routing.platform, chat_type=chat_type,
-            ),
+            "source": _source,
         }
+        if _unanswered:
+            from surogates.tools.builtin.ask_user_question import DISMISSES_QUESTION
+            event_data[DISMISSES_QUESTION] = _unanswered
         if _images:
             event_data["images"] = _images
         if _attachments:
@@ -816,74 +1061,6 @@ class ChannelInboundPipeline:
         if _file_refs:
             event_data["source"]["files"] = _file_refs
 
-        # ------------------------------------------------------------------
-        # Gate 7.5: per-user token allowance (a slice of the operator's
-        # subscription). Reserve this turn against the sender's cap before
-        # emitting/enqueueing; an exhausted allowance (or subscription-
-        # required / operator plan spent) drops the message with a notice.
-        # No-op unless ops projects a positive cap for this agent, so
-        # free/uncapped agents are unaffected; an unreachable allowance
-        # plane fails closed (a capped agent must not serve unmetered).
-        # ------------------------------------------------------------------
-        if (
-            identity.user_id is not None
-            and deps.platform_client is not None
-            and deps.runtime_config is not None
-        ):
-            from surogates.api.routes._commerce_turn import (
-                AllowanceReserveError,
-                limit_notice,
-                reserve_allowance,
-            )
-            from surogates.runtime.platform_client import (
-                AllowanceExhaustedError,
-            )
-
-            # Resolved once above; an unresolvable config is ``{}``, which
-            # fails OPEN (do not gate) — only a fetched, capped payload
-            # should ever block a turn, and a cache blip must not drop
-            # every channel message.
-            try:
-                await reserve_allowance(
-                    platform_client=deps.platform_client,
-                    runtime_payload=runtime_payload,
-                    session_store=deps.session_store,
-                    session_id=session_id,
-                    agent_id=routing.agent_id,
-                    content=msg.text or "",
-                    end_user_id=str(identity.user_id),
-                    channel=routing.platform,
-                )
-            except AllowanceExhaustedError as exc:
-                logger.info(
-                    "[channels] allowance gate blocked session %s (%s)",
-                    session_id,
-                    exc.detail,
-                )
-                if deps.input_nudge is not None:
-                    try:
-                        await deps.input_nudge(
-                            session_id,
-                            msg,
-                            limit_notice(
-                                exc.detail,
-                                runtime_payload.get("commerce_buy_url"),
-                            ),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "[channels] allowance-limit notice failed",
-                            exc_info=True,
-                        )
-                return InboundOutcome.DROPPED
-            except AllowanceReserveError:
-                logger.warning(
-                    "[channels] allowance plane unreachable — failing closed "
-                    "for session %s",
-                    session_id,
-                    exc_info=True,
-                )
-                return InboundOutcome.DROPPED
 
         # ------------------------------------------------------------------
         # Check-in Programs: attach the reply and inject the instruction.
@@ -907,6 +1084,11 @@ class ChannelInboundPipeline:
         ):
             try:
                 from surogates.programs.inbound import attach_reply, get_occurrence
+                from surogates.programs.step_context import (
+                    REPLY,
+                    STEP_MARKER,
+                    step_context,
+                )
 
                 _occurrence = await get_occurrence(
                     deps.session_factory, _checkin_invitation.occurrence_id,
@@ -922,17 +1104,18 @@ class ChannelInboundPipeline:
                 )
                 await deps.session_store.emit_synthetic_user_message(
                     session_id,
-                    content=(
-                        f"[Check-in] Run the '{_skill_ref}' skill with this "
-                        "person now. Record the result with checkin_outcome "
-                        "when the check-in ends; use escalate if "
-                        "anything needs the care team's attention."
+                    content=await step_context(
+                        deps.session_factory, _checkin_invitation, event=REPLY,
+                        now=datetime.now(timezone.utc), session_id=session_id,
+                        writer_user_id=identity.user_id,
                     ),
-                    synthetic="checkin",
+                    synthetic=STEP_MARKER,
                     metadata={
                         "program_id": str(_checkin_invitation.program_id),
                         "occurrence_id": str(_checkin_invitation.occurrence_id),
+                        "invitation_id": str(_checkin_invitation.id),
                         "skill_ref": _skill_ref,
+                        "step_event": REPLY,
                     },
                 )
             except Exception:  # noqa: BLE001
@@ -961,6 +1144,8 @@ class ChannelInboundPipeline:
                     exc_info=True,
                 )
 
+        await _keep_typing(deps, session_id, msg)
+
         # ------------------------------------------------------------------
         # Gate 8: Enqueue for worker pickup.
         # ------------------------------------------------------------------
@@ -984,61 +1169,70 @@ class ChannelInboundPipeline:
         routing: Any,
         deps: PipelineDeps,
         session_id: Any,
-    ) -> InboundOutcome | None:
+        sender_user_id: Any,
+    ) -> tuple[InboundOutcome | None, str | None]:
         """Handle a message that arrives while ``ask_user_question`` waits.
 
-        The platforms diverge on what a plain reply means:
+        Only an answer is taken as one: text that names a choice (a tapped
+        button or list row comes back as its label), or any text when the
+        single question offers no choices.  A reply to several questions at
+        once cannot be split between them, so it goes on as the person's
+        message like anything else.  Anything else -- a photo of a discharge
+        letter, "can I stop the aspirin?" under a consent question, a Flow
+        form -- was being recorded as an "other" answer, its media dropped
+        and its question never seen by the agent.  It now goes on as the
+        person's message, with its media, and dismisses the question.
 
-        - Slack has a modal surface, so a plain in-thread reply is NOT the
-          answer — nudge toward the Answer button and suppress the turn so
-          it doesn't pile into a blocked worker.
-        - Telegram has no modal; a plain reply IS the answer — resolve the
-          durable pending record with it and ack.
+        A built-in command is never the answer either: it goes on as a
+        message, whose command dismisses the question.
 
-        A built-in command is never the answer, on any of them: it goes on
-        as a message, whose command dismisses the question, and its wake
-        runs it.
+        Only the person the question was asked of answers or dismisses it:
+        in a shared Slack thread anyone else's message goes on as a plain
+        message and leaves the question waiting for them.
 
-        Returns the outcome when the message was consumed, or ``None`` to
-        continue normal processing (no question pending, a command, or a
-        Telegram resolution lost the race against a button tap — the text is
-        then a real user message, not an answer, and must not vanish).
+        Returns ``(outcome, None)`` when the message was consumed as the
+        answer, ``(None, tool_call_id)`` when it goes on and dismisses that
+        question, and ``(None, None)`` otherwise (nothing pending, a command,
+        or an answer that lost the race against a button tap -- the text is
+        then a real user message and must not vanish).
         """
         from surogates.harness.slash_skill import names_builtin_command
 
         if names_builtin_command(msg.text):
-            return None
+            return None, None
         try:
             pending = await deps.pending_input(session_id)
         except Exception:
             logger.warning(
                 "[channels] pending input lookup failed - continuing", exc_info=True,
             )
-            return None
-        if not pending:
-            return None
-
-        async def _nudge(text: str) -> None:
-            if deps.input_nudge is None:
-                return
-            try:
-                await deps.input_nudge(session_id, msg, text)
-            except Exception:
-                logger.warning("[channels] pending input nudge failed", exc_info=True)
-
-        if routing.platform == "slack":
-            await _nudge(
-                "I'm waiting on your answer - tap *Answer* above, or use the web inbox."
-            )
-            return InboundOutcome.DROPPED
-
-        if not msg.text.strip():
-            return None
+            return None, None
+        asked = pending.get("user_id") if pending else None
+        if asked is None or str(asked) != str(sender_user_id):
+            return None, None
 
         from surogates.channels.platforms.telegram_interactive import (
             resolve_text_answer,
         )
-        from surogates.session.interactive_input import resolve_input_response
+        from surogates.session.interactive_input import (
+            match_choice_label,
+            resolve_input_response,
+        )
+
+        questions = pending.get("questions") or []
+        text = (msg.text or "").strip()
+        answers = (
+            bool(text)
+            and len(questions) == 1
+            and not getattr(msg, "files", None)
+            and not (msg.source or {}).get("flow_reply")
+            and all(
+                not q.get("choices") or match_choice_label(text, q["choices"])
+                for q in questions
+            )
+        )
+        if not answers:
+            return None, pending.get("tool_call_id") or None
 
         resolved = False
         try:
@@ -1046,17 +1240,16 @@ class ChannelInboundPipeline:
                 deps.session_store,
                 session_id=session_id,
                 tool_call_id=pending.get("tool_call_id", ""),
-                responses=resolve_text_answer(
-                    pending.get("questions") or [], msg.text,
-                ),
+                responses=resolve_text_answer(questions, text),
             )
         except Exception:
             logger.warning("[channels] pending input resolution failed", exc_info=True)
         if resolved:
             # No acknowledgement of our own: the agent's next message is the
             # reply, in the language it speaks with this person.
-            return InboundOutcome.DROPPED
-        return None
+            await _keep_typing(deps, session_id, msg)
+            return InboundOutcome.DROPPED, None
+        return None, None
 
     @staticmethod
     async def _maybe_send_disclosure(
@@ -1094,7 +1287,16 @@ class ChannelInboundPipeline:
             return
         try:
             session = await deps.session_store.get_session(session_id)
-            if getattr(session, "message_count", 0):
+            if getattr(session, "message_count", 0) and (
+                # Messages refused for want of a plan were kept, not answered:
+                # the person still meets the disclosure on their first turn.
+                not await deps.session_store.has_event(
+                    session_id, EventType.USER_MESSAGE, with_key="held",
+                )
+                or await deps.session_store.has_event(
+                    session_id, EventType.DISCLOSURE_PRESENTED,
+                )
+            ):
                 return
             await deps.input_nudge(session_id, msg, cfg["text"])
             await deps.session_store.emit_event(

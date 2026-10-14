@@ -29,11 +29,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.constants import INTERACTIVE_PROMPT_CHANNELS
+from surogates.channels.whatsapp_flows import BUTTON_CHARS, MAX_LIST_ROWS
 from surogates.harness.slash_skill import names_builtin_command
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
@@ -45,9 +48,14 @@ logger = logging.getLogger(__name__)
 # Schema limits ------------------------------------------------------------
 MAX_QUESTIONS = 5
 MAX_CHOICES_PER_QUESTION = 4
+#: A messaging app's list holds ten rows (WhatsApp's interactive list), so a
+#: channel conversation may offer that many; the web widget keeps four.
+MAX_CHANNEL_CHOICES_PER_QUESTION = MAX_LIST_ROWS
 MAX_PROMPT_LENGTH = 1000
 MAX_LABEL_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
+#: WhatsApp's cap on a list message's button text.
+MAX_BUTTON_LABEL_LENGTH = BUTTON_CHARS
 
 # Polling / lease renewal --------------------------------------------------
 _POLL_INTERVAL_SECONDS = 1.0
@@ -70,6 +78,20 @@ DISMISSED_BY_A_COMMAND = (
     "The user typed a command instead of answering, so the question was not answered. "
     "Ask it again if you still need the answer."
 )
+
+#: Why a question went unanswered when its person sent something else on a
+#: channel (a photo, another question).  The message itself reaches the model
+#: next, so the turn goes on with it.
+WROTE_SOMETHING_ELSE = "person_wrote_something_else"
+WROTE_SOMETHING_ELSE_DETAIL = (
+    "The person wrote a message instead of picking an answer; it follows, and it "
+    "may answer the question in their own words. Read it first, then ask again "
+    "only for what is still missing."
+)
+
+#: Set on a channel ``user.message`` to the ``tool_call_id`` of the question it
+#: did not answer.
+DISMISSES_QUESTION = "dismisses_question"
 
 
 ASK_USER_QUESTION_DESCRIPTION = (
@@ -145,6 +167,15 @@ ASK_USER_QUESTION_SCHEMA = {
                             "open-ended question."
                         ),
                     },
+                    "button_label": {
+                        "type": "string",
+                        "maxLength": MAX_BUTTON_LABEL_LENGTH,
+                        "description": (
+                            "Optional, in the user's language: the text of "
+                            "the button that opens the choice list on "
+                            "messaging apps that need one (WhatsApp)."
+                        ),
+                    },
                     "allow_other": {
                         "type": "boolean",
                         "description": (
@@ -161,6 +192,15 @@ ASK_USER_QUESTION_SCHEMA = {
                 "single batch.  Each is rendered as a tab in the widget."
             ),
         },
+        "message": {
+            "type": "string",
+            "description": (
+                "Optional: what you say to the person right before the "
+                "question, in their language (an acknowledgement, the "
+                "answer to what they just wrote).  Sent to them as is on "
+                "messaging apps.  Never your reasoning or plans."
+            ),
+        },
     },
     "required": ["questions"],
 }
@@ -175,7 +215,9 @@ class AskUserQuestionSchemaError(ValueError):
     """Raised when the LLM-supplied ``questions`` payload is invalid."""
 
 
-def _validate_questions(raw: Any) -> list[dict[str, Any]]:
+def _validate_questions(
+    raw: Any, *, max_choices: int = MAX_CHOICES_PER_QUESTION,
+) -> list[dict[str, Any]]:
     """Return a normalised list of questions, or raise :class:`AskUserQuestionSchemaError`."""
     if not isinstance(raw, list):
         raise AskUserQuestionSchemaError("`questions` must be an array of objects.")
@@ -203,10 +245,10 @@ def _validate_questions(raw: Any) -> list[dict[str, Any]]:
                 raise AskUserQuestionSchemaError(
                     f"questions[{i}].choices must be an array.",
                 )
-            if len(raw_choices) > MAX_CHOICES_PER_QUESTION:
+            if len(raw_choices) > max_choices:
                 raise AskUserQuestionSchemaError(
                     f"questions[{i}].choices supports at most "
-                    f"{MAX_CHOICES_PER_QUESTION} entries.",
+                    f"{max_choices} entries.",
                 )
             for j, c in enumerate(raw_choices):
                 if not isinstance(c, dict):
@@ -236,6 +278,9 @@ def _validate_questions(raw: Any) -> list[dict[str, Any]]:
         }
         if choices:
             item["choices"] = choices
+        button_label = q.get("button_label")
+        if isinstance(button_label, str) and button_label.strip():
+            item["button_label"] = button_label.strip()[:MAX_BUTTON_LABEL_LENGTH]
         normalised.append(item)
 
     return normalised
@@ -367,10 +412,12 @@ async def _wait_for_response(
                 types=[EventType.ASK_USER_QUESTION_RESPONSE, EventType.USER_MESSAGE],
             )
             commanded = False
+            wrote_else = False
             for event in events:
                 data = event.data or {}
                 if event.type == EventType.USER_MESSAGE.value:
                     commanded = commanded or (event.id > said and _typed_a_command(event))
+                    wrote_else = wrote_else or data.get(DISMISSES_QUESTION) == tool_call_id
                 elif data.get("tool_call_id") == tool_call_id:
                     responses = data.get("responses")
                     if isinstance(responses, list):
@@ -378,6 +425,8 @@ async def _wait_for_response(
                     return {"cancelled": True, "reason": "malformed_response"}
             if commanded:
                 return {"cancelled": True, "reason": DISMISSED}
+            if wrote_else:
+                return {"cancelled": True, "reason": WROTE_SOMETHING_ELSE}
             cursor = said = max([cursor, said, *(event.id for event in events)])
 
             # 2. Has the session been stopped?  Status is the authoritative
@@ -441,7 +490,9 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
     )
 
     try:
-        questions = _validate_questions(arguments.get("questions"))
+        questions = _validate_questions(
+            arguments.get("questions"), max_choices=max_choices(kwargs.get("channel")),
+        )
     except AskUserQuestionSchemaError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -452,6 +503,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
             "tool_call_id": str(tool_call_id),
             "questions": questions,
             "context": arguments.get("context", ""),
+            "message": str(arguments.get("message") or "").strip(),
         },
     )
 
@@ -488,6 +540,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
                 "cancelled": True,
                 "reason": reason,
                 **({"detail": DISMISSED_BY_A_COMMAND} if reason == DISMISSED else {}),
+                **({"detail": WROTE_SOMETHING_ELSE_DETAIL} if reason == WROTE_SOMETHING_ELSE else {}),
                 "questions_asked": questions,
             },
             ensure_ascii=False,
@@ -501,6 +554,33 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
         },
         ensure_ascii=False,
     )
+
+
+def max_choices(channel: str | None) -> int:
+    """How many choices one question may offer in a conversation on *channel*."""
+    return (
+        MAX_CHANNEL_CHOICES_PER_QUESTION if channel in INTERACTIVE_PROMPT_CHANNELS
+        else MAX_CHOICES_PER_QUESTION
+    )
+
+
+def widen_for_channel(schema: dict[str, Any], channel: str | None) -> dict[str, Any]:
+    """*schema* allowing as many choices as *channel* takes.  Not mutated."""
+    if max_choices(channel) == MAX_CHOICES_PER_QUESTION:
+        return schema
+    schema = copy.deepcopy(schema)
+    function = schema["function"]
+    choices = function["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]
+    choices["maxItems"] = MAX_CHANNEL_CHOICES_PER_QUESTION
+    choices["description"] = (
+        f"Up to {MAX_CHANNEL_CHOICES_PER_QUESTION} labeled options; with more "
+        "than 3, or with descriptions, they show as a list to pick from. Omit "
+        "for an open-ended question."
+    )
+    function["description"] = function["description"].replace(
+        "up to 4 labeled options", f"up to {MAX_CHANNEL_CHOICES_PER_QUESTION} labeled options",
+    )
+    return schema
 
 
 def register(registry: ToolRegistry) -> None:
