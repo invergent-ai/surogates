@@ -1,7 +1,7 @@
 // The guest image's delivery: the arch its manifest names, the install record's base, and the download,
 // served by a local HTTP server as the install's base would serve it.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync,
@@ -12,9 +12,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { deliver, ImageDelivery, imageArchOf, type ImageManifest, installBase } from "../src/vm/image.js";
+import { vhdFooter } from "../src/vm/vhd.js";
+import { importedOn } from "./platforms.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const KEY = "a".repeat(64);
@@ -54,8 +56,9 @@ beforeEach(async () => {
   served = new Map();
   heard = [];
   answer = ranged;
-  // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away.
-  rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300_000)]);
+  // A disk with a run of zeros, which the unpack leaves as a hole, and data either side that does not compress away: in
+  // whole sectors, as a disk is.
+  rootfs = Buffer.concat([randomBytes(4096), Buffer.alloc(16 * 1024 * 1024), randomBytes(300 * 1024)]);
   kernel = randomBytes(200_000);
   initrd = randomBytes(50_000);
   manifest = { key: KEY, arch: "amd64", files: [publish("rootfs.img", rootfs), publish("vmlinuz", kernel), publish("initrd", initrd)] };
@@ -396,6 +399,83 @@ describe("the guest image's delivery", () => {
     };
     await expect(deliver({ ...options(), signal: stop.signal })).rejects.toThrow("the app quit");
     expect(statSync(join(images(), `${KEY}.partial`, "rootfs.img.zst.partial")).size).toBe(100_000);
+  });
+});
+
+// The image module as *platform*'s app imports it. Its unpack's clean spawn is Node's own here: on Windows the app's is
+// surogate-helper.exe's, and on macOS surogate-spawn's, neither of which this computer has.
+async function deliveryOn(platform: NodeJS.Platform): Promise<typeof import("../src/vm/image.js")> {
+  vi.doMock("../src/clean-child.js", () => ({ spawnClean: (program: string, args: string[], options: Parameters<typeof spawn>[2]) => spawn(program, args, options) }));
+  try {
+    return await importedOn(platform, () => import("../src/vm/image.js"));
+  } finally {
+    vi.doUnmock("../src/clean-child.js");
+  }
+}
+
+describe("the guest image's delivery on Windows, where Hyper-V opens a disk only as a VHD", () => {
+  // The image as Windows attaches it: its bytes, as the manifest hashes them, then their fixed VHD footer.
+  const footed = () => Buffer.concat([rootfs, vhdFooter(rootfs.length, sha256(rootfs))]);
+
+  it("gives the image its footer once its hash is checked, and the kernel and the initrd none, and keeps it sparse", async () => {
+    const { deliver: delivered, ImageDelivery: Delivery } = await deliveryOn("win32");
+    const folder = await delivered(options());
+    expect(readFileSync(join(folder, "rootfs.img")).equals(footed())).toBe(true);
+    expect(readFileSync(join(folder, "vmlinuz")).equals(kernel)).toBe(true);
+    expect(readFileSync(join(folder, "initrd")).equals(initrd)).toBe(true);
+    expect(statSync(join(folder, "rootfs.img")).blocks * 512).toBeLessThan(rootfs.length / 2);
+    // Whole by its sizes, the footer's counted: asked again, nothing is fetched, and a delivery is ready at once.
+    heard = [];
+    expect(await delivered(options())).toBe(folder);
+    expect(heard).toEqual([]);
+    expect(new Delivery(delivering()).state).toEqual({ state: "ready", folder });
+  });
+
+  it("gives no other OS's image a footer", async () => {
+    for (const platform of ["linux", "darwin"] as const) {
+      rmSync(images(), { recursive: true, force: true });
+      const folder = await (await deliveryOn(platform)).deliver(options());
+      expect(readFileSync(join(folder, "rootfs.img")).equals(rootfs), platform).toBe(true);
+    }
+  });
+
+  it("takes the image a crash left unpacked with its footer, and unpacks again one left without", async () => {
+    const { deliver: delivered } = await deliveryOn("win32");
+    const work = join(images(), `${KEY}.partial`);
+    for (const [left, fetched] of [[footed(), []], [rootfs, [`/desktop/vm/${KEY}/rootfs.img.zst`]]] as const) {
+      rmSync(images(), { recursive: true, force: true });
+      mkdirSync(work, { recursive: true });
+      writeFileSync(join(work, "rootfs.img"), left);
+      heard = [];
+      const folder = await delivered(options());
+      expect(readFileSync(join(folder, "rootfs.img")).equals(footed())).toBe(true);
+      expect(heard.map(({ url }) => url).filter((url) => url.includes("rootfs"))).toEqual(fetched);
+    }
+  });
+
+  it("checks the image by its bytes before the footer when asked, and the footer by them, and delivers it again once either differs", async () => {
+    const { ImageDelivery: Delivery } = await deliveryOn("win32");
+    const delivery = new Delivery(delivering());
+    delivery.start();
+    await delivery.wait(new AbortController().signal);
+    const disk = join(delivery.folder, "rootfs.img");
+    heard = [];
+    delivery.start(true);
+    await delivery.wait(new AbortController().signal);
+    expect(delivery.state).toEqual({ state: "ready", folder: delivery.folder });
+    expect(heard).toEqual([]);
+    // A bit flipped in the footer's id, and then in the disk's bytes, each at the same size.
+    for (const at of [rootfs.length + 70, 100]) {
+      const flipped = footed();
+      flipped[at]! ^= 1;
+      writeFileSync(disk, flipped);
+      heard = [];
+      delivery.start(true);
+      await delivery.wait(new AbortController().signal);
+      expect(delivery.state.state).toBe("ready");
+      expect(readFileSync(disk).equals(footed()), String(at)).toBe(true);
+      expect(heard.map(({ url }) => url), String(at)).toContain(`/desktop/vm/${KEY}/rootfs.img.zst`);
+    }
   });
 });
 

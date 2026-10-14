@@ -4,7 +4,9 @@
 // stops, or that nothing comes for, is resumed from its .partial file. Each file is on
 // disk before its rename, and the image's folder is renamed into place only once every
 // file in it is checked; its last step is its completion mark, so a folder with that
-// mark and its files' sizes is a whole image, and one without is downloaded again.
+// mark and its files' sizes is a whole image, and one without is downloaded again. On Windows, the
+// image's disk is a fixed VHD: its footer is given once its hash is checked, and every later check of
+// it reads its bytes before the footer, which the manifest hashes, and the footer by them.
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, type Stats, writeFileSync } from "node:fs";
 import { open, statfs } from "node:fs/promises";
@@ -12,6 +14,8 @@ import { open, statfs } from "node:fs/promises";
 import { spawnClean } from "../clean-child.js";
 import { download, type DownloadOptions, hashOf, sizeOf } from "../download.js";
 import { dirname, join } from "../host-path.js";
+import { forThisOs } from "../platform.js";
+import { addFooter, endsInFooter, FOOTER_SIZE } from "./vhd.js";
 
 // Each file the image has, as the manifest names it: unpacked, and as downloaded.
 export interface ImageFile {
@@ -39,6 +43,11 @@ const HASH = /^[0-9a-f]{64}$/;
 // boot without it, and download it with the image, which is one for every OS of its arch.
 const NAMES = ["initrd", "rootfs.img", "vmlinuz"];
 const size = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+// The files the VM attaches as disks where its hypervisor opens a disk only as a VHD: Hyper-V's, on Windows. Each is
+// the manifest's bytes, then their footer (vhd.ts). The release ships them raw, for every OS.
+const VHDS: readonly string[] = forThisOs({ win32: ["rootfs.img"] }) ?? [];
+// *file*'s size in the image's folder: with its footer, where it has one.
+const held = (file: ImageFile) => file.size + (VHDS.includes(file.name) ? FOOTER_SIZE : 0);
 
 /** This computer's own image arch, by Node's name for its arch (*arch*), or null for one no image is built for. */
 export function imageArch(arch: NodeJS.Architecture = process.arch): ImageArch | null {
@@ -178,16 +187,18 @@ function allocated(folder: string): number {
   }
 }
 
-// Whether *folder* is the whole image: its last step there, and each file at its manifest's size.
+// Whether *folder* is the whole image: its last step there, and each file at its manifest's size, and its footer's.
 function whole(folder: string, manifest: ImageManifest): boolean {
-  return existsSync(join(folder, COMPLETE)) && manifest.files.every((file) => sizeOf(join(folder, file.name)) === file.size);
+  return existsSync(join(folder, COMPLETE)) && manifest.files.every((file) => sizeOf(join(folder, file.name)) === held(file));
 }
 
-// Whether each of *folder*'s files has its manifest's size and sha256.
+// Whether each of *folder*'s files has its manifest's size and sha256, over its bytes before any footer, and
+// whether that footer is theirs.
 async function intact(folder: string, manifest: ImageManifest): Promise<boolean> {
   for (const file of manifest.files) {
     const path = join(folder, file.name);
-    if (sizeOf(path) !== file.size || (await hashOf(path)).digest("hex") !== file.sha256) return false;
+    if (sizeOf(path) !== held(file) || (await hashOf(path, file.size)).digest("hex") !== file.sha256) return false;
+    if (VHDS.includes(file.name) && !(await endsInFooter(path, file.sha256))) return false;
   }
   return true;
 }
@@ -206,11 +217,12 @@ export async function deliver(options: DeliverOptions): Promise<string> {
   const work = `${folder}.partial`;
   mkdirSync(work, { recursive: true, mode: 0o700 });
   // What is there is taken only as a regular file, never through a link, and an unpacked file only at
-  // its manifest's size. What an unpack killed partway left is never taken, and holds disk the delivery needs.
+  // its manifest's size, with its footer where it has one. What an unpack killed partway left is never
+  // taken, and holds disk the delivery needs.
   for (const name of readdirSync(work)) if (!lstatSync(join(work, name)).isFile()) rmSync(join(work, name), { recursive: true, force: true });
   for (const file of manifest.files) {
     rmSync(`${join(work, file.name)}.partial`, { force: true });
-    if (sizeOf(join(work, file.name)) !== file.size) rmSync(join(work, file.name), { force: true });
+    if (sizeOf(join(work, file.name)) !== held(file)) rmSync(join(work, file.name), { force: true });
   }
   const total = manifest.files.reduce((sum, file) => sum + file.downloadSize, 0);
   // What is here already: a file unpacked, a download whole or in part.
@@ -258,8 +270,9 @@ export async function deliver(options: DeliverOptions): Promise<string> {
   return folder;
 }
 
-// The downloaded *from*, unpacked by zstd into *to*, sparse, and checked by its hash. zstd, run by
-// its path, is given nothing of the app's environment, and ends at *signal*, as at the app's quit.
+// The downloaded *from*, unpacked by zstd into *to*, sparse, and checked by its hash; then a disk that
+// is a VHD here given its footer. zstd, run by its path, is given nothing of the app's environment,
+// and ends at *signal*, as at the app's quit.
 async function unpack(from: string, to: string, file: ImageFile, signal?: AbortSignal): Promise<void> {
   const partial = `${to}.partial`;
   const said = await new Promise<string | null>((resolve) => {
@@ -284,6 +297,7 @@ async function unpack(from: string, to: string, file: ImageFile, signal?: AbortS
     rmSync(from, { force: true });
     throw new Error(`${file.name} was not the file the app expects`);
   }
+  if (VHDS.includes(file.name)) await addFooter(partial, file.sha256);
   await settle(partial, to);
 }
 
