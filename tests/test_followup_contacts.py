@@ -552,3 +552,23 @@ async def test_handling_escalations_is_a_permission(sf, clinic):
         await db.commit()
     result = await team.handle_team_escalation({"action": "claim"}, **_kw(sf, nurse_session))
     assert result.startswith("Refused") and "take or resolve escalations" in result
+
+
+@pytest.mark.asyncio
+async def test_resolving_from_chat_closes_the_inbox_item_too(sf, clinic):
+    from surogates.db.models import InboxItem
+
+    _doctor, doctor_session, _ = clinic
+    inbox_sa = uuid.uuid4()
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=inbox_sa)
+    _ion, session = await _user(sf, "Ion Popescu", "40711111111")
+    await followup.handle_escalate({"reason": "febră"}, **_kw(sf, session))
+    [item] = await _all(sf, InboxItem)
+    assert item.status == "pending"
+
+    result = await team.handle_team_escalation(
+        {"action": "resolve"}, **_kw(sf, doctor_session),
+    )
+    assert "resolved" in result, result
+    [item] = await _all(sf, InboxItem)
+    assert item.status == "acknowledged" and item.responded_at is not None

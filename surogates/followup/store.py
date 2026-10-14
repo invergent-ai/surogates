@@ -25,6 +25,7 @@ from surogates.db.models import (
     FollowupContactRow,
     FollowupEnrollmentRow,
     FollowupSettingsRow,
+    InboxItem,
     OutreachMessageRow,
     ProgramScheduleRow,
     Session as SessionRow,
@@ -1055,11 +1056,39 @@ async def resolve_escalation(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
     escalation_id: uuid.UUID, resolved: bool = True,
 ) -> EscalationRow | None:
-    """Mark it dealt with, or open it again with ``resolved=False``."""
-    return await _escalation(
+    """Mark it dealt with, or open it again with ``resolved=False``.  Dealt
+    with, it also leaves the Inbox (see :func:`close_escalation_inbox_items`),
+    whoever resolved it, in Studio or in chat."""
+    row = await _escalation(
         session_factory, org_id, agent_id, escalation_id,
         resolved_at=_utcnow() if resolved else None,
     )
+    if row is not None and resolved:
+        await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+    return row
+
+
+async def close_escalation_inbox_items(
+    session_factory: Any, *, org_id: uuid.UUID, escalation_id: uuid.UUID,
+) -> int:
+    """Close the Inbox items an escalation raised, now that it is resolved.
+
+    Acknowledged, not responded: responding to an action posts a message into
+    the conversation, and an escalation's conversation is the person's own.
+    The item names its escalation as ``escalation:<step or ->:<id hex>``.
+    """
+    now = _utcnow()
+    async with session_factory() as db:
+        result = await db.execute(
+            sa.update(InboxItem)
+            .where(InboxItem.org_id == org_id)
+            .where(InboxItem.status == "pending")
+            .where(InboxItem.payload["escalation"].as_string().like(f"%:{escalation_id.hex}"))
+            .values(status="acknowledged", responded_at=now, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    return int(result.rowcount or 0)
 
 
 # ---------------------------------------------------------------------------

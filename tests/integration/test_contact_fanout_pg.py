@@ -115,3 +115,39 @@ async def test_a_step_reaches_the_person_and_each_contact_and_one_answer_closes_
         since=SLOT - timedelta(days=1),
     ))[schedule.program_id]
     assert (f["invited"], f["replied"], f["skipped"]) == (2, 1, 1)
+
+
+async def test_resolving_an_escalation_closes_its_inbox_item_on_postgres(sf):
+    from surogates.db.models import Event, InboxItem, ServiceAccount, Session as SessionRow
+
+    user_id, session_id, sa_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    escalation_id = await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=None, kind="alert", reason="x",
+    )
+    async with sf() as db:
+        db.add(User(id=user_id, org_id=ORG, email=f"{user_id}@x", display_name="P"))
+        db.add(ServiceAccount(id=sa_id, org_id=ORG, name="inbox", token_hash="h", token_prefix="p"))
+        db.add(SessionRow(id=session_id, org_id=ORG, agent_id=AGENT, channel="web", user_id=user_id))
+        await db.flush()
+        event = Event(session_id=session_id, org_id=ORG, type="followup.escalation", data={})
+        db.add(event)
+        await db.flush()
+        for key in (f"escalation:-:{escalation_id.hex}", "escalation:-:other"):
+            db.add(InboxItem(org_id=ORG, service_account_id=sa_id, session_id=session_id,
+                             source_event_id=event.id if key.endswith(escalation_id.hex) else
+                             (await _event(db, session_id)), kind="action_required",
+                             title="t", payload={"escalation": key}))
+        await db.commit()
+    await store.resolve_escalation(sf, org_id=ORG, agent_id=AGENT, escalation_id=escalation_id)
+    async with sf() as db:
+        states = {i.payload["escalation"]: i.status for i in (await db.execute(sa.select(InboxItem))).scalars()}
+    assert states == {f"escalation:-:{escalation_id.hex}": "acknowledged", "escalation:-:other": "pending"}
+
+
+async def _event(db, session_id):
+    from surogates.db.models import Event
+
+    event = Event(session_id=session_id, org_id=ORG, type="followup.escalation", data={})
+    db.add(event)
+    await db.flush()
+    return event.id
