@@ -28,6 +28,7 @@ class OpenDocument:
     id: UUID
     doc_key: str
     path: str
+    location: str
     session_ids: tuple[UUID, ...]
     base_version: str | None
     editors: tuple[str, ...]
@@ -42,6 +43,7 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
         id=row.id,
         doc_key=row.doc_key,
         path=row.path,
+        location=row.location,
         session_ids=tuple(UUID(str(value)) for value in row.session_ids),
         base_version=row.base_version,
         editors=tuple(str(value) for value in row.editors),

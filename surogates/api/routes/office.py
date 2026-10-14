@@ -24,16 +24,17 @@ from surogates.api.routes.workspace import (
 )
 from surogates.api.session_guards import is_scheduled_run_session, require_device_access
 from surogates.db.models import User
-from surogates.devices.binding import device_of
+from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
 from surogates.office import sessions as office_sessions
+from surogates.office.agent import location_of
 from surogates.office.chats import live_session
 from surogates.office.editor_config import build_editor_config
+from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session
 from surogates.office.kinds import office_kind
 from surogates.office.tokens import InvalidOfficeToken, read_document_server_body, read_url_token
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
-from surogates.tools.workspace_io import StorageWorkspaceIO
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +71,20 @@ async def get_workspace_editor(
         request, store, session_id, tenant, path=path, change=True,
     )
     await require_device_access(request, session, tenant)
-    if device_of(session.config) is not None:
-        raise HTTPException(status_code=409, detail="Documents in a folder on a computer cannot be opened in the editor yet.")
     user_id, user_name = await _acting_user(request, tenant)
-    async with workspace_files(request, session) as files:
-        if not isinstance(files, StorageWorkspaceIO):
+    target = await _document_session(request, session)
+    async with workspace_files(request, target) as files:
+        if not isinstance(files, DOCUMENT_FILES):
             raise HTTPException(status_code=409, detail="This workspace cannot be opened in the editor yet.")
-        key = await files.resolve(path)
-        if await files.stat(key) is None:
+        stat = await files.stat(await files.resolve(path))
+        if stat is None:
             raise HTTPException(status_code=404, detail=f"File not found: {path}")
-        location = files.location(key)
+        if isinstance(files, DeviceWorkspaceIO) and stat.size > MAX_READ_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{path} is over 50 MiB, the most a document on a computer can be to open in the editor.",
+            )
+    location = location_of(target, path)
     document = await _open_document(request, location=location, path=path, session_id=session.id, user=(user_id, user_name))
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
@@ -132,9 +137,9 @@ async def get_office_file(token: str, request: Request) -> Response:
     # Its key's session has ended: a fresh open would start from bytes about to be replaced.
     if (document.pending_save or {}).get("close"):
         raise HTTPException(status_code=409, detail="The document is still being saved; try again in a moment.")
-    session = await _live_session(request, document)
-    async with workspace_files(request, session) as files:
-        if not isinstance(files, StorageWorkspaceIO):
+    target = await _document_session(request, await _live_session(request, document))
+    async with workspace_files(request, target) as files:
+        if not isinstance(files, DOCUMENT_FILES):
             raise HTTPException(status_code=409, detail="This workspace cannot be opened in the editor yet.")
         key = await files.resolve(document.path)
         for _ in range(3):  # a version that matches the bytes served
@@ -197,6 +202,7 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
         logger.warning("could not download the save of %s (key %s)", document.path, document.doc_key, exc_info=True)
         raise HTTPException(status_code=502, detail="Could not download the saved document.") from None
     session = await _live_session(request, document)
+    # A chat on a computer keeps its bucket stamp: the pending area is the editor's, outside every chat's files.
     bucket = session.config["storage_bucket"]
     key = f"{PENDING_PREFIX}{document.doc_key}/{uuid4().hex}"
     storage = request.app.state.storage
@@ -277,6 +283,15 @@ async def _live_session(request: Request, document: office_sessions.OpenDocument
     if session is None:
         raise HTTPException(status_code=404, detail="The document's chat is gone.")
     return session
+
+
+async def _document_session(request: Request, session: Any) -> Any:
+    """The session whose files hold *session*'s documents: a project thread on a computer reaches the real folder
+    through its master."""
+    try:
+        return await document_session(session, session_factory=request.app.state.session_factory)
+    except FolderNotReady as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
 
 async def _announce(request: Request, document: office_sessions.OpenDocument, event_type: EventType, data: dict[str, Any]) -> None:

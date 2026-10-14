@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 from uuid import UUID
 
@@ -21,6 +22,7 @@ from surogates.office.tokens import read_url_token, sign
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import session_workspace_key
 from surogates.tenant.auth.jwt import create_access_token
+from tests.device_computer import computer_io
 
 from .conftest import create_org, create_user, issue_service_account_token
 
@@ -198,28 +200,90 @@ async def test_a_closing_document_that_lands_during_the_wait_opens_fresh(client,
     assert response.json()["config"]["document"]["key"] != first["config"]["document"]["key"]
 
 
-async def test_computer_folder_chats(client, app, session_factory, monkeypatch):
-    """Hidden from the org's other members, as every workspace route hides them; refused to their own user."""
+FOLDER = "/home/me/notes"
+
+
+async def _computer_chat(client, app, session_factory, monkeypatch, files, *, config=None):
+    """A chat on a folder of the user's computer, whose files a fake computer answers; the sessions asked for, kept."""
     _, headers, user_id, chat = await _user_chat(client, app, session_factory)
+    device_id = str(uuid.uuid4())
     store = SessionStore(session_factory)
     device_chat = await store.create_session(
         user_id=user_id, org_id=chat.org_id, agent_id=chat.agent_id,
-        config={"storage_bucket": chat.config["storage_bucket"],
-                "execution": {"kind": "device", "device_id": str(uuid.uuid4())}},
+        config={"storage_bucket": chat.config["storage_bucket"], "workspace_path": FOLDER,
+                "execution": {"kind": "device", "device_id": device_id, "device_name": "Mac"}, **(config or {})},
     )
-    url = f"/v1/sessions/{device_chat.id}/workspace/editor"
-    other = await create_user(session_factory, chat.org_id)
-    other_token = create_access_token(chat.org_id, other, {"sessions:read", "sessions:write", "tools:read"})
-    hidden = await client.get(url, params={"path": "a.docx"}, headers={"Authorization": f"Bearer {other_token}"})
-    assert hidden.status_code == 404
+    computer = computer_io(FOLDER, files, device_id=device_id)
+    asked: list = []
+
+    @asynccontextmanager
+    async def fake_session_files(session, **kwargs):
+        asked.append(session)
+        yield computer
 
     async def bound(_db, _root):
         return Binding("bound")
 
+    monkeypatch.setattr("surogates.api.routes.workspace.session_files", fake_session_files)
     monkeypatch.setattr("surogates.api.session_guards.binding_of", bound)
-    refused = await client.get(url, params={"path": "a.docx"}, headers=headers)
-    assert refused.status_code == 409
-    assert "folder on a computer" in refused.json()["detail"]
+    return headers, user_id, device_chat, computer, asked
+
+
+async def test_computer_folder_chats_are_hidden_from_other_members(client, app, session_factory, monkeypatch):
+    _, user_id, device_chat, _, _ = await _computer_chat(client, app, session_factory, monkeypatch, {})
+    other = await create_user(session_factory, device_chat.org_id)
+    other_token = create_access_token(device_chat.org_id, other, {"sessions:read", "sessions:write", "tools:read"})
+    hidden = await client.get(f"/v1/sessions/{device_chat.id}/workspace/editor", params={"path": "a.docx"},
+                              headers={"Authorization": f"Bearer {other_token}"})
+    assert hidden.status_code == 404
+
+
+async def test_a_document_on_the_computer_opens_and_is_fetched_from_it(client, app, session_factory, monkeypatch):
+    headers, _, device_chat, computer, _ = await _computer_chat(
+        client, app, session_factory, monkeypatch, {"docs/Plan.docx": b"PK-on-the-mac"},
+    )
+    response = await client.get(f"/v1/sessions/{device_chat.id}/workspace/editor",
+                                params={"path": "docs/Plan.docx"}, headers=headers)
+    assert response.status_code == 200, response.text
+    config = response.json()["config"]
+    document = await office_sessions.get_open(session_factory, _row_id(config))
+    device_id = device_chat.config["execution"]["device_id"]
+    assert document.location == f"device:{device_id}:{FOLDER}/docs/Plan.docx"
+    fetched = await client.get(f"/v1/office/files/{config['document']['url'].rsplit('/', 1)[1]}")
+    assert fetched.status_code == 200 and fetched.content == b"PK-on-the-mac"
+    assert (await office_sessions.get_open(session_factory, document.id)).base_version == computer.runner.files[f"{FOLDER}/docs/Plan.docx"][1]
+
+
+async def test_a_document_over_the_computers_cap_is_refused(client, app, session_factory, monkeypatch):
+    headers, _, device_chat, _, _ = await _computer_chat(client, app, session_factory, monkeypatch, {"big.docx": b"12345"})
+    monkeypatch.setattr("surogates.api.routes.office.MAX_READ_BYTES", 4)
+    response = await client.get(f"/v1/sessions/{device_chat.id}/workspace/editor",
+                                params={"path": "big.docx"}, headers=headers)
+    assert response.status_code == 413
+    assert "50 MiB" in response.json()["detail"]
+
+
+async def test_a_project_thread_on_the_computer_opens_the_real_file(client, app, session_factory, monkeypatch):
+    project_id = uuid.uuid4()
+    headers, user_id, master, computer, asked = await _computer_chat(
+        client, app, session_factory, monkeypatch, {"a.docx": b"real"},
+        config={"workspace_boundary": f"workstream:{project_id}"},
+    )
+    thread = await SessionStore(session_factory).create_session(
+        user_id=user_id, org_id=master.org_id, agent_id=master.agent_id,
+        config={**master.config, "execution": {**master.config["execution"], "history": {"thread": str(uuid.uuid4())}}},
+    )
+
+    async def master_of(_factory, pid):
+        assert pid == project_id
+        return master
+
+    monkeypatch.setattr("surogates.office.files._master_of", master_of)
+    response = await client.get(f"/v1/sessions/{thread.id}/workspace/editor", params={"path": "a.docx"}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert [session.id for session in asked] == [master.id]
+    document = await office_sessions.get_open(session_factory, _row_id(response.json()["config"]))
+    assert document.location == f"device:{master.config['execution']['device_id']}:{FOLDER}/a.docx"
 
 
 async def test_scheduled_run_opens_read_only(client, app, session_factory):
