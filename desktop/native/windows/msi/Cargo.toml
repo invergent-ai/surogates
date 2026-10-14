@@ -1,6 +1,6 @@
 [package]
 name = "msi"
-description = "surogate_msi.dll: the MSI's own custom actions, which take back its folders of ProgramData and turn on Windows's Virtual Machine Platform"
+description = "surogate_msi.dll: the MSI's own custom actions, which take back its folders of ProgramData, remove them at a full uninstall, and turn on Windows's Virtual Machine Platform"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -11,6 +11,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [target.'cfg(windows)'.dependencies]
+owners.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_DataExchange", "Win32_System_SystemInformation", "Win32_System_Threading",

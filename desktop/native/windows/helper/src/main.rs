@@ -1,6 +1,6 @@
 //! surogate-helper <command>: one answer a run, on stdout, and its words on stderr where it has none. It runs as the
 //! user who starts it, never elevated, reads no environment and no file of the caller's but the program `verify` or `version` is
-//! given, and starts no program but the one `spawn` is given. The app's TypeScript reads each answer (src/shell/ca-source-win32.ts,
+//! given, and starts no program but the one `spawn` is given, and, for `update`, surogate-admin.exe and the app. The app's TypeScript reads each answer (src/shell/ca-source-win32.ts,
 //! src/browser/processes-win32.ts, src/browser/known-win32.ts), and starts every program that is not its own through
 //! `spawn` (src/clean-child.ts).
 //!
@@ -16,6 +16,13 @@
 //!                     the program, by its whole path, holding the helper's first <keep> + 1 descriptors and nothing
 //!                     else of its caller's, in the helper's place: its output is the program's, and the helper ends as
 //!                     it ends, taking it along if killed first (spawn.rs, windows/spawn.rs)
+//!   update --app-pid <pid> --staged <folder> --version <x.y.z>
+//!                     the update staged in <folder> installed by surogate-admin.exe, once Windows's prompt has an
+//!                     administrator's approval: "approved", a line, as the app is to quit; its exit code the apply's,
+//!                     1223 where none approved; then the app started again (update.rs, windows/update.rs)
+//!   remove --app-pid <pid> [--forget <folder>]…
+//!                     the app uninstalled by surogate-admin.exe, the same way; then each <folder>, this user's,
+//!                     removed once the uninstall ended well
 //!
 //! A Windows-subsystem program: started by an app that has no console, as the installed app started from the Start
 //! menu has none, it gives Windows no reason to make one (Microsoft, "Creation of a Console": a console process gets a
@@ -25,13 +32,20 @@
 use std::ffi::OsString;
 use std::io::Write;
 
-const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path> | version <path> | spawn <keep> <program> <args>…";
+const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path> | version <path> | spawn <keep> <program> <args>… | update --app-pid <pid> --staged <folder> --version <x.y.z> | remove --app-pid <pid> [--forget <folder>]…";
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     // A program in the helper's place says nothing of the helper's: its output is the program's own.
     if args.first().and_then(|first| first.to_str()) == Some("spawn") {
         spawn(&args[1..]);
+    }
+    // An update and a removal say their one line midway, and end as the admin program ends.
+    if args.first().and_then(|first| first.to_str()) == Some("update") {
+        std::process::exit(update(&args[1..]));
+    }
+    if args.first().and_then(|first| first.to_str()) == Some("remove") {
+        std::process::exit(remove(&args[1..]));
     }
     let (code, out, words) = match run(&args) {
         Answer::Said(text) => (0, text, None),
@@ -91,6 +105,36 @@ fn run(args: &[OsString]) -> Answer {
 #[cfg(not(windows))]
 fn run(_args: &[OsString]) -> Answer {
     Answer::Failed("surogate-helper answers on Windows alone".to_string())
+}
+
+fn update(args: &[OsString]) -> i32 {
+    let Some(update) = surogate_helper::update::parsed(args) else {
+        let _ = writeln!(std::io::stderr().lock(), "{USAGE}");
+        return 2;
+    };
+    #[cfg(windows)]
+    return surogate_helper::windows::update::run(&update);
+    #[cfg(not(windows))]
+    {
+        let _ = update;
+        let _ = writeln!(std::io::stderr().lock(), "surogate-helper updates on Windows alone");
+        1
+    }
+}
+
+fn remove(args: &[OsString]) -> i32 {
+    let Some(removal) = surogate_helper::update::removal(args) else {
+        let _ = writeln!(std::io::stderr().lock(), "{USAGE}");
+        return 2;
+    };
+    #[cfg(windows)]
+    return surogate_helper::windows::update::remove(&removal);
+    #[cfg(not(windows))]
+    {
+        let _ = removal;
+        let _ = writeln!(std::io::stderr().lock(), "surogate-helper removes on Windows alone");
+        1
+    }
 }
 
 fn spawn(args: &[OsString]) -> ! {

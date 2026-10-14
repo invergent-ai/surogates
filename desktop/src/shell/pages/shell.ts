@@ -78,6 +78,7 @@ interface State {
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
+  uninstall: boolean; // whether the installed app can remove itself from this computer, as Windows's can
   unreachable: string | null;
   notice: string | null;
   copying: string | null; // while threads' copies of their folders are being made, what the sidebar says of them
@@ -94,6 +95,7 @@ interface Shell {
   signIn(): Promise<void>;
   signOut(): Promise<void>;
   remove(): Promise<void>;
+  uninstall(): Promise<void>;
   restore(): Promise<void>;
   go(path: string): Promise<void>;
   projects(): Promise<void>;
@@ -580,6 +582,8 @@ function draw(state: State): void {
   for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
     row.hidden = !state.links.includes(row.dataset.link ?? "");
   }
+  // Removing the app itself is an installed app's, where its OS's install can be removed from inside it.
+  byId("user-menu").querySelector<HTMLElement>('[data-action="uninstall"]')!.hidden = !state.uninstall;
   // Devices is the web client's Settings tab, which only an agent with local folders has.
   byId("user-menu").querySelector<HTMLElement>('[data-action="devices"]')!.hidden = state.agent?.desktopSessions !== true;
   // The divider under Plans and billing goes with it: no two dividers meet.
@@ -771,6 +775,7 @@ for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-actio
     else if (action === "devices") void shell.go("/settings?tab=devices");
     else if (action === "logout") void shell.signOut();
     else if (action === "remove") void shell.remove();
+    else if (action === "uninstall") void shell.uninstall();
     else if (row.dataset.link) void shell.link(action);
   });
 }

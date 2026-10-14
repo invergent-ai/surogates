@@ -371,3 +371,50 @@ test\win32\dev-app.ps1 -Remove
 - Pass: the app quits (where a thread is working, it asks first: answer it), and the script says it removed the shortcut.
 - Pass: Task Manager › Startup apps no longer lists it; the Start menu has no "Surogate Dev"; `surogate://open?url=<the agent's address>` from the Run box starts nothing.
 - **Send back:** the script's output, and what Startup apps listed in 8.6.
+
+## 9. Updates and removal, by hand
+
+These need Windows's own UAC prompt, a person to answer it, and an installed release to update from: the runner installs
+an update through `surogate-admin.exe` as its administrator, and never shows the prompt. Use two MSIs of this branch's
+layout, an older and a newer, signed as the release signs them, and a base that serves the newer one (the release's,
+or a test server's whose `release-keys` the older install lists).
+
+### 9.1 An update, as an administrator
+
+1. Install the older MSI (double-click it, and approve UAC's prompt). Start Surogate from the Start menu, and sign in.
+2. Wait for "Update available", or restart the app. Click **Restart to update**.
+3. Pass: Windows's prompt names Surogate's own program and its publisher. Approve it. The app quits, and within a
+   minute starts again, at the newer version (Help › About), without a prompt of its own and not elevated: in Task
+   Manager's Details tab, add the Elevated column; it says No for every Surogate.exe.
+4. Pass: `%ProgramData%\Surogate\apply\` holds one folder, the newer version's.
+- **Send back:** the version before and after, the Elevated column, and `%SystemRoot%\Temp\surogate-update-<version>.log`
+  if anything failed.
+
+### 9.2 An update, as a standard user
+
+1. With the older MSI installed again, sign in to Windows as a standard user, start Surogate, and click **Restart to
+   update**.
+2. Pass: Windows asks for an administrator's name and password. Click No. The app stays, and its line says "An
+   administrator needs to install this update.", with **Install as an administrator…**.
+3. Click it, and give an administrator's password. Pass: as 9.1's step 3.
+- **Send back:** each line the app showed.
+
+### 9.3 An older app over a newer one's data
+
+1. With the newer version installed and started once, run the older MSI as an administrator (it is allowed to replace
+   the newer), then start Surogate.
+2. Pass: the app does not start; it says "This Surogate is older than the data it would open" and names the newer
+   version to install. Nothing in `%LOCALAPPDATA%\Surogate` changed (compare its folders' dates).
+3. Install the newer MSI again. Pass: the app starts, signed in as before.
+- **Send back:** the dialog's words.
+
+### 9.4 Remove Surogate from This Computer
+
+1. As a standard user: open the menu under your name, choose **Remove Surogate from This Computer…**, tick "Also delete
+   your Surogate data", and click Remove. At Windows's prompt, click No.
+2. Pass: the app stays, and says "An administrator needs to remove Surogate.". Nothing is removed.
+3. Again, giving an administrator's password. Pass: the app quits; Settings › Apps no longer lists Surogate;
+   `%ProgramFiles%\Surogate`, `%ProgramData%\Surogate` and this user's `%LOCALAPPDATA%\Surogate` are gone; a chat's
+   folder you used is as it was; another user's `%LOCALAPPDATA%\Surogate` is as it was; Task Manager › Startup apps no
+   longer lists Surogate.
+- **Send back:** what each step showed, and `%SystemRoot%\Temp\surogate-remove.log` if anything failed.
