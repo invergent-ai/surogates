@@ -128,6 +128,11 @@ async def reserve_commerce(
             email=buyer.get("email"),
             name=buyer.get("name"),
             channel=channel,
+            end_user_id=(
+                str(session.user_id)
+                if getattr(session, "user_id", None) is not None
+                else None
+            ),
         )
     except CommercePaymentRequiredError:
         raise
@@ -435,6 +440,8 @@ LIMIT_TEXTS = {
         "A subscription is required to keep chatting with this assistant."
     ),
     "plan_channel_notice": "Your current plan doesn't include this channel.",
+    "plan_free_notice": "Choose a plan to keep chatting with this assistant; there is a free one.",
+    "plan_free_link": "Start free here: {link}",
     "plan_upgrade_notice": (
         "You have used this month's free allowance. Upgrade to keep chatting."
     ),
@@ -470,6 +477,10 @@ def limit_notice(
         lead = say("plan_channel_notice")
     elif code == "upgrade_required":
         lead = say("plan_upgrade_notice")
+    elif code == "free_plan_available":
+        if buy_url:
+            return f"{say('plan_free_notice')} {say('plan_free_link', link=buy_url)}"
+        lead = say("plan_free_notice")
     else:
         lead = say("plan_limit_notice")
     if buy_url:

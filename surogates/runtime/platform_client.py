@@ -421,8 +421,12 @@ class PlatformClient:
         email: str | None = None,
         name: str | None = None,
         channel: str | None = None,
+        end_user_id: str | None = None,
     ) -> dict:
         """Reserve tokens for one end-user turn on a monetized agent.
+
+        ``end_user_id`` lets ops recognise people the business brought in
+        (its team, followed people, their contacts), who never need a plan.
 
         Returns the reservation receipt
         ``{entitlement_id, reserved_tokens, reservation_id}`` (all-zero
@@ -443,6 +447,8 @@ class PlatformClient:
             body["name"] = name
         if channel is not None:
             body["channel"] = channel
+        if end_user_id is not None:
+            body["end_user_id"] = end_user_id
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/commerce/authorize",
             json=body,

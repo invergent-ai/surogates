@@ -81,6 +81,8 @@ const PAYWALL_LEADS: Record<string, string> = {
   subscription_required:
     "A subscription is required to keep chatting with this assistant.",
   channel_not_included: "Your current plan doesn't include this channel.",
+  free_plan_available:
+    "Choose a plan to keep chatting with this assistant; there is a free one.",
   upgrade_required:
     "You have used this month's free allowance. Upgrade to keep chatting.",
   operator_subscription_exhausted:

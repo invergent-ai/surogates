@@ -30,3 +30,10 @@ def test_broken_business_wording_falls_back() -> None:
     assert limit_notice("upgrade_required", "https://b", {"plan_link": "{nope}"}).endswith(
         "Get more access here: https://b",
     )
+
+
+def test_stranger_is_offered_the_free_plan_with_the_link() -> None:
+    assert limit_notice("free_plan_available", "https://buy/x") == (
+        "Choose a plan to keep chatting with this assistant; there is a free one. "
+        "Start free here: https://buy/x"
+    )
