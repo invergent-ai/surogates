@@ -2312,6 +2312,23 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(resolved).toEqual({ ok: folder });
   });
 
+  it("takes the folder from a chat's host as soon as the operation it was running ends", { timeout: 90_000 }, async () => {
+    const folder = changed();
+    const executor = threads({ idleMs: 60_000, landWaitMs: 10_000 });
+    // The chat on the folder itself runs a search that answers only once it is stopped: its host holds the folder, busy.
+    const stop = new AbortController();
+    const searching = executor.run(op("ripgrep", { key: folder, mode: "files", pattern: NEVER, glob: null, context: 0 }, CHAT), stop.signal);
+    await until(() => sleeping() === 1);
+    // A landing waits for the folder: its host has started.
+    const before = spawned.length;
+    const landing = executor.land(step("revisions", { paths: [] }), signal());
+    await until(() => spawned.length > before);
+    stop.abort();
+    expect(await searching).toEqual(CANCELLED);
+    // The chat's host lets the folder go once its search has ended: the landing has it within its wait, not after the chat's minute.
+    expect(await landing).toEqual({ ok: { revisions: [] } });
+  });
+
   it("leaves beside its name what a program holding the user's file open wrote into it after a landing replaced it, as the landing is forgotten, and tells it", { timeout: 90_000 }, async () => {
     const folder = changed();
     const executor = threads();

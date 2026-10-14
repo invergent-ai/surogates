@@ -1042,7 +1042,7 @@ class Host {
   // that nothing of the folder is left aside.
   private readonly landSteps = new Set<string>();
   private putBackOk = false;
-  // A landing waits for the folder this host holds: it lets it go as soon as nothing of it runs, not idleMs after.
+  // A landing waits for this host's folder: it lets it go as soon as nothing of it runs, not idleMs after.
   private yielding = false;
 
   constructor(
