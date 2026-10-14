@@ -1,15 +1,17 @@
 // How long the x64 guest takes from surogate-vm.exe's start to the agent's hello on this PC, booted directly by HCS's
 // LinuxKernelDirect with the image's bzImage and Hyper-V's initrd, three SCSI disks, the console on COM1, and the
-// protected-names rule attached, and where that time goes. Median of three, each of a data folder of its own, so each
-// makes its sessions disk as the app's first boot does; the target is under 1.5 s (Linux, under KVM: 650 to 752 ms).
-// A boot that fails is written down with the rest, and the boots after it are still made: one refused while the last
-// one's VM was still being ended is asked again. One boot more, with the measurements' agent disk, has its init write
-// the guest's uptime as the agent starts and as the rule's outcome lands, then the kernel's own log once the agent has
-// said hello, its waits and milestones, each line with its time since the kernel's start (probe.sh). Every boot's
-// timeline (harness.ts) has surogate-vm.exe's start, its lines, the boot line, the console's first byte and each of its
-// lines, and the hello, or why it failed; and how long the image's copy took to reach the disk before the first.
+// protected-names rule attached, and where that time goes. The first boot makes the sessions disk (vm/init's mke2fs),
+// as only the app's first boot does; the three after it find the disk there and check it, as every later boot does,
+// and their median is the target's: under 1.5 s (Linux, under KVM: 650 to 752 ms). A boot that fails is written down
+// with the rest, and the boots after it are still made: one refused while the last one's VM was still being ended is
+// asked again. One later boot more, with the measurements' agent disk, has its init write the guest's uptime as the
+// agent starts and as the rule's outcome lands, then the kernel's own log once the agent has said hello, its waits and
+// milestones, each line with its time since the kernel's start (probe.sh). Every boot's timeline (harness.ts) has
+// surogate-vm.exe's start, its lines, the boot line, the console's first byte and each of its lines, and the hello, or
+// why it failed; and how long the image's copy took to reach the disk before the first.
 //   npx vitest run -c test/vm/win32/measure/vitest.config.ts boot
-// PASS or FAIL: every boot reaches hello, in under 1.5 s at the median, and the rule attached at every boot.
+// PASS or FAIL: every boot reaches hello, the later ones in under 1.5 s at the median, and the rule attached at every
+// boot.
 
 import { readFileSync } from "node:fs";
 
@@ -35,16 +37,16 @@ interface Booted {
   timeline: Timeline;
 }
 
-// A boot of the new data folder *name*, and the time to its hello, or to its failure. One the service refuses while
-// the last one's VM is still being ended is asked again every second, for a minute at most. *logged*: the console's
-// kernel log is waited for after the hello, before the guest is stopped.
-async function boot(name: string, extra: Partial<VmOptions> = {}, logged = false): Promise<Booted> {
+// A boot of the data folder "boot", new for the first (*fresh*), and the time to its hello, or to its failure. One the
+// service refuses while the last one's VM is still being ended is asked again every second, for a minute at most.
+// *logged*: the console's kernel log is waited for after the hello, before the guest is stopped.
+async function boot(extra: Partial<VmOptions>, { fresh = false, logged = false } = {}): Promise<Booted> {
   const asked = performance.now();
   for (;;) {
     const begun = performance.now();
     const waited = Math.round(begun - asked);
     try {
-      const booted = await lab(name, extra);
+      const booted = await lab("boot", extra, undefined, { fresh });
       const took = ms(begun);
       if (logged) {
         const by = performance.now() + LOG_MS;
@@ -136,20 +138,24 @@ const said = ({ ms: took, failed, waited, timeline }: Booted) => ({
 });
 
 it("boots the x64 guest to its hello through HCS, with its initrd, and says where the time goes", async () => {
-  const boots: Booted[] = [];
-  for (let n = 0; n < 3; n += 1) boots.push(await boot(`boot-${n}`));
-  const logged = await boot("boot-logged", { agentDisk: PROBING_DISK }, true);
-  const times = boots.filter(({ failed }) => failed === undefined).map(({ ms: took }) => took);
+  const first = await boot({}, { fresh: true });
+  const later: Booted[] = [];
+  for (let n = 0; n < 3; n += 1) later.push(await boot({}));
+  const logged = await boot({ agentDisk: PROBING_DISK }, { logged: true });
+  const boots = [first, ...later];
+  const times = later.filter(({ failed }) => failed === undefined).map(({ ms: took }) => took);
+  const toHello = ({ ms: took, failed: why }: Booted) => (why === undefined ? took : `failed after ${took}`);
   const failed = record("boot", {
     "the image's copy, made by this measurement, on disk before the first boot, ms": IMAGE_FLUSH_MS ?? "copied before this measurement",
-    "boot to hello, ms": boots.map(({ ms: took, failed: why }) => (why === undefined ? took : `failed after ${took}`)),
+    "the first boot to hello, ms, the sessions disk made": toHello(first),
+    "each later boot to hello, ms, the sessions disk there": later.map(toHello),
     "median, ms": median(times),
     "each boot": boots.map(said),
     "the boot with the kernel's log": said(logged),
     "where the kernel's boot went": kernelTimes(logged.timeline),
   }, {
-    "every boot reaches hello": boots.every(({ failed: why }) => why === undefined),
-    "the image boots to hello in under 1.5 s at the median": times.length > 0 && median(times) < 1_500,
+    "every boot reaches hello": [...boots, logged].every(({ failed: why }) => why === undefined),
+    "the later boots reach hello in under 1.5 s at the median": times.length === later.length && median(times) < 1_500,
     "the protected-names rule attached at every boot": boots.every(({ attached }) => attached),
   });
   expect(failed).toEqual([]);

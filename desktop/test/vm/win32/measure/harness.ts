@@ -222,10 +222,13 @@ function tail(path: string, lines = 60): string {
   }
 }
 
-/** The guest booted for measurement *name*, its own folder in the data folder new; *extra* goes into its options. */
-export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?: Egress): Promise<Lab> {
+/**
+ * The guest booted for measurement *name*, its own folder in the data folder new, or with *fresh* false the last boot's
+ * of that name, its sessions disk kept, as every boot after the app's first finds it; *extra* goes into its options.
+ */
+export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?: Egress, { fresh = true } = {}): Promise<Lab> {
   const data = join(DATA, name);
-  rmSync(data, { recursive: true, force: true });
+  if (fresh) rmSync(data, { recursive: true, force: true });
   mkdirSync(join(data, "logs"), { recursive: true });
   mkdirSync(join(data, "run"), { recursive: true });
   const options: VmOptions = {
@@ -234,6 +237,8 @@ export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?:
     run: join(data, "run", "vm-measure"), user: USER, program: PROGRAM, data: DATA, ...extra,
   };
   mkdirSync(options.run, { recursive: true });
+  // The last boot's console goes first, so that what is read is this boot's alone.
+  rmSync(options.console, { force: true });
   const begun = performance.now();
   const at = () => Math.round((performance.now() - begun) * 10) / 10;
   const timeline: Timeline = { begun: new Date().toISOString(), events: [], console: [] };
