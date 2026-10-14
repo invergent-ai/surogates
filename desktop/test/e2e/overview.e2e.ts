@@ -506,6 +506,25 @@ describe("the Overview pane", () => {
     expect(await page.getAttribute("#overview", "aria-pressed")).toBe("false");
     expect(await page.evaluate(() => document.activeElement?.id)).toBe("overview");
   });
+
+  it("is a project's alone: a chat of no project has neither the pane nor its button, and the project has both again", async () => {
+    const { page, client } = await opened();
+    expect(await page.isVisible("#panel")).toBe(true);
+    const plain = "7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918";
+    await client.evaluate((path) => {
+      location.href = path;
+    }, `/chat/${plain}`).catch(() => {});
+    await expect.poll(() => page.textContent("#title")).toBe(new URL(origin).host);
+    await expect.poll(() => page.isVisible("#panel")).toBe(false);
+    expect(await page.isVisible("#overview")).toBe(false);
+    // The centre takes the pane's column: the web client reaches the window's right edge.
+    expect(await page.evaluate(() => Math.round(document.querySelector("#hole")!.getBoundingClientRect().right))).toBe(
+      await page.evaluate(() => window.innerWidth),
+    );
+    await page.click(`#projects [data-project="${REPORT}"] .project`);
+    await expect.poll(() => page.isVisible("#panel")).toBe(true);
+    expect(await page.isVisible("#overview")).toBe(true);
+  });
 });
 
 describe("a thread read in the Overview pane", () => {
