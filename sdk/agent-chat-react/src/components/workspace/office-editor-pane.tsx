@@ -24,7 +24,7 @@ function saveNotice(notice: AgentChatOfficeEvent): string | null {
 	if (notice.type === "office.save_waiting") {
 		return notice.reason === "offline"
 			? `Saving to ${computer} once it is back online.`
-			: `Saving to ${computer}: waiting for it to allow the save.`;
+			: `Saving to ${computer}… If it asks, allow the save there.`;
 	}
 	if (notice.reason === "declined") {
 		return `${notice.computer ?? "Your computer"} declined the save. Your changes are still here; the next save asks again.`;

@@ -172,7 +172,7 @@ describe("save notices in the editor pane", () => {
 
   it.each([
     [{ type: "office.save_waiting", eventId: 13, computer: "Mac", reason: "offline" }, "Saving to Mac once it is back online."],
-    [{ type: "office.save_waiting", eventId: 13, computer: "Mac", reason: "waiting" }, "Saving to Mac: waiting for it to allow the save."],
+    [{ type: "office.save_waiting", eventId: 13, computer: "Mac", reason: "waiting" }, "Saving to Mac… If it asks, allow the save there."],
     [{ type: "office.save_failed", eventId: 13, computer: "Mac", reason: "declined" },
       "Mac declined the save. Your changes are still here; the next save asks again."],
   ] as const)("says where a save on the computer is: %o", async (officeEvent, said) => {
