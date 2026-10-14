@@ -76,11 +76,10 @@ function Get-PeSignature([string] $Path) {
   $cms
 }
 
-# The digest algorithms of a program's signature and of its RFC 3161 timestamp, or why it has none.
-function Get-PeDigests([string] $Path) {
-  $cms = Get-PeSignature $Path
-  if (-not $cms) { return 'no signature' }
-  $signer = $cms.SignerInfos[0]
+# The digest algorithms of a program's signature, *cms*, and of its RFC 3161 timestamp, or why it has none.
+function Get-PeDigests($Cms) {
+  if (-not $Cms) { return 'no signature' }
+  $signer = $Cms.SignerInfos[0]
   $stamp = $signer.UnsignedAttributes | Where-Object { $_.Oid.Value -eq '1.3.6.1.4.1.311.3.3.1' } | Select-Object -First 1
   if (-not $stamp) { return "$($signer.DigestAlgorithm.Value), no RFC 3161 timestamp" }
   $token = $null
@@ -147,24 +146,30 @@ switch ($Command) {
     $signed = @(Get-Signed $First)
     if (-not $signed) { throw "sign-win.ps1: $First holds nothing the release signs" }
     $wrong = foreach ($file in $signed) {
+      # The signature the file carries, which signtool checks: never one of Windows's catalogs, which a library of
+      # Windows's own is in too, whatever signature it carries (Get-AuthenticodeSignature answers the catalog's).
       $said = & $signtool verify /pa /all /tw @chained $file 2>&1 | Out-String
       if ($LASTEXITCODE -ne 0) { "$file`: signtool verify exited $LASTEXITCODE`n$said"; continue }
-      $signature = Get-AuthenticodeSignature -LiteralPath $file
-      if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) { "$file`: $($signature.Status), $($signature.StatusMessage)"; continue }
-      $signers[$signature.SignerCertificate.Subject] = $true
       if ([IO.Path]::GetExtension($file) -eq '.msi') {
+        $signature = Get-AuthenticodeSignature -LiteralPath $file
+        if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) { "$file`: $($signature.Status), $($signature.StatusMessage)"; continue }
+        $signers[$signature.SignerCertificate.Subject] = $true
         if ($said -notmatch 'Hash of file \(sha256\)') { "$file`: no SHA-256 digest" }
       } else {
-        $digests = Get-PeDigests $file
+        $cms = Get-PeSignature $file
+        if ($cms) { $signers[$cms.SignerInfos[0].Certificate.Subject] = $true }
+        $digests = Get-PeDigests $cms
         if ($digests -ne "$Sha256, timestamped $Sha256") { "$file`: $digests" }
       }
     }
     if ($signers.Count -gt 1) { $wrong = @($wrong) + "signed by more than one signer: $($signers.Keys -join '; ')" }
     $nodes = @(Get-ChildItem -Path $First -Recurse -File | Where-Object { $_.FullName.Replace('/', '\').EndsWith($Node, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object FullName)
     foreach ($node in $nodes) {
-      $own = Get-AuthenticodeSignature -LiteralPath $node
-      $subject = if ($own.SignerCertificate) { $own.SignerCertificate.Subject } else { 'no signer' }
-      if ($own.Status -ne 'Valid' -or $subject -notmatch '\bO=OpenJS Foundation\b') { $wrong = @($wrong) + "$node`: not the OpenJS Foundation's: $($own.Status), $subject" }
+      $said = & $signtool verify /pa /all $node 2>&1 | Out-String
+      $code = $LASTEXITCODE
+      $cms = Get-PeSignature $node
+      $subject = if ($cms) { $cms.SignerInfos[0].Certificate.Subject } else { 'no signer' }
+      if ($code -ne 0 -or $subject -notmatch '\bO=OpenJS Foundation\b') { $wrong = @($wrong) + "$node`: not the OpenJS Foundation's: $subject`n$said" }
     }
     if ($wrong) { throw "sign-win.ps1: these are not signed as the release signs:`n$($wrong -join "`n")" }
     "verified, by $($signers.Keys -join '; ')$(if ($nodes) { "; node.exe by the OpenJS Foundation" })"
