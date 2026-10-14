@@ -100,7 +100,7 @@ export function win32Boot(start: Start, addresses: (run: string) => Addresses = 
         return await once(options, signal, deadline);
       } catch (error) {
         const why = (error as Error).message;
-        if (!why.includes(ENDING) || signal?.aborted) throw error;
+        if (!why.includes(ENDING)) throw error;
         if (performance.now() + AGAIN_MS >= deadline) throw new Error(`the data folder's last VM had not ended by the boot's deadline: ${why}`);
         await late(performance.now() + AGAIN_MS);
       }
