@@ -8,7 +8,7 @@
 // Windows is the shell's. Everything else is the app's code.
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,23 +34,40 @@ export const IMAGE = realpathSync(process.env.SUROGATE_VM_IMAGE ?? join(DESKTOP,
  */
 export const DATA = join(realpathSync.native(tmpdir()), "surogate-measure");
 
+// *path*'s bytes on disk, as the app's delivery syncs each file it unpacks (vm/image.ts, settle): a copy left in the
+// cache is flushed when HCS first opens it, at the first boot, which is timed.
+function flush(path: string): void {
+  const fd = openSync(path, "r+");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // The image, copied into the data folder unless the copy there is of the same build: its manifest
-// (images/guest/build.sh), copied last, marks a whole copy. Its 2.9 GB are copied here, never at a boot that is timed.
-// Its disk is a fixed VHD there, as Hyper-V opens a disk only as one: given its footer by the hash its manifest
-// names, as the app's delivery gives it on Windows (vm/image.ts).
+// (images/guest/build.sh), copied last, marks a whole copy. Its 2.9 GB are copied here, and on disk, never at a boot
+// that is timed. Its disk is a fixed VHD there, as Hyper-V opens a disk only as one: given its footer by the hash its
+// manifest names, as the app's delivery gives it on Windows (vm/image.ts).
 const IMAGE_COPY = join(DATA, "image");
 const manifest = readFileSync(join(IMAGE, "manifest.json"));
+let flushedMs: number | null = null;
 if (!existsSync(join(IMAGE_COPY, "manifest.json")) || !readFileSync(join(IMAGE_COPY, "manifest.json")).equals(manifest)) {
   rmSync(IMAGE_COPY, { recursive: true, force: true });
   mkdirSync(IMAGE_COPY, { recursive: true });
   for (const name of ["initrd", "rootfs.img", "vmlinuz"]) copyFileSync(join(IMAGE, name), join(IMAGE_COPY, name));
   const rootfs = readManifest(join(IMAGE, "manifest.json"), "amd64").files.find(({ name }) => name === "rootfs.img")!;
   await addFooter(join(IMAGE_COPY, "rootfs.img"), rootfs.sha256);
+  const begun = performance.now();
+  for (const name of ["initrd", "rootfs.img", "vmlinuz"]) flush(join(IMAGE_COPY, name));
+  flushedMs = Math.round(performance.now() - begun);
   writeFileSync(join(IMAGE_COPY, "manifest.json"), manifest);
 }
+/** How long the image's copy took to reach the disk once copied, where this process copied it; else null. */
+export const IMAGE_FLUSH_MS = flushedMs;
 
-// The agent disk *from*, copied into the data folder's *folder*, and a fixed VHD there: given its footer, unless it
-// has it already (vm/vhd.ts). None is, where *from* is not there, and the service says so at the boot.
+// The agent disk *from*, copied into the data folder's *folder*, and a fixed VHD there on disk: given its footer,
+// unless it has it already (vm/vhd.ts). None is, where *from* is not there, and the service says so at the boot.
 async function copied(from: string, folder: string): Promise<string> {
   rmSync(join(DATA, folder), { recursive: true, force: true });
   mkdirSync(join(DATA, folder), { recursive: true });
@@ -58,6 +75,7 @@ async function copied(from: string, folder: string): Promise<string> {
   if (existsSync(from)) {
     copyFileSync(from, to);
     await addFooter(to);
+    flush(to);
   }
   return to;
 }

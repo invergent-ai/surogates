@@ -9,7 +9,7 @@
 import { expect, it } from "vitest";
 
 import { checkWin32, requirementsWin32 } from "../../../../src/vm/win32.js";
-import { BootFailed, lab, record, type Timeline, told } from "./harness.js";
+import { BootFailed, IMAGE_FLUSH_MS, lab, record, type Timeline, told } from "./harness.js";
 
 it("says what this computer's sandbox lacks, and HCS's words at a boot attempt", async () => {
   const facts = await checkWin32();
@@ -26,7 +26,9 @@ it("says what this computer's sandbox lacks, and HCS's words at a boot attempt",
     if (error instanceof BootFailed) timeline = error.timeline;
   }
   record("requirements", {
-    "surogate-vm check": facts, "the backend's requirement words": words, "a boot attempt": boot,
+    "surogate-vm check": facts, "the backend's requirement words": words,
+    "the image's copy, made by this measurement, on disk before the boot, ms": IMAGE_FLUSH_MS ?? "copied before this measurement",
+    "a boot attempt": boot,
     "the boot attempt's timeline": timeline ? [`asked at ${timeline.begun}`, ...told(timeline)] : "none",
     "its console, ms seen: line": timeline ? timeline.console.map(({ ms, line }) => `${ms}: ${line}`) : [],
   });
