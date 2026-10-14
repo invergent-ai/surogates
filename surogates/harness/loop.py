@@ -211,6 +211,7 @@ from surogates.harness.loop_pending import (
     _first_unread,
     _goal_turn_waits,
     _left_behind,
+    _nothing_to_answer,
     _plain_message_unread,
     _read_as_words,
     _shown_before_its_answer,
@@ -1973,6 +1974,20 @@ class AgentHarness(
                     session_id,
                     cursor,
                 )
+                return
+            # A conversation revived for a message that never arrived (a
+            # plan gate dropped it) has nothing to answer: the model would
+            # write from its instructions alone, and a channel would send
+            # that to the person.  Put it back to rest instead.
+            if (
+                _nothing_to_answer(pending) and not unanswered_calls(all_events)
+                and not command_waits and not _hand_back_unread(all_events)
+            ):
+                logger.info(
+                    "Session %s: revived for a message that never came; nothing to answer",
+                    session_id,
+                )
+                await self._store.update_session_status(session_id, "completed")
                 return
 
             # 4'. A project's turn no route admitted (a thread's, a helper's,

@@ -72,6 +72,30 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     return pending
 
 
+#: ``session.resume`` sources written by a writer that revives a conversation
+#: only to append a message to it next (an inbound channel message, an API
+#: message, a journey step).  When that message never came (a plan gate
+#: dropped it), the revival alone is nothing to answer.
+_REVIVALS_BEFORE_A_MESSAGE = frozenset({"channel_message", "api", "program_step"})
+
+
+def _nothing_to_answer(pending: list[Any]) -> bool:
+    """Whether every pending event is a revival whose message never came, or
+    the AI disclosure shown to its sender.
+
+    Run on that, the model has no new words to answer and writes from its
+    instructions alone, which a channel delivers to the person verbatim.
+    """
+    return bool(pending) and all(
+        _event_type(event) == EventType.DISCLOSURE_PRESENTED.value
+        or (
+            _event_type(event) == EventType.SESSION_RESUME.value
+            and (getattr(event, "data", None) or {}).get("source") in _REVIVALS_BEFORE_A_MESSAGE
+        )
+        for event in pending
+    )
+
+
 def _ends_a_commands_turn(event: Any) -> bool:
     """Whether *event* is the ``session.complete`` that ended a command's turn: it names the command's message."""
     return _event_type(event) == EventType.SESSION_COMPLETE.value and "answers" in (getattr(event, "data", None) or {})
