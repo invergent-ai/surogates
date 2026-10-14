@@ -65,3 +65,26 @@ async def test_r2_store_add_replaces_the_titled_entry_by_position():
     assert store.get_entries("user") == [QUOTING, UPDATED]
     await store.add("user", "NOTE\nnew")
     assert store.get_entries("user") == [QUOTING, UPDATED, "NOTE\nnew"]
+
+
+def test_a_first_line_with_a_colon_is_a_note_not_a_title():
+    from surogates.memory.store import merge_entry
+
+    entries = ["Notes: likes mornings\nmore"]
+    merged, replaced = merge_entry(entries, "Notes: likes mornings\nother")
+    assert (merged, replaced) == ([*entries, "Notes: likes mornings\nother"], False)
+
+
+def test_a_record_heading_still_replaces_its_record():
+    from surogates.memory.store import merge_entry
+
+    merged, replaced = merge_entry(["FIȘA\nold", "other"], "FIȘA\nnew")
+    assert (merged, replaced) == (["FIȘA\nnew", "other"], True)
+
+
+def test_a_first_line_over_sixty_characters_is_no_title():
+    from surogates.memory.store import merge_entry
+
+    long = "x" * 61
+    merged, replaced = merge_entry([f"{long}\na"], f"{long}\nb")
+    assert replaced is False and len(merged) == 2

@@ -180,7 +180,9 @@ def titled_entry_index(content: str, entries: list[str]) -> int | None:
     stale and looped the turn.
     """
     title = content.strip().split("\n", 1)[0].strip()
-    if not title or len(title) > _TITLE_MAX:
+    # A heading, never a sentence: "Notes: x" is a note that happens to be
+    # first, and replacing on it would drop the earlier note.
+    if not title or len(title) > _TITLE_MAX or ":" in title:
         return None
     return next(
         (i for i, e in enumerate(entries) if e.strip().split("\n", 1)[0].strip() == title),
