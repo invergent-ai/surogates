@@ -8,9 +8,9 @@
 // Windows is the shell's. Everything else is the app's code.
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { HostUser } from "../../../../src/guest/protocol.js";
@@ -24,9 +24,38 @@ import { win32Boot } from "../../../../src/vm/win32.js";
 export const DESKTOP = realpathSync(fileURLToPath(new URL("../../../../", import.meta.url)));
 /** The x64 guest image (gh run download of the guest build's artifact): SUROGATE_VM_IMAGE, else the repository's out folder. */
 export const IMAGE = realpathSync(process.env.SUROGATE_VM_IMAGE ?? join(DESKTOP, "..", "images", "guest", "out"));
-/** The agent disk as a fixed VHD: the app's, or the one whose init runs a measurement's probe as root. */
-export const AGENT_DISK = process.env.SUROGATE_VM_AGENT_DISK ?? join(DESKTOP, "dist", "agent.vhd");
-export const PROBING_DISK = process.env.SUROGATE_VM_PROBING_DISK ?? join(DESKTOP, "dist", "agent-measure.vhd");
+/**
+ * The measurements' data folder, as the app's own is to its VM: in this user's profile by its long names, as the
+ * service takes no other and its walk refuses a short name (a runner's temp folder is under RUNNER~1), and holding
+ * every file a boot names, as the service takes the kernel, the initrd and the disks from the caller's data folder
+ * alone. Each measurement has a folder of its own in it.
+ */
+export const DATA = join(realpathSync.native(tmpdir()), "surogate-measure");
+
+// The image, copied into the data folder unless the copy there is of the same build: its manifest
+// (images/guest/build.sh), copied last, marks a whole copy. Its 2.9 GB are copied here, never at a boot that is timed.
+const IMAGE_COPY = join(DATA, "image");
+const manifest = readFileSync(join(IMAGE, "manifest.json"));
+if (!existsSync(join(IMAGE_COPY, "manifest.json")) || !readFileSync(join(IMAGE_COPY, "manifest.json")).equals(manifest)) {
+  rmSync(IMAGE_COPY, { recursive: true, force: true });
+  mkdirSync(IMAGE_COPY, { recursive: true });
+  for (const name of ["initrd", "rootfs.img", "vmlinuz"]) copyFileSync(join(IMAGE, name), join(IMAGE_COPY, name));
+  writeFileSync(join(IMAGE_COPY, "manifest.json"), manifest);
+}
+
+// The agent disk *from*, copied into the data folder's *folder*; none is, where *from* is not there, and the service
+// says so at the boot.
+function copied(from: string, folder: string): string {
+  rmSync(join(DATA, folder), { recursive: true, force: true });
+  mkdirSync(join(DATA, folder), { recursive: true });
+  const to = join(DATA, folder, basename(from));
+  if (existsSync(from)) copyFileSync(from, to);
+  return to;
+}
+
+/** The agent disk as a fixed VHD, copied into the data folder: the app's, or the one whose init runs a measurement's probe as root. */
+export const AGENT_DISK = copied(process.env.SUROGATE_VM_AGENT_DISK ?? join(DESKTOP, "dist", "agent.vhd"), "agent");
+export const PROBING_DISK = copied(process.env.SUROGATE_VM_PROBING_DISK ?? join(DESKTOP, "dist", "agent-measure.vhd"), "probing");
 /** surogate-vm.exe, the Cargo build's (native/windows/target/release). */
 export const PROGRAM = process.env.SUROGATE_VM_PROGRAM ?? join(DESKTOP, "native", "windows", "target", "release", "surogate-vm.exe");
 /** Where each measurement writes what it found. */
@@ -65,16 +94,16 @@ export interface Lab {
   stop(): Promise<void>;
 }
 
-/** The guest booted for measurement *name*, its data folder new; *extra* goes into its options. */
+/** The guest booted for measurement *name*, its own folder in the data folder new; *extra* goes into its options. */
 export async function lab(name: string, extra: Partial<VmOptions> = {}, egress?: Egress): Promise<Lab> {
-  const data = join(realpathSync(tmpdir()), "surogate-measure", name);
+  const data = join(DATA, name);
   rmSync(data, { recursive: true, force: true });
   mkdirSync(join(data, "logs"), { recursive: true });
   mkdirSync(join(data, "run"), { recursive: true });
   const options: VmOptions = {
-    kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: AGENT_DISK,
+    kernel: join(IMAGE_COPY, "vmlinuz"), rootfs: join(IMAGE_COPY, "rootfs.img"), agentDisk: AGENT_DISK,
     sessions: join(data, "vm", "sessions.vhdx"), console: join(data, "logs", "vm-console.log"),
-    run: join(data, "run", "vm-measure"), user: USER, program: PROGRAM, data, ...extra,
+    run: join(data, "run", "vm-measure"), user: USER, program: PROGRAM, data: DATA, ...extra,
   };
   mkdirSync(options.run, { recursive: true });
   let vm: VmBackend | undefined;
