@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from enum import Enum
 from typing import Any, Awaitable, Callable
@@ -37,6 +37,7 @@ from uuid import UUID
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from surogates.channels.capabilities import capabilities_for
+from surogates.channels import person_link
 from surogates.channels.dedup import MessageDeduplicator
 from surogates.channels.constants import multi_session_disabled
 from surogates.channels.source import (
@@ -539,6 +540,24 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         if msg.is_mention and msg.thread_key:
             await deps.state.mark_mentioned_thread(msg.thread_key)
+
+        # ------------------------------------------------------------------
+        # Gate 4b: a start link made for a known person binds this sender to
+        # them before identity resolution, so the turn below is already theirs.
+        # The code never reaches the agent or the transcript.
+        # ------------------------------------------------------------------
+        code = person_link.start_code(msg.text) if msg.is_dm else None
+        if code is not None:
+            try:
+                await person_link.consume(
+                    deps.redis, deps.session_factory, code=code,
+                    org_id=routing.org_id, platform=routing.platform,
+                    platform_user_id=msg.platform_user_id,
+                    display_name=msg.user_name,
+                )
+            except Exception:  # noqa: BLE001 — a failed link must not drop the message
+                logger.warning("[inbound] start link failed", exc_info=True)
+            msg = replace(msg, text="/start")
 
         # ------------------------------------------------------------------
         # Gate 5: Identity resolution.

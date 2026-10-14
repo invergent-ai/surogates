@@ -1,0 +1,126 @@
+"""A start link made for a known person binds the chat account that opens it."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import uuid
+
+import pytest
+import sqlalchemy as sa
+
+from surogates.channels import person_link
+from surogates.channels.inbound import ChannelInboundPipeline
+from surogates.db.models import ChannelIdentity, User
+from surogates.session.events import EventType
+from tests.test_channel_pipeline import (
+    AGENT_ORG_ID,
+    _FakeRedis,
+    _make_config,
+    _make_deps,
+    _make_msg,
+    _Routing,
+)
+
+ORG = AGENT_ORG_ID
+CODE = "Abc_def-12345678"
+
+
+class _Redis(_FakeRedis):
+    async def getdel(self, key):
+        return self.kv.pop(key, None)
+
+
+async def _user(sf, name, provider="whatsapp"):
+    async with sf() as db:
+        u = User(org_id=ORG, email=f"{name}@x.test", display_name=name, auth_provider=provider)
+        db.add(u)
+        await db.commit()
+        return u.id
+
+
+async def _identities(sf):
+    async with sf() as db:
+        return (await db.execute(sa.select(ChannelIdentity))).scalars().all()
+
+
+def _deps(sf, user_id, *, org=ORG, platform="telegram"):
+    redis = _Redis()
+    redis.kv[person_link.PREFIX + CODE] = json.dumps(
+        {"org_id": str(org), "user_id": str(user_id), "platform": platform},
+    )
+    return dataclasses.replace(_make_deps(), redis=redis, session_factory=sf)
+
+
+async def _start(deps, text=f"/start {CODE}"):
+    return await ChannelInboundPipeline().handle(
+        _make_msg(is_dm=True, platform_user_id="777", text=text),
+        routing=_Routing(platform="telegram", identifier="@bot"),
+        config=_make_config(), deps=deps,
+    )
+
+
+def test_start_code_reads_only_a_start_with_a_code():
+    assert person_link.start_code(f" /start {CODE} ") == CODE
+    assert person_link.start_code("/start") is None
+    assert person_link.start_code("/start a b") is None
+    assert person_link.start_code("hello") is None
+
+
+@pytest.mark.asyncio
+async def test_start_binds_the_sender_records_their_permission_and_hides_the_code(sf):
+    ana = await _user(sf, "ana")
+    deps = _deps(sf, ana)
+
+    await _start(deps)
+
+    [row] = await _identities(sf)
+    assert (row.user_id, row.platform, row.platform_user_id) == (ana, "telegram", "777")
+    perm = row.platform_meta["contact_permission"]
+    assert (perm["status"], perm["method"], perm["recorded_by"]) == ("granted", "start_link", "person")
+    assert person_link.PREFIX + CODE not in deps.redis.kv  # single use
+    assert any(c.startswith("channel_identity_changed:telegram") for c, _ in deps.redis.published)
+    texts = [d.get("content") or d.get("text") for _, t, d in deps.session_store.events
+             if t == EventType.USER_MESSAGE]
+    assert texts and all(CODE not in str(t) for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_a_code_for_another_org_is_ignored_and_kept(sf):
+    ana = await _user(sf, "ana")
+    deps = _deps(sf, ana, org=uuid.uuid4())
+
+    await _start(deps)
+
+    assert await _identities(sf) == []
+    assert person_link.PREFIX + CODE in deps.redis.kv
+
+
+@pytest.mark.asyncio
+async def test_a_shadow_account_gives_way_but_a_real_person_does_not(sf):
+    ana = await _user(sf, "ana")
+    shadow = await _user(sf, "777", provider="telegram")
+    async with sf() as db:
+        db.add(ChannelIdentity(org_id=ORG, user_id=shadow, platform="telegram",
+                               platform_user_id="777", platform_meta={}))
+        await db.commit()
+    assert await person_link.bind(sf, org_id=ORG, user_id=ana, platform="telegram",
+                                  platform_user_id="777", display_name="Ana")
+    [row] = await _identities(sf)
+    assert row.user_id == ana
+
+    dan = await _user(sf, "dan")
+    assert not await person_link.bind(sf, org_id=ORG, user_id=dan, platform="telegram",
+                                      platform_user_id="777", display_name="Dan")
+    [row] = await _identities(sf)
+    assert row.user_id == ana
+
+
+@pytest.mark.asyncio
+async def test_relinking_replaces_the_persons_earlier_account(sf):
+    ana = await _user(sf, "ana")
+    await person_link.bind(sf, org_id=ORG, user_id=ana, platform="telegram",
+                           platform_user_id="111", display_name="Ana")
+    await person_link.bind(sf, org_id=ORG, user_id=ana, platform="telegram",
+                           platform_user_id="222", display_name="Ana")
+    assert [r.platform_user_id for r in await _identities(sf)] == ["222"]
