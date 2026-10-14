@@ -34,11 +34,23 @@ pub struct Hcs<'a> {
 /// The most of the console one notice carries.
 const CONSOLE_CHUNK: usize = 4096;
 
-// The console's pipe, made by the service before the VM, which HCS's worker connects to as COM1's other end, as
-// WSL's service makes its own (WSL, src/windows/common/Dmesg.cpp, CreateConsolePipe: one instance, the service's
-// default descriptor). Read until the VM goes.
-fn console(name: &str, notify: Notify) -> Result<Arc<Pipe>, Failure> {
-    let pipe = Arc::new(Pipe::server(name, None, Way::Inbound, true, true).map_err(|error| Failure { code: -1, words: format!("the console's pipe could not be made: {error}") })?);
+/// The guest's console, as the service reads it: the server's end of COM1's pipe, read on a thread of its own until
+/// this goes, which ends the read.
+pub struct Console(Arc<Pipe>);
+
+impl Drop for Console {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// The console's pipe *name*, made by the service before the VM, which HCS's worker connects to as COM1's other end,
+/// and what the guest prints there told to *notify*. Both ways, as WSL's service makes its own (WSL,
+/// src/windows/common/Dmesg.cpp, CreateConsolePipe: PIPE_ACCESS_DUPLEX, one instance, the service's default
+/// descriptor): the worker opens a serial port's other end to read and to write, which a pipe its server alone reads
+/// refuses.
+pub fn console(name: &str, notify: Notify) -> Result<Console, Failure> {
+    let pipe = Arc::new(Pipe::server(name, None, Way::Duplex, true, true).map_err(|error| Failure { code: -1, words: format!("the console's pipe could not be made: {error}") })?);
     let reading = pipe.clone();
     thread::spawn(move || {
         if reading.accept().is_err() {
@@ -54,7 +66,7 @@ fn console(name: &str, notify: Notify) -> Result<Arc<Pipe>, Failure> {
             }
         }
     });
-    Ok(pipe)
+    Ok(Console(pipe))
 }
 
 /// One VM, by the service's one handle to it.
@@ -63,7 +75,9 @@ pub struct HcsVm {
     id: String,
     granted: Vec<String>,
     token: Handle,
-    console: Arc<Pipe>,
+    // Its read ended once the VM's handle has closed, as the fields go after drop().
+    #[allow(dead_code)]
+    console: Console,
 }
 
 impl Vm for HcsVm {
@@ -93,9 +107,8 @@ impl HcsVm {
 
 impl Drop for HcsVm {
     fn drop(&mut self) {
-        // The last handle closed ends the VM (ShouldTerminateOnLastHandleClosed); then its console, and its grants.
+        // The last handle closed ends the VM (ShouldTerminateOnLastHandleClosed); then its grants, and its console.
         self.system.take();
-        self.console.cancel();
         revoke(&self.token, &self.id, &self.granted);
     }
 }
