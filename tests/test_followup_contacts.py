@@ -72,7 +72,8 @@ async def clinic(sf):
         alert_recipient_user_ids=[doctor, nurse], alert_template_name="alert",
         alert_template_language="ro", message_template_name="msg",
         message_template_language="ro",
-        team_permissions={str(nurse): {"preset": "alerts_only", "handles": "wound care"}},
+        team_permissions={str(nurse): {"receives": ["urgent", "attention"],
+                                       "can": ["see_full_phones"], "handles": "wound care"}},
     )
     return doctor, doctor_session, nurse
 
@@ -326,10 +327,10 @@ async def test_a_shared_destination_also_receives_its_kinds(sf, clinic):
 
 
 @pytest.mark.asyncio
-async def test_permissions_default_full_and_presets_refuse_politely(sf, clinic):
+async def test_permissions_default_to_everything_and_refusals_name_the_action(sf, clinic):
     doctor, _, nurse = clinic
     settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
-    assert store.member_permissions(settings, doctor)["preset"] == "full"
+    assert store.member_permissions(settings, doctor)["can"] == frozenset(store.ABILITIES)
     assert store.can(settings, nurse, "see_full_phones")
     assert not store.can(settings, nurse, "see_people")
     assert not store.can(settings, uuid.uuid4(), "see_people")
@@ -340,10 +341,41 @@ async def test_permissions_default_full_and_presets_refuse_politely(sf, clinic):
                                                  "channel_identifier": "pn1"}))
         await db.commit()
     result = await team.handle_team_overview({}, **_kw(sf, nurse_session))
-    assert result.startswith("Refused") and "Alerts only" in result
+    assert result.startswith("Refused") and "can't see the people followed" in result
+    assert "manages the team" in result
+    for word in ("Alerts only", "Assistant", "Full", "preset", "role"):
+        assert word not in result
     with pytest.raises(ValueError):
         await store.update_settings(sf, org_id=ORG, agent_id=AGENT,
-                                    team_permissions={str(nurse): {"preset": "boss"}})
+                                    team_permissions={str(nurse): {"can": ["fly"]}})
+
+
+@pytest.mark.asyncio
+async def test_an_older_preset_reads_as_its_lists_and_is_saved_as_lists(sf, clinic):
+    doctor, _, nurse = clinic
+    async with sf() as db:
+        from surogates.db.models import FollowupSettingsRow
+
+        row = await db.get(FollowupSettingsRow, (ORG, AGENT))
+        row.team_permissions = {str(doctor): {"preset": "assistant"},
+                                str(nurse): {"preset": "alerts_only"}}
+        await db.commit()
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    assert not store.can(settings, doctor, "manage_team") and store.can(settings, doctor, "enroll")
+    assert store.member_permissions(settings, nurse)["receives"] == {"urgent", "attention"}
+    saved = await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, team_permissions=settings.team_permissions,
+    )
+    assert saved.team_permissions[str(doctor)] == {
+        "receives": "all", "can": [a for a in store.ABILITIES if a != "manage_team"],
+    }
+    assert saved.team_permissions[str(nurse)] == {
+        "receives": ["urgent", "attention"], "can": ["see_full_phones"],
+    }
+    full = await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, team_permissions={str(doctor): {"preset": "full"}},
+    )
+    assert full.team_permissions[str(doctor)] == {"receives": "all", "can": "all"}
 
 
 @pytest.mark.asyncio
@@ -429,13 +461,13 @@ async def test_an_assistant_cannot_enrol_without_permission(sf, clinic):
     doctor, doctor_session, _ = clinic
     await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT,
-        team_permissions={str(doctor): {"preset": "assistant", "can": ["see_people"]}},
+        team_permissions={str(doctor): {"can": ["see_people"]}},
     )
     result = await team.handle_team_enroll_person(
         {"phone": "+40 711 222 333", "person_name": "X", "days_ago": 1},
         **_kw(sf, doctor_session, redis=_Redis()),
     )
-    assert result.startswith("Refused") and "enrol people" in result
+    assert result.startswith("Refused") and "can't enrol people" in result
 
 
 @pytest.mark.asyncio
@@ -452,7 +484,8 @@ async def test_a_missed_streak_is_the_persons_whoever_the_copies_went_to(sf, cli
         ))
         await db.commit()
     now = datetime.now(timezone.utc)
-    for hours in (30, 6):
+    # Never woken at its deadline: the platform alerts 12 hours after it.
+    for hours in (40, 14):
         occ = await _occurrence(sf, program_id)
         for who in (person, ana):
             row = await _copy(sf, occ, program_id, who, person, response="no_reply_by_deadline")
@@ -464,6 +497,6 @@ async def test_a_missed_streak_is_the_persons_whoever_the_copies_went_to(sf, cli
     assert await alert_missed_checkins(sf, now=now) >= 1
     [escalation] = await _all(sf, EscalationRow)
     assert escalation.user_id == person
-    marked = {r.escalation_state for r in await _all(sf, ProgramInvitationRow) if r.created_at > now - timedelta(hours=8)}
+    marked = {r.escalation_state for r in await _all(sf, ProgramInvitationRow) if r.created_at > now - timedelta(hours=16)}
     assert marked == {"raised"}
     assert await alert_missed_checkins(sf, now=now) == 0

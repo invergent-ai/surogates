@@ -501,13 +501,12 @@ async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Perso
     return matches[0]
 
 
-_PRESET_NAMES = {"full": "Full", "assistant": "Assistant", "alerts_only": "Alerts only"}
 _ABILITY_WORDS = {
     "see_people": "see the people followed and their reports",
-    "message_person": "message a person",
+    "message_person": "message people",
     "enroll": "enrol people",
     "pause_resume_end": "pause, resume or end someone's follow-up",
-    "edit_details": "edit a person's details",
+    "edit_details": "change a person's details",
     "see_full_phones": "see full phone numbers",
     "manage_team": "manage the team",
 }
@@ -517,11 +516,9 @@ def _not_allowed(settings: Any, ctx: Any, ability: str) -> str | None:
     """A polite refusal naming what this member cannot do, or ``None``."""
     if followup_store.can(settings, ctx.user_id, ability):
         return None
-    preset = followup_store.member_permissions(settings, ctx.user_id)["preset"]
     return (
-        f"Refused: {_member(ctx)}'s team role ({_PRESET_NAMES.get(preset, preset)}) "
-        f"does not include permission to {_ABILITY_WORDS[ability]}. Tell them so "
-        "kindly; whoever manages the team can change it."
+        f"Refused: {_member(ctx)} can't {_ABILITY_WORDS[ability]} from here. Tell "
+        "them so kindly: they can ask whoever manages the team."
     )
 
 

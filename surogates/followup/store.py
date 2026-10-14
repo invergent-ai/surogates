@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ABILITIES",
-    "PRESETS",
     "RECEIVE_KINDS",
     "Recipient",
     "Speaker",
@@ -101,8 +100,8 @@ SETTINGS_FIELDS = frozenset({
 ALERT_SEVERITIES = ("red", "yellow")
 
 #: What a team member can be sent, and what they can do, in the team tools
-#: and in Studio.  A member's ``team_permissions`` entry names a preset and
-#: may list either set item by item.
+#: and in Studio.  A member's ``team_permissions`` entry lists either set, or
+#: says ``"all"``; a member with no entry gets everything.
 RECEIVE_KINDS = (
     "urgent", "attention", "missed_replies", "new_enrolments", "daily_report",
     "delivery_failures",
@@ -111,9 +110,11 @@ ABILITIES = (
     "see_people", "message_person", "enroll", "pause_resume_end", "edit_details",
     "see_full_phones", "manage_team",
 )
-PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "full": (RECEIVE_KINDS, ABILITIES),
-    "assistant": (RECEIVE_KINDS, tuple(a for a in ABILITIES if a != "manage_team")),
+#: Entries saved before permissions were plain lists named a preset; each
+#: still reads as the lists it stood for.
+_LEGACY_PRESETS: dict[str, tuple[Any, Any]] = {
+    "full": ("all", "all"),
+    "assistant": ("all", tuple(a for a in ABILITIES if a != "manage_team")),
     "alerts_only": (("urgent", "attention"), ("see_full_phones",)),
 }
 #: What a shared destination receives when it does not say.
@@ -557,19 +558,32 @@ def _normalised(field: str, value: Any) -> Any:
     return value
 
 
+def _permission_lists(entry: dict) -> dict[str, Any]:
+    """``receives`` and ``can`` of an entry, each ``"all"`` or a list; an
+    older entry's preset gives the lists it stood for."""
+    legacy = _LEGACY_PRESETS.get(str(entry.get("preset") or ""), ("all", "all"))
+    return {
+        key: entry[key] if entry.get(key) is not None else fallback
+        for key, fallback in zip(("receives", "can"), legacy)
+    }
+
+
 def _permission_entry(entry: Any) -> dict:
+    """An entry as it is saved: lists (or ``"all"``) and what they handle,
+    never a preset name."""
     entry = dict(entry or {})
-    preset = str(entry.get("preset") or "full")
-    if preset not in PRESETS:
-        raise ValueError(f"preset must be one of {', '.join(PRESETS)}")
-    out: dict[str, Any] = {"preset": preset}
-    for key, allowed in (("receives", RECEIVE_KINDS), ("can", ABILITIES)):
-        if entry.get(key) is not None:
-            items = list(dict.fromkeys(str(i) for i in entry[key]))
-            unknown = set(items) - set(allowed)
-            if unknown:
-                raise ValueError(f"unknown {key}: {', '.join(sorted(unknown))}")
-            out[key] = items
+    out: dict[str, Any] = {}
+    for (key, items), allowed in zip(_permission_lists(entry).items(), (RECEIVE_KINDS, ABILITIES)):
+        if items == "all":
+            out[key] = "all"
+            continue
+        if isinstance(items, str):
+            raise ValueError(f"{key} must be \"all\" or a list")
+        items = list(dict.fromkeys(str(i) for i in items))
+        unknown = set(items) - set(allowed)
+        if unknown:
+            raise ValueError(f"unknown {key}: {', '.join(sorted(unknown))}")
+        out[key] = "all" if set(items) == set(allowed) else items
     handles = str(entry.get("handles") or "").strip()
     if handles:
         out["handles"] = handles[:500]
@@ -593,15 +607,13 @@ def _destination(value: Any) -> dict:
 
 
 def member_permissions(settings: Any, user_id: Any) -> dict[str, Any]:
-    """``{preset, receives, can, handles}`` of one team member; ``full``
-    unless their entry says otherwise."""
+    """``{receives, can, handles}`` of one team member, the two sets
+    spelled out; everything unless their entry says otherwise."""
     entry = ((getattr(settings, "team_permissions", None) or {}) if settings else {}).get(str(user_id)) or {}
-    preset = entry.get("preset") if entry.get("preset") in PRESETS else "full"
-    receives, abilities = PRESETS[preset]
+    lists = _permission_lists(entry)
     return {
-        "preset": preset,
-        "receives": frozenset(entry["receives"] if entry.get("receives") is not None else receives),
-        "can": frozenset(entry["can"] if entry.get("can") is not None else abilities),
+        "receives": frozenset(RECEIVE_KINDS if lists["receives"] == "all" else lists["receives"]),
+        "can": frozenset(ABILITIES if lists["can"] == "all" else lists["can"]),
         "handles": str(entry.get("handles") or ""),
     }
 

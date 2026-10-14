@@ -181,7 +181,7 @@ async def test_contacts_answers_and_routing_on_postgres(engine):
 
     await store.update_settings(
         sf, org_id=ORG, agent_id="a1", alert_recipient_user_ids=[ana], senders={"slack": "T1"},
-        team_permissions={str(ana): {"preset": "assistant"}},
+        team_permissions={str(ana): {"can": ["see_people", "message_person"]}},
         team_destinations=[{"platform": "slack", "channel_id": "C1", "receives": ["urgent"]}],
     )
     settings = await store.get_settings(sf, org_id=ORG, agent_id="a1")
