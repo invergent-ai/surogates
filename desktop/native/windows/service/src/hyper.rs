@@ -1,6 +1,6 @@
 // The Host Compute Service for one caller (hcs::api): the VM made from the service's document, the caller's files
-// granted to it as the caller, its console read, its exit told, and every grant taken back as the caller once the VM
-// has gone, so no entry for a VM that is no more stays in a file's ACL.
+// granted to it as the caller, its console read from before it is made, its exit told, and every grant taken back as
+// the caller once the VM has gone, so no entry for a VM that is no more stays in a file's ACL.
 
 use std::sync::Arc;
 use std::thread;
@@ -75,9 +75,6 @@ pub struct HcsVm {
     id: String,
     granted: Vec<String>,
     token: Handle,
-    // Its read ended once the VM's handle has closed, as the fields go after drop().
-    #[allow(dead_code)]
-    console: Console,
 }
 
 impl Vm for HcsVm {
@@ -107,7 +104,7 @@ impl HcsVm {
 
 impl Drop for HcsVm {
     fn drop(&mut self) {
-        // The last handle closed ends the VM (ShouldTerminateOnLastHandleClosed); then its grants, and its console.
+        // The last handle closed ends the VM (ShouldTerminateOnLastHandleClosed); then its grants.
         self.system.take();
         revoke(&self.token, &self.id, &self.granted);
     }
@@ -131,6 +128,7 @@ fn duplicate(token: &Handle) -> Result<Handle, Failure> {
 
 impl Hypervisor for Hcs<'_> {
     type Vm = HcsVm;
+    type Console = Console;
 
     fn new_id(&self) -> String {
         let mut guid: GUID = unsafe { std::mem::zeroed() };
@@ -143,6 +141,10 @@ impl Hypervisor for Hcs<'_> {
 
     fn console(&self, id: &str) -> String {
         format!(r"\\.\pipe\surogate-console-{id}")
+    }
+
+    fn listen(&self, name: &str) -> Result<Console, Failure> {
+        console(name, self.notify.clone())
     }
 
     fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(HcsVm, String), Failure> {
@@ -160,16 +162,15 @@ impl Hypervisor for Hcs<'_> {
             }
             given.push(path.clone());
         }
-        let made = console(&self.console(id), self.notify.clone()).and_then(|console| {
-            let system = System::create(id, document)?;
+        let made = System::create(id, document).and_then(|system| {
             let notify = self.notify.clone();
             system.on_exit(Box::new(move |status| notify(Notice::Exited(exit_status(status.as_deref())))))?;
             let properties = system.properties(None)?;
             let runtime = runtime_id(&properties).ok_or_else(|| Failure { code: -1, words: format!("HCS named no runtime ID for the VM: {properties}") })?;
-            Ok((system, console, runtime))
+            Ok((system, runtime))
         });
         match made {
-            Ok((system, console, runtime)) => Ok((HcsVm { system: Some(system), id: id.to_owned(), granted: given, token, console }, runtime)),
+            Ok((system, runtime)) => Ok((HcsVm { system: Some(system), id: id.to_owned(), granted: given, token }, runtime)),
             Err(failure) => {
                 revoke(&token, id, &given);
                 Err(failure)
