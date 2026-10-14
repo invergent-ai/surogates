@@ -20,6 +20,10 @@ def test_normalize_caller(raw, expected):
     assert normalize_caller(raw) == expected
 
 
+async def _none():
+    return None
+
+
 async def _open(monkeypatch, *, caller, remember):
     seen = {}
 
@@ -33,6 +37,8 @@ async def _open(monkeypatch, *, caller, remember):
 
     monkeypatch.setattr(voice_sessions, "get_or_create_channel_identity", identity)
     monkeypatch.setattr(voice_sessions, "get_or_create_channel_session", session)
+    monkeypatch.setattr(voice_sessions, "same_person", lambda *a: _none())
+    monkeypatch.setattr(voice_sessions, "_shared_boundary", lambda *a: _none())
     vs = VoiceSessions(store=None, redis=None, session_factory=None)
     target = CallTarget(org_id=uuid4(), agent_id="agent-1", remember_callers=remember)
     call = await vs.open_call(target, call_id="SCL_1", called="+40300000001", caller=caller, greeting="Bună ziua!")
@@ -229,3 +235,29 @@ def test_a_choices_line_with_other_braces_reads_the_choices_and_keeps_the_rest()
     args = {"questions": [{"prompt": "Which day?", "choices": [{"label": "Monday"}, {"label": "Tuesday"}]}]}
     text = question_text(args, choices_line="Options: {} (pick {one})")  # an owner's wording; no crash
     assert "Monday" in text and "{one}" in text
+
+
+async def test_a_step_call_binds_its_step_before_the_callees_first_words_and_hears_each(monkeypatch):
+    from surogates.voice import sessions as vs
+
+    async def unanswered(store, **kw):
+        return None
+
+    monkeypatch.setattr(vs, "try_resolve_text_answer", unanswered)
+    order, heard = [], []
+    log = _Log()
+    log.get_session = _status("active")
+    call = _call(log)
+    call.redis.zadd = _noop
+
+    async def bind():
+        order.append(("bound", len([e for e in log.events if e.type == "user.message"])))
+
+    async def hear(text):
+        heard.append(text)
+
+    call.before_first_words, call.on_heard = bind, hear
+    await call.send("Da.")
+    await call.send("Mă simt bine.")
+    assert order == [("bound", 0)]  # once, before the first words land
+    assert heard == ["Da.", "Mă simt bine."]
