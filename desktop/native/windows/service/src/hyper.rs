@@ -1,9 +1,13 @@
-// The Host Compute Service for one caller (hcs::api): the VM made from the service's document, each file it opens
-// granted to it alone (HcsGrantVmAccess), the caller's own as the caller and the installed app's agent disk by the
-// service's own right, its console read from before it is made, its exit told, and every grant taken back by the right
-// that made it once the VM has gone, so no entry for a VM that is no more stays in a file's ACL. No file is given to the
-// group of all VMs (S-1-5-83-0): on a Windows 11 PC with Virtual Machine Platform alone, without Hyper-V's own
-// management, that SID maps to no account (icacls: "No mapping between account names and security IDs was done").
+// The Host Compute Service for one caller (hcs::api): the VM made from the service's document, the caller's files
+// granted to it as the caller, its console read from before it is made, its exit told, and every grant taken back as
+// the caller once the VM has gone, so no entry for a VM that is no more stays in a file's ACL.
+//
+// Nothing else is granted. Not the installed app's agent disk: HcsGrantVmAccess gives the VM's own account full control
+// of a file (FA, measured on a Windows runner), which no VM is given of the one file every user's VM boots; each VM reads
+// it as its folder lets every user of the computer, as WSL's own VM reads the disks WSL installs (WSL,
+// src/windows/service/exe/WslCoreVm.cpp, "VMWP may already have access via inherited ACLs"). And nothing to the group of
+// all VMs (S-1-5-83-0): on a Windows 11 PC with Virtual Machine Platform alone, without Hyper-V's own management, that
+// SID maps to no account (icacls: "No mapping between account names and security IDs was done").
 
 use std::sync::Arc;
 use std::thread;
@@ -16,7 +20,7 @@ use windows_sys::core::GUID;
 use windows_sys::Win32::System::Com::CoCreateGuid;
 
 use crate::caller::as_caller;
-use crate::core::{By, Grant, Hypervisor, Vm};
+use crate::core::{Hypervisor, Vm};
 
 /// What a VM tells its connection unasked.
 pub enum Notice {
@@ -80,7 +84,7 @@ pub fn console(name: &str, notify: Notify) -> Result<Console, Failure> {
 pub struct HcsVm {
     system: Option<System>,
     id: String,
-    granted: Vec<Grant>,
+    granted: Vec<String>,
     token: Handle,
 }
 
@@ -117,20 +121,9 @@ impl Drop for HcsVm {
     }
 }
 
-// *path* granted to the VM *id*, by the caller's right (as the caller of *token*) or by the service's own.
-fn grant(token: &Handle, id: &str, path: &str, by: By) -> Result<(), Failure> {
-    match by {
-        By::Caller => as_caller(token, || api::grant_vm_access(id, path)).map_err(|words| Failure { code: -1, words })?,
-        By::Service => api::grant_vm_access(id, path),
-    }
-}
-
-fn revoke(token: &Handle, id: &str, granted: &[Grant]) {
-    for Grant { path, by } in granted {
-        let _ = match by {
-            By::Caller => as_caller(token, || api::revoke_vm_access(id, path)).map(drop),
-            By::Service => api::revoke_vm_access(id, path).map_err(|failure| failure.words),
-        };
+fn revoke(token: &Handle, id: &str, granted: &[String]) {
+    for path in granted {
+        let _ = as_caller(token, || api::revoke_vm_access(id, path));
     }
 }
 
@@ -165,19 +158,20 @@ impl Hypervisor for Hcs<'_> {
         console(name, self.notify.clone())
     }
 
-    fn create(&self, id: &str, document: &str, granted: &[Grant]) -> Result<(HcsVm, String), Failure> {
+    fn create(&self, id: &str, document: &str, granted: &[String]) -> Result<(HcsVm, String), Failure> {
         let basic = api::service_properties(r#"{"PropertyTypes":["Basic"]}"#)?;
         if !supports(&basic, SCHEMA) {
             return Err(Failure { code: -1, words: format!("this Windows's Host Compute Service does not take schema {}.{}: {basic}", SCHEMA.0, SCHEMA.1) });
         }
         let token = duplicate(self.token)?;
         let mut given = Vec::new();
-        for each in granted {
-            if let Err(failure) = grant(&token, id, &each.path, each.by) {
+        for path in granted {
+            let grant = as_caller(&token, || api::grant_vm_access(id, path)).map_err(|words| Failure { code: -1, words })?;
+            if let Err(failure) = grant {
                 revoke(&token, id, &given);
-                return Err(Failure { code: failure.code, words: format!("{} for {}", failure.words, each.path) });
+                return Err(Failure { code: failure.code, words: format!("{} for {path}", failure.words) });
             }
-            given.push(each.clone());
+            given.push(path.clone());
         }
         let made = System::create(id, document).and_then(|system| {
             let notify = self.notify.clone();

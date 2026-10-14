@@ -83,8 +83,8 @@ async function copied(from: string, folder: string): Promise<string> {
 /**
  * The app's agent disk, where the installed app has it, as near as the development service lets it be: in the
  * development install's folder of Program Files (native/windows/dev-service.ps1 lays it out, a fixed VHD), which only
- * administrators write, and from which the service grants it to each VM by its own right. Never copied into the data
- * folder, where the service would grant it by the caller's.
+ * administrators write, and which the service grants to no VM: each reads it as its folder lets every user. Never
+ * copied into the data folder, where the service would grant it to the VM as the caller.
  */
 export const AGENT_DISK = process.env.SUROGATE_VM_AGENT_DISK ?? join(process.env.ProgramFiles ?? "C:\\Program Files", "Surogate Dev", "resources", "vm", "agent.vhd");
 /** The measurements' own agent disk, whose init runs a measurement's probe as root, copied into the data folder as a fixed VHD. */
@@ -102,7 +102,8 @@ export function windowsPowerShell(command: string): string {
 
 /**
  * The entries of *path*'s ACL for VMs, each as its SDDL says it, (A;;<rights>;;;<SID>): a VM's own SID is
- * S-1-5-83-1-…, which HcsGrantVmAccess grants and HcsRevokeVmAccess takes away, and S-1-5-83-0 is the group of all VMs.
+ * S-1-5-83-1-…, which HcsGrantVmAccess grants full control (FA) and HcsRevokeVmAccess takes away, and S-1-5-83-0 is the
+ * group of all VMs.
  */
 export function vmEntries(path: string): string[] {
   const sddl = windowsPowerShell(`(Get-Acl -LiteralPath '${path.replaceAll("'", "''")}').Sddl`);

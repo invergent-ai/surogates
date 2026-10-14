@@ -3,8 +3,8 @@
 # LocalSystem, demand start, with a security descriptor that lets interactive users start it, so a measurement run as
 # an ordinary user can reach it. It is laid out as the installed app is, in a folder of Program Files that only
 # administrators write: the service at service\surogate-service.exe, and the agent disk at resources\vm\agent.vhd,
-# which the service takes from there alone and grants to each VM it boots for that VM's life. No file is given to a
-# group of VMs.
+# the one file of that folder the service takes. Its ACL is the folder's own, which lets every user, and so each VM,
+# read it: nothing is granted on it, to a VM or to the group of all VMs.
 #
 # Run elevated, from desktop/native/windows:
 #   powershell -ExecutionPolicy Bypass -File dev-service.ps1            # build and install
