@@ -107,6 +107,33 @@ Your folders stay as they are.
 
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists each such message, and what an update says of a release this computer cannot trust.
 
+## What it writes on Windows
+
+On Windows, Surogate Desktop is installed for every user of the computer by its MSI, and writes
+these places, and no others:
+
+- **`%ProgramFiles%\Surogate\`**: the app itself, which only administrators can change.
+- **`%ProgramData%\Surogate\`**: the install's record of where updates come from, their channel
+  and the version installed (`install.json`), and `apply\`, where an update is checked and
+  installed from. Only administrators can change either.
+- **The registry, for every user:** `HKLM\Software\Surogate`, what the install was given, kept
+  for each later install; and `HKLM\Software\Classes\surogate`, which opens `surogate://` links in
+  the app.
+- **The Start menu's shortcut**, two Windows Firewall rules that keep the file tools off the
+  network, and the Surogate VM service, which runs the sandbox for each user who asks for it.
+- **`%LOCALAPPDATA%\Surogate\`, for each user**: everything the app keeps for you, your
+  sign-in, your settings, the sandbox's disks, your folders' histories, the agent's browser
+  profiles, and the updates it downloads.
+- **Start at login**, when you turn it on: Windows's list of the apps that start when you sign in.
+- **`%SystemRoot%\Temp\`**: Windows Installer's logs of an update (`surogate-update-<version>.log`)
+  and of a removal (`surogate-remove.log`).
+
+**Restart to update** asks Windows for an administrator, then quits the app, installs the
+update and starts the app again. **Remove Surogate from This Computer…**, in the menu under your
+name, removes the app for every user once an administrator approves it, and asks before it
+deletes your own `%LOCALAPPDATA%\Surogate\`. It never touches the folders your chats work on, or
+another user's data.
+
 ## Building from source
 
     ../images/guest/build.sh     # the sandbox's image, once

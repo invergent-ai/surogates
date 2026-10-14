@@ -3,7 +3,8 @@
 // %ProgramData%\Surogate, SYSTEM's, which only administrators may change, as the app checks before it takes it
 // (files/admins-own-win32.ts); the release keys the build wrote beside the app's code, in Program Files; and
 // surogate-helper.exe's update, which asks Windows's UAC for an administrator to run surogate-admin.exe on the files
-// the app downloaded, says once one has approved, and starts the app again after the MSI (native/windows/helper).
+// the app downloaded, says once one has approved, and starts the app again after the MSI (native/windows/helper); and
+// its remove, which has surogate-admin.exe uninstall the app the same way.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { basename, dirname, win32 } from "node:path";
@@ -23,20 +24,14 @@ const APPROVED = "approved";
 // The most that is kept of what the helper said, its end.
 const SAID_MAX = 4000;
 
-/**
- * What runs an update with *helper*, surogate-helper.exe: `update` on the release's folder, for this app's process
- * *pid*. It answers once Windows's prompt has an administrator's approval, with restarts: the app is to quit, for the MSI
- * to replace it, and the helper starts it again after. Or, where none approved or the helper could not ask, as it ended:
- * 1223 where the prompt was dismissed. The helper is never elevated, and outlives the app.
- */
-export function updateRun(helper: string, pid: number = process.pid): (files: Staged) => Promise<Applied> {
-  return (files) => new Promise((resolve) => {
-    const folder = dirname(files.tarball);
+// The helper run with *args*: it answers once Windows's prompt has an administrator's approval, with restarts, as the
+// app is to quit and the helper goes on; or, where none approved or it could not ask, as it ended, 1223 where the prompt
+// was dismissed. The helper is never elevated, and outlives the app.
+function helperRun(helper: string, args: string[]): Promise<Applied> {
+  return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(helper, ["update", "--app-pid", String(pid), "--staged", folder, "--version", basename(folder)], {
-        detached: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
-      });
+      child = spawn(helper, args, { detached: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     } catch (error) {
       return resolve({ code: null, said: error instanceof Error ? error.message : String(error) });
     }
@@ -49,7 +44,7 @@ export function updateRun(helper: string, pid: number = process.pid): (files: St
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
       heard += chunk;
       if (!heard.split(/\r?\n/).includes(APPROVED)) return;
-      // Approved: the app lets the helper go, which waits for the install and starts the app again.
+      // Approved: the app lets the helper go, which waits for the admin program.
       child.stdout?.destroy();
       child.stderr?.destroy();
       child.unref();
@@ -57,6 +52,25 @@ export function updateRun(helper: string, pid: number = process.pid): (files: St
     });
     child.once("exit", (code) => resolve({ code, said: said.trim() }));
   });
+}
+
+/**
+ * What runs an update with *helper*, surogate-helper.exe: `update` on the release's folder, for this app's process
+ * *pid*. Approved, the app quits for the MSI to replace it, and the helper starts it again after.
+ */
+export function updateRun(helper: string, pid: number = process.pid): (files: Staged) => Promise<Applied> {
+  return (files) => {
+    const folder = dirname(files.tarball);
+    return helperRun(helper, ["update", "--app-pid", String(pid), "--staged", folder, "--version", basename(folder)]);
+  };
+}
+
+/**
+ * What removes the app with *helper*: `remove`, for this app's process *pid*, which uninstalls it for every user once an
+ * administrator approved and the app has quit, and then removes the user's own folders it is given, *forget*.
+ */
+export function removeRun(helper: string, pid: number = process.pid): (forget: string[]) => Promise<Applied> {
+  return (forget) => helperRun(helper, ["remove", "--app-pid", String(pid), ...forget.flatMap((folder) => ["--forget", folder])]);
 }
 
 /**

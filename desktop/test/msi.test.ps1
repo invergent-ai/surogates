@@ -414,8 +414,18 @@ if ($Newer) {
   $updateLog = Join-Path $env:SystemRoot "Temp\surogate-update-$NewerVersion.log"
   Check 'the update''s MSI keeps the install''s own folder it runs from' ((Test-Path $updateLog) -and (Get-Content -Raw $updateLog) -match "Surogate: $([regex]::Escape($Data)) is the install's own already, and is kept") $updateLog
 }
-$last = Msiexec 'remove-again' "/x `"$(if ($Newer) { $Newer } else { $Msi })`""
-Check 'it uninstalls again' ($last.Code -eq 0) "msiexec exited $($last.Code)"
+if ($Newer) {
+  # The last uninstall as the app's Remove Surogate from This Computer has it run: surogate-admin.exe remove, once the app
+  # has ended, finds the installed product by the MSI's upgrade code and uninstalls it.
+  $err = Join-Path $Logs 'admin-remove.err'
+  $run = Start-Process -FilePath $Admin -ArgumentList 'remove', '--wait', $ended -Wait -PassThru -RedirectStandardError $err
+  $removeLog = Join-Path $env:SystemRoot 'Temp\surogate-remove.log'
+  $last = [pscustomobject]@{ Code = $run.ExitCode; Log = if (Test-Path $removeLog) { Get-Content -Raw $removeLog } else { '' } }
+  Check 'surogate-admin removes the app' ($last.Code -eq 0) "exit $($last.Code): $(Get-Content -Raw $err)"
+} else {
+  $last = Msiexec 'remove-again' "/x `"$Msi`""
+}
+Check 'it uninstalls again' ($last.Code -eq 0) "exit $($last.Code)"
 if ($Newer) {
   Check 'the uninstall removes what an update left in apply, with the folder' ($last.Log -match "Surogate: $([regex]::Escape($Data)) is removed at the uninstall: .*$([regex]::Escape("apply\$NewerVersion"))") ''
 }

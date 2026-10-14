@@ -20,6 +20,9 @@
 //!                     the update staged in <folder> installed by surogate-admin.exe, once Windows's prompt has an
 //!                     administrator's approval: "approved", a line, as the app is to quit; its exit code the apply's,
 //!                     1223 where none approved; then the app started again (update.rs, windows/update.rs)
+//!   remove --app-pid <pid> [--forget <folder>]…
+//!                     the app uninstalled by surogate-admin.exe, the same way; then each <folder>, this user's,
+//!                     removed once the uninstall ended well
 //!
 //! A Windows-subsystem program: started by an app that has no console, as the installed app started from the Start
 //! menu has none, it gives Windows no reason to make one (Microsoft, "Creation of a Console": a console process gets a
@@ -29,7 +32,7 @@
 use std::ffi::OsString;
 use std::io::Write;
 
-const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path> | version <path> | spawn <keep> <program> <args>… | update --app-pid <pid> --staged <folder> --version <x.y.z>";
+const USAGE: &str = "usage: surogate-helper trust | procs | verify <path> | app-path <name> | look <path> | version <path> | spawn <keep> <program> <args>… | update --app-pid <pid> --staged <folder> --version <x.y.z> | remove --app-pid <pid> [--forget <folder>]…";
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -37,9 +40,12 @@ fn main() {
     if args.first().and_then(|first| first.to_str()) == Some("spawn") {
         spawn(&args[1..]);
     }
-    // An update says its one line midway, and ends as its apply ends.
+    // An update and a removal say their one line midway, and end as the admin program ends.
     if args.first().and_then(|first| first.to_str()) == Some("update") {
         std::process::exit(update(&args[1..]));
+    }
+    if args.first().and_then(|first| first.to_str()) == Some("remove") {
+        std::process::exit(remove(&args[1..]));
     }
     let (code, out, words) = match run(&args) {
         Answer::Said(text) => (0, text, None),
@@ -112,6 +118,21 @@ fn update(args: &[OsString]) -> i32 {
     {
         let _ = update;
         let _ = writeln!(std::io::stderr().lock(), "surogate-helper updates on Windows alone");
+        1
+    }
+}
+
+fn remove(args: &[OsString]) -> i32 {
+    let Some(removal) = surogate_helper::update::removal(args) else {
+        let _ = writeln!(std::io::stderr().lock(), "{USAGE}");
+        return 2;
+    };
+    #[cfg(windows)]
+    return surogate_helper::windows::update::remove(&removal);
+    #[cfg(not(windows))]
+    {
+        let _ = removal;
+        let _ = writeln!(std::io::stderr().lock(), "surogate-helper removes on Windows alone");
         1
     }
 }

@@ -92,7 +92,7 @@ describe.runIf(WINDOWS)("an administrator's word on Windows", { timeout: 30_000 
   it("says a record not there is no install's, as Node says a file not there is", () => {
     rmSync(record);
     expect(() => adminsOwn(record)).toThrow(expect.objectContaining({ code: "ENOENT" }));
-    expect(() => installBase(record, true)).toThrow("Surogate was not installed by its install script");
+    expect(() => installBase(record, true)).toThrow("Surogate was not installed by its installer, so it does not know where it was installed from");
   });
 
   it("refuses a path that is not a whole path on a drive", () => {

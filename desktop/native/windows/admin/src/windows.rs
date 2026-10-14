@@ -22,6 +22,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING, READ_CONTROL,
 };
+use windows_sys::Win32::System::ApplicationInstallationAndServicing::MsiEnumRelatedProductsW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
@@ -350,6 +351,54 @@ fn run(apply: &Apply) -> Result<String, Failure> {
         }
     }
     Ok(if code == RESTART_NEEDED { format!("Surogate {} is installed, and a restart of Windows finishes it", apply.version) } else { String::new() })
+}
+
+// The MSI's UpgradeCode (windows/msi/Surogate.wxs), which every release's MSI shares.
+const UPGRADE_CODE: &str = "{5C1085D3-C840-4903-AD25-DDE9C711CD5D}";
+
+/// The product codes Windows Installer has installed under the MSI's UpgradeCode.
+fn installed_products() -> Vec<String> {
+    let upgrade = wide(UPGRADE_CODE);
+    let mut found = Vec::new();
+    for index in 0.. {
+        // A product code in braces, and its NUL.
+        let mut code = [0u16; 39];
+        // SAFETY: the upgrade code outlives the call, and the buffer is the 39 characters the call writes.
+        if unsafe { MsiEnumRelatedProductsW(upgrade.as_ptr(), 0, index, code.as_mut_ptr()) } != 0 {
+            break;
+        }
+        found.push(String::from_utf16_lossy(&code[..38]));
+    }
+    found
+}
+
+fn run_remove(wait: u32) -> Result<String, Failure> {
+    if !ended(wait, QUIT_SECONDS) {
+        return Err((exit::DID_NOT_QUIT, format!("Surogate did not quit within {QUIT_SECONDS} s, so nothing was removed")));
+    }
+    let products = installed_products();
+    let [product] = products.as_slice() else {
+        return Err(failed(if products.is_empty() { "Surogate is not installed on this computer".to_string() } else { format!("Windows Installer lists Surogate {} times", products.len()) }));
+    };
+    let msiexec = folder_of(GetSystemDirectoryW, "system")?.join("msiexec.exe");
+    let log = folder_of(GetSystemWindowsDirectoryW, "Windows")?.join("Temp").join("surogate-remove.log");
+    let status = std::process::Command::new(&msiexec)
+        .args([OsStr::new("/x"), OsStr::new(product), OsStr::new("/qn"), OsStr::new("/norestart"), OsStr::new("/l*v"), log.as_os_str()])
+        .status()
+        .map_err(|error| failed(format!("Windows Installer could not be started: {error}")))?;
+    let code = status.code().unwrap_or(-1);
+    if code != 0 && code != RESTART_NEEDED {
+        return Err((exit::INSTALLER_FAILED, format!("Windows Installer ended {code}, and Surogate was not removed: its log is {}", log.display())));
+    }
+    Ok(if code == RESTART_NEEDED { "Surogate is removed, and a restart of Windows finishes it".to_string() } else { String::new() })
+}
+
+/// The app removed for every user of this computer, once its process *wait* has ended: its exit code, and its words.
+pub fn remove(wait: u32) -> (i32, String) {
+    match run_remove(wait) {
+        Ok(words) => (exit::INSTALLED, words),
+        Err((code, words)) => (code, words),
+    }
 }
 
 /// The update applied: its exit code, and its words.

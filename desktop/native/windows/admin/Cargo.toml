@@ -1,6 +1,7 @@
 # surogate-admin.exe: what installs an update of the app once an administrator approved it through UAC, the one part
 # of the app that runs elevated at the user's asking. It checks the release again, from copies of its own where only
-# administrators reach, and runs Windows Installer on them; surogate-helper.exe's `update` starts it.
+# administrators reach, and runs Windows Installer on them; surogate-helper.exe's `update` starts it. And it removes the
+# app, by Windows Installer's uninstall, as its `remove` asks.
 [package]
 name = "surogate-admin"
 version.workspace = true
@@ -30,6 +31,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
+  "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_Com",
   "Win32_System_LibraryLoader",
   "Win32_System_SystemInformation",

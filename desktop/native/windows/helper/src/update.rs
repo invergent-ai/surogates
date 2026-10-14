@@ -2,6 +2,9 @@
 //! *folder* installed through UAC. What is read and written for it is here, the same on every OS and tested on each;
 //! windows/update.rs asks Windows for an administrator to run surogate-admin.exe's apply, says so to the app, which then
 //! quits, waits for the apply, keeps how it ended in the folder for the app's next start, and starts the app again.
+//! And `surogate-helper remove --app-pid <pid> [--forget <folder>]…`: the app uninstalled the same way, by
+//! surogate-admin.exe's remove, and then each folder of this user's that the app named removed, once the uninstall ended
+//! well.
 
 use std::ffi::{OsStr, OsString};
 
@@ -61,6 +64,44 @@ pub fn admin_args(update: &Update<'_>) -> Vec<OsString> {
     ]
 }
 
+/// A removal's arguments: the app's process, and the folders of the user's own to remove after it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Remove<'a> {
+    pub app_pid: u32,
+    pub forget: Vec<&'a OsStr>,
+}
+
+// A folder by its whole path on a drive, with no quote in it.
+fn on_a_drive(path: &OsStr) -> bool {
+    path.to_str().is_some_and(|path| {
+        let bytes = path.as_bytes();
+        bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' && !path.contains(['"', '\0'])
+    })
+}
+
+/// *args* after `remove`, as it takes them, or None: the app's pid, then `--forget` and a folder on a drive, each as often
+/// as the app names one.
+pub fn removal(args: &[OsString]) -> Option<Remove<'_>> {
+    let (head, rest) = args.split_at_checked(2)?;
+    let [pid_flag, pid] = head else { return None };
+    if pid_flag.to_str() != Some("--app-pid") {
+        return None;
+    }
+    let pid = pid.to_str().filter(|text| !text.is_empty() && text.len() <= 10 && text.bytes().all(|byte| byte.is_ascii_digit()))?;
+    let app_pid: u32 = pid.parse().ok().filter(|&pid| pid > 0)?;
+    let (pairs, odd) = rest.as_chunks::<2>();
+    if !odd.is_empty() {
+        return None;
+    }
+    let forget = pairs.iter().map(|[flag, folder]| (flag.to_str() == Some("--forget") && on_a_drive(folder)).then_some(folder.as_os_str())).collect::<Option<Vec<_>>>()?;
+    Some(Remove { app_pid, forget })
+}
+
+/// surogate-admin.exe's arguments for *removal*: its remove, waiting for the app.
+pub fn remove_args(removal: &Remove<'_>) -> Vec<OsString> {
+    vec!["remove".into(), "--wait".into(), removal.app_pid.to_string().into()]
+}
+
 /// How an apply of *version* ended, as its result file holds it: one line of JSON.
 pub fn result(version: &str, code: i32) -> String {
     format!("{{\"version\":\"{version}\",\"code\":{code}}}\n")
@@ -98,6 +139,19 @@ mod tests {
             let mut list = GOOD;
             list[at] = bad;
             assert_eq!(parsed(&args(&list)), None, "{bad} at {at}");
+        }
+    }
+
+    #[test]
+    fn takes_a_removal_and_the_folders_to_forget_after_it() {
+        let given = args(&["--app-pid", "9", "--forget", "C:\\Users\\me\\AppData\\Roaming\\Surogate", "--forget", "C:\\Users\\me\\AppData\\Local\\Surogate"]);
+        let removal = removal(&given).expect("a removal");
+        assert_eq!(removal.app_pid, 9);
+        assert_eq!(removal.forget, [OsStr::new("C:\\Users\\me\\AppData\\Roaming\\Surogate"), OsStr::new("C:\\Users\\me\\AppData\\Local\\Surogate")]);
+        assert_eq!(remove_args(&removal), args(&["remove", "--wait", "9"]));
+        assert_eq!(super::removal(&args(&["--app-pid", "9"])).map(|removal| removal.forget.len()), Some(0), "nothing to forget");
+        for bad in [&["--app-pid"][..], &["--app-pid", "0"], &["--app-pid", "9", "--forget"], &["--app-pid", "9", "--forget", "Surogate"], &["--app-pid", "9", "--keep", "C:\\x"]] {
+            assert_eq!(super::removal(&args(bad)), None, "{bad:?}");
         }
     }
 

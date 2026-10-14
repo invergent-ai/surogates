@@ -1,6 +1,7 @@
 //! `surogate-admin apply --wait <pid> --manifest <path> --signature <path> --msi <path> --version <x.y.z>`, each in this
 //! order, as surogate-helper's `update` gives them: the app's process, which is waited for; the release's manifest,
-//! its signature and its MSI, as the app downloaded them into its user's cache; and the version they are of.
+//! its signature and its MSI, as the app downloaded them into its user's cache; and the version they are of. And
+//! `surogate-admin remove --wait <pid>`, as its `remove` gives it: the app's process, waited for before the uninstall.
 
 use std::ffi::OsString;
 
@@ -25,6 +26,28 @@ fn whole_path(path: &OsString) -> bool {
     })
 }
 
+/// What a run is asked: an update applied, or the app removed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked {
+    Apply(Apply),
+    Remove { wait: u32 },
+}
+
+// A process's id in decimal, as the app gives its own.
+fn pid(text: &OsString) -> Option<u32> {
+    let text = text.to_str().filter(|text| !text.is_empty() && text.len() <= 10 && text.bytes().all(|byte| byte.is_ascii_digit()))?;
+    text.parse().ok().filter(|&pid| pid > 0)
+}
+
+/// *args*, after the program's name, as a run takes them, or None.
+pub fn asked(args: &[OsString]) -> Option<Asked> {
+    if let [command, wait_flag, wait] = args {
+        let flags = [command, wait_flag].map(|flag| flag.to_str());
+        return (flags == [Some("remove"), Some("--wait")]).then(|| pid(wait)).flatten().map(|wait| Asked::Remove { wait });
+    }
+    parsed(args).map(Asked::Apply)
+}
+
 /// *args*, after the program's name, as an apply takes them, or None.
 pub fn parsed(args: &[OsString]) -> Option<Apply> {
     let [command, wait_flag, wait, manifest_flag, manifest, signature_flag, signature, msi_flag, msi, version_flag, version] = args else { return None };
@@ -32,8 +55,7 @@ pub fn parsed(args: &[OsString]) -> Option<Apply> {
     if flags != [Some("apply"), Some("--wait"), Some("--manifest"), Some("--signature"), Some("--msi"), Some("--version")] {
         return None;
     }
-    let wait = wait.to_str().filter(|text| !text.is_empty() && text.len() <= 10 && text.bytes().all(|byte| byte.is_ascii_digit()))?;
-    let wait: u32 = wait.parse().ok().filter(|&pid| pid > 0)?;
+    let wait = pid(wait)?;
     let version = version.to_str().filter(|text| version_ok(text))?.to_string();
     [manifest, signature, msi].into_iter().all(whole_path).then(|| Apply { wait, manifest: manifest.clone(), signature: signature.clone(), msi: msi.clone(), version })
 }
@@ -58,6 +80,15 @@ mod tests {
         assert_eq!(apply.wait, 4242);
         assert_eq!(apply.version, "1.2.3");
         assert_eq!(apply.msi, OsString::from(GOOD[8]));
+    }
+
+    #[test]
+    fn takes_a_remove_of_the_app_s_process() {
+        assert_eq!(asked(&args(&["remove", "--wait", "77"])), Some(Asked::Remove { wait: 77 }));
+        assert!(matches!(asked(&args(&GOOD)), Some(Asked::Apply(_))));
+        for bad in [&["remove", "--wait"][..], &["remove", "--wait", "0"], &["remove", "--pid", "77"], &["Remove", "--wait", "77"], &["remove", "--wait", "77", "x"]] {
+            assert_eq!(asked(&args(bad)), None, "{bad:?}");
+        }
     }
 
     #[test]

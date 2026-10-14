@@ -12,6 +12,8 @@ describe.runIf(process.platform === "linux")("an update's install on Linux", () 
     expect(INSTALLER.record()).toBe("/etc/surogate/install.json");
     expect(INSTALLER.updates).toBe(installedUpdates);
     expect(INSTALLER.helper).toBe(helperRun);
+    // The install script removes the app, never the app itself.
+    expect(INSTALLER.uninstall).toBeNull();
   });
 });
 
@@ -19,5 +21,6 @@ describe.runIf(process.platform === "win32")("an installed app's record on Windo
   it("is the MSI's, in %ProgramData%'s Surogate folder, read without a throw as the app starts", () => {
     expect(INSTALLER.record()).toBe(machineRecord());
     expect(INSTALLER.record()).toMatch(/^[A-Za-z]:\\.*\\Surogate\\install\.json$/);
+    expect(typeof INSTALLER.uninstall).toBe("function");
   });
 });

@@ -393,6 +393,33 @@ async function updateAction(): Promise<void> {
   if (updates.state.state === "restarting") app.quit();
 }
 
+// Remove Surogate from This Computer, where the installed app can remove itself, as Windows's does: confirmed first,
+// with whether to delete this user's own data asked beside it; the login item turned off; then the MSI's uninstall, for
+// every user, through UAC, by the helper, which removes the data after it where asked. Once an administrator has
+// approved, the app quits, which stops its hosts and its VM, as the uninstall waits for it. It never touches a chat's
+// folder, nor another user's data: what it deletes is this user's data root alone.
+async function uninstall(): Promise<void> {
+  const remove = INSTALLER.uninstall;
+  if (!remove || !app.isPackaged) return;
+  const { response, checkboxChecked: forget } = await messageBoxResult({
+    type: "warning", message: "Remove Surogate from this computer?",
+    detail: "Surogate is uninstalled for every user of this computer, once an administrator approves it. The folders your chats work on are left as they are.",
+    checkboxLabel: "Also delete your Surogate data on this computer: your sign-in, your settings and the sandbox's disks", checkboxChecked: false,
+    buttons: ["Remove", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
+  });
+  if (response !== 0) return;
+  await Promise.resolve(loginItem.set(false, loginCommand())).catch(report);
+  const { code, said, restarts } = await remove(forget ? [root] : []);
+  if (code === 0 && restarts) return void app.quit();
+  if (said) report(new Error(`Surogate was not removed${code === null ? "" : ` (exit ${code})`}: ${said}`));
+  const dismissed = code === 1223;
+  await messageBox({
+    type: dismissed ? "info" : "error", message: dismissed ? "An administrator needs to remove Surogate." : "Surogate could not be removed.",
+    detail: dismissed ? "Nothing was changed. Choose Remove Surogate from This Computer again to ask for an administrator." : said || "Nothing was changed.",
+    buttons: ["OK"], noLink: true,
+  });
+}
+
 // The image's delivery started, once made: its manifest unreadable is a delivery that failed, so a
 // packaged app never boots the repository's image in its place. *check*: as Retry asks.
 function startDelivery(check = false): void {
@@ -1724,6 +1751,7 @@ function state() {
     projects: listed,
     failure,
     links: Object.keys(links()),
+    uninstall: app.isPackaged && INSTALLER.uninstall !== null,
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() || sessionStore.unencrypted()
       ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
@@ -2531,6 +2559,7 @@ function wire(window: MainWindow, page: string): void {
     const agent = agents.get();
     if (agent) void signOut(agent, true);
   });
+  handle("shell:uninstall", () => void uninstall().catch(report));
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
     goWeb(path);

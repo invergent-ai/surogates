@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { installedUpdates, machineRecord, updateRun } from "../src/shell/installer-win32.js";
+import { installedUpdates, machineRecord, removeRun, updateRun } from "../src/shell/installer-win32.js";
 
 describe("the install record on Windows", () => {
   it("is install.json in %ProgramData%'s Surogate folder", () => {
@@ -58,6 +58,14 @@ describe.runIf(process.platform !== "win32")("running an update with the helper"
     const applied = await updateRun(helper("approved\\r\\n", "", null), 4242)(files);
     expect(applied).toEqual({ code: 0, said: "", restarts: true });
     expect(readFileSync(join(dir, "args"), "utf8").split("\n").slice(0, 7)).toEqual(["update", "--app-pid", "4242", "--staged", "/u/updates/1.4.0", "--version", "1.4.0"]);
+  });
+
+  it("hands a removal this app's process and the folders to forget after it, and answers once an administrator approved", async () => {
+    const applied = await removeRun(helper("approved\\n", "", null), 77)(["C:\\Users\\ana\\AppData\\Local\\Surogate"]);
+    expect(applied).toEqual({ code: 0, said: "", restarts: true });
+    expect(readFileSync(join(dir, "args"), "utf8").split("\n").slice(0, 5)).toEqual(["remove", "--app-pid", "77", "--forget", "C:\\Users\\ana\\AppData\\Local\\Surogate"]);
+    expect(await removeRun(helper("", "No administrator approved it", 3), 77)([])).toEqual({ code: 3, said: "No administrator approved it" });
+    expect(readFileSync(join(dir, "args"), "utf8").split("\n").slice(0, 3)).toEqual(["remove", "--app-pid", "77"]);
   });
 
   it("answers how the helper ended, with what it said, where no administrator approved or it could not ask", async () => {
