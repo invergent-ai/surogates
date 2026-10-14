@@ -102,8 +102,11 @@ def call_failure(error: Exception) -> SendResult:
 
 
 async def deliver_voice(group: list[Any], *, session_store: Any, redis: Any, routing: Any, livekit: Any,
-                        settings: Any) -> SendResult:
-    """Phone the person whose conversation *group* belongs to and wait for an answer."""
+                        settings: Any, session_factory: Any = None) -> SendResult:
+    """Phone the person whose conversation *group* belongs to and wait for an answer.
+
+    An urgent alert that cannot be phoned goes out at once on the member's next alert channel
+    (with *session_factory*)."""
     from livekit import api
 
     from surogates.channels.resolve import resolve_tenant
@@ -117,15 +120,22 @@ async def deliver_voice(group: list[Any], *, session_store: Any, redis: Any, rou
     messages = [m for m in [await message_of(session_store, it) for it in group] if m is not None]
     if not messages:
         return SendResult(success=True)
+
+    async def failed(result: SendResult) -> SendResult:
+        if session_factory is not None and any(m.kind == "alert" for m in messages):
+            await alert_elsewhere(session_factory, [i.id for i in group], why=result.error or "failed")
+        return result
+
     config, vs = session.config or {}, settings.voice
     number, digits = str(config.get("channel_identifier") or ""), str(config.get("voice_channel_id") or "")
     tenant = await resolve_tenant(routing, "voice", number) if number else None
     if tenant is None:
-        return SendResult(success=False, error=f"call failed: {number or 'no number'} is not this agent's line",
-                          retryable=False)
+        return await failed(SendResult(success=False, retryable=False,
+                                       error=f"call failed: {number or 'no number'} is not this agent's line"))
     trunk = str((tenant.get("config") or {}).get("outbound_trunk_id") or vs.outbound_trunk_id)
     if not trunk:
-        return SendResult(success=False, error=f"call failed: {number} cannot place calls", retryable=False)
+        return await failed(SendResult(success=False, error=f"call failed: {number} cannot place calls",
+                                       retryable=False))
     kinds = {m.kind for m in messages}
     call = Outbound(session_id=str(session.id), call_id=f"out-{item.id}", number=number, to=f"+{digits}",
                     text="\n\n".join(m.text for m in messages),
@@ -147,7 +157,8 @@ async def deliver_voice(group: list[Any], *, session_store: Any, redis: Any, rou
         except Exception:  # noqa: BLE001 — the room empties and closes on its own
             log.debug("could not delete room %s", room, exc_info=True)
         log.info("call %s to %s not connected: %s", call.call_id, call.to, exc)
-        return call_failure(exc)
+        result = call_failure(exc)
+        return await failed(result) if not result.retryable else result
     log.info("call %s to %s answered (session %s)", call.call_id, call.to, session.id)
     return SendResult(success=True, message_id=call.call_id)
 
@@ -171,7 +182,8 @@ async def dial_forever(settings: Any) -> None:
     async def handler(group):
         async with lines:
             return await deliver_voice(group, session_store=store, redis=rt.redis, routing=rt.routing,
-                                       livekit=livekit, settings=settings)
+                                       livekit=livekit, settings=settings,
+                                       session_factory=rt.sessions._sf)  # noqa: SLF001
 
     try:
         await run_forever(DeliveryService(rt.sessions._sf, rt.redis), rt.sessions._sf,  # noqa: SLF001
@@ -179,3 +191,53 @@ async def dial_forever(settings: Any) -> None:
     finally:
         await livekit.aclose()
         await rt.aclose()
+
+
+async def alert_elsewhere(session_factory: Any, outbox_ids: Any, *, why: str) -> int:
+    """An urgent alert call nobody acknowledged (unanswered, busy, or answered without a yes): send the
+    same alert at once on the member's next alert channel. 2B's red-alert reminder stays the backstop.
+
+    Returns how many alerts went to another channel.
+    """
+    import uuid
+
+    import sqlalchemy as sa
+
+    from surogates.channels.capabilities import capabilities_for, initiating_platforms
+    from surogates.db.models import DeliveryOutbox, Event, OutreachMessageRow
+    from surogates.followup import store as followup_store
+
+    async with session_factory() as db:
+        ids = (await db.execute(
+            sa.select(Event.data["outreach_id"].astext)
+            .join(DeliveryOutbox, DeliveryOutbox.event_id == Event.id)
+            .where(DeliveryOutbox.id.in_(list(outbox_ids)))
+            .where(Event.data["synthetic"].astext == "outreach")
+        )).scalars().all()
+        rows = [r for r in [await db.get(OutreachMessageRow, uuid.UUID(i)) for i in ids if i]
+                if r is not None and r.kind == "alert" and r.severity == "red" and r.read_at is None]
+    moved = 0
+    for row in rows:
+        settings = await followup_store.get_settings(session_factory, org_id=row.org_id, agent_id=row.agent_id)
+        senders = {p: s for p, s in followup_store.senders_of(settings).items()
+                   if p != "voice" and capabilities_for(p).can_initiate}
+        reachable = (await followup_store._granted_platforms(  # noqa: SLF001 — notify_team's own rule
+            session_factory, org_id=row.org_id, user_ids=[row.user_id])).get(row.user_id, set())
+        order = ((getattr(settings, "team_channels", None) or {}).get(str(row.user_id))
+                 or ["whatsapp", *(p for p in initiating_platforms() if p != "whatsapp")])
+        platform = next((p for p in order if p in senders and p in reachable), None)
+        if platform is None:
+            log.info("alert %s: unanswered call, and no other channel reaches the member", row.id)
+            continue
+        template = capabilities_for(platform).opener == "template" and settings is not None
+        await followup_store.queue_outreach(
+            session_factory, org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
+            platform=platform, channel_identifier=senders[platform], kind="alert", text=row.text,
+            template_name=settings.alert_template_name if template else None,
+            template_language=settings.alert_template_language if template else None,
+            subject_user_id=row.subject_user_id, created_by=row.created_by,
+            dedupe_key=f"call-unanswered:{row.id}", severity=row.severity, alert_reason=row.alert_reason,
+        )
+        log.info("alert %s: call %s, sent on %s", row.id, why, platform)
+        moved += 1
+    return moved

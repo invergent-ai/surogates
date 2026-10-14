@@ -28,7 +28,14 @@ from surogates.config import load_settings
 from surogates.voice.agent import CallConfig, VoiceAgent
 from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
-from surogates.voice.outbound import LIVE_GRACE_SECONDS, Outbound, acknowledges, dial_forever, mark_live
+from surogates.voice.outbound import (
+    LIVE_GRACE_SECONDS,
+    Outbound,
+    acknowledges,
+    alert_elsewhere,
+    dial_forever,
+    mark_live,
+)
 from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
 from surogates.voice.sessions import CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.text import asks_for_details
@@ -273,6 +280,10 @@ async def entrypoint(ctx: JobContext) -> None:
             ("end the session", call and call.end()),
             ("let the conversation be called again", call and outbound and mark_live(
                 rt.redis, call.session_id, LIVE_GRACE_SECONDS)),
+            # an urgent alert heard without a yes is not read: it goes on to the member's next channel
+            ("send an unacknowledged alert elsewhere", alert_elsewhere(
+                rt.sessions._sf, outbound.outbox_ids, why="answered without an acknowledgement",  # noqa: SLF001
+            ) if outbound is not None and outbound.kind == "alert" else None),
             ("report the call", call and report(outcome)),
             ("release the line", slots and slots.release(info.call_id)),
             ("stop the background", background and background.aclose()),

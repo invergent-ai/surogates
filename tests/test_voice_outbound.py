@@ -157,3 +157,75 @@ async def test_the_call_joins_the_conversation_it_was_placed_from(monkeypatch):
     assert (call.session_id, call.user_id, call.caller) == (sid, user, "40712000103")
     assert "You phoned this person" in call.note and "vă sun de la clinică" in call.note
     assert call.before_first_words is not None and configured == [("voice_call_id", "out-40")]
+
+
+async def _alert_call(sf, *, severity="red", read=False, granted=("voice", "whatsapp")):
+    from datetime import datetime, timezone
+
+    from surogates.db.models import ChannelIdentity, DeliveryOutbox, Event, OutreachMessageRow
+    from surogates.followup.store import update_settings
+
+    org, member = uuid4(), uuid4()
+    await update_settings(sf, org_id=org, agent_id="a1", senders={"voice": "+40300000001", "whatsapp": "pn1"},
+                          team_channels={str(member): ["voice", "whatsapp"]})
+    async with sf() as db:
+        for platform in granted:
+            db.add(ChannelIdentity(org_id=org, user_id=member, platform=platform, platform_user_id="40712000103",
+                                   platform_meta={"contact_permission": {"status": "granted"}}))
+        row = OutreachMessageRow(org_id=org, agent_id="a1", user_id=member, platform="voice",
+                                 channel_identifier="+40300000001", kind="alert", text="Ion: durere în piept",
+                                 severity=severity, read_at=datetime.now(timezone.utc) if read else None)
+        db.add(row)
+        await db.flush()
+        event = Event(session_id=uuid4(), type="llm.response", data={"synthetic": "outreach", "outreach_id": str(row.id)})
+        db.add(event)
+        await db.flush()
+        db.add(DeliveryOutbox(id=40, session_id=event.session_id, event_id=event.id, channel="voice",
+                              destination={}, payload={}, dedupe_key="voice:1", status="claimed"))
+        await db.commit()
+    return org, member
+
+
+async def _rows(sf, org):
+    import sqlalchemy as sa
+
+    from surogates.db.models import OutreachMessageRow
+
+    async with sf() as db:
+        return (await db.execute(sa.select(OutreachMessageRow).where(OutreachMessageRow.org_id == org)
+                                 .order_by(OutreachMessageRow.created_at))).scalars().all()
+
+
+async def test_an_unacknowledged_urgent_call_goes_on_to_the_members_next_alert_channel(sf):
+    org, member = await _alert_call(sf)
+    assert await vo.alert_elsewhere(sf, [40], why="call failed: no answer") == 1
+    rows = await _rows(sf, org)
+    again = [r for r in rows if r.platform == "whatsapp"]
+    assert len(again) == 1 and again[0].text == "Ion: durere în piept" and again[0].severity == "red"
+    assert again[0].user_id == member and again[0].channel_identifier == "pn1"
+    assert await vo.alert_elsewhere(sf, [40], why="again") == 1  # one cause, one message
+    assert len([r for r in await _rows(sf, org) if r.platform == "whatsapp"]) == 1
+
+
+@pytest.mark.parametrize("kw", [{"read": True}, {"severity": "amber"}, {"granted": ("voice",)}])
+async def test_a_read_a_normal_or_an_unreachable_alert_is_not_sent_again(sf, kw):
+    org, _ = await _alert_call(sf, **kw)
+    assert await vo.alert_elsewhere(sf, [40], why="x") == 0
+    assert [r.platform for r in await _rows(sf, org)] == ["voice"]
+
+
+async def test_an_urgent_call_that_cannot_connect_alerts_elsewhere_at_once(monkeypatch):
+    sent = []
+
+    async def elsewhere(sf, ids, *, why):
+        sent.append((list(ids), why))
+
+    monkeypatch.setattr(vo, "alert_elsewhere", elsewhere)
+    lk = LiveKit(fail=SipCallError("unavailable", "x", status=400, metadata={"sip_status_code": "480"}))
+    await deliver_voice(rows(9), session_store=Store(), redis=Redis(), routing=Routing({"outbound_trunk_id": "T"}),
+                        livekit=lk, settings=settings(), session_factory=object())
+    assert sent == [([40], "call failed: no answer")]
+    sent.clear()
+    await deliver_voice(rows(5), session_store=Store(), redis=Redis(), routing=Routing({"outbound_trunk_id": "T"}),
+                        livekit=lk, settings=settings(), session_factory=object())
+    assert sent == []  # a step call that fails just falls back as a step
