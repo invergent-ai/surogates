@@ -24,6 +24,7 @@ from surogates.followup.outreach import window_open
 
 __all__ = [
     "STOP_WORDS",
+    "honour_stop",
     "Reach",
     "is_stop",
     "withdraw_consent",
@@ -215,6 +216,26 @@ STOP_WORDS = frozenset({
 
 def is_stop(text: str | None) -> bool:
     return (text or "").strip().rstrip(".!").strip().casefold() in STOP_WORDS
+
+
+async def honour_stop(
+    sf: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID, platform: str,
+    platform_user_id: str, text: str | None,
+) -> bool:
+    """A person's bare "STOP" withdraws this channel before the agent reads
+    it.  Never a team member's: their "stop" is said to the agent (to cut a
+    long answer short), and withdrawing it would silently end their alerts.
+    True when it withdrew."""
+    if not is_stop(text):
+        return False
+    settings = await followup_store.get_settings(sf, org_id=org_id, agent_id=agent_id)
+    if followup_store.is_team_member(settings, user_id):
+        return False
+    await withdraw_consent(
+        sf, org_id=org_id, agent_id=agent_id, user_id=user_id, platform=platform,
+        platform_user_id=platform_user_id, reason=f"«{(text or '').strip()}»", by="person",
+    )
+    return True
 
 
 async def withdraw_consent(

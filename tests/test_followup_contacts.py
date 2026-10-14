@@ -802,3 +802,26 @@ async def test_two_people_with_one_name_stay_two_in_the_overview(sf, clinic):
     result = await team.handle_team_overview({}, **_kw(sf, doctor_session))
     assert "Maria Popescu (+40…111)" in result and "Maria Popescu (+40…222)" in result
     assert result.count("alert ") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_team_members_stop_is_said_to_the_agent_not_an_opt_out(sf, clinic):
+    doctor, _, _ = clinic
+    assert not await people.honour_stop(
+        sf, org_id=ORG, agent_id=AGENT, user_id=doctor, platform="whatsapp",
+        platform_user_id="40700000099", text="Stop.",
+    )
+    [identity] = [i for i in await _all(sf, ChannelIdentity) if i.user_id == doctor]
+    assert store.permission_status(identity) == "granted"
+
+    ion, _ = await _user(sf, "Ion", "40711111111")
+    assert not await people.honour_stop(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ion, platform="whatsapp",
+        platform_user_id="40711111111", text="please stop the pain",
+    )
+    assert await people.honour_stop(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ion, platform="whatsapp",
+        platform_user_id="40711111111", text="STOP",
+    )
+    [identity] = [i for i in await _all(sf, ChannelIdentity) if i.user_id == ion]
+    assert store.permission_status(identity) == "withdrawn"
