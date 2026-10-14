@@ -296,9 +296,9 @@ jobs:
 
   # One real boot through the development service, experimental and never gating: GitHub does not promise nested
   # virtualization on its runners. It builds the native programs and the desktop, installs the development service,
-  # takes vm-guest's image and agent disk, and runs the boot and requirements measurements. If the guest boots, their
-  # JSON holds the timings; if it does not, it holds the Host Compute Service's own words. Either way the result is
-  # kept, and the job does not fail the branch.
+  # takes vm-guest's image and agent disk, gives the agent disk its VHD footer, and runs the boot and requirements
+  # measurements. If the guest boots, their JSON holds the timings; if it does not, it holds the Host Compute Service's
+  # own words. Either way the result is kept, and the job does not fail the branch.
   vm-boot:
     needs: vm-guest
     runs-on: windows-2025
@@ -347,11 +347,17 @@ jobs:
           name: desktop-agent-disk
           path: desktop/dist
 
+      # Hyper-V opens a disk only as a VHD: the raw agent disk the release makes, made a fixed one in place by the
+      # app's own code (scripts/vhd-footer.mjs), as the app's Windows layout makes it.
+      - name: Give the agent disk its VHD footer
+        working-directory: desktop
+        run: node scripts/vhd-footer.mjs dist/agent.img
+
       - name: Install the development VM service
         working-directory: desktop/native/windows
         run: powershell -ExecutionPolicy Bypass -File dev-service.ps1
 
-      # The agent disk as the release makes it, a raw file: the app gives no disk a VHD footer yet.
+      # The agent disk with its footer. The measurements give the image's disk its own, as the app's delivery does.
       - name: Try one real boot, and record what happened
         working-directory: desktop
         continue-on-error: true
