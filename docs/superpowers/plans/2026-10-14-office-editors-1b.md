@@ -1943,6 +1943,340 @@ git commit -m "feat(sdk): say when a document's save waits on the computer"
 
 ---
 
+### Task 9: A landing takes the folder from chat hosts that sit idle on it
+
+On a computer, every chat's host on a project's real folder keeps the folder for `IDLE_MS` (2 minutes) after its last operation. That includes the master's host, which serves the document editor's reads and saves. A thread's landing then waits that long for the folder. With this task, a landing asks every chat host on its folder to let the folder go as soon as nothing of that host runs:
+- **Idle host:** lets go now.
+- **Busy host:** lets go when its current operation ends.
+- **Host with a live background process:** keeps the folder until the process ends, as before.
+
+**Files:**
+- Modify: `desktop/src/hosts/tool-hosts.ts`. Add `Host.yieldFolder()` and the `yielding` field, and a check in `Host.idle()`. In `ToolHosts`, yield the folder's chat hosts when a landing's host is made, and in `hostFor` when a landing is already waiting for that folder.
+- Modify: `docs/superpowers/specs/2026-10-13-office-editors-design.md`. Remove the Known-gaps bullet that begins "**On a computer, the editor's reads and saves keep the desktop's hold**".
+- Test: `desktop/test/tool-hosts.test.ts`
+
+**Interfaces:**
+- Produces: `Host.yieldFolder(): void`.
+
+- [ ] **Step 1: Write the failing test**
+
+In `desktop/test/tool-hosts.test.ts`, inside the `describe` that holds `"lands a thread's file in the folder through the landing's host, …"` (it uses `threads(...)`, `changed()`, `op(...)`, `executor.land(step(...))`, `CHAT`, `signal()`), add:
+
+```ts
+  it("takes the folder from a chat's host that sits idle on it, without waiting out its idle time", { timeout: 90_000 }, async () => {
+    const folder = changed();
+    // The chat's host keeps the folder a minute after its last operation; the landing waits five seconds for it.
+    const executor = threads({ idleMs: 60_000, landWaitMs: 5_000 });
+    // The chat on the folder itself read it a moment ago: its host holds the folder, idle.
+    expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
+    // The landing has the folder within its wait, not after the chat's minute.
+    expect(await executor.land(step("revisions", { paths: [] }), signal())).toEqual({ ok: { revisions: [] } });
+    expect(await executor.land(step("forget", { saga: "s1", applied: [] }), signal())).toEqual({ ok: {} });
+    // The chat's next operation starts a host again once the landing is forgotten.
+    await until(async () => "ok" in (await executor.run(op("resolve", { path: "" }, CHAT), signal())), 15_000);
+  });
+```
+
+Use the file's own helper names: `step` is the local factory the landing tests use. If that `describe` names it differently, use its name, with the default root `ROOT_A`. `until` is the file's polling helper; if it takes a sync predicate, poll the resolve result through a variable.
+
+- [ ] **Step 2: Run it to see it fail**
+
+Run: `cd desktop && npm run build && npx vitest run test/tool-hosts.test.ts -t "takes the folder from a chat's host"`
+Expected: FAIL. The landing answers `folderBusy(folder)` after its 5 s wait, because the chat's host holds the folder for 60 s.
+
+- [ ] **Step 3: Implement**
+
+In `class Host` (`desktop/src/hosts/tool-hosts.ts`), add beside the other private fields:
+
+```ts
+  // A landing waits for the folder this host holds: it lets it go as soon as nothing of it runs, not idleMs after.
+  private yielding = false;
+```
+
+and a method beside `finish`:
+
+```ts
+  /** A landing wants this host's folder: it lets it go once no operation of it runs and no process of its root lives. */
+  yieldFolder(): void {
+    this.yielding = true;
+    this.idle();
+  }
+```
+
+In `idle()`, after the two lines that abort and renew `this.prompts`, before the `idleTimer` is set:
+
+```ts
+    if (this.yielding) {
+      this.finish();
+      return;
+    }
+```
+
+In `ToolHosts`, add a private helper:
+
+```ts
+  // The chats' hosts on *folder* itself let it go once nothing of theirs runs: a landing there would otherwise wait
+  // out a host that only read or wrote a file a moment before. One still running something keeps it until that ends.
+  private yieldTo(folder: string, lander: Host): void {
+    for (const host of this.live) {
+      if (host === lander || host.works.at !== undefined || host.kept !== undefined || host.recovers) continue;
+      if (host.works.folder.path === folder) host.yieldFolder();
+    }
+  }
+```
+
+Call `this.yieldTo(binding.folder, host)` right after `host = this.lander(root, binding, copy, kept);` succeeds, inside the existing `try`, after the assignment and before `void host.exited…`.
+
+In `hostFor`, after the `new Host(...)` for a root on the folder itself (`works.at === undefined`), yield it at once when a landing on that folder still waits for it:
+
+```ts
+    if (works.at === undefined && [...this.landers.values()].some((lander) => !lander.holds && lander.works.folder.path === works.folder.path)) {
+      host.yieldFolder();
+    }
+```
+
+Place it after the host is made and registered, before `return host`. Read `hostFor` first: if it returns the host in one expression, keep that shape, binding `host` first.
+
+- [ ] **Step 4: Remove the Known gap**
+
+In the spec's Known gaps, delete the bullet "**On a computer, the editor's reads and saves keep the desktop's hold on a project's real folder for its 2-minute idle**, so a thread landing right after one waits up to that long."
+
+- [ ] **Step 5: Run the tests to see them pass**
+
+Run: `cd desktop && npx vitest run test/tool-hosts.test.ts test/host.test.ts && npx tsc --noEmit -p .`
+Expected: PASS, apart from failures this machine already has in other files. `host.test.ts` exercises `Host` directly. Never leave a test process running.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add desktop/src/hosts/tool-hosts.ts desktop/test/tool-hosts.test.ts docs/superpowers/specs/2026-10-13-office-editors-design.md
+git commit -m "fix(desktop): a landing takes the folder from chat hosts that sit idle on it"
+```
+
+---
+
+### Task 10: One document however its name is spelled on the computer
+
+On a computer whose folder ignores case or Unicode form (macOS, Windows), `plan.docx` and `Plan.docx` are one file. Today they are two locations, so they open two editing sessions, and a sandbox write under the other spelling passes the guard. With this task:
+- **Opening on a computer** (the pane's route, and the agent when no open row matches as written) takes the spelling the computer's folder lists.
+- **The guard, the read note and the turn's save** match open documents on a computer without case.
+- **Locations on a computer** are NFC-normalised.
+
+**Files:**
+- Modify: `surogates/office/files.py`. Add `on_disk_spelling` and `_folded`.
+- Modify: `surogates/office/agent.py`. NFC in `location_of`'s computer branch; `open_for_agent` takes the on-disk spelling.
+- Modify: `surogates/api/routes/office.py`. `get_workspace_editor` takes the on-disk spelling.
+- Modify: `surogates/office/sessions.py`. Add `open_like`.
+- Modify: `surogates/office/guard.py`. On a computer, the refusal and the read note match open rows with `open_like`.
+- Modify: `surogates/office/turn_end.py`. On a computer, save every open row `open_like` finds.
+- Modify: `surogates/db/models.py` and `surogates/db/observability.sql`. A partial index on `lower(location)` where open.
+- Modify: `docs/superpowers/specs/2026-10-13-office-editors-design.md`. Remove the Known-gaps bullet that begins "**On a computer whose folder ignores case**".
+- Test: `tests/test_office_files.py`, `tests/integration/test_office_routes.py`, `tests/integration/test_office_agent.py`, `tests/integration/test_office_guard.py`, `tests/integration/test_office_turn_end.py`, `tests/integration/test_office_sessions.py`
+
+**Interfaces:**
+- Produces:
+  - `async def on_disk_spelling(files: DeviceWorkspaceIO, path: str) -> str`, in `surogates/office/files.py`.
+  - `async def open_like(session_factory, locations: list[str]) -> list[OpenDocument]`, in `surogates/office/sessions.py`.
+
+- [ ] **Step 1: Write the failing tests**
+
+**`tests/test_office_files.py`.** Add these. The fake computer's `list_dir` is needed: add a `list_dir` branch to `tests/device_computer.py` `Computer.run`, answering the names of the keys directly under `args["key"]` (`{"ok": sorted(names)}`). Also add a case-insensitive mode: a `Computer(..., ignores_case=True)` whose `stat`, `read` and `resolve` of a key find a stored key equal under `casefold()`.
+
+```python
+from tests.device_computer import Computer
+from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.office.files import on_disk_spelling
+
+
+def _io(files, *, ignores_case):
+    return DeviceWorkspaceIO(Computer(FOLDER, files, ignores_case=ignores_case), root=FOLDER, identity=f"device:{DEVICE}")
+
+
+async def test_a_name_the_computer_finds_in_another_case_takes_its_listed_spelling():
+    io = _io({"Docs/Plan.docx": b"x"}, ignores_case=True)
+    assert await on_disk_spelling(io, "docs/plan.docx") == "Docs/Plan.docx"
+    assert await on_disk_spelling(io, "Docs/Plan.docx") == "Docs/Plan.docx"
+
+
+async def test_a_folder_that_tells_case_apart_keeps_the_name_as_written():
+    io = _io({"plan.docx": b"x"}, ignores_case=False)
+    # Not found as written: a new file, not plan.docx.
+    assert await on_disk_spelling(io, "Plan.docx") == "Plan.docx"
+
+
+async def test_a_name_not_there_stays_as_written_with_the_rest_of_its_path():
+    io = _io({"docs/a.docx": b"x"}, ignores_case=True)
+    assert await on_disk_spelling(io, "Docs/new/b.docx") == "docs/new/b.docx"
+
+
+def test_a_computer_location_is_one_unicode_form():
+    nfd = "Re\u0301sume\u0301.docx"
+    nfc = "R\u00e9sum\u00e9.docx"
+    assert location_of(on_computer(), nfd) == location_of(on_computer(), nfc)
+```
+
+(In the third test, `Docs` is found as `docs`. `new` is not there, so it and `b.docx` stay as written.)
+
+**`tests/integration/test_office_sessions.py`:**
+
+```python
+async def test_open_rows_are_found_without_case(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location="device:d:/f/Plan.docx", path="Plan.docx", session_id=uuid4())
+    [found] = await office_sessions.open_like(session_factory, ["device:d:/f/plan.DOCX"])
+    assert found.id == document.id
+    assert await office_sessions.open_like(session_factory, ["device:d:/f/other.docx"]) == []
+```
+
+(Use the file's helpers for a session id, if `open_or_reuse` needs a real session.)
+
+**`tests/integration/test_office_routes.py`.** In the computer tests, which use `_computer_chat` and the fake `session_files`, build the fake with `Computer(..., ignores_case=True)`. A new test opens `docs/plan.docx` when the computer holds `Docs/Plan.docx`:
+- the row's location ends `/Docs/Plan.docx` and its `path` is `Docs/Plan.docx`;
+- opening `Docs/Plan.docx` again joins the same row (same doc key).
+
+Let `_computer_chat` take `ignores_case=False` and pass it through.
+
+**`tests/integration/test_office_agent.py`:** on a case-insensitive fake computer holding `Plan.docx`, the agent's `office_edit` path `plan.docx` with create=True:
+- joins the row the pane opened for `Plan.docx` (same doc key);
+- does not make a new file (no `write` in `io.runner.calls`).
+
+**`tests/integration/test_office_guard.py`:** on a computer session with `Plan.docx` open:
+- `write_file` to `plan.docx` is refused;
+- in a cloud session, the guard stays exact: `plan.docx` is not refused when `Plan.docx` is open there.
+
+**`tests/integration/test_office_turn_end.py`:** on a computer, an `office_edit` naming `plan.docx` saves the open row of `Plan.docx` (flushed once, forcesave sent).
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `/work/surogates/.venv/bin/python -m pytest tests/test_office_files.py tests/integration/test_office_sessions.py tests/integration/test_office_routes.py tests/integration/test_office_agent.py tests/integration/test_office_guard.py tests/integration/test_office_turn_end.py -q`
+Expected: FAIL. `on_disk_spelling` and `open_like` don't exist, and the spellings open two rows.
+
+- [ ] **Step 3: `on_disk_spelling`**
+
+In `surogates/office/files.py` (imports `unicodedata`):
+
+```python
+def _folded(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+async def on_disk_spelling(files: DeviceWorkspaceIO, path: str) -> str:
+    """*path*, relative to the folder, spelled as the computer's folder lists it.
+
+    A folder that ignores case or Unicode form (macOS, Windows) finds ``plan.docx`` for ``Plan.docx``: each name not
+    listed as written, but found all the same, takes the one listed spelling, so one file is one document however it
+    is asked for. A name the computer does not find stays as written, with the rest of the path: a new file, or a
+    folder that tells case apart.
+    """
+    parts = [part for part in path.split("/") if part]
+    done: list[str] = []
+    for index, part in enumerate(parts):
+        try:
+            names = await files.list_dir(await files.resolve("/".join(done)))
+        except (FileNotFoundError, NotADirectoryError):
+            return "/".join([*done, *parts[index:]])
+        if part not in names:
+            matches = [name for name in names if _folded(name) == _folded(part)]
+            if len(matches) != 1 or await files.stat(await files.resolve("/".join([*done, part]))) is None:
+                return "/".join([*done, *parts[index:]])
+            part = matches[0]
+        done.append(part)
+    return "/".join(done)
+```
+
+- [ ] **Step 4: Locations in one Unicode form**
+
+In `location_of`'s computer branch (`surogates/office/agent.py`, imports `unicodedata`), normalise the joined path:
+
+```python
+        return f"device:{device_id}:{unicodedata.normalize('NFC', posixpath.join(folder, posixpath.normpath(path)))}"
+```
+
+- [ ] **Step 5: The pane's route takes the on-disk spelling**
+
+In `get_workspace_editor`, inside `async with workspace_files(request, target) as files:`, right after the `DOCUMENT_FILES` check and before the stat:
+
+```python
+        if isinstance(files, DeviceWorkspaceIO):
+            path = await on_disk_spelling(files, path)
+```
+
+The `stat`, the 413 check, `location_of(target, path)`, `_open_document(…, path=path, …)` and `build_editor_config(…, path=path, …)` then all use that spelling. Import `on_disk_spelling` from `surogates.office.files`.
+
+- [ ] **Step 6: The agent takes it too**
+
+In `open_for_agent`, keep the exact `open_at` fast path. When it finds nothing, take the on-disk spelling inside the files context, then look for an open row again before checking existence. Replace the `async with session_files(...)` block's body with:
+
+```python
+                if not isinstance(files, DOCUMENT_FILES):
+                    raise AgentDocumentError("This workspace cannot be edited live yet.")
+                try:
+                    if isinstance(files, DeviceWorkspaceIO):
+                        path = await on_disk_spelling(files, path)
+                    key = await files.resolve(path)
+                except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
+                    raise AgentDocumentError(str(exc)) from None
+                location = location_of(target, path)
+                # Asked for in another spelling of a document the editor has open: that one.
+                missing = await office_sessions.open_at(session_factory, location) is None and await files.etag(key) is None
+```
+
+Import `DeviceWorkspaceIO` from `surogates.devices.workspace` and `on_disk_spelling` from `surogates.office.files`. The returned `AgentDocument.path` is then the on-disk spelling.
+
+- [ ] **Step 7: `open_like`**
+
+In `surogates/office/sessions.py` (imports `func` from sqlalchemy):
+
+```python
+async def open_like(session_factory: Any, locations: list[str]) -> list[OpenDocument]:
+    """The open rows at *locations*, compared without case: a folder on a computer may ignore it. Each row once."""
+    if not locations:
+        return []
+    keys = sorted({location.lower() for location in locations})
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(func.lower(OfficeSession.location).in_(keys), OfficeSession.status == OPEN)
+        )
+        return [_snapshot(row) for row in rows.all()]
+```
+
+In `surogates/db/models.py`, add to `OfficeSession.__table_args__`:
+
+```python
+        Index("idx_office_sessions_open_location_folded", func.lower(text("location")), postgresql_where=text("status = 'open'")),
+```
+
+Use the file's existing imports and spelling for `func`/`text`. If the column expression is written differently there, use `func.lower(location_column)` as the file does elsewhere.
+
+In `surogates/db/observability.sql`, beside the other `office_sessions` statements:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_office_sessions_open_location_folded ON office_sessions (lower(location)) WHERE status = 'open';
+```
+
+- [ ] **Step 8: The guard, the read note and the turn's save match without case on a computer**
+
+**`surogates/office/guard.py`.** `refused_open_document` and `open_document_note` currently call `office_sessions.open_locations(...)`. On a computer (`device_of(session.config)` not None), look the locations up with `open_like` instead. A requested location is open when its `.lower()` equals the `.lower()` of a found row's location; refuse it, or add the note, with the requested path in the message. In the cloud, keep `open_locations` (exact). `hold_open_documents` stays as it is, since it runs only in the cloud landing.
+
+**`surogates/office/turn_end.py`.** On a computer, replace the per-location `office_sessions.open_at(session_factory, location)` with `office_sessions.open_like(session_factory, [location])`. Save each row found, once per row id across the turn. In the cloud, keep `open_at`.
+
+- [ ] **Step 9: Remove the Known gap**
+
+In the spec's Known gaps, delete the bullet that begins "**On a computer whose folder ignores case (macOS, Windows), a document opened under two spellings**".
+
+- [ ] **Step 10: Run the tests to see them pass**
+
+Run: `/work/surogates/.venv/bin/python -m pytest tests/test_office_files.py tests/test_device_workspace_guarded.py tests/integration/test_office_*.py tests/test_office_*.py -q`
+Expected: PASS.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add surogates/office/files.py surogates/office/agent.py surogates/api/routes/office.py surogates/office/sessions.py surogates/office/guard.py surogates/office/turn_end.py surogates/db/models.py surogates/db/observability.sql docs/superpowers/specs/2026-10-13-office-editors-design.md tests/device_computer.py tests/test_office_files.py tests/integration/test_office_sessions.py tests/integration/test_office_routes.py tests/integration/test_office_agent.py tests/integration/test_office_guard.py tests/integration/test_office_turn_end.py
+git commit -m "feat(office): one document however its name is spelled on the computer"
+```
+
+---
+
 ### Task 8: End to end on DEV, with Surogate Desktop
 
 This step replaces the DEV runtime's processes with this branch's code against the shared DEV database and Redis, and needs Surogate Desktop signed in to DEV on Flavius's computer. **Ask Flavius before Step 2**, and tell him when DEV is back on master.
@@ -1997,6 +2331,8 @@ Start the ops server only after the worker is listening for ops; started before 
 5. **The agent creates a document.** Ask the agent for a new `notes/Plan.docx`. In "Ask every time" it prompts once. The file appears in the folder and opens in the pane.
 6. **A project on the computer.** Ask the master for a document. The thread edits the project's real file live, never its copy. The real file changes on disk. At the thread's next landing, History records the change as yours.
 7. **Too large.** A `.docx` over 50 MiB in the folder answers with the 50 MiB message in the pane.
+8. **Two spellings.** On a Mac, with `Plan.docx` open in the pane, ask the agent to edit `plan.docx`: the edit arrives in the same pane, and no second file or session appears.
+9. **A landing right after an edit.** In the project, a thread that edits a document live and changes another file in the same turn finishes its turn without a two-minute wait for the folder (time its `session.complete`).
 
 - [ ] **Step 4: Put DEV back**
 
