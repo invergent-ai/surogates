@@ -27,6 +27,8 @@ if (location.protocol === "file:") {
     signOut: () => ipcRenderer.invoke("shell:sign-out"),
     remove: () => ipcRenderer.invoke("shell:remove"),
     uninstall: () => ipcRenderer.invoke("shell:uninstall"),
+    chat: (id: unknown) => ipcRenderer.invoke("shell:chat", id),
+    moreChats: () => ipcRenderer.invoke("shell:more-chats"),
     restore: () => ipcRenderer.invoke("shell:restore"),
     go: (path: string) => ipcRenderer.invoke("shell:go", path),
     projects: () => ipcRenderer.invoke("shell:projects"),

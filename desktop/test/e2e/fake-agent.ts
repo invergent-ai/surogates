@@ -415,7 +415,8 @@ export async function signedInAndAdded(shell: ElectronApplication, page: Page, a
 // unopened, when set, is why it opens none, whose unrestored and notUndone, when set, are why it restores
 // or undoes none, whose put, when set, is what a Restore or an Undo answers, whose gotten names each project
 // it was asked for, whose held, when set, is what an answer to such a question waits for, whose historyHeld, when
-// set, is what a read of a file's History waits for, and whose register()
+// set, is what a read of a file's History waits for, whose pages keeps each page of chats it was asked for, as [offset,
+// limit], and whose register()
 // registers the source, or with the methods it lacks the
 // source of an agent older than the app, which serves less. What it changes of a project it keeps at
 // the fake agent, so the next load serves it.
@@ -438,6 +439,7 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
     gotten: [] as string[],
     held: null as Promise<void> | null,
     historyHeld: null as Promise<void> | null,
+    pages: [] as Array<[number, number]>,
     register: (_lacks?: string[]) => {},
     changed: (id: string, threadId: string | null) => {
       for (const listener of listeners.get(id) ?? []) listener(threadId);
@@ -454,6 +456,12 @@ function serveProjects(data: ProjectFixtures, delay: number): void {
       const found = this.served.projects.find((project) => project.id === id);
       if (!found) throw new Error("No such project");
       return found;
+    },
+    async chats({ offset, limit }: { offset: number; limit: number }) {
+      fake.pages.push([offset, limit]);
+      if (fake.unreachable) throw new Error("API server is not reachable.");
+      const newest = [...this.served.chats].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+      return { chats: newest.slice(offset, offset + limit), more: offset + limit < newest.length };
     },
     async list() {
       fake.lists++;

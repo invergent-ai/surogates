@@ -152,7 +152,26 @@ export interface Routine {
   status: string;
 }
 
+// A chat of the agent's that is in no project, as Surogate Desktop's sidebar lists it under Recents: neither a project's
+// conversation nor one of its threads, nor a helper's. Its title is null until the agent names it.
+export interface RecentChat {
+  id: string;
+  title: string | null;
+  updatedAt: string; // ISO 8601, UTC: its last activity
+  // The computer whose folder it works on, by name; null for a chat in the cloud.
+  computer: string | null;
+}
+
+// A page of them, newest activity first, and whether more come after it.
+export interface RecentChats {
+  chats: RecentChat[];
+  more: boolean;
+}
+
 export interface ProjectsSource {
+  // The agent's chats in no project, a page of *limit* from *offset*: the desktop's Recents. Pages of an
+  // agent older than the desktop serve none: the desktop says so, and lists none.
+  chats(page: { offset: number; limit: number }): Promise<RecentChats>;
   list(): Promise<ProjectSummary[]>;
   get(projectId: string): Promise<Project>;
   create(input: { name: string; goal?: string; instructions?: string; execution?: ProjectFolder }): Promise<Project>;

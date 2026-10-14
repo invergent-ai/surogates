@@ -1,12 +1,12 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// The project routes (/v1/workstreams) over the fetch they are given: the cards of a project's
-// master call them, and in Surogate Desktop they are the ProjectsSource the page serves. Every
+// The project routes (/v1/workstreams) over the fetch they are given, and the list of the chats in no project: the cards
+// of a project's master call them, and in Surogate Desktop they are the ProjectsSource the page serves. Every
 // import here is a file of web/src named with its extension, so a node test runs these routes
 // over a fake fetch.
 
-import type { DeletedFiles, ProjectsSource, ThreadRow } from "../lib/projects-contract";
+import type { DeletedFiles, ProjectsSource, RecentChat, ThreadRow } from "../lib/projects-contract";
 import {
   fileVersionOf,
   libraryEntryOf,
@@ -100,6 +100,29 @@ const DELETED = one([], (body: { files?: unknown; more?: unknown }): DeletedFile
 const ROUTINES = (body: unknown) => many(ROUTINE)((body as { items?: unknown } | null)?.items);
 const PUT_BACK = one([], undoResultOf);
 
+// A time of the server's as ISO 8601 in UTC with its Z: one that names no zone is the server's UTC, never read as this
+// computer's local time.
+function utc(at: string): string {
+  const moment = Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(at) ? at : `${at}Z`);
+  if (Number.isNaN(moment)) throw new TypeError("Not a time");
+  return new Date(moment).toISOString();
+}
+
+// The computer a chat on a folder of the user's computer works on, by the name the server stamped (the chat SDK's
+// sessionComputer reads it the same way); null for a chat in the cloud.
+function computerOf(config: unknown): string | null {
+  const execution = (config as { execution?: { kind?: unknown; device_name?: unknown } } | null)?.execution;
+  return execution?.kind === "device" && typeof execution.device_name === "string" ? execution.device_name : null;
+}
+
+// GET /api/v1/sessions answers {sessions}: each a chat the user started, newest first, a project's own conversation and
+// any chat under another never among them.
+const CHAT = one(["id", "updated_at"], (body: { id: string; title?: unknown; updated_at: string; parent_id?: unknown; config?: unknown }): RecentChat | null =>
+  body.parent_id == null
+    ? { id: body.id, title: typeof body.title === "string" && body.title !== "" ? body.title : null, updatedAt: utc(body.updated_at), computer: computerOf(body.config) }
+    : null);
+const CHATS = (body: unknown) => many(CHAT)((body as { sessions?: unknown } | null)?.sessions).filter((chat): chat is RecentChat => chat !== null);
+
 // An Undo whose answer never came back whole: the network cut it, or a gateway stopped waiting for the agent, which
 // goes on with it all the same once it has it.
 const UNDO_UNANSWERED = "The connection was lost before the agent answered: the undo may still finish.";
@@ -182,6 +205,13 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFil
     },
     deleted: async (projectId) =>
       asked(`${project(projectId)}/history/deleted`, undefined, "Failed to fetch the project's deleted files", DELETED),
+    // The agent's chats in no project, from the sessions route, which lists the chats the user started: one more than
+    // asked, which says whether more come after the page.
+    chats: async ({ offset, limit }) => {
+      const page = new URLSearchParams({ limit: String(limit + 1), offset: String(offset) });
+      const found = await read(`/api/v1/sessions?${page}`, undefined, "Failed to fetch the chats", CHATS);
+      return { chats: found.slice(0, limit), more: found.length > limit };
+    },
     start: async (projectId, proposalId, key) =>
       row(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
     makeOnComputer: async (projectId, proposalId, key, execution) =>

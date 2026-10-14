@@ -4,7 +4,7 @@
 // Projects and their threads (desktop design, Section 12): the wire types, and fixtures
 // with a thread in every group and with every reason, for fakes of a ProjectsSource.
 
-import type { DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, Routine, ThreadRow } from "./projects-contract.js";
+import type { DeletedFiles, FileVersion, LibraryEntry, ProducedFile, Project, RecentChat, Routine, ThreadRow } from "./projects-contract.js";
 
 export type * from "./projects-contract.js";
 
@@ -15,6 +15,7 @@ export interface ProjectFixtures {
   routines: Record<string, Routine[]>;
   history: Record<string, Record<string, FileVersion[]>>; // by project, then by file
   deleted: Record<string, DeletedFiles>; // by project: its files that are gone, each the version that deleted it
+  chats: RecentChat[]; // the agent's chats in no project, in no order: a source lists them newest first
 }
 
 export const FIXTURE_IDS = {
@@ -27,9 +28,15 @@ export const FIXTURE_IDS = {
   computer: "7cdfad8f-f19e-4dcf-8a87-8192a3b4c5d6",
   idle: "3e9b6f4b-bd5a-4f8b-8c43-4d5e6f708192",
   resolved: "8de0be90-02af-4ed0-9b98-92a3b4c5d6e7",
+  tripNotes: "9a1b2c3d-4e5f-4a60-8b71-c2d3e4f5a6b7",
+  budgetQuestions: "ab2c3d4e-5f60-4b71-8c82-d3e4f5a6b7c8",
+  untitled: "bc3d4e5f-6071-4c82-9d93-e4f5a6b7c8d9",
 } as const;
 
-/** Two projects: a report with a thread in every group and with every reason, and a budget with routines only. Times count back from *now*. */
+/**
+ * Two projects: a report with a thread in every group and with every reason, and a budget with routines only; and three
+ * chats in no project, one on a folder of a computer and one the agent has not named yet. Times count back from *now*.
+ */
 export function projectFixtures(now = Date.now()): ProjectFixtures {
   const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
   const ids = FIXTURE_IDS;
@@ -76,6 +83,11 @@ export function projectFixtures(now = Date.now()): ProjectFixtures {
     goal: null, instructions: "", masterSessionId: id, coordinatorTier: null, threadTier: null, place: cloud, folder: null,
   });
   return {
+    chats: [
+      { id: ids.budgetQuestions, title: "Budget questions", updatedAt: ago(90), computer: null },
+      { id: ids.untitled, title: null, updatedAt: ago(3_000), computer: null },
+      { id: ids.tripNotes, title: "Notes on the trip", updatedAt: ago(5), computer: "Laptop" },
+    ],
     projects: [
       { ...project(ids.report, "Quarterly report", 4_320, 17, report), goal: "The third quarter's report for the board" },
       project(ids.budget, "Budget", 14_400, 2_880, []),

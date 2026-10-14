@@ -15,7 +15,7 @@ import {
 
 import type { DesktopAccount } from "../../../web/src/lib/desktop-bridge-contract.js";
 import type {
-  DeletedFiles, LibraryEntry, Project, ProjectSummary, Routine, ThreadRow, Tier,
+  DeletedFiles, LibraryEntry, Project, ProjectSummary, RecentChats, Routine, ThreadRow, Tier,
 } from "../../../web/src/lib/projects-contract.js";
 import { BROWSER_HOST, BrowserClient, type FromBrowser, type ToBrowser } from "../browser/client.js";
 import {
@@ -212,6 +212,9 @@ const projects = new PageProjects((message) => main?.webContents()?.send("deskto
 // The History of a file of the open project's Library, while the pane shows it.
 const fileHistory = new FileHistory(projects, () => changed());
 let served = false;
+// The agent's chats in no project, as the page serves them (the sidebar's Recents): its first pages, newest first, and
+// whether more come; null while the page serves none, as an older agent's page does not.
+let recents: RecentChats | null = null;
 // Settled once the page serves its projects: a project chosen while it loads waits for this.
 let serving = Promise.withResolvers<void>();
 let listed: ProjectSummary[] = [];
@@ -778,6 +781,7 @@ function follow(): void {
 function withdrawProjects(signedOut: boolean): void {
   if (served) serving = Promise.withResolvers();
   served = false;
+  recents = null;
   projects.withdrawn();
   if (signedOut) forgetAccount();
   changed();
@@ -787,6 +791,7 @@ function withdrawProjects(signedOut: boolean): void {
 // why what it last asked for did not happen.
 function forgetAccount(): void {
   listed = [];
+  recents = null;
   failure = null;
   // The project dialog shows one of its projects: it goes too, and nothing it sends reaches the next account's page.
   if (projectDialog && main?.settingsContents() === projectDialog) main.closeSettings();
@@ -794,6 +799,53 @@ function forgetAccount(): void {
   masters.clear();
   overview = null;
   if (view.kind === "project") show({ kind: "web" });
+}
+
+// How many of Recents' chats are asked for at a time, and at most at once: the page asks the agent for one more.
+const RECENTS_PAGE = 30;
+const RECENTS_MOST = 199;
+// What a page of an agent older than this app answers for the chats it does not serve (preload.cts).
+const RECENTS_NOT_SERVED = "This agent cannot list its chats in the sidebar yet";
+// One question about Recents at a time, each after the one before, so that an older answer never lands last; and a
+// refresh asked while one waits is that one.
+let recentsWork: Promise<void> = Promise.resolve();
+let recentsQueued = false;
+
+// Recents asked again from its start, for as many chats as it lists, so that those scrolled to stay: when the page serves
+// its source, when the window comes to the front, when the centre shows another chat, and every half minute while the
+// window shows. Where it fails, what was listed stays; an agent whose page serves no chats lists none.
+function refreshRecents(): void {
+  if (!served || recentsQueued) return;
+  recentsQueued = true;
+  recentsWork = recentsWork.then(async () => {
+    recentsQueued = false;
+    if (!served) return;
+    try {
+      const page = await projects.chats({ offset: 0, limit: Math.min(Math.max(RECENTS_PAGE, recents?.chats.length ?? 0), RECENTS_MOST) });
+      if (served) recents = page;
+    } catch (error) {
+      if (error instanceof Error && error.message === RECENTS_NOT_SERVED) recents = null;
+      else report(error);
+    }
+    changed();
+  });
+}
+
+// The next page of Recents, as the sidebar is scrolled to its end: each chat once, newest first.
+function moreRecents(): void {
+  recentsWork = recentsWork.then(async () => {
+    const shown = recents;
+    if (!served || !shown?.more || shown.chats.length >= RECENTS_MOST) return;
+    try {
+      const page = await projects.chats({ offset: shown.chats.length, limit: Math.min(RECENTS_PAGE, RECENTS_MOST - shown.chats.length) });
+      if (recents !== shown) return;
+      const known = new Set(shown.chats.map((chat) => chat.id));
+      recents = { chats: [...shown.chats, ...page.chats.filter((chat) => !known.has(chat.id))], more: page.more };
+    } catch (error) {
+      report(error);
+    }
+    changed();
+  });
 }
 
 /** Run *replaced* whenever *contents* replaces its page: a load that commits, or one that fails and draws its error page. A load the shell cancels replaces nothing. */
@@ -1583,6 +1635,7 @@ function bridge(contents: WebContents, agent: Agent): void {
       serving.resolve();
       follow();
       void refreshProjects();
+      refreshRecents();
     },
   });
   for (const [name, handler] of Object.entries(handlers)) {
@@ -1751,6 +1804,8 @@ function state() {
     projects: listed,
     failure,
     links: Object.keys(links()),
+    // The chats in no project, and which of them the centre shows.
+    recents: recents && { ...recents, shown: chatShown },
     uninstall: app.isPackaged && INSTALLER.uninstall !== null,
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() || sessionStore.unencrypted()
@@ -1844,8 +1899,14 @@ let chatShown: string | null = null;
 
 function showing(url: string): void {
   const path = new URL(url).pathname;
+  const was = chatShown;
   chatShown = path.startsWith("/chat/") && webClientPath(path) ? path.slice("/chat/".length) : null;
   followAgent();
+  // A chat begun, or another opened: Recents lists it, and marks the one shown.
+  if (chatShown !== was) {
+    refreshRecents();
+    changed();
+  }
 }
 
 // What the agent tells, followed on the app's own sign-in, for whoever is signed in now: their
@@ -2560,6 +2621,13 @@ function wire(window: MainWindow, page: string): void {
     if (agent) void signOut(agent, true);
   });
   handle("shell:uninstall", () => void uninstall().catch(report));
+  // A chat of Recents opened in the centre, by its id: a page of the web client's, as any other.
+  handle("shell:chat", (id) => {
+    const path = typeof id === "string" ? `/chat/${encodeURIComponent(id)}` : "";
+    if (!webClientPath(path) || !recents?.chats.some((chat) => chat.id === id)) throw new Error("Not a chat of Recents");
+    void goWeb(path);
+  });
+  handle("shell:more-chats", () => moreRecents());
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
     goWeb(path);
@@ -2891,7 +2959,14 @@ if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
       }
       updateTray();
     }
-    main.window.on("focus", () => void refreshProjects());
+    main.window.on("focus", () => {
+      void refreshProjects();
+      refreshRecents();
+    });
+    // Recents, every half minute while the window shows.
+    setInterval(() => {
+      if (main?.window.isVisible()) refreshRecents();
+    }, 30_000).unref();
     // The window going away, or coming back, starts or ends the follow of the chat it shows.
     app.on("browser-window-focus", () => followAgent());
     app.on("browser-window-blur", () => followAgent());
