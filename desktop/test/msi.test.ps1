@@ -298,6 +298,21 @@ Check '%ProgramData%\Surogate\apply grants administrators and SYSTEM alone' ($ap
 $product = @(Get-Product)
 Check 'Installed apps lists Surogate of this version, by Surogate' ($product.Count -eq 1 -and $product[0].DisplayVersion -eq $Version -and $product[0].Publisher -eq 'Surogate') "$($product | Format-List DisplayName, DisplayVersion, Publisher | Out-String)"
 
+# The installed app started from Program Files, as its Start menu shortcut starts it: as its main process loads it reads
+# the install's record, as an administrator's word, and it comes to its window, titled Surogate, with nothing thrown
+# (Electron shows a thrown error in a window of its own). Then it is stopped, every process of it, before the uninstall.
+$app = Join-Path $Installed 'Surogate.exe'
+Start-Process -FilePath $app | Out-Null
+$title = ''
+for ($tries = 0; $tries -lt 60 -and -not $title; $tries++) {
+  Start-Sleep -Milliseconds 500
+  $title = @(Get-Process -Name Surogate -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $app -and $_.MainWindowTitle } | ForEach-Object MainWindowTitle) | Select-Object -First 1
+}
+Check 'the installed app starts from Program Files, to its window' ($title -eq 'Surogate') "its window: '$title'"
+$running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith("$Installed\") })
+$running | Stop-Process -Force -ErrorAction SilentlyContinue
+$running | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+
 # Started, as an interactive user's surogate-vm.exe starts it; the uninstall stops it, then removes everything.
 $started = try { if ((Get-ServiceState) -ne 'missing') { Start-Service SurogateVM }; '' } catch { "$_" }
 Check 'the service starts' ((Get-ServiceState) -eq 'Running') "$(Get-ServiceState) $started"
@@ -353,7 +368,53 @@ if ($Newer) {
     Check "the $($step[0]) keeps the install's own folder, and the copies an update left in apply" ($run.Log -match "Surogate: $([regex]::Escape($Data)) is the install's own already, and is kept" -and (Test-Path (Join-Path $copies 'manifest.json'))) "$(Get-ChildItem -Force -Recurse $Data -ErrorAction SilentlyContinue | ForEach-Object FullName)"
   }
 }
-$last = Msiexec 'remove-again' "/x `"$Msi`""
+if ($Newer) {
+  # An update as the app has it applied (src/shell/installer-win32.ts, surogate-helper.exe update): surogate-admin.exe,
+  # the installed one, run as this administrator, as UAC's approval runs it, on the newer release staged as the app
+  # stages one, its manifest signed by a key the install's release-keys lists in its place. Each run waits for a process
+  # that has ended, as the app's has once it quit.
+  $Admin = Join-Path $Installed 'bin\surogate-admin.exe'
+  $Keys = Join-Path $Installed 'resources\release-keys'
+  $ended = (Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList '/c', 'exit' -WindowStyle Hidden -PassThru -Wait).Id
+  $Staged = Join-Path $Logs "staged\$NewerVersion"
+  function Apply-Update([string] $Name, [string] $AsVersion, [string[]] $Release, [switch] $Other) {
+    Remove-Item -Recurse -Force $Staged -ErrorAction SilentlyContinue
+    $signed = @(if ($Other) { '--other' })
+    node (Join-Path $PSScriptRoot 'win32\test-release.mjs') $Staged @Release $Keys @signed | Out-Null
+    $err = Join-Path $Logs "admin-$Name.err"
+    $run = Start-Process -FilePath $Admin -ArgumentList 'apply', '--wait', $ended, '--manifest', (Join-Path $Staged 'manifest.json'), '--signature', (Join-Path $Staged 'manifest.json.sig'), '--msi', (Join-Path $Staged 'release.msi'), '--version', $AsVersion -Wait -PassThru -RedirectStandardError $err
+    [pscustomobject]@{ Code = $run.ExitCode; Said = if (Test-Path $err) { (Get-Content -Raw $err) } else { '' } }
+  }
+  $record = Get-Content -Raw (Join-Path $Data 'install.json') | ConvertFrom-Json
+  $refusals = @(
+    @('unsigned', 'a manifest no listed key signed', @($Newer, $NewerVersion, $record.channel), 'not signed'),
+    @('channel', 'a release of another channel', @($Newer, $NewerVersion, 'nightly'), 'channel nightly'),
+    @('same', 'a release not newer than the version installed', @($Msi, $Version, $record.channel), 'not newer')
+  )
+  foreach ($refusal in $refusals) {
+    $asked = if ($refusal[0] -eq 'same') { $Version } else { $NewerVersion }
+    $run = Apply-Update $refusal[0] $asked $refusal[2] -Other:($refusal[0] -eq 'unsigned')
+    Check "surogate-admin refuses $($refusal[1]), and installs nothing" ($run.Code -eq 3 -and $run.Said -match $refusal[3] -and @(Get-Product)[0].DisplayVersion -eq $Version) "exit $($run.Code): $($run.Said)"
+  }
+  # An MSI that is not the manifest's: one byte more than the one it names.
+  Remove-Item -Recurse -Force $Staged -ErrorAction SilentlyContinue
+  node (Join-Path $PSScriptRoot 'win32\test-release.mjs') $Staged $Newer $NewerVersion $record.channel $Keys | Out-Null
+  [IO.File]::AppendAllText((Join-Path $Staged 'release.msi'), ' ')
+  $err = Join-Path $Logs 'admin-changed.err'
+  $changed = Start-Process -FilePath $Admin -ArgumentList 'apply', '--wait', $ended, '--manifest', (Join-Path $Staged 'manifest.json'), '--signature', (Join-Path $Staged 'manifest.json.sig'), '--msi', (Join-Path $Staged 'release.msi'), '--version', $NewerVersion -Wait -PassThru -RedirectStandardError $err
+  Check 'surogate-admin refuses an MSI that is not the one its manifest names' ($changed.ExitCode -eq 3 -and (Get-Content -Raw $err) -match 'not the one') "exit $($changed.ExitCode): $(Get-Content -Raw $err)"
+  $update = Apply-Update 'update' $NewerVersion @($Newer, $NewerVersion, $record.channel)
+  $product = @(Get-Product)
+  Check 'surogate-admin installs the newer release from its own copies' ($update.Code -eq 0 -and $product.Count -eq 1 -and $product[0].DisplayVersion -eq $NewerVersion) "exit $($update.Code): $($update.Said); $(@($product | ForEach-Object DisplayVersion) -join ', ')"
+  Check 'the update keeps the base and channel, and records its version' ((Get-Record) -eq "{`"base`":`"$($record.base)`",`"channel`":`"$($record.channel)`",`"version`":`"$NewerVersion`"}") (Get-Record)
+  $kept = @(Get-ChildItem -Force (Join-Path $Data 'apply') | ForEach-Object Name)
+  Check 'apply holds the installed release''s copies alone' (($kept -join ',') -eq $NewerVersion -and (Test-Path (Join-Path $Data "apply\$NewerVersion\release.msi"))) ($kept -join ', ')
+  $copiesAcl = Get-Acl (Join-Path $Data "apply\$NewerVersion")
+  Check 'the update''s copies are the Administrators'', with no one else let change them' ($copiesAcl.Owner -eq 'BUILTIN\Administrators' -and @(Get-Writers (Join-Path $Data "apply\$NewerVersion")).Count -eq 0) "$($copiesAcl.Owner); $(@(Get-Writers (Join-Path $Data "apply\$NewerVersion")) -join '; ')"
+  $updateLog = Join-Path $env:SystemRoot "Temp\surogate-update-$NewerVersion.log"
+  Check 'the update''s MSI keeps the install''s own folder it runs from' ((Test-Path $updateLog) -and (Get-Content -Raw $updateLog) -match "Surogate: $([regex]::Escape($Data)) is the install's own already, and is kept") $updateLog
+}
+$last = Msiexec 'remove-again' "/x `"$(if ($Newer) { $Newer } else { $Msi })`""
 Check 'it uninstalls again' ($last.Code -eq 0) "msiexec exited $($last.Code)"
 if ($Newer) {
   Check 'the uninstall removes what an update left in apply, with the folder' ($last.Log -match "Surogate: $([regex]::Escape($Data)) is removed at the uninstall: .*$([regex]::Escape("apply\$NewerVersion"))") ''
