@@ -47,6 +47,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import os
 import time
 from typing import Any
 
@@ -120,6 +121,16 @@ def _slack_error_code(exc: SlackApiError) -> str:
         return resp.get("error") or ""
     except Exception:
         return ""
+
+
+#: Slack's Web API (slack_sdk wants the trailing slash).  Overridable only so a
+#: local stack can run end to end against a stand-in server; production never
+#: sets it.
+SLACK_API_BASE = os.environ.get("SUROGATES_SLACK_API_BASE") or "https://slack.com/api/"
+
+
+def web_client(bot_token: str) -> AsyncWebClient:
+    return AsyncWebClient(token=bot_token, base_url=SLACK_API_BASE)
 
 
 # Replay-guard window in seconds (±5 minutes matches Slack's recommendation).
@@ -607,7 +618,7 @@ class SlackPlatform:
         singletons so no explicit close is needed.
         """
         if bot_token not in self._clients:
-            self._clients[bot_token] = AsyncWebClient(token=bot_token)
+            self._clients[bot_token] = web_client(bot_token)
         return self._clients[bot_token]
 
     async def _resolve_bot_user_id(self, bot_token: str) -> str:
@@ -1068,7 +1079,8 @@ class SlackPlatform:
             return None
         from urllib.parse import urlparse
         host = (urlparse(url).hostname or "").lower()
-        if host != "slack.com" and not host.endswith(".slack.com"):
+        stand_in = urlparse(SLACK_API_BASE).hostname if os.environ.get("SUROGATES_SLACK_API_BASE") else None
+        if host != "slack.com" and not host.endswith(".slack.com") and host != stand_in:
             logger.warning("[SlackPlatform] download_file refusing non-slack host: %s", host)
             return None
         try:

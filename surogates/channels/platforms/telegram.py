@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 from typing import Any, Callable
 
 import httpx
@@ -54,6 +55,12 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The Bot API.  Overridable only so a local stack can run end to end against
+#: a stand-in server; production never sets it.
+TELEGRAM_API_BASE = (
+    os.environ.get("SUROGATES_TELEGRAM_API_BASE") or "https://api.telegram.org"
+).rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +335,7 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 
 def _bot_api_url(bot_token: str, method: str) -> str:
     """Return the full Telegram Bot API URL for *method*."""
-    return f"https://api.telegram.org/bot{bot_token}/{method}"
+    return f"{TELEGRAM_API_BASE}/bot{bot_token}/{method}"
 
 
 def _extract_files(message: dict) -> list[InboundFileRef]:
@@ -806,7 +813,7 @@ class TelegramPlatform:
                 )
                 return None
             download_url = (
-                f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+                f"{TELEGRAM_API_BASE}/file/bot{bot_token}/{file_path}"
             )
             resp = await self._http.get(download_url)
             if resp.status_code < 200 or resp.status_code >= 300:

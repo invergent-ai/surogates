@@ -58,9 +58,9 @@ def _opener_text(config: dict) -> str:
 
 
 def _default_slack_client(bot_token: str):
-    from slack_sdk.web.async_client import AsyncWebClient
+    from surogates.channels.platforms.slack import web_client
 
-    return AsyncWebClient(token=bot_token)
+    return web_client(bot_token)
 
 
 async def dm_session(
