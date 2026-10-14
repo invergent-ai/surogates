@@ -46,23 +46,25 @@
     <!-- An administrative extract (msiexec /a), which installs nothing, is the release's check of what an MSI holds. -->
     <Launch Condition="Installed OR ACTION = &quot;ADMIN&quot; OR (VersionNT64 AND WINDOWS_BUILD &gt;= 22000)" Message="Surogate needs Windows 11 on a 64-bit PC." />
 
-    <!-- %ProgramFiles%\Surogate alone: refused if the command line names a folder, and again once the folders are worked
-         out, if the install's is any other than Program Files' own, by the environment's name for it. -->
-    <Launch Condition="Installed OR ACTION = &quot;ADMIN&quot; OR (NOT INSTALLFOLDER AND NOT TARGETDIR)"
-            Message="Surogate installs into its own folder of Program Files alone: give it no INSTALLFOLDER and no TARGETDIR." />
+    <!-- %ProgramFiles%\Surogate alone: refused, once the folders are worked out, if the command line named one, as it
+         was read before anything worked one out, in the sequence that runs first (a full UI's, whose folders reach the
+         install's own sequence as though given), or if the install's is any other than Program Files' own, by the
+         environment's name for it. -->
+    <SetProperty Id="GIVEN_FOLDER" Action="KeepGivenFolder" Value="[INSTALLFOLDER][TARGETDIR]" Before="AppSearch" Sequence="first" Condition="INSTALLFOLDER OR TARGETDIR" />
     <SetProperty Id="SUROGATE_FOLDER" Action="NameSurogatesFolder" Value="[%ProgramW6432]\Surogate\" Before="CostFinalize" Sequence="both" />
-    <CustomAction Id="RefuseAnotherFolder" Error="Surogate installs into its own folder of Program Files alone, [SUROGATE_FOLDER], and into no other." />
+    <CustomAction Id="RefuseAnotherFolder" Error="Surogate installs into its own folder of Program Files alone, [SUROGATE_FOLDER], and into no other: give it no INSTALLFOLDER and no TARGETDIR." />
     <InstallUISequence>
-      <Custom Action="RefuseAnotherFolder" After="CostFinalize" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; SUROGATE_FOLDER" />
+      <Custom Action="RefuseAnotherFolder" After="CostFinalize" Condition="NOT Installed AND (GIVEN_FOLDER OR INSTALLFOLDER ~&lt;&gt; SUROGATE_FOLDER)" />
     </InstallUISequence>
     <InstallExecuteSequence>
-      <Custom Action="RefuseAnotherFolder" After="CostFinalize" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; SUROGATE_FOLDER" />
+      <Custom Action="RefuseAnotherFolder" After="CostFinalize" Condition="NOT Installed AND (GIVEN_FOLDER OR INSTALLFOLDER ~&lt;&gt; SUROGATE_FOLDER)" />
     </InstallExecuteSequence>
 
     <!-- What an earlier install was given, read back (HKLM\Software\Surogate, the Remembered component), unless this
          install's command line gives it again: each is kept before the search, which would replace it, and given back
          after it. Then the public base and channel where neither gave one. (The WiX Toolset's "remember property"
-         pattern.) -->
+         pattern.) In each sequence that runs: after a full UI's, the install's own searches again, and is given what the
+         UI's came to. -->
     <Property Id="SUROGATE_BASE" Secure="yes">
       <RegistrySearch Id="RememberedBase" Root="HKLM" Key="Software\Surogate" Name="Base" Type="raw" />
     </Property>
@@ -72,14 +74,14 @@
     <Property Id="SUROGATE_VMP" Secure="yes">
       <RegistrySearch Id="RememberedVmp" Root="HKLM" Key="Software\Surogate" Name="VirtualMachinePlatform" Type="raw" />
     </Property>
-    <SetProperty Id="GIVEN_SUROGATE_BASE" Action="KeepGivenBase" Value="[SUROGATE_BASE]" Before="AppSearch" Sequence="first" Condition="SUROGATE_BASE" />
-    <SetProperty Id="GIVEN_SUROGATE_CHANNEL" Action="KeepGivenChannel" Value="[SUROGATE_CHANNEL]" Before="AppSearch" Sequence="first" Condition="SUROGATE_CHANNEL" />
-    <SetProperty Id="GIVEN_SUROGATE_VMP" Action="KeepGivenVmp" Value="[SUROGATE_VMP]" Before="AppSearch" Sequence="first" Condition="SUROGATE_VMP" />
-    <SetProperty Id="SUROGATE_BASE" Action="GiveBackBase" Value="[GIVEN_SUROGATE_BASE]" After="AppSearch" Sequence="first" Condition="GIVEN_SUROGATE_BASE" />
-    <SetProperty Id="SUROGATE_CHANNEL" Action="GiveBackChannel" Value="[GIVEN_SUROGATE_CHANNEL]" After="AppSearch" Sequence="first" Condition="GIVEN_SUROGATE_CHANNEL" />
-    <SetProperty Id="SUROGATE_VMP" Action="GiveBackVmp" Value="[GIVEN_SUROGATE_VMP]" After="AppSearch" Sequence="first" Condition="GIVEN_SUROGATE_VMP" />
-    <SetProperty Id="SUROGATE_BASE" Action="PublicBase" Value="https://surogate.ai" After="GiveBackBase" Sequence="first" Condition="NOT SUROGATE_BASE" />
-    <SetProperty Id="SUROGATE_CHANNEL" Action="PublicChannel" Value="stable" After="GiveBackChannel" Sequence="first" Condition="NOT SUROGATE_CHANNEL" />
+    <SetProperty Id="GIVEN_SUROGATE_BASE" Action="KeepGivenBase" Value="[SUROGATE_BASE]" Before="AppSearch" Sequence="both" Condition="SUROGATE_BASE" />
+    <SetProperty Id="GIVEN_SUROGATE_CHANNEL" Action="KeepGivenChannel" Value="[SUROGATE_CHANNEL]" Before="AppSearch" Sequence="both" Condition="SUROGATE_CHANNEL" />
+    <SetProperty Id="GIVEN_SUROGATE_VMP" Action="KeepGivenVmp" Value="[SUROGATE_VMP]" Before="AppSearch" Sequence="both" Condition="SUROGATE_VMP" />
+    <SetProperty Id="SUROGATE_BASE" Action="GiveBackBase" Value="[GIVEN_SUROGATE_BASE]" After="AppSearch" Sequence="both" Condition="GIVEN_SUROGATE_BASE" />
+    <SetProperty Id="SUROGATE_CHANNEL" Action="GiveBackChannel" Value="[GIVEN_SUROGATE_CHANNEL]" After="AppSearch" Sequence="both" Condition="GIVEN_SUROGATE_CHANNEL" />
+    <SetProperty Id="SUROGATE_VMP" Action="GiveBackVmp" Value="[GIVEN_SUROGATE_VMP]" After="AppSearch" Sequence="both" Condition="GIVEN_SUROGATE_VMP" />
+    <SetProperty Id="SUROGATE_BASE" Action="PublicBase" Value="https://surogate.ai" After="GiveBackBase" Sequence="both" Condition="NOT SUROGATE_BASE" />
+    <SetProperty Id="SUROGATE_CHANNEL" Action="PublicChannel" Value="stable" After="GiveBackChannel" Sequence="both" Condition="NOT SUROGATE_CHANNEL" />
 
     <Icon Id="Surogate.ico" SourceFile="..\surogate.ico" />
     <Property Id="ARPPRODUCTICON" Value="Surogate.ico" />

@@ -13,8 +13,9 @@ pub const DATA_SDDL: &str = "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OIC
 /// `%ProgramData%\Surogate\apply`: SYSTEM's own; SYSTEM and administrators alone; nothing inherited.
 pub const APPLY_SDDL: &str = "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
-/// The record found there: SYSTEM's own, with no access rule of its own, so that it takes its folder's.
-pub const RECORD_SDDL: &str = "O:SYG:SYD:AI";
+/// The record found there: SYSTEM's own, with no access rule of its own, but the rules `Surogate` gives a file, each
+/// inherited, written out: set on the record alone, they are read from no folder above it.
+pub const RECORD_SDDL: &str = "O:SYG:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)";
 
 /// The record's name in `Surogate`, and the folder for updates.
 pub const RECORD: &str = "install.json";
@@ -76,6 +77,12 @@ mod tests {
         }
         assert!(DATA_SDDL.starts_with("O:SYG:SYD:PAI(") && APPLY_SDDL.starts_with("O:SYG:SYD:PAI("));
         assert!(!APPLY_SDDL.contains(";;;BU)"));
-        assert_eq!(RECORD_SDDL, "O:SYG:SYD:AI");
+    }
+
+    #[test]
+    fn gives_the_record_exactly_the_rules_its_folder_gives_a_file_each_inherited_and_none_its_own() {
+        let (_, aces) = DATA_SDDL.split_once("D:PAI").unwrap();
+        assert_eq!(RECORD_SDDL, format!("O:SYG:SYD:AI{}", aces.replace(";OICI;", ";ID;")));
+        assert!(!RECORD_SDDL.contains("D:P") && !RECORD_SDDL.contains(";OICI;"));
     }
 }

@@ -119,11 +119,12 @@ function Check-Gone([string] $When) {
 # The access rules *path* has of its own, each "<who> <rights> <inheritance>", in order of their words; whether any is
 # inherited is said as "inherited".
 function Get-Rules([string] $Path) {
+  if (-not (Test-Path $Path)) { return @("$Path is missing") }
   @((Get-Acl $Path).Access | ForEach-Object { if ($_.IsInherited) { 'inherited' } else { "$($_.IdentityReference) $($_.AccessControlType) $($_.FileSystemRights) $($_.InheritanceFlags)" } } | Sort-Object)
 }
 
 # A folder made as the squatter makes one in ProgramData: theirs, with every right of theirs, and *files* of theirs in it,
-# each theirs alone and read-only, so that only its owner may touch it.
+# each read-only and then theirs alone, so that only its owner may touch it.
 function Squat([string] $Path, [string[]] $Files) {
   New-Item -ItemType Directory -Force $Path | Out-Null
   icacls $Path /setowner $Squatter | Out-Null
@@ -131,9 +132,9 @@ function Squat([string] $Path, [string[]] $Files) {
   foreach ($file in $Files) {
     $at = Join-Path $Path $file
     Set-Content -Path $at -Value '{"base":"https://squatter.example.test","channel":"squatted"}'
+    (Get-Item $at).Attributes = 'ReadOnly'
     icacls $at /setowner $Squatter | Out-Null
     icacls $at /inheritance:r /grant:r "${Squatter}:F" | Out-Null
-    (Get-Item $at).Attributes = 'ReadOnly'
   }
 }
 
@@ -162,7 +163,8 @@ Check-Gone 'before the install'
 
 # Surogate's folders of ProgramData made first by a standard user, with files of theirs: a library in apply, a file
 # beside the record, and a record of theirs.
-$password = "$([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(18)))aA1!"
+# Of 14 characters, past which net user asks whether to go on.
+$password = "$([Guid]::NewGuid().ToString('N').Substring(0, 10))aA1!"
 net user $Squatter $password /add | Out-Null
 Check 'a standard user is made to squat the folders' ($LASTEXITCODE -eq 0) "net user exited $LASTEXITCODE"
 Squat $Data @('planted.txt', 'install.json')
@@ -278,7 +280,8 @@ $again = Msiexec 'install-given' "/i `"$Msi`" SUROGATE_VMP=0 SUROGATE_BASE=https
 Check 'it installs with SUROGATE_VMP=0 and a base and channel of its own' ($again.Code -eq 0) "msiexec exited $($again.Code)"
 Check 'with SUROGATE_VMP=0 the custom action does not run' ($again.Log -match 'Skipping action: EnableVirtualMachinePlatform \(condition is false\)' -and $again.Log -notmatch "Surogate: Windows's Virtual Machine Platform") ''
 Check 'the install record holds the base and channel given' ((Get-Record) -eq '{"base":"https://mirror.example.test","channel":"beta"}') (Get-Record)
-Check 'a link in the data folder''s place is removed, and the folder is one' ((Get-Item $Data -Force).LinkType -eq $null -and -not ((Get-Item $Data -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) "$((Get-Item $Data -Force).LinkType)"
+$made = Get-Item $Data -Force -ErrorAction SilentlyContinue
+Check 'a link in the data folder''s place is removed, and the folder is one' ($made -and $made.PSIsContainer -and -not ($made.Attributes -band [IO.FileAttributes]::ReparsePoint)) "$(if ($made) { $made.Attributes } else { 'missing' })"
 Check 'the folder the link named is as it was, and holds nothing of the install''s' ((Get-Acl $Victim).Sddl -eq $victimSddl -and @(Get-ChildItem -Force $Victim).Count -eq 0) "$(Get-ChildItem -Force $Victim | ForEach-Object Name)"
 Check-Taken '%ProgramData%\Surogate, made where the link was,' $Data $DataRules
 $kept = Get-ItemProperty $Remembered -ErrorAction SilentlyContinue

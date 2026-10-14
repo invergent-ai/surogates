@@ -2,17 +2,18 @@
 //! (folders.rs). Its CustomActionData is `[DataFolder]`, `%ProgramData%\Surogate\`. As LocalSystem, with the privileges
 //! to take ownership and to restore, each entry is opened by a backup-semantics handle that follows no reparse point, so
 //! a link is seen as a link and removed, never followed: its folder's owner and access list are set on that handle, and
-//! every other entry is deleted through one. A folder that is not there is left for the install to make. Any step that
-//! fails fails the install, which then changes nothing.
+//! every other entry is deleted through one. Each descriptor is set whole, as it is written, on that one entry: none is
+//! carried to what a folder holds, which its maker's access rules may keep the install from reading, nor read from the
+//! folder above it. A folder that is not there is left for the install to make. Any step that fails fails the install,
+//! which then changes nothing.
 
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, LUID};
-use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, LookupPrivilegeValueW, ACL, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES,
-    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
-    UNPROTECTED_DACL_SECURITY_INFORMATION,
+    AdjustTokenPrivileges, LookupPrivilegeValueW, SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle, SetFileInformationByHandle, FileBasicInfo, FileDispositionInfoEx,
@@ -103,22 +104,18 @@ fn open(path: &str, access: u32) -> Result<Option<(Handle, u32)>, String> {
     Ok(Some((handle, information.dwFileAttributes)))
 }
 
-/// *handle*'s owner and access list made those of *sddl*: protected, where *protected*, or else taken from its folder.
-fn secure(handle: &Handle, sddl: &str, protected: bool, path: &str) -> Result<(), String> {
+/// *handle*'s owner and access list made those of *sddl*, its protection and its inherited rules as the descriptor
+/// says them: on that one entry, and on nothing it holds.
+fn secure(handle: &Handle, sddl: &str, path: &str) -> Result<(), String> {
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(wide(sddl).as_ptr(), SDDL_REVISION_1, &mut descriptor, null_mut()) } == 0 {
         return Err(last_error(sddl));
     }
-    let mut owner: PSID = null_mut();
-    let mut dacl: *mut ACL = null_mut();
-    let (mut present, mut defaulted) = (0, 0);
-    let read = unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) } != 0
-        && unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) } != 0;
-    let inheritance = if protected { PROTECTED_DACL_SECURITY_INFORMATION } else { UNPROTECTED_DACL_SECURITY_INFORMATION };
-    let status = if read { unsafe { SetSecurityInfo(handle.0, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | inheritance, owner, null_mut(), dacl, null()) } } else { 1 };
+    let set = unsafe { SetKernelObjectSecurity(handle.0, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, descriptor) } != 0;
+    let error = unsafe { GetLastError() };
     unsafe { LocalFree(descriptor) };
-    if !read || status != 0 {
-        return Err(format!("{path}'s owner and access list could not be set: Windows error {status}"));
+    if !set {
+        return Err(format!("{path}'s owner and access list could not be set: Windows error {error}"));
     }
     Ok(())
 }
@@ -150,7 +147,7 @@ fn remove(path: &str) -> Result<(), String> {
     let access = READ_CONTROL | WRITE_DAC | WRITE_OWNER | DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY;
     let Some((handle, attributes)) = open(path, access)? else { return Ok(()) };
     if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-        secure(&handle, SYSTEM_ALONE, true, path)?;
+        secure(&handle, SYSTEM_ALONE, path)?;
         for (name, _, _) in entries(path)? {
             remove(&format!("{path}\\{name}"))?;
         }
@@ -173,15 +170,15 @@ fn take_back_folder(path: &str, sddl: &str, in_apply: bool) -> Result<String, St
         remove(path)?;
         return Ok(format!("{path} was a link or a file, and is removed"));
     }
-    secure(&handle, sddl, true, path)?;
+    secure(&handle, sddl, path)?;
     let mut said = vec![format!("{path} is SYSTEM's again")];
     for (name, folder, link) in entries(path)? {
         let inner = format!("{path}\\{name}");
         match found(&name, in_apply, folder, link) {
             Found::Apply => said.push(take_back_folder(&inner, APPLY_SDDL, true)?),
             Found::Record => {
-                let Some((record, _)) = open(&inner, READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_WRITE_ATTRIBUTES)? else { continue };
-                secure(&record, RECORD_SDDL, false, &inner)?;
+                let Some((record, _)) = open(&inner, READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)? else { continue };
+                secure(&record, RECORD_SDDL, &inner)?;
                 // A plain file, which the install writes again whole: no attribute of its maker's, read-only among them.
                 let basic = FILE_BASIC_INFO { CreationTime: 0, LastAccessTime: 0, LastWriteTime: 0, ChangeTime: 0, FileAttributes: FILE_ATTRIBUTE_NORMAL };
                 let size = std::mem::size_of::<FILE_BASIC_INFO>() as u32;
