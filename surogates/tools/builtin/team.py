@@ -36,7 +36,13 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc, day_index, next_contact
-from surogates.followup.outreach import operator_unanswered_hours, plain_reason, window_open
+from surogates.followup.outreach import (
+    Described,
+    describe_people,
+    operator_unanswered_hours,
+    plain_reason,
+    window_open,
+)
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
@@ -311,14 +317,12 @@ async def team_tool_exclusions(
 
 
 class _Person:
-    def __init__(self, user_id: uuid.UUID, rows: list, user: Any, phone: str) -> None:
-        self.user_id = user_id
-        self.rows = rows
-        self.display_name = (user.display_name if user else "") or ""
-        self.phone = phone
-        self.label = followup_store.person_label(
-            self.display_name, followup_store.labelling_enrollment(rows),
-        ) or f"user {user_id}"
+    def __init__(self, described: Described) -> None:
+        self.user_id = described.user_id
+        self.rows = described.rows
+        self.display_name = described.display_name
+        self.phone = described.wa_id
+        self.label = described.name or f"user {described.user_id}"
 
     def matches(self, fragment: str) -> bool:
         digits = "".join(c for c in fragment if c.isdigit())
@@ -335,29 +339,8 @@ async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> l
     for row in await followup_store.enrollments(sf, org_id=org_id, agent_id=agent_id):
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
-    if not by_user:
-        return []
-    ids = list(by_user)
-    async with sf() as db:
-        users = {
-            u.id: u for u in (
-                await db.execute(sa.select(User).where(User.id.in_(ids)))
-            ).scalars()
-        }
-        phones = dict(
-            (
-                await db.execute(
-                    sa.select(ChannelIdentity.user_id, ChannelIdentity.platform_user_id)
-                    .where(ChannelIdentity.org_id == org_id)
-                    .where(ChannelIdentity.platform == "whatsapp")
-                    .where(ChannelIdentity.user_id.in_(ids))
-                )
-            ).all()
-        )
-    return [
-        _Person(uid, rows, users.get(uid), phones.get(uid) or "")
-        for uid, rows in by_user.items()
-    ]
+    described = await describe_people(sf, org_id=org_id, agent_id=agent_id, rows_by_user=by_user)
+    return [_Person(d) for d in described.values()]
 
 
 def _sender(ctx: Any, settings: Any) -> str | None:

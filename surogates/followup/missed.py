@@ -21,11 +21,11 @@ import sqlalchemy as sa
 from surogates.db.models import (
     ProgramInvitationRow,
     ProgramScheduleRow,
-    User,
 )
 from surogates.channels.identity import readable_phone
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
+from surogates.followup.outreach import describe_people
 
 logger = logging.getLogger(__name__)
 
@@ -159,24 +159,18 @@ async def _alert_if_streak(
         # another full run of unanswered openers, not one more on top of it.
         if any(e != "none" for _, e in recent[1:]):
             return 0
-        user = await db.get(User, inv.user_id)
 
     key = (inv.org_id, inv.agent_id)
     if key not in settings_cache:
         settings_cache[key] = await followup_store.get_settings(
             session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
         )
-    enrollment = followup_store.labelling_enrollment(
-        await followup_store.enrollments(
-            session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
-            user_id=inv.user_id,
-        )
-    )
+    [person] = (await describe_people(
+        session_factory, org_id=inv.org_id, agent_id=inv.agent_id, user_ids=[inv.user_id],
+    )).values()
     text = render_missed_text(
         config.get("missed_alert_text"),
-        name=followup_store.person_label(
-            user.display_name if user else "", enrollment,
-        ) or "?",
+        name=person.name or "?",
         phone=readable_phone(inv.platform_user_id) if inv.platform_user_id else "?",
         count=threshold,
         program=str(config.get("name") or "check-in"),
