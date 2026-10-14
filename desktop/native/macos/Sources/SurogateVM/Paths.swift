@@ -1,7 +1,7 @@
 // What surogate-vm takes of the paths it is given: only those inside its own runtime folder, the image's
 // folder, the app's own files and the app's data, each named as it is, with no link on its way, and
-// a folder to share only as an absolute path that is its own real path, outside all of those but a
-// folder's history. Everything else is refused, before any of it is opened.
+// a folder to share only as an absolute path that is its own real path, outside all of those but what a
+// folder's history keeps for the guest. Everything else is refused, before any of it is opened.
 
 import Foundation
 #if canImport(Darwin)
@@ -95,14 +95,31 @@ public func checkBoot(_ boot: Boot, in places: Places, uid: uid_t = getuid()) th
   }
 }
 
+// Whether *bytes* are *count* hex digits in small letters.
+private func hex(_ bytes: Substring.UTF8View, _ count: Int) -> Bool {
+  bytes.count == count && bytes.allSatisfy { (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }
+}
+
+// Whether *rest*, a path below the data's history folder, is by its shape what the history keeps for the guest
+// (desktop/src/history/place.ts): a folder's place, `<key>`, its 16 hex digits; or a thread's copy in it,
+// `<key>/threads/<thread>`, the thread a session's id as desktop/src/vm/history.ts's THREAD names one.
+func historyShared(_ rest: String) -> Bool {
+  let parts = rest.split(separator: "/", omittingEmptySubsequences: false)
+  guard let key = parts.first, hex(key.utf8, 16) else { return false }
+  if parts.count == 1 { return true }
+  guard parts.count == 3, parts[1] == "threads" else { return false }
+  let pieces = parts[2].split(separator: "-", omittingEmptySubsequences: false)
+  return pieces.count == 5 && zip(pieces, [8, 4, 4, 4, 12]).allSatisfy { hex($0.0.utf8, $0.1) }
+}
+
 /// The folder at *path*, checked as one to share into the guest: absolute and plain, its own real path,
-/// a folder, and in none of the run's folders, nor holding one, but for a folder's history in the data
-/// (`<data>/history/<key>`), which the guest's root shares for its own git.
+/// a folder, and in none of the run's folders, nor holding one, but for what a folder's history in the data
+/// keeps for the guest: its place (`<data>/history/<key>`), which the guest's root shares for its own git,
+/// and a thread's copy in it (`<data>/history/<key>/threads/<thread>`), which is the thread's root's folder.
 public func checkShared(_ path: String, in places: Places) throws {
   guard named(path), let info = lstatOf(path), isDirectory(info) else { throw Refusal("the folder to share is not a folder named as it is: \(path)") }
   let history = (places.data as NSString).appendingPathComponent("history")
-  let key = String(path.dropFirst(history.count + 1))
-  let isHistory = inside(path, history) && key.utf8.count == 16 && key.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x61...0x66).contains($0) })
+  let isHistory = inside(path, history) && historyShared(String(path.dropFirst(history.count + 1)))
   for folder in [places.run, places.data, places.image, places.bundle] where !(isHistory && folder == places.data) {
     if path == folder || inside(path, folder) || inside(folder, path) {
       throw Refusal("the folder to share is the app's own, or holds it: \(path)")
