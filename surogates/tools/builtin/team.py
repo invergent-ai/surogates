@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -20,23 +22,23 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import (
-    channel_user_email, mask_readable_phones, masked_phone, normalize_wa_id, readable_phone,
+    mask_readable_phones, masked_phone, normalize_wa_id, readable_phone,
 )
+from surogates.channels import person_link
 from surogates.channels.memory_boundary import session_memory_boundary
-from surogates.db.agent_users import SOURCE_MANUAL, ensure_agent_user
 from surogates.db.models import (
+    AgentUser,
     ChannelContactRow,
-    ChannelIdentity,
     Event,
     OutreachMessageRow,
     ProgramInvitationRow,
     Session as SessionRow,
     User,
 )
+from surogates.followup import people
 from surogates.followup import store as followup_store
 from surogates.followup.context import (
     channel_names,
@@ -53,7 +55,6 @@ from surogates.followup.outreach import (
     describe_people,
     operator_unanswered_hours,
     plain_reason,
-    window_open,
 )
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
@@ -235,6 +236,15 @@ TEAM_UPDATE_PERSON_SCHEMA = ToolSchema(
                     "relation, e.g. \"Ana, daughter\"."
                 ),
             },
+            "timezone": {
+                "type": "string",
+                "description": "The person's own IANA timezone, e.g. Europe/London.",
+            },
+            "preferred_channel": {
+                "type": "string",
+                "enum": ["whatsapp", "telegram", "slack"],
+                "description": "The channel the person wants to be written to on.",
+            },
             "confirmation": {
                 "type": "string",
                 "description": (
@@ -250,13 +260,15 @@ TEAM_UPDATE_PERSON_SCHEMA = ToolSchema(
 TEAM_ENROLL_PERSON_SCHEMA = ToolSchema(
     name="team_enroll_person",
     description=(
-        "Team only. Enrol a new person by their WhatsApp number on a team "
-        "member's word: it records their permission to be messaged as the "
-        "team member's say-so and sends them the business's welcome message. "
-        "First call without confirmation: it shows who would be enrolled and "
-        "how, changes nothing and gives a confirmation code. Show that to the "
-        "team member and only after they answer yes call again with the same "
-        "arguments and that code."
+        "Team only. Enrol a person on a team member's word, reached by one of: "
+        "their WhatsApp number (phone), their Slack member id (slack_member), "
+        "a one-use Telegram start link they open themselves (telegram_link), or "
+        "someone the business already knows (existing_person). For a number or "
+        "Slack member it records their permission to be messaged as the team "
+        "member's say-so and sends the welcome message. First call without "
+        "confirmation: it shows who would be enrolled and how, changes nothing "
+        "and gives a confirmation code. Show that to the team member and only "
+        "after they answer yes call again with the same arguments and that code."
     ),
     parameters={
         "type": "object",
@@ -264,6 +276,18 @@ TEAM_ENROLL_PERSON_SCHEMA = ToolSchema(
             "phone": {
                 "type": "string",
                 "description": "The person's WhatsApp number with country code, e.g. +40 746 148 303.",
+            },
+            "slack_member": {
+                "type": "string",
+                "description": "The person's Slack member id, e.g. U01ABCDEF.",
+            },
+            "telegram_link": {
+                "type": "boolean",
+                "description": "True to make a one-use Telegram start link for the person.",
+            },
+            "existing_person": {
+                "type": "string",
+                "description": "The name or handle of someone the business already knows.",
             },
             "person_name": {"type": "string", "description": "The person's full name."},
             "protocol": {
@@ -305,7 +329,6 @@ TEAM_ENROLL_PERSON_SCHEMA = ToolSchema(
                 ),
             },
         },
-        "required": ["phone", "person_name"],
     },
 )
 
@@ -336,6 +359,10 @@ class _Person:
         self.phone = described.wa_id
         self.handles = described.handles
         self.label = described.name or f"user {described.user_id}"
+        #: ``(user_id, name, relation)`` of each confirmed contact.
+        self.contacts: list[tuple] = []
+        #: Their contacts' phones and names, for finding them by either.
+        self.contact_handles: list[str] = []
 
     @property
     def contact(self) -> str:
@@ -345,6 +372,10 @@ class _Person:
         for platform, found in self.handles.items():
             if found:
                 return f"{platform} …{found[0][-4:]}"
+        if self.contacts:
+            return "no channel of their own; reached through " + ", ".join(
+                f"{name or '?'} ({relation or 'contact'})" for _, name, relation in self.contacts
+            )
         return "no contact"
 
     def matches(self, fragment: str) -> bool:
@@ -358,8 +389,12 @@ class _Person:
             for h in found
         ):
             return True
+        if len(digits) >= 4 and any(digits in h for h in self.contact_handles if h.isdigit()):
+            return True
         needle = fold_label(fragment.strip())
-        names = [self.display_name] + [r.patient_name or "" for r in self.rows]
+        names = [self.display_name] + [r.patient_name or "" for r in self.rows] + [
+            h for h in self.contact_handles if not h.isdigit()
+        ]
         return bool(needle) and any(needle in fold_label(n) for n in names)
 
 
@@ -370,7 +405,22 @@ async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> l
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
     described = await describe_people(sf, org_id=org_id, agent_id=agent_id, rows_by_user=by_user)
-    return [_Person(d) for d in described.values()]
+    out = [_Person(d) for d in described.values()]
+    links = await followup_store.contacts(sf, org_id=org_id, agent_id=agent_id)
+    if links:
+        known = await describe_people(
+            sf, org_id=org_id, agent_id=agent_id, user_ids={c.contact_user_id for c in links},
+        )
+        by_person = {p.user_id: p for p in out}
+        for link in links:
+            person, contact = by_person.get(link.person_user_id), known.get(link.contact_user_id)
+            if person is None or contact is None:
+                continue
+            person.contacts.append((link.contact_user_id, contact.display_name, link.relation))
+            person.contact_handles.extend(
+                [contact.display_name, contact.wa_id] if contact.wa_id else [contact.display_name]
+            )
+    return out
 
 
 def _senders(ctx: Any, settings: Any) -> dict[str, str]:
@@ -438,6 +488,30 @@ async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Perso
             "one:\n" + "\n".join(f"- {p.label} ({p.contact})" for p in matches)
         )
     return matches[0]
+
+
+_PRESET_NAMES = {"full": "Full", "assistant": "Assistant", "alerts_only": "Alerts only"}
+_ABILITY_WORDS = {
+    "see_people": "see the people followed and their reports",
+    "message_person": "message a person",
+    "enroll": "enrol people",
+    "pause_resume_end": "pause, resume or end someone's follow-up",
+    "edit_details": "edit a person's details",
+    "see_full_phones": "see full phone numbers",
+    "manage_team": "manage the team",
+}
+
+
+def _not_allowed(settings: Any, ctx: Any, ability: str) -> str | None:
+    """A polite refusal naming what this member cannot do, or ``None``."""
+    if followup_store.can(settings, ctx.user_id, ability):
+        return None
+    preset = followup_store.member_permissions(settings, ctx.user_id)["preset"]
+    return (
+        f"Refused: {_member(ctx)}'s team role ({_PRESET_NAMES.get(preset, preset)}) "
+        f"does not include permission to {_ABILITY_WORDS[ability]}. Tell them so "
+        "kindly; whoever manages the team can change it."
+    )
 
 
 def _member(ctx: Any) -> str:
@@ -653,6 +727,12 @@ async def _memory(kwargs: dict, sf: Any, ctx: Any, user_id: uuid.UUID) -> list[s
         # A group's or Slack's shared partition describes a room, not them.
         if boundary and boundary != "public" and not (session.config or {}).get("multi_party"):
             boundaries[boundary] = None
+    # The person's shared record, kept with their contacts' conversations.
+    for row in await followup_store.enrollments(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
+    ):
+        if row.memory_boundary:
+            boundaries[row.memory_boundary] = None
     boundaries[None] = None
 
     async def read(key: str) -> Any:
@@ -697,6 +777,9 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     ctx, settings = await load_context(kwargs)
     if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
         return NOT_TEAM
+    refused = _not_allowed(settings, ctx, "see_people")
+    if refused:
+        return refused
     try:
         since_hours = int(arguments.get("since_hours") or 24)
     except (TypeError, ValueError):
@@ -765,6 +848,10 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
                 )
                 text += "; next message " + (local_time(*found) if found else "none scheduled")
             lines.append(text)
+        if person.contacts:
+            lines.append("  contacts (each gets every step): " + "; ".join(
+                f"{name or '?'} ({relation or 'contact'})" for _, name, relation in person.contacts
+            ))
         invs = invitations.get(person.user_id, [])
         lines.append(
             f"  last wrote {_ago(wrote, now)}; last step {_last_checkin(invs)}; "
@@ -813,7 +900,10 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             "with the person argument."
         )
     if arguments.get("include_phone") is True:
-        out += "\n\n" + await _send_phones(sf, ctx, settings, people[:shown])
+        out += "\n\n" + (
+            _not_allowed(settings, ctx, "see_full_phones")
+            or await _send_phones(sf, ctx, settings, people[:shown])
+        )
     return mask_readable_phones(out)
 
 
@@ -908,26 +998,14 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         return "Nothing sent: the message is empty."
     if len(text) > MAX_MESSAGE:
         return f"Nothing sent: keep a message under {MAX_MESSAGE:,} characters."
+    refused = _not_allowed(settings, ctx, "message_person")
+    if refused:
+        return refused
 
     person = await _one_person(sf, ctx, settings, fragment)
     if isinstance(person, str):
         return f"Nothing sent: {person}"
 
-    async with sf() as db:
-        found = (
-            await db.execute(
-                sa.select(ChannelIdentity)
-                .where(ChannelIdentity.org_id == ctx.org_id)
-                .where(ChannelIdentity.user_id == person.user_id)
-                .order_by(ChannelIdentity.id.desc())
-            )
-        ).scalars().all()
-    identities: dict[str, Any] = {}
-    for identity in found:
-        if capabilities_for(identity.platform).can_initiate:
-            identities.setdefault(identity.platform, identity)
-    if not identities:
-        return f"Nothing sent: {person.label} has no number or account the business can write to."
     phone = person.contact
     call = f"Call them instead ({phone}); {PHONE_HINT}"
     active = any(r.status == "active" for r in person.rows)
@@ -941,52 +1019,41 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
             "Ask the team member whether to message them anyway; only if they say "
             f"yes, call again with even_if_paused: true. {call}"
         )
-    granted = {
-        p: i for p, i in identities.items() if followup_store.permission_status(i) == "granted"
-    }
-    if not granted:
-        return (
-            f"Nothing sent: {person.label} has not given permission to be "
-            f"messaged on {channel_names(identities)}. {call}"
-        )
     senders = _senders(ctx, settings)
-    if not any(p in senders for p in granted):
-        return f"Nothing sent: {channel_names(granted)} is not switched on for this business. {call}"
     now = datetime.now(timezone.utc)
-    last: dict[str, datetime | None] = {}
-    for p in granted:
-        if p in senders:
-            last[p] = await followup_store.last_inbound(
-                sf, org_id=ctx.org_id, platform=p,
-                platform_user_id=granted[p].platform_user_id, channel_identifier=senders[p],
-            )
-    # A bot cannot write first to someone who never wrote to it.
-    usable = [p for p in last if last[p] is not None or not capabilities_for(p).needs_prior_contact]
-    if not usable:
-        return f"Nothing sent: {person.label} has never written to the business on {channel_names(last)}. {call}"
+    template_name = settings.message_template_name if settings else None
     preferred = next(
-        (r.preferred_channel for r in person.rows if r.status == "active" and r.preferred_channel in usable),
+        (r.preferred_channel for r in person.rows if r.status == "active" and r.preferred_channel),
         None,
     )
-    wrote = [p for p in usable if last[p] is not None]
-    platform = preferred or (
-        max(wrote, key=lambda p: as_utc(last[p])) if wrote
-        else "whatsapp" if "whatsapp" in usable else usable[0]
+    # The person on their best channel; a closed window with no template
+    # falls through to their other channels.  Someone with none is reached
+    # through their contacts.
+    found, why = await people.reachable(
+        sf, org_id=ctx.org_id, user_id=person.user_id, senders=senders,
+        preferred=preferred, template=bool(template_name), now=now,
     )
+    recipient, via = person.user_id, ""
+    if not found:
+        for contact_id, contact_name, relation in person.contacts:
+            found, _ = await people.reachable(
+                sf, org_id=ctx.org_id, user_id=contact_id, senders=senders,
+                template=bool(template_name), now=now,
+            )
+            if found:
+                recipient, via = contact_id, f" through {contact_name or 'their contact'} ({relation or 'contact'})"
+                break
+    if not found:
+        return f"Nothing sent: {person.label} {why}. {call}"
+    reach = found[0]
+    platform = reach.platform
     name = channel_names([platform])
-    windowed = bool(capabilities_for(platform).window_hours)
-    template = (settings.message_template_name if settings else None) if windowed else None
-    is_open = not windowed or window_open(last[platform], now)
-    if not is_open and not template:
-        return (
-            f"Nothing sent: {person.label} has not written in the last 24 hours, "
-            f"so {name} only lets an approved message template reach them, and "
-            f"the business has none chosen under Follow-up. {call}"
-        )
+    is_open = not reach.needs_template
+    template = template_name if reach.needs_template else None
 
     refused = await _unconfirmed(
         kwargs, "team_message_person", arguments,
-        f"Will send to {person.label} ({phone}): «{text}»"
+        f"Will send to {person.label}{via} ({phone}): «{text}»"
         + (
             f", now, as a normal {name} message." if is_open else
             ". Their 24h window is closed, so the approved opener template goes "
@@ -998,7 +1065,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         return refused
 
     await followup_store.queue_outreach(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=recipient,
         platform=platform, channel_identifier=senders[platform], kind="operator",
         text=text, template_name=template,
         template_language=(settings.message_template_language if settings and template else None),
@@ -1078,11 +1145,20 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
         "patient_name": arguments.get("person_name") or arguments.get("patient_name"),
         "answered_by": arguments.get("answered_by"),
     }
-    for field, label in (("patient_name", "name"), ("answered_by", "answered by")):
+    given["timezone"] = arguments.get("timezone")
+    given["preferred_channel"] = arguments.get("preferred_channel")
+    for field, label in (
+        ("patient_name", "name"), ("answered_by", "answered by"),
+        ("timezone", "timezone"), ("preferred_channel", "preferred channel"),
+    ):
         value = str(given[field] or "").strip()
         if value:
             changes[field] = value
             described.append(f"{label} {getattr(row, field) or 'none'} → {value}")
+    if set(changes) - {"status", "status_reason"}:
+        refused = _not_allowed(settings, ctx, "edit_details")
+        if refused:
+            return refused
     status = arguments.get("status")
     reason = str(arguments.get("reason") or "").strip()
     if status is not None:
@@ -1093,6 +1169,9 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             )
         if status in ("paused", "ended") and not reason:
             return "Nothing changed: ask the team member why before pausing or ending."
+        refused = _not_allowed(settings, ctx, "pause_resume_end")
+        if refused:
+            return refused
         changes["status"] = status
         # No column records who changed an enrolment; the reason carries it.
         changes["status_reason"] = f"{reason} (by {_member(ctx)})" if reason else None
@@ -1108,10 +1187,13 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if refused:
         return refused
 
-    updated = await followup_store.update_enrollment(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
-        protocol=row.protocol, **changes,
-    )
+    try:
+        updated = await followup_store.update_enrollment(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person.user_id,
+            protocol=row.protocol, **changes,
+        )
+    except ValueError as exc:
+        return f"Nothing changed: {exc}."
     if updated is None:
         return f"Nothing changed: {person.label} is no longer enrolled in {row.protocol}."
     result = f"Updated {person.label}'s {row.protocol}: status {updated.status}"
@@ -1133,6 +1215,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             reason=f"{row.protocol} {status} by {_member(ctx)}: {reason}",
             created_by=f"team:{ctx.user_id}", subject_user_id=person.user_id,
             exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
+            topic="attention",
         )
         result += " " + told(queued, why_not)
     return result
@@ -1143,76 +1226,34 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _number_holder(sf: Any, org_id: uuid.UUID, wa_id: str) -> User | None:
-    """The account this number already belongs to, the way ops resolves it:
-    the identity holding the number, else the phone-only account's e-mail."""
+_SLACK_MEMBER = re.compile(r"^[UW][A-Z0-9]{6,}$")
+
+
+async def _existing(sf: Any, ctx: Any, settings: Any, fragment: str) -> Any:
+    """The one person *fragment* names: someone followed, else one of this
+    agent's users by name or channel handle."""
+    found = await _one_person(sf, ctx, settings, fragment)
+    if not isinstance(found, str) or "more than one" in found:
+        return found
+    needle = fold_label(fragment)
     async with sf() as db:
-        held = (
-            await db.execute(
-                sa.select(ChannelIdentity.user_id)
-                .where(ChannelIdentity.org_id == org_id)
-                .where(ChannelIdentity.platform == "whatsapp")
-                .where(ChannelIdentity.platform_user_id == wa_id)
-            )
-        ).scalar_one_or_none()
-        if held is not None:
-            return await db.get(User, held)
-        return (
+        users = (
             await db.execute(
                 sa.select(User)
-                .where(User.org_id == org_id)
-                .where(sa.func.lower(User.email) == channel_user_email("whatsapp", wa_id, org_id))
-                .order_by(User.created_at)
-                .limit(1)
+                .join(AgentUser, AgentUser.user_id == User.id)
+                .where(AgentUser.org_id == ctx.org_id)
+                .where(AgentUser.agent_id == ctx.agent_id)
+                .where(AgentUser.removed_at.is_(None))
             )
-        ).scalar_one_or_none()
-
-
-async def _person_account(
-    sf: Any, ctx: Any, wa_id: str, name: str, holder: User | None,
-) -> uuid.UUID | str:
-    """The account behind *wa_id*, created phone-only when there is none, in
-    the shape ops' Users page creates: synthetic e-mail, external auth, the
-    number bound, a runtime shadow promoted, and bound to this agent."""
-    async with sf() as db:
-        user = await db.get(User, holder.id) if holder is not None else None
-        if user is None:
-            user = User(
-                org_id=ctx.org_id, display_name=name, auth_provider="external",
-                email=channel_user_email("whatsapp", wa_id, ctx.org_id),
-            )
-            db.add(user)
-            await db.flush()
-        bound = (
-            await db.execute(
-                sa.select(ChannelIdentity.platform_user_id)
-                .where(ChannelIdentity.org_id == ctx.org_id)
-                .where(ChannelIdentity.platform == "whatsapp")
-                .where(ChannelIdentity.user_id == user.id)
-            )
-        ).scalar_one_or_none()
-        if bound is None:
-            db.add(ChannelIdentity(
-                org_id=ctx.org_id, user_id=user.id, platform="whatsapp",
-                platform_user_id=wa_id, platform_meta={},
-            ))
-        elif bound != wa_id:
-            # Never move a person's number, as the Users page refuses to.
-            return f"that person's account already has the number {masked_phone(bound)}."
-        # Someone who wrote first has a runtime shadow account, which the
-        # linked identity policy refuses; the team member vouching makes them known.
-        if user.auth_provider == "whatsapp":
-            user.auth_provider = "external"
-        await ensure_agent_user(
-            db, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user.id,
-            source=SOURCE_MANUAL, reactivate=True,
-        )
-        try:
-            await db.commit()
-        except IntegrityError:
-            await db.rollback()
-            return "the number was registered for someone else at the same moment; try again."
-        return user.id
+        ).scalars().all()
+    matches = [
+        u for u in users
+        if needle and needle in fold_label(u.display_name or "")
+        and not followup_store.is_team_member(settings, u.id)
+    ]
+    if len(matches) != 1:
+        return f"'{fragment}' " + ("matches nobody here" if not matches else "matches several people; ask which")
+    return matches[0]
 
 
 async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
@@ -1220,12 +1261,20 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     ctx, settings = await load_context(kwargs)
     if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
         return NOT_TEAM
-    try:
-        wa_id = normalize_wa_id(str(arguments.get("phone") or ""))
-    except ValueError as exc:
-        return f"Not enrolled: {exc}"
+    refused = _not_allowed(settings, ctx, "enroll")
+    if refused:
+        return refused
+    phone_raw = str(arguments.get("phone") or "").strip()
+    slack_member = str(arguments.get("slack_member") or "").strip().lstrip("@").upper()
+    telegram = arguments.get("telegram_link") is True
+    existing = str(arguments.get("existing_person") or "").strip()
+    if sum(map(bool, (phone_raw, slack_member, telegram, existing))) != 1:
+        return (
+            "Not enrolled: give exactly one way to reach them: phone (WhatsApp), "
+            "slack_member, telegram_link: true, or existing_person."
+        )
     name = str(arguments.get("person_name") or arguments.get("patient_name") or "").strip()
-    if not name:
+    if not name and not existing:
         return "Not enrolled: ask the team member for the person's full name."
     zones = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
@@ -1251,38 +1300,78 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     approximate = arguments.get("start_date_approximate") is True if start else None
     answered_by = str(arguments.get("answered_by") or "").strip() or None
 
-    holder = await _number_holder(sf, ctx.org_id, wa_id)
-    if holder is not None and followup_store.is_team_member(settings, holder.id):
-        return (
-            f"Not enrolled: {masked_phone(wa_id)} belongs to a member of the team, "
-            "who receives the alerts and is not followed. Check the number."
-        )
-    sender = _sender(ctx, settings)
+    platform, handle, holder, shown = None, None, None, ""
+    if phone_raw:
+        try:
+            handle = normalize_wa_id(phone_raw)
+        except ValueError as exc:
+            return f"Not enrolled: {exc}"
+        platform, shown = "whatsapp", masked_phone(handle)
+    elif slack_member:
+        if not _SLACK_MEMBER.match(slack_member):
+            return "Not enrolled: a Slack member id looks like U01ABCDEF (their profile, Copy member ID)."
+        platform, handle, shown = "slack", slack_member, f"Slack member …{slack_member[-4:]}"
+    if platform:
+        holder = await people.channel_holder(sf, ctx.org_id, platform, handle)
+        if holder is not None and followup_store.is_team_member(settings, holder.id):
+            return (
+                f"Not enrolled: {shown} belongs to a member of the team, "
+                "who receives the alerts and is not followed. Check it."
+            )
+    person: Any = None
+    if existing:
+        person = await _existing(sf, ctx, settings, existing)
+        if isinstance(person, str):
+            return f"Not enrolled: {person}"
+        name = name or getattr(person, "label", None) or person.display_name
+        shown = getattr(person, "contact", None) or "their existing account"
+    bot = os.environ.get("SUROGATES_TELEGRAM_USERNAME", "").strip().lstrip("@")
+    if telegram:
+        if not bot or kwargs.get("redis") is None:
+            return "Not enrolled: Telegram is not connected on this agent, so no start link can be made."
+        shown = "a Telegram start link"
+    senders = _senders(ctx, settings)
+    welcome_on = platform if platform and platform in senders else None
 
     when = (
         f"from {start}" + (" (approximate)" if approximate else "")
         if start else "with no start date, so no Program reaches them until one is set"
     )
+    how = {
+        "whatsapp": "; record their permission to be messaged on your say-so",
+        "slack": "; record their permission to be messaged on your say-so",
+    }.get(platform or "", "")
+    if telegram:
+        how = "; give you a one-use link for them to open and press Start, which links and asks them"
     refused = await _unconfirmed(
         kwargs, "team_enroll_person", arguments,
-        f"Will enrol {name} ({masked_phone(wa_id)}) in {protocol} {when}"
+        f"Will enrol {name} ({shown}) in {protocol} {when}"
         + (f", answered by {answered_by}" if answered_by else "")
-        + (f"; the number is already known as {holder.display_name}" if holder else "")
-        + "; record their permission to be messaged on your say-so"
-        + ("; and send them the business's welcome message" if sender else "")
+        + (f"; the {'number' if platform == 'whatsapp' else 'account'} is already known as "
+           f"{holder.display_name}" if holder else "")
+        + how
+        + ("; and send them the business's welcome message" if welcome_on else "")
         + ".",
         "Nothing has been changed.",
     )
     if refused:
         return refused
 
-    user_id = await _person_account(sf, ctx, wa_id, name, holder)
-    if isinstance(user_id, str):
-        return f"Not enrolled: {user_id}"
-    await followup_store.grant_contact_permission(
-        sf, org_id=ctx.org_id, platform="whatsapp", platform_user_id=wa_id,
-        recorded_by=f"team:{ctx.user_id}", method="team",
-    )
+    if platform:
+        user_id = await people.channel_account(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, platform=platform,
+            platform_user_id=handle, name=name, holder=holder,
+        )
+        if isinstance(user_id, str):
+            return f"Not enrolled: {user_id}"
+        await followup_store.grant_contact_permission(
+            sf, org_id=ctx.org_id, platform=platform, platform_user_id=handle,
+            recorded_by=f"team:{ctx.user_id}", method="team",
+        )
+    elif person is not None:
+        user_id = person.user_id if isinstance(person, _Person) else person.id
+    else:
+        user_id = await people.named_account(sf, org_id=ctx.org_id, agent_id=ctx.agent_id, name=name)
     try:
         row = await followup_store.upsert_enrollment(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
@@ -1291,21 +1380,31 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             answered_by=answered_by, start_date_approximate=approximate,
         )
     except followup_store.TeamMember:
-        return f"Not enrolled: {masked_phone(wa_id)} belongs to a member of the team."
-    result = f"Enrolled {name} ({masked_phone(wa_id)}) in {protocol}"
+        return f"Not enrolled: {shown} belongs to a member of the team."
+    result = f"Enrolled {name} ({shown}) in {protocol}"
     if row.start_date:
         result += f" from {start_text(row)}"
-    result += ". Permission to message them recorded on your say-so."
-    if sender:
+    result += "."
+    if platform:
+        result += " Permission to message them recorded on your say-so."
+    if telegram:
+        code = await person_link.mint(kwargs["redis"], org_id=ctx.org_id, user_id=user_id)
+        result += (
+            f" Their link: https://t.me/{bot}?start={code} (one use, 7 days). Give "
+            "it to the team member to pass on; opening it and pressing Start links "
+            "the person and records their agreement."
+        )
+    if welcome_on:
+        windowed = bool(capabilities_for(welcome_on).window_hours)
         welcome = await followup_store.queue_outreach(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=user_id,
-            platform="whatsapp", channel_identifier=sender, kind="welcome",
+            platform=welcome_on, channel_identifier=senders[welcome_on], kind="welcome",
             text=(
                 ((settings.texts or {}).get("welcome_text") or "").strip()
                 or WELCOME_TEXT
             ),
-            template_name=settings.welcome_template_name,
-            template_language=settings.welcome_template_language,
+            template_name=settings.welcome_template_name if windowed else None,
+            template_language=settings.welcome_template_language if windowed else None,
             subject_user_id=user_id, created_by=f"team:{ctx.user_id}",
             dedupe_key=(
                 f"welcome:team:{ctx.agent_id}:{user_id}:{protocol}:"
@@ -1313,16 +1412,18 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             ),
         )
         result += f" Welcome message queued (state {welcome.state})."
-    else:
-        result += " No welcome sent: WhatsApp is not switched on for this business."
+    elif platform:
+        result += f" No welcome sent: {channel_names([platform])} is not switched on for this business."
     queued, why_not = await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="enrolment",
         text=(
             f"{name} enrolled in {protocol} by {_member(ctx)}."
-            f"\n\n— {followup_store.person_label(name, row)} · {readable_phone(wa_id)}"
+            f"\n\n— {followup_store.person_label(name, row)}"
+            + (f" · {readable_phone(handle)}" if platform == "whatsapp" else "")
         ),
         created_by=f"team:{ctx.user_id}", subject_user_id=user_id,
         exclude_user_id=ctx.user_id, fallback_senders={ctx.channel: ctx.sender},
+        topic="new_enrolments",
     )
     return result + " " + told(queued, why_not)
 

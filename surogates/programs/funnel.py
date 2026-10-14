@@ -49,60 +49,69 @@ async def step_funnel(
     """Each Program's funnel over the invitations created since *since*.
 
     Keyed by the ids as given; a Program with no invitations still has a
-    funnel of zeros.  A skipped person was never sent anything, so they count
-    only towards ``skipped`` and its reasons.
+    funnel of zeros.  Counts people: a step that reached a person and their
+    contacts is one, replied when any of them replied.  A skipped person was
+    never sent anything, so they count only towards ``skipped`` and its
+    reasons; ``channels`` counts the messages sent on each.
     """
     funnels = {program_id: _empty() for program_id in program_ids}
     if not program_ids:
         return funnels
     by_id = {str(program_id): program_id for program_id in program_ids}
-    read = ProgramInvitationRow.read_at.isnot(None)
+    person = sa.func.coalesce(ProgramInvitationRow.person_user_id, ProgramInvitationRow.user_id)
     async with session_factory() as db:
         rows = (
             await db.execute(
                 sa.select(
-                    ProgramInvitationRow.program_id, ProgramInvitationRow.platform,
-                    ProgramInvitationRow.delivery_state, ProgramInvitationRow.response_state,
-                    read, ProgramInvitationRow.outcome, ProgramInvitationRow.reason,
-                    sa.func.count(),
+                    ProgramInvitationRow.program_id, ProgramInvitationRow.occurrence_id, person,
+                    ProgramInvitationRow.platform, ProgramInvitationRow.delivery_state,
+                    ProgramInvitationRow.response_state, ProgramInvitationRow.read_at.isnot(None),
+                    ProgramInvitationRow.outcome, ProgramInvitationRow.reason,
+                    ProgramInvitationRow.person_user_id.is_(None)
+                    | (ProgramInvitationRow.person_user_id == ProgramInvitationRow.user_id),
                 )
                 .where(ProgramInvitationRow.org_id == org_id)
                 .where(ProgramInvitationRow.agent_id == agent_id)
                 .where(ProgramInvitationRow.program_id.in_(list(program_ids)))
                 .where(ProgramInvitationRow.created_at >= since)
-                .group_by(
-                    ProgramInvitationRow.program_id, ProgramInvitationRow.platform,
-                    ProgramInvitationRow.delivery_state, ProgramInvitationRow.response_state,
-                    # Grouped by the plain reason: a CASE with bound
-                    # parameters in both lists is not the same expression
-                    # to Postgres.  Only a skip's reason is read below.
-                    read, ProgramInvitationRow.outcome, ProgramInvitationRow.reason,
-                )
             )
         ).all()
-    for program_id, platform, delivery, response, was_read, outcome, reason, n in rows:
-        f = funnels[by_id[str(program_id)]]
-        f["invited"] += n
-        if delivery in _SKIPPED:
-            f["skipped"] += n
-            key = reason or "Skipped"
-            f["skip_reasons"][key] = f["skip_reasons"].get(key, 0) + n
+    # One unit per person per occurrence: a step reaches the person and each
+    # contact, and is answered when any of them answers.
+    units: dict[tuple, list] = {}
+    for program_id, occurrence_id, who, *rest in rows:
+        units.setdefault((str(program_id), occurrence_id, who), []).append(rest)
+    for (program_id, _occurrence, _who), copies in units.items():
+        f = funnels[by_id[program_id]]
+        f["invited"] += 1
+        tried = [c for c in copies if c[1] not in _SKIPPED]
+        if not tried:
+            # The person's own row says why, when there is one.
+            reason = next((c[5] for c in copies if c[6]), copies[0][5]) or "Skipped"
+            f["skipped"] += 1
+            f["skip_reasons"][reason] = f["skip_reasons"].get(reason, 0) + 1
             continue
-        f["channels"][platform] = f["channels"].get(platform, 0) + n
-        if delivery in _SENT:
-            f["sent"] += n
-        if delivery == "delivered" or was_read:
-            f["delivered"] += n
+        for platform, *_ in tried:
+            f["channels"][platform] = f["channels"].get(platform, 0) + 1
+        deliveries = {c[1] for c in tried}
+        responses = {c[2] for c in tried}
+        was_read = any(c[3] for c in tried)
+        if deliveries & set(_SENT):
+            f["sent"] += 1
+        if "delivered" in deliveries or was_read:
+            f["delivered"] += 1
         if was_read:
-            f["read"] += n
-        if delivery in ("failed", "undelivered"):
-            f["failed"] += n
-        if response in _REPLIED:
-            f["replied"] += n
-        if response == "completed":
-            f["completed"] += n
-        if response == "no_reply_by_deadline":
-            f["no_reply"] += n
+            f["read"] += 1
+        if deliveries <= {"failed", "undelivered"}:
+            f["failed"] += 1
+        replied = bool(responses & set(_REPLIED))
+        if replied:
+            f["replied"] += 1
+        if "completed" in responses:
+            f["completed"] += 1
+        if not replied and "no_reply_by_deadline" in responses:
+            f["no_reply"] += 1
+        outcome = next((c[4] for c in tried if c[4]), None)
         if outcome:
-            f["outcomes"][outcome] = f["outcomes"].get(outcome, 0) + n
+            f["outcomes"][outcome] = f["outcomes"].get(outcome, 0) + 1
     return funnels

@@ -1192,3 +1192,7 @@ UPDATE program_invitations SET attempts = NULL WHERE attempts = 'null'::jsonb;
 
 -- ── a step's outcome is the agent's label, never its status ──────────
 UPDATE program_invitations SET outcome = NULL WHERE outcome IN ('completed', 'declined');
+
+-- ── a browser push when a message waits in a person's web chat ───────
+ALTER TABLE followup_settings
+    ADD COLUMN IF NOT EXISTS web_push boolean NOT NULL DEFAULT false;

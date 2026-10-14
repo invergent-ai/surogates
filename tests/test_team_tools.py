@@ -533,7 +533,9 @@ def bindings(monkeypatch):
     async def ensure(db, **kw):
         calls.append(kw)
 
-    monkeypatch.setattr(team, "ensure_agent_user", ensure)
+    from surogates.followup import people
+
+    monkeypatch.setattr(people, "ensure_agent_user", ensure)
     return calls
 
 

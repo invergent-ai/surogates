@@ -70,7 +70,7 @@ _CHANNEL_TOOLS: frozenset[str] = frozenset({
     # the tools act on the conversation's own person and invitation.
     # ``escalate`` is not here: a web conversation can raise a hand too.
     "checkin_outcome", "followup_enroll", "followup_update",
-    "followup_status",
+    "followup_status", "followup_contacts", "followup_withdraw_consent",
 })
 _CRON_TOOLS: frozenset[str] = frozenset({
     "cron_create", "cron_list", "cron_delete",

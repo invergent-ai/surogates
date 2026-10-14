@@ -181,6 +181,10 @@ async def resolve_dm(
             _dm_key("slack", dm_id, user), dm_id,
             {"channel_id": dm_id, "thread_ts": None, "channel_identifier": sender},
         )
+    from surogates.channels.outbound import dm_target
+
+    if (target := dm_target(platform, user, sender)) is not None:
+        return target
     raise OpenerUndeliverable(f"The platform cannot write first on {platform}")
 
 

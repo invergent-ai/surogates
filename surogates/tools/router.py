@@ -57,6 +57,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "followup_enroll": ToolLocation.HARNESS,
     "followup_update": ToolLocation.HARNESS,
     "followup_status": ToolLocation.HARNESS,
+    "followup_contacts": ToolLocation.HARNESS,
+    "followup_withdraw_consent": ToolLocation.HARNESS,
     "escalate": ToolLocation.HARNESS,
     "team_overview": ToolLocation.HARNESS,
     "team_message_person": ToolLocation.HARNESS,

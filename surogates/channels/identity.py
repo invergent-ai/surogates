@@ -121,7 +121,10 @@ def readable_phone(wa_id: str) -> str:
     return " ".join(["+" + cc, *groups])
 
 
-_READABLE_PHONE_RE = re.compile(r"\+\d{1,3}(?: \d{1,6})+")
+#: A phone-like run: digits with spaces, dashes, dots or brackets between,
+#: never part of a longer word or id.
+_READABLE_PHONE_RE = re.compile(r"(?<![\w(-])\+?\(?\d[\d \-.()]{5,}\d(?![\w-])")
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?: \d{1,2})?")
 
 
 def masked_phone(wa_id: str) -> str:
@@ -132,10 +135,14 @@ def masked_phone(wa_id: str) -> str:
 
 
 def mask_readable_phones(text: str) -> str:
-    """*text* with every :func:`readable_phone` number masked."""
+    """*text* with every phone-like run of seven or more digits masked,
+    however it is written (``+40 746 148 303``, ``0746-148-303``,
+    ``40746148303``); dates are left alone."""
     def mask(match: re.Match) -> str:
         number = match.group()
-        return masked_phone(number) if sum(c.isdigit() for c in number) >= 7 else number
+        if sum(c.isdigit() for c in number) < 7 or _DATE_RE.fullmatch(number.strip()):
+            return number
+        return masked_phone(number)
 
     return _READABLE_PHONE_RE.sub(mask, text)
 

@@ -45,6 +45,7 @@ from surogates.channels.source import (
     build_session_key_for_config,
 )
 from surogates.followup import store as followup_store
+from surogates.followup.people import is_stop as is_opt_out, withdraw_consent
 from surogates.followup.outreach import deliver_pending
 from surogates.session.events import EventType
 
@@ -661,6 +662,16 @@ class ChannelInboundPipeline:
             source=msg.source,
             fallback_id=session_key,
         )
+        # A followed person's own conversations and their contacts' share
+        # one record: the person's memory partition.
+        if deps.session_factory is not None and chat_type not in ("group", "channel"):
+            try:
+                memory_boundary = await followup_store.shared_memory_boundary(
+                    deps.session_factory, org_id=UUID(str(routing.org_id)),
+                    agent_id=routing.agent_id, user_id=identity.user_id,
+                ) or memory_boundary
+            except Exception:  # noqa: BLE001 — the conversation's own partition
+                logger.warning("[inbound] shared memory partition lookup failed", exc_info=True)
 
         session_id = await deps.get_or_create_session(
             deps.session_store,
@@ -716,6 +727,15 @@ class ChannelInboundPipeline:
                         platform=routing.platform,
                         channel_identifier=routing.identifier,
                         session_id=session_id,
+                    )
+                # "STOP" is honoured before the agent reads it: nothing more
+                # goes out on this channel whatever the agent then does.
+                if msg.is_dm and is_opt_out(msg.text):
+                    await withdraw_consent(
+                        deps.session_factory, org_id=_org, agent_id=routing.agent_id,
+                        user_id=identity.user_id, platform=routing.platform,
+                        platform_user_id=msg.platform_user_id,
+                        reason=f"«{msg.text.strip()}»", by="person",
                     )
             except Exception:  # noqa: BLE001
                 # The person's own message must reach the agent whatever

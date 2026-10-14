@@ -24,6 +24,8 @@ from surogates.db.models import (
     ProgramInvitationRow,
     ProgramScheduleRow,
 )
+from surogates.channels.identity import normalize_wa_id
+from surogates.followup import people
 from surogates.followup import store as followup_store
 from surogates.followup.context import (
     Context,
@@ -37,7 +39,16 @@ from surogates.followup.context import (
     told,
 )
 from surogates.followup.eligibility import day_index, next_contact
+from surogates.session.interactive_input import fold_label
 from surogates.tools.builtin.checkin import _open_invitation_for_session
+from surogates.tools.builtin.followup_people import (
+    CONTACT_TOOL_NAMES,
+    FOLLOWUP_CONTACTS_SCHEMA,
+    FOLLOWUP_WITHDRAW_CONSENT_SCHEMA,
+    add_contact,
+    handle_followup_contacts,
+    handle_followup_withdraw_consent,
+)
 from surogates.tools.registry import ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -46,17 +57,21 @@ logger = logging.getLogger(__name__)
 #: agents without the Programs capability.
 FOLLOWUP_TOOL_NAMES: frozenset[str] = frozenset({
     "followup_enroll", "followup_update", "followup_status", "escalate",
+    *CONTACT_TOOL_NAMES,
 })
 
 FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
     name="followup_enroll",
     description=(
-        "Enrol the person you are talking to in a follow-up protocol, so the "
-        "business's scheduled messages start reaching them. Only call this "
-        "after the person has clearly agreed to be contacted on this channel; "
-        "pass consent=true to record that agreement. Enrolling again updates "
-        "the start date or phase and reactivates a paused or ended enrolment. "
-        "The team is told about every enrolment."
+        "Enrol a person in a follow-up protocol, so the business's scheduled "
+        "messages start reaching them: the one writing, or (for_someone_else) "
+        "someone they write for, such as a parent, who then becomes a person "
+        "of their own with the one writing linked as their contact. Every "
+        "step goes to the person and to each linked contact. Only call this "
+        "after the one writing has clearly agreed to be contacted on this "
+        "channel; pass consent=true to record that agreement. Enrolling again "
+        "updates the start date or phase and reactivates a paused or ended "
+        "enrolment. The team is told about every enrolment."
     ),
     parameters={
         "type": "object",
@@ -133,10 +148,48 @@ FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
                     "the person answers themselves."
                 ),
             },
+            "for_someone_else": {
+                "type": "boolean",
+                "description": (
+                    "True when the one writing enrols someone else (a parent, a "
+                    "child): that person is followed, the one writing is linked "
+                    "as their contact (pass relation)."
+                ),
+            },
+            "relation": {
+                "type": "string",
+                "description": (
+                    "With for_someone_else: who the one writing is to the person, "
+                    "e.g. \"daughter\"."
+                ),
+            },
+            "person_phone": {
+                "type": "string",
+                "description": (
+                    "With for_someone_else: the person's own number, when they have "
+                    "one. They are messaged there only after they agree themselves."
+                ),
+            },
+            "contacts": {
+                "type": "array",
+                "description": (
+                    "Other people to link to the person (numbers the one writing "
+                    "gives you), each receiving every step once they agree."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "phone": {"type": "string"},
+                        "name": {"type": "string"},
+                        "relation": {"type": "string"},
+                    },
+                    "required": ["phone", "relation"],
+                },
+            },
             "consent": {
                 "type": "boolean",
                 "description": (
-                    "True only when the person agreed, in this conversation, "
+                    "True only when the one writing agreed, in this conversation, "
                     "to receive messages from the business here."
                 ),
             },
@@ -188,6 +241,18 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
                     "Who now answers the scheduled messages for the person, with their "
                     "relation, e.g. \"Ana, daughter\"."
                 ),
+            },
+            "timezone": {
+                "type": "string",
+                "description": (
+                    "The person's own IANA timezone (e.g. Europe/London) when they "
+                    "live in another zone than the business: steps follow it."
+                ),
+            },
+            "preferred_channel": {
+                "type": "string",
+                "enum": ["whatsapp", "telegram", "slack"],
+                "description": "The channel the person asked to be written to on.",
             },
             "status": {
                 "type": "string",
@@ -248,6 +313,15 @@ ESCALATE_SCHEMA = ToolSchema(
                     "Default yellow."
                 ),
             },
+            "to": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Names of the team members this is for, chosen from what each "
+                    "handles (followup_status lists them). Omit to tell everyone "
+                    "who receives this kind of alert."
+                ),
+            },
         },
         "required": ["reason"],
     },
@@ -262,7 +336,7 @@ async def _tell_team(
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
         text=f"{text.strip()}\n\n— {await ctx.person_label(sf)}", created_by="agent",
-        subject_user_id=ctx.user_id, exclude_user_id=ctx.user_id,
+        subject_user_id=await ctx.person_user_id(sf), exclude_user_id=ctx.user_id,
         fallback_senders={ctx.channel: ctx.sender},
         **extra,
     )
@@ -377,6 +451,13 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     approximate = arguments.get("start_date_approximate") is True if start else None
     patient_name = str(arguments.get("patient_name") or "").strip() or None
     answered_by = str(arguments.get("answered_by") or "").strip() or None
+    someone_else = arguments.get("for_someone_else") is True
+    relation = str(arguments.get("relation") or "").strip()
+    if someone_else and (not relation or not patient_name):
+        return (
+            "Not enrolled: for someone else, pass relation (who the one writing "
+            "is to them) and person_name (their full name)."
+        )
 
     granted = await followup_store.grant_contact_permission(
         sf, org_id=ctx.org_id, platform=ctx.channel,
@@ -384,14 +465,31 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     )
     if not granted:
         return f"Not enrolled: this person has no {ctx.channel} identity on record."
+    person = ctx.user_id
+    if someone_else:
+        person = await _person_for(sf, ctx, settings, patient_name, arguments.get("person_phone"))
+        if isinstance(person, str):
+            return f"Not enrolled: {person}"
+        answered_by = None
     enrollment = await followup_store.upsert_enrollment(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=person,
         protocol=protocol, start_date=start, phase=phase, enrolled_by="agent",
         patient_name=patient_name, answered_by=answered_by,
         start_date_approximate=approximate,
     )
+    if someone_else:
+        await followup_store.link_contact(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, person_user_id=person,
+            contact_user_id=ctx.user_id, relation=relation, created_by="agent",
+        )
+    linked = [
+        await add_contact(sf, ctx, settings, person, enrollment.patient_name or "", item)
+        for item in (arguments.get("contacts") or []) if isinstance(item, dict)
+    ]
     ctx.named_by(enrollment)
-    queued, why_not = await _tell_team(sf, ctx, settings, kind="enrolment", text=summary)
+    queued, why_not = await _tell_team(
+        sf, ctx, settings, kind="enrolment", text=summary, topic="new_enrolments",
+    )
 
     parts = [f"Enrolled in {protocol}"]
     if enrollment.patient_name:
@@ -402,6 +500,10 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         parts.append(f"from {start_text(enrollment)}")
     if enrollment.phase:
         parts.append(f"phase {enrollment.phase}")
+    if someone_else:
+        parts.append(f"with the one writing linked as their {relation}")
+    if linked:
+        parts.append("(" + " ".join(linked) + ")")
     if enrollment.start_date is None:
         return (
             " ".join(parts) + ". Consent recorded. " + told(queued, why_not)
@@ -413,6 +515,37 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         " ".join(parts) + ". Consent recorded. " + told(queued, why_not)
         + " " + _next_contact_text(enrollment, configs, await _last_inbound(sf, ctx))
     )
+
+
+async def _person_for(
+    sf: Any, ctx: Context, settings: Any, name: str, phone: Any,
+) -> uuid.UUID | str:
+    """The person someone enrols on their behalf: the one they already speak
+    for under that name, the account holding the number they gave, else a new
+    person known by name."""
+    for link in await followup_store.contacts(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, contact_user_id=ctx.user_id,
+    ):
+        known = await followup_store.person_name(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=link.person_user_id,
+        )
+        if fold_label(known) == fold_label(name):
+            return link.person_user_id
+    if str(phone or "").strip():
+        try:
+            wa_id = normalize_wa_id(str(phone))
+        except ValueError as exc:
+            return str(exc)
+        holder = await people.channel_holder(sf, ctx.org_id, "whatsapp", wa_id)
+        if holder is not None and (
+            holder.id == ctx.user_id or followup_store.is_team_member(settings, holder.id)
+        ):
+            return "that number is the one writing's own, or a team member's."
+        return await people.channel_account(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, platform="whatsapp",
+            platform_user_id=wa_id, name=name, holder=holder,
+        )
+    return await people.named_account(sf, org_id=ctx.org_id, agent_id=ctx.agent_id, name=name)
 
 
 def _enrol_missing(arguments: dict) -> list[str]:
@@ -462,7 +595,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
             return f"Not updated: {exc}."
     if isinstance(arguments.get("start_date_approximate"), bool):
         changes["start_date_approximate"] = arguments["start_date_approximate"]
-    for field in ("phase", "patient_name", "answered_by"):
+    for field in ("phase", "patient_name", "answered_by", "timezone", "preferred_channel"):
         if str(arguments.get(field) or "").strip():
             changes[field] = str(arguments[field]).strip()
     status = arguments.get("status")
@@ -480,10 +613,13 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     if not changes:
         return "Nothing to update."
 
-    row = await followup_store.update_enrollment(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
-        protocol=protocol, **changes,
-    )
+    try:
+        row = await followup_store.update_enrollment(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=await ctx.person_user_id(sf),
+            protocol=protocol, **changes,
+        )
+    except ValueError as exc:
+        return f"Not updated: {exc}."
     if row is None:
         return f"Not updated: this person is not enrolled in '{protocol}'."
     ctx.named_by(row)
@@ -497,10 +633,15 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
         result += f", start {start_text(row)}"
     if row.phase:
         result += f", phase {row.phase}"
+    if row.timezone:
+        result += f", timezone {row.timezone}"
+    if row.preferred_channel:
+        result += f", preferred channel {row.preferred_channel}"
     result += "."
     if status in ("paused", "ended"):
         queued, why_not = await _tell_team(
             sf, ctx, settings, kind="alert", text=f"{protocol} {status}: {reason}",
+            topic="attention",
         )
         result += " " + told(queued, why_not)
     return result
@@ -534,8 +675,26 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
             "the business's notices here. They are not someone followed — do not "
             "enrol them or ask them a step's questions."
         )
+    speaker = await ctx.speaker(sf)
+    if speaker is not None:
+        lines.append(followup_store.writer_line(speaker) + ".")
+        links = await followup_store.contacts(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, person_user_id=speaker.person_user_id,
+        )
+        names = await followup_store.display_names(sf, [c.contact_user_id for c in links])
+        lines.append(
+            "Linked contacts (each receives every step; any answer counts for "
+            "all): " + ("; ".join(
+                f"{names.get(c.contact_user_id) or '?'} ({c.relation or 'contact'})" for c in links
+            ) or "none") + "."
+        )
+    team = _team_lines(settings, await followup_store.display_names(
+        sf, [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])],
+    ))
+    if team:
+        lines.append("Team (for escalate.to, by what they handle): " + "; ".join(team) + ".")
     rows = await followup_store.enrollments(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=await ctx.person_user_id(sf),
     )
     if not rows:
         lines.append("This person is not enrolled in any protocol.")
@@ -558,11 +717,36 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
             detail.append(f"phase {row.phase}")
         if row.status_reason:
             detail.append(f"reason: {row.status_reason}")
+        if row.timezone:
+            detail.append(f"timezone {row.timezone}")
+        if row.preferred_channel:
+            detail.append(f"prefers {row.preferred_channel}")
         lines.append(
             ", ".join(detail) + ". "
             + _next_contact_text(row, configs, last)
         )
     return "\n".join(lines)
+
+
+def _team_lines(settings: Any, names: dict) -> list[str]:
+    """Each team member who receives alerts, with what they handle."""
+    out = []
+    for member in (settings.alert_recipient_user_ids if settings else []):
+        perms = followup_store.member_permissions(settings, member)
+        if not perms["receives"] & {"urgent", "attention"}:
+            continue
+        name = names.get(uuid.UUID(str(member))) or "?"
+        out.append(name + (f" — handles: {perms['handles']}" if perms["handles"] else ""))
+    return out
+
+
+def _chosen(settings: Any, names: dict, wanted: Any) -> list[uuid.UUID]:
+    """The team members the agent named in ``escalate.to``."""
+    needles = [fold_label(str(w)) for w in (wanted or []) if str(w).strip()]
+    return [
+        uid for uid, name in names.items()
+        if any(n and (n in fold_label(name) or n == str(uid)) for n in needles)
+    ]
 
 
 async def _inbox(
@@ -681,10 +865,13 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
         reason=reason, payload={**payload, "escalation": escalation},
     )
+    team = [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])]
+    to = _chosen(settings, await followup_store.display_names(sf, team), arguments.get("to"))
     queued, why_not = await _tell_team(
         sf, ctx, settings, kind="alert",
         text=f"🔴 {reason}" if severity == "red" else reason, reason=reason,
         severity=severity, dedupe_prefix=escalation,
+        topic="urgent" if severity == "red" else "attention", to=to or None,
     )
 
     if invitation is not None:
@@ -708,15 +895,15 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
                 row.reason = note
             await db.commit()
 
-    if ctx.user_id is not None:
-        await followup_store.record_escalation(
-            sf, escalation_id=escalation_id, org_id=ctx.org_id, agent_id=ctx.agent_id,
-            user_id=ctx.user_id, kind="alert", reason=reason, severity=severity,
-            state="raised" if inboxed or queued else "failed", platform=ctx.channel or None,
-            session_id=ctx.session_id,
-            invitation_id=invitation.id if invitation is not None else None,
-            program_id=invitation.program_id if invitation is not None else None,
-        )
+    # Recorded even with no known person: the team's queue must show it.
+    await followup_store.record_escalation(
+        sf, escalation_id=escalation_id, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        user_id=await ctx.person_user_id(sf), kind="alert", reason=reason, severity=severity,
+        state="raised" if inboxed or queued else "failed", platform=ctx.channel or None,
+        session_id=ctx.session_id,
+        invitation_id=invitation.id if invitation is not None else None,
+        program_id=invitation.program_id if invitation is not None else None,
+    )
 
     if not inboxed and not queued:
         return (
@@ -763,6 +950,9 @@ def register(registry: Any) -> None:
         ("followup_update", FOLLOWUP_UPDATE_SCHEMA, handle_followup_update),
         ("followup_status", FOLLOWUP_STATUS_SCHEMA, handle_followup_status),
         ("escalate", ESCALATE_SCHEMA, handle_escalate),
+        ("followup_contacts", FOLLOWUP_CONTACTS_SCHEMA, handle_followup_contacts),
+        ("followup_withdraw_consent", FOLLOWUP_WITHDRAW_CONSENT_SCHEMA,
+         handle_followup_withdraw_consent),
     ):
         registry.register(
             name=name, schema=schema, handler=_retryable(name, handler), toolset="followup",

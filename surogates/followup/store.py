@@ -78,7 +78,7 @@ SETTINGS_FIELDS = frozenset({
     "alert_template_language", "message_template_name",
     "message_template_language", "welcome_template_name",
     "welcome_template_language", "offer_protocols", "texts",
-    "operator_unanswered_hours", "red_alert_reminder_minutes",
+    "operator_unanswered_hours", "red_alert_reminder_minutes", "web_push",
 })
 ALERT_SEVERITIES = ("red", "yellow")
 #: Allowed ranges, inclusive, for the settings that time outreach.  The

@@ -15,7 +15,12 @@ import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.identity import readable_phone
-from surogates.db.models import ChannelIdentity, Session as SessionRow, User
+from surogates.db.models import (
+    ChannelIdentity,
+    ProgramInvitationRow,
+    Session as SessionRow,
+    User,
+)
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import start_date_problem
 
@@ -60,6 +65,8 @@ class Context:
         #: most calls never name anyone.
         self.enrollment: Any = None
         self._named = False
+        self._speaker: Any = None
+        self._spoken = False
 
     @property
     def can_write_first(self) -> bool:
@@ -92,17 +99,63 @@ class Context:
     def named_by(self, enrollment: Any) -> None:
         self.enrollment, self._named = enrollment, True
 
-    async def person_label(self, session_factory: Any) -> str:
-        """How the team recognises who an alert is about."""
-        if not self._named and self.user_id is not None:
-            self.named_by(followup_store.labelling_enrollment(
-                await followup_store.enrollments(
+    async def speaker(self, session_factory: Any) -> Any:
+        """Who is writing, for which followed person
+        (:class:`followup_store.Speaker`), or ``None`` for anyone else.  A
+        contact of several people speaks for the one whose step is open
+        here, else their most recent link."""
+        if not self._spoken:
+            self._spoken = True
+            open_for = None
+            if self.user_id is not None:
+                async with session_factory() as db:
+                    open_for = (
+                        await db.execute(
+                            sa.select(ProgramInvitationRow.person_user_id)
+                            .where(ProgramInvitationRow.session_id == self.session_id)
+                            .where(ProgramInvitationRow.person_user_id.isnot(None))
+                            .order_by(ProgramInvitationRow.created_at.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+            self._speaker = await followup_store.speaker_for(
+                session_factory, org_id=self.org_id, agent_id=self.agent_id,
+                user_id=self.user_id, person_user_id=open_for,
+            ) if open_for else None
+            if self._speaker is None:
+                self._speaker = await followup_store.speaker_for(
                     session_factory, org_id=self.org_id, agent_id=self.agent_id,
                     user_id=self.user_id,
                 )
+        return self._speaker
+
+    async def person_user_id(self, session_factory: Any) -> uuid.UUID | None:
+        """The followed person this conversation acts for: the writer, or
+        the person they are a contact of."""
+        speaker = await self.speaker(session_factory)
+        return speaker.person_user_id if speaker is not None else self.user_id
+
+    async def person_label(self, session_factory: Any) -> str:
+        """How the team recognises who an alert is about, and who reported it."""
+        speaker = await self.speaker(session_factory)
+        person = speaker.person_user_id if speaker is not None else self.user_id
+        if not self._named and person is not None:
+            self.named_by(followup_store.labelling_enrollment(
+                await followup_store.enrollments(
+                    session_factory, org_id=self.org_id, agent_id=self.agent_id,
+                    user_id=person,
+                )
             ))
-        name = followup_store.person_label(self.display_name, self.enrollment)
+        own = speaker is None or speaker.role == "person"
+        name = followup_store.person_label(
+            self.display_name if own else speaker.person_name, self.enrollment,
+        )
         parts = [name] if name else []
+        if not own:
+            parts.append(
+                f"reported by {speaker.name or 'a contact'}"
+                + (f" ({speaker.relation})" if speaker.relation else "")
+            )
         if self.channel == "whatsapp" and self.platform_user_id:
             parts.append(readable_phone(self.platform_user_id))
         return " · ".join(parts) or f"user {self.user_id}"

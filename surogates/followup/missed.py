@@ -105,7 +105,7 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     # complete a streak; the older ones were judged when they were newest.
     newest: dict[tuple, Any] = {}
     for inv in candidates:
-        newest[(inv.program_id, inv.user_id)] = inv
+        newest[(inv.program_id, _person(inv))] = inv
     # A streak is judged once.  The lookback keeps an opener a candidate for
     # hours, and without this every pass (each minute) would re-run the
     # streak query for every one of them.  Kept per process and pruned with
@@ -135,31 +135,58 @@ async def alert_missed_checkins(session_factory: Any, *, now: datetime) -> int:
     return queued
 
 
+def _person(inv: Any) -> Any:
+    """The followed person an invitation is about: its recipient, or the
+    person whose contact the recipient is."""
+    return inv.person_user_id or inv.user_id
+
+
+def _about(person_id: Any):
+    """Rows about *person_id*: theirs, or a contact's copy of their step."""
+    return sa.or_(
+        ProgramInvitationRow.person_user_id == person_id,
+        sa.and_(
+            ProgramInvitationRow.person_user_id.is_(None),
+            ProgramInvitationRow.user_id == person_id,
+        ),
+    )
+
+
 async def _alert_if_streak(
     session_factory: Any, inv: Any, config: dict, threshold: int, settings_cache: dict,
 ) -> int:
+    person_id = _person(inv)
     async with session_factory() as db:
-        recent = (
+        rows = (
             await db.execute(
                 sa.select(
+                    ProgramInvitationRow.occurrence_id,
                     ProgramInvitationRow.response_state,
                     ProgramInvitationRow.escalation_state,
                 )
                 .where(ProgramInvitationRow.program_id == inv.program_id)
-                .where(ProgramInvitationRow.user_id == inv.user_id)
+                .where(_about(person_id))
                 .where(ProgramInvitationRow.created_at <= inv.created_at)
                 # Skips are not silence: the person was never asked.
                 .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled")))
                 .order_by(ProgramInvitationRow.created_at.desc())
-                .limit(threshold)
+                .limit(threshold * 8)
             )
         ).all()
-        if len(recent) < threshold or any(r != "no_reply_by_deadline" for r, _ in recent):
-            return 0
-        # A streak already reported does not count again: the next alert needs
-        # another full run of unanswered openers, not one more on top of it.
-        if any(e != "none" for _, e in recent[1:]):
-            return 0
+    # One step per occurrence, whoever of the person and their contacts it
+    # reached: unanswered only when none of them answered.
+    steps: dict[Any, list] = {}
+    for occurrence_id, response, escalation in rows:
+        steps.setdefault(occurrence_id, []).append((response, escalation))
+    recent = list(steps.values())[:threshold]
+    if len(recent) < threshold or any(
+        r != "no_reply_by_deadline" for step in recent for r, _ in step
+    ):
+        return 0
+    # A streak already reported does not count again: the next alert needs
+    # another full run of unanswered openers, not one more on top of it.
+    if any(e != "none" for step in recent[1:] for _, e in step):
+        return 0
 
     key = (inv.org_id, inv.agent_id)
     if key not in settings_cache:
@@ -167,12 +194,13 @@ async def _alert_if_streak(
             session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
         )
     [person] = (await describe_people(
-        session_factory, org_id=inv.org_id, agent_id=inv.agent_id, user_ids=[inv.user_id],
+        session_factory, org_id=inv.org_id, agent_id=inv.agent_id, user_ids=[person_id],
     )).values()
-    # A Slack member id or a Telegram chat id is no phone: then the
-    # person's WhatsApp number, if they have one.
+    # A Slack member id or a Telegram chat id is no phone, nor is a
+    # contact's number the person's: then the person's WhatsApp number.
     phone = (
-        inv.platform_user_id if capabilities_for(inv.platform).identity == "phone"
+        inv.platform_user_id
+        if capabilities_for(inv.platform).identity == "phone" and person_id == inv.user_id
         else person.wa_id
     )
     text = render_missed_text(
@@ -185,8 +213,8 @@ async def _alert_if_streak(
     queued, _why_not = await followup_store.notify_team(
         session_factory, settings_cache[key], org_id=inv.org_id,
         agent_id=inv.agent_id, kind="alert", text=text,
-        created_by="missed-checkins", subject_user_id=inv.user_id,
-        dedupe_prefix=f"missed:{inv.id}",
+        created_by="missed-checkins", subject_user_id=person_id,
+        dedupe_prefix=f"missed:{inv.id}", topic="missed_replies",
         # The Program's own sender, on its own channel: a Slack Program's
         # team id is no WhatsApp sender.
         fallback_senders={
@@ -198,23 +226,28 @@ async def _alert_if_streak(
     # one record instead of queuing the team a second item.
     await followup_store.record_escalation(
         session_factory, escalation_id=inv.id, org_id=inv.org_id,
-        agent_id=inv.agent_id, user_id=inv.user_id, kind="missed_replies",
+        agent_id=inv.agent_id, user_id=person_id, kind="missed_replies",
         reason=text, state="raised" if queued else "failed", platform=inv.platform,
         invitation_id=inv.id, program_id=inv.program_id, session_id=inv.session_id,
     )
+    # Visible, never silent: when nobody could be told, the history says so
+    # and the pass moves on.  Every copy of the step is marked, so a
+    # contact's copy is not judged again as a streak of its own.
     async with session_factory() as db:
-        row = await db.get(ProgramInvitationRow, inv.id)
-        if queued:
-            row.escalation_state = "raised"
-            row.reason = f"No answer to {threshold} openers in a row; team alerted"
-        else:
-            # Visible, never silent: the streak happened and nobody could
-            # be told.  Marked so the history says so and the pass moves on.
-            row.escalation_state = "failed"
-            row.reason = (
-                f"No answer to {threshold} openers in a row; nobody on the "
-                "team could be told"
+        await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.occurrence_id == inv.occurrence_id)
+            .where(_about(person_id))
+            .where(ProgramInvitationRow.escalation_state == "none")
+            .values(
+                escalation_state="raised" if queued else "failed",
+                reason=(
+                    f"No answer to {threshold} openers in a row; team alerted" if queued
+                    else f"No answer to {threshold} openers in a row; nobody on the "
+                    "team could be told"
+                ),
             )
+        )
         await db.commit()
     return queued
 

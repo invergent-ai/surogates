@@ -48,6 +48,8 @@ from surogates.db.models import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import as_utc
+from surogates.channels.identity import get_or_create_channel_session
+from surogates.channels.source import SessionSource, build_session_key
 from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
 from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
 
@@ -702,7 +704,7 @@ async def _remind(
     minutes = red_alert_reminder_minutes(settings)
     queued, why_not = await followup_store.notify_team(
         session_factory, settings, org_id=row.org_id, agent_id=row.agent_id,
-        kind="alert", severity="red", created_by="reminder",
+        kind="alert", severity="red", created_by="reminder", topic="urgent",
         text=_wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
         dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
@@ -860,7 +862,7 @@ async def _surface_person_failures(session_factory: Any, *, now: datetime) -> in
                         settings, "person_failure_notice",
                         name=name, why=plain_reason(failure["first"][1], settings.texts), phone=phone,
                     ),
-                    dedupe_prefix=key,
+                    dedupe_prefix=key, topic="delivery_failures",
                 )
                 surfaced += queued
             for model in (ProgramInvitationRow, OutreachMessageRow):
@@ -958,6 +960,11 @@ async def _send_one(
     slack_client_factory: Any = None,
 ) -> int:
     queued = row.state == "queued"
+    if getattr(row, "destination", None):
+        return await _send_to_destination(
+            session_factory, row, session_store=session_store, redis=redis, now=now,
+            storage=storage, settings=settings,
+        )
     identity = await identity_lookup(row.org_id, row.platform, row.user_id)
     refusal = (
         f"No {row.platform} identity for the recipient" if identity is None
@@ -1010,6 +1017,36 @@ async def _send_one(
         # A held text arriving because they answered is delivered; a queued
         # one written straight into an open window has only been sent.
         final_state="sent" if queued else "delivered",
+    ))
+
+
+async def _send_to_destination(
+    session_factory: Any, row: Any, *, session_store: Any, redis: Any, now: datetime,
+    storage: Any, settings: Any,
+) -> int:
+    """Post into the team's shared place (a Slack channel, a Telegram group):
+    the team configured it, so no person's permission or window applies."""
+    channel = row.destination
+    if row.platform not in ("slack", "telegram"):
+        return await _fail(session_factory, row.id, f"No shared destination on {row.platform}")
+    key = build_session_key(SessionSource(
+        platform=row.platform, chat_id=channel, chat_type="channel", user_id=channel,
+        user_name="", thread_id=None, chat_name=channel,
+    ))
+    session_id = await get_or_create_channel_session(
+        session_store, redis, session_key=key, user_id=None, org_id=row.org_id,
+        agent_id=row.agent_id, channel=row.platform,
+        config={
+            f"{row.platform}_channel_id": channel, f"{row.platform}_thread_key": None,
+            "channel_identifier": row.channel_identifier, "multi_party": True,
+            "memory_boundary": f"{row.platform}:team:{channel}",
+        },
+        session_factory=session_factory, storage=storage, settings=settings, resume=False,
+    )
+    if await _busy(session_factory, session_id, now):
+        return 0
+    return int(await _deliver_now(
+        session_factory, session_store, row, session_id=session_id, now=now, final_state="sent",
     ))
 
 

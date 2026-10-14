@@ -1246,6 +1246,11 @@ class FollowupSettingsRow(Base):
         JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
         server_default=text("'{}'"),
     )
+    #: Whether people reached on web get a browser push when a message waits
+    #: for them in their chat (they must also have allowed it in a browser).
+    web_push: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
     #: The approved template that reopens a recipient's conversation when the
     #: provider's customer-service window has closed.  One for alerts to the
     #: team, one for messages an operator sends a person.
@@ -2650,3 +2655,25 @@ class WorkstreamHistory(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class WebPushSubscription(Base):
+    """A browser that allowed push notifications from one agent.
+
+    Written when the person allows them (``POST /v1/push/subscriptions``),
+    forgotten when they disallow or the push service reports the browser gone.
+    One row per browser: the endpoint is the browser's own address.
+    """
+
+    __tablename__ = "web_push_subscriptions"
+    __table_args__ = (Index("idx_web_push_subscriptions_user", "user_id", "agent_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    #: The browser's keys (base64url): what the payload is encrypted for.
+    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
+    auth: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, server_default=func.now())

@@ -132,3 +132,21 @@ async def consume(
         except Exception:  # noqa: BLE001 — the cache entry ages out on its own
             logger.warning("channel_identity_changed publish failed", exc_info=True)
     return bound
+
+
+#: How long a start link stays usable; ops mints its own with the same life.
+LINK_TTL_SECONDS = 7 * 24 * 3600
+
+
+async def mint(redis: Any, *, org_id: Any, user_id: Any, platform: str = "telegram") -> str:
+    """A one-use code that binds whoever opens the start link to *user_id*,
+    stored the way ops stores the ones it mints."""
+    import secrets
+
+    code = secrets.token_urlsafe(16)
+    await redis.set(
+        f"{PREFIX}{code}",
+        json.dumps({"org_id": str(org_id), "user_id": str(user_id), "platform": platform}),
+        ex=LINK_TTL_SECONDS,
+    )
+    return code
