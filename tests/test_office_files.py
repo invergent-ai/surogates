@@ -29,6 +29,12 @@ def test_a_document_on_a_computer_is_named_by_its_path_there():
     assert location_of(on_computer(), "docs/a.docx") == f"device:{DEVICE}:{FOLDER}/docs/a.docx"
 
 
+def test_a_pane_path_spelled_otherwise_names_the_same_document_on_a_computer():
+    assert location_of(on_computer(), "docs/./a.docx") == location_of(on_computer(), "docs//a.docx") == (
+        f"device:{DEVICE}:{FOLDER}/docs/a.docx"
+    )
+
+
 def test_a_thread_and_its_master_name_a_document_alike():
     master = on_computer(workspace_boundary="workstream:p1")
     thread = on_computer(workspace_boundary="workstream:p1", execution={

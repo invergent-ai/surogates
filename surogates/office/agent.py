@@ -6,16 +6,18 @@ import posixpath
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from surogates.config import OfficeSettings
 from surogates.devices.binding import device_of
+from surogates.devices.workspace import DeviceOperationError, said
 from surogates.office import sessions as office_sessions
 from surogates.office.editor_config import build_editor_config
+from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, editor_files
 from surogates.office.kinds import office_kind
 from surogates.office.runtime_office import RuntimeOffice
 from surogates.session.attachment_ingest import workspace_root_id
-from surogates.session.files import session_files
+from surogates.session.files import ComputerAway, session_files
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
@@ -57,13 +59,14 @@ def relative_path(path: str, session: Any) -> str:
 def location_of(session: Any, path: str) -> str:
     """Where *path*, relative to the workspace, is: one name however the file is reached.
 
-    A cloud session names it as the workspace layer does (``StorageWorkspaceIO.location``); a session on a computer
-    by its path there.  A project thread's copy sits at the folder's own path, so it names the real file, as its
-    master does: the editor only ever opens that one.
+    A cloud session names it as the workspace layer does (``StorageWorkspaceIO.location``), literally; a session on
+    a computer by its normalised path there, as the computer resolves it.  A project thread's copy sits at the
+    folder's own path, so it names the real file, as its master does: the editor only ever opens that one.
     """
     device_id = device_of(session.config)
     if device_id is not None:
-        return f"device:{device_id}:{posixpath.join(str(session.config['workspace_path']).rstrip('/'), path)}"
+        folder = str(session.config["workspace_path"]).rstrip("/")
+        return f"device:{device_id}:{posixpath.join(folder, posixpath.normpath(path))}"
     prefix = boundary_workspace_prefix(session.config, session, workspace_root_id(session))
     return StorageWorkspaceIO(None, bucket=session.config["storage_bucket"], prefix=prefix).location(path)
 
@@ -72,32 +75,40 @@ async def open_for_agent(
     *, session: Any, agent_id: str, agent_name: str, path: str, create: bool, office: OfficeSettings,
     runtime: RuntimeOffice, storage: Any, session_factory: Any, redis: Any,
 ) -> AgentDocument:
-    """The agent's editor page on the document at *path*, made blank first when *create* and it does not exist."""
+    """The agent's editor page on the document at *path*, made blank first when *create* and it does not exist.
+
+    A project thread on a computer opens the real file, through its project's master: its own copy is not the
+    document."""
     kind = office_kind(path)
     if kind is None or kind.file_type != "docx":
         raise AgentDocumentError("office_read and office_edit work on Word documents (.docx) for now.")
-    if device_of(session.config) is not None:
-        raise AgentDocumentError("Documents in a folder on a computer cannot be edited live yet.")
     created = False
-    async with session_files(session, storage=storage, session_factory=session_factory, redis=redis) as files:
-        if not isinstance(files, StorageWorkspaceIO):
-            raise AgentDocumentError("This workspace cannot be edited live yet.")
-        try:
-            key = await files.resolve(path)
-        except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
-            raise AgentDocumentError(str(exc)) from None
-        if await files.etag(key) is None:
+    try:
+        target = await document_session(session, session_factory=session_factory)
+        async with session_files(target, storage=storage, session_factory=session_factory, redis=redis) as files:
+            if not isinstance(files, DOCUMENT_FILES):
+                raise AgentDocumentError("This workspace cannot be edited live yet.")
+            try:
+                key = await files.resolve(path)
+            except (WorkspaceSandboxError, ValueError) as exc:  # a traversal, or a NUL in the path
+                raise AgentDocumentError(str(exc)) from None
+            missing = await files.etag(key) is None
+        if missing:
             if not create:
                 raise AgentDocumentError(
                     f"No document at {path} in the project's files: one this thread made this turn reaches them when the turn ends."
                     if is_project_thread(session.config) else f"No document at {path}."
                 )
-            try:
-                await files.write_if(key, BLANK_DOCX.read_bytes(), expected=None)
-                created = True
-            except RevisionConflict:
-                pass  # someone made it meanwhile: open theirs
-        location = files.location(key)
+            created = await _make_blank(target, path, storage=storage, session_factory=session_factory, redis=redis)
+    except FolderNotReady as exc:
+        raise AgentDocumentError(str(exc)) from None
+    except ComputerAway as exc:
+        raise AgentDocumentError(f"{exc}: the document opens once it is back.") from None
+    except PermissionError:
+        raise AgentDocumentError(f"{path} was not made: the computer's user declined it.") from None
+    except (DeviceOperationError, OSError) as exc:
+        raise AgentDocumentError(said(exc)) from None
+    location = location_of(target, path)
     user_id = agent_user_id(agent_id, session.id)
     try:
         document = await office_sessions.open_waiting(
@@ -113,3 +124,15 @@ async def open_for_agent(
                               document_server_url=office.internal_url)
     return AgentDocument(page_id=page, document=document, path=path, user_id=user_id, created=created)
 
+
+async def _make_blank(target: Any, path: str, *, storage: Any, session_factory: Any, redis: Any) -> bool:
+    """Make *path* a blank document; whether this call made it. On a computer, through the editor's own request,
+    which its app asks about once in a folder that asks every time."""
+    blank = BLANK_DOCX.read_bytes()
+    async with editor_files(target, storage=storage, session_factory=session_factory, redis=redis,
+                            request_id=f"new.{uuid4().hex}", data=blank) as files:
+        try:
+            await files.write_if(await files.resolve(path), blank, expected=None)
+        except RevisionConflict:
+            return False  # someone made it meanwhile: open theirs
+    return True

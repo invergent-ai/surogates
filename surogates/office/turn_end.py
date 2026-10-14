@@ -11,14 +11,11 @@ from uuid import uuid4
 
 from surogates.config import OfficeSettings
 from surogates.office import sessions as office_sessions
-from surogates.office.agent import relative_path
+from surogates.office.agent import location_of, relative_path
 from surogates.office.commands import force_save
 from surogates.office.runtime_office import PageGone, RuntimeOffice, RuntimeOfficeError, page_id
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
-from surogates.session.files import session_files
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import StorageWorkspaceIO
 
 logger = logging.getLogger(__name__)
 
@@ -41,27 +38,15 @@ async def edited_paths(store: Any, session_id: Any, after: int) -> list[str]:
     return paths
 
 
-async def save_turn(
-    *, store: Any, session: Any, after: int, office: OfficeSettings, storage: Any, session_factory: Any, redis: Any,
-) -> None:
+async def save_turn(*, store: Any, session: Any, after: int, office: OfficeSettings, session_factory: Any) -> None:
     """Save every document this turn edited: flush the agent's editor, force a save, wait for it to come."""
     paths = await edited_paths(store, session.id, after)
     if not paths:
         return
     # Waiting on the document server holds none of the worker's turn slots; a turn that edited nothing gives none back.
     async with turn_waiting():
-        locations: list[str] = []
-        async with session_files(session, storage=storage, session_factory=session_factory, redis=redis) as files:
-            if not isinstance(files, StorageWorkspaceIO):
-                return
-            for path in paths:
-                try:
-                    # As office_edit read it: stripped, then relative to the workspace.
-                    location = files.location(await files.resolve(relative_path(path.strip(), session)))
-                except (WorkspaceSandboxError, ValueError):  # a traversal, or a NUL: the call itself was refused
-                    continue
-                if location not in locations:
-                    locations.append(location)
+        # As office_edit named them: stripped, relative to the workspace, one name however the file is reached.
+        locations = list(dict.fromkeys(location_of(session, relative_path(path.strip(), session)) for path in paths))
         runtime = RuntimeOffice(office)
         for location in locations:
             document = await office_sessions.open_at(session_factory, location)

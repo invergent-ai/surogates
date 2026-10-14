@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from surogates.config import load_settings
-from surogates.devices.binding import device_of
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of, relative_path
 from surogates.office.kinds import office_kind
@@ -17,7 +16,7 @@ WRITING_TOOLS = frozenset({"write_file", "patch"})
 
 def _applies(session: Any, session_factory: Any) -> bool:
     # Only where office_read and office_edit are offered: every word here sends the model to them.
-    return session_factory is not None and device_of(session.config) is None and load_settings().office.agent_editing
+    return session_factory is not None and load_settings().office.agent_editing
 
 
 async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
