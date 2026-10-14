@@ -1,4 +1,7 @@
-"""The editor is the only writer of a document open in it: other writes are refused, reads are told."""
+"""The editor is the only writer of a document open in it: other writes are refused, reads are told.
+
+A Word document is office_edit's to change whether or not it is open: text writes to one are refused, and reads of one
+are told where to change it."""
 
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ async def _open_locations(session_factory: Any, session: Any, locations: list[st
 
 
 async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
-    """Why a write_file or patch to a document open in the editor is refused, or None."""
+    """Why a write_file or patch to a document open in the editor, or to a Word document, is refused, or None."""
     if tool_name not in WRITING_TOOLS or not isinstance(tool_args, dict) or not _applies(session, session_factory):
         return None
     targets = [str(tool_args.get("path") or "")] if tool_name == "write_file" else patch_targets(tool_args)
@@ -52,11 +55,15 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
             f"{paths[location]} is open in the document editor, where people may be editing it: change it with "
             f"office_edit (read it with office_read), not with {tool_name}."
         )
+    # Closed, a Word document is office_edit's too: a text write breaks it.
+    for path in sorted(paths.values()):
+        if office_kind(path).file_type == "docx":
+            return f"{path} is a Word document: change it with office_edit (read it with office_read), not with {tool_name}."
     return None
 
 
 async def open_document_note(tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
-    """The note read_file adds when the document it read is open in the editor, or None."""
+    """The note read_file adds when the document it read is open in the editor or is a Word document, or None."""
     raw = str(tool_args.get("path") or "") if isinstance(tool_args, dict) else ""
     if not raw or not office_kind(raw) or "\0" in raw or not _applies(session, session_factory):
         return None
@@ -64,10 +71,13 @@ async def open_document_note(tool_args: Any, session: Any, *, session_factory: A
     if device_of(session.config) is not None and not within_folder(path):
         return None  # it cannot be matched to an open document
     if not await _open_locations(session_factory, session, [location_of(session, path)]):
-        return None
+        if office_kind(path).file_type != "docx":
+            return None
+        return f"{path} is a Word document: to change it, read it with office_read and edit it with office_edit."
     return (
-        f"{path} is open in the document editor: this read can lag what people are writing there. Use office_read "
-        "for what is in it now, and office_edit to change it."
+        f"{path} is open in the document editor, which holds it now: read it with office_read and change it with "
+        "office_edit. Your own files can lag the editor or not have the document yet (a project thread's copy gets it "
+        "at its next turn): do not look for it there."
     )
 
 

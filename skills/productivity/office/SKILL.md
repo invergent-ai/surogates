@@ -18,6 +18,9 @@ file.
   `$HOME` or an absolute path outside that folder.
 - Nothing to look up first: `office_edit` makes a missing document, and `office_read` says when there is none. No
   `list_files`, terminal or other tool to find or check the place.
+- `office_read` is how you check what you wrote: once it shows your text, the document is written. Your own files can
+  lag the editor or not have the document at all (a project thread's copy of the folder gets it at its next turn):
+  never look for it with `read_file`, `list_files` or the terminal.
 - You cannot see pages. For a length the user asks for, count words: about 450 words of body text fill a page. Never
   render or convert the document to check it: the user is reading it live.
 
