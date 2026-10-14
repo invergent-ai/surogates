@@ -73,7 +73,8 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
 
 
 async def _has_open_invitation(db, schedule, user_id, configs: dict) -> bool:
-    """Is this user already in the middle of a step of this journey, on any channel?
+    """Is this person already in the middle of a step of this journey, on any
+    channel, through any of the copies their contacts got?
 
     One open question per journey, not per agent: a person following two
     journeys may have a step of each open at once, and a reply goes to the
@@ -96,7 +97,15 @@ async def _has_open_invitation(db, schedule, user_id, configs: dict) -> bool:
                 # idx_program_invitations_person_open.
                 .where(ProgramInvitationRow.org_id == schedule.org_id)
                 .where(ProgramInvitationRow.agent_id == schedule.agent_id)
-                .where(ProgramInvitationRow.user_id == user_id)
+                # The followed person's own copies and their contacts';
+                # one answer closes them all (programs.inbound.attach_reply).
+                .where(sa.or_(
+                    ProgramInvitationRow.person_user_id == user_id,
+                    sa.and_(
+                        ProgramInvitationRow.person_user_id.is_(None),
+                        ProgramInvitationRow.user_id == user_id,
+                    ),
+                ))
                 # A queued opener not yet sent (held through quiet hours, or
                 # from a step that fired in the same tick) is a question too.
                 .where(sa.or_(
@@ -119,6 +128,15 @@ async def _has_open_invitation(db, schedule, user_id, configs: dict) -> bool:
     return any(
         configs[pid] is None or protocol_of(configs[pid]) == mine for pid in open_programs
     )
+
+
+async def _is_open(db, schedule, person, configs: dict, seen: dict) -> bool:
+    """:func:`_has_open_invitation` for *person*, judged once per occurrence:
+    rows this occurrence adds for them must not make their contacts' copies
+    look like a second question."""
+    if person not in seen:
+        seen[person] = await _has_open_invitation(db, schedule, person, configs)
+    return seen[person]
 
 
 async def materialize_occurrence(
@@ -149,17 +167,34 @@ async def materialize_occurrence(
         session_factory=session_factory, identity_lookup=identity_lookup,
         with_last_inbound=pause is not None,
     )
+    # Each followed person's step also goes to every confirmed contact: one
+    # row per recipient, all carrying the person.  The person's own rows come
+    # first, so a recipient who is also someone else's contact keeps their own.
+    copies: list[tuple[uuid.UUID, Any, Any, uuid.UUID | None]] = [
+        (user_id, identity, enrollment, user_id if enrollment is not None else None)
+        for user_id, identity, enrollment in roster
+    ]
+    for _person, _identity, enrollment in roster:
+        if enrollment is None:
+            continue
+        for recipient in (await followup_store.recipients_for(session_factory, enrollment))[1:]:
+            copies.append((
+                recipient.user_id,
+                await identity_lookup(schedule.org_id, platform, recipient.user_id),
+                None, enrollment.user_id,
+            ))
     chosen: dict[uuid.UUID, Any] = {}
     if per_person:
-        for user_id, _identity, enrollment in roster:
-            chosen[user_id] = await choose_channel(
-                config, org_id=schedule.org_id, user_id=user_id,
-                enrollment=enrollment, identity_lookup=identity_lookup,
-                session_factory=session_factory,
-            )
+        for user_id, _identity, enrollment, _person in copies:
+            if user_id not in chosen:
+                chosen[user_id] = await choose_channel(
+                    config, org_id=schedule.org_id, user_id=user_id,
+                    enrollment=enrollment, identity_lookup=identity_lookup,
+                    session_factory=session_factory,
+                )
     paused: set[uuid.UUID] = set()
     if pause:
-        for user_id, identity, _enrollment in roster:
+        for user_id, identity, _enrollment, _person in copies:
             if per_person and chosen[user_id] is not None:
                 identity = chosen[user_id][1]
             if (
@@ -191,7 +226,12 @@ async def materialize_occurrence(
             return await _existing_occurrence(db, schedule.program_id, now)
 
         open_configs: dict = {}
-        for user_id, identity, _enrollment in roster:
+        open_people: dict[uuid.UUID, bool] = {}
+        written: set[uuid.UUID] = set()
+        for user_id, identity, _enrollment, person in copies:
+            if user_id in written:
+                continue  # one row per recipient per occurrence
+            written.add(user_id)
             reason: str | None = None
             state = "queued"
             row_platform, sender, fallbacks = platform, config.get("channel_identifier"), []
@@ -205,7 +245,7 @@ async def materialize_occurrence(
                 reason = "No reachable channel"  # reachable, but no sender for it
             if reason is not None:
                 pass
-            elif await _has_open_invitation(db, schedule, user_id, open_configs):
+            elif await _is_open(db, schedule, person or user_id, open_configs, open_people):
                 reason = "An earlier step is still waiting for an answer"
             elif user_id in paused:
                 reason = (
@@ -222,6 +262,7 @@ async def materialize_occurrence(
                     org_id=schedule.org_id,
                     agent_id=schedule.agent_id,
                     user_id=user_id,
+                    person_user_id=person,
                     platform=row_platform,
                     platform_user_id=(
                         identity.platform_user_id if identity else ""
