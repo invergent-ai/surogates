@@ -224,8 +224,8 @@ async def test_whatsapp_inside_its_window_lets_the_agent_write(sf, monkeypatch):
     assert w.delivery.calls == []
 
 
-@pytest.mark.asyncio
-async def test_the_agents_message_is_matched_back_to_its_step(sf, monkeypatch):
+async def _woken_step(sf, monkeypatch):
+    """A step the agent was woken to write, and its conversation's events so far."""
     w = _wiring(sf, monkeypatch)
     program = await _program(sf)
     user = await _person(sf)
@@ -234,17 +234,62 @@ async def test_the_agents_message_is_matched_back_to_its_step(sf, monkeypatch):
     await send_queued_openers(sf, identity_lookup=_lookup, now=NOW, enqueue=w.enqueue)
     async with sf() as db:
         db.add(SessionRow(id=SESSION, org_id=ORG, agent_id=AGENT, channel="telegram", config={}))
-        db.add(Event(id=1, session_id=SESSION, type="llm.response", data={}))
+        db.add(Event(id=1, session_id=SESSION, type="user.message", data={
+            "content": "ctx", "synthetic": "checkin", "invitation_id": str(inv.id),
+            "step_event": "due",
+        }))
+        await db.commit()
+    return inv
+
+
+async def _then(sf, *events):
+    """Append *events* (``(id, type, data)``); the last is the agent's
+    message, which goes to the outbox."""
+    async with sf() as db:
+        for eid, kind, data in events:
+            db.add(Event(id=eid, session_id=SESSION, type=kind, data=data))
+        last = events[-1][0]
         db.add(DeliveryOutbox(
-            id=501, session_id=SESSION, event_id=1, channel="telegram",
-            destination={}, payload={"content": "Hi Ion, how did you sleep?"},
-            dedupe_key="telegram:1", status="pending",
+            id=500 + last, session_id=SESSION, event_id=last, channel="telegram",
+            destination={}, payload={"content": "Hi"}, dedupe_key=f"telegram:{last}",
+            status="pending",
         ))
         await db.commit()
+    return 500 + last
 
-    assert await record_outbox_result(sf, 501, provider_message_id="m1", error=None)
+
+@pytest.mark.asyncio
+async def test_the_agents_message_is_matched_back_to_its_step(sf, monkeypatch):
+    inv = await _woken_step(sf, monkeypatch)
+    outbox = await _then(sf, (2, "harness.wake", {}), (3, "llm.response", {}))
+
+    assert await record_outbox_result(sf, outbox, provider_message_id="m1", error=None)
     row = await _reload(sf, inv.id)
-    assert (row.outbox_id, row.delivery_state) == (501, "delivered")
+    assert (row.outbox_id, row.delivery_state) == (outbox, "delivered")
+
+
+@pytest.mark.asyncio
+async def test_a_wake_taken_with_the_persons_own_message_is_not_the_steps(sf, monkeypatch):
+    # The wake waited behind a question; the person's answer came first.
+    inv = await _woken_step(sf, monkeypatch)
+    outbox = await _then(
+        sf, (2, "user.message", {"content": "yes"}), (3, "harness.wake", {}),
+        (4, "llm.response", {}),
+    )
+    assert not await record_outbox_result(sf, outbox, provider_message_id="m1", error=None)
+    assert (await _reload(sf, inv.id)).outbox_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_later_turns_message_is_not_the_steps(sf, monkeypatch):
+    inv = await _woken_step(sf, monkeypatch)
+    outbox = await _then(
+        sf, (2, "harness.wake", {}), (3, "llm.response", {}),
+        (4, "user.message", {"content": "thanks"}), (5, "harness.wake", {}),
+        (6, "llm.response", {}),
+    )
+    assert not await record_outbox_result(sf, outbox, provider_message_id="m1", error=None)
+    assert (await _reload(sf, inv.id)).outbox_id is None
 
 
 @pytest.mark.asyncio
@@ -520,13 +565,15 @@ async def test_the_agent_may_skip_a_step_it_was_woken_to_write(sf):
     )
     assert "reason" in await handle_checkin_outcome({"outcome": "skipped"}, **_tool_kwargs(sf))
     await handle_checkin_outcome(
-        {"outcome": "skipped", "note": "They wrote an hour ago; nothing new to ask"},
+        {"outcome": "skipped", "label": "green",
+         "note": "They wrote an hour ago; nothing new to ask"},
         **_tool_kwargs(sf),
     )
     row = await _reload(sf, inv.id)
     assert (row.response_state, row.delivery_state, row.deadline_at) == (
         "skipped_by_agent", "skipped", None,
     )
+    assert row.outcome is None
     assert row.reason == "They wrote an hour ago; nothing new to ask"
 
 

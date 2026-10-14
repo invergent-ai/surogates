@@ -28,7 +28,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
-from surogates.db.models import DeliveryOutbox, ProgramInvitationRow
+from surogates.db.models import DeliveryOutbox, Event, ProgramInvitationRow
 from surogates.followup.outreach import apply_outreach_status
 from surogates.programs.journey import fall_back
 
@@ -124,17 +124,27 @@ async def record_outbox_result(
 
 
 async def _woken_step_of(db: Any, outbox_id: int) -> ProgramInvitationRow | None:
-    """The step the agent was woken to write in this outbox row's
-    conversation and has not written yet: this row is its message.
+    """The step the agent was woken to write, when this outbox row is the
+    message of the turn that answered that wake.
+
+    Only that turn's: the first wake of the conversation after the step
+    context, with no message of the person's between them, and the row's
+    event before any later wake.  A wake held back (a turn under way, a
+    question waiting) and then taken with the person's own message, or any
+    later turn, is not the step's message, however soon it comes.
 
     Keyed on the row from then on, so the provider's statuses reach the step
     as they do an opener's.  Served by idx_program_invitations_woken.
     """
-    session_id = (
-        await db.execute(sa.select(DeliveryOutbox.session_id).where(DeliveryOutbox.id == outbox_id))
-    ).scalar_one_or_none()
-    if session_id is None:
+    found = (
+        await db.execute(
+            sa.select(DeliveryOutbox.session_id, DeliveryOutbox.event_id)
+            .where(DeliveryOutbox.id == outbox_id)
+        )
+    ).first()
+    if found is None:
         return None
+    session_id, said = found
     row = (
         await db.execute(
             sa.select(ProgramInvitationRow)
@@ -146,9 +156,37 @@ async def _woken_step_of(db: Any, outbox_id: int) -> ProgramInvitationRow | None
             .limit(1)
         )
     ).scalar_one_or_none()
-    if row is not None:
-        row.outbox_id = outbox_id
+    if row is None or not await _answers_the_wake(db, session_id, str(row.id), said):
+        return None
+    row.outbox_id = outbox_id
     return row
+
+
+async def _answers_the_wake(db: Any, session_id: Any, invitation_id: str, said: int) -> bool:
+    """Whether event *said* belongs to the turn that took the step context."""
+    events = (
+        await db.execute(
+            sa.select(Event.id, Event.type, Event.data)
+            .where(Event.session_id == session_id)
+            .where(Event.id <= said)
+            .where(Event.type.in_(("user.message", "harness.wake")))
+            .order_by(Event.id.desc())
+            .limit(200)
+        )
+    ).all()
+    # Newest first, back to the step context: exactly one wake (the turn's
+    # own), and before it nothing the person wrote.
+    wakes = 0
+    person_first = False
+    for _, kind, data in events:
+        data = data or {}
+        if kind == "harness.wake":
+            wakes += 1
+        elif data.get("invitation_id") == invitation_id and data.get("step_event") == "due":
+            return wakes == 1 and not person_first
+        elif wakes and not data.get("synthetic"):
+            person_first = True
+    return False
 
 
 async def apply_status_callback(

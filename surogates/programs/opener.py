@@ -42,9 +42,10 @@ from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.memory_boundary import boundary_token
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.channels.whatsapp_flows import new_flow_token
-from surogates.db.models import ProgramInvitationRow
+from surogates.db.models import ProgramInvitationRow, Session as SessionRow
 from surogates.followup.store import last_inbound, shared_memory_boundary
 from surogates.session.events import CHECKIN_OPENER_MARKER
+from surogates.session.models import REUSABLE_SESSION_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +236,12 @@ def make_step_waker(
     """
     from surogates.programs.step_context import DUE, STEP_MARKER, step_context
 
+    async def _status(session_id: UUID) -> str | None:
+        async with session_factory() as db:
+            return (
+                await db.execute(sa.select(SessionRow.status).where(SessionRow.id == session_id))
+            ).scalar_one_or_none()
+
     async def _wake(invitation: Any, *, event: str, config: dict | None = None) -> UUID:
         config = config if config is not None else await config_for_program(invitation.program_id) or {}
         platform = invitation.platform
@@ -244,6 +251,9 @@ def make_step_waker(
         )
         now = datetime.now(timezone.utc)
         session_id = invitation.session_id if event != DUE else None
+        status = await _status(session_id) if session_id is not None else None
+        if status not in REUSABLE_SESSION_STATUSES:
+            session_id = None
         if session_id is None:
             target = await resolve_dm(
                 platform, invitation.platform_user_id, sender,
@@ -257,6 +267,12 @@ def make_step_waker(
                 user_id=invitation.user_id, platform=platform,
                 session_key=target.session_key, channel_id=target.channel_id, sender=sender,
             )
+            status = await _status(session_id)
+        # An idle conversation must be revived like an inbound message
+        # revives it, or the harness drops the wake ("status is 'completed',
+        # skipping wake") and the step waits for nothing until its deadline.
+        if status in ("completed", "paused"):
+            await session_store.resume_session(session_id, source="program_step")
         can_write = True
         if capabilities_for(platform).window_hours:
             from surogates.followup.outreach import window_open

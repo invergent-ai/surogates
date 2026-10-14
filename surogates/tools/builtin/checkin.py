@@ -59,7 +59,8 @@ STEP_OUTCOME_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": (
                     "One or two words from the categories the step's "
-                    "instructions define, e.g. green. Not the status. When "
+                    "instructions define, e.g. green. Not the status, and none "
+                    "with 'skipped'. When "
                     "omitted and you escalated during this step, the "
                     "escalation's severity is recorded instead."
                 ),
@@ -148,8 +149,10 @@ async def handle_checkin_outcome(arguments: dict, **kwargs: Any) -> str:
 
     # ``result`` is the label's older name.
     label = str(arguments.get("label") or arguments.get("result") or "").strip().lower()[:100]
+    if outcome == "skipped":
+        label = ""  # a step not done has no result to categorise
     async with sf() as db:
-        if not label:
+        if not label and outcome != "skipped":
             severities = set((await db.execute(
                 sa.select(EscalationRow.severity)
                 .where(EscalationRow.invitation_id == inv.id)
@@ -169,7 +172,7 @@ async def handle_checkin_outcome(arguments: dict, **kwargs: Any) -> str:
             row.deadline_at = None
             if row.outbox_id is None:
                 row.delivery_state = "skipped"
-        row.outcome = label or row.outcome
+        row.outcome = None if outcome == "skipped" else label or row.outcome
         if note:
             row.reason = note
         await db.commit()
