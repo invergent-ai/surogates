@@ -751,6 +751,7 @@ export class ToolHosts implements Executor {
     let host: Host;
     try {
       host = this.lander(root, binding, copy, kept);
+      this.yieldTo(binding.folder, host);
     } catch (error) {
       copies.close(handle);
       throw error;
@@ -800,7 +801,19 @@ export class ToolHosts implements Executor {
     );
     this.hosts.set(root, host);
     this.keep(host);
+    if (works.at === undefined && [...this.landers.values()].some((lander) => !lander.holds && lander.works.folder.path === works.folder.path)) {
+      host.yieldFolder();
+    }
     return host;
+  }
+
+  // The chats' hosts on *folder* itself let it go once nothing of theirs runs: a landing there would otherwise wait
+  // out a host that only read or wrote a file a moment before. One still running something keeps it until that ends.
+  private yieldTo(folder: string, lander: Host): void {
+    for (const host of this.live) {
+      if (host === lander || host.works.at !== undefined || host.kept !== undefined || host.recovers) continue;
+      if (host.works.folder.path === folder) host.yieldFolder();
+    }
   }
 
   // A host's start on what *works* holds, with the helper's working folder *tmp*.
@@ -1029,6 +1042,8 @@ class Host {
   // that nothing of the folder is left aside.
   private readonly landSteps = new Set<string>();
   private putBackOk = false;
+  // A landing waits for this host's folder: it lets it go as soon as nothing of it runs, not idleMs after.
+  private yielding = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -1158,6 +1173,12 @@ class Host {
     void this.letGo().then(() => this.stop(stepMs));
   }
 
+  /** A landing wants this host's folder: it lets it go once no operation of it runs and no process of its root lives. */
+  yieldFolder(): void {
+    this.yielding = true;
+    this.idle();
+  }
+
   /**
    * *inner* while this host holds the folder, so the folder is not let go mid-way.
    * With *guard*: the hook guard's refusal first; "around" then, whatever the outcome,
@@ -1241,6 +1262,10 @@ class Host {
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
+    if (this.yielding) {
+      this.finish();
+      return;
+    }
     this.idleTimer = setTimeout(() => {
       this.onGone();
       void this.letGo().then(() => this.stop());

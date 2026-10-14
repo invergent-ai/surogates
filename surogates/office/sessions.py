@@ -11,10 +11,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from surogates.db.models import OfficeSession
+from surogates.office.files import _folded
 
 OPEN = "open"
 CLOSED = "closed"
@@ -28,6 +29,7 @@ class OpenDocument:
     id: UUID
     doc_key: str
     path: str
+    location: str
     session_ids: tuple[UUID, ...]
     base_version: str | None
     editors: tuple[str, ...]
@@ -42,6 +44,7 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
         id=row.id,
         doc_key=row.doc_key,
         path=row.path,
+        location=row.location,
         session_ids=tuple(UUID(str(value)) for value in row.session_ids),
         base_version=row.base_version,
         editors=tuple(str(value) for value in row.editors),
@@ -137,6 +140,30 @@ async def open_locations(session_factory: Any, locations: list[str]) -> set[str]
         return set(found.all())
 
 
+async def open_like(session_factory: Any, locations: list[str]) -> list[OpenDocument]:
+    """The open rows at *locations*, a computer's compared without case or Unicode form: its folder may ignore them.
+    Any other location is compared as written. Each row once."""
+    if not locations:
+        return []
+    on_computer = {location for location in locations if location.startswith("device:")}
+    exact = set(locations) - on_computer
+    folded = {_folded(location) for location in on_computer}
+    # A computer's location is device:<id>:<path>, and the id holds no colon. Its open rows are fetched by that prefix
+    # and folded here: a C-locale database's lower() folds ASCII only.
+    prefixes = {location[:location.index(":", len("device:")) + 1] for location in on_computer}
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(
+                OfficeSession.status == OPEN,
+                or_(
+                    OfficeSession.location.in_(exact),
+                    *(OfficeSession.location.startswith(prefix, autoescape=True) for prefix in prefixes),
+                ),
+            )
+        )
+        return [_snapshot(row) for row in rows.all() if row.location in exact or _folded(row.location) in folded]
+
+
 async def open_documents(session_factory: Any) -> list[OpenDocument]:
     async with session_factory() as db:
         rows = (await db.scalars(select(OfficeSession).where(OfficeSession.status == OPEN))).all()
@@ -186,7 +213,7 @@ async def set_pending(
         if previous and datetime.fromisoformat(previous["lastsave"]) > lastsave:
             row.pending_save = {**previous, "close": close, "marks": marks, "authors": authors, "changes": changes}
             return key
-        row.pending_save = {
+        pending: dict[str, Any] = {
             "bucket": bucket,
             "key": key,
             "lastsave": lastsave.isoformat(),
@@ -196,6 +223,16 @@ async def set_pending(
             "authors": authors,
             "changes": changes,
         }
+        if previous.get("waiting"):
+            # The chats were told the save waits: still so until this one lands, which says it.
+            pending["waiting"] = previous["waiting"]
+        abandoned = list(previous.get("abandoned") or [])
+        if previous.get("waiting") == "waiting":
+            # Its write may still be open on the computer: landing later, it would make this save a conflict copy.
+            abandoned.append({"key": previous["key"], "try": int(previous.get("try", 0))})
+        if abandoned:
+            pending["abandoned"] = abandoned
+        row.pending_save = pending
         replaced = previous.get("key")
         return str(replaced) if replaced and replaced != key else None
 
@@ -270,6 +307,37 @@ def mark_attempt(row: OfficeSession) -> int:
     pending["attempts"] = int(pending.get("attempts", 0)) + 1
     row.pending_save = pending
     return pending["attempts"]
+
+
+def mark_waiting(row: OfficeSession, reason: str) -> bool:
+    """Record that the pending save waits on its computer for *reason*; whether that is news to its chats."""
+    pending = dict(row.pending_save or {})
+    if pending.get("waiting") == reason:
+        return False
+    pending["waiting"] = reason
+    row.pending_save = pending
+    return True
+
+
+def next_try(row: OfficeSession) -> None:
+    """Let the next try ask the computer anew: a request joined again only repeats what it got."""
+    pending = dict(row.pending_save or {})
+    left = int(pending.get("try", 0))
+    if pending.get("waiting") == "waiting":
+        # The request it leaves may still be open on the computer, for the save job to cancel.
+        pending["abandoned"] = [*(pending.get("abandoned") or []), {"key": pending["key"], "try": left}]
+    pending["try"] = left + 1
+    row.pending_save = pending
+
+
+def drop_pending(row: OfficeSession) -> tuple[str, str]:
+    """Give up the pending save; the (bucket, key) of its blob, to delete. A closing save's row closes."""
+    pending = row.pending_save or {}
+    blob = (str(pending["bucket"]), str(pending["key"]))
+    if pending.get("close"):
+        _close(row)
+    row.pending_save = None
+    return blob
 
 
 async def close_never_opened(session_factory: Any, *, older_than: timedelta, now: datetime | None = None) -> int:

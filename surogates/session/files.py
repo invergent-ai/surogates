@@ -7,7 +7,8 @@ conversation's boundary for a managed channel.  A session on a folder of the
 user's computer reaches its files only through that computer: each call is a
 device operation, journaled under one request outside any tool call.  Nothing
 reads or writes the cloud workspace of a session on a computer; its storage
-fields are kept for ``create_child_session`` alone.
+fields are kept for ``create_child_session``, and its bucket for the document
+editor's pending saves, under ``_office/pending/``, outside every chat's files.
 """
 
 from __future__ import annotations

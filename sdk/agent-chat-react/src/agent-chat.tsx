@@ -12,7 +12,7 @@ import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspaceFileDrawer } from "./components/workspace/workspace-file-drawer";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
-import { isOfficeDocument } from "./lib/office";
+import { isOfficeDocument, officeEventFor } from "./lib/office";
 import { cn } from "./lib/utils";
 import {
   isSubAgentSession,
@@ -665,7 +665,7 @@ export function AgentChat({
                   sessionId={sessionId}
                   path={previewPath}
                   view={effectiveDisabled}
-                  officeEvent={runtime.state.officeEvents[previewPath]}
+                  officeEvent={officeEventFor(runtime.state.officeEvents, previewPath)}
                   onClose={() => setOpenPane(null)}
                 />
               )}

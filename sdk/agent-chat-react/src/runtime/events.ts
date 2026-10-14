@@ -58,6 +58,8 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "thread.proposed",
   "office.conflict",
   "office.save_failed",
+  "office.save_waiting",
+  "office.saved",
   "stream.live",
 ] as const satisfies readonly AgentChatEventType[];
 

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -89,8 +90,8 @@ async def test_the_turns_save_flushes_then_forces_a_save_and_waits_for_its_mark(
 
     monkeypatch.setattr(turn_end, "RuntimeOffice", Runtime)
     monkeypatch.setattr(turn_end, "force_save", force_save)
-    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
-                             session_factory=session_factory, redis=None)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE,
+                             session_factory=session_factory)
     assert flushed == [f"{document.doc_key}.{session.id}"]
     assert len(sent) == 1 and json.loads(sent[0])["turn"]
     assert (await office_sessions.get_open(session_factory, document.id)).pending_save["marks"] == sent
@@ -114,8 +115,8 @@ async def test_a_closed_page_still_gets_its_save_and_nothing_unsaved_ends_at_onc
     monkeypatch.setattr(turn_end, "force_save", nothing_unsaved)
     monkeypatch.setattr(turn_end, "RuntimeOffice", Gone)
     started = time.monotonic()
-    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
-                             session_factory=session_factory, redis=None)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE,
+                             session_factory=session_factory)
     assert len(sent) == 1
     assert time.monotonic() - started < 5
 
@@ -147,11 +148,11 @@ async def test_the_turns_slots_go_back_only_for_a_turn_that_edited(session_facto
     monkeypatch.setattr(turn_end, "RuntimeOffice", _flushing(True))
     monkeypatch.setattr(turn_end, "force_save", nothing_unsaved)
     edited_none = await store.last_event_id(session.id)
-    await turn_end.save_turn(store=store, session=session, after=edited_none, office=OFFICE, storage=storage,
-                             session_factory=session_factory, redis=None)
+    await turn_end.save_turn(store=store, session=session, after=edited_none, office=OFFICE,
+                             session_factory=session_factory)
     assert entered == []
-    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
-                             session_factory=session_factory, redis=None)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE,
+                             session_factory=session_factory)
     assert entered == [True]
 
 
@@ -166,7 +167,134 @@ async def test_an_editor_with_unsent_changes_gets_no_forced_save(session_factory
     monkeypatch.setattr(turn_end, "RuntimeOffice", _flushing(False))
     monkeypatch.setattr(turn_end, "force_save", force_save)
     started = time.monotonic()
-    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, storage=storage,
-                             session_factory=session_factory, redis=None)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE,
+                             session_factory=session_factory)
     assert sent == []
     assert time.monotonic() - started < 5
+
+
+async def test_a_turn_on_the_computer_saves_the_document_it_edited(session_factory, monkeypatch):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = SessionStore(session_factory)
+    session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={
+        "storage_bucket": "b", "workspace_path": "/home/me/notes",
+        "execution": {"kind": "device", "device_id": "00000000-0000-0000-0000-000000000001"},
+    })
+    document = await office_sessions.open_or_reuse(
+        session_factory, location=location_of(session, "a.docx"), path="a.docx", session_id=session.id,
+    )
+    after = (await store.get_events(session.id))[-1].id if await store.get_events(session.id) else 0
+    await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": "a.docx", "ops": []}})
+    flushed, sent = [], []
+
+    class Runtime:
+        def __init__(self, office):
+            pass
+
+        async def flush(self, page):
+            flushed.append(page)
+            return True
+
+    async def force_save(office, key, userdata):
+        sent.append(userdata)
+        return 4  # nothing unsaved: every edit is saved
+
+    monkeypatch.setattr(turn_end, "RuntimeOffice", Runtime)
+    monkeypatch.setattr(turn_end, "force_save", force_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert flushed == [f"{document.doc_key}.{session.id}"] and len(sent) == 1
+
+
+async def test_a_turn_on_the_computer_saves_the_document_under_any_spelling_once(session_factory, monkeypatch):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = SessionStore(session_factory)
+    session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={
+        "storage_bucket": "b", "workspace_path": "/home/me/notes",
+        "execution": {"kind": "device", "device_id": "00000000-0000-0000-0000-000000000001"},
+    })
+    document = await office_sessions.open_or_reuse(
+        session_factory, location=location_of(session, "Plan.docx"), path="Plan.docx", session_id=session.id,
+    )
+    after = await store.last_event_id(session.id)
+    for path in ("plan.docx", "PLAN.docx"):
+        await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": path, "ops": []}})
+    flushed, sent = [], []
+
+    class Runtime:
+        def __init__(self, office):
+            pass
+
+        async def flush(self, page):
+            flushed.append(page)
+            return True
+
+    async def force_save(office, key, userdata):
+        sent.append(userdata)
+        return 4  # nothing unsaved: every edit is saved
+
+    monkeypatch.setattr(turn_end, "RuntimeOffice", Runtime)
+    monkeypatch.setattr(turn_end, "force_save", force_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert flushed == [f"{document.doc_key}.{session.id}"] and len(sent) == 1
+
+
+async def test_a_refused_path_saves_nothing_and_stops_no_other_save(session_factory, storage, monkeypatch):
+    store, session, document, _ = await _turn(session_factory, storage)
+    after = await store.last_event_id(session.id)
+    for path in ("../b.docx", "a.docx"):  # a traversal office_edit refused, then the document
+        await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": path}})
+    saved: list[str] = []
+
+    async def recording_save(runtime, office, session_factory, opened, session_id):
+        saved.append(opened.location)
+
+    monkeypatch.setattr(turn_end, "_save", recording_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert saved == [document.location]
+
+
+async def test_a_path_holding_nul_stops_no_other_save(session_factory, storage, monkeypatch):
+    store, session, document, _ = await _turn(session_factory, storage)
+    after = await store.last_event_id(session.id)
+    await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": "a.docx"}})
+    events = store.get_events
+
+    async def with_nul(session_id, **kwargs):
+        # The events table refuses a NUL, so the call naming one is read back beside the stored one.
+        nul = SimpleNamespace(data={"name": "office_edit", "arguments": {"path": "a\x00.docx"}})
+        return [nul, *await events(session_id, **kwargs)]
+
+    monkeypatch.setattr(store, "get_events", with_nul)
+    saved: list[str] = []
+
+    async def recording_save(runtime, office, session_factory, opened, session_id):
+        saved.append(opened.location)
+
+    monkeypatch.setattr(turn_end, "_save", recording_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert saved == [document.location]
+
+
+async def test_a_path_outside_the_folder_on_the_computer_saves_nothing(session_factory, monkeypatch):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = SessionStore(session_factory)
+    device = "00000000-0000-0000-0000-000000000001"
+    session = await store.create_session(user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={
+        "storage_bucket": "b", "workspace_path": "/home/me/notes", "execution": {"kind": "device", "device_id": device},
+    })
+    # Another chat's document on the same computer, open in the editor.
+    other = "/Users/me/other/b.docx"
+    await office_sessions.open_or_reuse(session_factory, location=f"device:{device}:{other}", path="b.docx", session_id=session.id)
+    after = await store.last_event_id(session.id)
+    await store.emit_event(session.id, EventType.TOOL_CALL, {"name": "office_edit", "arguments": {"path": other}})
+    saved: list[str] = []
+
+    async def recording_save(runtime, office, session_factory, opened, session_id):
+        saved.append(opened.location)
+
+    monkeypatch.setattr(turn_end, "_save", recording_save)
+    await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
+    assert saved == []

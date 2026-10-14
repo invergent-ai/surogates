@@ -21,7 +21,7 @@ def test_only_chats_with_a_file_pane_get_them():
     assert [s["function"]["name"] for s in kept] == names
 
 
-def test_a_file_pane_is_a_web_chat_or_a_projects_thread_in_the_cloud():
+def test_a_file_pane_is_a_web_chat_or_a_projects_thread():
     from surogates.harness.tool_schemas import has_file_pane
     from surogates.workstreams import THREAD
 
@@ -32,7 +32,8 @@ def test_a_file_pane_is_a_web_chat_or_a_projects_thread_in_the_cloud():
     assert has_file_pane(SimpleNamespace(channel="api", config={})) is False
     assert has_file_pane(SimpleNamespace(channel="voice", config={})) is False
     assert has_file_pane(SimpleNamespace(channel="website", config={})) is False
-    assert has_file_pane(SimpleNamespace(channel="web", config=device)) is False
+    # Surogate Desktop shows the pane beside a chat on a folder of the computer too.
+    assert has_file_pane(SimpleNamespace(channel="web", config=device)) is True
 
 
 def test_strict_coordinators_do_not_get_them_and_they_run_in_the_worker():

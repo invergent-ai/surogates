@@ -16,7 +16,9 @@ enforces its rules; the worker never touches the folder.
   read_lines      key, encoding, offset, limit, max_bytes       {data (base64), total_lines}
   write           key, data (base64), or                        null
                   key, transfer {size, sha256};
-                  and expected_revision, when the call has one
+                  and expected_revision, when the call has one,
+                  or create (true), to make the file only
+                  where none is: EEXIST otherwise
   delete          key                                           null
   list_dir        key                                           [name]
   walk            key, skip ([name]), skip_top ([name]),        {files: [[path, size]], truncated, cursor}
@@ -341,10 +343,13 @@ class DeviceWorkspaceIO:
             pass
         raise DeviceOperationError("The computer returned an invalid page")
 
-    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None, create: bool = False) -> None:
         refuse_nul(key)
         # Only when there is one: a write that expects nothing asks for what it always did.
         expected = {} if expected_revision is None else {"expected_revision": expected_revision}
+        if create:
+            # Makes the file only where none is: the computer answers EEXIST otherwise.
+            expected["create"] = True
         if len(data) <= MAX_PAYLOAD_BYTES:
             await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"), **expected)
             return
@@ -355,6 +360,21 @@ class DeviceWorkspaceIO:
         # worker's other sessions share.
         transfer = await asyncio.to_thread(_transfer_for, data)
         await self._call("write", payload=data, key=key, transfer=transfer, **expected)
+
+    async def etag(self, key: str) -> str | None:
+        """The file's revision, None where no file is: what :meth:`write_if` expects."""
+        stat = await self.stat(key)
+        return None if stat is None or stat.is_dir else stat.revision
+
+    async def write_if(self, key: str, data: bytes, *, expected: str | None) -> None:
+        """Write over the revision *expected*, or, with None, only where no file is; RevisionConflict otherwise."""
+        if expected is not None:
+            await self.write(key, data, expected_revision=expected)
+            return
+        try:
+            await self.write(key, data, create=True)
+        except FileExistsError as exc:
+            raise RevisionConflict(str(exc)) from None
 
     async def delete(self, key: str) -> None:
         refuse_nul(key)

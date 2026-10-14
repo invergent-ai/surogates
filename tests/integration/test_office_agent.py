@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 import pytest
@@ -10,14 +11,20 @@ from sqlalchemy import delete
 
 from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
+from surogates.devices.binding import Binding
+from surogates.office import agent as office_agent
+from surogates.office import files as office_files
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import BLANK_DOCX, AgentDocumentError, location_of, open_for_agent
+from surogates.office.files import DENIED_ON_COMPUTER, EDITOR_REQUEST
 from surogates.office.runtime_office import page_id
+from surogates.session.files import ComputerAway
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import session_workspace_key
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
 from surogates.workstreams import THREAD
+from tests.device_computer import computer_io
 
 from .conftest import create_org, create_user
 
@@ -93,15 +100,101 @@ async def test_a_missing_document_is_made_blank_only_when_asked(session_factory,
     assert await storage.read("b", session_workspace_key(session.id, "new/Notes.docx")) == BLANK_DOCX.read_bytes()
 
 
-async def test_other_files_and_computer_folders_are_refused(session_factory, redis_client, storage):
+async def test_other_files_are_refused(session_factory, redis_client, storage):
     session = await _chat(session_factory)
-    with pytest.raises(AgentDocumentError, match=r"\.docx"):
-        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "sheet.xlsx")
+    with pytest.raises(AgentDocumentError, match="Word documents"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.xlsx", create=True)
     with pytest.raises(AgentDocumentError, match="NUL"):
         await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a\x00.docx", create=True)
-    on_a_computer = await _chat(session_factory, config={"execution": {"kind": "device", "device_id": "00000000-0000-0000-0000-000000000001"}})
-    with pytest.raises(AgentDocumentError, match="computer"):
-        await _open(on_a_computer, storage, session_factory, redis_client, FakeRuntime(), "a.docx", create=True)
+
+
+FOLDER = "/home/me/notes"
+
+
+def _computer(monkeypatch, files, device_id, *, ignores_case=False):
+    """A fake computer answering every request of the office code; the sessions and requests asked for, kept."""
+    io = computer_io(FOLDER, files, device_id=device_id, ignores_case=ignores_case)
+    asked: list = []
+
+    @asynccontextmanager
+    async def fake_session_files(session, **kwargs):
+        asked.append((session, kwargs))
+        yield io
+
+    async def bound(_db, _root):
+        return Binding("bound")
+
+    monkeypatch.setattr(office_agent, "session_files", fake_session_files)
+    monkeypatch.setattr(office_files, "session_files", fake_session_files)
+    monkeypatch.setattr(office_files, "binding_of", bound)
+    return io, asked
+
+
+def _on_computer(device_id, **config):
+    return {"workspace_path": FOLDER, "execution": {"kind": "device", "device_id": device_id, "device_name": "Mac"}, **config}
+
+
+async def test_a_document_on_the_computer_opens_in_the_agents_editor(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+    io, _ = _computer(monkeypatch, {"a.docx": b"PK"}, device_id)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    runtime = FakeRuntime()
+    opened = await _open(session, storage, session_factory, redis_client, runtime, "a.docx", create=False)
+    assert opened.document.location == f"device:{device_id}:{FOLDER}/a.docx"
+    assert opened.created is False and len(runtime.opened) == 1
+
+
+async def test_a_document_open_in_the_editor_is_not_looked_up_on_the_computer_again(session_factory, redis_client, storage,
+                                                                                      monkeypatch):
+    device_id = str(uuid4())
+    _, asked = _computer(monkeypatch, {"a.docx": b"PK"}, device_id)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    runtime = FakeRuntime()
+    await _open(session, storage, session_factory, redis_client, runtime, "a.docx")
+    assert len(asked) == 1
+    await _open(session, storage, session_factory, redis_client, runtime, "a.docx")
+    assert len(asked) == 1 and len(runtime.opened) == 2
+
+
+async def test_another_spelling_of_a_document_the_pane_has_open_joins_it(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+    io, _ = _computer(monkeypatch, {"Plan.docx": b"PK"}, device_id, ignores_case=True)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    pane = await office_sessions.open_or_reuse(session_factory, location=location_of(session, "Plan.docx"), path="Plan.docx",
+                                               session_id=session.id, user=("user:1", "Flavius"))
+    opened = await _open(session, storage, session_factory, redis_client, FakeRuntime(), "plan.docx", create=True)
+    assert opened.document.doc_key == pane.doc_key and opened.path == "Plan.docx"
+    assert opened.created is False and not [kind for kind, _ in io.runner.calls if kind == "write"]
+
+
+async def test_a_new_document_on_the_computer_is_made_through_the_editors_own_request(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+    io, asked = _computer(monkeypatch, {}, device_id)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    opened = await _open(session, storage, session_factory, redis_client, FakeRuntime(), "notes/Plan.docx", create=True)
+    assert opened.created is True
+    assert io.runner.files[f"{FOLDER}/notes/Plan.docx"][0] == BLANK_DOCX.read_bytes()
+    made = [kwargs for _, kwargs in asked if kwargs.get("change")]
+    assert len(made) == 1 and made[0]["request_id"].startswith(f"{EDITOR_REQUEST}new.")
+
+
+async def test_a_thread_on_the_computer_opens_its_projects_real_file(session_factory, redis_client, storage, monkeypatch):
+    device_id, project_id = str(uuid4()), uuid4()
+    io, asked = _computer(monkeypatch, {"a.docx": b"real"}, device_id)
+    master = await _chat(session_factory, config=_on_computer(device_id, workspace_boundary=f"workstream:{project_id}"))
+    thread = await _chat(session_factory, config=_on_computer(
+        device_id, workspace_boundary=f"workstream:{project_id}", workstream_role=THREAD,
+        execution={"kind": "device", "device_id": device_id, "history": {"thread": str(uuid4())}},
+    ))
+
+    async def master_of(_factory, pid):
+        assert pid == project_id
+        return master
+
+    monkeypatch.setattr(office_files, "_master_of", master_of)
+    opened = await _open(thread, storage, session_factory, redis_client, FakeRuntime(), "a.docx", create=False)
+    assert {session.id for session, _ in asked} == {master.id}
+    assert opened.document.location == f"device:{device_id}:{FOLDER}/a.docx"
 
 
 async def test_open_locations_names_the_open_ones(session_factory, storage):
@@ -143,3 +236,63 @@ async def test_a_document_still_closing_is_refused_after_the_wait(session_factor
     await office_sessions.set_pending(session_factory, users.id, bucket="b", key="k", close=True)
     with pytest.raises(AgentDocumentError, match="still being saved"):
         await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.docx")
+
+
+def _answers(io, kind, error):
+    """The fake computer answers every *kind* operation with *error*."""
+    run = io.runner.run
+
+    async def answer(asked, args, payload=None):
+        return {"error": error} if asked == kind else await run(asked, args, payload)
+
+    io.runner.run = answer
+
+
+async def test_a_folder_not_set_up_on_the_computer_is_said(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+    _computer(monkeypatch, {}, device_id)
+
+    async def pending(_db, _root):
+        return Binding("pending", "not set up")
+
+    monkeypatch.setattr(office_files, "binding_of", pending)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    with pytest.raises(AgentDocumentError, match="not set up"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.docx", create=True)
+
+
+async def test_a_computer_away_is_named(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+
+    @asynccontextmanager
+    async def away(session, **kwargs):
+        raise ComputerAway("Mac", revoked=False)
+        yield
+
+    monkeypatch.setattr(office_agent, "session_files", away)
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    with pytest.raises(AgentDocumentError, match="Mac"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.docx")
+
+
+async def test_what_the_computer_answered_is_said(session_factory, redis_client, storage, monkeypatch):
+    device_id = str(uuid4())
+    io, _ = _computer(monkeypatch, {"a.docx": b"PK"}, device_id)
+    _answers(io, "stat", {"type": "unavailable", "message": "The folder's drive is not connected"})
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    with pytest.raises(AgentDocumentError, match="The folder's drive is not connected"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.docx")
+
+
+@pytest.mark.parametrize(("message", "said"), [
+    (DENIED_ON_COMPUTER, "notes/Plan.docx was not made: the computer's user declined it."),
+    ("Operation not permitted: the folder is read-only", "Operation not permitted: the folder is read-only"),
+])
+async def test_only_the_users_no_reads_as_declined(session_factory, redis_client, storage, monkeypatch, message, said):
+    device_id = str(uuid4())
+    io, _ = _computer(monkeypatch, {}, device_id)
+    _answers(io, "write", {"type": "os", "code": "EACCES", "message": message})
+    session = await _chat(session_factory, config=_on_computer(device_id))
+    with pytest.raises(AgentDocumentError) as refused:
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "notes/Plan.docx", create=True)
+    assert str(refused.value) == said

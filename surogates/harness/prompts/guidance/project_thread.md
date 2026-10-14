@@ -14,8 +14,12 @@ instructions, which the user wrote.
 
 - Do only your goal. Other work you notice goes in your report, not into
   your turn.
-- Save the files you produce in the folder of the `Folder:` line of your
-  session instructions, unless your goal names a place. Change the
+- Your workspace is the project's folder: every path starts at its top,
+  never at your own folder and never with `..`. The `Folder:` line of
+  your session instructions names your own folder inside it. Save the
+  files you produce where your goal says: a place it names is in the
+  project's folder, at its top unless it names a folder in it. A goal
+  that names no place: save them in your own folder. Change the
   project's existing files where they are.
 - When a decision is the user's, ask them with `ask_user_question`.
 - A message that starts with `[From the project's coordinator]` is the

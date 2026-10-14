@@ -257,8 +257,14 @@ class EventType(str, Enum):
     # save landed as a sibling copy (data: path, conflict_path) and the editors
     # were sent to reload.
     OFFICE_CONFLICT = "office.conflict"
-    # A save from the document editor failed (data: path, and status or attempts).
+    # A save from the document editor failed (data: path, and status or attempts; or reason "declined" and computer).
     OFFICE_SAVE_FAILED = "office.save_failed"
+    # A save from the document editor waits for the computer its file is on (data: path, computer, and reason:
+    # "offline", or "waiting" for the computer's user to allow it). Said when a pending save starts waiting, or
+    # its reason changes.
+    OFFICE_SAVE_WAITING = "office.save_waiting"
+    # A save that had waited for its computer landed (data: path).
+    OFFICE_SAVED = "office.saved"
 
     # ask_user_question — user's response to an `ask_user_question` tool
     # call.  Emitted by the ask_user_question response endpoint when the

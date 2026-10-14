@@ -269,17 +269,25 @@ export function applyAgentChatEvent(
       return { ...nextState, deviceWait: null };
 
     case "office.conflict":
-    case "office.save_failed": {
+    case "office.save_failed":
+    case "office.save_waiting":
+    case "office.saved": {
       const path = stringValue(event.data.path);
       if (!path) return nextState;
       const conflict = event.type === "office.conflict";
+      const computer = stringValue(event.data.computer);
+      const reason = stringValue(event.data.reason);
       return {
         ...nextState,
         officeEvents: {
           ...nextState.officeEvents,
-          [path]: conflict
-            ? { type: event.type, eventId: event.eventId, conflictPath: stringValue(event.data.conflict_path) }
-            : { type: event.type, eventId: event.eventId },
+          [path]: {
+            type: event.type,
+            eventId: event.eventId,
+            ...(conflict ? { conflictPath: stringValue(event.data.conflict_path) } : {}),
+            ...(computer ? { computer } : {}),
+            ...(reason ? { reason } : {}),
+          },
         },
         // The copy the conflicting save landed as shows in the tree.
         workspaceRefreshKey: nextState.workspaceRefreshKey + (conflict ? 1 : 0),

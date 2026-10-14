@@ -1528,15 +1528,13 @@ class ArtifactCompletionMixin:
         """Save the documents this turn edited through the editor; nothing for a turn that edited none."""
         try:
             office = load_settings().office
-            if not office.agent_editing or self._storage is None or device_of(session.config) is not None:
+            if not office.agent_editing:
                 return
             # Local: the office package reaches back into the session and sandbox modules this one is imported by.
             from surogates.office.turn_end import save_turn
 
-            await save_turn(
-                store=self._store, session=session, after=self._turn_after_event_id, office=office,
-                storage=self._storage, session_factory=self._session_factory, redis=self._redis,
-            )
+            await save_turn(store=self._store, session=session, after=self._turn_after_event_id, office=office,
+                            session_factory=self._session_factory)
         except Exception:
             logger.exception("Could not save the documents %s edited this turn", session.id)
 

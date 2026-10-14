@@ -650,6 +650,8 @@ export type AgentChatEventType =
   | "thread.proposed"
   | "office.conflict"
   | "office.save_failed"
+  | "office.save_waiting"
+  | "office.saved"
   | "stream.live";
 
 export interface AgentChatRuntimeEvent {
@@ -752,12 +754,17 @@ export interface AgentChatState {
   officeAutoOpen: { path: string; eventId: number } | null;
 }
 
-/** A save from the document editor that met trouble: the file changed outside it, or it could not land yet. */
+/** A save from the document editor that met trouble or waited: the file changed outside it, it could not land yet,
+ * it waits on the computer its file is on, or it landed after waiting. */
 export interface AgentChatOfficeEvent {
-  type: "office.conflict" | "office.save_failed";
+  type: "office.conflict" | "office.save_failed" | "office.save_waiting" | "office.saved";
   eventId: number;
   /** office.conflict: where the editor's edits were saved instead. */
   conflictPath?: string;
+  /** The computer a save on it waits on, or that declined it. */
+  computer?: string;
+  /** office.save_waiting: "offline", or "waiting" for the computer to allow it; office.save_failed: "declined". */
+  reason?: string;
 }
 
 /**

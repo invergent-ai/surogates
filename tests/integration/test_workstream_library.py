@@ -133,7 +133,8 @@ async def test_a_thread_starts_with_the_projects_name_and_instructions(api):
     assert thread.config["system"] == "Project: Quarterly report\nThread: Draft A\nFolder: threads/Draft A/\n\nUse euros."
     prompt = await system_prompt(api, thread)
     assert prompt.endswith("## Session instructions\n\n" + thread.config["system"])
-    assert "Save the files you produce in the folder of the `Folder:` line of your" in prompt
+    assert "every path starts at its top," in prompt
+    assert "save them in your own folder." in prompt
 
 
 async def test_a_change_to_the_instructions_reaches_new_threads_and_the_master(api):

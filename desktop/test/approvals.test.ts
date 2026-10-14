@@ -267,6 +267,31 @@ describe("a chat that asks every time", () => {
     expect(user.asked).toHaveLength(6);
   });
 
+  it("asks once about the document editor's saves of a document, then lets that document's saves through", async () => {
+    bind(ROOT, "ask");
+    user.auto = "allow";
+    const doc = `${FOLDER}/docs/Plan.docx`;
+    const save = (key: string, n: number) => ({ ...op("write", { key, data: "UEs=" }), invocationId: `request:editor.k1.s${n}.0` });
+    expect(await approvals.admit(save(doc, 1), never())).toBeNull();
+    expect(await approvals.admit(save(doc, 2), never())).toBeNull();
+    expect(user.asked).toHaveLength(1);
+    expect(user.asked[0]).toMatchObject({ kind: "change", action: "write", path: doc, editor: true });
+    // Another document asks for itself; the page's own request and an agent's tool call writing this one still ask.
+    expect(await approvals.admit(save(`${FOLDER}/other.docx`, 3), never())).toBeNull();
+    expect(await approvals.admit({ ...op("write", { key: doc, data: "" }), invocationId: "request:0f3a9c2e7b1d4a6f" }, never())).toBeNull();
+    expect(await approvals.admit(op("write", { key: doc, data: "" }), never())).toBeNull();
+    expect(user.asked).toHaveLength(4);
+  });
+
+  it("asks again about a document whose editor save was denied", async () => {
+    bind(ROOT, "ask");
+    user.auto = "deny";
+    const save = { ...op("write", { key: `${FOLDER}/a.docx`, data: "" }), invocationId: "request:editor.k1.s1.0" };
+    expect(await approvals.admit(save, never())).toEqual(CHANGE_DENIED);
+    expect(await approvals.admit({ ...save, id: "again" }, never())).toEqual(CHANGE_DENIED);
+    expect(user.asked).toHaveLength(2);
+  });
+
   it("asks about a kind it does not know, and in a chat whose mode it does not know", async () => {
     bind(ROOT, "ask");
     bind(OTHER, "maybe" as Mode);

@@ -18,9 +18,10 @@ from uuid import UUID
 from PIL import Image
 
 from surogates.config import load_settings
-from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path
+from surogates.devices.workspace import DeviceOperationError, said
+from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
 from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOffice, RuntimeOfficeError
-from surogates.session.files import session_files
+from surogates.session.files import ComputerAway, session_files
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
@@ -146,6 +147,8 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         return _error('"path" names the document in the workspace.')
     session = await kwargs["session_store"].get_session(UUID(str(kwargs["session_id"])))
     path = relative_path(raw_path, session)
+    if not within_folder(path):
+        return _error("Name the document by its path in the chat's folder, like docs/report.docx.")
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
     try:
@@ -172,7 +175,8 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
             return _error(str(exc))
         logger.warning("runtime-office failed on %s", path, exc_info=True)
         return _error(f"The editor could not do that: {exc}")
-    answer: dict[str, Any] = {"document": path, "open_by": _open_by(document)}
+    # Named as its saves and notices name it, the computer's spelling of it: the next call finds it at once.
+    answer: dict[str, Any] = {"document": document.document.path, "open_by": _open_by(document)}
     if document.created:
         answer["created"] = True
     if result.get("flushed") is False:
@@ -224,12 +228,14 @@ async def _with_pictures(ops: list[Any], session: Any, kwargs: dict[str, Any]) -
 
 async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     path = relative_path(str(block.get("path") or ""), session)
-    async with session_files(session, storage=kwargs["storage"], session_factory=kwargs["session_factory"],
-                             redis=kwargs["redis"]) as files:
-        try:
+    try:
+        async with session_files(session, storage=kwargs["storage"], session_factory=kwargs["session_factory"],
+                                 redis=kwargs["redis"]) as files:
             data = await files.read(await files.resolve(path), max_bytes=MAX_IMAGE_BYTES + 1)
-        except (FileNotFoundError, WorkspaceSandboxError, ValueError):  # ValueError: a NUL in the path
-            raise AgentDocumentError(f"No picture at {path}.") from None
+    except (FileNotFoundError, WorkspaceSandboxError, ValueError):  # ValueError: a NUL in the path
+        raise AgentDocumentError(f"No picture at {path}.") from None
+    except (ComputerAway, DeviceOperationError, OSError) as exc:
+        raise AgentDocumentError(f"Could not read {path}: {said(exc)}") from None
     if len(data) > MAX_IMAGE_BYTES:
         raise AgentDocumentError(f"{path} is over 5 MB; use a smaller picture.")
     try:

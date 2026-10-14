@@ -132,6 +132,19 @@ describe("an approval prompt", () => {
     expect([ids(own), allowing(own), own.focus, own.cancel]).toEqual([["deny", "allow"], ["allow"], "deny", "deny"]);
   });
 
+  it("says the document editor saves a document, and that later saves of it go through", () => {
+    const content = approval({
+      kind: "change", chat: CHAT, action: "write", path: "/home/me/notes/docs/Plan.docx", bytes: 2048, preview: null, editor: true,
+    });
+    expect(content.title).toBe("Save Plan.docx?");
+    expect(content.lead).toBe(
+      `The document editor wants to save this document in notes, ${sizeOf(2048)}. Allowed, its later saves of it go through until you quit Surogate.`,
+    );
+    expect(content.details).toEqual([{ label: "File", value: "docs/Plan.docx", code: true, keep: "" }]);
+    expect(content.buttons.map(({ id, label }) => [id, label])).toEqual([["deny", "Deny"], ["stop_asking", "Allow and stop asking"], ["allow", "Allow"]]);
+    expect([allowing(content), content.focus, content.cancel]).toEqual([["stop_asking", "allow"], "deny", "deny"]);
+  });
+
   it("asks about a delete, and names a path outside the folder whole, never as the folder's", () => {
     const content = approval({ kind: "change", chat: CHAT, action: "delete", path: "/tmp/x", bytes: null, preview: null });
     expect([content.title, content.details]).toEqual(["Delete x?", [{ label: "File", value: "/tmp/x", code: true, keep: "" }]]);

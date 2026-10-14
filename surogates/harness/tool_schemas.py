@@ -84,12 +84,13 @@ _OFFICE_TOOLS: frozenset[str] = frozenset({
 
 
 def has_file_pane(session: Any) -> bool:
-    """Whether the session's chat shows a document beside it: the web, Surogate Desktop, Surogate Studio's Work chat
-    and a project's threads; never a phone call, a channel, a website visitor, an API caller or a folder on a computer."""
+    """Whether the session's chat shows a document beside it: the web and Surogate Desktop (on a folder of the
+    computer too), Surogate Studio's Work chat and a project's threads; never a phone call, a channel, a website
+    visitor or an API caller."""
     from surogates.workstreams import is_project_thread
 
     config = getattr(session, "config", None) or {}
-    return (getattr(session, "channel", None) in ("web", STUDIO_CHANNEL) or is_project_thread(config)) and device_of(config) is None
+    return getattr(session, "channel", None) in ("web", STUDIO_CHANNEL) or is_project_thread(config)
 
 
 def channel_tool_flags(channel: str | None) -> dict[str, bool]:

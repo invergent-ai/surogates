@@ -36,6 +36,35 @@ async def test_same_location_reuses_the_key(session_factory):
     assert set(two.session_ids) == {first, second}
 
 
+def _on_computer(name: str) -> str:
+    return f"device:{uuid4()}:/f/{name}"
+
+
+async def test_open_rows_are_found_without_case(session_factory):
+    location = _on_computer("Plan.docx")
+    document = await office_sessions.open_or_reuse(session_factory, location=location, path="Plan.docx", session_id=uuid4())
+    [found] = await office_sessions.open_like(session_factory, [location.replace("Plan.docx", "plan.DOCX")])
+    assert found.id == document.id
+    assert await office_sessions.open_like(session_factory, [location.replace("Plan.docx", "other.docx")]) == []
+    named_at = _on_computer("Ședință.docx")
+    named = await office_sessions.open_or_reuse(session_factory, location=named_at, path="Ședință.docx", session_id=uuid4())
+    assert [found.id for found in await office_sessions.open_like(session_factory, [named_at])] == [named.id]
+
+
+async def test_open_rows_on_a_computer_are_found_without_case_beyond_ascii(session_factory):
+    location = _on_computer("Été.docx")
+    document = await office_sessions.open_or_reuse(session_factory, location=location, path="Été.docx", session_id=uuid4())
+    [found] = await office_sessions.open_like(session_factory, [location.replace("Été", "été")])
+    assert found.id == document.id
+    # In another Unicode form too, and only on its own computer.
+    assert [found.id for found in await office_sessions.open_like(session_factory, [location.replace("Été", "e\u0301te\u0301")])] == [document.id]
+    assert await office_sessions.open_like(session_factory, [_on_computer("été.docx")]) == []
+    # A cloud location is compared as written.
+    cloud = await office_sessions.open_or_reuse(session_factory, location="bucket:test/x/A.docx", path="A.docx", session_id=uuid4())
+    assert await office_sessions.open_like(session_factory, ["bucket:test/x/a.docx"]) == []
+    assert [found.id for found in await office_sessions.open_like(session_factory, ["bucket:test/x/A.docx"])] == [cloud.id]
+
+
 async def test_concurrent_opens_get_one_key(session_factory):
     location = _location()
     chats = [uuid4() for _ in range(8)]
@@ -152,6 +181,44 @@ async def test_mark_attempt_counts_up(session_factory):
         async with office_sessions.claim_pending(session_factory) as row:
             assert office_sessions.mark_attempt(row) == expected
     assert (await office_sessions.get_open(session_factory, document.id)).pending_save["attempts"] == 2
+
+
+async def test_a_save_replacing_one_waiting_on_its_computer_records_its_write_abandoned(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k1", close=False)
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False)
+    assert "abandoned" not in (await office_sessions.get_open(session_factory, document.id)).pending_save
+    async with office_sessions.claim_pending(session_factory) as row:
+        row.pending_save = {**row.pending_save, "waiting": "waiting", "try": 2}
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k3", close=False)
+    assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [{"key": "k2", "try": 2}]
+    # Kept by the saves after it until a pass cancels it. k3 still reads as waiting, so its write is recorded too:
+    # cancelling one never asked does nothing.
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k4", close=False)
+    assert (await office_sessions.get_open(session_factory, document.id)).pending_save["abandoned"] == [
+        {"key": "k2", "try": 2}, {"key": "k3", "try": 0},
+    ]
+
+
+async def test_a_save_replacing_a_waiting_one_still_waits(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k1", close=False)
+    async with office_sessions.claim_pending(session_factory) as row:
+        office_sessions.mark_waiting(row, "waiting")
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k2", close=False)
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["key"] == "k2" and pending["waiting"] == "waiting"
+
+
+async def test_leaving_a_waiting_try_records_its_request_abandoned(session_factory):
+    document = await office_sessions.open_or_reuse(session_factory, location=_location(), path="a.docx", session_id=uuid4())
+    await office_sessions.set_pending(session_factory, document.id, bucket="b", key="k", close=False)
+    async with office_sessions.claim_pending(session_factory) as row:
+        office_sessions.next_try(row)
+        office_sessions.mark_waiting(row, "waiting")
+        office_sessions.next_try(row)
+    pending = (await office_sessions.get_open(session_factory, document.id)).pending_save
+    assert pending["try"] == 2 and pending["abandoned"] == [{"key": "k", "try": 1}]
 
 
 async def test_never_opened_rows_are_closed(session_factory):

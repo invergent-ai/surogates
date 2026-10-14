@@ -14,6 +14,24 @@ interface OfficeEditorPaneProps {
 	onClose: () => void;
 }
 
+/** What the pane says about a save, or null when there is nothing to say. */
+function saveNotice(notice: AgentChatOfficeEvent): string | null {
+	const computer = notice.computer ?? "your computer";
+	if (notice.type === "office.conflict") {
+		return `This document changed outside the editor. Your edits were saved to ${notice.conflictPath}.`;
+	}
+	if (notice.type === "office.saved") return null;
+	if (notice.type === "office.save_waiting") {
+		return notice.reason === "offline"
+			? `Saving to ${computer} once it is back online.`
+			: `Saving to ${computer}… If it asks, allow the save there.`;
+	}
+	if (notice.reason === "declined") {
+		return `${notice.computer ?? "Your computer"} declined the save. Your changes are still here; the next save asks again.`;
+	}
+	return "Your latest changes could not be saved yet.";
+}
+
 /** An office document open in the document server's editor, in the file pane. */
 export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, onClose }: OfficeEditorPaneProps) {
 	const { resolvedTheme } = useTheme();
@@ -104,11 +122,9 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 					<span>{error}</span>
 				</div>
 			)}
-			{notice && (
+			{notice && saveNotice(notice) && (
 				<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
-					{notice.type === "office.conflict"
-						? `This document changed outside the editor. Your edits were saved to ${notice.conflictPath}.`
-						: "Your latest changes could not be saved yet."}
+					{saveNotice(notice)}
 				</div>
 			)}
 			{loading && !error && <div className="p-3 text-sm text-muted-foreground">Opening {fileName}…</div>}
