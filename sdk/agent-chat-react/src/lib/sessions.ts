@@ -38,6 +38,16 @@ export function isSubAgentSession(
   return false;
 }
 
+// A project's thread: the server makes it a ``worker`` child of the
+// project's master and stamps its role, but it is the user's chat too --
+// they read it and write to it, and the thread tells their words from
+// its coordinator's.  Its own helpers carry no role and stay sub-agents.
+export function isProjectThread(
+  session: AgentChatSession | null | undefined,
+): boolean {
+  return session?.config?.workstream_role === "thread";
+}
+
 export interface ReadOnlyReason {
   readOnly: boolean;
   reason?: string;
@@ -53,6 +63,9 @@ export function readOnlyReasonForSession(
 ): ReadOnlyReason {
   if (isScheduledRunSession(session)) {
     return { readOnly: true, reason: "Scheduled run is read-only" };
+  }
+  if (isProjectThread(session)) {
+    return { readOnly: false };
   }
   if (isSubAgentSession(session)) {
     return {
