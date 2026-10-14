@@ -1,6 +1,7 @@
 import {
 	AlertCircleIcon,
 	DownloadIcon,
+	FileIcon,
 	Loader2Icon,
 	RefreshCwIcon,
 	TrashIcon,
@@ -151,6 +152,7 @@ function RenderEntries({
 				return (
 					<FileTreeFile key={entry.path} name={entry.name} path={entry.path}>
 						<span className="size-4 shrink-0" />
+						<FileIcon className="size-4.5 shrink-0 text-muted-foreground" strokeWidth={1.8} />
 						<TruncatedFileName name={entry.name} />
 						{entry.size != null && (
 							<span className="ml-1 shrink-0 text-xs text-muted-foreground/60">
@@ -386,13 +388,11 @@ export function WorkspacePanel({
 	);
 
 	return (
-		// Always fills its parent: the panel is the body of the Files
-		// accordion, which owns the frame and the height. The side-drawer
-		// it used to be — resize handle, min/max width, its own left
-		// border — went away with the drawer.
+		// Always fills its parent: the panel is the body of the composer
+		// tray's Files tab, which owns the frame and the height.
 		<aside
 			data-testid="workspace-panel"
-			className="relative z-10 flex h-full border-input border-[2px] pb-[10px] border-b-0 min-h-0 w-full flex-col overflow-hidden"
+			className="flex h-full min-h-0 w-full flex-col overflow-hidden"
 		>
 			<input
 				ref={fileInputRef}
@@ -405,14 +405,21 @@ export function WorkspacePanel({
 				}}
 			/>
 
-			{/* No icon or title: the Files accordion card is the header. Only
-			    the actions remain, tucked into the right edge. */}
-			<div className="flex items-center justify-end gap-2 border-b border-line px-3 py-1.5">
+			{/* No icon or title: the tray's Files tab is the header. The root
+			    it lists, and its actions. Every button here is type="button":
+			    the tray sits inside the composer's form, where a bare button
+			    sends the message. */}
+			<div className="flex h-12 shrink-0 items-center gap-1 border-b border-border pr-2.5 pl-4.5">
+				<span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
+					workspace /
+				</span>
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<Button
+							type="button"
 							variant="ghost"
 							size="icon-sm"
+							className="rounded-xl text-foreground/80 md:size-11"
 							onClick={() => fileInputRef.current?.click()}
 							disabled={disabled || !sessionId || uploading}
 							aria-label="Upload files"
@@ -420,7 +427,7 @@ export function WorkspacePanel({
 							{uploading ? (
 								<Loader2Icon className="size-4 animate-spin" />
 							) : (
-								<UploadIcon className="size-4" />
+								<UploadIcon className="size-4.5" />
 							)}
 						</Button>
 					</TooltipTrigger>
@@ -429,14 +436,16 @@ export function WorkspacePanel({
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<Button
+							type="button"
 							variant="ghost"
 							size="icon-sm"
+							className="rounded-xl text-foreground/80 md:size-11"
 							onClick={() => void fetchTree()}
 							disabled={!sessionId || loading}
 							aria-label="Refresh workspace"
 						>
 							<RefreshCwIcon
-								className={cn("size-4", loading && "animate-spin")}
+								className={cn("size-4.5", loading && "animate-spin")}
 							/>
 						</Button>
 					</TooltipTrigger>
@@ -460,7 +469,7 @@ export function WorkspacePanel({
 			)}
 
 			<ScrollArea className="min-h-0 flex-1">
-				<div className="px-1 py-1">
+				<div className="px-2.5 py-1.5">
 					{waiting && (
 						<div
 							role="status"
@@ -496,6 +505,7 @@ export function WorkspacePanel({
 						<div className="px-4 py-8 text-center text-sm text-faint">
 							<p>No workspace files</p>
 							<Button
+								type="button"
 								variant="outline"
 								size="sm"
 								className="mt-3 gap-1.5"

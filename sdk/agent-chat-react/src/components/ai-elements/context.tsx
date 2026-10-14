@@ -12,7 +12,7 @@ const NEARLY_FULL = 0.9;
 const ICON_RADIUS = 10;
 const ICON_VIEWBOX = 24;
 const ICON_CENTER = 12;
-const ICON_STROKE_WIDTH = 2;
+const ICON_STROKE_WIDTH = 3;
 
 type ModelId = string;
 
@@ -90,11 +90,12 @@ export const ContextIcon = ({ className }: { className?: string }) => {
         stroke="currentColor"
         strokeWidth={ICON_STROKE_WIDTH}
       />
+      {/* Amber for the same reason as the bar in ContextContentHeader. */}
       <circle
+        className="text-amber-400"
         cx={ICON_CENTER}
         cy={ICON_CENTER}
         fill="none"
-        opacity="0.7"
         r={ICON_RADIUS}
         stroke="currentColor"
         strokeDasharray={`${circumference} ${circumference}`}

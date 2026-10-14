@@ -131,7 +131,7 @@ describe("Composer view-mode toggle", () => {
     expect(labels).toEqual(["Simple view", "Advanced view"]);
   });
 
-  it("keeps the segments pill-shaped — no squared inner edges", () => {
+  it("keeps every segment rounded — no squared inner edges", () => {
     const dom = mount(
       <ChatComposer
         onSend={sendFn}
@@ -144,10 +144,10 @@ describe("Composer view-mode toggle", () => {
     const group = dom.querySelector("[role='group'][aria-label='Chat view mode']")!;
     // ButtonGroup squares off the inner edges of everything it holds, which
     // leaves each segment outlined inside the track's own outline. A plain
-    // track keeps both halves round; nothing may reintroduce the group.
+    // track keeps every segment round; nothing may reintroduce the group.
     expect(group.getAttribute("data-slot")).not.toBe("button-group");
     for (const button of group.querySelectorAll("button")) {
-      expect(button.className).toContain("rounded-full");
+      expect(button.className).toContain("rounded-[9px]");
       expect(button.className).not.toMatch(/rounded-[lr]-none/);
       expect(button.className).toContain("border-0");
     }

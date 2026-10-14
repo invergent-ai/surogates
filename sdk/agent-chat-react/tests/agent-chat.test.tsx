@@ -133,17 +133,55 @@ function createAdapter(
   } satisfies AgentChatAdapter;
 }
 
-/** The right column starts closed; a card above the composer opens it. */
+/** The composer tray's tab for a resource, or null when the chat has none. */
+function trayTab(
+  node: ParentNode,
+  which: "browser" | "files",
+): HTMLButtonElement | null {
+  return node.querySelector<HTMLButtonElement>(
+    `[data-testid="composer-tray-${which}"]`,
+  );
+}
+
+/** Opens the tray's fold on the Browser tab, where the browser's details are. */
+async function openBrowserFold(node: ParentNode): Promise<void> {
+  const tab = trayTab(node, "browser");
+  if (!tab) throw new Error("no browser tab to open");
+  if (tab.getAttribute("aria-pressed") === "true") return;
+  await act(async () => {
+    tab.click();
+  });
+}
+
+/** The browser's details in the tray's fold, once it is open on its tab. */
+function browserFoldText(node: ParentNode): string {
+  return node.querySelector('[data-testid="browser-fold"]')?.textContent ?? "";
+}
+
+/**
+ * Toggles a pane from the composer's tray: the Files tab folds the workspace
+ * open and shut in the card; the browser fold's button shows and hides the
+ * browser beside the chat.
+ */
 async function openPane(
   node: HTMLElement,
   which: "browser" | "files",
 ): Promise<void> {
-  const card = node.querySelector<HTMLButtonElement>(
-    `[data-testid="session-pane-card-${which}"]`,
-  );
-  if (!card) throw new Error(`no ${which} card to open the pane with`);
+  if (which === "browser") {
+    await openBrowserFold(node);
+    const toggle = node.querySelector<HTMLButtonElement>(
+      '[data-testid="browser-fold"] button[aria-pressed]',
+    );
+    if (!toggle) throw new Error("no browser toggle in the tray");
+    await act(async () => {
+      toggle.click();
+    });
+    return;
+  }
+  const tab = trayTab(node, "files");
+  if (!tab) throw new Error("no files tab to open the pane with");
   await act(async () => {
-    card.click();
+    tab.click();
   });
 }
 
@@ -432,10 +470,8 @@ describe("AgentChat", () => {
 
     await openPane(container, "files");
     expect(container.querySelector('[data-testid="workspace-panel"]')).not.toBeNull();
-    // No browser in this session, so no browser card and no browser pane.
-    expect(
-      container.querySelector('[data-testid="session-pane-card-browser"]'),
-    ).toBeNull();
+    // No browser in this session, so no browser tab and no browser pane.
+    expect(trayTab(container, "browser")).toBeNull();
     expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
   });
 
@@ -470,9 +506,8 @@ describe("AgentChat", () => {
         await Promise.resolve();
       });
 
-      const cardText = () =>
-        container?.querySelector('[data-testid="session-pane-card-browser"]')
-          ?.textContent ?? "";
+      await openBrowserFold(container);
+      const cardText = () => browserFoldText(container!);
       expect(cardText()).toContain("surogate has control");
 
       await act(async () => {
@@ -568,8 +603,9 @@ describe("AgentChat", () => {
       stream.emit("browser.provisioned", 10, { session_id: "s-1", computer: true });
       await Promise.resolve();
     });
-    const card = () => container?.querySelector('[data-testid="session-pane-card-browser"]')?.textContent ?? "";
+    const card = () => browserFoldText(container!);
     const pane = () => container?.querySelector('[data-testid="browser-pane"]')?.textContent;
+    await openBrowserFold(container);
     expect(card()).toContain("On the chat's computer");
     await openPane(container, "browser");
     expect(pane()).toBe("The browser is open on the chat's computer.");
@@ -598,7 +634,7 @@ describe("AgentChat", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     const draw = ({ available }: { available: boolean }) => <p data-testid="host-pane">{available ? "open there" : "none there"}</p>;
-    const card = () => container?.querySelector('[data-testid="session-pane-card-browser"]') ?? null;
+    const card = () => trayTab(container!, "browser");
     const hostPane = () => container?.querySelector('[data-testid="host-pane"]')?.textContent;
     const hear = async (type: "browser.provisioned" | "browser.destroyed", id: number, session: string) => {
       await act(async () => {
@@ -615,7 +651,8 @@ describe("AgentChat", () => {
 
     // The sub-agent's tab, written by the server to its root chat's log: the chat offers its browser.
     await hear("browser.provisioned", 10, "child-1");
-    expect(card()?.textContent).toContain("On the chat's computer");
+    await openBrowserFold(container);
+    expect(browserFoldText(container)).toContain("On the chat's computer");
     await openPane(container, "browser");
     expect(hostPane()).toBe("open there");
 
@@ -625,7 +662,7 @@ describe("AgentChat", () => {
     expect(card()).not.toBeNull();
     expect(hostPane()).toBe("open there");
 
-    // The last tab closed: the card and the pane go.
+    // The last tab closed: the tray's tab and the pane go.
     await hear("browser.destroyed", 13, "s-1");
     expect(card()).toBeNull();
     expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
@@ -633,7 +670,7 @@ describe("AgentChat", () => {
     expect(opened).toEqual(["s-1"]);
   });
 
-  it("toggles the browser pane from its card", async () => {
+  it("toggles the browser pane from the tray", async () => {
     const stream = new FakeEventStream();
     const adapter = {
       ...createAdapter(stream),
@@ -657,13 +694,13 @@ describe("AgentChat", () => {
     await openPane(container, "browser");
     expect(container.querySelector('[data-testid="browser-panel"]')).not.toBeNull();
 
-    // The same card hides it again — show and hide live on one button.
+    // The same button hides it again — show and hide live on one button.
     await openPane(container, "browser");
     expect(container.querySelector('[data-testid="browser-panel"]')).toBeNull();
     expect(container.querySelector('[data-testid="right-stack"]')).toBeNull();
   });
 
-  it("expands the files accordion in the chat column, not a drawer", async () => {
+  it("expands the files fold in the chat column, not a drawer", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);
     container = document.createElement("div");
@@ -675,27 +712,26 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    const card = () =>
-      container!.querySelector('[data-testid="session-pane-card-files"]');
-    expect(card()?.getAttribute("aria-expanded")).toBe("false");
+    const card = () => trayTab(container!, "files");
+    expect(card()?.getAttribute("aria-pressed")).toBe("false");
 
     await openPane(container!, "files");
     const panel = container!.querySelector('[data-testid="workspace-panel"]');
     expect(panel).not.toBeNull();
-    // Inline above the composer: the chat column contains it, and no right
+    // Inline in the composer card: the chat column contains it, and no right
     // column opens for it — the drawer is the browser's alone now.
     expect(
       container!.querySelector('[data-testid="chat-panel"]')!.contains(panel!),
     ).toBe(true);
     expect(container!.querySelector('[data-testid="right-stack"]')).toBeNull();
-    expect(card()?.getAttribute("aria-expanded")).toBe("true");
+    expect(card()?.getAttribute("aria-pressed")).toBe("true");
 
-    // The same header collapses it.
+    // The same tab folds it.
     await openPane(container!, "files");
     expect(
       container!.querySelector('[data-testid="workspace-panel"]'),
     ).toBeNull();
-    expect(card()?.getAttribute("aria-expanded")).toBe("false");
+    expect(card()?.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("offers a phone tab for the open pane, and closes when it goes away", async () => {
@@ -1147,13 +1183,11 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    // Another session's files: the accordion folds and the previous
+    // Another session's files: the tray folds and the previous
     // session's preview does not follow across.
-    expect(
-      container
-        .querySelector('[data-testid="session-pane-card-files"]')
-        ?.getAttribute("aria-expanded"),
-    ).toBe("false");
+    expect(trayTab(container, "files")?.getAttribute("aria-pressed")).toBe(
+      "false",
+    );
     expect(
       container.querySelector('[data-testid="workspace-panel"]'),
     ).toBeNull();
@@ -1642,7 +1676,7 @@ describe("AgentChat", () => {
     expect(buttons()).not.toContain("Retry");
   });
 
-  it("shows a chat the host only reads no Browser card, and its browser nothing that takes it over or shuts it down", async () => {
+  it("shows a chat the host only reads its browser to watch, and nothing that takes it over or shuts it down", async () => {
     // The shell opens a socket as it mounts; happy-dom would dial it.
     vi.stubGlobal("WebSocket", class {
       readyState = 0;
@@ -1676,16 +1710,8 @@ describe("AgentChat", () => {
         stream.emit("browser.provisioned", 10, { session_id: "s-1" });
         await Promise.resolve();
       });
-      expect(container.querySelector('[data-testid="session-pane-card-browser"]')).toBeNull();
-      // The composer's tools still show it, to watch.
-      await act(async () => {
-        container!.querySelector<HTMLElement>('[aria-label="Composer tools"]')!.click();
-      });
-      await act(async () => {
-        [...document.body.querySelectorAll<HTMLElement>('[role="option"]')]
-          .find((item) => item.textContent?.trim() === "Browser")!
-          .click();
-      });
+      // The tray still offers it, to watch.
+      await openPane(container, "browser");
       expect(container.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="browser-shell-control"]')).toBeNull();
       await act(async () => {
@@ -2081,18 +2107,12 @@ describe("AgentChat", () => {
     expect(textarea?.disabled).toBe(true);
     expect(textarea?.placeholder).toContain("Scheduled run is read-only");
 
-    // The tools panel stays: a read-only run still has a workspace worth
-    // opening. What read-only removes is the ability to add material to the
-    // next turn, so the Attach group is gone from inside it.
-    const tools = container.querySelector(
-      'button[aria-label="Composer tools"]',
-    ) as HTMLButtonElement | null;
-    expect(tools).not.toBeNull();
-    await act(async () => {
-      tools?.click();
-      await Promise.resolve();
-    });
-    expect(document.body.textContent).toContain("Workspace");
-    expect(document.body.textContent).not.toContain("Add local files");
+    // The tray stays: a read-only run still has a workspace worth opening.
+    // What read-only removes is the ability to add material to the next turn,
+    // and with nothing else to offer, the tools button goes with it.
+    expect(trayTab(container, "files")).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Composer tools"]'),
+    ).toBeNull();
   });
 });

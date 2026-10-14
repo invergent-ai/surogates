@@ -195,14 +195,14 @@ export function AgentChat({
   // so much as a rumour of one.
   const [mobileView, setMobileView] = useState<MobilePane>("chat");
   // Which right-stack pane is open, if any. The column starts closed and
-  // is opened from the cards above the composer; the composer's toggles
-  // drive the same state, so the two affordances cannot disagree about
-  // what is showing. One pane at a time -- the panes are tabs now, not
-  // stacked halves.
+  // is opened from the composer's tray (the browser) or a file row (the
+  // preview). One pane at a time -- the panes are tabs now, not stacked
+  // halves.
   const [openPane, setOpenPane] = useState<MobilePane | null>(null);
-  // The files accordion above the composer. Not a pane: it expands in place
-  // inside the chat column, so it needs no phone tab and no drawer.
-  const [filesOpen, setFilesOpen] = useState(false);
+  // The fold at the top of the composer card that shows its Files or Browser
+  // tab. Not a pane: it expands in place inside the chat column, so it needs
+  // no phone tab and no drawer.
+  const [trayOpen, setTrayOpen] = useState(false);
 
   const runtime = useAgentChatRuntime({
     adapter,
@@ -234,17 +234,17 @@ export function AgentChat({
     // Switching modes closes the column rather than choosing a pane for
     // the user: the cards make re-opening one click.
     setOpenPane(null);
-    setFilesOpen(false);
+    setTrayOpen(false);
   }, [runtime.viewMode]);
 
   // The documents the agent's live edits have opened in the file pane.
   const officeAutoOpened = useRef(new Set<string>());
 
-  // A different session is a different workspace: fold the accordion and
+  // A different session is a different workspace: fold the tray and
   // drop the old session's selection and preview rather than carrying them
   // where they refer to nothing.
   useEffect(() => {
-    setFilesOpen(false);
+    setTrayOpen(false);
     setWorkspacePath(null);
     setPreviewPath(null);
     setOpenPane(null);
@@ -431,10 +431,6 @@ export function AgentChat({
     setMobileView("browser");
   }, []);
 
-  const handleToggleFiles = useCallback(() => {
-    setFilesOpen((open) => !open);
-  }, []);
-
   // The phone toggle offers exactly the panes that currently exist, so it
   // disappears when there is only the chat. `mobileView` is validated against
   // that list rather than trusted: a browser that closes, or a workspace that
@@ -561,15 +557,12 @@ export function AgentChat({
               onSelectBrowserProfile={onSelectBrowserProfile}
               browserProfilesEnabled={browserProfilesEnabled}
               browserProfileLocked={!!sessionId}
-              showBrowser={openPane === "browser"}
-              onToggleBrowser={handleToggleBrowser}
-              showWorkspace={filesOpen}
-              onToggleWorkspace={handleToggleFiles}
-              canShowBrowser={browserAvailable}
-              canShowWorkspace={workspaceAvailable}
               paneCards={{
-                // A chat the host only reads offers its browser no card: the card is the way to take it over.
-                browser: browserRunning && !disabled
+                open: trayOpen,
+                onOpenChange: setTrayOpen,
+                // A chat the host only reads still offers its browser, to
+                // watch: the pane it opens takes no control and closes nothing.
+                browser: browserRunning
                   ? {
                       subtitle: browserOnComputer
                         ? browserState?.status === "unavailable"
@@ -578,16 +571,17 @@ export function AgentChat({
                         : browserState?.controlOwner
                           ? `${browserState.controlOwner} has control`
                           : undefined,
-                      thumbnail: browserPreview,
-                      // Show and hide on the same card, like the Files
-                      // accordion header and the composer's Tools item.
+                      thumbnail: browserPreview.src,
+                      updatedAt: browserPreview.updatedAt,
+                      // Its own computer's window is the live view; there is
+                      // no screenshot to take again.
+                      onRefresh: browserOnComputer ? undefined : browserPreview.refresh,
+                      showing: browserVisible,
                       onOpen: handleToggleBrowser,
                     }
                   : null,
                 files: workspaceAvailable
                   ? {
-                      open: filesOpen,
-                      onToggle: handleToggleFiles,
                       panel: (
                         <WorkspacePanel
                           adapter={adapter}

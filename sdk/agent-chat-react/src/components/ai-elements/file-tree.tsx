@@ -81,11 +81,11 @@ export function FileTree({
   return (
     <FileTreeContext.Provider value={contextValue}>
       <div
-        className={cn("rounded-lg border text-base", className)}
+        className={cn("rounded-lg border text-sm", className)}
         role="tree"
         {...props}
       >
-        <div className="p-2">{children}</div>
+        {children}
       </div>
     </FileTreeContext.Provider>
   );
@@ -149,8 +149,8 @@ export function FileTreeFolder({
       <div className={cn("", className)} role="treeitem" tabIndex={0} {...props}>
         <div
           className={cn(
-            "flex w-full items-center gap-1 rounded px-2 py-1 text-left transition-colors hover:bg-muted/50",
-            isSelected && "bg-muted",
+            "flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-accent",
+            isSelected && "bg-accent",
           )}
         >
           <CollapsibleTrigger asChild>
@@ -168,22 +168,22 @@ export function FileTreeFolder({
             </button>
           </CollapsibleTrigger>
           <button
-            className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 border-none bg-transparent p-0 text-left"
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 border-none bg-transparent p-0 text-left"
             onClick={handleSelect}
             type="button"
           >
             <FileTreeIcon>
               {isExpanded ? (
-                <FolderOpenIcon className="size-4 text-blue-500" />
+                <FolderOpenIcon className="size-4.5 text-muted-foreground" strokeWidth={1.8} />
               ) : (
-                <FolderIcon className="size-4 text-blue-500" />
+                <FolderIcon className="size-4.5 text-muted-foreground" strokeWidth={1.8} />
               )}
             </FileTreeIcon>
             <FileTreeName>{name}</FileTreeName>
           </button>
         </div>
         <CollapsibleContent>
-          <div className="ml-4 border-l border-muted-foreground/50 pl-2">
+          <div className="pl-5">
             {children}
           </div>
         </CollapsibleContent>
@@ -225,8 +225,8 @@ export function FileTreeFile({
   return (
     <div
       className={cn(
-        "group flex cursor-pointer items-center gap-1 rounded px-2 py-1 transition-colors hover:bg-muted/50",
-        isSelected && "bg-muted",
+        "group flex h-9 cursor-pointer items-center gap-2 rounded-lg px-2 transition-colors hover:bg-accent",
+        isSelected && "bg-accent",
         className,
       )}
       onClick={handleClick}
