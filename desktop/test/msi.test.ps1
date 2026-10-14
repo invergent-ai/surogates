@@ -118,7 +118,7 @@ Check 'its custom action left Virtual Machine Platform on' ($install.Log -match 
 
 # The app, every file of its layout as it is there, in %ProgramFiles%\Surogate, which only administrators write.
 $theirs = @(Get-Files $Layout)
-$ours = if (Test-Path $Installed) { @(Get-Files $Installed) } else { @() }
+$ours = @(if (Test-Path $Installed) { Get-Files $Installed })
 $unlike = @(Get-Unlike $theirs $ours)
 Check 'every file of the layout is installed, and nothing else' ($theirs.Count -gt 0 -and $unlike.Count -eq 0) "$($unlike.Count): $(($unlike | Select-Object -First 5) -join '; ')"
 $differ = @($theirs | Where-Object { (Test-Path (Join-Path $Installed $_)) -and (Get-FileHash (Join-Path $Layout $_)).Hash -ne (Get-FileHash (Join-Path $Installed $_)).Hash })
@@ -184,14 +184,14 @@ $dataAcl = if (Test-Path $Data) { Get-Acl $Data } else { $null }
 Check '%ProgramData%\Surogate inherits nothing, and only administrators and SYSTEM write it' ($dataAcl -and $dataAcl.AreAccessRulesProtected -and @(Get-Writers $Data).Count -eq 0 -and @(Get-Writers $record).Count -eq 0) "$(if ($dataAcl) { $dataAcl.Access | Out-String } else { 'missing' })"
 $apply = Join-Path $Data 'apply'
 $applyAcl = if (Test-Path $apply) { Get-Acl $apply } else { $null }
-$others = if ($applyAcl) { @($applyAcl.Access | Where-Object { 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators' -notcontains $_.IdentityReference.Value }) } else { @('missing') }
+$others = @(if ($applyAcl) { $applyAcl.Access | Where-Object { 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators' -notcontains $_.IdentityReference.Value } } else { 'missing' })
 Check '%ProgramData%\Surogate\apply grants administrators and SYSTEM alone' ($applyAcl -and $applyAcl.AreAccessRulesProtected -and $others.Count -eq 0) ($others | Out-String)
 $product = @(Get-Product)
 Check 'Installed apps lists Surogate of this version, by Surogate' ($product.Count -eq 1 -and $product[0].DisplayVersion -eq $Version -and $product[0].Publisher -eq 'Surogate') "$($product | Format-List DisplayName, DisplayVersion, Publisher | Out-String)"
 
 # Started, as an interactive user's surogate-vm.exe starts it; the uninstall stops it, then removes everything.
-if ((Get-ServiceState) -ne 'missing') { Start-Service SurogateVM }
-Check 'the service starts' ((Get-ServiceState) -eq 'Running') (Get-ServiceState)
+$started = try { if ((Get-ServiceState) -ne 'missing') { Start-Service SurogateVM }; '' } catch { "$_" }
+Check 'the service starts' ((Get-ServiceState) -eq 'Running') "$(Get-ServiceState) $started"
 $remove = Msiexec 'remove' "/x `"$Msi`""
 Check 'it uninstalls, the service running, and asks for no restart' ($remove.Code -eq 0) "msiexec exited $($remove.Code)"
 Check 'its custom action does not run at the uninstall' ($remove.Log -notmatch "Surogate: Windows's Virtual Machine Platform")
