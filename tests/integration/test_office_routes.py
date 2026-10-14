@@ -275,7 +275,9 @@ async def test_a_document_over_the_computers_cap_is_refused(client, app, session
     response = await client.get(f"/v1/sessions/{device_chat.id}/workspace/editor",
                                 params={"path": "big.docx"}, headers=headers)
     assert response.status_code == 413
-    assert "50 MiB" in response.json()["detail"]
+    assert response.json()["detail"] == (
+        "The document exceeds 50 MB and cannot be displayed here. Open it from its folder on your computer instead."
+    )
 
 
 async def test_a_project_thread_on_the_computer_opens_the_real_file(client, app, session_factory, monkeypatch):

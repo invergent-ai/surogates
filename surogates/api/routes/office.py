@@ -84,7 +84,7 @@ async def get_workspace_editor(
         if isinstance(files, DeviceWorkspaceIO) and stat.size > MAX_READ_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"{path} is over 50 MiB, the most a document on a computer can be to open in the editor.",
+                detail="The document exceeds 50 MB and cannot be displayed here. Open it from its folder on your computer instead.",
             )
     location = location_of(target, path)
     document = await _open_document(request, location=location, path=path, session_id=session.id, user=(user_id, user_name))
