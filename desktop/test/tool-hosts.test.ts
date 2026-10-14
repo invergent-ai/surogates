@@ -2295,6 +2295,23 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(lies(folder)).toEqual(after);
   });
 
+  it("takes the folder from a chat's host that sits idle on it, without waiting out its idle time", { timeout: 90_000 }, async () => {
+    const folder = changed();
+    // The chat's host keeps the folder a minute after its last operation; the landing waits five seconds for it.
+    const executor = threads({ idleMs: 60_000, landWaitMs: 5_000 });
+    // The chat on the folder itself read it a moment ago: its host holds the folder, idle.
+    expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
+    // The landing has the folder within its wait, not after the chat's minute.
+    expect(await executor.land(step("revisions", { paths: [] }), signal())).toEqual({ ok: { revisions: [] } });
+    expect(await executor.land(step("forget", { saga: "s1", applied: [] }), signal())).toEqual({ ok: {} });
+    // The chat's next operation starts a host again once the landing is forgotten.
+    let resolved: Outcome = await executor.run(op("resolve", { path: "" }, CHAT), signal());
+    for (const deadline = Date.now() + 15_000; !("ok" in resolved) && Date.now() < deadline;) {
+      resolved = await executor.run(op("resolve", { path: "" }, CHAT), signal());
+    }
+    expect(resolved).toEqual({ ok: folder });
+  });
+
   it("leaves beside its name what a program holding the user's file open wrote into it after a landing replaced it, as the landing is forgotten, and tells it", { timeout: 90_000 }, async () => {
     const folder = changed();
     const executor = threads();
@@ -2556,9 +2573,12 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
   it("reads the folder for a thread where a landing's host is on it only once that host holds it and its helper has put back what was cut short: one still waiting for the folder is no word that it has", { timeout: 90_000 }, async () => {
     const { folder, before } = await killed();
     const { executor, told } = startedAgain({ idleMs: 30_000, landWaitMs: 3_000 });
-    // A chat holds the folder: the start's put-back waits in vain, and so does the landing that comes after.
+    // A chat holds the folder, a search of its still running: the start's put-back waits in vain, and so does the landing
+    // that comes after.
     const chat = spawned.length;
     expect(await executor.run(op("resolve", { path: "" }, CHAT), signal())).toEqual({ ok: folder });
+    const searching = executor.run(op("ripgrep", { key: folder, mode: "files", pattern: NEVER, glob: null, context: 0 }, CHAT), signal());
+    await until(() => sleeping() === 1);
     executor.recoverLeft();
     await until(() => told.length === 2, 15_000);
     const hosts = spawned.length;
@@ -2570,6 +2590,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     // Once the chat lets the folder go, the landing's host puts the file back, and the folder may be read.
     executor.retired(CHAT, { folder, ...identities.get(folder)! });
     await new Promise<void>((resolve) => spawned[chat]?.onExit(resolve));
+    expect(await searching).toEqual(HOST_STOPPED);
     expect(await executor.land(step("recover"), signal())).toEqual({ ok: putBack });
     expect(await executor.recoverBefore(folder, signal())).toBeNull();
     expect(lies(folder)).toEqual(before);
