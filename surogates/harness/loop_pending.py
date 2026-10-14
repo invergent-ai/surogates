@@ -80,14 +80,20 @@ _REVIVALS_BEFORE_A_MESSAGE = frozenset({"channel_message", "api", "program_step"
 
 
 def _nothing_to_answer(pending: list[Any]) -> bool:
-    """Whether every pending event is a revival whose message never came, or
-    the AI disclosure shown to its sender.
+    """Whether every pending event is a revival whose message never came, the
+    AI disclosure shown to its sender, or a message kept but refused for want
+    of a plan (``held``).
 
     Run on that, the model has no new words to answer and writes from its
-    instructions alone, which a channel delivers to the person verbatim.
+    instructions alone, which a channel delivers to the person verbatim.  A
+    held message is answered with the next message that is let through.
     """
     return bool(pending) and all(
         _event_type(event) == EventType.DISCLOSURE_PRESENTED.value
+        or (
+            _event_type(event) == EventType.USER_MESSAGE.value
+            and bool((getattr(event, "data", None) or {}).get("held"))
+        )
         or (
             _event_type(event) == EventType.SESSION_RESUME.value
             and (getattr(event, "data", None) or {}).get("source") in _REVIVALS_BEFORE_A_MESSAGE

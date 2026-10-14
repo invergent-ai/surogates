@@ -70,3 +70,10 @@ async def test_a_wake_with_nothing_to_answer_runs_no_model(monkeypatch):
         c for c in store.emit_event.call_args_list
         if c.args and c.args[1] in (EventType.HARNESS_WAKE, EventType.LLM_REQUEST)
     ]
+
+
+def test_a_message_refused_for_want_of_a_plan_is_nothing_to_answer_alone():
+    held = _event(13, EventType.USER_MESSAGE, content="Bună", held="subscription_required")
+    assert _nothing_to_answer([*REVIVED, held])
+    # Let through later, the next message brings the held one along.
+    assert not _nothing_to_answer([held, _event(14, EventType.USER_MESSAGE, content="Am plătit")])
