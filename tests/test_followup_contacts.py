@@ -500,3 +500,55 @@ async def test_a_missed_streak_is_the_persons_whoever_the_copies_went_to(sf, cli
     marked = {r.escalation_state for r in await _all(sf, ProgramInvitationRow) if r.created_at > now - timedelta(hours=16)}
     assert marked == {"raised"}
     assert await alert_missed_checkins(sf, now=now) == 0
+
+
+# --- escalations from chat -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_member_takes_and_resolves_an_escalation_and_the_others_are_told(sf, clinic):
+    doctor, doctor_session, nurse = clinic
+    ion, session = await _user(sf, "Ion Popescu", "40711111111")
+    await store.upsert_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=ion, protocol="post-op",
+        start_date=date.today(), phase=None, enrolled_by="agent", patient_name="Ion Popescu",
+    )
+    await followup.handle_escalate({"reason": "durere în piept", "severity": "red"},
+                                   **_kw(sf, session))
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT,
+                                texts={"escalation_taken": "{member} preia cazul lui {name}"})
+
+    # Without a name: the one in the latest alert the member received.
+    result = await team.handle_team_escalation({"action": "claim"}, **_kw(sf, doctor_session))
+    assert "taken by you" in result and "1 colleague" in result
+    [escalation] = await _all(sf, EscalationRow)
+    assert escalation.owner == "Dr. Ionescu" and escalation.resolved_at is None
+    told = [o for o in await _all(sf, OutreachMessageRow) if o.kind == "notice"]
+    assert [(o.user_id, o.text) for o in told] == [(nurse, "Dr. Ionescu preia cazul lui Ion Popescu")]
+
+    result = await team.handle_team_escalation(
+        {"action": "resolve", "person": "Popescu"}, **_kw(sf, doctor_session),
+    )
+    assert "resolved" in result
+    [escalation] = await _all(sf, EscalationRow)
+    assert escalation.resolved_at is not None
+    again = await team.handle_team_escalation(
+        {"action": "resolve", "person": "Popescu"}, **_kw(sf, doctor_session),
+    )
+    assert "no open escalation" in again
+
+
+@pytest.mark.asyncio
+async def test_handling_escalations_is_a_permission(sf, clinic):
+    _doctor, _, nurse = clinic
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    assert "handle_escalations" in store.ABILITIES
+    assert not store.can(settings, nurse, "handle_escalations")
+    nurse_session = uuid.uuid4()
+    async with sf() as db:
+        db.add(SessionRow(id=nurse_session, org_id=ORG, agent_id=AGENT, channel="whatsapp",
+                          user_id=nurse, config={"whatsapp_channel_id": "40700000098",
+                                                 "channel_identifier": "pn1"}))
+        await db.commit()
+    result = await team.handle_team_escalation({"action": "claim"}, **_kw(sf, nurse_session))
+    assert result.startswith("Refused") and "take or resolve escalations" in result

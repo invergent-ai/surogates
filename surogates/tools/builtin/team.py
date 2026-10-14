@@ -31,6 +31,7 @@ from surogates.channels import person_link
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.models import (
     AgentUser,
+    EscalationRow,
     ChannelContactRow,
     Event,
     OutreachMessageRow,
@@ -67,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 TEAM_TOOL_NAMES: frozenset[str] = frozenset({
     "team_overview", "team_message_person", "team_update_person",
-    "team_enroll_person",
+    "team_enroll_person", "team_escalation",
 })
 
 NOT_TEAM = (
@@ -509,6 +510,7 @@ _ABILITY_WORDS = {
     "edit_details": "change a person's details",
     "see_full_phones": "see full phone numbers",
     "manage_team": "manage the team",
+    "handle_escalations": "take or resolve escalations",
 }
 
 
@@ -1450,6 +1452,142 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     return result + " " + told(queued, why_not)
 
 
+TEAM_ESCALATION_SCHEMA = ToolSchema(
+    name="team_escalation",
+    description=(
+        "Team only. Take an escalation (\"I'll handle Ion\") or mark it resolved "
+        "(\"done\", \"resolved\") on a team member's word: the same record as the "
+        "Escalations queue in Studio. Name the person it is about; without a "
+        "name it is the one in the latest alert this team member received. The "
+        "rest of the team who got that alert is told who took or resolved it."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["claim", "resolve"]},
+            "person": {
+                "type": "string",
+                "description": "The person's name, phone fragment or handle. Omit for the latest alert.",
+            },
+        },
+        "required": ["action"],
+    },
+)
+
+#: The team's notice when a colleague takes or resolves an escalation;
+#: ``followup_settings.texts`` words them in the business's language.
+ESCALATION_TEXTS = {
+    "escalation_taken": "{member} took {name}'s case: {reason}",
+    "escalation_resolved": "{member} resolved {name}'s case: {reason}",
+}
+
+
+async def _latest_alerted(sf: Any, ctx: Any) -> uuid.UUID | None:
+    """Who the latest alert this team member received was about."""
+    async with sf() as db:
+        return (
+            await db.execute(
+                sa.select(OutreachMessageRow.subject_user_id)
+                .where(OutreachMessageRow.org_id == ctx.org_id)
+                .where(OutreachMessageRow.agent_id == ctx.agent_id)
+                .where(OutreachMessageRow.user_id == ctx.user_id)
+                .where(OutreachMessageRow.kind == "alert")
+                .where(OutreachMessageRow.subject_user_id.isnot(None))
+                .order_by(OutreachMessageRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+
+async def _alerted_with(sf: Any, escalation: Any) -> set[uuid.UUID]:
+    """The team members an escalation's alert went to."""
+    keys = (f"escalation:%:{escalation.id.hex}:%", f"missed:{escalation.id}:%")
+    async with sf() as db:
+        found = (
+            await db.execute(
+                sa.select(OutreachMessageRow.user_id)
+                .where(OutreachMessageRow.org_id == escalation.org_id)
+                .where(OutreachMessageRow.kind == "alert")
+                .where(sa.or_(*(OutreachMessageRow.dedupe_key.like(k) for k in keys)))
+            )
+        ).scalars().all()
+    return set(found) - {followup_store.NO_PERSON}
+
+
+async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
+    sf = kwargs["session_factory"]
+    ctx, settings = await load_context(kwargs)
+    if ctx is None or not followup_store.is_team_member(settings, ctx.user_id):
+        return NOT_TEAM
+    refused = _not_allowed(settings, ctx, "handle_escalations")
+    if refused:
+        return refused
+    action = str(arguments.get("action") or "").strip()
+    if action not in ("claim", "resolve"):
+        return "Nothing changed: action is claim or resolve."
+    fragment = str(arguments.get("person") or "").strip()
+    if fragment:
+        person = await _one_person(sf, ctx, settings, fragment)
+        if isinstance(person, str):
+            return f"Nothing changed: {person}"
+        subject, label = person.user_id, person.label
+    else:
+        subject = await _latest_alerted(sf, ctx)
+        if subject is None:
+            return "Nothing changed: say whose case it is; no alert reached this team member yet."
+        label = await followup_store.person_name(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=subject,
+        ) or "?"
+    async with sf() as db:
+        escalation = (
+            await db.execute(
+                sa.select(EscalationRow)
+                .where(EscalationRow.org_id == ctx.org_id)
+                .where(EscalationRow.agent_id == ctx.agent_id)
+                .where(EscalationRow.user_id == subject)
+                .where(EscalationRow.resolved_at.is_(None))
+                .order_by(EscalationRow.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if escalation is None:
+        return f"Nothing changed: {label} has no open escalation."
+    member = _member(ctx)
+    if action == "claim":
+        await followup_store.claim_escalation(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+            escalation_id=escalation.id, owner=member,
+        )
+    else:
+        if not escalation.owner:
+            await followup_store.claim_escalation(
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+                escalation_id=escalation.id, owner=member,
+            )
+        await followup_store.resolve_escalation(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=escalation.id,
+        )
+    key = "escalation_taken" if action == "claim" else "escalation_resolved"
+    text = followup_store.render_text(
+        ((settings.texts or {}) if settings else {}).get(key), ESCALATION_TEXTS[key],
+        member=member, name=label, reason=escalation.reason[:300],
+    )
+    told = 0
+    for colleague in sorted(await _alerted_with(sf, escalation) - {ctx.user_id}, key=str):
+        queued, _ = await followup_store.notify_team(
+            sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind="notice", text=text,
+            created_by=f"team:{ctx.user_id}", subject_user_id=subject,
+            only_user_id=colleague, dedupe_prefix=f"{key}:{escalation.id}",
+            fallback_senders={ctx.channel: ctx.sender},
+        )
+        told += queued
+    done = "taken by you" if action == "claim" else "resolved"
+    return (
+        f"{label}'s escalation is {done} (\u201c{escalation.reason[:200]}\u201d). "
+        + (f"{told} colleague(s) who got the alert were told." if told else "Nobody else got that alert.")
+    )
+
+
 def register(registry: Any) -> None:
     for name, schema, handler in (
         ("team_overview", TEAM_OVERVIEW_SCHEMA, handle_team_overview),
@@ -1457,6 +1595,7 @@ def register(registry: Any) -> None:
          handle_team_message_person),
         ("team_update_person", TEAM_UPDATE_PERSON_SCHEMA,
          handle_team_update_person),
+        ("team_escalation", TEAM_ESCALATION_SCHEMA, handle_team_escalation),
         ("team_enroll_person", TEAM_ENROLL_PERSON_SCHEMA,
          handle_team_enroll_person),
     ):

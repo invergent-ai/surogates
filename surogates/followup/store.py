@@ -108,7 +108,7 @@ RECEIVE_KINDS = (
 )
 ABILITIES = (
     "see_people", "message_person", "enroll", "pause_resume_end", "edit_details",
-    "see_full_phones", "manage_team",
+    "see_full_phones", "manage_team", "handle_escalations",
 )
 #: Entries saved before permissions were plain lists named a preset; each
 #: still reads as the lists it stood for.
