@@ -10,6 +10,7 @@ withheld from every other session's tool list.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -590,20 +591,25 @@ async def _memory(kwargs: dict, sf: Any, ctx: Any, user_id: uuid.UUID) -> list[s
         if boundary and boundary != "public" and not (session.config or {}).get("multi_party"):
             boundaries[boundary] = None
     boundaries[None] = None
+
+    async def read(key: str) -> Any:
+        try:
+            return await read_user_memory(backend, bucket=bucket, key=key)
+        except Exception:
+            logger.warning("[team] memory read failed for %s", key, exc_info=True)
+            return None
+
+    keys = [
+        memory_object_key(
+            storage_key_prefix=tenant.asset_root, user_id=str(user_id),
+            boundary=boundary, target=target,
+        )
+        for boundary in boundaries for target in ("user", "memory")
+    ]
     entries: list[str] = []
-    for boundary in boundaries:
-        for target in ("user", "memory"):
-            key = memory_object_key(
-                storage_key_prefix=tenant.asset_root, user_id=str(user_id),
-                boundary=boundary, target=target,
-            )
-            try:
-                found = await read_user_memory(backend, bucket=bucket, key=key)
-            except Exception:
-                logger.warning("[team] memory read failed for %s", key, exc_info=True)
-                continue
-            if found:
-                entries.extend(e.strip() for e in found[0].split("\n---\n") if e.strip())
+    for found in await asyncio.gather(*(read(key) for key in keys)):
+        if found:
+            entries.extend(e.strip() for e in found[0].split("\n---\n") if e.strip())
     return list(dict.fromkeys(entries))
 
 
@@ -646,23 +652,26 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         return "Nobody is enrolled with this business's follow-up yet."
 
     ids = [p.user_id for p in people]
-    configs = await followup_store.active_program_configs(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    sender = _sender(ctx, settings)
+
+    async def no_one() -> dict:
+        return {}
+
+    configs, last_in, invitations, alerts, undelivered = await asyncio.gather(
+        followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id),
+        followup_store.last_inbound_by_user(
+            sf, org_id=ctx.org_id, platform="whatsapp", channel_identifier=sender,
+            platform_user_ids=[p.phone for p in people if p.phone],
+        ) if sender else no_one(),
+        _invitations(sf, ctx.org_id, ctx.agent_id, ids, now),
+        _alerts(sf, ctx.org_id, ctx.agent_id, ids, now),
+        _undelivered(sf, ctx.org_id, ctx.agent_id, ids, now),
     )
     zones = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
-    sender = _sender(ctx, settings)
-    last_in = await followup_store.last_inbound_by_user(
-        sf, org_id=ctx.org_id, platform="whatsapp", channel_identifier=sender or "",
-        platform_user_ids=[p.phone for p in people if p.phone],
-    ) if sender else {}
-    invitations = await _invitations(sf, ctx.org_id, ctx.agent_id, ids, now)
-    alerts = await _alerts(sf, ctx.org_id, ctx.agent_id, ids, now)
-    undelivered = await _undelivered(sf, ctx.org_id, ctx.agent_id, ids, now)
 
     new, changed, silent = [], [], []
-    blocks: list[str] = []
     for person in people:
         wrote = last_in.get(person.phone)
         active = [r for r in person.rows if r.status == "active"]
@@ -678,6 +687,8 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         if quiet_since is not None and now - as_utc(quiet_since) >= SILENT_AFTER:
             silent.append(f"{person.label} (wrote {_ago(wrote, now)})")
 
+    async def block(person: _Person) -> str:
+        wrote = last_in.get(person.phone)
         head = person.label
         if person.phone:
             head += f" · {masked_phone(person.phone)}"
@@ -716,7 +727,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             lines.extend(_memory_lines(
                 await _memory(kwargs, sf, ctx, person.user_id)
             ))
-        blocks.append("\n".join(lines))
+        return "\n".join(lines)
 
     header = [
         (
@@ -734,14 +745,16 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     ]
     out = "\n".join(header)
     shown = 0
-    for block in blocks[:MAX_PEOPLE]:
-        if len(out) + len(block) > MAX_CHARS:
+    # Only as many people as the reply can hold are written out.
+    for person in people[:MAX_PEOPLE]:
+        text = await block(person)
+        if len(out) + len(text) > MAX_CHARS:
             break
-        out += "\n\n" + block
+        out += "\n\n" + text
         shown += 1
-    if shown < len(blocks):
+    if shown < len(people):
         out += (
-            f"\n\n… {len(blocks) - shown} more not shown; ask about one person "
+            f"\n\n… {len(people) - shown} more not shown; ask about one person "
             "with the person argument."
         )
     if arguments.get("include_phone") is True:
