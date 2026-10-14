@@ -4,7 +4,6 @@ in one browser (:mod:`surogates.channels.web_push`)."""
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -59,11 +58,13 @@ async def push_subscribe(
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     _rate: None = Depends(rate_limit_dep),
 ) -> Response:
-    from surogates.channels.web_push import subscribe
+    from surogates.channels.web_push import endpoint_problem, keys_problem, subscribe
 
-    url = urlsplit(body.endpoint)
-    if url.scheme != "https" and url.hostname not in ("localhost", "127.0.0.1"):  # a local stub may be plain http
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A push endpoint is an https URL.")
+    problem = await endpoint_problem(
+        body.endpoint, request.app.state.settings.vapid.extra_push_hosts,
+    ) or keys_problem(body.keys.p256dh, body.keys.auth)
+    if problem:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
     await subscribe(request.app.state.session_factory, org_id=tenant.org_id, agent_id=agent_runtime.agent_id,
                     user_id=_user(tenant), endpoint=body.endpoint, p256dh=body.keys.p256dh, auth=body.keys.auth)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

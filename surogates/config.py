@@ -839,6 +839,9 @@ class VapidSettings(BaseSettings):
     public_key: str = ""  # base64url uncompressed P-256 point, also given to browsers
     private_key: str = ""  # base64url raw private scalar
     subject: str = "mailto:support@surogate.ai"  # who push services contact about our pushes
+    # Hosts besides the browsers' push services a subscription may point at,
+    # comma-separated: only for a local stub on a laptop, never in production.
+    extra_push_hosts: str = ""
 
 
 class OfficeSettings(BaseSettings):

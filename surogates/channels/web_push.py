@@ -90,8 +90,69 @@ def vapid_header(endpoint: str, public_key: str, private_key: str, subject: str)
     return f"vapid t={token}, k={public_key}"
 
 
+#: The browsers' push services (Chrome/Edge via FCM, Firefox, Safari,
+#: Windows).  A subscription pointing anywhere else is refused: the endpoint
+#: comes from a browser we do not control, and the runtime would POST to it
+#: from inside the cluster.
+PUSH_SERVICE_HOSTS = (
+    "fcm.googleapis.com", "push.services.mozilla.com", "push.apple.com", "notify.windows.com",
+)
+
+
+def _extra_hosts(extra: str | None) -> set[str]:
+    return {h.strip().lower() for h in (extra or "").split(",") if h.strip()}
+
+
+def allowed_host(endpoint: str, extra: str | None = None) -> bool:
+    """Whether *endpoint* is on a known push service (or a configured stub)."""
+    host = (urlsplit(endpoint).hostname or "").lower()
+    if host in _extra_hosts(extra):
+        return True
+    return urlsplit(endpoint).scheme == "https" and any(
+        host == known or host.endswith("." + known) for known in PUSH_SERVICE_HOSTS
+    )
+
+
+async def endpoint_problem(endpoint: str, extra: str | None = None) -> str | None:
+    """Why a subscription's endpoint is refused, or ``None``: a known push
+    service over https whose name resolves only to public addresses."""
+    import asyncio
+    import ipaddress
+    import socket
+
+    if not allowed_host(endpoint, extra):
+        return "A push endpoint is an https URL of a browser push service."
+    host = urlsplit(endpoint).hostname or ""
+    if host.lower() in _extra_hosts(extra):
+        return None
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        return "The push endpoint's host does not resolve."
+    for *_rest, sockaddr in infos:
+        address = ipaddress.ip_address(sockaddr[0])
+        if not address.is_global:
+            return "The push endpoint resolves to a private address."
+    return None
+
+
+def keys_problem(p256dh: str, auth: str) -> str | None:
+    """Why a subscription's keys are refused, or ``None``: a P-256 point and a
+    16-byte secret, base64url."""
+    try:
+        point, secret = unb64u(p256dh), unb64u(auth)
+    except (ValueError, TypeError):
+        return "The push keys are not base64url."
+    if len(point) != 65 or point[0] != 4 or len(secret) != 16:
+        return "The push keys are not a browser subscription's."
+    return None
+
+
 async def send(http: Any, settings: Any, sub: Any, payload: dict) -> int:
-    """Push *payload* to one subscription; returns the push service's status."""
+    """Push *payload* to one subscription; returns the push service's status.
+    A subscription not on a push service is answered 410, so it is dropped."""
+    if not allowed_host(sub.endpoint, getattr(settings, "extra_push_hosts", "")):
+        return 410
     body = encrypt(json.dumps(payload, ensure_ascii=False).encode(), unb64u(sub.p256dh), unb64u(sub.auth))
     resp = await http.post(sub.endpoint, content=body, timeout=10.0, headers={
         "Authorization": vapid_header(sub.endpoint, settings.public_key, settings.private_key, settings.subject),

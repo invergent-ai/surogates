@@ -59,7 +59,7 @@ async def test_a_person_is_pushed_on_each_browser_and_a_gone_one_is_forgotten(sf
     user, ua = uuid4(), ec.generate_private_key(ec.SECP256R1())
     ua_public = b64u(web_push._point(ua.public_key()))
     async with sf() as db:
-        for host in ("push.one", "push.gone"):
+        for host in ("fcm.googleapis.com", "updates.push.services.mozilla.com"):
             db.add(WebPushSubscription(org_id=uuid4(), agent_id="agent-1", user_id=user,
                                        endpoint=f"https://{host}/x", p256dh=ua_public, auth=b64u(b"0" * 16)))
         await db.commit()
@@ -75,7 +75,40 @@ async def test_a_person_is_pushed_on_each_browser_and_a_gone_one_is_forgotten(sf
     assert {h["Content-Encoding"] for _, h in http.sent} == {"aes128gcm"}
     async with sf() as db:
         left = (await db.execute(sa.select(WebPushSubscription.endpoint))).scalars().all()
-    assert left == ["https://push.one/x"]
+    assert left == ["https://fcm.googleapis.com/x"]
     # no keys: nothing is sent
     assert await web_push.push_to_person(sf, Http([]), SimpleNamespace(public_key="", private_key="",
                                                                        subject=""), session, "x") == 0
+
+
+async def test_a_subscription_can_only_point_at_a_browser_push_service(monkeypatch):
+    import asyncio
+    import socket
+
+    async def resolve(self, host, port, **kw):
+        address = {"fcm.googleapis.com": "142.250.1.1", "evil.push.apple.com": "10.0.0.5"}[host]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", resolve)
+    assert await web_push.endpoint_problem("https://fcm.googleapis.com/fcm/send/x") is None
+    for bad in ("https://metadata.google.internal/x", "http://fcm.googleapis.com/x",
+                "https://fcm.googleapis.com.evil.io/x", "https://10.0.0.1/x"):
+        assert await web_push.endpoint_problem(bad), bad
+    assert "private" in await web_push.endpoint_problem("https://evil.push.apple.com/x")
+    # A laptop's stub only when configured, and never resolved.
+    assert await web_push.endpoint_problem("http://127.0.0.1:8099/push", "127.0.0.1") is None
+
+
+def test_keys_must_be_a_browser_subscriptions():
+    ua = ec.generate_private_key(ec.SECP256R1())
+    point = b64u(web_push._point(ua.public_key()))
+    assert web_push.keys_problem(point, b64u(b"0" * 16)) is None
+    assert web_push.keys_problem("not base64!!", b64u(b"0" * 16))
+    assert web_push.keys_problem(point, b64u(b"0" * 8))
+
+
+async def test_a_stored_endpoint_off_the_push_services_is_never_posted_to():
+    http = Http([])
+    sub = SimpleNamespace(endpoint="https://169.254.169.254/latest", p256dh="", auth="")
+    assert await web_push.send(http, SimpleNamespace(), sub, {}) == 410
+    assert http.sent == []

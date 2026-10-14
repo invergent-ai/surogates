@@ -10,6 +10,8 @@ with ``journeys:write``) it reports the message delivered and read, and with
 Push: ``GET /push/subscription`` returns a subscription (an endpoint on this server
 and freshly made browser keys) to POST to ``/v1/push/subscriptions`` as the
 signed-in person; each push it then receives is decrypted and printed.
+The runtime only pushes to browser push services, so start it with
+``SUROGATES_VAPID_EXTRA_PUSH_HOSTS=127.0.0.1`` to let it reach this stub.
 
     .venv/bin/python scripts/fake_receivers.py --secret s3cret \\
         --api-base http://127.0.0.1:8888 --api-key surg_sk_… --reply "Da, am luat pastila"
