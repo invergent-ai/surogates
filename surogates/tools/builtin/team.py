@@ -1564,8 +1564,10 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
         label = await followup_store.person_name(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=subject,
         ) or "?"
+    # Every open case of theirs: one red and two yellows raised in the same
+    # hour are one situation, and the ones left behind came back in reports.
     async with sf() as db:
-        escalation = (
+        escalations = (
             await db.execute(
                 sa.select(EscalationRow)
                 .where(EscalationRow.org_id == ctx.org_id)
@@ -1573,34 +1575,44 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
                 .where(EscalationRow.user_id == subject)
                 .where(EscalationRow.resolved_at.is_(None))
                 .order_by(EscalationRow.created_at.desc())
-                .limit(1)
             )
-        ).scalar_one_or_none()
-    if escalation is None:
+        ).scalars().all()
+    if not escalations:
         return f"Nothing changed: {label} has no open escalation."
+    escalation = escalations[0]
     member = _member(ctx)
-    # A case resolved before anyone took it is the resolver's.
-    if action == "claim" or not escalation.owner:
-        await followup_store.claim_escalation(
-            sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
-            escalation_id=escalation.id, owner=member,
-        )
-    if action == "resolve":
-        await followup_store.resolve_escalation(
-            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=escalation.id,
-        )
+    alerted: set[uuid.UUID] = set()
+    for row in escalations:
+        # The latest is taken whoever had it; the rest only when nobody had,
+        # and a case resolved before anyone took it is the resolver's.
+        if not row.owner or (action == "claim" and row is escalation):
+            await followup_store.claim_escalation(
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+                escalation_id=row.id, owner=member,
+            )
+        if action == "resolve":
+            await followup_store.resolve_escalation(
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=row.id,
+            )
+        alerted |= await _alerted_with(sf, row)
     key = "escalation_taken" if action == "claim" else "escalation_resolved"
     text = followup_store.wording(settings, key, member=member, name=label, reason=escalation.reason[:300])
     colleagues_told = 0
-    for colleague in sorted(await _alerted_with(sf, escalation) - {ctx.user_id}, key=str):
+    for colleague in sorted(alerted - {ctx.user_id}, key=str):
         queued, _ = await _tell_team(
             sf, ctx, settings, kind="notice", text=text, subject_user_id=subject,
             only_user_id=colleague, dedupe_prefix=f"{key}:{escalation.id}",
         )
         colleagues_told += queued
     done = "taken by you" if action == "claim" else "resolved"
+    count = len(escalations)
     return (
-        f"{label}'s escalation is {done} (\u201c{escalation.reason[:200]}\u201d). "
+        (
+            f"{label}'s escalation is {done} (\u201c{escalation.reason[:200]}\u201d). "
+            if count == 1 else
+            f"{label}'s {count} open escalations are {done}; the latest: "
+            f"\u201c{escalation.reason[:200]}\u201d. "
+        )
         + (
             f"{colleagues_told} colleague(s) who got the alert were told." if colleagues_told
             else "Nobody else got that alert."

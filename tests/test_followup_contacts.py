@@ -815,3 +815,38 @@ async def test_an_escalation_nobody_receives_still_reaches_the_team(sf, clinic):
     assert {r.user_id for r in alerts} == {doctor, nurse}
     [escalation] = await _all(sf, EscalationRow)
     assert escalation.user_id == stranger and escalation.state == "raised"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["claim", "resolve"])
+async def test_a_member_handles_every_open_escalation_of_the_person_at_once(sf, clinic, action):
+    doctor, doctor_session, nurse = clinic
+    ion, session = await _user(sf, "Ion Popescu", "40711111111")
+    for reason, severity in (("Fell", "red"), ("Dizzy", "yellow"), ("Dizzy again", "yellow")):
+        await followup.handle_escalate({"reason": reason, "severity": severity}, **_kw(sf, session))
+    await followup_store_mark_owner(sf, "Someone else")
+
+    result = await team.handle_team_escalation(
+        {"action": action, "person": "Popescu"}, **_kw(sf, doctor_session),
+    )
+    assert "3 open escalations" in result
+    rows = await _all(sf, EscalationRow)
+    if action == "resolve":
+        assert all(r.resolved_at is not None for r in rows)
+    else:
+        latest = max(rows, key=lambda r: r.created_at)
+        assert latest.owner == "Dr. Ionescu"
+        # An earlier case someone already took stays theirs.
+        assert sorted(r.owner for r in rows) == ["Dr. Ionescu", "Dr. Ionescu", "Someone else"]
+    told = [o for o in await _all(sf, OutreachMessageRow) if o.kind == "notice"]
+    assert [o.user_id for o in told] == [nurse]
+
+
+async def followup_store_mark_owner(sf, owner):
+    """Raised a minute apart, the oldest already taken by *owner*."""
+    ages = {"Fell": 3, "Dizzy": 2, "Dizzy again": 1}
+    async with sf() as db:
+        for row in (await db.execute(sa.select(EscalationRow))).scalars().all():
+            row.created_at = datetime.now(timezone.utc) - timedelta(minutes=ages[row.reason])
+            row.owner = owner if row.reason == "Fell" else None
+        await db.commit()
