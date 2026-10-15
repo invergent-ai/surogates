@@ -18,6 +18,15 @@ const STYLED = `<section data-transition="fade" style="background:linear-gradien
   <aside>Styled.</aside>
 </section>`;
 
+// A slide that fades in, and the HTML that replaces it: no transition; a card whose blurred shadow makes a group and
+// which rises out; a table.
+const FADING = `<section data-transition="fade" style="background:#ffffff"><h2 style="font-size:64px">Fading</h2></section>`;
+const LATER = `<section style="background:#ffffff"><h2 style="font-size:64px">Later</h2></section>`;
+const REPLACEMENT = `<section style="background:#ffffff;font-family:Arial;padding:128px">
+  <table style="width:800px;font-size:32px"><tr><td>North</td><td>120</td></tr></table>
+  <div data-build-out="rise" style="position:absolute;left:1200px;top:600px;width:400px;height:200px;background:#2f5597;box-shadow:0 8px 24px rgba(0,0,0,0.25)"></div>
+</section>`;
+
 describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
   let fixture: Fixture;
   let pool: PagePool;
@@ -71,5 +80,41 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
       expect(state.effects.map((e: Any) => e[1])).toEqual(["onclick", "afterprevious", "onclick"]);
       expect(state.transition).toBe("effectFadeSmoothly");
     });
+  });
+
+  it("replaces a slide that is not the current one: its group lands on it, its exit rises out the top, its old transition goes", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pptx");
+    // Two slides added: the last one is current.
+    await office.edit(agent, [{ op: "slides", slides: [{ html: FADING }, { html: LATER }] }]);
+    const fading = (await office.read(agent, { view: "outline" }) as Any).slides[2];
+    const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ id: fading.id, hash: fading.hash, html: REPLACEMENT }] }]);
+    expect(result).toMatchObject({ applied: true, flushed: true });
+    // Editor internals: the current slide, a group's children and a fly-out's direction (its preset subtype), which the
+    // builder reads nothing of.
+    const read = `function () {
+      var all = Api.GetPresentation().GetAllSlides(), s = all.filter(function (x) { return String(x.Slide.Get_Id()) === scope.id; })[0];
+      if (!s) return null;
+      var groups = s.GetAllDrawings().filter(function (x) { return x.GetClassType() === "group"; });
+      return JSON.stringify({
+        current: Api.GetPresentation().Presentation.CurPage, index: s.GetSlideIndex(),
+        kinds: s.GetAllDrawings().map(function (x) { return x.GetClassType(); }),
+        group: groups.map(function (g) { return g.Drawing.spTree.length; }),
+        effects: s.GetTimeLine().GetAllEffects().map(function (e) { return [e.GetEffectType(), e.Effect.cTn.presetSubtype]; }),
+        transition: s.GetSlideShowTransition().GetEntryEffect(),
+        others: all.filter(function (x) { return x !== s; }).map(function (x) { return x.GetAllDrawings().filter(function (d) { return d.GetClassType() === "group"; }).length; })
+      });
+    }`;
+    for (const page of [agent, user]) {
+      await eventually(async () => {
+        const state = JSON.parse(((await (await pool.get(page)).command(read, { id: fading.id })).value as string | null) ?? "null");
+        expect(state).not.toBeNull();
+        expect(state.kinds.sort()).toEqual(["group", "table"]);
+        expect(state.group).toEqual([2]);
+        expect(state.others).toEqual([0, 0, 0]);
+        expect(state.current).not.toBe(state.index);
+        expect(state.effects).toEqual([["exitFlyOut", 1]]);
+        expect(state.transition).toBe("effectNone");
+      });
+    }
   });
 });

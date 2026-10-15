@@ -1,3 +1,4 @@
+import type { Page } from "playwright-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { EditorPage } from "../src/connector.js";
 import { Measurer, type Canvas } from "../src/slides/measure.js";
@@ -14,9 +15,12 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
   let close: () => Promise<void>;
   let measurer: Measurer;
 
+  let page: Page;
+
   beforeAll(async () => {
     const opened = await measuringPage();
     close = opened.close;
+    page = opened.page;
     measurer = new Measurer(async () => opened.page, systemFonts);
   });
   afterAll(async () => {
@@ -146,6 +150,38 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
     ]) {
       const page = `<section ${section ?? 'style="background:#fff"'}>${html}</section>`;
       await expect(measurer.measure(page, WIDE, editor), page).rejects.toThrow(said!);
+    }
+  });
+
+  it("draws the icons of an element drawn whole into its picture", async () => {
+    const [card] = await one(`<div style="${box};background:#14285a;opacity:0.9;padding:24px"><x-icon name="Star" style="width:96px;height:96px;color:#ffffff"></x-icon></div>`);
+    expect(card).toMatchObject({ kind: "picture", w: 400 * E });
+    // Light pixels where the icon is (24 to 120 px into the card, at device scale 2): the card alone is flat navy.
+    const light = await page.evaluate(async (src: string) => {
+      const img = new Image();
+      img.src = src;
+      await img.decode();
+      const canvas = document.createElement("canvas");
+      [canvas.width, canvas.height] = [img.width, img.height];
+      const context = canvas.getContext("2d")!;
+      context.drawImage(img, 0, 0);
+      const data = context.getImageData(48, 48, 192, 192).data;
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i]! > 128) n++;
+      return n;
+    }, card.src);
+    expect(light).toBeGreaterThan(100);
+  });
+
+  it("refuses what an element drawn whole, or one moving as a group, would lose", async () => {
+    for (const [html, said, section] of [
+      [`<div style="${box};background:#eeeeee;transform:rotate(10deg)"><x-connector></x-connector></div>`, "pin it beside the box"],
+      [`<div id="results" style="position:absolute;left:100px;top:100px;width:1200px"><h2 style="font-size:64px">Results</h2><table style="font-size:32px"><tr><td>A</td><td>1</td></tr></table></div>`, "give the table its own motion"],
+      [`<div id="hero" style="${box};background:#000000"><div data-build-in="pop" style="position:absolute;left:10px;top:10px;width:50px;height:50px;background:#ffffff"></div></div>`, "builds go on the section's pinned children"],
+      [`<div data-build-in="fade" style="${box};background:#000000"><div id="dot" style="position:absolute;left:10px;top:10px;width:50px;height:50px;background:#ffffff"></div></div>`, "magic-move ids go on the section's pinned children", `data-transition="magic" style="background:#fff"`],
+    ]) {
+      const html2 = `<section ${section ?? 'style="background:#fff"'}>${html}</section>`;
+      await expect(measurer.measure(html2, WIDE, editor), html2).rejects.toThrow(said!);
     }
   });
 

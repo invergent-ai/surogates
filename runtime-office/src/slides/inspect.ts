@@ -753,6 +753,9 @@ export function inspect(args: InspectArgs): Inspected {
     const own = (el: Element): ShapeSpec[] => {
       const cs = getComputedStyle(el), outer = box(el), t = transformOf(el);
       if (drawnWhole(el, t)) {
+        // Nothing inside the picture is native: a connector (which this page does not paint) or a build would be lost.
+        const lost = Array.from(el.querySelectorAll("x-connector, [data-build-in], [data-build-out]")).find((d) => !inside(d));
+        if (lost) fail(`${describe(lost)} is inside ${describe(el)}, which goes in as one picture (a filter, a blend mode, or opacity or a turn over its children): pin it beside the box.`);
         whole.add(el);
         if (outer.w < 1 || outer.h < 1) return [];
         const under = cs.mixBlendMode !== "normal" || cs.backdropFilter !== "none";
@@ -807,10 +810,18 @@ export function inspect(args: InspectArgs): Inspected {
       const all = [...behind, ...shapes.map((s) => (s.kind === "shape" || s.kind === "picture" ? faded(s) : s))];
       return all.length > 1 ? [{ kind: "group", ...region(outer), rot: 0, children: all }] : all;
     };
-    // A pinned element's builds and magic-move name go on everything it draws: one drawing, or a group of them.
+    const tabled = (list: ShapeSpec[]): boolean => list.some((s) => s.kind === "table" || (s.kind === "group" && tabled(s.children)));
+    // A pinned element's builds and magic-move name go on everything it draws: one drawing, or a group of them. What it
+    // groups moves with it, so its own build or magic-move name would be lost; and the editor groups no table.
     const moving = (el: Element, shapes: ShapeSpec[]): ShapeSpec[] => {
       const m = motion(el);
       if ((!m.magic && !m.build) || !shapes.length) return shapes;
+      for (const d of Array.from(el.querySelectorAll("[data-build-in], [data-build-out], [id]"))) {
+        if (inside(d) || !pinned(d)) continue;
+        if (d.hasAttribute("data-build-in") || d.hasAttribute("data-build-out")) fail(`${describe(d)} has a build inside ${describe(el)}, which moves as one drawing: builds go on the section's pinned children.`);
+        if (d.id && section.getAttribute("data-transition") === "magic") fail(`${describe(d)} has an id inside ${describe(el)}, which moves as one drawing: magic-move ids go on the section's pinned children.`);
+      }
+      if (shapes.length > 1 && tabled(shapes)) fail(`${describe(el)} moves as one group (it has a build or an id), and a table cannot join a group: give the table its own motion, or move it out of the moving box.`);
       return [Object.assign(shapes.length === 1 ? shapes[0]! : { kind: "group" as const, ...region(box(el)), rot: 0, children: shapes }, m)];
     };
     // Claude Slides' paint order: in a host, its flow content is one layer where its first flow child sits. In the

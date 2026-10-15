@@ -461,7 +461,9 @@
   }];
   // Builds, by order and then as listed. Fade, scale and pop are public effects; the fly-ins take a direction (a preset
   // subtype) AddEffect does not pass, so they take its own three internal steps with it.
-  var FLY = { rise: 4, drop: 1, left: 8, right: 2 };
+  // A fly-in's subtype is where the shape comes from, a fly-out's where it goes: a rise comes up from the bottom and
+  // leaves by the top, a drop the reverse.
+  var FLY = { 1: { rise: 4, drop: 1, left: 8, right: 2 }, 2: { rise: 1, drop: 4, left: 8, right: 2 } };
   var PUBLIC = { fade: ["fade", "fade-out"], scale: ["zoom", "zoom-out"], pop: ["bounce", "bounce-out"] };
   function addBuilds(slide) {
     var mine = pendingBuilds.filter(function (b) { return b.slide === slide; }), steps = [];
@@ -474,8 +476,8 @@
     if (!steps.length) return;
     var timeline = slide.GetTimeLine(), seq = timeline.GetMainSequence(), T = timeline.Timing;
     steps.forEach(function (s) {
-      if (FLY[s.step.effect] !== undefined) {
-        var eff = T.createEffect(s.drawing.Drawing.GetId(), s.cls, 2, FLY[s.step.effect], null);   // internal: preset 2 is fly in/out
+      if (FLY[s.cls][s.step.effect] !== undefined) {
+        var eff = T.createEffect(s.drawing.Drawing.GetId(), s.cls, 2, FLY[s.cls][s.step.effect], null);   // internal: preset 2 is fly in/out
         eff.cTn.setNodeType(s.step.auto ? AscFormat.NODE_TYPE_AFTEREFFECT : AscFormat.NODE_TYPE_CLICKEFFECT);
         T.addEffectsToMainSequence([eff]);
       } else {
@@ -521,6 +523,10 @@
     // A new slide shows its layout's background, else its master's: so does this one, unless its HTML sets its own.
     // (A layout leaves a background set on the slide itself in place.)
     if (!slide.FollowLayoutBackground()) slide.FollowMasterBackground();
+    // A new slide has no transition: nor has this one, unless its HTML gives one.
+    var none = Api.CreateSlideShowTransition();
+    none.SetEntryEffect("effectNone");
+    slide.SetSlideShowTransition(none);
     var notes = slide.GetNotesPage();
     if (notes && notes.GetBodyShape()) notes.GetBodyShape().GetDocContent().RemoveAllElements();
     build(slide, spec);

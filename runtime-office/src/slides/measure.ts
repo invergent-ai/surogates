@@ -89,6 +89,7 @@ export class Measurer {
       });
     }
     const { spec, icons, embeds, shots } = (await this.inspect(page, args("shapes"))) as Extract<Inspected, { spec: SlideSpec }>;
+    if (shots.length) await paintIcons(page);
     await this.drawPictures(page, canvas, spec, { icons, embeds, shots });
     return spec;
   }
@@ -134,6 +135,28 @@ export class Measurer {
 }
 
 const png = (data: Buffer): string => `data:image/png;base64,${data.toString("base64")}`;
+
+// The page paints no icon (they come from the icon set): each is painted in, in its colour and box, so a picture of an
+// element holding one shows it.
+async function paintIcons(page: Page): Promise<void> {
+  const wanted = await page.evaluate(() => {
+    for (const marked of Array.from(document.querySelectorAll("[data-paint]"))) marked.removeAttribute("data-paint");
+    const icons = Array.from(document.querySelectorAll<HTMLElement>("section x-icon")).filter((el) => !el.parentElement?.closest("svg, x-embed"));
+    return icons.map((el, i) => {
+      el.setAttribute("data-paint", String(i));
+      const rgb = (/(\d+), (\d+), (\d+)/.exec(getComputedStyle(el).color) ?? ["", "0", "0", "0"]).slice(1).map((v) => Number(v).toString(16).padStart(2, "0"));
+      return { name: el.getAttribute("name")!, color: `#${rgb.join("")}`, px: el.offsetWidth };
+    });
+  });
+  const srcs = wanted.map((icon) => iconSvg(icon.name, icon.color, Math.max(1, Math.round(icon.px))));
+  await page.evaluate((list) => Promise.all(list.map((src, i) => {
+    const img = document.createElement("img");
+    img.src = src;
+    img.style.cssText = "display:block;width:100%;height:100%";
+    document.querySelector(`[data-paint="${i}"]`)!.replaceChildren(img);
+    return img.decode();
+  })), srcs);
+}
 
 // A shot: the page as a style laid over it shows the marked element (see Shot), over the picture's own box. Everything
 // it changes is put back.
