@@ -303,3 +303,35 @@ async def test_sweeper_does_not_touch_responded_items(
     item = await _get_inbox_item_for_session(session_store, session.id)
 
     assert item.status == "responded"
+
+
+async def test_an_escalation_outlives_its_session_until_resolved(
+    session_factory,
+    session_store,
+):
+    import uuid
+
+    from surogates.db.models import Event
+    from surogates.followup.store import close_escalation_inbox_items
+
+    session = await _create_user_session(session_factory, session_store)
+    escalation_id = uuid.uuid4()
+    async with session_store._sf() as db:
+        event = Event(session_id=session.id, org_id=session.org_id, type="followup.escalation", data={})
+        db.add(event)
+        await db.flush()
+        db.add(InboxItem(
+            org_id=session.org_id, user_id=session.user_id, session_id=session.id,
+            source_event_id=event.id, kind="action_required", title="Needs your attention",
+            payload={"escalation": f"escalation:-:{escalation_id.hex}"},
+        ))
+        await db.execute(update(Session).where(Session.id == session.id).values(status="completed"))
+        await db.commit()
+
+    await expire_inbox_items(session_store)
+    assert (await _get_inbox_item_for_session(session_store, session.id)).status == "pending"
+
+    await close_escalation_inbox_items(
+        session_factory, org_id=session.org_id, escalation_id=escalation_id,
+    )
+    assert (await _get_inbox_item_for_session(session_store, session.id)).status == "acknowledged"

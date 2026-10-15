@@ -63,6 +63,10 @@ async def expire_inbox_items(session_store) -> int:
                         # persist until read/acknowledged rather than
                         # expiring on a terminal session.
                         InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
+                        # A person's channel conversation ends after every
+                        # turn; the escalation it raised waits for a human
+                        # and leaves the Inbox when it is resolved.
+                        not_(InboxItem.payload.has_key("escalation")),
                         # A thread's wait on you over its files outlives its
                         # turn: your next message to it answers it.
                         not_(files),
