@@ -1,6 +1,11 @@
 import { Button } from "@invergent/ui-sdk/button";
+import { TonePill } from "@invergent/ui-sdk/chip";
+import { CONTROL_FIELD } from "@invergent/ui-sdk/control-styles";
+import { SegmentedControl } from "@invergent/ui-sdk/segmented-control";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { ArrowLeftIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { cn } from "../../lib/utils";
 import type { AgentChatAdapter, CodingAgentConnection } from "../../types";
 
 export interface CodingAgentsPanelProps {
@@ -12,6 +17,11 @@ export interface CodingAgentsPanelProps {
 }
 
 type Mode = "oauth" | "api_key";
+
+const MODES = [
+  { value: "oauth", label: "Subscription" },
+  { value: "api_key", label: "API key" },
+] as const;
 
 interface ProviderMeta {
   /** Slug used in the "/code" commands (claude/codex). */
@@ -107,14 +117,12 @@ export function CodingAgentsPanel({ agentId, adapter, onBack }: CodingAgentsPane
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6">
       {onBack && (
-        <button
-          type="button"
-          onClick={onBack}
-          className="-mx-2 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-lg px-2 text-sm text-muted-foreground pointer-fine:mx-0 pointer-fine:min-h-0 pointer-fine:px-0 pointer-fine:hover:text-foreground"
-        >
-          <ArrowLeftIcon className="h-4 w-4" />
-          Back
-        </button>
+        <TextLink asChild variant="muted">
+          <button type="button" onClick={onBack}>
+            <ArrowLeftIcon className="size-4" />
+            Back
+          </button>
+        </TextLink>
       )}
       <div>
         <h1 className="text-2xl font-bold text-foreground">Coding agents</h1>
@@ -213,51 +221,25 @@ function ProviderCard({
     <section className="flex flex-col gap-3 rounded-lg border border-border p-4">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-foreground">{meta.name}</h2>
-        <span
-          className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ${
-            connected
-              ? "bg-primary/10 text-primary"
-              : "bg-muted text-muted-foreground"
-          }`}
-        >
+        <TonePill tone={connected ? "ok" : "muted"}>
           {connected
             ? `Connected${
                 connection?.auth_mode === "api_key" ? " (API key)" : ""
               }`
             : "Not connected"}
-        </span>
+        </TonePill>
       </div>
 
-      <div className="flex gap-1 text-xs">
-        <button
-          type="button"
-          onClick={() => {
-            setMode("oauth");
-            setError(null);
-          }}
-          className={`rounded-md border px-2 py-1 ${
-            mode === "oauth"
-              ? "border-primary bg-primary/10 text-primary"
-              : "border-border text-muted-foreground hover:bg-accent"
-          }`}
-        >
-          Subscription
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMode("api_key");
-            setError(null);
-          }}
-          className={`rounded-md border px-2 py-1 ${
-            mode === "api_key"
-              ? "border-primary bg-primary/10 text-primary"
-              : "border-border text-muted-foreground hover:bg-accent"
-          }`}
-        >
-          API key
-        </button>
-      </div>
+      <SegmentedControl
+        aria-label="Credential type"
+        segments={MODES}
+        value={mode}
+        onChange={(next) => {
+          setMode(next);
+          setError(null);
+        }}
+        className="self-start"
+      />
 
       <p className="text-sm text-muted-foreground">{instructions}</p>
 
@@ -269,7 +251,7 @@ function ProviderCard({
         autoComplete="off"
         rows={mode === "oauth" && meta.provider === "openai" ? 4 : 2}
         aria-label={`${meta.name} credential`}
-        className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs [-webkit-text-security:disc]"
+        className={cn(CONTROL_FIELD, "resize-y font-mono [-webkit-text-security:disc]")}
       />
 
       {error && (

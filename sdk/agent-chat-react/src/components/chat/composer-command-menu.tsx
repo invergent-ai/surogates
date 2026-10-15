@@ -5,7 +5,7 @@ import { Command as CommandPrimitive } from "cmdk";
 import { SearchIcon } from "lucide-react";
 import type { AgentChatSlashCommand } from "../../types";
 import { PopoverContent } from "@invergent/ui-sdk/popover";
-import { Command, CommandEmpty, CommandItem, CommandList } from "../ui/command";
+import { Command, CommandEmpty, CommandItem, CommandList } from "@invergent/ui-sdk/command";
 import { Skeleton } from "@invergent/ui-sdk/skeleton";
 
 // ── Modes ────────────────────────────────────────────────────────────

@@ -13,10 +13,11 @@ import type {
   AgentChatViewMode,
 } from "../../types";
 import { Button } from "@invergent/ui-sdk/button";
-import { ButtonGroup } from "../ui/button-group";
+import { ButtonGroup } from "@invergent/ui-sdk/button-group";
 import { Checkbox } from "@invergent/ui-sdk/checkbox";
 import { Input } from "@invergent/ui-sdk/input";
 import { Label } from "@invergent/ui-sdk/label";
+import { SegmentedControl } from "@invergent/ui-sdk/segmented-control";
 import {
   Tooltip,
   TooltipContent,
@@ -119,6 +120,14 @@ const VIEW_MODE_LABELS: Record<AgentChatViewMode, string> = {
   expert: "Advanced",
   whiteboard: "Whiteboard",
 };
+
+const VIEW_MODE_SEGMENTS = (["simple", "expert", "whiteboard"] as const).map(
+  (mode) => ({
+    value: mode,
+    label: VIEW_MODE_LABELS[mode],
+    ariaLabel: `${VIEW_MODE_LABELS[mode]} view`,
+  }),
+);
 
 export interface AgentWhiteboardProps {
   adapter: AgentChatAdapter;
@@ -1460,25 +1469,12 @@ export function WhiteboardSurface({
           </Button>
         ) : null}
         {viewMode && onViewModeChange && hasAnswer ? (
-          <div className="flex items-center rounded-full border p-0.5">
-            {(["simple", "expert", "whiteboard"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                aria-label={`${VIEW_MODE_LABELS[mode]} view`}
-                aria-pressed={viewMode === mode}
-                className={cn(
-                  "rounded-full px-3 py-1 text-xs",
-                  viewMode === mode
-                    ? "bg-background font-medium shadow-sm"
-                    : "text-muted-foreground",
-                )}
-                onClick={() => onViewModeChange(mode)}
-              >
-                {VIEW_MODE_LABELS[mode]}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            aria-label="View"
+            segments={VIEW_MODE_SEGMENTS}
+            value={viewMode}
+            onChange={onViewModeChange}
+          />
         ) : null}
       </div>
     </div>

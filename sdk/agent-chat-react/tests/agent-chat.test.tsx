@@ -1714,10 +1714,13 @@ describe("AgentChat", () => {
       await openPane(container, "browser");
       expect(container.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="browser-shell-control"]')).toBeNull();
+      // The overflow is a menu: it opens on a press or a key, in a portal on the body.
       await act(async () => {
-        container!.querySelector<HTMLButtonElement>('[data-testid="browser-shell"] button[aria-label="More"]')!.click();
+        container!
+          .querySelector<HTMLButtonElement>('[data-testid="browser-shell"] button[aria-label="More"]')!
+          .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       });
-      const offered = [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+      const offered = [...document.body.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent?.trim());
       expect(offered).toContain("Maximize");
       expect(offered).not.toContain("Close browser");
     } finally {

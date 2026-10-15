@@ -22,6 +22,7 @@ import {
   DialogTitle,
 } from "@invergent/ui-sdk/dialog";
 import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";
 import { DiffViewer } from "../diff-viewer";
@@ -64,13 +65,11 @@ function FileNameWithTooltip({
     <Tooltip>
       <TooltipTrigger asChild>
         {onFileSelect ? (
-          <button
-            type="button"
-            onClick={() => onFileSelect(filePath)}
-            className="text-primary hover:underline truncate text-left cursor-pointer underline"
-          >
-            {name}
-          </button>
+          <TextLink size="inline" asChild>
+            <button type="button" onClick={() => onFileSelect(filePath)} className="truncate text-left">
+              {name}
+            </button>
+          </TextLink>
         ) : (
           <span className="text-muted-foreground truncate">{name}</span>
         )}

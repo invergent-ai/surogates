@@ -4,7 +4,7 @@ import { Button } from "@invergent/ui-sdk/button";
 import {
   ButtonGroup,
   ButtonGroupText,
-} from "../ui/button-group";
+} from "@invergent/ui-sdk/button-group";
 import {
   Tooltip,
   TooltipContent,

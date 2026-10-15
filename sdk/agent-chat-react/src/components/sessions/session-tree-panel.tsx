@@ -14,9 +14,11 @@ import {
   LaptopIcon,
   SquareIcon,
   Trash2Icon,
-  UsersIcon,
 } from "lucide-react";
 import { Badge } from "@invergent/ui-sdk/badge";
+import { Button } from "@invergent/ui-sdk/button";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
 import { sessionComputer } from "../../lib/sessions";
 import { cn } from "../../lib/utils";
 import type {
@@ -198,18 +200,6 @@ function fallbackSessionTitle(entry: AgentChatSessionTreeNode): string {
   return "New session";
 }
 
-// Background / border classes for a tree row, by group state: the active
-// row, a row in the active group, or an unrelated row.
-function rowStateClass(isActive: boolean, isInActiveGroup: boolean): string {
-  if (isActive) {
-    return "bg-faint/30 dark:bg-[#1e2840] text-foreground border-l-primary";
-  }
-  if (isInActiveGroup) {
-    return "bg-line/70 dark:bg-line/60 text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent";
-  }
-  return "bg-transparent text-foreground/80 hover:bg-input hover:text-foreground border-l-transparent";
-}
-
 function TreeNodeRow({
   entry,
   depth,
@@ -253,47 +243,16 @@ function TreeNodeRow({
 
   return (
     <>
-      {/* eslint-disable-next-line jsx-a11y/prefer-tag-over-role --
-          The row has nested interactive elements (chevron + stop); a
-          button-in-button would be invalid HTML.  Match the existing
-          pattern from navbar.tsx / skills-page.tsx sidebar rows. */}
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => onSelect(entry.id)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") onSelect(entry.id);
-        }}
-        className={cn(
-          "group flex items-center gap-2 w-full py-2 pr-2 text-left cursor-pointer transition-colors border-l-2",
-          "min-h-11 md:min-h-0",
-          rowStateClass(isActive, isInActiveGroup),
-        )}
-        style={{ paddingLeft: `${depth * 12 + 12}px` }}
-      >
-        {hasChildren ? (
-          <button
-            type="button"
-            className="p-2 md:p-0.5 rounded hover:bg-line shrink-0"
-            onClick={(e) => {
-              e.stopPropagation();
-              setExpanded(!expanded);
-            }}
-            aria-label={expanded ? "Collapse" : "Expand"}
-            aria-expanded={expanded}
-          >
-            {expanded ? (
-              <ChevronDownIcon className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronRightIcon className="w-3.5 h-3.5" />
-            )}
-          </button>
-        ) : (
-          <span className="w-4 h-4 shrink-0" />
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="text-sm truncate">{title}</div>
-          <div className="flex items-center gap-1 text-xs text-faint min-w-0">
+      {/* The kit row, drawn onto a div: the row holds nested buttons (the
+          chevron, stop and delete), and a button inside a button would be
+          invalid HTML. The row in the active group but not active itself
+          gets a faint tint, a state the kit row has no variant for. */}
+      <ListRow
+        asChild
+        size="sm"
+        label={title}
+        description={
+          <span className="flex min-w-0 items-center gap-1">
             {entry.computer && (
               // A chat on a folder of the user's computer, in every list of chats, the browser's too.
               <span data-testid="session-computer" title={`On ${entry.computer}`} className="inline-flex min-w-0 max-w-[50%] items-center gap-1">
@@ -303,37 +262,82 @@ function TreeNodeRow({
             )}
             {entry.computer && subtitle && <span aria-hidden="true">·</span>}
             <span className="truncate">{subtitle}</span>
-          </div>
+          </span>
+        }
+        isActive={isActive}
+        className={cn(
+          "cursor-pointer",
+          !isActive && isInActiveGroup && "bg-foreground/[0.03]",
+        )}
+        style={{ paddingLeft: `${depth * 12 + 12}px` }}
+        trailing={
+          <>
+            {isRunning && canStop && isChildSession && (
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:opacity-0 md:group-hover/list-row:opacity-100 md:focus-visible:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStop(entry.id);
+                }}
+                aria-label="Stop child session"
+                title="Stop child session"
+              >
+                <SquareIcon fill="currentColor" />
+              </Button>
+            )}
+            {canDelete && (
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="text-muted-foreground opacity-60 hover:bg-destructive/10 hover:text-destructive md:opacity-50 md:group-hover/list-row:opacity-100 md:focus-visible:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(entry.id);
+                }}
+                aria-label="Delete session"
+                title="Delete session"
+              >
+                <Trash2Icon />
+              </Button>
+            )}
+          </>
+        }
+      >
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onSelect(entry.id)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") onSelect(entry.id);
+          }}
+        >
+          {/* The chevron sits in a column as wide as itself, kept empty on a
+              row without children so sibling titles line up. */}
+          {hasChildren ? (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="size-5"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded(!expanded);
+              }}
+              aria-label={expanded ? "Collapse" : "Expand"}
+              aria-expanded={expanded}
+            >
+              {expanded ? (
+                <ChevronDownIcon className="size-3.5" />
+              ) : (
+                <ChevronRightIcon className="size-3.5" />
+              )}
+            </Button>
+          ) : (
+            <span className="size-5 shrink-0" />
+          )}
         </div>
-        {isRunning && canStop && isChildSession && (
-          <button
-            type="button"
-            className="p-2 md:p-1 rounded opacity-100 md:opacity-0 md:group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
-            onClick={(e) => {
-              e.stopPropagation();
-              onStop(entry.id);
-            }}
-            aria-label="Stop child session"
-            title="Stop child session"
-          >
-            <SquareIcon className="w-3 h-3" fill="currentColor" />
-          </button>
-        )}
-        {canDelete && (
-          <button
-            type="button"
-            className="p-2 md:p-1 rounded opacity-60 md:opacity-50 md:group-hover:opacity-100 md:focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(entry.id);
-            }}
-            aria-label="Delete session"
-            title="Delete session"
-          >
-            <Trash2Icon className="w-3 h-3" />
-          </button>
-        )}
-      </div>
+      </ListRow>
       {hasChildren && expanded &&
         entry.children.map((child) => (
           <TreeNodeRow
@@ -602,15 +606,18 @@ export function SessionTreePanel({
   return (
     <>
       {!hideHeader && (
-        <div className="border-t border-line flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wide">
-          <UsersIcon className="w-3.5 h-3.5" />
-          <span>{title}</span>
-          {runningCount > 0 && (
-            <Badge variant="default" className="h-4 px-1.5 text-[10px] ml-auto">
-              {runningCount}
-            </Badge>
-          )}
-        </div>
+        <SectionLabel
+          label={
+            <>
+              {title}
+              {runningCount > 0 && (
+                <Badge variant="default" className="ml-1.5">
+                  {runningCount}
+                </Badge>
+              )}
+            </>
+          }
+        />
       )}
       {error && (
         <div className="px-3 py-2 text-xs text-destructive">{error}</div>

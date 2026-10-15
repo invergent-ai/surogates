@@ -1,4 +1,4 @@
-import { RABBIT_MARK_BOX, RABBIT_MARK_PATH } from "../ui/rabbit-mark";
+import { RABBIT_MARK_BOX, RABBIT_MARK_PATH } from "@invergent/ui-sdk/rabbit-mark";
 import {
   type DrawBounds,
   normalize as normalizeDraw,

@@ -84,6 +84,6 @@ describe("MissionResearchTab", () => {
     const empty = research();
     empty.nodes = [];
     const dom = mount(<MissionResearchTab research={empty} />);
-    expect(dom.textContent).toContain("No hypotheses yet.");
+    expect(dom.textContent).toContain("No hypotheses yet");
   });
 });
