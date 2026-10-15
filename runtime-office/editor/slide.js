@@ -599,8 +599,24 @@
     });
     if (empty) empty.Delete();
     // Numbered once every change is made.
-    results.forEach(function (r) { if (r.slides) r.slides = r.slides.map(function (slide) { return { id: idOf(slide), number: slide.GetSlideIndex() + 1 }; }); });
+    results.forEach(function (r) {
+      if (!r.slides) return;
+      r.slides = r.slides.map(function (slide) { return { id: idOf(slide), number: slide.GetSlideIndex() + 1 }; });
+      var note = magicNote(ops[r.op].slides.map(function (s) { return s.spec; }), r.slides);
+      if (note) r.note = note;
+    });
     return { results: results };
+  }
+  // Morph moves what two neighbouring slides both name only when the first leaves by it: ids shared with the next
+  // slide built here, on a slide that does not, move nothing.
+  function magicNote(specs, slides) {
+    var names = function (spec) { return spec.shapes.map(function (s) { return s.magic; }).filter(Boolean); };
+    for (var i = 0; i + 1 < specs.length; i++) {
+      if (slides[i + 1].number !== slides[i].number + 1 || (specs[i].transition && specs[i].transition.effect === "magic")) continue;
+      var next = names(specs[i + 1]);
+      if (names(specs[i]).some(function (name) { return next.indexOf(name) >= 0; })) return "ids match across slides but slide " + slides[i].number + " has no data-transition=\"magic\": nothing will move.";
+    }
+    return null;
   }
 
   try {

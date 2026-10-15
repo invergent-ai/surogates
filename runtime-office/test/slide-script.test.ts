@@ -28,6 +28,7 @@ function deck(slides: { layout?: string; boxes?: Box[]; notes?: string }[]) {
       GetSlideIndex: () => all.indexOf(slide),
       Delete: () => all.splice(all.indexOf(slide), 1),
       ApplyLayout: () => undefined, RemoveAllObjects: () => undefined, FollowLayoutBackground: () => true, SetSlideShowTransition: () => undefined,
+      AddObject: () => true,
     };
     return slide;
   };
@@ -36,7 +37,11 @@ function deck(slides: { layout?: string; boxes?: Box[]; notes?: string }[]) {
     GetWidth: () => 12192000, GetHeight: () => 6858000, GetAllSlides: () => all.slice(), GetSlidesCount: () => all.length,
     AddSlide: (slide: Any, index: number) => all.splice(index, 0, slide), GetMaster: () => null,
   };
-  const Api = { GetPresentation: () => pres, CreateSlide: () => makeSlide({}), CreateSlideShowTransition: () => ({ SetEntryEffect: () => undefined }) };
+  const Api = {
+    GetPresentation: () => pres, CreateSlide: () => makeSlide({}),
+    CreateSlideShowTransition: () => ({ SetEntryEffect: () => undefined, SetDuration: () => undefined }),
+    CreateImage: () => ({ SetPosition: () => undefined, Drawing: { setName: () => undefined } }),
+  };
   const run = (scope: Any): Any => {
     const out = runInNewContext(`(${SCRIPT})()`, { Api, scope, AscFormat: {}, AscCommon: {} });
     if (out?.__error) throw new Error(out.__error);
@@ -74,5 +79,25 @@ describe("a new deck's empty slide", () => {
     const replaced = deck([TEMPLATE]), hash = replaced.run({ action: "outline" }).slides[0].hash;
     replaced.run({ action: "edit", ops: [{ op: "slides", slides: [{ id: "100", hash, spec: EMPTY_SPEC }, { after: null, spec: EMPTY_SPEC }] }] });
     expect(replaced.ids()).toEqual(["100", "101"]);
+  });
+});
+
+describe("a magic move that cannot play", () => {
+  // A slide pinning a card by the id "next-step", and leaving by a magic move or not.
+  const pinning = (magic: boolean) => ({
+    after: null, spec: { ...EMPTY_SPEC, transition: magic ? { effect: "magic", ms: 1000 } : null,
+      shapes: [{ kind: "picture", src: "icon:0", x: 0, y: 0, w: 100, h: 100, rot: 0, magic: "next-step" }] },
+  });
+  const typed = { boxes: [{ text: "Agenda" }] };
+
+  it("is told: two neighbouring slides share an id, and the first does not leave by a magic move", () => {
+    const { run } = deck([typed]);
+    const out = run({ action: "edit", ops: [{ op: "slides", slides: [pinning(false), pinning(false)] }] });
+    expect(out.results[0].note).toBe('ids match across slides but slide 2 has no data-transition="magic": nothing will move.');
+  });
+
+  it("says nothing when the first leaves by one", () => {
+    const { run } = deck([typed]);
+    expect(run({ action: "edit", ops: [{ op: "slides", slides: [pinning(true), pinning(false)] }] }).results[0].note).toBeUndefined();
   });
 });

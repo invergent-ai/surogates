@@ -130,6 +130,8 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
     measured.length = 0;
     const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ html: TEAM }, { html: BUDGET }] }]);
     expect(result).toMatchObject({ applied: true, flushed: true });
+    // The card's data-transition is on the card, not on the first slide's section: the agent is told nothing will move.
+    expect(result.results[0].note).toBe('ids match across slides but slide 3 has no data-transition="magic": nothing will move.');
     const E = 12192000 / 1920;
     for (const [n, slide] of result.results[0].slides.entries()) {
       // The card moves, so it is one group: its blurred shadow grouped behind its box, then its two lines of text.
