@@ -30,15 +30,20 @@ afterEach(() => {
 /**
  * scripts/*script* run in a package of the test's own on a computer that uname calls *system* and *machine*, with
  * *failing* the fake that exits 1: its status, what it said, and each faked command it started, one a line, its
- * standard input after a "<" where it read one, and its temporary folder written $tmp. *args* are the script's own.
+ * standard input after a "<" where it read one, and its temporary folder written $tmp. *args* are the script's own; *held*,
+ * the version a program at the package's bin/node says it is, where one is there before the script runs.
  */
-function run(script: string, [system, machine]: readonly [string, string], failing?: string, args: string[] = []): { status: number | null; stderr: string; ran: string[] } {
+function run(script: string, [system, machine]: readonly [string, string], failing?: string, args: string[] = [], held?: string): { status: number | null; stderr: string; ran: string[] } {
   const at = mkdtempSync(join(dir, "run-"));
   const fakes = join(at, "fakes");
   const log = join(at, "ran");
   mkdirSync(join(at, "package", "scripts"), { recursive: true });
   mkdirSync(fakes);
   copyFileSync(join(PACKAGE, "scripts", script), join(at, "package", "scripts", script));
+  if (held !== undefined) {
+    mkdirSync(join(at, "package", "bin"));
+    writeFileSync(join(at, "package", "bin", "node"), `#!/bin/sh\necho ${held}\n`, { mode: 0o755 });
+  }
   writeFileSync(join(fakes, "uname"), `#!/bin/sh\ncase "$1" in -s) echo '${system}' ;; -m) echo '${machine}' ;; esac\n`);
   for (const name of FAKED) {
     const said = name === "sha256sum" || name === "shasum" ? `read -r input; echo "${name} $* < $input"` : `echo "${name} $*"`;
@@ -91,6 +96,18 @@ describe("scripts/node.sh", () => {
         "mv -f bin/node.new bin/node",
       ],
     });
+  });
+
+  it("fetches macOS's node by its pin even where a node of the pinned version is at bin/node already: the app ships only the pinned bytes, checked by their hash", () => {
+    // As setup-node's would be, put there by a Mac's build (scripts/mac-node.sh), were its version the pin's.
+    const fetched = run("node.sh", MAC, undefined, ["darwin-arm64"]);
+    expect(fetched.ran.length).toBeGreaterThan(0);
+    expect(run("node.sh", MAC, undefined, ["darwin-arm64"], "v22.23.3")).toEqual(fetched);
+  });
+
+  it("keeps on Linux a bin/node of the pinned version, fetching nothing, as it always has", () => {
+    expect(run("node.sh", LINUX, undefined, [], "v22.23.3")).toEqual({ status: 0, stderr: "", ran: [] });
+    expect(run("node.sh", LINUX, undefined, [], "v22.14.0").ran[0]).toMatch(/^curl .*node-v22\.23\.3-linux-x64\.tar\.gz$/);
   });
 
   it("puts no node in place whose archive is not the pinned one", () => {

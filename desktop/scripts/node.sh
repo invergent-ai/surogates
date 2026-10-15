@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The app's own node (spec, Section 11): Node 22 LTS, the floor of this package's engines, its archive checked against
 # the sha256 that nodejs.org's signed SHASUMS256.txt gives, without npm. A bin/node of that version already there is
-# kept.
+# kept, but for macOS's.
 #
 #   scripts/node.sh             the Linux app's, the first step of npm run build: on Linux on x64, linux-x64's,
 #                               stripped, at bin/node. On Windows it refuses, naming the Windows app's build, npm run
@@ -12,7 +12,8 @@
 #   scripts/node.sh darwin-arm64  the macOS app's, which its bundle ships (scripts/package-mac.sh): on a Mac with Apple
 #                               silicon, darwin-arm64's at bin/node, never stripped, renamed over the one there and never
 #                               written over it: macOS kills a signed program whose file was written over in place, at its
-#                               next start. The release signs it again, with the app (scripts/sign-mac.sh)
+#                               next start, and fetched whatever node is there. The release signs it again, with the
+#                               app (scripts/sign-mac.sh)
 #
 # Any other computer is refused.
 #
@@ -48,7 +49,8 @@ if [ "$TARGET" = win-x64 ]; then
   exit 0
 fi
 if [ "$TARGET" = darwin-arm64 ]; then
-  [ "$(bin/node --version 2>/dev/null)" = "$VERSION" ] && exit 0
+  # Fetched whatever bin/node says it is: a Mac's build puts the PATH's node there (scripts/mac-node.sh), and the release
+  # ships the pinned bytes alone, checked by their hash.
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   # -q first, or curl reads the user's curlrc, whose headers, logins and netrc would go out with it.
