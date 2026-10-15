@@ -241,7 +241,7 @@ describe("the shell", () => {
     expect(await page.evaluate(() => [
       matchMedia("(prefers-color-scheme: dark)").matches, document.documentElement.dataset.theme,
       getComputedStyle(document.querySelector("#sidebar")!).backgroundColor,
-    ])).toEqual([true, "dark", "rgb(17, 17, 17)"]);
+    ])).toEqual([true, "dark", "rgb(11, 11, 11)"]);
   });
 
   it("hides when it is closed, and a second launch shows it again", async () => {
