@@ -620,6 +620,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     before = {
         r.protocol: r.status for r in await followup_store.enrollments(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=await ctx.person_user_id(sf),
+            protocol=protocol,
         )
     }
     try:
