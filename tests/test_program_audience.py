@@ -239,3 +239,22 @@ async def test_a_once_per_person_step_reaches_each_person_once_inside_its_window
     )
     again = {r.user_id for r in await _rows(sf, week_later)}
     assert again == ({skipped} if once else {reached, skipped})
+
+
+@pytest.mark.asyncio
+async def test_a_person_reached_only_through_a_contact_has_no_failed_row_of_their_own(sf):
+    person = await _enrol(sf, start=LOCAL_TODAY)
+    alone = await _enrol(sf, start=LOCAL_TODAY)
+    caregiver = uuid.uuid4()
+    await store.link_contact(sf, org_id=ORG, agent_id=AGENT, person_user_id=person,
+                             contact_user_id=caregiver, relation="daughter", created_by="t")
+    occ = await materialize_occurrence(
+        _schedule({"protocol": "post-op", "day_from": 0, "day_to": 30}),
+        session_factory=sf, identity_lookup=_lookup({caregiver: "40700000009"}), now=NOW,
+    )
+    rows = {(r.user_id, r.person_user_id): (r.delivery_state, r.reason) for r in await _rows(sf, occ)}
+    assert rows == {
+        (caregiver, person): ("queued", None),
+        # Nobody reaches this one: the reason says why nothing went out.
+        (alone, alone): ("skipped", "No whatsapp identity"),
+    }

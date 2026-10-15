@@ -257,10 +257,16 @@ async def materialize_occurrence(
         open_configs: dict = {}
         open_people: dict[uuid.UUID, bool] = {}
         written: set[uuid.UUID] = set()
+        through_contacts = {person for user_id, _i, _e, person in copies if person and user_id != person}
         for user_id, identity, _enrollment, person in copies:
             if user_id in written:
                 continue  # one row per recipient per occurrence
             written.add(user_id)
+            unreachable = chosen.get(user_id) is None if per_person else identity is None
+            if user_id == person and person in through_contacts and unreachable:
+                # Reached through their contacts: no channel of their own is
+                # not a step that failed to go out.
+                continue
             reason: str | None = None
             state = "queued"
             row_platform, sender, fallbacks = platform, config.get("channel_identifier"), []
