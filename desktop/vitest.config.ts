@@ -25,6 +25,8 @@ export const MACOS = [
   // Updates and the removal on macOS: the updater's rows for it, and the app's own install, with surogate-helper built
   // for the Mac swapping bundles of the test's own.
   "test/updates-darwin.test.ts", "test/installer.test.ts", "test/installer-darwin.test.ts",
+  // When updates are looked for, their retries and the unsigned line's day, which every OS's app has alike.
+  "test/updates-cadence.test.ts",
 ];
 
 // The files that pass on Windows, which the Windows workflow runs (.github/workflows/desktop-windows.yml): each part of
