@@ -1,4 +1,4 @@
-import { chromium, type Browser } from "playwright-core";
+import { chromium, type Browser, type Page } from "playwright-core";
 import { EditorPage } from "./connector.js";
 
 /** No room for another document: the caller tries again later. */
@@ -40,6 +40,7 @@ export class PagePool {
   private browser: Promise<Browser> | null = null;
   private readonly pages = new Map<string, EditorPage>();
   private readonly opening = new Map<string, Promise<string>>();
+  private measuring: Promise<Page> | null = null;
 
   constructor(private readonly options: PoolOptions) {}
 
@@ -115,8 +116,24 @@ export class PagePool {
     return closed;
   }
 
+  /** A page of its own for measuring slides: no script of their content runs (their CSP says so) and nothing they
+   * name is fetched (every request is aborted). Device scale 2, so a drawn svg stays sharp. */
+  async measuringPage(): Promise<Page> {
+    const current = this.measuring && (await this.measuring.catch(() => null));
+    if (!current || current.isClosed()) {
+      this.measuring = (async () => {
+        const context = await (await this.launch()).newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 2 });
+        await context.route("**/*", (route) => route.abort());
+        return context.newPage();
+      })();
+    }
+    return this.measuring!;
+  }
+
   async shutdown(): Promise<void> {
     for (const id of [...this.pages.keys()]) await this.close(id);
+    await (await this.measuring?.catch(() => null))?.context().close().catch(() => undefined);
+    this.measuring = null;
     const browser = await this.browser?.catch(() => null);
     this.browser = null;
     await browser?.close();
@@ -131,6 +148,7 @@ export class PagePool {
         (browser) => browser.on("disconnected", () => {
           this.browser = null;
           this.pages.clear();
+          this.measuring = null;
         }),
         () => { this.browser = null; },
       );
