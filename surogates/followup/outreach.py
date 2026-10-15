@@ -38,6 +38,7 @@ from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
     DeliveryOutbox,
+    EscalationRow,
     ProgramInvitationRow,
     Event,
     FollowupEnrollmentRow,
@@ -700,9 +701,12 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
     groups: dict[str, list[tuple[Any, Any]]] = {}
     for row, settings in rows:
         groups.setdefault(row.dedupe_key.rsplit(":", 1)[0], []).append((row, settings))
+    handled = await _handled_escalations(session_factory, groups)
 
     reminded = 0
     for escalation, members in groups.items():
+        if escalation.rsplit(":", 1)[1] in handled:
+            continue
         row, settings = members[0]
         wait = timedelta(minutes=red_alert_reminder_minutes(settings))
         if as_utc(row.created_at) > as_utc(now) - wait:
@@ -714,6 +718,27 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
         except Exception:  # noqa: BLE001 — one escalation, not the pass
             logger.exception("[outreach] could not remind the team of %s", escalation)
     return reminded
+
+
+async def _handled_escalations(session_factory: Any, groups: dict[str, Any]) -> set[str]:
+    """The id hexes, among *groups*' escalations, a team member took or resolved."""
+    ids = set()
+    for key in groups:
+        try:
+            ids.add(uuid.UUID(key.rsplit(":", 1)[1]))
+        except ValueError:
+            continue
+    if not ids:
+        return set()
+    async with session_factory() as db:
+        found = (
+            await db.execute(
+                sa.select(EscalationRow.id)
+                .where(EscalationRow.id.in_(ids))
+                .where(sa.or_(EscalationRow.owner.isnot(None), EscalationRow.resolved_at.isnot(None)))
+            )
+        ).scalars().all()
+    return {escalation_id.hex for escalation_id in found}
 
 
 async def _remind(

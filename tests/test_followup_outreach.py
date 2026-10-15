@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import sqlalchemy as sa
 
-from surogates.db.models import OutreachMessageRow
+from surogates.db.models import EscalationRow, OutreachMessageRow
 from surogates.followup import outreach, store
 from surogates.session.events import EventType
 
@@ -504,7 +504,7 @@ async def test_the_agents_setting_moves_the_expiry_but_not_other_texts(sf, docto
 # --- red alerts nobody opened -----------------------------------------------
 
 
-async def _red_alert(sf, team, *, minutes=None, invitation_id="-"):
+async def _red_alert(sf, team, *, minutes=None, invitation_id="-", escalation_id=None):
     await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, channel_identifier=SENDER,
         alert_recipient_user_ids=team, alert_template_name="alert",
@@ -514,7 +514,7 @@ async def _red_alert(sf, team, *, minutes=None, invitation_id="-"):
     await store.notify_care_team(
         sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="🔴 Faint",
         created_by="agent", severity="red",
-        dedupe_prefix=f"escalation:{invitation_id}:{uuid.uuid4().hex}",
+        dedupe_prefix=f"escalation:{invitation_id}:{(escalation_id or uuid.uuid4()).hex}",
     )
 
 
@@ -557,6 +557,26 @@ async def test_an_unopened_red_alert_is_sent_once_more_to_the_whole_team(sf, doc
     for later in (5, 60, 600):
         await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=later))
     assert len(await _alerts(sf, "reminder")) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handled", [{"owner": "Ana"}, {"resolved_at": NOW}])
+async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session, handled):
+    taken, open_ = uuid.uuid4(), uuid.uuid4()
+    async with sf() as db:
+        for escalation_id, extra in ((taken, handled), (open_, {})):
+            db.add(EscalationRow(
+                id=escalation_id, org_id=ORG, agent_id=AGENT, kind="alert",
+                severity="red", reason="Faint", **extra,
+            ))
+        await db.commit()
+    await _red_alert(sf, [uuid.uuid4()], escalation_id=taken)
+    await _red_alert(sf, [uuid.uuid4()], escalation_id=open_)
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    await _at(sf, 40)
+    await _send(sf, _Store(), _Delivery())
+    [reminder] = await _alerts(sf, "reminder")
+    assert open_.hex in reminder.dedupe_key
 
 
 @pytest.mark.asyncio
