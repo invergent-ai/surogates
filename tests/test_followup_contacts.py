@@ -856,7 +856,7 @@ async def followup_store_mark_owner(sf, owner):
 async def test_a_stop_tells_the_team_once_by_the_journeys_name(sf, clinic):
     async with sf() as db:
         db.add(ProgramScheduleRow(
-            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=False,
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=True,
             config={"audience": {"protocol": "post-op"},
                     "journey": {"slug": "post-op", "name": "Recovery"}},
         ))

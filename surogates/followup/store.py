@@ -486,18 +486,10 @@ async def journey_names(
     slug only where no step names a journey for it."""
     from surogates.programs.journey import journey_of, protocol_of
 
-    async with session_factory() as db:
-        configs = (
-            await db.execute(
-                sa.select(ProgramScheduleRow.config)
-                .where(ProgramScheduleRow.org_id == org_id)
-                .where(ProgramScheduleRow.agent_id == agent_id)
-            )
-        ).scalars().all()
     names: dict[str, str] = {}
-    for config in configs:
-        name = str(journey_of(config or {}).get("name") or "").strip()
-        protocol = protocol_of(config or {})
+    for config in await active_program_configs(session_factory, org_id=org_id, agent_id=agent_id):
+        name = str(journey_of(config).get("name") or "").strip()
+        protocol = protocol_of(config)
         if name and protocol:
             names.setdefault(protocol, name)
     return ", ".join(names.get(p, p) for p in protocols)
