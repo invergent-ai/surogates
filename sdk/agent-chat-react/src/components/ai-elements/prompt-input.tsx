@@ -957,7 +957,7 @@ export const PromptInput = ({
               distinct keys to tailwind-merge, so a mismatched pair leaves both
               the base `rounded-none` and this `rounded-3xl` on the element and
               stylesheet order — not this file — decides which one lands. */}
-          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-data-[align=block-end]:rounded-3xl has-data-[align=block-start]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
+          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white shadow-sm dark:bg-popover dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-data-[align=block-end]:rounded-3xl has-data-[align=block-start]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
             {children}
           </InputGroup>
         </BrandBeam>
