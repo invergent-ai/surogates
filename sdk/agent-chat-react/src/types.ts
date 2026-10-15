@@ -735,8 +735,8 @@ export interface AgentChatState {
    * Empty for a chat in the cloud, whose browser is one.
    */
   browserTabs: string[];
-  // "simple" groups iteration content under one-liners + appends a
-  // TurnSummaryCard; "expert" renders today's per-tool timeline.
+  // "simple" groups iteration content under one-liners + lists the
+  // turn's downloads; "expert" renders today's per-tool timeline.
   // Persisted per-user via AgentChatAdapter.getChatViewMode /
   // setChatViewMode with a localStorage fallback.
   viewMode: AgentChatViewMode;

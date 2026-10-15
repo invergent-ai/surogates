@@ -57,9 +57,10 @@ class EventType(str, Enum):
     # rendered by Simple chat mode in agent-chat-react.
     ITERATION_SUMMARY = "iteration.summary"
 
-    # Per-assistant-turn recap + curated artifact list. Emitted after the
-    # final iteration of a turn completes; rendered as the
-    # TurnSummaryCard at the bottom of each turn in Simple mode.
+    # Per-assistant-turn list of delivered files (its ``recap`` is always
+    # empty now; older events may carry one). Emitted after the final
+    # iteration of a turn completes; rendered as the download cards under
+    # each turn's last answer in Simple mode.
     TURN_SUMMARY = "turn.summary"
 
     # Tool execution

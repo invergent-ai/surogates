@@ -80,7 +80,7 @@ def _should_take_reservations(session: Any, config_key: str) -> bool:
 
 
 def summary_ruled_out(session: Any) -> bool:
-    """Whether the session's config or channel rules every turn's recap out, whatever the turn does (see wants_turn_summary)."""
+    """Whether the session's config or channel rules every turn's summary out, whatever the turn does (see wants_turn_summary)."""
     config = getattr(session, "config", None) or {}
     return bool(
         config.get("active_mission_id")
@@ -91,14 +91,14 @@ def summary_ruled_out(session: Any) -> bool:
 
 
 def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
-    """Whether a finished turn gets its recap and deliverables scan.
+    """Whether a finished turn gets its deliverables scan, and the summary listing them.
 
     Orchestrated sessions skip it: a mission / auto-research coordinator ends its turn repeatedly
-    across the orchestration loop, and a "Task complete" recap after each one reads as the chat
+    across the orchestration loop, and a list of files after each one reads as the chat
     stopping while the run goes on (``active_mission_id``, or ``active_research_run_id`` which an
     Arbor coordinator keeps after a terminal verdict). A project's master skips it the same way: it
     ends a turn at every exchange while its threads work on. A phone call skips it too: the caller heard
-    the answer, nothing renders a recap card on a call, and the drain (up to 10 s of summary calls)
+    the answer, nothing renders a download card on a call, and the drain (up to 10 s of caption calls)
     holds the session while the caller's next words wait for it.
     """
     if summary_ruled_out(session):
@@ -442,17 +442,17 @@ class ArtifactCompletionMixin:
     ) -> list[dict[str, Any]] | None:
         """Drain pending iteration summaries, then emit TURN_SUMMARY.
 
-        Soft 10s cap on the drain so a hung iteration-summary task
-        can't stall session completion. Same 10s cap on the turn
-        summary call. Any failure is logged and swallowed — the SDK
-        falls back to the per-iteration view when TURN_SUMMARY is
-        missing.
+        The drain lets the last step's caption land before the session
+        completes; a soft 10s cap keeps a hung caption task from stalling
+        it. TURN_SUMMARY carries the turn's delivered files. Any failure
+        is logged and swallowed — the SDK finds the files from the turn's
+        tool calls when TURN_SUMMARY is missing.
 
         Returns the deliverables the summary named, or None when it was
         not written, so a worker's report lists no files it cannot know.
         """
         # No early return on a missing summarizer: the manifest needs no
-        # model, so the download card outlives the recap.
+        # model, so the download card does without one.
         pending = list(self._pending_iteration_summary_tasks.values())
         if pending:
             try:
@@ -465,36 +465,6 @@ class ArtifactCompletionMixin:
                     "iteration summary drain timed out for turn %s", turn_id,
                 )
 
-        # Read back the resolved iteration summaries in order so the
-        # turn summarizer sees the same recap thread the SDK will
-        # render. We re-query the event log because some iteration
-        # tasks may have failed silently (returned None).
-        try:
-            iter_events = await self._store.get_events(
-                session_id,
-                types=[EventType.ITERATION_SUMMARY],
-            )
-        except Exception:
-            logger.warning(
-                "Failed to read iteration summaries for turn %s; "
-                "summarizing without them.",
-                turn_id,
-                exc_info=True,
-            )
-            iter_events = []
-        ordered = sorted(
-            (
-                e for e in iter_events
-                if (getattr(e, "data", None) or {}).get("turn_id") == turn_id
-            ),
-            key=lambda e: (getattr(e, "data", None) or {}).get(
-                "iteration_index", 0,
-            ),
-        )
-        iteration_summaries = [
-            str((getattr(e, "data", None) or {}).get("summary") or "")
-            for e in ordered
-        ]
         candidate_artifacts, entries_by_path = (
             await self._collect_candidate_artifacts(
                 session_id=session_id, turn_id=turn_id,
@@ -523,7 +493,6 @@ class ArtifactCompletionMixin:
             )
 
         delivered = manifest.delivered
-        recap = ""
 
         if self._turn_summarizer is not None:
             # One question the workspace cannot answer: which of several
@@ -545,33 +514,8 @@ class ArtifactCompletionMixin:
                     "deliverable pick failed for %s", turn_id, exc_info=True,
                 )
 
-            try:
-                # Outer backstop sits above the summarizer's own timeout.
-                result = await asyncio.wait_for(
-                    self._turn_summarizer.summarize_turn(
-                        turn_id=turn_id,
-                        user_message=user_message,
-                        iteration_summaries=iteration_summaries,
-                        artifacts=delivered,
-                    ),
-                    timeout=35.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("turn summary call timed out for %s", turn_id)
-                result = None
-            except Exception:
-                logger.warning(
-                    "turn summary call failed for %s", turn_id, exc_info=True,
-                )
-                result = None
-            if result is not None:
-                recap = result.recap
-                delivered = result.artifacts
-
-        # With recaps off there is nothing to say but still something to
-        # show, so a turn that produced nothing emits nothing rather than
-        # an empty card.
-        if not recap and not delivered and not manifest.unsupported_claim:
+        # A turn that delivered nothing emits nothing rather than an empty list.
+        if not delivered and not manifest.unsupported_claim:
             return []
 
         artifacts = [{"kind": a.kind, "label": a.label, "ref": a.ref} for a in delivered]
@@ -581,7 +525,10 @@ class ArtifactCompletionMixin:
                 EventType.TURN_SUMMARY,
                 {
                     "turn_id": turn_id,
-                    "recap": recap,
+                    # No recap is written any more: the turn's closing
+                    # message says what it did. Kept empty, so a client
+                    # that still reads the field shows nothing.
+                    "recap": "",
                     # Advisory, and only ever set when the turn delivered
                     # nothing at all: the closing message claimed a file
                     # that was never written. Surfaced rather than acted
@@ -924,7 +871,7 @@ class ArtifactCompletionMixin:
 
         Awaited before the call runs, never in the background: a mark that
         landed after a tool's first write would miss its file.  Not taken for
-        a turn whose recap is ruled out, which lists no files.
+        a turn whose summary is ruled out, which lists no files.
         """
         if self._turn_marked or device_of(session.config) is None or summary_ruled_out(session):
             return
@@ -1144,7 +1091,7 @@ class ArtifactCompletionMixin:
         a successful turn end (``stop``/``done``/``complete``/``completed``),
         drains any in-flight iteration-summary tasks and emits a
         ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
-        sees the recap in the same event stream as the closing message.
+        sees the turn's files in the same event stream as the closing message.
 
         A project's thread lands its turn first: before its pod goes, and
         before the turn summary and the report, so both see the landed files.
@@ -1275,15 +1222,14 @@ class ArtifactCompletionMixin:
         #
         # Orchestrated sessions skip it: a mission / auto-research
         # coordinator ends its turn repeatedly across the orchestration loop
-        # (dispatch, wait, harvest, decide), and a "Task complete" recap
-        # after each one reads as the chat stopping when the run is still
+        # (dispatch, wait, harvest, decide), and a list of files after
+        # each one reads as the chat stopping when the run is still
         # going. ``active_mission_id`` marks a live mission; an Arbor
         # research coordinator also carries ``active_research_run_id`` (and
         # keeps running report turns even after the mission id is cleared at
         # a terminal verdict), so suppress on either key.
         # Not gated on the summarizer: deciding what was delivered is
-        # bookkeeping now, so the download card survives with recaps
-        # turned off. Only the recap itself needs a model.
+        # bookkeeping, so the download card needs no model.
         # The turn's files, for a report: None when no summary was written.
         files: list[dict[str, Any]] | None = None
         if wants_turn_summary(session, turn_id=turn_id, reason=reason):

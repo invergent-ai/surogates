@@ -43,7 +43,7 @@ async def test_pdf_summary_keeps_inspected_pdf_and_excludes_generator_and_cache(
     harness._turn_summarizer = None
     harness._store = AsyncMock()
     harness._store.get_session.return_value = session
-    harness._store.get_events.side_effect = [[], events]
+    harness._store.get_events.return_value = events
     harness._storage = AsyncMock()
     harness._storage.list_entries.return_value = [
         {"key": f"{session_id}/{path}", "size": size, "modified": modified}
@@ -94,7 +94,7 @@ async def test_a_turn_whose_folder_could_not_be_listed_flags_no_file_its_reply_n
         harness._storage = None
         harness._store = AsyncMock()
         harness._store.get_session.return_value = session
-        harness._store.get_events.side_effect = [[], events]
+        harness._store.get_events.return_value = events
 
         await harness._drain_and_emit_turn_summary(
             session_id=session_id, turn_id=turn_id, user_message="make the report",

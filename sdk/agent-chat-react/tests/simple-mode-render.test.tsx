@@ -327,7 +327,7 @@ describe("Simple mode ChatThread rendering", () => {
     });
   }
 
-  it("shows the iteration summary line, hides per-tool entries by default, shows the recap", () => {
+  it("shows the iteration summary line, hides per-tool entries by default, lists the files", () => {
     const messages = [
       // Iteration 0 with tool calls; iteration summary attached.
       assistantMessage({
@@ -368,8 +368,9 @@ describe("Simple mode ChatThread rendering", () => {
 
     expect(dom.textContent).toContain("Reworked the hero copy"); // iteration summary
     expect(dom.textContent).toContain("Here's what I did."); // final answer
-    expect(dom.textContent).toContain("Reworked the hero around brain/hands."); // recap
-    expect(dom.textContent).toContain("landing.html"); // artifact
+    // No recap: the turn's files are listed under the answer, nothing more.
+    expect(dom.textContent).not.toContain("Reworked the hero around brain/hands.");
+    expect(dom.textContent).toContain("Code · HTML"); // artifact
     // Per-tool labels stay collapsed in Simple mode.
     expect(dom.textContent).not.toMatch(/^Patch$/m);
   });
@@ -496,7 +497,7 @@ describe("Simple mode ChatThread rendering", () => {
     // No turn.summary on the tail message, but the synthetic
     // derivation should still produce a download card.
     expect(dom.textContent).toContain("Summary.docx");
-    expect(dom.textContent).toContain("Word document");
+    expect(dom.textContent).toContain("Document · DOCX");
     const downloadAnchor = Array.from(dom.querySelectorAll("a"))
       .find((a) => a.textContent?.includes("Download"));
     expect(downloadAnchor).toBeDefined();

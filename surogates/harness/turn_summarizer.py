@@ -1,4 +1,4 @@
-"""Per-iteration and per-turn LLM summaries for the Simple chat view.
+"""Per-iteration captions and the deliverable pick for the Simple chat view.
 
 The :class:`TurnSummarizer` produces:
 
@@ -7,16 +7,18 @@ The :class:`TurnSummarizer` produces:
   the cheap ``summary_model`` auxiliary LLM (already wired up for
   context compression and title generation) because they fire on every
   iteration, and
-* a per-turn recap plus a curated list of downloadable artifacts
-  (TurnSummaryCard), run on the agent's base model — picking the
-  user's actual deliverable out of a pile of intermediate workspace
-  files needs the stronger model, and it only runs once per turn.
-  Only downloadable deliverables — workspace files and created
-  artifacts — are surfaced; URLs and commands are not.
+* the pick of a turn's deliverables when more than one real file
+  survives the workspace check, run on the agent's base model — picking
+  the user's actual deliverable out of a pile of intermediate workspace
+  files needs the stronger model, and it only runs once per turn. Only
+  downloadable deliverables — workspace files and created artifacts —
+  are surfaced; URLs and commands are not.
+
+There is no per-turn recap: the turn's own closing message says what it
+did, and the chat lists the delivered files under it.
 
 Both methods degrade gracefully on timeouts, malformed responses, and
-unconfigured clients: they return ``None`` and the harness's caller is
-expected to omit the summary event rather than fail the turn.
+unconfigured clients, so a failure never fails the turn.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
@@ -40,23 +42,22 @@ from surogates.harness.structured_output import (
 
 logger = logging.getLogger(__name__)
 
-# Soft caps so a hung provider can't stall the turn. The turn summary
+# Soft caps so a hung provider can't stall the turn. The deliverable pick
 # runs on the base model, which is slower than the cheap summary model.
 _ITERATION_SUMMARY_TIMEOUT_SECONDS: float = 10.0
-_TURN_SUMMARY_TIMEOUT_SECONDS: float = 30.0
+_DELIVERABLE_PICK_TIMEOUT_SECONDS: float = 30.0
 
 # The ``{"caption": …}`` wrapper costs tokens the caption used to have
 # to itself, and a reply truncated mid-object parses to nothing at all
 # where a truncated string was still usable.
 _MAX_ITERATION_SUMMARY_TOKENS: int = 96
-_MAX_TURN_SUMMARY_TOKENS: int = 512
 
 TurnArtifactKind = Literal["file", "artifact"]
 
 
 @dataclass(frozen=True)
 class TurnArtifact:
-    """A single downloadable artifact shown in :class:`TurnSummaryCard`.
+    """A single downloadable artifact listed under the turn's last answer.
 
     ``ref`` semantics depend on ``kind``:
 
@@ -68,14 +69,6 @@ class TurnArtifact:
     label: str
     ref: str
     meta: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class TurnSummary:
-    """Per-turn recap. ``recap`` is 1–3 short sentences in plain prose."""
-
-    recap: str
-    artifacts: list[TurnArtifact] = field(default_factory=list)
 
 
 # Demonstrated rather than specified. The rule-list version of this
@@ -155,16 +148,6 @@ _PICK_PROMPT = (
     "Reply with one path per line, copied exactly, and nothing else. If "
     "every file looks like part of the answer, list them all."
 )
-
-
-_TURN_PROMPT = (
-    "You are reviewing a completed agent turn. Reply with 1-3 short "
-    "sentences of plain prose, no markdown, summarizing what the agent "
-    "accomplished for the user. Do not list files -- the deliverables "
-    "are decided elsewhere and shown separately. Reply with the "
-    "sentences only, no preamble and no JSON."
-)
-
 
 
 # Openers that mark the summary model role-playing the agent instead of
@@ -425,12 +408,12 @@ def _is_internal_workspace_path(path: str, *, on_folder: bool = False) -> bool:
 
 
 class TurnSummarizer:
-    """Produce one-line iteration summaries and per-turn recaps.
+    """Produce one-line iteration summaries and pick a turn's deliverables.
 
     Iteration summaries run on the cheap auxiliary ``summary_model``
-    (they fire on every iteration); the per-turn recap + artifact
-    curation runs on the agent's base model, which is reliable enough
-    to pick the user's actual deliverable out of intermediate files.
+    (they fire on every iteration); the deliverable pick runs on the
+    agent's base model, which is reliable enough to pick the user's
+    actual deliverable out of intermediate files.
     """
 
     def __init__(
@@ -440,17 +423,11 @@ class TurnSummarizer:
         base_model: str,
         summary_client: Any | None = None,
         summary_model: str = "",
-        recap_enabled: bool = True,
     ) -> None:
         self._base_client = base_client
         self._base_model = base_model
         self._summary_client = summary_client
         self._summary_model = summary_model
-        # Iteration one-liners and the end-of-turn recap are separately
-        # controlled: the one-liners are written while the turn runs, the
-        # recap only after the agent has stopped talking, where it sits
-        # between the last word and session.complete.
-        self._recap_enabled = recap_enabled
         # Cleared the first time this summarizer's provider rejects
         # ``response_format``; see :meth:`summarize_iteration`.
         self._iteration_json_mode = True
@@ -636,7 +613,7 @@ class TurnSummarizer:
                 "stream": False,
             },
             label=f"pick {turn_id}",
-            timeout=_TURN_SUMMARY_TIMEOUT_SECONDS,
+            timeout=_DELIVERABLE_PICK_TIMEOUT_SECONDS,
         )
         if not content:
             return artifacts
@@ -659,70 +636,6 @@ class TurnSummarizer:
 
         keep = {a.ref for a in chosen}
         return [a for a in artifacts if a.kind != "file" or a.ref in keep]
-
-    async def summarize_turn(
-        self,
-        *,
-        turn_id: str,
-        user_message: str,
-        iteration_summaries: list[str],
-        artifacts: list[TurnArtifact],
-    ) -> TurnSummary | None:
-        """Write the turn's recap. ``artifacts`` are already decided.
-
-        Curation used to happen here: every touched file went into the
-        prompt and the base model picked the user's deliverable. That is
-        now reconciled against the workspace (see
-        :mod:`surogates.harness.delivery_manifest`), so this call only
-        writes prose -- which is what the cheap summary model is for, and
-        it is the reason the call no longer runs on the base model.
-
-        Returns ``None`` when the turn has nothing worth summarizing or
-        the model returns nothing usable.
-        """
-        if not self._recap_enabled:
-            return None
-        if not iteration_summaries and not artifacts:
-            return None
-
-        user_block_parts: list[str] = [f"User asked: {user_message[:1000]}"]
-        if iteration_summaries:
-            user_block_parts.append(
-                "Iteration summaries:\n"
-                + "\n".join(f"- {s}" for s in iteration_summaries)
-            )
-        if artifacts:
-            user_block_parts.append(
-                "Delivered:\n"
-                + "\n".join(f"- {a.label}" for a in artifacts)
-            )
-        user_block = "\n\n".join(user_block_parts)
-
-        # Prose only, so the cheap auxiliary is enough. Falling back to
-        # the base model keeps recaps working where no summary model is
-        # configured, rather than dropping them.
-        client = self._summary_client or self._base_client
-        model = self._summary_model or self._base_model
-
-        content = await self._chat_completion(
-            client,
-            {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": _TURN_PROMPT},
-                    {"role": "user", "content": user_block},
-                ],
-                "max_tokens": _MAX_TURN_SUMMARY_TOKENS,
-                "temperature": 0.3,
-                "stream": False,
-            },
-            label=f"turn {turn_id}",
-            timeout=_TURN_SUMMARY_TIMEOUT_SECONDS,
-        )
-        recap = (content or "").strip()
-        if not recap and not artifacts:
-            return None
-        return TurnSummary(recap=recap, artifacts=list(artifacts))
 
     # ------------------------------------------------------------------
     # Internals
@@ -789,7 +702,7 @@ class TurnSummarizer:
             return None
 
         # A reasoning field contains the model's working notes. It must
-        # never become a caption, recap, or list of selected files when
+        # never become a caption or a list of selected files when
         # the output allowance ends before the answer is produced.
         raw_content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
         content = content_as_text(raw_content).strip()

@@ -81,7 +81,7 @@ import { reasoningTokenLabel } from "../../runtime/reasoning-tokens";
 import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
-import { TurnSummaryCard } from "./turn-summary-card";
+import { TurnDownloads } from "./turn-downloads";
 import { ThreadCards } from "./thread-cards";
 import { cn } from "../../lib/utils";
 import {
@@ -1534,20 +1534,6 @@ function deriveFileArtifactsFromMessages(
   const seen = new Set<string>();
   const out: AgentChatTurnArtifactRef[] = [];
   for (const msg of messages) {
-    // Structured artifacts are derived from their ``artifact.created`` /
-    // ``artifact.updated`` system markers, not the ``create_artifact``
-    // tool call: the marker carries the ``artifact_id`` that
-    // TurnSummaryCard's resolveArtifactRef matches on (the tool call only
-    // knows the name, which would degrade the card to plain text). The
-    // marker is also folded into the same group the summary renders in.
-    if (msg.role === "system") {
-      if (msg.systemKind !== "artifact") continue;
-      const { artifactId, name } = unpackArtifactMeta(msg.systemMeta, msg.content);
-      if (!artifactId || seen.has(`artifact:${artifactId}`)) continue;
-      seen.add(`artifact:${artifactId}`);
-      out.push({ kind: "artifact", label: name, ref: artifactId });
-      continue;
-    }
     if (msg.role !== "assistant" || !msg.toolCalls) continue;
     for (const tc of msg.toolCalls) {
       const status = effectiveStatus(tc);
@@ -1583,8 +1569,8 @@ function deriveFileArtifactsFromMessages(
 // ── Simple-mode AssistantGroup ───────────────────────────────────────
 //
 // Renders an assistant turn as: per-iteration IterationGroup rows (one
-// per assistant message), the final-answer text, a TurnSummaryCard
-// when one is attached, and TurnFeedback on the final answer. System
+// per assistant message), the final-answer text, the turn's downloads
+// when it delivered files, and TurnFeedback on the final answer. System
 // messages threaded into the group (skill_invoked / artifact_created)
 // keep their existing markers so we don't lose their visibility in
 // Simple mode.
@@ -1610,7 +1596,6 @@ function SimpleAssistantGroup({
   activeAssistantId,
   isRunning,
   sessionId,
-  onFileSelect,
   onRetry,
   hideTurnSummary = false,
 }: {
@@ -1618,7 +1603,6 @@ function SimpleAssistantGroup({
   activeAssistantId?: string;
   isRunning: boolean;
   sessionId: string | null;
-  onFileSelect?: (path: string) => void;
   onRetry?: () => Promise<void>;
   hideTurnSummary?: boolean;
 }) {
@@ -1639,54 +1623,15 @@ function SimpleAssistantGroup({
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
 
-  // Synthetic-artifact fallback so file deliverables still surface
-  // even when the harness summarizer is missing or didn't include
-  // them in turn.summary. We scan every assistant message in the
-  // group for write_file / patch / create_artifact tool calls and
-  // promote each unique output path to a file artifact. The real
-  // turn.summary always wins when present and non-empty.
-  //
-  // Gated on turn completion: the fallback would otherwise pop into
-  // view as soon as the agent's first write_file lands, well before
-  // the user-facing turn is done. We only synthesize once the tail
-  // iteration has stopped streaming so the summary card matches what
-  // the harness would have emitted at turn end.
+  // The turn's downloads: the files the harness summarizer named, or failing
+  // that, the ones the turn's own tool calls wrote. The fallback waits for
+  // the turn to end, so it does not pop in at the agent's first write_file
+  // and matches what the harness would have emitted at turn end.
   const turnComplete = !isRunning && tail?.status === "complete";
-  // Honour the model's own ``summary="show|hide"`` declaration in the
-  // tail iteration's <next_action> footer.  Default is "hide" so a
-  // missing/malformed declaration suppresses the card — model has to
-  // opt IN to the heavier UI affordance.  Artifact-derived summaries
-  // still render even when hidden, because file output is a strong
-  // signal the user wants the artifact tray visible.
-  const summaryPref =
-    finalText !== null
-      ? stripAndParseNextAction(finalText).action?.summary ?? "hide"
-      : "hide";
-  const effectiveTurnSummary = (() => {
-    const fromHarness = tail?.turnSummary;
-    if (fromHarness && fromHarness.artifacts.length > 0) {
-      return fromHarness;
-    }
-    // Synthetic file-artifact fallback surfaces file deliverables even
-    // when the model opted to hide the recap (``summaryPref === "hide"``):
-    // a download card is a strong, low-noise signal the user wants the
-    // artifact tray. The recap *text* still honours the preference, so a
-    // hidden turn carries the cards without the prose summary. Gated on
-    // turn completion so it matches what the harness would emit at end.
-    if (turnComplete) {
-      const derived = deriveFileArtifactsFromMessages(messages);
-      if (derived.length > 0) {
-        return {
-          turnId: fromHarness?.turnId ?? "",
-          recap: summaryPref === "show" ? (fromHarness?.recap ?? "") : "",
-          artifacts: derived,
-        };
-      }
-    }
-    // No artifacts to surface — honour the hide preference for the
-    // recap-only card.
-    if (summaryPref === "hide") return null;
-    return fromHarness;
+  const turnFiles = (() => {
+    const named = (tail?.turnSummary?.artifacts ?? []).filter((a) => a.kind === "file");
+    if (named.length > 0) return named;
+    return turnComplete ? deriveFileArtifactsFromMessages(messages) : [];
   })();
 
   // Adjacent commands fold into one group: "Ran 5 commands" once done, the
@@ -1816,13 +1761,8 @@ function SimpleAssistantGroup({
             />
           </div>
         )}
-        {effectiveTurnSummary && !hideTurnSummary && (
-          <TurnSummaryCard
-            summary={effectiveTurnSummary}
-            sessionId={sessionId}
-            messages={messages}
-            onFileSelect={onFileSelect}
-          />
+        {turnFiles.length > 0 && sessionId && !hideTurnSummary && (
+          <TurnDownloads sessionId={sessionId} files={turnFiles} />
         )}
         {showErrorInfo && (
           <div className="mt-3">
@@ -1868,7 +1808,6 @@ function AssistantGroup({
         activeAssistantId={activeAssistantId}
         isRunning={isRunning}
         sessionId={sessionId}
-        onFileSelect={onFileSelect}
         onRetry={onRetry}
         hideTurnSummary={hideTurnSummary}
       />
