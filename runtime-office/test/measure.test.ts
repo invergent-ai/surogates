@@ -231,6 +231,13 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(table.rows[0].cells[0].paras[0].runs[0]).toMatchObject({ text: "Region", b: true, color: { hex: "#ffffff", alpha: 1 } });
   });
 
+  it("names the slide's first heading's shape Title, and no other", async () => {
+    const spec: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial">
+      <p style="position:absolute;left:1480px;top:88px;width:320px;font-size:26px">NEW HUB</p>
+      <h2 style="font-size:64px">Lisbon: team and setup</h2><h3 style="font-size:44px">Who goes</h3></section>`);
+    expect(spec.shapes.filter((s: Any) => s.name === "Title").map((s: Any) => s.text.paras[0].runs[0].text)).toEqual(["Lisbon: team and setup"]);
+  });
+
   it("refuses a table row or cell background that is not solid", async () => {
     for (const [row, cell, said] of [
       ["background:rgba(255,255,255,0.08)", "", 'tr:nth-of-type(2)> ("North120"): a table row\'s background must be a solid colour (the editor draws it opaque).'],

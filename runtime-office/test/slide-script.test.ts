@@ -9,7 +9,7 @@ type Any = any;
 const SCRIPT = readFileSync(new URL("../editor/slide.js", import.meta.url), "utf8");
 const EMPTY_SPEC = { background: null, shapes: [], notes: "", hidden: false, transition: null };
 
-interface Box { placeholder?: string; text?: string }
+interface Box { placeholder?: string; text?: string; name?: string }
 function deck(slides: { layout?: string; boxes?: Box[]; notes?: string }[]) {
   let next = 100;
   const all: Any[] = [];
@@ -19,7 +19,7 @@ function deck(slides: { layout?: string; boxes?: Box[]; notes?: string }[]) {
       Slide: { Get_Id: () => id, cSld: { spTree: [] } },
       GetAllDrawings: () => boxes.map((b) => ({
         GetClassType: () => "shape", Shape: { txBody: {} }, GetDocContent: () => ({ GetText: () => b.text ?? "" }),
-        GetPlaceholder: () => (b.placeholder ? { GetType: () => b.placeholder } : null),
+        GetPlaceholder: () => (b.placeholder ? { GetType: () => b.placeholder } : null), GetName: () => b.name ?? "",
         GetPosX: () => 0, GetPosY: () => 0, GetWidth: () => 0, GetHeight: () => 0,
       })),
       GetLayout: () => ({ GetName: () => layout }),
@@ -99,5 +99,16 @@ describe("a magic move that cannot play", () => {
   it("says nothing when the first leaves by one", () => {
     const { run } = deck([typed]);
     expect(run({ action: "edit", ops: [{ op: "slides", slides: [pinning(true), pinning(false)] }] }).results[0].note).toBeUndefined();
+  });
+});
+
+describe("a slide's title in the outline", () => {
+  it("is its heading's text, before any text above it; else its title placeholder's or its first text", () => {
+    const { run } = deck([
+      { boxes: [{ text: "NEW HUB" }, { text: "Lisbon: team and setup", name: "Title" }] },
+      { boxes: [{ text: "Draft" }, { text: "Quarterly review", placeholder: "title" }] },
+      { boxes: [{ text: "Just words" }] },
+    ]);
+    expect(run({ action: "outline" }).slides.map((s: Any) => s.title)).toEqual(["Lisbon: team and setup", "Quarterly review", "Just words"]);
   });
 });

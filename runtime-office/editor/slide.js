@@ -57,15 +57,17 @@
     parts.push(notesOf(slide));
     return hash(parts.join("\n"));
   }
+  // The heading runtime-office named, else the title placeholder, else the first text.
   function titleOf(slide) {
-    var drawings = slide.GetAllDrawings(), first = "";
+    var drawings = slide.GetAllDrawings(), title = null, first = "";
     for (var i = 0; i < drawings.length; i++) {
       var placeholder = drawings[i].GetPlaceholder ? drawings[i].GetPlaceholder() : null, type = placeholder ? placeholder.GetType() : "";
       var text = textOf(drawings[i]).replace(/\s+/g, " ").trim();
-      if (type === "title" || type === "ctrTitle") return clip(text, 80);
+      if (drawings[i].GetName && drawings[i].GetName() === "Title") return clip(text, 80);
+      if (title === null && (type === "title" || type === "ctrTitle")) title = text;
       if (!first && text) first = text;
     }
-    return clip(first, 80);
+    return clip(title !== null ? title : first, 80);
   }
   function entry(slide) {
     var layout = slide.GetLayout();
@@ -493,8 +495,10 @@
       if (!maker) throw new Error("no builder for a " + shape.kind);
       var drawing = maker(shape);
       if (!slide.AddObject(drawing)) throw new Error("the slide refused shape " + i);
-      // Morph pairs shapes by one "!!" name on two slides, which the public SetName will not give: it renames the
-      // other holder (internal setName does not). A group's name goes after it joins the slide, or it is lost.
+      // Names are internal setName's: the public SetName renames any other holder of the name, on every slide (every
+      // slide's heading is "Title"), and so would not give Morph its one "!!" name on two slides. A group's name goes
+      // after it joins the slide, or it is lost. A heading that moves keeps Morph's name.
+      if (shape.name) drawing.Drawing.setName(shape.name);
       if (shape.magic) drawing.Drawing.setName("!!" + shape.magic);
       if (shape.build) pendingBuilds.push({ slide: slide, drawing: drawing, build: shape.build });
     }

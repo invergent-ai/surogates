@@ -905,6 +905,7 @@ export function inspect(args: InspectArgs): Inspected {
     };
     // What one element draws by itself, as one drawing (a group when it takes several); a container's children are
     // laid out by layer().
+    const heading = Array.from(section.querySelectorAll("h1, h2, h3")).find((h) => !inside(h));
     const own = (el: Element): ShapeSpec[] => {
       const cs = getComputedStyle(el), outer = box(el), t = transformOf(el);
       if (drawnWhole(el, t)) {
@@ -955,6 +956,8 @@ export function inspect(args: InspectArgs): Inspected {
       const behind = bare ? [shot(el, isText(el) ? "text" : "box", outer, Math.max(reach(cs.boxShadow), textReach))] : [];
       const look: Look = bare ? { fill: null, line: null } : { fill: background as Fill | null, line: stroke(cs) };
       const shapes = tag === "IMG" ? [picture(el as HTMLImageElement, f)] : isText(el) ? textShape(el, f, look) : tag === "HR" ? [rule(el, f)] : painted(el, f, look, t);
+      // The slide's first heading names it in the outline, before any text above it.
+      if (el === heading && shapes[0]) shapes[0].name = "Title";
       if (!bare && shadow) {
         // The editor draws an unblurred shadow under what is filled or stroked; other readers put an unfilled text
         // box's shadow on its text. Any other shadow is Chromium's picture of it behind the box.

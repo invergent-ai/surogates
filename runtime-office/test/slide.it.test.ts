@@ -86,6 +86,15 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
     });
   });
 
+  it("outlines a slide by its heading, not by a badge above it", async () => {
+    const { agent, user } = await deck();
+    const badged = `<section style="background:#ffffff;padding:128px"><p style="position:absolute;left:1480px;top:88px;width:320px;font-size:26px;transform:rotate(8deg)">NEW HUB</p><h2 style="font-size:64px">Lisbon: team and setup</h2></section>`;
+    expect(((await office.edit(agent, [{ op: "slides", slides: [{ html: badged }] }])) as Any).applied).toBe(true);
+    await eventually(async () => {
+      expect((await outline(user)).slides[2].title).toBe("Lisbon: team and setup");
+    });
+  });
+
   it("replaces a slide in place, keeping its id", async () => {
     const { agent } = await deck();
     const second = (await outline(agent)).slides[1];
