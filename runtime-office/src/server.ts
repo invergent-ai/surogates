@@ -2,7 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { HOST_HTML } from "./host.js";
 import { ContentError } from "./markdown.js";
-import { EditorError, type Office } from "./office.js";
+import { EditorError } from "./formats/format.js";
+import type { Office } from "./office.js";
 import { Busy, PageGone } from "./pages.js";
 
 export type OfficeApi = Pick<Office, "open" | "read" | "edit" | "flush" | "close" | "health">;

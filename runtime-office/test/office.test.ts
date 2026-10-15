@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EditorPage } from "../src/connector.js";
-import type { Format } from "../src/formats/format.js";
+import { EditorError, type Format } from "../src/formats/format.js";
 import { word } from "../src/formats/word.js";
 import { ContentError } from "../src/markdown.js";
-import { EditorError, FLUSH_WAIT_MS, Office, UNDO_WAIT_MS } from "../src/office.js";
+import { FLUSH_WAIT_MS, Office, UNDO_WAIT_MS } from "../src/office.js";
 import { PageGone, type PagePool } from "../src/pages.js";
 
 type Reply = { sentAt: number; value: unknown };

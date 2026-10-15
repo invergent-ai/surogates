@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EditorPage } from "../src/connector.js";
+import { EditorError } from "../src/formats/format.js";
 import { checkSlideOps, slideFormat } from "../src/formats/slide.js";
 import { ContentError } from "../src/markdown.js";
 import type { Canvas, Measurer } from "../src/slides/measure.js";
@@ -47,5 +48,16 @@ describe("slide ops", () => {
     expect(measure.mock.calls[0]![1]).toEqual({ width: 1920, height: 1440, emuPerPx: 4762.5 });
     await expect(format.compile([{ op: "slides", slides: [{ html: "<section>ok</section>" }, { html: "<section>too big</section>" }] }], context))
       .rejects.toThrow("op 0, slide 1: The content of <section > p> overflows its box by 40 px.");
+  });
+
+  it("says a slide that could not be measured for a reason not its own is the editor's failure, in one line", async () => {
+    const measure = vi.fn(async () => {
+      throw new Error("page.screenshot: Timeout 30000ms exceeded.\nCall log:\n  - taking page screenshot");
+    });
+    const format = slideFormat({ measure } as unknown as Measurer);
+    const context = { page: {} as EditorPage, run: vi.fn(async () => ({ width: 12192000, height: 6858000 })) };
+    const compiled = format.compile([{ op: "slides", slides: [{ html: "<section>a</section>" }] }], context);
+    await expect(compiled).rejects.toThrow(EditorError);
+    await expect(compiled).rejects.toThrow(/^op 0, slide 0 could not be measured: page\.screenshot: Timeout 30000ms exceeded\.$/);
   });
 });

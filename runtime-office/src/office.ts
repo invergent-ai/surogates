@@ -1,5 +1,5 @@
 import { withTimeout, type EditorPage, type UndoState } from "./connector.js";
-import { Stalled, type EditContext, type Format, type Outcome, type Scope } from "./formats/format.js";
+import { EditorError, Stalled, type EditContext, type Format, type Outcome, type Scope } from "./formats/format.js";
 import { formatsFor } from "./formats/index.js";
 import { PageGone, type PagePool, type OpenRequest } from "./pages.js";
 
@@ -18,9 +18,6 @@ const FRAME_SILENT = "the editor's frame did not answer";
 const COMMIT = ["GroupActions", ""];
 const CANCEL = ["GroupActions", "", "cancel"];
 const STALLED_EDIT = "the editor stopped answering; the edit may have applied: read the document again before editing";
-
-/** The editor could not do what was asked (not the agent's input, not a dead page). */
-export class EditorError extends Error {}
 
 /** The editor skipped the command, answering nothing: the document is unchanged. */
 class NotRun extends EditorError {}

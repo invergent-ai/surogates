@@ -26,6 +26,9 @@ export interface Format {
   edit(context: EditContext, ops: unknown[]): Promise<Outcome>;
 }
 
+/** The editor could not do what was asked (not the agent's input, not a dead page). */
+export class EditorError extends Error {}
+
 /** The editor stopped answering a command: what it did is not known. */
 export class Stalled extends Error {}
 

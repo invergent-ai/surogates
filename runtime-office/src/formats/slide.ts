@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { ContentError } from "../markdown.js";
 import type { Canvas, Measurer } from "../slides/measure.js";
-import { checkBatch, textArg, type EditContext, type Format, type Outcome, type Scope } from "./format.js";
+import { checkBatch, EditorError, textArg, type EditContext, type Format, type Outcome, type Scope } from "./format.js";
 
 const MAX_OPS = 20;
 const MAX_SLIDES = 10;
@@ -84,7 +84,9 @@ async function compile(raw: unknown, context: EditContext, measurer: Measurer): 
         slides.push({ ...rest, spec: await measurer.measure(html, canvas, context.page) });
       } catch (error) {
         if (error instanceof ContentError) throw new ContentError(`op ${index}, slide ${n}: ${error.message}`);
-        throw error;
+        // Not the slide's fault: a font the document server did not send, a page that crashed or ran out of time.
+        const said = error instanceof Error ? error.message.split("\n")[0] : String(error);
+        throw new EditorError(`op ${index}, slide ${n} could not be measured: ${said}`);
       }
     }
     out.push({ op: "slides", slides });

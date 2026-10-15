@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { EditorError } from "../src/formats/format.js";
 import { formatsFor } from "../src/formats/index.js";
 import { pdf } from "../src/formats/pdf.js";
-import { EditorError, Office } from "../src/office.js";
+import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
 import { eventually, itEnabled, pair, startFixture, type Fixture } from "./support/office.js";
 
