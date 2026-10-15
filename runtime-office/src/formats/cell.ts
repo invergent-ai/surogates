@@ -31,7 +31,9 @@ export type CellOp =
 
 type Raw = Record<string, unknown>;
 type Phase = { refused: unknown } | { results: Record<string, unknown>; pending?: unknown[] };
-type Lock = { state: "granted" | "pending" } | { state: "refused"; op: number; reason: string };
+type LockState = { state: "granted" | "pending" } | { state: "refused"; op: number; reason: string };
+// A refusal the script decided before asking for any cell (a sheet that is gone), or what the editor's lock request came to.
+type Lock = { refused: unknown } | LockState;
 
 function column(letters: string): number {
   let n = 0;
@@ -246,10 +248,11 @@ async function edit(context: EditContext, list: unknown[]): Promise<Outcome> {
   if (writes.length) {
     const ticket = randomUUID();
     let lock = (await context.run({ action: "lock", ranges: writes, ticket })) as Lock;
+    if ("refused" in lock) return lock;
     const until = Date.now() + SETTLE_MS;
     while (lock.state === "pending" && Date.now() < until) {
       await sleep(POLL_MS);
-      lock = (await context.run({ action: "locks", ticket })) as Lock;
+      lock = (await context.run({ action: "locks", ticket })) as LockState;
     }
     if (lock.state === "refused") return { refused: { op: lock.op, reason: lock.reason } };
     if (lock.state === "pending") {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { EditorPage } from "../src/connector.js";
 import { cell, compileCellOps } from "../src/formats/cell.js";
 import { ContentError } from "../src/markdown.js";
 
@@ -74,5 +75,15 @@ describe("format, chart and sheet", () => {
 
   it("refuses an unknown op", () => {
     expect(() => compileCellOps([{ op: "insert" }])).toThrow(ContentError);
+  });
+});
+
+describe("a spreadsheet batch", () => {
+  it("stops at a refusal the editor gives while asking for the cells", async () => {
+    const refused = { refused: { op: 0, reason: "There is no sheet Gone: read the outline again." } };
+    const run = vi.fn(async (scope: Record<string, unknown>) => (scope.action === "lock" ? refused : { results: {} }));
+    const ops = compileCellOps([{ op: "set", range: "Gone!A1", values: [["x"]] }]);
+    expect(await cell.edit({ page: {} as EditorPage, run }, ops)).toEqual(refused);
+    expect(run.mock.calls.map(([scope]) => scope.action)).toEqual(["lock"]);
   });
 });
