@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { HOST_HTML } from "../../src/host.js";
+import type { Office } from "../../src/office.js";
 
 export const IT = {
   dsUrl: process.env.OFFICE_IT_DS_URL ?? "",
@@ -85,4 +86,26 @@ export async function startFixture(): Promise<Fixture> {
     callbacks,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
+}
+
+/** An agent page and a person page on one fresh key, their ids added to *opened* for the test to close. */
+export async function pair(office: Office, opened: string[], file = "sample.docx"): Promise<{ agent: string; user: string }> {
+  const key = newKey();
+  const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT, file), documentServerUrl: IT.dsUrl });
+  const user = await office.open({ docKey: key, sessionId: "user", config: editorConfig(key, USER, file), documentServerUrl: IT.dsUrl });
+  opened.push(agent, user);
+  return { agent, user };
+}
+
+/** Runs *check* until it passes or *ms* run out: the other editor can still be taking in a change. */
+export async function eventually(check: () => Promise<void>, ms = 10_000): Promise<void> {
+  const until = Date.now() + ms;
+  for (;;) {
+    try {
+      return await check();
+    } catch (error) {
+      if (Date.now() > until) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
 }

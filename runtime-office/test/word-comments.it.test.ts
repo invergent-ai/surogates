@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
-import { AGENT, editorConfig, IT, itEnabled, newKey, startFixture, USER, type Fixture } from "./support/office.js";
+import { AGENT, eventually, itEnabled, pair, startFixture, type Fixture } from "./support/office.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -26,30 +26,11 @@ describe.skipIf(!itEnabled)("comments", () => {
     await fixture.close();
   });
 
-  async function pair(): Promise<{ agent: string; user: string }> {
-    const key = newKey();
-    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT), documentServerUrl: IT.dsUrl });
-    const user = await office.open({ docKey: key, sessionId: "user", config: editorConfig(key, USER), documentServerUrl: IT.dsUrl });
-    opened.push(agent, user);
-    return { agent, user };
-  }
   const comments = async (id: string): Promise<Any[]> => ((await office.read(id, { view: "outline" })) as Any).comments;
   const edit = async (id: string, ops: unknown[]): Promise<Any> => office.edit(id, ops);
-  // The user's editor can still be taking in the agent's change.
-  async function eventually(check: () => Promise<void>, ms = 10_000): Promise<void> {
-    const until = Date.now() + ms;
-    for (;;) {
-      try {
-        return await check();
-      } catch (error) {
-        if (Date.now() > until) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-  }
 
   it("comments on words, replies and resolves, under the agent's name", async () => {
-    const { agent, user } = await pair();
+    const { agent, user } = await pair(office, opened);
     const made = await edit(agent, [{ op: "comment", anchor: { find: "North grew" }, body: "Source?" }]);
     const thread = made.results[0].thread;
     expect(thread).toMatch(/\S/);
@@ -67,7 +48,7 @@ describe.skipIf(!itEnabled)("comments", () => {
   });
 
   it("keeps no reply or resolve of a refused batch, in the agent's editor or the user's", async () => {
-    const { agent, user } = await pair();
+    const { agent, user } = await pair(office, opened);
     const thread = (await edit(agent, [{ op: "comment", anchor: { find: "North grew" }, body: "Source?" }])).results[0].thread;
     const replied = await edit(agent, [{ op: "reply", thread, body: "x" }, { op: "reply", thread: "999999", body: "y" }]);
     expect(replied).toMatchObject({ applied: false, refused: { op: 1 } });
