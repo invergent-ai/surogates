@@ -3,6 +3,8 @@
 require "digest"
 require "json"
 require "minitest/autorun"
+require "open3"
+require "tmpdir"
 require "yaml"
 
 class ReleaseWorkflowTest < Minitest::Test
@@ -36,6 +38,18 @@ class ReleaseWorkflowTest < Minitest::Test
   def windows_jobs
     @workflow.fetch("jobs").keys.grep(/\Adesktop-win-/)
   end
+
+  # The macOS release's jobs, arm64's guest image's among them: what the release waits for of them is its publish, where
+  # the Developer ID signs, through the one job that says whether macOS is the release's.
+  def mac_jobs
+    @workflow.fetch("jobs").keys.grep(/\Adesktop-(mac-|vm-(image|manifest)-arm64\z)/)
+  end
+
+  # macOS's trial, and its describe: no job waits for them.
+  MAC_TRIAL = %w[desktop-mac-trial desktop-mac-trial-describe].freeze
+  # The run's one word for how it signs the macOS app, from the job that decides it once.
+  MAC_MODE = "needs.desktop-signing-mode.outputs.mac-signing"
+  MAC_SIGNER = "${{ needs.desktop-signing-mode.outputs.mac-signer }}"
 
   # Every job the named one waits for: its `needs`, and theirs.
   def waits_for(name)
@@ -113,25 +127,59 @@ class ReleaseWorkflowTest < Minitest::Test
     # out all the same. By this rule, so that a job added later is waited for too.
     # While Windows publishes nothing (the repository names no signing account), the release is every job but Windows's,
     # and its rollout waits for no Windows job: a trial of Windows's that fails stops nothing of Linux's.
+    # Neither waits for macOS's trial, which nothing waits for.
     unset = rollout_jobs.first
-    assert_equal (jobs.keys - rollout_jobs - windows_jobs).sort, waits_for(unset).sort
+    assert_equal (jobs.keys - rollout_jobs - windows_jobs - MAC_TRIAL).sort, waits_for(unset).sort
     # Once it names one, Windows's publish is the release's too: its rollout waits for every other job, Windows's among them.
     set = rollout_jobs.last
-    assert_equal (jobs.keys - rollout_jobs).sort, waits_for(set).sort
+    assert_equal (jobs.keys - rollout_jobs - MAC_TRIAL).sort, waits_for(set).sort
     assert_includes Array(jobs.fetch(set).fetch("needs")), "desktop-win-publish"
+    # Each waits for macOS through the one job that says whether macOS is the release's.
+    rollout_jobs.each { |name| assert_equal ["desktop-mac-released"], Array(jobs.fetch(name).fetch("needs")) & mac_jobs, name }
+    jobs.each { |name, job| assert_empty Array(job.fetch("needs", [])) & MAC_TRIAL, name unless name == "desktop-mac-trial-describe" }
     # Each runs only where every need succeeded: a condition with no status check of its own is success() and it, and
     # always(), !cancelled() or a result read by hand would roll out a release that failed. And never both.
     ROLLOUTS.each do |name, condition|
       assert_equal condition, jobs.fetch(name).fetch("if"), name
       refute_match(/always|cancelled|failure|success|result/, jobs.fetch(name).fetch("if"), name)
     end
-    # And no job of Linux's, nor of the cloud's release, waits for a Windows job, whatever the variable says.
-    (jobs.keys - rollout_jobs - windows_jobs).each do |name|
-      assert_empty waits_for(name) & windows_jobs, "#{name} waits for a Windows job"
+    # And no job of Linux's, nor of the cloud's release, waits for a Windows job or a macOS one, whatever the variables say.
+    (jobs.keys - rollout_jobs - windows_jobs - mac_jobs).each do |name|
+      assert_empty waits_for(name) & (windows_jobs + mac_jobs), "#{name} waits for a Windows or macOS job"
     end
     # Windows's publish runs only once the account is named, and every Windows job is reached by it.
     assert_equal "#{MODE} == 'account'", jobs.fetch("desktop-win-publish").fetch("if")
     assert_equal (windows_jobs - ["desktop-win-publish"]).sort, (waits_for("desktop-win-publish") & windows_jobs).sort
+  end
+
+  def test_macos_is_the_release_s_through_one_job_which_waits_for_its_publish_where_the_developer_id_signs_and_for_nothing_of_its_trial
+    jobs = @workflow.fetch("jobs")
+    gate = jobs.fetch("desktop-mac-released")
+    # Published, with arm64's guest manifest attached, where the Developer ID signs; or not asked for, in a trial. Its
+    # condition is the one place macOS's results are read: !cancelled() so that it is asked when its needs were skipped,
+    # each need's result by its name, and never always(), which would ask it in a run that was cancelled.
+    assert_equal "${{ !cancelled() && (#{MAC_MODE} == 'trial' || (needs.desktop-mac-publish.result == 'success' && needs.desktop-vm-manifest-arm64.result == 'success')) }}", gate.fetch("if")
+    assert_equal %w[desktop-signing-mode desktop-mac-publish desktop-vm-manifest-arm64], Array(gate.fetch("needs"))
+    assert_equal %w[if needs permissions runs-on steps timeout-minutes], gate.keys.sort
+    assert_equal({}, gate.fetch("permissions"))
+    assert_equal 1, gate.fetch("steps").length
+    assert_equal({ "SIGNING" => "${{ #{MAC_MODE} }}" }, gate.fetch("steps").first.fetch("env"))
+    refute_match(/secrets|vars\./, gate.to_s)
+    # It waits for every job of macOS's publishing, and for none of its trial.
+    assert_equal (mac_jobs - MAC_TRIAL - ["desktop-mac-released"]).sort, (waits_for("desktop-mac-released") & mac_jobs).sort
+    # Each job of macOS's publishing runs only where the Developer ID signs: arm64's image, the build, and the publish by
+    # their own conditions, and the rest by needing them, so that in a trial all are skipped as soon as their needs end.
+    %w[desktop-vm-image-arm64 desktop-mac-build desktop-mac-publish].each { |name| assert_equal "#{MAC_MODE} == 'developer-id'", jobs.fetch(name).fetch("if"), name }
+    %w[desktop-mac-sign desktop-mac-describe desktop-vm-manifest-arm64].each do |name|
+      refute jobs.fetch(name).key?("if"), name
+      assert_includes waits_for(name), "desktop-vm-image-arm64", name
+    end
+    assert_equal ["desktop-vm-image-arm64"], Array(jobs.fetch("desktop-mac-build").fetch("needs")) & %w[desktop-vm-image-arm64]
+    # And the trial only where none signs, needing nothing of macOS's publishing, as its describe needs nothing but it.
+    assert_equal "#{MAC_MODE} == 'trial'", jobs.fetch("desktop-mac-trial").fetch("if")
+    assert_equal %w[desktop-build desktop-signing-mode], Array(jobs.fetch("desktop-mac-trial").fetch("needs"))
+    assert_equal %w[desktop-describe desktop-mac-trial], Array(jobs.fetch("desktop-mac-trial-describe").fetch("needs"))
+    MAC_TRIAL.each { |name| assert_empty waits_for(name) & (mac_jobs - MAC_TRIAL), name }
   end
 
   def test_the_cluster_s_rollout_holds_no_permission_on_the_repository
@@ -219,19 +267,31 @@ class ReleaseWorkflowTest < Minitest::Test
     end
   end
 
-  def test_the_release_builds_the_linux_app_s_guest_alone
-    job = @workflow.fetch("jobs").fetch("desktop-vm-image")
-
+  def test_the_release_builds_each_arch_s_guest_in_a_job_of_its_own_and_arm64_s_only_where_macos_publishes
+    jobs = @workflow.fetch("jobs")
     # amd64's, the Linux app's, on an amd64 runner, and each of the guest's scripts told so. A job
     # that needs a matrix waits for every leg of it: an arm64 leg that failed, or that no runner
-    # took, would hold the Linux app's release and the attach of amd64's manifest. arm64's image is
-    # built by hand (desktop-guest-arm64.yml) until the release ships the macOS app.
-    refute job.key?("strategy")
-    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
-    guest = job.fetch("steps").flat_map { |step| step["run"].to_s.scan(%r{images/guest/\S+\.sh[^\n]*}) }
-    assert_equal 4, guest.size
-    guest.each { |run| assert_match(/ --arch amd64\b/, run) }
-    refute_match(/arm64/, @workflow.to_s)
+    # took, would hold the Linux app's release and the attach of amd64's manifest.
+    { "desktop-vm-image" => ["amd64", "blacksmith-4vcpu-ubuntu-2404"], "desktop-vm-image-arm64" => ["arm64", "blacksmith-4vcpu-ubuntu-2404-arm"] }.each do |name, (arch, runner)|
+      job = jobs.fetch(name)
+      refute job.key?("strategy"), name
+      assert_equal runner, job.fetch("runs-on"), name
+      guest = job.fetch("steps").flat_map { |step| step["run"].to_s.scan(%r{images/guest/\S+\.sh[^\n]*}) }
+      assert_equal 4, guest.size, name
+      guest.each { |run| assert_match(/ --arch #{arch}\b/, run, name) }
+    end
+    # arm64's, the macOS app's, in a group of its own, read by macOS's jobs alone, and only where macOS publishes.
+    arm64 = jobs.fetch("desktop-vm-image-arm64")
+    assert_equal({ "group" => "desktop-vm-image-arm64", "cancel-in-progress" => false }, arm64.fetch("concurrency"))
+    assert_equal "#{MAC_MODE} == 'developer-id'", arm64.fetch("if")
+    assert_equal ["desktop-signing-mode"], Array(arm64.fetch("needs"))
+    assert_equal({ "contents" => "read" }, arm64.fetch("permissions"))
+    # Its steps are amd64's, each told arm64, its artifact named for its arch.
+    amd64 = jobs.fetch("desktop-vm-image")
+    assert_equal amd64.fetch("steps").map { |step| step.to_s.gsub("amd64", "arm64").sub("desktop-vm-manifest", "desktop-vm-manifest-arm64").sub("desktop's tarball", "macOS app") }, arm64.fetch("steps").map(&:to_s)
+    assert_equal amd64.fetch("outputs"), arm64.fetch("outputs")
+    # And no job but macOS's names arm64.
+    assert_empty jobs.keys.select { |name| jobs.fetch(name).to_s.include?("arm64") } - mac_jobs
   end
 
   def test_only_the_jobs_that_write_a_release_may_write_its_assets
@@ -449,8 +509,8 @@ class ReleaseWorkflowTest < Minitest::Test
         refute step.to_s.include?("secrets."), "#{step["name"] || step["uses"]} reads a secret"
       end
     end
-    # Windows's publish holds it as Linux's does (test_windows_s_publish_signs_and_sends_the_signed_msi_…), and no other job.
-    jobs.except("desktop-publish", "desktop-win-publish").each { |name, job| refute job.to_s.include?("DESKTOP_RELEASE_KEY"), "#{name} reads the release key" }
+    # Windows's and macOS's publishes hold it as Linux's does (test_windows_s_publish_…, test_macos_s_publish_…), and no other job.
+    jobs.except("desktop-publish", "desktop-win-publish", "desktop-mac-publish").each { |name, job| refute job.to_s.include?("DESKTOP_RELEASE_KEY"), "#{name} reads the release key" }
     # The release key is in one step's environment, the signing's, and nowhere wider: not the
     # job's, which the check above refuses, and not the workflow's.
     keyed = jobs.fetch("desktop-publish").fetch("steps").select { |step| step.to_s.include?("DESKTOP_RELEASE_KEY") }
@@ -471,7 +531,11 @@ class ReleaseWorkflowTest < Minitest::Test
   def test_desktop_jobs_are_bounded
     jobs = @workflow.fetch("jobs")
 
-    %w[desktop-build desktop-describe desktop-win-build desktop-win-sign desktop-win-msi desktop-win-sign-msi desktop-win-describe desktop-publish desktop-win-publish].each do |name|
+    %w[
+      desktop-build desktop-describe desktop-win-build desktop-win-sign desktop-win-msi desktop-win-sign-msi desktop-win-describe desktop-publish desktop-win-publish
+      desktop-vm-image-arm64 desktop-vm-manifest-arm64 desktop-mac-build desktop-mac-sign desktop-mac-describe desktop-mac-publish desktop-mac-trial
+      desktop-mac-trial-describe desktop-mac-released
+    ].each do |name|
       assert jobs.fetch(name).key?("timeout-minutes"), "#{name} is not bounded"
     end
   end
@@ -516,11 +580,25 @@ class ReleaseWorkflowTest < Minitest::Test
   def test_the_signing_is_decided_once_for_the_run_by_one_job_and_every_windows_job_and_rollout_takes_it_from_there
     jobs = @workflow.fetch("jobs")
     mode = jobs.fetch("desktop-signing-mode")
-    # One step that reads the two variables and says three words: it holds nothing, needs nothing and reads nothing.
+    # One step that reads Windows's two variables and says three words, and one that reads macOS's one and says two: it
+    # holds nothing, needs nothing and reads nothing.
     assert_equal %w[outputs permissions runs-on steps timeout-minutes], mode.keys.sort
     assert_equal({}, mode.fetch("permissions"))
-    assert_equal({ "signing" => "${{ steps.mode.outputs.signing }}", "account" => "${{ steps.mode.outputs.account }}", "signer" => "${{ steps.mode.outputs.signer }}" }, mode.fetch("outputs"))
-    assert_equal 1, mode.fetch("steps").length
+    assert_equal({
+      "signing" => "${{ steps.mode.outputs.signing }}", "account" => "${{ steps.mode.outputs.account }}", "signer" => "${{ steps.mode.outputs.signer }}",
+      "mac-signing" => "${{ steps.mac.outputs.signing }}", "mac-signer" => "${{ steps.mac.outputs.signer }}",
+    }, mode.fetch("outputs"))
+    assert_equal 2, mode.fetch("steps").length
+    mac = mode.fetch("steps").last
+    assert_equal({ "TEAM" => "${{ vars.APPLE_TEAM_ID }}" }, mac.fetch("env"))
+    assert_includes mac.fetch("run"), "printf 'signing=developer-id\\nsigner=%s\\n' \"$TEAM\" >>\"$GITHUB_OUTPUT\""
+    assert_includes mac.fetch("run"), "printf 'signing=trial\\nsigner=Surogate trial signer\\n' >>\"$GITHUB_OUTPUT\""
+    # macOS's variable is read here alone too, and each job of macOS's that signs, publishes or says it is the release's
+    # takes its words from here.
+    assert_equal ["desktop-signing-mode"], jobs.select { |_, job| job.to_s.match?(/vars\.APPLE_TEAM_ID\b/) }.keys
+    %w[desktop-vm-image-arm64 desktop-mac-build desktop-mac-sign desktop-mac-publish desktop-mac-trial desktop-mac-released].each do |name|
+      assert_includes Array(jobs.fetch(name).fetch("needs")), "desktop-signing-mode", name
+    end
     step = mode.fetch("steps").first
     assert_equal({ "ACCOUNT" => "${{ vars.ARTIFACT_SIGNING_ACCOUNT }}", "SUBJECT" => "${{ vars.ARTIFACT_SIGNING_SUBJECT }}" }, step.fetch("env"))
     assert_includes step.fetch("run"), "printf 'signing=account\\naccount=%s\\nsigner=%s\\n' \"$ACCOUNT\" \"$SUBJECT\""
@@ -535,6 +613,74 @@ class ReleaseWorkflowTest < Minitest::Test
     (jobs.keys - ["desktop-signing-mode"]).each { |name| refute_match(/ARTIFACT_SIGNING_ACCOUNT|ARTIFACT_SIGNING_SUBJECT/, jobs.fetch(name).to_s, name) }
     # The publish of Windows and the rollout that waits for it, by that word alone.
     assert_equal "#{MODE} == 'account'", jobs.fetch("desktop-win-publish").fetch("if")
+  end
+
+  def test_a_team_id_of_another_form_ends_the_deciding_job_so_every_job_that_needs_it_is_skipped_while_linux_s_jobs_still_publish
+    jobs = @workflow.fetch("jobs")
+    step = jobs.fetch("desktop-signing-mode").fetch("steps").last
+    run = step.fetch("run")
+    # The Team ID's form is checked before anything is said of it: ten capital letters and digits, and nothing else,
+    # a line more among them.
+    assert_operator run.index('[[ "$TEAM" =~ ^[A-Z0-9]{10}$ ]] || {'), :<, run.index("printf 'signing=developer-id")
+    Dir.mktmpdir do |dir|
+      said = lambda do |team|
+        output = File.join(dir, "output")
+        File.write(output, "")
+        _, status = Open3.capture2e({ "TEAM" => team, "GITHUB_OUTPUT" => output }, "bash", "-e", "-c", run)
+        [status.exitstatus, File.read(output)]
+      end
+      assert_equal [0, "signing=developer-id\nsigner=ABCDE12345\n"], said.call("ABCDE12345")
+      assert_equal [0, "signing=trial\nsigner=Surogate trial signer\n"], said.call("")
+      ["abcde12345", "ABCDE1234", "ABCDE123456", " ABCDE12345", "ABCDE12345 ", "ABCDE12345\nsigning=trial", "ABCDE-2345"].each do |team|
+        assert_equal [1, ""], said.call(team), team.inspect
+      end
+    end
+    # Ended there, it holds every job that needs it: arm64's image, macOS's jobs, Windows's from its signing on, and the
+    # rollouts. Windows's build, which holds nothing to sign with, and Linux's own image, build, describe, publish and
+    # attach need it not: they run, and Linux's still publishes.
+    holding = jobs.keys.select { |name| waits_for(name).include?("desktop-signing-mode") }
+    assert_equal (windows_jobs - ["desktop-win-build"] + mac_jobs + rollout_jobs).sort, holding.sort
+    %w[desktop-vm-image desktop-vm-manifest desktop-build desktop-describe desktop-publish].each { |name| refute_includes waits_for(name), "desktop-signing-mode", name }
+  end
+
+  def test_each_signing_job_signs_only_the_layout_its_build_job_said_it_made
+    jobs = @workflow.fetch("jobs")
+    # macOS's: the build says its tarball's sha256, right after it packs it and before it keeps it, and the signing checks
+    # its download by it before it opens it.
+    build = jobs.fetch("desktop-mac-build")
+    assert_equal({ "unsigned-sha256" => "${{ steps.unsigned.outputs.sha256 }}" }, build.fetch("outputs"))
+    steps = build.fetch("steps")
+    said = steps.index { |step| step["id"] == "unsigned" }
+    assert_equal %(sha256="$(shasum -a 256 <../out/desktop-mac-unsigned.tar.gz | cut -d' ' -f1)"\necho "sha256=$sha256" >>"$GITHUB_OUTPUT"\n), steps[said].fetch("run")
+    assert_operator steps.index { |step| step["run"].to_s.include?("sign-mac.sh pack") }, :<, said
+    assert_operator said, :<, steps.index { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    sign = jobs.fetch("desktop-mac-sign").fetch("steps")
+    unpack = sign.find { |step| step["run"].to_s.include?("tar -xzf out/desktop-mac-unsigned.tar.gz") }
+    assert_equal({ "SHA256" => "${{ needs.desktop-mac-build.outputs.unsigned-sha256 }}" }, unpack.fetch("env"))
+    run = unpack.fetch("run")
+    assert_includes run, '[[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || {'
+    assert_operator run.index('echo "$SHA256  out/desktop-mac-unsigned.tar.gz" | shasum -a 256 --check --status'), :<, run.index("tar -xzf")
+    assert_operator sign.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }, :<, sign.index(unpack)
+    assert_operator sign.index(unpack), :<, sign.index { |step| step["id"] == "identity" }
+    # Windows's: the build says one digest of its layout (scripts/layout-digest.sh), and the signing checks its download
+    # by it before it lists, or signs, anything.
+    build = jobs.fetch("desktop-win-build")
+    assert_equal({ "digest" => "${{ steps.layout.outputs.digest }}" }, build.fetch("outputs"))
+    steps = build.fetch("steps")
+    said = steps.index { |step| step["id"] == "layout" }
+    assert_equal "bash", steps[said].fetch("shell")
+    assert_equal %(digest="$(scripts/layout-digest.sh ../out/win)"\necho "digest=$digest" >>"$GITHUB_OUTPUT"\n), steps[said].fetch("run")
+    assert_operator steps.index { |step| step["run"].to_s.include?("scripts/package-win.sh") }, :<, said
+    assert_operator said, :<, steps.index { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    sign = jobs.fetch("desktop-win-sign").fetch("steps")
+    check = sign.find { |step| step["run"].to_s.include?("layout-digest.sh out/win") }
+    assert_equal "bash", check.fetch("shell")
+    assert_equal({ "DIGEST" => "${{ needs.desktop-win-build.outputs.digest }}" }, check.fetch("env"))
+    assert_includes check.fetch("run"), '[[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]] || {'
+    assert_includes check.fetch("run"), '[ "$found" = "$DIGEST" ] || {'
+    assert_equal sign.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") } + 1, sign.index(check)
+    assert_equal sign.index(check) + 1, sign.index { |step| step["run"].to_s.include?("sign-win.ps1 list") }
+    assert File.executable?("desktop/scripts/layout-digest.sh")
   end
 
   def test_the_windows_app_is_built_and_its_msi_made_on_windows_by_jobs_that_hold_nothing_to_sign_with
@@ -632,7 +778,7 @@ class ReleaseWorkflowTest < Minitest::Test
     taken = steps.select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }.map { |step| step.fetch("with") }
     assert_equal [{ "name" => "desktop-win-msi-unsigned", "path" => "out/msi" }, { "name" => "desktop-win-signed", "path" => "out/win" }], taken
     # Every variable the release reads, by its name: none is a secret, and none is given a value here.
-    assert_equal %w[ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_CERTIFICATE_PROFILE ARTIFACT_SIGNING_ENDPOINT ARTIFACT_SIGNING_SUBJECT AZURE_CLIENT_ID AZURE_TENANT_ID],
+    assert_equal %w[APPLE_TEAM_ID ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_CERTIFICATE_PROFILE ARTIFACT_SIGNING_ENDPOINT ARTIFACT_SIGNING_SUBJECT AZURE_CLIENT_ID AZURE_TENANT_ID],
                  File.read(".github/workflows/release.yml").gsub(/^\s*#.*$/, "").scan(/\bvars\.([A-Z_]+)/).flatten.uniq.sort
   end
 
@@ -687,9 +833,9 @@ class ReleaseWorkflowTest < Minitest::Test
     }, steps[2].fetch("env"))
     assert_equal({ "DESKTOP_TARGET" => "win32-x64", **r2 }, steps[3].fetch("env"))
     refute job.key?("env")
-    # The release key reaches the two publish jobs' signing steps alone.
+    # The release key reaches the three publish jobs' signing steps alone.
     keyed = jobs.flat_map { |name, each| each.fetch("steps", []).select { |step| step.to_s.include?("DESKTOP_RELEASE_KEY") }.map { |step| [name, step["name"]] } }
-    assert_equal [["desktop-publish", "Sign its manifest"], ["desktop-win-publish", "Sign its manifest"]], keyed
+    assert_equal [["desktop-publish", "Sign its manifest"], ["desktop-win-publish", "Sign its manifest"], ["desktop-mac-publish", "Sign its manifest"]], keyed
   end
 
   def test_the_windows_layout_is_described_with_no_secret_and_its_schema_must_be_the_linux_app_s
@@ -714,20 +860,193 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal({ "schema" => "${{ steps.manifest.outputs.schema }}" }, job.fetch("outputs"))
   end
 
+  # The steps' runs of a job, each stripped, that start with one of *heads*.
+  def runs_of(job, *heads)
+    job.fetch("steps").map { |step| step["run"].to_s.strip }.select { |run| run.start_with?(*heads) }
+  end
+
+  def test_the_macos_app_is_built_and_laid_out_on_a_mac_by_a_job_that_holds_nothing_to_sign_with
+    jobs = @workflow.fetch("jobs")
+    # npm's install scripts run here: no secret, no Environment, no variable, a token that reads the repository alone and
+    # is kept nowhere its steps can read it, on a Mac with Apple silicon.
+    %w[desktop-mac-build desktop-mac-trial].each do |name|
+      job = jobs.fetch(name)
+      assert_equal "macos-15", job.fetch("runs-on"), name
+      assert_equal({ "contents" => "read" }, job.fetch("permissions"), name)
+      refute job.key?("environment"), name
+      refute_match(/secrets|id-token|vars\./, job.to_s, name)
+      checkouts = job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+      assert_equal [{ "persist-credentials" => false }], checkouts.map { |step| step.fetch("with") }, name
+      # The tag's app with every native program of it, its pins fetched again, laid out by package-mac.sh, and its layout's test.
+      assert_equal ["rm -rf bin dictionaries\nnpm ci", "scripts/mac-build.sh"], runs_of(job, "# The app's node", "npm", "scripts/mac-build.sh").map { |run| run.sub(/\A#[^\n]*\n/, "") }, name
+      assert(runs_of(job, "scripts/package-mac.sh", "mkdir -p ../out/vm").any? { |run| run.include?('scripts/package-mac.sh "${GITHUB_REF_NAME#v}" ../out/vm/manifest.json ../out/agent/agent.img ../out/mac') }, name)
+      check = job.fetch("steps").find { |step| step["run"].to_s.include?("test/package-mac.test.ts") }
+      assert_equal %w[SUROGATE_MAC_AGENT_DISK SUROGATE_MAC_LAYOUT SUROGATE_MAC_VM_MANIFEST], check.fetch("env").keys.sort, name
+      assert check.fetch("run").start_with?('SUROGATE_MAC_VERSION="${GITHUB_REF_NAME#v}" npx vitest run'), name
+    end
+    build = jobs.fetch("desktop-mac-build")
+    assert_equal %w[desktop-build desktop-vm-image-arm64 desktop-signing-mode], Array(build.fetch("needs"))
+    taken = build.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-agent-disk", "path" => "out/agent" }, { "name" => "desktop-vm-manifest-arm64", "path" => "out/vm" }], taken.map { |step| step.fetch("with") }
+    # Handed on as a tarball, which keeps the frameworks' links, and nothing else.
+    assert_equal ["scripts/sign-mac.sh pack ../out/mac/Surogate.app ../out/desktop-mac-unsigned.tar.gz"], runs_of(build, "scripts/sign-mac.sh")
+  end
+
+  def test_the_macos_app_is_signed_with_the_developer_id_notarized_stapled_and_assessed_by_a_job_that_runs_no_build_tool
+    jobs = @workflow.fetch("jobs")
+    job = jobs.fetch("desktop-mac-sign")
+    steps = job.fetch("steps")
+    assert_equal "macos-15", job.fetch("runs-on")
+    assert_equal "desktop-macos-signing", job.fetch("environment")
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal %w[desktop-mac-build desktop-signing-mode], Array(job.fetch("needs"))
+    # No step installs or runs npm, npx or node, whose packages' scripts would run beside the certificate.
+    steps.each do |step|
+      refute_match(/\b(npm|npx|node|vitest)\b/, step["run"].to_s, step["name"])
+      refute_match(/setup-node/, step["uses"].to_s, step["name"])
+    end
+    assert_equal [{ "persist-credentials" => false }], steps.select { |step| step["uses"].to_s.start_with?("actions/checkout@") }.map { |step| step.fetch("with") }
+    # Exactly the five secrets of the Environment, each by its step alone, and no variable: the Team ID is the deciding
+    # job's word, which the import checks the certificate against.
+    assert_equal %w[APPLE_NOTARY_ISSUER_ID APPLE_NOTARY_KEY_ID APPLE_NOTARY_KEY_P8 MACOS_SIGNING_CERTIFICATE_P12 MACOS_SIGNING_CERTIFICATE_PASSWORD], job.to_s.scan(/secrets\.([A-Z0-9_]+)/).flatten.uniq.sort
+    refute_match(/vars\./, job.to_s)
+    identity = steps.find { |step| step["id"] == "identity" }
+    assert_equal MAC_SIGNER, identity.fetch("env").fetch("TEAM")
+    run = identity.fetch("run")
+    # The keychain is the job's own, its path said before anything is put in it.
+    assert_operator run.index('echo "keychain=$keychain" >>"$GITHUB_OUTPUT"'), :<, run.index('desktop/scripts/sign-mac.sh import "$keychain" "$TEAM"')
+    assert_includes run, 'keychain="$RUNNER_TEMP/signing.keychain-db"'
+    forget = steps.find { |step| step["run"].to_s.include?("sign-mac.sh forget") }
+    assert_equal "always() && steps.identity.outputs.keychain != ''", forget.fetch("if")
+    # Signed, checked as the team's, notarized and stapled, packed, the disk image made, notarized and checked, both
+    # assessed by Gatekeeper, and the app staged and taken as its updater takes an update, in that order and each
+    # gating; then its words said, which the publish needs: nothing is published before all of it.
+    order = [
+      "desktop/scripts/sign-mac.sh import", 'desktop/scripts/sign-mac.sh sign out/mac/Surogate.app "$IDENTITY" "$KEYCHAIN"',
+      'desktop/scripts/sign-mac.sh verify out/mac/Surogate.app developer-id "$TEAM"', "desktop/scripts/sign-mac.sh notarize out/mac/Surogate.app",
+      "desktop/scripts/sign-mac.sh pack", "desktop/scripts/sign-mac.sh dmg ", "desktop/scripts/sign-mac.sh notarize \"out/release",
+      "desktop/scripts/sign-mac.sh dmg-check", "desktop/scripts/sign-mac.sh assess", 'desktop/scripts/sign-mac.sh staged out/mac/Surogate.app "${GITHUB_REF_NAME#v}"',
+      "sign-mac.sh forget", "dmg-sha256=",
+    ].map { |part| steps.index { |step| step["run"].to_s.include?(part) } }
+    refute_includes order, nil
+    assert_equal order.sort, order
+    steps.each { |step| refute step.key?("continue-on-error"), step["name"] }
+    assert_empty steps.reject { |step| step == forget }.select { |step| step.key?("if") }
+    %w[verify dmg-check].each { |verb| assert_equal({ "TEAM" => MAC_SIGNER }, steps.find { |step| step["run"].to_s.include?("sign-mac.sh #{verb}") }.fetch("env"), verb) }
+    # Its outputs are its own words for what it made, and only the tarball and the disk image are handed on.
+    assert_equal({ "sha256" => "${{ steps.made.outputs.sha256 }}", "size" => "${{ steps.made.outputs.size }}", "dmg-sha256" => "${{ steps.made.outputs.dmg-sha256 }}" }, job.fetch("outputs"))
+    kept = steps.select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.map { |step| [step.fetch("with").fetch("name"), step.fetch("with").fetch("path")] }
+    assert_equal [%w[desktop-mac-tarball out/release/surogate-desktop-*-darwin-arm64.tar.gz], %w[desktop-mac-dmg out/release/surogate-desktop-*-darwin-arm64.dmg]], kept
+  end
+
+  def test_the_macos_trial_signs_with_its_own_identity_and_is_checked_as_the_release_s_and_kept_for_its_describe_alone
+    jobs = @workflow.fetch("jobs")
+    job = jobs.fetch("desktop-mac-trial")
+    steps = job.fetch("steps")
+    taken = steps.select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-agent-disk", "path" => "out/agent" }], taken.map { |step| step.fetch("with") }
+    # A stand-in of arm64's manifest's form, which names no key: no arm64 image is built in a trial.
+    lay = steps.find { |step| step["run"].to_s.include?("scripts/package-mac.sh") }.fetch("run")
+    assert_includes lay, %(printf '{"key":"%s","arch":"arm64","files":[]}\\n' "$(printf '0%.0s' $(seq 64))" > ../out/vm/manifest.json)
+    trial = steps.find { |step| step["id"] == "trial" }
+    assert_equal({ "SIGNER" => MAC_SIGNER }, trial.fetch("env"))
+    run = trial.fetch("run")
+    order = [
+      'echo "keychain=$keychain" >>"$GITHUB_OUTPUT"', 'identity="$(scripts/sign-mac.sh trial "$keychain" "$SIGNER")"',
+      'scripts/sign-mac.sh sign ../out/mac/Surogate.app "$identity" "$keychain"', 'scripts/sign-mac.sh verify ../out/mac/Surogate.app trial "$SIGNER"',
+      "scripts/sign-mac.sh pack", "scripts/sign-mac.sh dmg ", "scripts/sign-mac.sh dmg-check",
+    ].map { |part| run.index(part) }
+    refute_includes order, nil
+    assert_equal order.sort, order
+    refute_match(/notarize|assess|import/, job.to_s)
+    forget = steps.find { |step| step["run"].to_s.include?("sign-mac.sh forget") }
+    assert_equal "always() && steps.trial.outputs.keychain != ''", forget.fetch("if")
+    # Its tarball alone is kept, under a name of its own, which its describe alone takes.
+    kept = steps.select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.map { |step| step.fetch("with").fetch("name") }
+    assert_equal ["desktop-mac-trial-tarball"], kept
+    describe = jobs.fetch("desktop-mac-trial-describe")
+    refute_match(/secrets|DESKTOP_RELEASE_KEY|desktop-release|vars\./i, describe.to_s)
+    assert_equal({
+      "DESKTOP_TARGET" => "darwin-arm64", "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-mac-trial.outputs.sha256 }}",
+      "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-mac-trial.outputs.size }}", "LINUX_STATE_SCHEMA" => "${{ needs.desktop-describe.outputs.schema }}",
+    }, describe.fetch("steps").last.fetch("env"))
+  end
+
+  def test_the_macos_tarball_is_described_with_no_secret_and_its_schema_must_be_the_linux_app_s
+    job = @workflow.fetch("jobs").fetch("desktop-mac-describe")
+    assert_equal %w[desktop-describe desktop-mac-sign], Array(job.fetch("needs"))
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal %w[needs outputs permissions runs-on steps timeout-minutes], job.keys.sort
+    refute_match(/secrets|DESKTOP_RELEASE_KEY|desktop-release|vars\./i, job.to_s)
+    taken = job.fetch("steps").select { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }
+    assert_equal [{ "name" => "desktop-mac-tarball", "path" => "out/mac" }], taken.map { |step| step.fetch("with") }
+    step = job.fetch("steps").find { |each| each["id"] == "manifest" }
+    assert_equal({
+      "DESKTOP_TARGET" => "darwin-arm64", "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-mac-sign.outputs.sha256 }}",
+      "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-mac-sign.outputs.size }}", "LINUX_STATE_SCHEMA" => "${{ needs.desktop-describe.outputs.schema }}",
+    }, step.fetch("env"))
+    assert_includes step.fetch("run"), 'desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/mac'
+    assert_includes step.fetch("run"), '[ "$schema" = "$LINUX_STATE_SCHEMA" ] || {'
+    assert_equal({ "schema" => "${{ steps.manifest.outputs.schema }}" }, job.fetch("outputs"))
+  end
+
+  def test_macos_s_publish_signs_and_sends_the_notarized_tarball_and_disk_image_by_its_signing_job_s_words_in_the_release_s_environment
+    jobs = @workflow.fetch("jobs")
+    job = jobs.fetch("desktop-mac-publish")
+    steps = job.fetch("steps")
+    r2 = {
+      "S3_ENDPOINT" => "${{ secrets.R2_ENDPOINT }}",
+      "S3_BUCKET" => "${{ secrets.R2_BUCKET }}",
+      "AWS_ACCESS_KEY_ID" => "${{ secrets.R2_ACCESS_KEY_ID }}",
+      "AWS_SECRET_ACCESS_KEY" => "${{ secrets.R2_SECRET_ACCESS_KEY }}",
+    }
+    assert_equal %w[desktop-mac-sign desktop-mac-describe desktop-signing-mode], Array(job.fetch("needs"))
+    assert_equal "#{MAC_MODE} == 'developer-id'", job.fetch("if")
+    assert_equal "desktop-release", job.fetch("environment")
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
+    assert_equal({ "group" => "desktop-release-darwin-arm64", "cancel-in-progress" => false }, job.fetch("concurrency"))
+    assert_equal "blacksmith-4vcpu-ubuntu-2404", job.fetch("runs-on")
+    assert_equal %w[concurrency environment if needs permissions runs-on steps timeout-minutes], job.keys.sort
+    # The tag's checkout, the tarball's and the disk image's downloads, and publish.sh's sign and send for macOS's target:
+    # nothing else, no npm, and no archive opened.
+    assert_equal [
+      { "uses" => "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" },
+      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
+      { "uses" => "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" },
+      { "run" => 'desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop' },
+      { "run" => 'desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop' },
+    ], steps.map { |step| step.slice("uses", "run") }
+    assert_equal [%w[uses], %w[name uses with], %w[name uses with], %w[env name run], %w[env name run]], steps.map { |step| step.keys.sort }
+    assert_equal [{ "name" => "desktop-mac-tarball", "path" => "out/desktop" }, { "name" => "desktop-mac-dmg", "path" => "out/desktop" }], steps[1..2].map { |step| step.fetch("with") }
+    assert_equal({
+      "DESKTOP_TARGET" => "darwin-arm64",
+      "DESKTOP_RELEASE_KEY" => "${{ secrets.DESKTOP_RELEASE_KEY }}",
+      "DESKTOP_TARBALL_SHA256" => "${{ needs.desktop-mac-sign.outputs.sha256 }}",
+      "DESKTOP_TARBALL_SIZE" => "${{ needs.desktop-mac-sign.outputs.size }}",
+      "DESKTOP_STATE_SCHEMA" => "${{ needs.desktop-mac-describe.outputs.schema }}",
+    }, steps[3].fetch("env"))
+    assert_equal({ "DESKTOP_TARGET" => "darwin-arm64", "DESKTOP_DMG_SHA256" => "${{ needs.desktop-mac-sign.outputs.dmg-sha256 }}", **r2 }, steps[4].fetch("env"))
+    refute job.key?("env")
+    # The disk image is taken by macOS's publish alone, which runs only once the team is named.
+    takers = jobs.select { |_, each| each.fetch("steps", []).any? { |step| step["uses"].to_s.start_with?("actions/download-artifact@") && step.dig("with", "name") == "desktop-mac-dmg" } }.keys
+    assert_equal ["desktop-mac-publish"], takers
+  end
+
   def test_the_desktop_s_secrets_reach_no_other_job_however_they_are_named
     jobs = @workflow.fetch("jobs")
 
     # An Environment's secrets reach every job that names it, all of them at once through
     # toJSON(secrets), which names none.
-    jobs.except("desktop-publish", "desktop-win-publish").each do |name, job|
+    jobs.except("desktop-publish", "desktop-win-publish", "desktop-mac-publish").each do |name, job|
       refute_includes job["environment"].to_s, "desktop-release", "#{name} runs in the desktop's Environment"
     end
     # secrets.X, secrets['X'] or all of them: the build names no secret in any form.
     refute_match(/\bsecrets\b/, jobs.fetch("desktop-build").to_s)
     # R2's keys can rewrite desktop/install.sh, which runs as root on each new install: the guest
-    # image's job and the desktop's two publish jobs read them, and no other.
+    # image's two jobs and the desktop's three publish jobs read them, and no other.
     r2 = /\bR2_(ENDPOINT|BUCKET|ACCESS_KEY_ID|SECRET_ACCESS_KEY)\b/
-    assert_equal %w[desktop-vm-image desktop-publish desktop-win-publish], jobs.select { |_, job| job.to_s.match?(r2) }.keys
+    assert_equal %w[desktop-vm-image desktop-vm-image-arm64 desktop-publish desktop-win-publish desktop-mac-publish], jobs.select { |_, job| job.to_s.match?(r2) }.keys
   end
 
   def test_the_macos_suites_run_by_hand_on_a_mac_on_the_ref_they_are_given_and_hold_nothing_to_leak
@@ -743,7 +1062,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], macos.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, macos.fetch("permissions"))
     jobs = macos.fetch("jobs")
-    assert_equal %w[unit file-host vm-native shell], jobs.keys
+    assert_equal %w[unit file-host vm-native shell app], jobs.keys
     jobs.each do |name, job|
       assert_equal "macos-15", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -758,6 +1077,62 @@ class ReleaseWorkflowTest < Minitest::Test
     steps = jobs.fetch("unit").fetch("steps")
     # The files of the desktop's vitest project for macOS, which each part built for macOS joins.
     assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
+  end
+
+  def test_the_macos_app_is_laid_out_checked_and_signed_by_the_run_s_own_identity_and_nothing_but_the_release_notarizes_or_assesses_it
+    jobs = YAML.load_file(MACOS).fetch("jobs")
+    app = jobs.fetch("app")
+    steps = app.fetch("steps")
+    runs = steps.map { |step| step["run"].to_s }
+    # The bundle as the release makes it, with a disk of zeros and an arm64 manifest's form in the guest's place, then
+    # its layout's test, the signing script's own tests, and the app signed with the run's identity and checked as the
+    # release checks its own, packed, and put in a disk image that is checked: in that order, each step gating.
+    order = [
+      "scripts/mac-build.sh", "scripts/package-mac.sh 0.1.0 ../out/stand-in/manifest.json ../out/stand-in/agent.img ../out/mac",
+      "test/package-mac.test.ts", "test/sign-mac.test.sh",
+    ].map { |part| runs.index { |run| run.include?(part) } }
+    signing = runs.index { |run| run.include?("scripts/sign-mac.sh trial") }
+    refute_nil signing
+    order << signing << runs.index { |run| run.include?("WebAssembly.Module") } << runs.index { |run| run.include?("test/operations.test.ts") }
+    refute_includes order, nil
+    assert_equal order.sort, order
+    assert_includes runs[order.first], "scripts/mac-build.sh"
+    refute app.key?("continue-on-error")
+    # Packed and unpacked elsewhere, as the release hands its layout from its build to its signing, then signed and
+    # checked as the release checks its own, packed, and put in a disk image that is checked: in that order.
+    lines = runs[signing].split("\n")
+    within = [
+      "scripts/sign-mac.sh pack ../out/mac/Surogate.app ../out/desktop-mac-unsigned.tar.gz", "tar -xzf ../out/desktop-mac-unsigned.tar.gz -C ../out/signed",
+      %(identity="$(scripts/sign-mac.sh trial "$keychain" 'Surogate trial signer')"),
+      'scripts/sign-mac.sh sign ../out/signed/Surogate.app "$identity" "$keychain"',
+      "scripts/sign-mac.sh verify ../out/signed/Surogate.app trial 'Surogate trial signer'",
+      "scripts/sign-mac.sh pack ../out/signed/Surogate.app ../out/signed/surogate-desktop-0.1.0-darwin-arm64.tar.gz",
+      'scripts/sign-mac.sh dmg ../out/signed/Surogate.app ../out/signed/surogate-desktop-0.1.0-darwin-arm64.dmg "$identity" "$keychain"',
+      "scripts/sign-mac.sh dmg-check ../out/signed/surogate-desktop-0.1.0-darwin-arm64.dmg ../out/signed/Surogate.app trial 'Surogate trial signer'",
+    ].map { |line| lines.index(line) }
+    refute_includes within, nil
+    assert_equal within.sort, within
+    # The layout's test is told the bundle and what it was made of.
+    check = steps.find { |step| step["run"].to_s.include?("test/package-mac.test.ts") }
+    assert_equal %w[SUROGATE_MAC_AGENT_DISK SUROGATE_MAC_LAYOUT SUROGATE_MAC_VERSION SUROGATE_MAC_VM_MANIFEST], check.fetch("env").keys.sort
+    # Every step gates; the file host's suites run on the bundle's own signed node and fsat, in place of a development build's.
+    assert_empty steps.select { |step| step.key?("continue-on-error") }
+    host = steps.find { |step| step["run"].to_s.include?("test/operations.test.ts") }.fetch("run")
+    assert_includes host, "cp ../out/signed/Surogate.app/Contents/Resources/app/bin/node bin/node.new\nmv -f bin/node.new bin/node\n"
+    assert_includes host, "cp ../out/signed/Surogate.app/Contents/Resources/app/dist/native/fsat.node dist/native/fsat.node.new\nmv -f dist/native/fsat.node.new dist/native/fsat.node\n"
+    # The run's keychain is gone at the job's end, however it ends.
+    assert_equal "always()", steps.last.fetch("if")
+    assert_includes steps.last.fetch("run"), 'scripts/sign-mac.sh forget "$KEYCHAIN"'
+    assert_equal({ "KEYCHAIN" => "${{ steps.trial.outputs.keychain }}" }, steps.last.fetch("env"))
+    # Notarization, Gatekeeper's assessment and the Developer ID's import are the release's signing job's alone, in
+    # every workflow file: a run of a branch's code is never handed Apple's keys.
+    workflows.each do |file, workflow|
+      workflow.fetch("jobs").each do |name, job|
+        used = job.fetch("steps", []).flat_map { |step| step["run"].to_s.scan(/sign-mac\.sh (notarize|assess|import)\b/).flatten }.uniq.sort
+        expected = file == "release.yml" && name == "desktop-mac-sign" ? %w[assess import notarize] : []
+        assert_equal expected, used, "#{file}: #{name}"
+      end
+    end
   end
 
   def test_the_windows_suites_run_by_hand_or_for_the_release_on_windows_on_the_ref_they_are_given_and_hold_nothing_to_leak
@@ -918,8 +1293,8 @@ class ReleaseWorkflowTest < Minitest::Test
   def test_the_arm64_guest_is_built_and_tested_by_hand_on_an_arm64_runner_and_holds_nothing_to_leak
     arm64 = YAML.load_file(ARM64)
     on = triggers(arm64)
-    # Until the release ships the macOS app, arm64's guest is built only when someone asks, on the ref
-    # they name: never by a push or a pull request, whose code it would build and boot.
+    # Here arm64's guest is built only when someone asks, on the ref they name: never by a push or a
+    # pull request, whose code it would build and boot. The release builds it where it publishes the macOS app.
     assert_equal %w[workflow_dispatch], on.keys
     inputs = on.fetch("workflow_dispatch").fetch("inputs")
     assert_equal %w[ref], inputs.keys
@@ -994,8 +1369,16 @@ class ReleaseWorkflowTest < Minitest::Test
         ["desktop-vm-image", "Publish the image"] => r2,
         ["desktop-publish", "Sign its manifest"] => %w[DESKTOP_RELEASE_KEY],
         ["desktop-publish", "Publish the release"] => r2,
+        ["desktop-vm-image-arm64", "Look for the image's key in our releases, and check R2 against it"] => r2,
+        ["desktop-vm-image-arm64", "Publish the image"] => r2,
         ["desktop-win-publish", "Sign its manifest"] => %w[DESKTOP_RELEASE_KEY],
         ["desktop-win-publish", "Publish the release"] => r2,
+        # The Developer ID's certificate to its import alone, and the notary service's key to each notarization alone.
+        ["desktop-mac-sign", "Import the Developer ID into a keychain of this job's own"] => %w[MACOS_SIGNING_CERTIFICATE_P12 MACOS_SIGNING_CERTIFICATE_PASSWORD],
+        ["desktop-mac-sign", "Notarize the app, and staple its ticket to it"] => %w[APPLE_NOTARY_KEY_P8 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID],
+        ["desktop-mac-sign", "Notarize the disk image, and staple its ticket to it"] => %w[APPLE_NOTARY_KEY_P8 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID],
+        ["desktop-mac-publish", "Sign its manifest"] => %w[DESKTOP_RELEASE_KEY],
+        ["desktop-mac-publish", "Publish the release"] => r2,
         # Each rollout hands the cluster's three to the workflow it calls, each by its name.
         ["rollout", nil] => %w[NODE_HOSTS MASTER_HOST SSH_KEY],
         ["rollout-with-windows", nil] => %w[NODE_HOSTS MASTER_HOST SSH_KEY],
@@ -1061,6 +1444,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "file-host" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 af11daf312d88a9c cef9c04da9316c5d b6677173b7a766d9 65c59a548203f2a3 4aaeb9cc7e06d889]],
         "vm-native" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 5f09c6834194b464 52c04af5d542ff2d aa9be0ef548ec62e 196c921f1237fc02 fb5acba9341bb560]],
         "shell" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed d57a229d162b158b 82ea49c2e002c4eb bb26d389f9d8b55f 2734cf3c0643d000 512eb34e3e8c1e1d bea3be8dc0d7d250]],
+        "app" => ["ae8e071452550d33", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 5b86e1c519cf457a 021891c04ae48470 ddaf78ce5b4faa4c c5f950b2471bf664 09e2fa7e767b7d38 247377e64ac3f6be b0fce85cd95e4f43 4e6849a8a58355bd]],
       },
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b 3a48c3294046bd31 a2a1334e455b966d]],
@@ -1079,19 +1463,28 @@ class ReleaseWorkflowTest < Minitest::Test
         "npm" => ["3bb6071d27310db0", %w[87fcdec176307d16 def0caf4b753eb6e 8f8a53d795b99dc8 807dcbfaa4796d62 55af956a9b746fbb 5408cbb4d7c827a5]],
         "desktop-vm-image" => ["891e383153375f2d", %w[87fcdec176307d16 4c034b1990bdc512 c7898d9ce9c764f9 04f76870922f0e0c b7eef4a1402a3c44 84bb50f2712c5cd6 b71b78b7115f448e]],
         "desktop-vm-manifest" => ["f9c7e07cd29827c7", %w[e335da8090635b93 ba3ff68edbc5f647]],
+        "desktop-vm-image-arm64" => ["f607a88566a9de8c", %w[87fcdec176307d16 91c249e8fbfe1784 7b664bd9c72599d0 04f76870922f0e0c 8047bd9298c5deb4 a30a06f82f349d39 3ae4990c173d97bb]],
+        "desktop-vm-manifest-arm64" => ["741bd6195a396191", %w[4478c395a33b5a5f 87bce91ba340fecf]],
         "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298 b76e38f5fbfb4713]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
-        "desktop-signing-mode" => ["058333d3d8a3f05f", %w[bc812f6801c0327b]],
-        "desktop-win-build" => ["96928565e2086ccf", %w[fff07e32632a765a 2cbb6c778ee9cf1c d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 96ec46bd03bed893 2b49b547691c5152 3c1d40e7182b4f9e 0dbbd3120ac54992]],
-        "desktop-win-sign" => ["5331c2e7e01683ed", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 8e179919d8dba5d0 8956b5db4a5d9233 d45c1cf5db225c25 5e02861b5f4f1723 ef9eb69984b75079 8d39f0600fb0a5c9 14d765c09ebc5439]],
+        "desktop-signing-mode" => ["ce55854669b3f975", %w[bc812f6801c0327b 047323041118780c]],
+        "desktop-win-build" => ["866c8d2a91bbcd22", %w[fff07e32632a765a 2cbb6c778ee9cf1c d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 96ec46bd03bed893 2b49b547691c5152 3c1d40e7182b4f9e ad08b43461994b0e 0dbbd3120ac54992]],
+        "desktop-win-sign" => ["5331c2e7e01683ed", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 7c0c54afd8fd92cc 8e179919d8dba5d0 8956b5db4a5d9233 d45c1cf5db225c25 5e02861b5f4f1723 ef9eb69984b75079 8d39f0600fb0a5c9 14d765c09ebc5439]],
         "desktop-win-msi" => ["340222aa30f1a523", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c f3dc7563940f8a17 01d5449a1b1abf81 bcbbe8f0cd626b61 481012fa557cec29]],
         "desktop-win-sign-msi" => ["03bec184cbedddaa", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c a0051ea6afa86484 c8a2f46e9dd8850f 2393d71fab9f2fc9 8956b5db4a5d9233 87dc6abcdae90aa5 23a5585e4c8281f3 4c351d6393cf4dc0 59bd8c5a75ce6cdc 8d39f0600fb0a5c9 f87f5ad2f490be6b 49dfba79af0cbedc]],
         "desktop-win-describe" => ["5b0cc765a071d830", %w[87fcdec176307d16 f3dc7563940f8a17 1260aac792094cce]],
         "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
         "desktop-win-publish" => ["d55475461df016fa", %w[87fcdec176307d16 3a3b2f3ed7fe05d1 267e964df473dfd2 c60cfc32944bedee]],
+        "desktop-mac-build" => ["e8c2fca2e02ddae7", %w[2cbb6c778ee9cf1c d2e7366771aefc4f d0000c3cf79cc46e 5b86e1c519cf457a 2b49b547691c5152 47af9ca5a4f571dd fe34d707df436e2e fc20838e54695c31 2a5c1342ed0f75b6 61b6305fdb40d23d 64b21012ad600b9d]],
+        "desktop-mac-sign" => ["30c4a6d8c96d40ee", %w[2cbb6c778ee9cf1c 967e287f380e284d 9405428e60c94609 849ebc0c27f19012 3d8b6fb5b776aba7 577c35d752b20847 f4908908d502641a c3605d586e7cad83 cf4e9fd6d17cd85d eb44ac7e242dd943 840bbbd87e49e37c 28d23aaf383d21c4 30b7e8b0b33d0a94 440cc89ed8349156 99b4809ea360d9fa 5599a0aa3c381f18 b36359b66dfa07f0]],
+        "desktop-mac-describe" => ["fa2dd27c947c0419", %w[87fcdec176307d16 7fb5320391f81a52 94b3a4c5d5b5e8e6]],
+        "desktop-mac-publish" => ["e414ca0907132180", %w[87fcdec176307d16 7cf00c361d2445fd 97f84d9d36f03e7f 7abd7e16a19cd2dd 018ff0ebc90fc137]],
+        "desktop-mac-trial" => ["86bec079fb1e05df", %w[2cbb6c778ee9cf1c d2e7366771aefc4f d0000c3cf79cc46e 5b86e1c519cf457a 2b49b547691c5152 d9092a2baf95bb85 fc20838e54695c31 889cfce002b12c3e fee3a388b8d06834 42cbd804475d9d48 a43855a41e838eb5]],
+        "desktop-mac-trial-describe" => ["71b8ba1cbc7663d7", %w[87fcdec176307d16 3d7fc3a2234fb086 6e1fddfe2c180542]],
+        "desktop-mac-released" => ["c35ca5ceb1572f37", %w[8c9a21e02e45fc44]],
         "release" => ["33f64af0592c0ef5", %w[dc15019acb8b0420 b2c42af94398cc27 04917607907da35f d088ed479c39da82 eda05a5d7a75fede]],
-        "rollout" => ["c9836d22960a4ba0", %w[]],
-        "rollout-with-windows" => ["4a92c695959893a8", %w[]],
+        "rollout" => ["e252bee11667f5e2", %w[]],
+        "rollout-with-windows" => ["488cd12f77b92474", %w[]],
       },
       "update-images.yml" => {
         "update-agent-images" => ["bce0913a43e4c4dc", %w[79f419cc70509398 17127a23ac6df9ec ee7d72f941971e8f 8ec0d2118169566d]],
@@ -1124,6 +1517,8 @@ class ReleaseWorkflowTest < Minitest::Test
       ["release.yml", "desktop-win-sign-msi", "desktop-windows-signing"],
       ["release.yml", "desktop-publish", "desktop-release"],
       ["release.yml", "desktop-win-publish", "desktop-release"],
+      ["release.yml", "desktop-mac-sign", "desktop-macos-signing"],
+      ["release.yml", "desktop-mac-publish", "desktop-release"],
     ], named
   end
 
@@ -1186,16 +1581,24 @@ class ReleaseWorkflowTest < Minitest::Test
       end
     end
     assert_equal [
-      %w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-build desktop-tarball], %w[desktop-build desktop-agent-disk],
+      %w[wheel dist], %w[desktop-vm-image desktop-vm-manifest], %w[desktop-vm-image-arm64 desktop-vm-manifest-arm64], %w[desktop-build desktop-tarball],
+      %w[desktop-build desktop-agent-disk],
       %w[desktop-win-build desktop-win-unsigned], %w[desktop-win-sign desktop-win-signed], %w[desktop-win-msi desktop-win-msi-unsigned],
       %w[desktop-win-sign-msi desktop-win-msi],
+      %w[desktop-mac-build desktop-mac-unsigned], %w[desktop-mac-sign desktop-mac-tarball], %w[desktop-mac-sign desktop-mac-dmg],
+      %w[desktop-mac-trial desktop-mac-trial-tarball],
     ], kept
     assert_equal [
-      %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-build desktop-vm-manifest], %w[desktop-describe desktop-tarball],
+      %w[desktop-vm-manifest desktop-vm-manifest], %w[desktop-vm-manifest-arm64 desktop-vm-manifest-arm64], %w[desktop-build desktop-vm-manifest],
+      %w[desktop-describe desktop-tarball],
       %w[desktop-win-build desktop-vm-manifest], %w[desktop-win-build desktop-agent-disk], %w[desktop-win-sign desktop-win-unsigned],
       %w[desktop-win-msi desktop-win-signed], %w[desktop-win-sign-msi desktop-win-msi-unsigned], %w[desktop-win-sign-msi desktop-win-signed],
       %w[desktop-win-describe desktop-win-signed],
-      %w[desktop-publish desktop-tarball], %w[desktop-win-publish desktop-win-msi], %w[release dist],
+      %w[desktop-publish desktop-tarball], %w[desktop-win-publish desktop-win-msi],
+      %w[desktop-mac-build desktop-agent-disk], %w[desktop-mac-build desktop-vm-manifest-arm64], %w[desktop-mac-sign desktop-mac-unsigned],
+      %w[desktop-mac-describe desktop-mac-tarball], %w[desktop-mac-publish desktop-mac-tarball], %w[desktop-mac-publish desktop-mac-dmg],
+      %w[desktop-mac-trial desktop-agent-disk], %w[desktop-mac-trial-describe desktop-mac-trial-tarball],
+      %w[release dist],
     ], taken
   end
 end

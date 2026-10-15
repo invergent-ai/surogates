@@ -1,8 +1,8 @@
 # Surogate Desktop's arm64 guest (images/guest/), the macOS app's, built and tested on an arm64 runner,
-# natively. Started by hand, on the ref it is given: the release builds amd64's guest alone until it
-# ships the macOS app, and arm64's is built here meanwhile and published nowhere. A run builds and boots
-# whatever code the ref names, so no job here is given anything to leak: no secret, no Environment, and a
-# token that reads the repository alone.
+# natively. Started by hand, on the ref it is given: the release builds arm64's guest only where it
+# publishes the macOS app (release.yml's desktop-vm-image-arm64), and here it is built and booted on any
+# ref and published nowhere. A run builds and boots whatever code the ref names, so no job here is given
+# anything to leak: no secret, no Environment, and a token that reads the repository alone.
 name: Desktop's arm64 guest
 
 on:
