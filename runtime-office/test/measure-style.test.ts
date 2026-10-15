@@ -179,7 +179,7 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
       [`<div style="${box};background:#eeeeee;transform:rotate(10deg)"><x-connector></x-connector></div>`, "pin it beside the box"],
       [`<div id="results" style="position:absolute;left:100px;top:100px;width:1200px"><h2 style="font-size:64px">Results</h2><table style="font-size:32px"><tr><td>A</td><td>1</td></tr></table></div>`, "give the table its own motion"],
       [`<div id="hero" style="${box};background:#000000"><div data-build-in="pop" style="position:absolute;left:10px;top:10px;width:50px;height:50px;background:#ffffff"></div></div>`, "builds go on the section's pinned children"],
-      [`<div data-build-in="fade" style="${box};background:#000000"><div id="dot" style="position:absolute;left:10px;top:10px;width:50px;height:50px;background:#ffffff"></div></div>`, "magic-move ids go on the section's pinned children", `data-transition="magic" style="background:#fff"`],
+      [`<div data-build-in="fade" style="${box};background:#000000"><div id="dot" style="position:absolute;left:10px;top:10px;width:50px;height:50px;background:#ffffff"></div></div>`, "magic-move ids go on the section's pinned children"],
     ]) {
       const html2 = `<section ${section ?? 'style="background:#fff"'}>${html}</section>`;
       await expect(measurer.measure(html2, WIDE, editor), html2).rejects.toThrow(said!);

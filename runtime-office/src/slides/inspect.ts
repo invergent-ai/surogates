@@ -979,7 +979,8 @@ export function inspect(args: InspectArgs): Inspected {
       for (const d of Array.from(el.querySelectorAll("[data-build-in], [data-build-out], [id]"))) {
         if (inside(d) || !pinned(d)) continue;
         if (d.hasAttribute("data-build-in") || d.hasAttribute("data-build-out")) fail(`${describe(d)} has a build inside ${describe(el)}, which moves as one drawing: builds go on the section's pinned children.`);
-        if (d.id && section.getAttribute("data-transition") === "magic") fail(`${describe(d)} has an id inside ${describe(el)}, which moves as one drawing: magic-move ids go on the section's pinned children.`);
+        // An id is only ever a magic-move name, whichever of the two slides arrives by the move.
+        if (d.id) fail(`${describe(d)} has an id inside ${describe(el)}, which moves as one drawing: magic-move ids go on the section's pinned children.`);
       }
       if (shapes.length > 1 && tabled(shapes)) fail(`${describe(el)} moves as one group (it has a build or an id), and a table cannot join a group: give the table its own motion, or move it out of the moving box.`);
       return [Object.assign(shapes.length === 1 ? shapes[0]! : { kind: "group" as const, ...region(box(el)), rot: 0, children: shapes }, m)];
