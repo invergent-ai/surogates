@@ -145,3 +145,20 @@ def test_an_allow_list_still_lets_a_phone_agent_hang_up():
     # an operator may still forbid it outright
     denied = governance_profile({"enabled": True, "allowed_tools": ["web_search"], "denied_tools": ["end_call"]})
     assert "end_call" in denied["denied_tools"]
+
+
+def test_a_tool_the_policy_refuses_by_name_is_not_offered():
+    from surogates.governance.policy import GovernanceGate
+
+    gates = [
+        GovernanceGate(allowed_tools={"escalate", "memory"}, denied_tools={"memory"}),
+        GovernanceGate(denied_tools={"fetch_channel_messages"}),
+        GovernanceGate(),
+        GovernanceGate(allowed_tools={"escalate"}, require_approval={"send_email"}),
+    ]
+    for gate in gates:
+        for name in ("escalate", "memory", "fetch_channel_messages", "send_email", "mcp__x__y"):
+            decision = gate.check(name, {})
+            assert gate.offers(name) == (decision.allowed or decision.overridable), (name, decision)
+    assert not gates[0].offers("fetch_channel_messages")
+    assert gates[3].offers("send_email")

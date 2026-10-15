@@ -38,12 +38,12 @@ from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
     DeliveryOutbox,
+    EscalationRow,
     ProgramInvitationRow,
     Event,
     FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
-    SessionLease,
     User,
 )
 from surogates.followup import store as followup_store
@@ -52,7 +52,8 @@ from surogates.followup.wording import wording
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
-from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
+from surogates.session.events import OUTREACH_OPENER_MARKER, PLATFORM_NOTE, EventType
+from surogates.session.store import live_lease_token
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,8 @@ DEFAULT_TEXTS = {
     "why_setup": "the channel is not set up correctly for this business",
     "why_stopped": "the step was stopped before it was sent",
     "why_undelivered": "it could not be delivered",
+    # Off unless the business words it.
+    "busy_safety_line": "",
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
@@ -143,17 +146,34 @@ def window_open(last_inbound_at: datetime | None, now: datetime) -> bool:
     return as_utc(now) - as_utc(last_inbound_at) < WINDOW - WINDOW_MARGIN
 
 
-async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> bool:
-    """Whether a worker holds this conversation right now."""
+async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> uuid.UUID | None:
+    """The token of the turn holding this conversation right now, if any."""
     async with session_factory() as db:
-        expires = (
-            await db.execute(
-                sa.select(SessionLease.expires_at)
-                .where(SessionLease.session_id == session_id)
-            )
-        ).scalar_one_or_none()
-    # ``session_leases.expires_at`` is naive UTC.
-    return expires is not None and as_utc(expires) > as_utc(now)
+        return await live_lease_token(db, session_id, now)
+
+
+async def busy_line_for(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, session_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> tuple[str, uuid.UUID] | None:
+    """The business's ``busy_safety_line`` and the running turn's lease token,
+    when *user_id* writes mid-turn; ``None`` when it is unset, no turn runs,
+    or they are on the team (nobody waits on the agent for them)."""
+    async with session_factory() as db:
+        settings = await db.get(FollowupSettingsRow, (org_id, agent_id))
+        line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
+        if not line or followup_store.is_team_member(settings, user_id):
+            return None
+        token = await live_lease_token(db, session_id)
+    return (line, token) if token is not None else None
+
+
+async def first_busy_line(redis: Any, session_id: uuid.UUID, token: uuid.UUID) -> bool:
+    """Whether this is the running turn's first busy line: one per turn."""
+    return bool(await redis.set(
+        f"surogates:followup:busy-line:{session_id}:{token}", "1",
+        ex=int(timedelta(hours=6).total_seconds()), nx=True,
+    ))
 
 
 async def _transition(
@@ -179,6 +199,29 @@ async def _fail(session_factory: Any, row_id: uuid.UUID, reason: str) -> int:
     return 1
 
 
+#: Model-only notes on an outreach message in the log; never delivered.
+MASKED_NOTE = (
+    "[Numbers are masked in this log only; the recipient's copy shows them "
+    "in full and can be tapped to call.]"
+)
+ESCALATION_NOTE = (
+    "[Open escalation: when the team member takes it or says it is done, "
+    "call team_escalation with action claim or resolve.]"
+)
+
+
+def _opener_note(row: Any) -> str:
+    """What the model reads for a template it cannot see the text of."""
+    note = f"[Outreach opener sent: template '{row.template_name}'"
+    if row.subject_user_id is not None and row.subject_user_id != row.user_id:
+        # A model once read the name under an alert as the team member's own.
+        note += (
+            ". This conversation is with a team member of the business; the "
+            "message that follows is about another person, not about them"
+        )
+    return note + "]"
+
+
 async def _write_text(
     session_store: Any, session_id: uuid.UUID, row: Any, text: str | None = None,
 ) -> None:
@@ -188,11 +231,18 @@ async def _write_text(
     # which the model reads, keeps phone numbers masked; only the outbox
     # carries them whole, for the team member who has to call.
     text = text or row.text
+    logged = mask_readable_phones(text)
+    # Without these the model, seeing only the masked log, told a team
+    # member it could not give them the number and never closed the case.
+    notes = [MASKED_NOTE] if logged != text else []
+    if row.kind == "alert" and followup_store.escalation_of(row.dedupe_key):
+        notes.append(ESCALATION_NOTE)
     data = {
-        "message": {"role": "assistant", "content": mask_readable_phones(text)},
+        "message": {"role": "assistant", "content": logged},
         "synthetic": "outreach",
         "outreach_id": str(row.id),
         "outreach_kind": row.kind,
+        **({PLATFORM_NOTE: "\n\n".join(notes)} if notes else {}),
     }
     await session_store.emit_event(
         session_id, EventType.LLM_RESPONSE, data,
@@ -690,7 +740,18 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
                 .where(OutreachMessageRow.kind == "alert")
                 .where(OutreachMessageRow.severity == "red")
                 .where(OutreachMessageRow.reminded_at.is_(None))
-                .where(OutreachMessageRow.dedupe_key.like("escalation:%"))
+                .where(OutreachMessageRow.dedupe_key.like(followup_store.ESCALATION_PREFIX + "%"))
+                # A case a team member took or resolved needs no reminder.
+                .where(~sa.exists().where(
+                    EscalationRow.org_id == OutreachMessageRow.org_id,
+                    EscalationRow.agent_id == OutreachMessageRow.agent_id,
+                    sa.or_(EscalationRow.owner.isnot(None), EscalationRow.resolved_at.isnot(None)),
+                    OutreachMessageRow.dedupe_key.like(
+                        sa.literal(followup_store.ESCALATION_PREFIX + "%:")
+                        + sa.func.replace(sa.cast(EscalationRow.id, sa.String), "-", "")
+                        + sa.literal(":%")
+                    ),
+                ))
                 .where(OutreachMessageRow.created_at <= now - BATCH_WINDOW)
                 .where(OutreachMessageRow.created_at >= now - REMINDER_LOOKBACK)
                 .order_by(OutreachMessageRow.created_at)
@@ -699,7 +760,7 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
         ).all()
     groups: dict[str, list[tuple[Any, Any]]] = {}
     for row, settings in rows:
-        groups.setdefault(row.dedupe_key.rsplit(":", 1)[0], []).append((row, settings))
+        groups.setdefault(followup_store.escalation_of(row.dedupe_key), []).append((row, settings))
 
     reminded = 0
     for escalation, members in groups.items():
@@ -731,7 +792,7 @@ async def _remind(
         kind="alert", severity="red", created_by="reminder", topic="urgent",
         text=wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
-        dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
+        dedupe_prefix="reminder:" + escalation.removeprefix(followup_store.ESCALATION_PREFIX),
         fallback_senders={row.platform: row.channel_identifier},
     )
     async with session_factory() as db:
@@ -1163,7 +1224,7 @@ async def _reopen(
     try:
         event_id = await session_store.emit_synthetic_user_message(
             session_id,
-            content=f"[Outreach opener sent: template '{row.template_name}']",
+            content=_opener_note(row),
             synthetic=OUTREACH_OPENER_MARKER,
             metadata={"outreach_id": str(row.id), "template_name": row.template_name},
         )

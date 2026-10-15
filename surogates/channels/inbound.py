@@ -26,6 +26,7 @@ the cache TTL).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -47,8 +48,8 @@ from surogates.channels.source import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
-from surogates.followup.outreach import deliver_pending
-from surogates.session.events import EventType
+from surogates.followup.outreach import busy_line_for, deliver_pending, first_busy_line
+from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note, disclosure_note
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,22 @@ def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     # never match after a space.  (?<!\w)/(?!\w) behaves like \b for plain
     # words and still works for punctuated patterns.
     return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE)
+
+
+_background: set[asyncio.Task] = set()
+
+
+def _in_background(send: Any) -> None:
+    """Run *send* without holding up the message it accompanies."""
+    async def run() -> None:
+        try:
+            await send
+        except Exception:  # noqa: BLE001
+            logger.warning("[channels] background notice failed", exc_info=True)
+
+    task = asyncio.create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 def is_stop_command(text: str | None) -> bool:
@@ -801,6 +818,7 @@ class ChannelInboundPipeline:
         # them (an alert, an operator's message) goes out now, ahead of the
         # agent's answer to what they wrote.
         # ------------------------------------------------------------------
+        _busy_line = None
         if deps.session_factory is not None and routing.identifier:
             try:
                 _org = UUID(str(routing.org_id))
@@ -832,6 +850,11 @@ class ChannelInboundPipeline:
                         user_id=identity.user_id, platform=routing.platform,
                         platform_user_id=msg.platform_user_id, text=msg.text,
                     )
+                    if deps.input_nudge is not None:
+                        _busy_line = await busy_line_for(
+                            deps.session_factory, org_id=_org, agent_id=routing.agent_id,
+                            session_id=session_id, user_id=identity.user_id,
+                        )
             except Exception:  # noqa: BLE001
                 # The person's own message must reach the agent whatever
                 # happens to the bookkeeping around it.
@@ -947,7 +970,7 @@ class ChannelInboundPipeline:
         # gets the notice as its own message before any agent output.
         # After the /stop gate — a control command interrupts a run, it
         # does not open a conversation.
-        await self._maybe_send_disclosure(
+        _disclosed = await self._maybe_send_disclosure(
             msg, routing=routing, deps=deps, session_id=session_id,
             runtime_payload=runtime_payload,
         )
@@ -1038,6 +1061,20 @@ class ChannelInboundPipeline:
             "media_types": msg.media_types,
             "source": _source,
         }
+        # Read only when the running turn reaches its next step; a message
+        # that ended a pending question is read at once and needs no line.
+        _notes = [disclosure_note(_disclosed)] if _disclosed else []
+        if _busy_line and not _unanswered:
+            try:
+                line, token = _busy_line
+                if await first_busy_line(deps.redis, session_id, token):
+                    _in_background(deps.input_nudge(session_id, msg, line))
+                    _notes.append(busy_line_note(line))
+            except Exception:  # noqa: BLE001
+                logger.warning("[followup] busy line not sent for %s", session_id, exc_info=True)
+        if _notes:
+            event_data[PLATFORM_NOTE] = "\n\n".join(_notes)
+
         if _unanswered:
             from surogates.tools.builtin.ask_user_question import DISMISSES_QUESTION
             event_data[DISMISSES_QUESTION] = _unanswered
@@ -1259,8 +1296,9 @@ class ChannelInboundPipeline:
         deps: PipelineDeps,
         session_id: Any,
         runtime_payload: dict | None,
-    ) -> None:
-        """Deliver the AI disclosure on a conversation's first contact.
+    ) -> str | None:
+        """Deliver the AI disclosure on a conversation's first contact, and
+        return its text so the person's message carries it for the model.
 
         Fires only for agents whose runtime-config governance carries an
         enabled disclosure config.  "First contact" is detected via the
@@ -1281,10 +1319,10 @@ class ChannelInboundPipeline:
         from surogates.runtime.governance import disclosure_config
 
         if runtime_payload is None or deps.input_nudge is None:
-            return
+            return None
         cfg = disclosure_config(runtime_payload.get("governance"))
         if cfg is None or not cfg["enabled"] or not cfg["text"]:
-            return
+            return None
         try:
             session = await deps.session_store.get_session(session_id)
             if getattr(session, "message_count", 0) and (
@@ -1297,7 +1335,7 @@ class ChannelInboundPipeline:
                     session_id, EventType.DISCLOSURE_PRESENTED,
                 )
             ):
-                return
+                return None
             await deps.input_nudge(session_id, msg, cfg["text"])
             await deps.session_store.emit_event(
                 session_id,
@@ -1308,11 +1346,13 @@ class ChannelInboundPipeline:
                     "delivery": "channel_message",
                 },
             )
+            return cfg["text"]
         except Exception:
             logger.warning(
                 "[channels] AI disclosure delivery failed for session %s",
                 session_id, exc_info=True,
             )
+        return None
 
     @staticmethod
     async def _record_reply_target(

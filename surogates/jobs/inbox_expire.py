@@ -21,7 +21,7 @@ from sqlalchemy import and_, func, not_, or_, select, update
 from sqlalchemy.orm import aliased
 
 from surogates.db.models import InboxItem, Session, WorkstreamThread
-from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
+from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS, UNTIL_RESOLVED
 from surogates.tools.builtin.ask_user_question import (
     ASK_USER_QUESTION_MAX_WAIT_SECONDS,
 )
@@ -63,6 +63,7 @@ async def expire_inbox_items(session_store) -> int:
                         # persist until read/acknowledged rather than
                         # expiring on a terminal session.
                         InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
+                        not_(InboxItem.payload.contains({UNTIL_RESOLVED: True})),
                         # A thread's wait on you over its files outlives its
                         # turn: your next message to it answers it.
                         not_(files),

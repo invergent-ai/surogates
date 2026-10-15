@@ -31,7 +31,6 @@ from surogates.channels import person_link
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.db.models import (
     AgentUser,
-    EscalationRow,
     Event,
     OutreachMessageRow,
     ProgramInvitationRow,
@@ -376,6 +375,11 @@ class _Person:
         self.contact_handles: list[str] = []
 
     @property
+    def enrolled(self) -> bool:
+        """Followed in some journey; else known here only by an open escalation."""
+        return bool(self.rows)
+
+    @property
     def contact(self) -> str:
         """How the person is reached, masked: the phone, else a channel id."""
         if self.phone:
@@ -393,6 +397,8 @@ class _Person:
         digits = "".join(c for c in fragment if c.isdigit())
         if len(digits) >= 4 and digits in self.phone:
             return True
+        if _masked_match(fragment, [self.phone, *(h for h in self.contact_handles if h.isdigit())]):
+            return True
         handle = fragment.strip().lstrip("@").casefold()
         if len(handle) >= 3 and any(
             handle in h.casefold()
@@ -407,6 +413,19 @@ class _Person:
             h for h in self.contact_handles if not h.isdigit()
         ]
         return bool(needle) and any(needle in fold_label(n) for n in names)
+
+
+def _masked_match(fragment: str, phones: list[str]) -> bool:
+    """*fragment* is a number as the model sees it masked: as
+    :func:`masked_phone` masks the stored number (``+40…842``), or as it was
+    written in its national form, trunk ``0`` kept (``+07…842``)."""
+    wanted = "".join(fragment.split()).replace("...", "…")
+    if "…" not in wanted:
+        return False
+    return any(
+        wanted in {masked_phone(p), *(masked_phone("0" + p[k:]) for k in (1, 2, 3))}
+        for p in phones if p
+    )
 
 
 async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> list[_Person]:
@@ -474,14 +493,34 @@ def _ago(at: datetime | None, now: datetime) -> str:
     return f"{seconds // 86400}d ago"
 
 
+async def _escalated_people(sf: Any, ctx: Any, settings: Any) -> list[_Person]:
+    """Whoever has an open escalation without being enrolled: the team must
+    be able to reach a stranger who asked for help."""
+    enrolled = {r.user_id for r in await followup_store.enrollments(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)}
+    ids = {
+        e.user_id for e in await followup_store.open_escalations(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
+        if e.user_id not in enrolled and not followup_store.is_team_member(settings, e.user_id)
+    }
+    described = await describe_people(sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_ids=ids)
+    return [_Person(d) for d in described.values()]
+
+
+async def _matching(sf: Any, ctx: Any, settings: Any, fragment: str) -> list[_Person]:
+    """The people *fragment* names: enrolled ones, else strangers with an
+    open escalation (looked up only when no enrolled person matches)."""
+    matches = [p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings) if p.matches(fragment)]
+    return matches or [p for p in await _escalated_people(sf, ctx, settings) if p.matches(fragment)]
+
+
+def _nobody_matches(fragment: str) -> str:
+    return f"nobody enrolled with this business or with an open escalation matches '{fragment}'."
+
+
 async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Person | str:
-    """The one enrolled person *fragment* names, or why there is not one."""
-    matches = [
-        p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings)
-        if p.matches(fragment)
-    ]
+    """The one person *fragment* names, or why there is not one."""
+    matches = await _matching(sf, ctx, settings, fragment)
     if not matches:
-        return f"nobody enrolled with this business matches '{fragment}'."
+        return _nobody_matches(fragment)
     if len(matches) > 1:
         return (
             f"'{fragment}' matches more than one person. Ask the team member which "
@@ -800,12 +839,13 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=since_hours)
 
-    people = await _people(sf, ctx.org_id, ctx.agent_id, settings)
     fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
     if fragment:
-        people = [p for p in people if p.matches(fragment)]
+        people = await _matching(sf, ctx, settings, fragment)
         if not people:
-            return f"Nobody enrolled with this business matches '{fragment}'."
+            return "N" + _nobody_matches(fragment)[1:]
+    else:
+        people = await _people(sf, ctx.org_id, ctx.agent_id, settings)
     if not people:
         return "Nobody is enrolled with this business's follow-up yet."
 
@@ -845,6 +885,8 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         head = person.label
         head += f" · {person.contact}"
         lines = [f"• {head}"]
+        if not person.enrolled:
+            lines.append("  not enrolled; has an open escalation")
         for row in person.rows:
             index = day_today(row, zones)
             text = f"  {row.protocol}: " + (f"day {index}" if index is not None else "no start date")
@@ -1026,7 +1068,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         status = "; ".join(
             f"{r.protocol} {r.status}" + (f" ({r.status_reason})" if r.status_reason else "")
             for r in person.rows
-        )
+        ) or "not enrolled"
         return (
             f"Nothing sent: {person.label}'s follow-up is not active ({status}). "
             "Ask the team member whether to message them anyway; only if they say "
@@ -1115,6 +1157,11 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
 
 
 def _enrollment_of(person: _Person, protocol: str) -> Any:
+    if not person.enrolled:
+        return (
+            f"{person.label} is not enrolled in anything; they only have an open "
+            "escalation. Enrol them first to change a follow-up."
+        )
     if protocol:
         row = next((r for r in person.rows if r.protocol == protocol), None)
         return row or (
@@ -1144,8 +1191,9 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if isinstance(row, str):
         return f"Nothing changed: {row}"
 
+    configs = await followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
     zones = await followup_store.protocol_timezones(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
     changes: dict[str, Any] = {}
     described: list[str] = []
@@ -1184,12 +1232,28 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             return refused
     status = arguments.get("status")
     reason = str(arguments.get("reason") or "").strip()
-    if status is not None:
-        if status not in followup_store.ENROLLMENT_STATUSES:
-            return (
-                "Nothing changed: status must be one of "
-                f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
-            )
+    if status is not None and status not in followup_store.ENROLLMENT_STATUSES:
+        return (
+            "Nothing changed: status must be one of "
+            f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
+        )
+    # Checked before asking for a reason: a team member asked why they want
+    # to pause someone whose follow-up is over was left with a question about
+    # nothing, and a pause still pending in later turns.
+    moot = status is not None and (
+        row.status == status or (row.status == "ended" and status in ("paused", "active"))
+    )
+    verb = "pause" if status == "paused" else "change"
+    if moot and not changes:
+        return (
+            f"Nothing changed: {person.label}'s {row.protocol} is already {row.status}, "
+            f"so there is nothing to {verb}. Tell the team member so in one sentence; "
+            "do not ask for a reason, nothing is waiting for their confirmation."
+            + (" To follow them again, enrol them again." if row.status == "ended" else "")
+        )
+    if moot:
+        described.append(f"status stays {row.status} (nothing to {verb})")
+    elif status is not None:
         if status in ("paused", "ended") and not reason:
             return "Nothing changed: ask the team member why before pausing or ending."
         refused = _not_allowed(settings, ctx, "pause_resume_end")
@@ -1227,13 +1291,16 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if updated.start_date:
         result += f", start {start_text(updated)}"
     result += "."
-    if status in ("paused", "ended"):
+    if status in ("paused", "ended") and updated.previous_status != status:
         label = followup_store.person_label(person.display_name, updated, settings)
         notice = followup_store.wording(
-            settings, f"notice_{status}_by", journey=row.protocol, member=_member(ctx), reason=reason,
+            settings, f"notice_{status}_by", member=_member(ctx), reason=reason,
+            journey=await followup_store.journey_names(
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[row.protocol], configs=configs,
+            ),
         )
         queued, why_not = await _tell_team(
-            sf, ctx, settings, kind="alert", text=f"{notice}\n\n— {label or person.label}",
+            sf, ctx, settings, kind="alert", text=followup_store.signed(notice, label or person.label, settings),
             reason=notice, subject_user_id=person.user_id, exclude_user_id=ctx.user_id,
             topic="attention",
         )
@@ -1293,8 +1360,9 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     name = str(arguments.get("person_name") or arguments.get("patient_name") or "").strip()
     if not name and not existing:
         return "Not enrolled: ask the team member for the person's full name."
+    configs = await followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
     zones = await followup_store.protocol_timezones(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
     protocol = str(arguments.get("protocol") or "").strip()
     if not protocol and len(zones) == 1:
@@ -1435,12 +1503,16 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         result += f" No welcome sent: {channel_names([platform])} is not switched on for this business."
     queued, why_not = await _tell_team(
         sf, ctx, settings, kind="enrolment",
-        text=(
+        text=followup_store.signed(
             followup_store.wording(
-                settings, "notice_enrolled_by", name=name, journey=protocol, member=_member(ctx),
-            )
-            + f"\n\n— {followup_store.person_label(name, row, settings)}"
-            + (f" · {readable_phone(handle)}" if platform == "whatsapp" else "")
+                settings, "notice_enrolled_by", name=name, member=_member(ctx),
+                journey=await followup_store.journey_names(
+                    sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[protocol], configs=configs,
+                ),
+            ),
+            followup_store.person_label(name, row, settings)
+            + (f" · {readable_phone(handle)}" if platform == "whatsapp" else ""),
+            settings,
         ),
         subject_user_id=user_id, exclude_user_id=ctx.user_id, topic="new_enrolments",
     )
@@ -1494,14 +1566,23 @@ async def _latest_alerted(sf: Any, ctx: Any) -> uuid.UUID | None:
         ).scalar_one_or_none()
 
 
-async def _alerted_with(sf: Any, escalation: Any) -> set[uuid.UUID]:
-    """The team members an escalation's alert went to."""
-    keys = (f"escalation:%:{escalation.id.hex}:%", f"missed:{escalation.id}:%")
+async def _alerted_with(sf: Any, escalations: list) -> set[uuid.UUID]:
+    """The team members the alerts of *escalations* went to."""
+    if not escalations:
+        return set()
+    keys = [
+        pattern
+        for escalation in escalations
+        for pattern in (
+            f"{followup_store.ESCALATION_PREFIX}%:{escalation.id.hex}:%",
+            f"missed:{escalation.id}:%",
+        )
+    ]
     async with sf() as db:
         found = (
             await db.execute(
                 sa.select(OutreachMessageRow.user_id)
-                .where(OutreachMessageRow.org_id == escalation.org_id)
+                .where(OutreachMessageRow.org_id == escalations[0].org_id)
                 .where(OutreachMessageRow.kind == "alert")
                 .where(sa.or_(*(OutreachMessageRow.dedupe_key.like(k) for k in keys)))
             )
@@ -1530,43 +1611,43 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
         label = await followup_store.person_name(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=subject,
         ) or "?"
-    async with sf() as db:
-        escalation = (
-            await db.execute(
-                sa.select(EscalationRow)
-                .where(EscalationRow.org_id == ctx.org_id)
-                .where(EscalationRow.agent_id == ctx.agent_id)
-                .where(EscalationRow.user_id == subject)
-                .where(EscalationRow.resolved_at.is_(None))
-                .order_by(EscalationRow.created_at.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-    if escalation is None:
+    # Every open case of theirs: one red and two yellows raised in the same
+    # hour are one situation, and the ones left behind came back in reports.
+    escalations = await followup_store.open_escalations(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=subject,
+    )
+    if not escalations:
         return f"Nothing changed: {label} has no open escalation."
+    escalation = escalations[0]
     member = _member(ctx)
-    # A case resolved before anyone took it is the resolver's.
-    if action == "claim" or not escalation.owner:
-        await followup_store.claim_escalation(
-            sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
-            escalation_id=escalation.id, owner=member,
-        )
-    if action == "resolve":
-        await followup_store.resolve_escalation(
-            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=escalation.id,
-        )
+    # The latest is taken whoever had it; the rest only when nobody had, and
+    # a case resolved before anyone took it is the resolver's.  Someone
+    # else's case stays theirs: its alert's recipients are not told.
+    taken = [r for r in escalations if not r.owner or (action == "claim" and r is escalation)]
+    resolved = escalations if action == "resolve" else []
+    await followup_store.handle_escalations(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, owner=member,
+        take=[r.id for r in taken], resolve=[r.id for r in resolved],
+    )
+    alerted = await _alerted_with(sf, resolved or taken)
     key = "escalation_taken" if action == "claim" else "escalation_resolved"
     text = followup_store.wording(settings, key, member=member, name=label, reason=escalation.reason[:300])
     colleagues_told = 0
-    for colleague in sorted(await _alerted_with(sf, escalation) - {ctx.user_id}, key=str):
+    for colleague in sorted(alerted - {ctx.user_id}, key=str):
         queued, _ = await _tell_team(
             sf, ctx, settings, kind="notice", text=text, subject_user_id=subject,
             only_user_id=colleague, dedupe_prefix=f"{key}:{escalation.id}",
         )
         colleagues_told += queued
     done = "taken by you" if action == "claim" else "resolved"
+    count = len(escalations)
     return (
-        f"{label}'s escalation is {done} (\u201c{escalation.reason[:200]}\u201d). "
+        (
+            f"{label}'s escalation is {done} (\u201c{escalation.reason[:200]}\u201d). "
+            if count == 1 else
+            f"{label}'s {count} open escalations are {done}; the latest: "
+            f"\u201c{escalation.reason[:200]}\u201d. "
+        )
         + (
             f"{colleagues_told} colleague(s) who got the alert were told." if colleagues_told
             else "Nobody else got that alert."

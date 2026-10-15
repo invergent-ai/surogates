@@ -594,7 +594,7 @@ def test_every_platform_sentence_has_a_key():
     for key, default in store.TEAM_TEXTS.items():
         assert store.wording(None, key, **{k: "x" for k in (
             "answered_by", "contact", "relation", "name", "journey", "reason", "member", "who",
-            "channel", "what", "journeys", "writer_name", "writer")}) != default or "{" not in default
+            "channel", "what", "journeys", "writer_name", "writer", "label")}) != default or "{" not in default
 
 
 @pytest.mark.asyncio
@@ -797,3 +797,98 @@ async def test_a_team_members_stop_is_said_to_the_agent_not_an_opt_out(sf, clini
     )
     [identity] = [i for i in await _all(sf, ChannelIdentity) if i.user_id == ion]
     assert store.permission_status(identity) == "withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_nobody_receives_still_reaches_the_team(sf, clinic):
+    doctor, _, nurse = clinic
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT,
+        team_permissions={str(m): {"receives": ["new_enrolments"]} for m in (doctor, nurse)},
+    )
+    stranger, stranger_session = await _user(sf, "Ana Pop", "40711111111")
+    result = await followup.handle_escalate(
+        {"reason": "Asked to join a follow-up that is not active"}, **_kw(sf, stranger_session),
+    )
+    assert "2 team member(s)" in result
+    alerts = [r for r in await _all(sf, OutreachMessageRow) if r.kind == "alert"]
+    assert {r.user_id for r in alerts} == {doctor, nurse}
+    [escalation] = await _all(sf, EscalationRow)
+    assert escalation.user_id == stranger and escalation.state == "raised"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["claim", "resolve"])
+async def test_a_member_handles_every_open_escalation_of_the_person_at_once(sf, clinic, action):
+    doctor, doctor_session, nurse = clinic
+    ion, session = await _user(sf, "Ion Popescu", "40711111111")
+    for reason, severity in (("Fell", "red"), ("Dizzy", "yellow"), ("Dizzy again", "yellow")):
+        await followup.handle_escalate({"reason": reason, "severity": severity}, **_kw(sf, session))
+    await followup_store_mark_owner(sf, "Someone else")
+
+    result = await team.handle_team_escalation(
+        {"action": action, "person": "Popescu"}, **_kw(sf, doctor_session),
+    )
+    assert "3 open escalations" in result
+    rows = await _all(sf, EscalationRow)
+    if action == "resolve":
+        assert all(r.resolved_at is not None for r in rows)
+    else:
+        latest = max(rows, key=lambda r: r.created_at)
+        assert latest.owner == "Dr. Ionescu"
+        # An earlier case someone already took stays theirs.
+        assert sorted(r.owner for r in rows) == ["Dr. Ionescu", "Dr. Ionescu", "Someone else"]
+    told = [o for o in await _all(sf, OutreachMessageRow) if o.kind == "notice"]
+    assert [o.user_id for o in told] == [nurse]
+
+
+async def followup_store_mark_owner(sf, owner):
+    """Raised a minute apart, the oldest already taken by *owner*."""
+    ages = {"Fell": 3, "Dizzy": 2, "Dizzy again": 1}
+    async with sf() as db:
+        for row in (await db.execute(sa.select(EscalationRow))).scalars().all():
+            row.created_at = datetime.now(timezone.utc) - timedelta(minutes=ages[row.reason])
+            row.owner = owner if row.reason == "Fell" else None
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_tells_the_team_once_by_the_journeys_name(sf, clinic):
+    async with sf() as db:
+        db.add(ProgramScheduleRow(
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=True,
+            config={"audience": {"protocol": "post-op"},
+                    "journey": {"slug": "post-op", "name": "Recovery"}},
+        ))
+        await db.commit()
+    ion, ion_session = await _user(sf, "Ion", "40722222222")
+    await store.upsert_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=ion, protocol="post-op",
+                                  start_date=date.today(), phase=None, enrolled_by="agent")
+    await followup_people.handle_followup_withdraw_consent({"reason": "stop please"}, **_kw(sf, ion_session))
+    # The agent ending it as well, after the stop, tells nobody again.
+    await followup.handle_followup_update(
+        {"protocol": "post-op", "status": "ended", "reason": "asked to stop"}, **_kw(sf, ion_session),
+    )
+    notices = {(o.text) for o in await _all(sf, OutreachMessageRow) if o.kind == "alert"}
+    assert notices == {"Ion asked to stop messages on WhatsApp: Recovery ended. stop please"}
+
+
+@pytest.mark.asyncio
+async def test_taking_a_case_tells_nobody_whose_alert_was_someone_elses_case(sf, clinic):
+    doctor, doctor_session, nurse = clinic
+    ion, session = await _user(sf, "Ion Popescu", "40711111111")
+    await followup.handle_escalate(
+        {"reason": "Fell", "severity": "red", "to": ["Asistenta Maria"]}, **_kw(sf, session),
+    )
+    await followup.handle_escalate(
+        {"reason": "Dizzy", "severity": "yellow", "to": ["Dr. Ionescu"]}, **_kw(sf, session),
+    )
+    ages = {"Fell": 2, "Dizzy": 1}
+    async with sf() as db:
+        for row in (await db.execute(sa.select(EscalationRow))).scalars().all():
+            row.created_at = datetime.now(timezone.utc) - timedelta(minutes=ages[row.reason])
+            row.owner = "Asistenta Maria" if row.reason == "Fell" else None
+        await db.commit()
+
+    await team.handle_team_escalation({"action": "claim", "person": "Popescu"}, **_kw(sf, doctor_session))
+    assert [o for o in await _all(sf, OutreachMessageRow) if o.kind == "notice"] == []

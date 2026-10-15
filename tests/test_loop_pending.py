@@ -720,3 +720,18 @@ async def test_a_hand_backs_wake_expands_no_skill_for_a_follow_up_with_the_words
 def test_replay_takes_a_users_message_whatever_names_its_source(source, reads):
     said_so = SimpleNamespace(id=1, type=EventType.USER_MESSAGE.value, data={"content": "Go on.", "source": source})
     assert ContextReplayMixin._rebuild_messages(SimpleNamespace(), [said_so]) == [{"role": "user", "content": reads}]
+
+
+def test_a_platform_note_on_a_reply_follows_it_for_the_model_alone():
+    events = [
+        event(1, EventType.LLM_RESPONSE, message={"role": "assistant", "content": "Alert: +40…111"},
+              platform_note="[Numbers are masked in this log only.]"),
+        event(2, EventType.USER_MESSAGE, content="Give me the number"),
+    ]
+    for each in events:
+        each.type = each.type.value
+    assert ContextReplayMixin._rebuild_messages(SimpleNamespace(), events) == [
+        {"role": "assistant", "content": "Alert: +40…111"},
+        {"role": "user", "content": "[Numbers are masked in this log only.]"},
+        {"role": "user", "content": "Give me the number"},
+    ]

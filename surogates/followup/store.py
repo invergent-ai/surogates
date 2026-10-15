@@ -332,7 +332,8 @@ async def update_enrollment(
 
     ``None`` is a real value here (clear the phase, forget the start date),
     which is why "not passed" has its own sentinel.  Returns ``None`` when
-    the person is not enrolled in that protocol.
+    the person is not enrolled in that protocol; the row returned carries
+    ``previous_status``, so a caller tells a real transition from a no-op.
     """
     if status is not _UNSET and status not in ENROLLMENT_STATUSES:
         raise ValueError(f"status must be one of {', '.join(ENROLLMENT_STATUSES)}")
@@ -363,6 +364,7 @@ async def update_enrollment(
             row.answered_by = (answered_by or "").strip() or None
         if phase is not _UNSET:
             row.phase = phase or None
+        previous_status = row.status
         if status is not _UNSET:
             row.status = status
             if status == "active" and status_reason is _UNSET:
@@ -372,6 +374,7 @@ async def update_enrollment(
         row.updated_at = _utcnow()
         await db.commit()
         await db.refresh(row)
+        row.previous_status = previous_status
         return row
 
 
@@ -382,6 +385,8 @@ TEAM_TEXTS = {
     "label_answered_by": "via {answered_by}",
     "label_reported_by": "reported by {contact} ({relation})",
     "label_contact": "contact",
+    "label_footer": "About: {label}",
+    "inbox_attention_title": "Needs your attention: {name}",
     "label_contact_for": "{contact} ({relation}), for {name}",
     "notice_paused": "{journey} paused: {reason}",
     "notice_ended": "{journey} ended: {reason}",
@@ -402,6 +407,11 @@ TEAM_TEXTS = {
         "Confirm or refuse it."
     ),
 }
+
+
+def signed(text: str, label: str, texts: Any = None) -> str:
+    """*text* to the team, with who it is about underneath."""
+    return f"{text.strip()}\n\n{wording(texts, 'label_footer', label=label)}"
 
 
 def person_label(display_name: str | None, enrollment: Any = None, texts: Any = None) -> str:
@@ -470,6 +480,25 @@ async def active_program_configs(
             )
         ).scalars().all()
     return [config or {} for config in configs]
+
+
+async def journey_names(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, protocols: Iterable[str],
+    configs: list[dict] | None = None,
+) -> str:
+    """*protocols* as the team knows them: each journey's display name, its
+    slug only where no step names a journey for it."""
+    from surogates.programs.journey import journey_of, protocol_of
+
+    names: dict[str, str] = {}
+    if configs is None:
+        configs = await active_program_configs(session_factory, org_id=org_id, agent_id=agent_id)
+    for config in configs:
+        name = str(journey_of(config).get("name") or "").strip()
+        protocol = protocol_of(config)
+        if name and protocol:
+            names.setdefault(protocol, name)
+    return ", ".join(names.get(p, p) for p in protocols)
 
 
 async def protocol_timezones(
@@ -764,7 +793,11 @@ async def notify_team(
         recipients = [only_user_id]
     else:
         if topic is not None:
-            recipients = [r for r in recipients if topic in member_permissions(settings, r)["receives"]]
+            # Someone waits on a human for an escalation: when nobody takes
+            # its kind, the whole team does rather than nobody.
+            recipients = [
+                r for r in recipients if topic in member_permissions(settings, r)["receives"]
+            ] or (recipients if escalation_of(dedupe_prefix) else [])
         chosen = {str(u) for u in to or ()}
         recipients = [r for r in recipients if str(r) in chosen] or recipients
         destinations = [
@@ -1174,6 +1207,72 @@ async def resolve_escalation(
     if row is not None and resolved:
         await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
     return row
+
+
+ESCALATION_PREFIX = "escalation:"
+
+
+def escalation_key(escalation_id: uuid.UUID, invitation_id: uuid.UUID | None = None) -> str:
+    """``escalation:<step or ->:<id hex>``: what groups one escalation's
+    alerts, its Inbox item and its reminder."""
+    return f"{ESCALATION_PREFIX}{invitation_id or '-'}:{escalation_id.hex}"
+
+
+def escalation_of(key: str | None) -> str | None:
+    """The escalation key *key* starts with (an alert's dedupe key adds its
+    recipient), or ``None`` when it names no escalation."""
+    parts = (key or "").split(":")
+    if parts[0] + ":" != ESCALATION_PREFIX or len(parts) < 3:
+        return None
+    return ":".join(parts[:3])
+
+
+def escalation_hex(key: str) -> str:
+    """The id hex of the escalation an escalation key names."""
+    return key.split(":")[2]
+
+
+async def open_escalations(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID | None = None,
+) -> list[EscalationRow]:
+    """The agent's unresolved escalations about someone, latest first; about
+    *user_id* alone when given."""
+    query = (
+        sa.select(EscalationRow)
+        .where(EscalationRow.org_id == org_id)
+        .where(EscalationRow.agent_id == agent_id)
+        .where(EscalationRow.resolved_at.is_(None))
+        .where(EscalationRow.user_id.isnot(None))
+        .order_by(EscalationRow.created_at.desc())
+    )
+    if user_id is not None:
+        query = query.where(EscalationRow.user_id == user_id)
+    async with session_factory() as db:
+        return list((await db.execute(query)).scalars().all())
+
+
+async def handle_escalations(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
+    take: list[uuid.UUID], resolve: list[uuid.UUID], owner: str,
+) -> None:
+    """*owner* takes the escalations *take* names and resolves those
+    *resolve* names, which then leave the Inbox: one write each."""
+    owner = (owner or "").strip()
+    if not owner:
+        raise ValueError("an escalation needs an owner")
+    async with session_factory() as db:
+        for ids, values in ((take, {"owner": owner}), (resolve, {"resolved_at": _utcnow()})):
+            if ids:
+                await db.execute(
+                    sa.update(EscalationRow)
+                    .where(EscalationRow.org_id == org_id)
+                    .where(EscalationRow.agent_id == agent_id)
+                    .where(EscalationRow.id.in_(ids))
+                    .values(**values)
+                )
+        await db.commit()
+    for escalation_id in resolve:
+        await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
 
 
 async def close_escalation_inbox_items(

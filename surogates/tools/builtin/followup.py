@@ -23,9 +23,10 @@ from surogates.db.models import (
     ProgramInvitationRow,
     ProgramScheduleRow,
 )
-from surogates.channels.identity import normalize_wa_id
+from surogates.channels.identity import mask_readable_phones, normalize_wa_id
 from surogates.followup import people
 from surogates.followup import store as followup_store
+from surogates.session.inbox_payload import UNTIL_RESOLVED
 from surogates.followup.context import (
     Context,
     channel_names,
@@ -308,7 +309,9 @@ ESCALATE_SCHEMA = ToolSchema(
                 "description": (
                     "What needs attention, quoting the person where it "
                     "matters, in one to three sentences the team can "
-                    "act on, in their language."
+                    "act on, in their language. Do not state the severity "
+                    "or its colour: the severity field carries it and the "
+                    "platform marks red alerts."
                 ),
             },
             "severity": {
@@ -341,7 +344,8 @@ async def _tell_team(
     extra.setdefault("reason", text)
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
-        text=f"{text.strip()}\n\n— {await ctx.person_label(sf, settings)}", created_by="agent",
+        text=followup_store.signed(text, await ctx.person_label(sf, settings), settings),
+        created_by="agent",
         subject_user_id=await ctx.person_user_id(sf), exclude_user_id=ctx.user_id,
         fallback_senders={ctx.channel: ctx.sender},
         **extra,
@@ -427,21 +431,15 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     offered = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
-    if not offered:
+    if not offered or protocol not in offered:
         return (
-            f"Not enrolled: the business has no active Program, so nobody can "
-            f"be enrolled in '{protocol}' or any other protocol. This is a "
-            f"configuration problem at the business, not something the person "
-            f"did: tell them follow-up is not set up yet and the team will "
-            f"be told, then call escalate with the reason \"No active follow-up "
-            f"Program for protocol '{protocol}'\"."
-        )
-    if protocol not in offered:
-        return (
-            f"Not enrolled: '{protocol}' is not offered here. Offered: "
-            f"{', '.join(sorted(offered))}. If the business told you to use "
-            f"'{protocol}', it has no active Program for it: that is a "
-            f"configuration problem at the business, so escalate saying so."
+            f"Not enrolled: '{protocol}' is not active for this business"
+            + (f" (active: {', '.join(sorted(offered))})" if offered else "")
+            + ". The person is waiting on the team now: call escalate with what "
+            f"they asked for and the reason \"No active follow-up for '{protocol}'\". "
+            "This note is for you: do not explain programs, protocols or "
+            "configuration to the person; tell them only that the team will get "
+            "back to them."
         )
     summary = str(arguments.get("summary") or "").strip()
     if not summary:
@@ -644,10 +642,14 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     if row.preferred_channel:
         result += f", preferred channel {row.preferred_channel}"
     result += "."
-    if status in ("paused", "ended"):
+    # Already so (a stop the platform honoured first): the team was told.
+    if status in ("paused", "ended") and row.previous_status != status:
+        journey = await followup_store.journey_names(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[protocol],
+        )
         queued, why_not = await _tell_team(
             sf, ctx, settings, kind="alert",
-            text=followup_store.wording(settings, f"notice_{status}", journey=protocol, reason=reason),
+            text=followup_store.wording(settings, f"notice_{status}", journey=journey, reason=reason),
             topic="attention",
         )
         result += " " + told(queued, why_not)
@@ -758,6 +760,7 @@ def _chosen(settings: Any, names: dict, wanted: Any) -> list[uuid.UUID]:
 async def _inbox(
     sf: Any,
     ctx: Context,
+    settings: Any,
     *,
     service_account_id: uuid.UUID,
     event_type: str,
@@ -785,9 +788,14 @@ async def _inbox(
                 source_event_id=event.id,
                 # An existing InboxKind; the ops Inbox filters on a Literal.
                 kind="action_required",
-                title=f"Needs your attention: {await ctx.person_label(sf)}",
+                # The inbox is a list anyone with access scrolls: the full
+                # number stays on the alert sent to the team member.
+                title=followup_store.wording(
+                    settings, "inbox_attention_title",
+                    name=mask_readable_phones(await ctx.person_label(sf, settings)),
+                ),
                 body=reason,
-                payload={**payload, "user_id": str(ctx.user_id)},
+                payload={**payload, "user_id": str(ctx.user_id), UNTIL_RESOLVED: True},
             )
         )
         try:
@@ -865,9 +873,11 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     # red one is reminded once and read as one, and names the check-in
     # whose history records it.
     escalation_id = uuid.uuid4()
-    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{escalation_id.hex}"
+    escalation = followup_store.escalation_key(
+        escalation_id, invitation.id if invitation is not None else None,
+    )
     inboxed = target_id is not None and await _inbox(
-        sf, ctx, service_account_id=target_id,
+        sf, ctx, settings, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
         reason=reason, payload={**payload, "escalation": escalation},
     )

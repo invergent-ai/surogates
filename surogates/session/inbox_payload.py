@@ -25,6 +25,11 @@ class InboxRow:
 # the session is actively viewed. Kinds not listed here need a real response.
 ACKNOWLEDGE_ONLY_KINDS = frozenset({"task_complete", "progress_checkin"})
 
+#: Payload flag of an item that outlives its session and stays until what it
+#: names is resolved (an escalation: a person's channel conversation ends
+#: after every turn, the human it waits for does not).
+UNTIL_RESOLVED = "until_resolved"
+
 #: Tool-call id prefix of the ``ask_user_question`` call the harness makes out
 #: of a final reply that asked the user something.  Its ``context`` is that
 #: reply, the one ``context`` written for the person rather than about them.

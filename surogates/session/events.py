@@ -25,6 +25,27 @@ OPENER_SYNTHETIC_MARKERS = (CHECKIN_OPENER_MARKER, OUTREACH_OPENER_MARKER)
 #: platform woke (a journey step) is the agent's to stay quiet in.
 SILENT_REPLY = "NO_MESSAGE"
 
+#: An event's model-only note from the platform: on a ``user.message`` it is
+#: folded into the message, on an ``llm.response`` it follows the reply as its
+#: own note.  Transcripts and channels never show it.
+PLATFORM_NOTE = "platform_note"
+
+
+def disclosure_note(text: str) -> str:
+    """What the model reads of the AI disclosure the platform sent."""
+    return (
+        "[From the platform, not the person: it already sent them this AI "
+        f"disclosure, in this conversation: «{text}»]"
+    )
+
+
+def busy_line_note(line: str) -> str:
+    """What the model reads of the busy line the platform sent."""
+    return (
+        "[Sent by the platform to the person when this message came in, "
+        f"while you were still answering them: «{line}»]"
+    )
+
 
 @unique
 class EventType(str, Enum):

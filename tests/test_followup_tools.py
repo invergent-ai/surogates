@@ -125,8 +125,8 @@ async def test_enrol_refuses_a_protocol_no_program_offers(sf, patient):
         {"protocol": "made-up", "consent": True, "summary": "x"},
         **_kw(sf, session_id),
     )
-    assert "not offered" in result
-    assert "post-op" in result
+    assert "is not active for this business (active: post-op)" in result
+    assert "call escalate" in result and "do not explain" in result
 
 
 async def _deactivate_programs(sf):
@@ -145,11 +145,8 @@ async def test_no_active_program_is_named_a_practice_configuration_problem(sf, p
         {"protocol": "post-op", "consent": True, "summary": "x"},
         **_kw(sf, session_id),
     )
-    assert result.startswith("Not enrolled")
-    assert "no active Program" in result
-    assert "configuration problem at the business" in result
-    assert "escalate" in result
-    assert "post-op" in result
+    assert result.startswith("Not enrolled: 'post-op' is not active for this business.")
+    assert "call escalate" in result and "do not explain" in result
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert status.startswith("Protocols offered: none.")
@@ -337,7 +334,9 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.service_account_id == inbox_sa
-    assert item.title == "Needs your attention: Ion Popescu · +40 700 000 001"
+    assert item.title == "Needs your attention: Ion Popescu · +40…001"
+    # It waits for its escalation, not for the conversation that raised it.
+    assert item.payload["until_resolved"] is True
     [alert] = await _outreach(sf)
     assert alert.user_id == doctor
 
@@ -370,6 +369,11 @@ async def test_the_models_own_severity_mark_is_not_doubled(sf, patient, care_tea
 
 def test_escalate_asks_for_every_new_report_even_a_repeat():
     assert "even when a similar one was escalated before" in followup.ESCALATE_SCHEMA.description
+
+
+def test_the_escalation_reason_leaves_the_severity_to_its_field():
+    reason = followup.ESCALATE_SCHEMA.parameters["properties"]["reason"]["description"]
+    assert "Do not state the severity or its colour" in reason
 
 
 @pytest.mark.asyncio
@@ -490,7 +494,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     )
     assert "for Petre Marin (answered by Ana, fiica)" in result
     [note] = await _outreach(sf)
-    assert note.text.endswith("— Petre Marin · via Ana, fiica · +40 700 000 001")
+    assert note.text.endswith("About: Petre Marin · via Ana, fiica · +40 700 000 001")
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert "name Petre Marin, answered by Ana, fiica" in status
@@ -499,7 +503,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.title == (
-        "Needs your attention: Petre Marin · via Ana, fiica · +40 700 000 001"
+        "Needs your attention: Petre Marin · via Ana, fiica · +40…001"
     )
 
 

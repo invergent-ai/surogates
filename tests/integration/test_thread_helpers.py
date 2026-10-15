@@ -387,8 +387,12 @@ async def test_a_helper_starting_call_that_starts_none_hands_nothing_on_and_leav
         looping._governance_gate = GovernanceGate(denied_tools={"delegate_task"})
     locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
-    [refusal] = await results_of(api, thread, "delegate_task")
-    assert "error" in json.loads(refusal), refusal
+    if refused_by == "governance":
+        # A tool the policy denies is not even offered: the call never runs.
+        assert await results_of(api, thread, "delegate_task") == []
+    else:
+        [refusal] = await results_of(api, thread, "delegate_task")
+        assert "error" in json.loads(refusal), refusal
     # No helper, no lock asked, nothing pushed; and the stop after it found nothing to drop, and asked no lock either.
     assert await helpers_of(api, thread) == []
     assert (stopped, locks) == ([False], [])

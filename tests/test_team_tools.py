@@ -476,6 +476,46 @@ async def test_pausing_needs_a_reason(sf, practice):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["paused", "active"])
+async def test_an_ended_follow_up_has_nothing_to_pause_or_resume(sf, practice, status):
+    await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=practice.ioana[0], protocol="post-op",
+        status="ended", status_reason="asked to stop",
+    )
+    out = await team.handle_team_update_person(
+        {"person": "Ioana", "status": status}, **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Nothing changed: Ioana Popa's post-op is already ended")
+    assert "do not ask for a reason" in out and "confirmation=" not in out
+    assert _redis.data == {}
+    assert (await _enrollment(sf, practice.ioana[0])).status == "ended"
+
+
+@pytest.mark.asyncio
+async def test_a_status_it_already_has_does_not_drop_the_other_changes(sf, practice):
+    args = {"person": "Ioana", "status": "active", "person_name": "Ioana M. Popa"}
+    out = await _confirmed(team.handle_team_update_person, args, _kw(sf, practice.doctor_session))
+    assert out.startswith("Updated")
+    row = await _enrollment(sf, practice.ioana[0])
+    assert (row.status, row.patient_name) == ("active", "Ioana M. Popa")
+
+
+@pytest.mark.asyncio
+async def test_someone_with_only_an_escalation_has_no_follow_up_to_change(sf, practice):
+    stranger, _ = await _person(sf, "Maria Stan", "40700000842", enrol=False)
+    await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=stranger, kind="alert", reason="Call me",
+    )
+    out = await team.handle_team_update_person(
+        {"person": "Maria", "status": "paused", "reason": "x"}, **_kw(sf, practice.doctor_session),
+    )
+    assert out == (
+        "Nothing changed: Maria Stan is not enrolled in anything; they only have an "
+        "open escalation. Enrol them first to change a follow-up."
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_preview_changes_nothing(sf, practice):
     ioana, _ = practice.ioana
     out = await team.handle_team_update_person(
@@ -815,3 +855,45 @@ async def test_a_person_on_slack_is_found_by_handle_and_messaged_there(sf, pract
     [row] = await _outreach(sf)
     assert (row.user_id, row.platform, row.channel_identifier) == (ioana, "slack", "T1")
     assert row.template_name is None
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_with_an_open_escalation_is_found_and_their_number_sent(sf, practice):
+    stranger, _ = await _person(sf, "Maria Stan", "40700000842", enrol=False)
+    kw = _kw(sf, practice.doctor_session)
+    assert "Nobody" in await team.handle_team_overview({"person": "Maria"}, **kw)
+
+    await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=stranger, kind="alert", reason="Needs a call",
+    )
+    out = await team.handle_team_overview({"person": "+40…842", "include_phone": True}, **kw)
+    assert "Maria Stan" in out and "not enrolled; has an open escalation" in out
+    async with sf() as db:
+        [notice] = (await db.execute(
+            sa.select(OutreachMessageRow).where(OutreachMessageRow.created_by == "team-overview")
+        )).scalars().all()
+    assert "+40 700 000 842" in notice.text
+
+    result = await team.handle_team_escalation({"action": "claim", "person": "Maria"}, **kw)
+    assert "has no open escalation" not in result and not result.startswith("Nothing changed")
+    # The full list stays the people followed.
+    assert "Maria" not in await team.handle_team_overview({}, **kw)
+
+
+@pytest.mark.asyncio
+async def test_a_masked_number_two_people_share_is_ambiguous(sf, practice):
+    await _person(sf, "Ana Pop", "40711111001")
+    out = await team.handle_team_message_person(
+        {"person": "+40…001", "text": "Hello"}, **_kw(sf, practice.doctor_session),
+    )
+    assert "matches more than one person" in out
+
+
+def test_a_masked_number_matches_its_leading_and_trailing_digits():
+    assert team._masked_match("+40…842", ["40700000842"])
+    assert team._masked_match("+40...842", ["40700000842"])
+    assert not team._masked_match("+40…843", ["40700000842"])
+    assert not team._masked_match("+41…842", ["40700000842"])
+    # Masked as it was written, in its national form.
+    assert team._masked_match("+07…842", ["40700000842"])
+    assert not team._masked_match("+08…842", ["40700000842"])

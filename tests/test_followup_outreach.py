@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import sqlalchemy as sa
 
-from surogates.db.models import OutreachMessageRow
+from surogates.db.models import EscalationRow, OutreachMessageRow
 from surogates.followup import outreach, store
 from surogates.session.events import EventType
 
@@ -504,7 +504,7 @@ async def test_the_agents_setting_moves_the_expiry_but_not_other_texts(sf, docto
 # --- red alerts nobody opened -----------------------------------------------
 
 
-async def _red_alert(sf, team, *, minutes=None, invitation_id="-"):
+async def _red_alert(sf, team, *, minutes=None, invitation_id="-", escalation_id=None):
     await store.update_settings(
         sf, org_id=ORG, agent_id=AGENT, channel_identifier=SENDER,
         alert_recipient_user_ids=team, alert_template_name="alert",
@@ -514,7 +514,7 @@ async def _red_alert(sf, team, *, minutes=None, invitation_id="-"):
     await store.notify_care_team(
         sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="🔴 Faint",
         created_by="agent", severity="red",
-        dedupe_prefix=f"escalation:{invitation_id}:{uuid.uuid4().hex}",
+        dedupe_prefix=f"escalation:{invitation_id}:{(escalation_id or uuid.uuid4()).hex}",
     )
 
 
@@ -557,6 +557,35 @@ async def test_an_unopened_red_alert_is_sent_once_more_to_the_whole_team(sf, doc
     for later in (5, 60, 600):
         await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(minutes=later))
     assert len(await _alerts(sf, "reminder")) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handled", [{"owner": "Ana"}, {"resolved_at": NOW}])
+async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session, handled, monkeypatch):
+    taken, open_ = uuid.uuid4(), uuid.uuid4()
+    async with sf() as db:
+        for escalation_id, extra in ((taken, handled), (open_, {})):
+            db.add(EscalationRow(
+                id=escalation_id, org_id=ORG, agent_id=AGENT, kind="alert",
+                severity="red", reason="Faint", **extra,
+            ))
+        await db.commit()
+    await _red_alert(sf, [uuid.uuid4()], escalation_id=taken)
+    await _red_alert(sf, [uuid.uuid4()], escalation_id=open_)
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
+    await _at(sf, 40)
+    # A batch of one: the handled, older alert must not take the newer's place.
+    async with sf() as db:
+        await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.dedupe_key.like(f"%{taken.hex}%"))
+            .values(created_at=NOW - timedelta(minutes=41))
+        )
+        await db.commit()
+    monkeypatch.setattr(outreach, "BATCH", 1)
+    await _send(sf, _Store(), _Delivery())
+    [reminder] = await _alerts(sf, "reminder")
+    assert open_.hex in reminder.dedupe_key
 
 
 @pytest.mark.asyncio
@@ -910,12 +939,35 @@ async def test_an_answer_after_expiry_is_told_kindly_and_the_requester_hears(sf,
 @pytest.mark.asyncio
 async def test_the_log_keeps_a_number_masked_and_only_the_delivery_has_it_whole(sf, doctor_session):
     await _wrote(sf, NOW - timedelta(hours=2))
-    await _queue(sf, uuid.uuid4(), text="Faint\n\n— Ion Pop · +40 711 111 111")
+    await _queue(sf, uuid.uuid4(), text="Faint\n\nAbout: Ion Pop · +40 711 111 111")
     session_store = _Store()
     await _send(sf, session_store, _Delivery())
     [(_, _, data)] = session_store.events
-    assert data["message"]["content"] == "Faint\n\n— Ion Pop · +40…111"
-    assert session_store.delivered["message"]["content"].endswith("+40 711 111 111")
+    assert data["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40…111"
+    assert data["platform_note"] == outreach.MASKED_NOTE
+    assert session_store.delivered["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40 711 111 111"
+    # The channel takes the text alone: the model's note never goes out.
+    from surogates.session.store import _build_channel_payload
+
+    assert _build_channel_payload(EventType.LLM_RESPONSE, session_store.delivered, "whatsapp") == {
+        "content": "Faint\n\nAbout: Ion Pop · +40 711 111 111", "intermediate": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_alert_reminds_the_model_to_close_it_and_delivers_unchanged(sf, doctor_session):
+    await _wrote(sf, NOW - timedelta(hours=2))
+    await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(), platform="whatsapp",
+        channel_identifier=SENDER, kind="alert", text="Faint", template_name="alert", template_language="ro",
+        dedupe_key=f"escalation:-:{uuid.uuid4().hex}:x",
+    )
+    session_store = _Store()
+    await _send(sf, session_store, _Delivery())
+    [(_, _, data)] = session_store.events
+    assert data["message"]["content"] == "Faint"
+    assert data["platform_note"] == outreach.ESCALATION_NOTE
+    assert session_store.delivered["message"]["content"] == "Faint"
 
 
 
@@ -999,3 +1051,11 @@ async def test_telegram_outreach_fails_for_someone_who_never_started_the_bot(sf)
     saved = await _row(sf, row.id)
     assert saved.state == "failed"
     assert "has not written" in saved.reason
+
+
+def test_the_opener_note_says_a_team_members_alert_is_about_someone_else():
+    member, subject = uuid.uuid4(), uuid.uuid4()
+    about_other = SimpleNamespace(template_name="alert", user_id=member, subject_user_id=subject)
+    own = SimpleNamespace(template_name="msg", user_id=subject, subject_user_id=subject)
+    assert "about another person, not about them" in outreach._opener_note(about_other)
+    assert outreach._opener_note(own) == "[Outreach opener sent: template 'msg']"

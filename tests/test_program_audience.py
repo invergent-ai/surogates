@@ -204,3 +204,100 @@ async def test_a_fixed_roster_is_unchanged(sf):
     [row] = await _rows(sf, occ)
     assert row.user_id == user
     assert row.delivery_state == "queued"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("once", [True, False])
+async def test_a_once_per_person_step_reaches_each_person_once_inside_its_window(sf, once):
+    reached = await _enrol(sf, start=LOCAL_TODAY - timedelta(days=21))
+    skipped = await _enrol(sf, start=LOCAL_TODAY - timedelta(days=21))
+    schedule = _schedule({"protocol": "post-op", "day_from": 21, "day_to": 35})
+    if once:
+        schedule.config["once_per_person"] = True
+    phones = {reached: "40700000001", skipped: "40700000002"}
+
+    first = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=_lookup(phones), now=NOW,
+    )
+    async with sf() as db:
+        await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.user_id == skipped)
+            .values(delivery_state="skipped")
+        )
+        await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.user_id == reached)
+            .values(delivery_state="delivered", response_state="completed")
+        )
+        await db.commit()
+    assert {r.user_id for r in await _rows(sf, first)} == {reached, skipped}
+
+    week_later = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=_lookup(phones),
+        now=NOW + timedelta(days=7),
+    )
+    again = {r.user_id for r in await _rows(sf, week_later)}
+    assert again == ({skipped} if once else {reached, skipped})
+
+
+@pytest.mark.asyncio
+async def test_a_person_reached_only_through_a_contact_has_no_failed_row_of_their_own(sf):
+    person = await _enrol(sf, start=LOCAL_TODAY)
+    alone = await _enrol(sf, start=LOCAL_TODAY)
+    caregiver = uuid.uuid4()
+    await store.link_contact(sf, org_id=ORG, agent_id=AGENT, person_user_id=person,
+                             contact_user_id=caregiver, relation="daughter", created_by="t")
+    occ = await materialize_occurrence(
+        _schedule({"protocol": "post-op", "day_from": 0, "day_to": 30}),
+        session_factory=sf, identity_lookup=_lookup({caregiver: "40700000009"}), now=NOW,
+    )
+    rows = {(r.user_id, r.person_user_id): (r.delivery_state, r.reason) for r in await _rows(sf, occ)}
+    assert rows == {
+        (caregiver, person): ("queued", None),
+        # Nobody reaches this one: the reason says why nothing went out.
+        (alone, alone): ("skipped", "No whatsapp identity"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_person_keeps_their_skipped_row_when_no_contact_copy_reaches_anyone(sf):
+    # Their contact is unreachable; the other's contact is followed too and
+    # gets one row only, their own.
+    unreached = await _enrol(sf, start=LOCAL_TODAY)
+    shared = await _enrol(sf, start=LOCAL_TODAY)
+    caregiver_without_phone = uuid.uuid4()
+    followed_caregiver = await _enrol(sf, start=LOCAL_TODAY)
+    await store.link_contact(sf, org_id=ORG, agent_id=AGENT, person_user_id=unreached,
+                             contact_user_id=caregiver_without_phone, relation="son", created_by="t")
+    await store.link_contact(sf, org_id=ORG, agent_id=AGENT, person_user_id=shared,
+                             contact_user_id=followed_caregiver, relation="wife", created_by="t")
+    occ = await materialize_occurrence(
+        _schedule({"protocol": "post-op", "day_from": 0, "day_to": 30}),
+        session_factory=sf, identity_lookup=_lookup({followed_caregiver: "40700000008"}), now=NOW,
+    )
+    rows = {(r.user_id, r.person_user_id): r.delivery_state for r in await _rows(sf, occ)}
+    assert rows[(unreached, unreached)] == "skipped"
+    assert rows[(shared, shared)] == "skipped"
+    assert rows[(followed_caregiver, followed_caregiver)] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_got_as_someone_elses_contact_is_not_ones_own_step(sf):
+    person = await _enrol(sf, start=LOCAL_TODAY - timedelta(days=21))
+    caregiver = await _enrol(sf, start=LOCAL_TODAY - timedelta(days=21))
+    schedule = _schedule({"protocol": "post-op", "day_from": 21, "day_to": 35})
+    schedule.config["once_per_person"] = True
+    async with sf() as db:
+        db.add(ProgramInvitationRow(
+            occurrence_id=uuid.uuid4(), program_id=schedule.program_id, org_id=ORG, agent_id=AGENT,
+            user_id=caregiver, person_user_id=person, platform="whatsapp",
+            platform_user_id="40700000002", delivery_state="delivered",
+            response_state="completed", escalation_state="none",
+        ))
+        await db.commit()
+    occ = await materialize_occurrence(
+        schedule, session_factory=sf,
+        identity_lookup=_lookup({person: "40700000001", caregiver: "40700000002"}), now=NOW,
+    )
+    assert {r.user_id for r in await _rows(sf, occ)} == {caregiver}

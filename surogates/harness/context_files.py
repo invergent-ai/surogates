@@ -87,7 +87,7 @@ async def load_agent_md(bundle) -> str | None:
         if not content:
             continue
         content = scan_context_content(content, name)
-        return truncate_context(content)
+        return truncate_context(content, filename=name, readable=False)
     return None
 
 
@@ -114,7 +114,7 @@ async def load_soul_md(bundle) -> str | None:
     if not content:
         return None
     content = scan_context_content(content, "SOUL.md")
-    return truncate_context(content)
+    return truncate_context(content, filename="SOUL.md", readable=False)
 
 
 def load_project_context(workspace_path: str | None) -> str | None:
@@ -215,6 +215,7 @@ def truncate_context(
     content: str,
     max_chars: int = MAX_CONTEXT_CHARS,
     filename: str = "",
+    readable: bool = True,
 ) -> str:
     """Head/tail truncation with a marker in the middle.
 
@@ -229,7 +230,12 @@ def truncate_context(
     head = content[:head_chars]
     tail = content[-tail_chars:]
     label = filename or "content"
-    marker = f"\n\n[...truncated {label}: kept {head_chars}+{tail_chars} of {len(content)} chars. Use file tools to read the full file.]\n\n"
+    # A bundle file is not in the workspace: pointing the model at file
+    # tools sends it searching for something it can never find.
+    hint = " Use file tools to read the full file." if readable else ""
+    marker = f"\n\n[...truncated {label}: kept {head_chars}+{tail_chars} of {len(content)} chars.{hint}]\n\n"
+    if not readable:
+        logger.warning("%s is %d chars, over the %d limit: its middle is cut", label, len(content), max_chars)
 
     return head + marker + tail
 

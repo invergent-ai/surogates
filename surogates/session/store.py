@@ -356,6 +356,18 @@ _THREAD_DEST_FIELDS = {
 }
 
 
+
+async def live_lease_token(db: AsyncSession, session_id: UUID, now: datetime | None = None) -> UUID | None:
+    """The token of the lease a worker holds on *session_id* right now, read
+    in *db*; *now* (else the database's clock) decides what is live."""
+    at = func.now() if now is None else now.astimezone(timezone.utc).replace(tzinfo=None)
+    return (await db.execute(
+        select(LeaseRow.lease_token).where(
+            LeaseRow.session_id == session_id,
+            LeaseRow.expires_at > at,
+        ).limit(1)
+    )).scalar_one_or_none()
+
 class SessionStore:
     """Async, PostgreSQL-backed store for sessions, events, leases, and cursors.
 
@@ -2697,12 +2709,7 @@ class SessionStore:
     async def has_live_lease(self, session_id: UUID) -> bool:
         """True when a worker currently holds *session_id*."""
         async with self._sf() as db:
-            return (await db.execute(
-                select(LeaseRow.session_id).where(
-                    LeaseRow.session_id == session_id,
-                    LeaseRow.expires_at > func.now(),
-                ).limit(1)
-            )).scalar_one_or_none() is not None
+            return await live_lease_token(db, session_id) is not None
 
     async def release_stale_lease(self, session_id: UUID) -> bool:
         """Delete a session's lease row only if it has already expired.

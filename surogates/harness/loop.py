@@ -2813,6 +2813,14 @@ class AgentHarness(
                 if e.toolset == "user_reports"
             }
 
+        # A tool the policy refuses by name is not offered: a model that
+        # called one spent an iteration on the refusal.
+        gate = self._governance_gate
+        if gate is not None:
+            tool_filter = {
+                name for name in (self._tools.tool_names if tool_filter is None else tool_filter)
+                if gate.offers(name)
+            }
         tool_schemas = filter_schemas_for_tenant(
             self._tools.get_schemas(names=tool_filter),
             has_agents=self._prompt.has_agents,
@@ -5105,7 +5113,7 @@ class AgentHarness(
         if "ask_user_question" not in self._tools.tool_names:
             return False
         gate = self._governance_gate
-        return gate is None or gate.check("ask_user_question", {}).allowed
+        return gate is None or gate.offers("ask_user_question")
 
     def _ensure_always_available_tools(
         self,

@@ -622,7 +622,15 @@ THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOL
 # or a form started mid-stream wrote its channel row to the outbox before the
 # text the model wrote beside it, so patients got the question or form before
 # the introduction leading up to it.
-HELD_UNTIL_SAVED_TOOLS: frozenset[str] = SESSION_STARTING_TOOLS | AFTER_THE_RESPONSE_TOOLS | frozenset({"ask_user_question", "send_form"})
+# A call that tells someone else waits too, so the text beside it goes first.
+TELLS_OTHERS_TOOLS: frozenset[str] = frozenset({
+    "escalate", "followup_enroll", "followup_update", "followup_withdraw_consent",
+    "team_message_person", "team_update_person", "team_enroll_person", "team_escalation",
+})
+HELD_UNTIL_SAVED_TOOLS: frozenset[str] = (
+    SESSION_STARTING_TOOLS | AFTER_THE_RESPONSE_TOOLS | TELLS_OTHERS_TOOLS
+    | frozenset({"ask_user_question", "send_form"})
+)
 
 
 def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
