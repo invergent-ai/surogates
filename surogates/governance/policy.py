@@ -184,6 +184,18 @@ class GovernanceGate:
     # Check
     # ------------------------------------------------------------------
 
+    def offers(self, tool_name: str) -> bool:
+        """Whether *tool_name* may be called at all, whatever its arguments:
+        the name-level half of :meth:`check`.  A tool that needs approval is
+        offered, since approving it is how it runs."""
+        if not self._enabled:
+            return True
+        if tool_name in self._denied_tools:
+            return False
+        if tool_name in self._require_approval or self._open_policy or tool_name.startswith("mcp__"):
+            return True
+        return tool_name in self._engine.state_permissions.get(_DEFAULT_ROLE, set())
+
     def check(
         self,
         tool_name: str,

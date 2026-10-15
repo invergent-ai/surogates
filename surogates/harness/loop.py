@@ -2844,6 +2844,11 @@ class AgentHarness(
             has_forms=capabilities_for(session.channel).forms and bool(whatsapp_forms),
             has_file_pane=has_file_pane(session),
         )
+        # A tool the policy refuses by name is not offered: a model that
+        # called one spent an iteration on the refusal.
+        gate = self._governance_gate
+        if gate is not None and hasattr(gate, "offers"):
+            tool_schemas = [s for s in tool_schemas if gate.offers(s["function"]["name"])]
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
