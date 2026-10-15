@@ -26,6 +26,7 @@ from surogates.db.models import (
 from surogates.channels.identity import mask_readable_phones, normalize_wa_id
 from surogates.followup import people
 from surogates.followup import store as followup_store
+from surogates.session.inbox_payload import UNTIL_RESOLVED
 from surogates.followup.context import (
     Context,
     channel_names,
@@ -794,7 +795,7 @@ async def _inbox(
                     name=mask_readable_phones(await ctx.person_label(sf, settings)),
                 ),
                 body=reason,
-                payload={**payload, "user_id": str(ctx.user_id)},
+                payload={**payload, "user_id": str(ctx.user_id), UNTIL_RESOLVED: True},
             )
         )
         try:

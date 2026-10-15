@@ -128,9 +128,7 @@ DEFAULT_TEXTS = {
     "why_setup": "the channel is not set up correctly for this business",
     "why_stopped": "the step was stopped before it was sent",
     "why_undelivered": "it could not be delivered",
-    # Off unless the business words it: what someone who writes again while
-    # the agent is still answering them reads at once (where to get help if
-    # it cannot wait), since their message is only read when the turn ends.
+    # Off unless the business words it.
     "busy_safety_line": "",
 }
 #: Rows handled per pass; the rest wait for the next tick.

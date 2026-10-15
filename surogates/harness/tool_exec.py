@@ -622,9 +622,7 @@ THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOL
 # or a form started mid-stream wrote its channel row to the outbox before the
 # text the model wrote beside it, so patients got the question or form before
 # the introduction leading up to it.
-# A call that tells someone else (the team, a person a team member writes
-# to) waits as well: the team's alert was queued before the safety text the
-# model wrote to the person beside it.
+# A call that tells someone else waits too, so the text beside it goes first.
 TELLS_OTHERS_TOOLS: frozenset[str] = frozenset({
     "escalate", "followup_enroll", "followup_update", "followup_withdraw_consent",
     "team_message_person", "team_update_person", "team_enroll_person", "team_escalation",

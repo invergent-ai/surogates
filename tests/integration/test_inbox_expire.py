@@ -323,7 +323,7 @@ async def test_an_escalation_outlives_its_session_until_resolved(
         db.add(InboxItem(
             org_id=session.org_id, user_id=session.user_id, session_id=session.id,
             source_event_id=event.id, kind="action_required", title="Needs your attention",
-            payload={"escalation": f"escalation:-:{escalation_id.hex}"},
+            payload={"escalation": f"escalation:-:{escalation_id.hex}", "until_resolved": True},
         ))
         await db.execute(update(Session).where(Session.id == session.id).values(status="completed"))
         await db.commit()

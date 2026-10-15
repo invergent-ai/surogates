@@ -335,6 +335,8 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.service_account_id == inbox_sa
     assert item.title == "Needs your attention: Ion Popescu · +40…001"
+    # It waits for its escalation, not for the conversation that raised it.
+    assert item.payload["until_resolved"] is True
     [alert] = await _outreach(sf)
     assert alert.user_id == doctor
 
