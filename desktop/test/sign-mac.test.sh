@@ -163,16 +163,18 @@ grep -Eq 'flags=0x[0-9a-f]+\([a-z,-]*runtime' <<<"$info" && not_ok "signs a deve
   && ok "signs a development build's surogate-helper ad hoc, as its app" || not_ok "signs a development build's surogate-helper otherwise than its app"
 
 # An extended attribute on a file of the bundle, as macOS leaves some: the payload carries none, in no AppleDouble file
-# and in no header, as either would break the seal of the bundle the updater unpacks.
-xattr -w ai.invergent.surogate.test kept "$signed/Contents/Resources/app/package.json"
-[ -n "$(xattr -p ai.invergent.surogate.test "$signed/Contents/Resources/app/package.json" 2>/dev/null)" ] || not_ok "the test's extended attribute was set"
+# and in no header (libarchive's LIBARCHIVE.xattr.<name> and SCHILY.xattr.<name> keywords), as either would break the seal
+# of the bundle the updater unpacks. Its name is no part of any file's content in the bundle.
+PROBE=ai.invergent.surogate.packprobe
+xattr -w "$PROBE" kept "$signed/Contents/Resources/app/package.json"
+[ -n "$(xattr -p "$PROBE" "$signed/Contents/Resources/app/package.json" 2>/dev/null)" ] || not_ok "the test's extended attribute was set"
 takes "packs the update payload" "$SIGN" pack "$signed" "$work/payload.tar.gz"
 mkdir "$work/unpacked"
 tar -xzf "$work/payload.tar.gz" -C "$work/unpacked"
 [ -z "$(xattr -lr "$work/unpacked" 2>/dev/null)" ] && ok "packs no extended attribute: unpacked, no file of it has one" || not_ok "packs extended attributes: $(xattr -lr "$work/unpacked" | head -3)"
-[ "$(gzip -dc "$work/payload.tar.gz" | LC_ALL=C grep -a -c 'ai.invergent.surogate.test' || :)" = 0 ] \
+[ "$(gzip -dc "$work/payload.tar.gz" | LC_ALL=C grep -a -c "xattr\.$PROBE" || :)" = 0 ] \
   && ok "packs no header that names an extended attribute" || not_ok "packs a header that names an extended attribute"
-xattr -d ai.invergent.surogate.test "$signed/Contents/Resources/app/package.json"
+xattr -d "$PROBE" "$signed/Contents/Resources/app/package.json"
 [ "$(ls -A "$work/unpacked")" = Surogate.app ] && ok "packs Surogate.app as its one top folder" || not_ok "packs another top folder: $(ls -A "$work/unpacked")"
 [ -z "$(tar -tzf "$work/payload.tar.gz" | grep -E '(^|/)\._' || :)" ] && ok "packs no AppleDouble file" || not_ok "packs AppleDouble files"
 takes "packs the bundle as it was signed: unpacked, it checks out as the test's" "$SIGN" verify "$work/unpacked/Surogate.app" trial "$SIGNER"
