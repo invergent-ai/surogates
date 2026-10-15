@@ -22,7 +22,6 @@ import {
 
 import { MessageResponse } from "../ai-elements/message";
 import { renderInlineMarkdown } from "../chat/inline-markdown";
-import { Badge } from "@invergent/ui-sdk/badge";
 import { Button } from "@invergent/ui-sdk/button";
 import {
   Card,
@@ -31,6 +30,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@invergent/ui-sdk/card";
+import { type Tone, TonePill } from "@invergent/ui-sdk/chip";
+import {
+  Collapsible,
+  CollapsibleContent,
+} from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
 
 import type {
   AgentChatMissionEvent,
@@ -59,19 +67,20 @@ export interface MissionTasksTabProps {
 }
 
 
-const TASK_STATUS_BADGE_CLASS: Record<string, string> = {
-  running: "border-primary/30 bg-primary/10 text-primary",
-  blocked: "border-amber-500/30 bg-amber-500/10 text-amber-600",
-  done: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
-  failed: "border-destructive/30 bg-destructive/10 text-destructive",
-  cancelled: "border-border bg-muted text-muted-foreground",
+// Running and blocked share the amber the platform uses for work in
+// motion; queued and cancelled tasks are untinted. The workers tab reads
+// the same table, adding the session statuses a direct child reports.
+const TASK_STATUS_TONE: Record<string, Tone> = {
+  running: "warn",
+  blocked: "warn",
+  done: "ok",
+  failed: "bad",
+  active: "warn",
+  completed: "ok",
 };
 
-function statusBadgeClass(status: string): string {
-  return (
-    TASK_STATUS_BADGE_CLASS[status] ??
-    "border-foreground/20 bg-foreground/5 text-foreground/70"
-  );
+export function missionTaskStatusTone(status: string): Tone {
+  return TASK_STATUS_TONE[status] ?? "muted";
 }
 
 
@@ -83,22 +92,24 @@ function TaskChip({
   onSelect: (taskId: string) => void;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="outline"
+      size="xs"
       data-task-chip
       onClick={() => onSelect(task.id)}
-      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs hover:bg-muted/40"
+      className="max-w-full"
     >
       <span
         className={`size-1.5 shrink-0 rounded-full ${missionTaskStatusDotClass(task.status)}`}
       />
-      <span className="truncate text-foreground/85">
+      <span className="min-w-0 truncate">
         {missionTaskTitle(task.goal, 40)}
       </span>
-      <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">
+      <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
         {task.id.slice(0, 8)}
       </span>
-    </button>
+    </Button>
   );
 }
 
@@ -115,35 +126,24 @@ function TaskRailRow({
   const preview = stripMissionControlMarkup(
     task.status === "done" && task.result ? task.result : task.goal,
   );
+  // The status dot leads the row: an asChild row places the element's own
+  // children before the label.
   return (
-    <button
-      type="button"
+    <ListRow
+      asChild
+      size="sm"
+      isActive={selected}
+      label={task.goal}
+      description={[task.agentDefName, preview].filter(Boolean).join(" · ")}
       onClick={() => onSelect(task.id)}
-      className={`w-full rounded-md border px-3 py-2 text-left text-sm transition-colors ${
-        selected
-          ? "border-primary/40 bg-primary/5"
-          : "border-transparent hover:bg-muted/40"
-      }`}
+      className="cursor-pointer"
     >
-      <div className="flex items-center gap-2">
+      <button type="button">
         <span
           className={`size-2 shrink-0 rounded-full ${missionTaskStatusDotClass(task.status)}`}
         />
-        <span className="min-w-0 flex-1 truncate font-medium text-foreground/90">
-          {task.goal}
-        </span>
-      </div>
-      <div className="mt-1 flex flex-col gap-2 pl-4">
-        {task.agentDefName ? (
-          <span className="shrink-0 text-xs font-mono text-muted-foreground">
-            {task.agentDefName}
-          </span>
-        ) : null}
-        <span className="line-clamp-2 min-w-0 flex-1 text-xs text-muted-foreground/70">
-          {preview}
-        </span>
-      </div>
-    </button>
+      </button>
+    </ListRow>
   );
 }
 
@@ -184,9 +184,7 @@ export function MissionTasksTab({
 
   if (tasks.length === 0) {
     return (
-      <div className="py-8 text-center text-sm text-muted-foreground/60">
-        No tasks spawned yet.
-      </div>
+      <EmptyState className="py-8" title="No tasks spawned yet" />
     );
   }
 
@@ -196,10 +194,8 @@ export function MissionTasksTab({
       <div className="w-72 shrink-0 space-y-4 overflow-y-auto pr-1">
         {groups.map((group) => (
           <div key={group.key}>
-            <div className="mb-1 px-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-              {group.label} ({group.tasks.length})
-            </div>
-            <div className="space-y-1">
+            <SectionLabel label={`${group.label} (${group.tasks.length})`} />
+            <div className="space-y-0.5">
               {group.tasks.map((t) => (
                 <TaskRailRow
                   key={t.id}
@@ -284,12 +280,9 @@ function TaskDetail({
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <Badge
-            variant="destructive"
-            className={`font-mono text-sm uppercase tracking-wide ${statusBadgeClass(task.status)}`}
-          >
+          <TonePill tone={missionTaskStatusTone(task.status)} className="capitalize">
             {task.status}
-          </Badge>
+          </TonePill>
           {task.agentDefName ? (
             <span className="text-muted-foreground">
               {task.agentDefName}
@@ -314,14 +307,10 @@ function TaskDetail({
       {/* Dependencies */}
       {parents.length > 0 || children.length > 0 ? (
         <div className="space-y-2">
-          <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-            Dependencies
-          </div>
+          <SectionLabel label="Dependencies" className="pl-0" />
           {parents.length > 0 ? (
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-1 text-[10px] uppercase text-muted-foreground/50">
-                Depends on
-              </span>
+              <span className="mr-1 text-[12px] text-subtle">Depends on</span>
               {parents.map((p) => (
                 <TaskChip key={p.id} task={p} onSelect={onSelect} />
               ))}
@@ -329,9 +318,7 @@ function TaskDetail({
           ) : null}
           {children.length > 0 ? (
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-1 text-[10px] uppercase text-muted-foreground/50">
-                Blocks
-              </span>
+              <span className="mr-1 text-[12px] text-subtle">Blocks</span>
               {children.map((c) => (
                 <TaskChip key={c.id} task={c} onSelect={onSelect} />
               ))}
@@ -342,31 +329,27 @@ function TaskDetail({
 
       {/* Brief — goals are authored as markdown by the coordinator. */}
       <div>
-        <div className="mb-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-          Brief
-        </div>
+        <SectionLabel label="Brief" className="mb-1 pl-0" />
         <MessageResponse className="text-sm leading-relaxed text-foreground/90">
           {task.goal}
         </MessageResponse>
       </div>
 
       {task.resultMetadata ? (
-        <details>
-          <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-            Result metadata
-          </summary>
-          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted/30 px-2 py-1.5 text-[11px] text-foreground/90">
-            {JSON.stringify(task.resultMetadata, null, 2)}
-          </pre>
-        </details>
+        <Collapsible className="rounded-[10px] border border-foreground/[0.08]">
+          <CollapsibleHeader variant="section">Result metadata</CollapsibleHeader>
+          <CollapsibleContent>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-foreground/[0.08] px-3 py-2 text-[11px] text-foreground/90">
+              {JSON.stringify(task.resultMetadata, null, 2)}
+            </pre>
+          </CollapsibleContent>
+        </Collapsible>
       ) : null}
 
       {/* History */}
       {eventsSupported && taskEvents.length > 0 ? (
         <div>
-          <div className="mb-2 font-mono font-semibold uppercase text-muted-foreground">
-            History ({taskEvents.length})
-          </div>
+          <SectionLabel label={`History (${taskEvents.length})`} className="mb-2 pl-0" />
           <ol className="space-y-3">
             {taskEvents.map((e) => (
               <li key={e.id} className="flex items-start gap-3 text-xs">

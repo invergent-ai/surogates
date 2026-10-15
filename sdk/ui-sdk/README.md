@@ -58,6 +58,14 @@ the kit carries Work's own components:
 | `empty-state` | `EmptyState`, `EmptyStateLogo` | The brand badge, a heading, copy and actions for an empty list. |
 | `stat-card` | `StatCard`, `InfoHint`, `ChannelChip` | A stat tile: label, value, hint, detail. |
 | `control-styles` | `CONTROL_*` | Class strings for native controls that cannot be a component. |
+| `command` | `Command`, `CommandList`, `CommandGroup`, `CommandItem`, … | A searchable list (cmdk) with Work's menu rows; `data-checked` on an item lights its amber check. |
+| `hover-card` | `HoverCard`, `HoverCardTrigger`, `HoverCardContent` | A card shown on hover, on the popover surface. |
+| `item` | `Item`, `ItemMedia`, `ItemContent`, `ItemTitle`, `ItemDescription`, `ItemActions`, … | A content row (media, title, description, actions), plain, outlined or muted. |
+| `button-group` | `ButtonGroup`, `ButtonGroupText`, `ButtonGroupSeparator` | Buttons joined into one control, rounded only at its ends. |
+| `progress-bar` | `ProgressBar` | A 4px bar on the line colour, filled with `color` (amber by default). |
+| `responsive-panel` | `ResponsivePanel` | A popover with a cursor, a bottom sheet on a phone. |
+| `timeline` | `Timeline`, `TimelineItem`, `TimelineIndicator`, `TimelineSeparator`, … | A vertical run of steps, each a dot on a connecting line. |
+| `rabbit-mark` | `RabbitMark`, `RABBIT_MARK_PATH`, `RABBIT_MARK_BOX` | The rabbit silhouette as an icon in `currentColor`, and its path for a canvas. |
 
 Several rely on the `data-*` variants and the `no-scrollbar` utility from
 `shadcn/tailwind.css`; import it alongside the theme.

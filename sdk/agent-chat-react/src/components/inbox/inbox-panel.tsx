@@ -33,6 +33,11 @@ import {
 import { useAnswerWindow } from "./inbox-expiry";
 import { Badge } from "@invergent/ui-sdk/badge";
 import { Button } from "@invergent/ui-sdk/button";
+import { CONTROL_FIELD, CONTROL_OPTION } from "@invergent/ui-sdk/control-styles";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import { TextLink } from "@invergent/ui-sdk/text-link";
+import { ViewSwitch } from "@invergent/ui-sdk/toggle-group";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
@@ -143,28 +148,35 @@ type InboxView = "active" | "updates" | "history";
 const VIEWS: Record<
   InboxView,
   {
+    label: string;
     statuses: AgentChatInboxStatus[];
     kinds?: AgentChatInboxKind[];
     empty: string;
   }
 > = {
   active: {
+    label: "Active",
     statuses: ["pending"],
     kinds: ["input_required", "action_required", "governance_gate"],
     empty: "Nothing needs you right now",
   },
   updates: {
+    label: "Updates",
     statuses: ["pending"],
     kinds: ["task_complete", "progress_checkin"],
     empty: "No news from your agent",
   },
   history: {
+    label: "History",
     statuses: ["acknowledged", "responded", "expired"],
     empty: "No history yet",
   },
 };
 
-const VIEW_NAMES = Object.keys(VIEWS) as InboxView[];
+const VIEW_OPTIONS = (Object.keys(VIEWS) as InboxView[]).map((id) => ({
+  id,
+  label: VIEWS[id].label,
+}));
 
 function belongsToView(item: AgentChatInboxItem, view: InboxView): boolean {
   const kinds = VIEWS[view].kinds;
@@ -196,9 +208,6 @@ function InboxBody({ body, muted }: { body: string; muted?: boolean }) {
     </MessageResponse>
   );
 }
-
-const FIELD_CLASS =
-  "h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -293,7 +302,7 @@ function QuestionInput({
       <div className="space-y-1.5">
         <select
           aria-label={prompt}
-          className={FIELD_CLASS}
+          className={CONTROL_FIELD}
           disabled={disabled}
           value={
             useOther
@@ -314,22 +323,30 @@ function QuestionInput({
         >
           {/* Disabled, so it cannot be chosen back: its value is "" and
               Number("") is 0, which would read as the first choice. */}
-          <option value="" disabled>
+          <option value="" disabled className={CONTROL_OPTION}>
             Select
           </option>
           {choices.map((choice, index) => (
-            <option key={choice.label} value={String(index)}>
+            <option
+              key={choice.label}
+              value={String(index)}
+              className={CONTROL_OPTION}
+            >
               {choice.label}
             </option>
           ))}
           {/* Without this the menu is the only answer the user can
               give, even when the agent said any answer is fine. */}
-          {allowOther && <option value={OTHER_OPTION}>Other</option>}
+          {allowOther && (
+            <option value={OTHER_OPTION} className={CONTROL_OPTION}>
+              Other
+            </option>
+          )}
         </select>
         {useOther && (
           <input
             aria-label={`${prompt} (other)`}
-            className={FIELD_CLASS}
+            className={CONTROL_FIELD}
             placeholder="Type your answer…"
             disabled={disabled}
             value={typed}
@@ -343,7 +360,7 @@ function QuestionInput({
   return (
     <input
       aria-label={prompt}
-      className={FIELD_CLASS}
+      className={CONTROL_FIELD}
       disabled={disabled}
       value={typed}
       onChange={(event) => onType(event.target.value)}
@@ -793,14 +810,12 @@ function InboxDetail({
       {/* Below md the detail replaced the list, so it has to offer the way
           back; above md both panes are on screen and this is noise. */}
       {onBack && (
-        <button
-          type="button"
-          onClick={onBack}
-          className="-ml-2 mb-2 inline-flex min-h-11 items-center gap-1.5 px-2 text-sm font-medium text-muted-foreground md:hidden"
-        >
-          <ChevronLeftIcon className="size-4" />
-          Inbox
-        </button>
+        <TextLink variant="muted" asChild className="mb-2 md:hidden">
+          <button type="button" onClick={onBack}>
+            <ChevronLeftIcon />
+            Inbox
+          </button>
+        </TextLink>
       )}
       <div className="mb-5 flex min-w-0 items-start gap-3">
         <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center border border-line text-muted-foreground">
@@ -1039,22 +1054,13 @@ export function InboxPanel({
             <h1 className="font-semibold">{title}</h1>
           </div>
         )}
-        <div className="flex gap-1 border-b border-line px-2 py-2">
-          {VIEW_NAMES.map((value) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => selectView(value)}
-              className={cn(
-                "px-2 py-1 text-xs capitalize transition-colors",
-                view === value
-                  ? "bg-line font-medium text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {value}
-            </button>
-          ))}
+        <div className="border-b border-line px-2 py-2">
+          <ViewSwitch
+            label="Inbox view"
+            views={VIEW_OPTIONS}
+            value={view}
+            onChange={selectView}
+          />
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {error && items.length === 0 && (
@@ -1066,45 +1072,32 @@ export function InboxPanel({
             </div>
           )}
           {items.length === 0 && !error && !loading && (
-            <div className="px-4 py-8 text-sm text-muted-foreground">
-              {VIEWS[view].empty}
-            </div>
+            <EmptyState className="px-4 py-10" title={VIEWS[view].empty} />
           )}
-          {items.map((item) => {
-            const Icon = kindIcon(item.kind);
-            const selected = item.id === selectedItemId;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                aria-label={`Open inbox item ${item.title}`}
-                className={cn(
-                  "flex w-full min-w-0 gap-3 border-l-2 px-3 py-3 text-left transition-colors hover:bg-input",
-                  selected
-                    ? "border-l-primary bg-line text-foreground"
-                    : "border-l-transparent text-subtle",
-                  !item.readAt && "font-medium text-foreground",
-                )}
-                onClick={() => void selectItem(item.id)}
-              >
-                <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1">
-                  <span className="flex min-w-0 items-center justify-between gap-2">
-                    <span className="truncate text-xs uppercase tracking-wide text-muted-foreground">
-                      {kindLabel(item.kind)}
-                    </span>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {formatRelative(item.createdAt)}
-                    </span>
-                  </span>
-                  <span className="mt-1 block truncate text-sm">{item.title}</span>
-                  <span className="mt-1 block text-xs text-muted-foreground">
-                    {statusLabel(item.status)}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
+          {items.map((item) => (
+            <ListRow
+              key={item.id}
+              size="lg"
+              icon={kindIcon(item.kind)}
+              label={item.title}
+              description={`${kindLabel(item.kind)} · ${statusLabel(item.status)}`}
+              meta={formatRelative(item.createdAt)}
+              isActive={item.id === selectedItemId}
+              // The navbar badge counts these, so the list has to say which
+              // ones it is counting.
+              badge={
+                !item.readAt && (
+                  <span
+                    aria-label="Unread"
+                    title="Unread"
+                    className="size-[7px] shrink-0 rounded-full bg-amber-500"
+                  />
+                )
+              }
+              aria-label={`Open inbox item ${item.title}`}
+              onClick={() => void selectItem(item.id)}
+            />
+          ))}
           {nextCursor && (
             <Button
               type="button"

@@ -15,6 +15,7 @@ import type {
 } from "../../types";
 import { Button } from "@invergent/ui-sdk/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@invergent/ui-sdk/dropdown-menu";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 
 const GROUP_LABEL: Record<NonNullable<AgentChatThreadRow["group"]>, string> = {
   waiting: "Waiting on you",
@@ -265,13 +266,11 @@ function WorkerCard({ worker }: { worker: AgentChatWorker }) {
               // A long name is cut, its mark never.
               <li key={`${file.kind}:${file.ref}`} className="flex min-w-0 max-w-full" title={file.label}>
                 {file.kind === "file" && onFileSelect ? (
-                  <button
-                    type="button"
-                    className="min-w-0 truncate underline"
-                    onClick={() => onFileSelect(file.ref)}
-                  >
-                    <bdi>{file.label}</bdi>
-                  </button>
+                  <TextLink variant="muted" size="inline" asChild>
+                    <button type="button" className="min-w-0 truncate" onClick={() => onFileSelect(file.ref)}>
+                      <bdi>{file.label}</bdi>
+                    </button>
+                  </TextLink>
                 ) : (
                   <span className="min-w-0 truncate">
                     <bdi>{file.label}</bdi>

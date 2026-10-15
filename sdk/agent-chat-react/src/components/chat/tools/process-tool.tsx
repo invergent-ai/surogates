@@ -20,6 +20,7 @@ import {
   TerminalHeader,
 } from "../../ai-elements/terminal";
 import { Button } from "@invergent/ui-sdk/button";
+import { TonePill } from "@invergent/ui-sdk/chip";
 import {
   Dialog,
   DialogContent,
@@ -90,56 +91,49 @@ function truncateCommand(cmd: string, max = 80): string {
 function StatusBadge({ status, exitCode }: { status: string; exitCode?: number | null }) {
   if (status === "running") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+      <TonePill tone="ok">
         <CircleDotIcon className="size-3 animate-pulse" />
         running
-      </span>
+      </TonePill>
     );
   }
   if (status === "exited") {
     const ok = exitCode === 0;
     return (
-      <span className={cn(
-        "inline-flex items-center gap-1 text-xs font-medium",
-        ok ? "text-muted-foreground" : "text-red-500 dark:text-red-400",
-      )}>
+      <TonePill tone={ok ? "muted" : "bad"}>
         {ok
           ? <CircleCheckIcon className="size-3" />
           : <CircleXIcon className="size-3" />}
         exited({exitCode ?? "?"})
-      </span>
+      </TonePill>
     );
   }
   if (status === "killed") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs font-medium text-orange-500 dark:text-orange-400">
+      <TonePill tone="bad">
         <SkullIcon className="size-3" />
         killed
-      </span>
+      </TonePill>
     );
   }
   if (status === "timeout") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-500 dark:text-amber-400">
+      <TonePill tone="warn">
         <ClockIcon className="size-3" />
         timeout
-      </span>
+      </TonePill>
     );
   }
   if (status === "interrupted") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-500 dark:text-amber-400">
+      <TonePill tone="warn">
         <CircleXIcon className="size-3" />
         interrupted
-      </span>
+      </TonePill>
     );
   }
   // not_found, error, ok, already_exited, etc.
-  return (
-    <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
-      {status}
-    </span>
-  );
+  return <TonePill>{status}</TonePill>;
 }
 
 // ── Action: list ────────────────────────────────────────────────────

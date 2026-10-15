@@ -18,8 +18,11 @@ import {
   AlertCircle,
 } from "lucide-react";
 
+import { Badge } from "@invergent/ui-sdk/badge";
 import { Button } from "@invergent/ui-sdk/button";
 import { Card, CardContent } from "@invergent/ui-sdk/card";
+import { Checkbox } from "@invergent/ui-sdk/checkbox";
+import { type Tone, TonePill } from "@invergent/ui-sdk/chip";
 import {
   Dialog,
   DialogContent,
@@ -28,7 +31,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@invergent/ui-sdk/dialog";
-import { Progress } from "../ui/progress";
+import { ProgressBar } from "@invergent/ui-sdk/progress-bar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@invergent/ui-sdk/tabs";
 import {
   Tooltip,
@@ -50,7 +53,7 @@ import {
   isTerminalMissionStatus,
 } from "./mission-derive";
 import { MissionActivityTab } from "./mission-activity-tab";
-import { MissionMetadataTab } from "./mission-metadata-tab";
+import { MissionMetadataTab, missionVerdictTone } from "./mission-metadata-tab";
 import { MissionResearchTab } from "./mission-research-tab";
 import { MissionTasksTab } from "./mission-tasks-tab";
 import { MissionWorkersTab } from "./mission-workers-tab";
@@ -60,18 +63,24 @@ import { useMissionEvents } from "./use-mission-events";
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 
-/** Small count chip shown next to tab labels — same shape as
- * ``frontend/src/components/sessions/session-detail.tsx``'s CountBadge.
- * Hidden when ``n === 0`` so empty tabs don't look noisy.
+/** The quiet count shown next to a tab label. Hidden when ``n === 0`` so
+ * empty tabs don't look noisy.
  */
 function CountBadge({ n }: { n: number }) {
   if (n === 0) return null;
-  return (
-    <span className="ml-1 rounded bg-muted px-1 py-px text-[9px] text-muted-foreground/70">
-      {n}
-    </span>
-  );
+  return <Badge variant="secondary">{n}</Badge>;
 }
+
+
+// Running and paused share the amber the platform uses for work in motion;
+// an unknown status reads as itself, untinted.
+const MISSION_STATUS_TONE: Record<string, Tone> = {
+  active: "warn",
+  paused: "warn",
+  satisfied: "ok",
+  failed: "bad",
+  cancelled: "bad",
+};
 
 
 export interface MissionDashboardProps {
@@ -297,15 +306,6 @@ export function MissionDashboard({
     }
   };
 
-  const statusTone =
-    mission.status === "satisfied"
-      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-      : mission.status === "failed" || mission.status === "cancelled"
-        ? "border-destructive/40 bg-destructive/10 text-destructive"
-        : mission.status === "paused"
-          ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-          : "border-primary/40 bg-primary/10 text-primary";
-
   const isActive = ACTIVE_MISSION_STATUSES.has(mission.status);
   const iterationPct =
     mission.maxIterations > 0
@@ -322,11 +322,12 @@ export function MissionDashboard({
               {/* Top row: status pill + iteration metric + actions */}
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-3">
-                  <span
-                    className={`rounded-md border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider ${statusTone}`}
+                  <TonePill
+                    tone={MISSION_STATUS_TONE[mission.status] ?? "muted"}
+                    className="capitalize"
                   >
                     {mission.status}
-                  </span>
+                  </TonePill>
                   <div className="flex items-baseline gap-1.5">
                     <span className="font-display text-2xl font-bold tracking-tight tabular-nums text-foreground">
                       {mission.iteration}
@@ -339,11 +340,11 @@ export function MissionDashboard({
                     </span>
                   </div>
                   {mission.lastEvaluationResult ? (
-                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
-                      <span className="opacity-70">last verdict</span>
-                      <span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-primary">
+                    <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                      <span>Last verdict</span>
+                      <TonePill tone={missionVerdictTone(mission.lastEvaluationResult)}>
                         {mission.lastEvaluationResult}
-                      </span>
+                      </TonePill>
                     </div>
                   ) : null}
                 </div>
@@ -400,9 +401,9 @@ export function MissionDashboard({
               </div>
 
               {/* Iteration progress bar — fades when terminal. */}
-              <Progress
+              <ProgressBar
                 value={iterationPct}
-                className={`h-1 ${isActive ? "" : "opacity-40"}`}
+                className={isActive ? undefined : "opacity-40"}
               />
 
               {/* Description — full text, generously sized.  Long
@@ -527,10 +528,9 @@ export function MissionDashboard({
               </DialogDescription>
             </DialogHeader>
             <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={cancelCascade}
-                onChange={(e) => setCancelCascade(e.target.checked)}
+                onCheckedChange={(checked) => setCancelCascade(checked === true)}
               />
               <span>
                 Also cancel <strong>{runningWorkerCount}</strong> running worker

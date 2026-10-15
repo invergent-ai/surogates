@@ -4,11 +4,11 @@ import { Button } from "@invergent/ui-sdk/button";
 import {
   Collapsible,
   CollapsibleContent,
-  CollapsibleTrigger,
 } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
 import { cn } from "../../lib/utils";
-import { ChevronDownIcon, PaperclipIcon } from "lucide-react";
+import { PaperclipIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 
 export interface QueueMessagePart {
@@ -186,7 +186,7 @@ export const QueueList = ({
   className,
   ...props
 }: QueueListProps) => (
-  <ScrollArea className={cn("mt-2 -mb-1", className)} {...props}>
+  <ScrollArea className={className} {...props}>
     <div className="max-h-40 pr-4">
       <ul>{children}</ul>
     </div>
@@ -205,25 +205,10 @@ export const QueueSection = ({
 );
 
 // QueueSectionTrigger - section header/trigger
-export type QueueSectionTriggerProps = ComponentProps<"button">;
+export type QueueSectionTriggerProps = ComponentProps<typeof CollapsibleHeader>;
 
-export const QueueSectionTrigger = ({
-  children,
-  className,
-  ...props
-}: QueueSectionTriggerProps) => (
-  <CollapsibleTrigger asChild>
-    <button
-      className={cn(
-        "group flex w-full items-center justify-between rounded-md bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground text-sm transition-colors hover:bg-muted",
-        className
-      )}
-      type="button"
-      {...props}
-    >
-      {children}
-    </button>
-  </CollapsibleTrigger>
+export const QueueSectionTrigger = (props: QueueSectionTriggerProps) => (
+  <CollapsibleHeader variant="section" {...props} />
 );
 
 // QueueSectionLabel - label content with icon and count
@@ -241,7 +226,6 @@ export const QueueSectionLabel = ({
   ...props
 }: QueueSectionLabelProps) => (
   <span className={cn("flex items-center gap-2", className)} {...props}>
-    <ChevronDownIcon className="size-4 transition-transform group-data-[state=closed]:-rotate-90" />
     {icon}
     <span>
       {count} {label}
@@ -258,7 +242,10 @@ export const QueueSectionContent = ({
   className,
   ...props
 }: QueueSectionContentProps) => (
-  <CollapsibleContent className={cn(className)} {...props} />
+  <CollapsibleContent
+    className={cn("border-t border-foreground/[0.08] p-1.5", className)}
+    {...props}
+  />
 );
 
 export type QueueProps = ComponentProps<"div">;
@@ -266,7 +253,7 @@ export type QueueProps = ComponentProps<"div">;
 export const Queue = ({ className, ...props }: QueueProps) => (
   <div
     className={cn(
-      "flex flex-col gap-2 rounded-xl border border-border bg-background px-3 pt-2 pb-2 shadow-xs",
+      "flex flex-col overflow-hidden rounded-[10px] border border-foreground/[0.08] bg-background",
       className
     )}
     {...props}

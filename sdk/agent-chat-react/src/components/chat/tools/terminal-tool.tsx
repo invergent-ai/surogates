@@ -2,16 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { useState } from "react";
-import {
-  CheckCircle2Icon,
-  ChevronDownIcon,
-  CopyIcon,
-} from "lucide-react";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@invergent/ui-sdk/collapsible";
+import { CheckCircle2Icon, CopyIcon } from "lucide-react";
+import { Button } from "@invergent/ui-sdk/button";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { Shimmer } from "../../ai-elements/shimmer";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";
@@ -21,9 +15,10 @@ import { toolErrorSummary } from "./shared";
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
-      type="button"
-      className="shrink-0 p-0.5 rounded opacity-0 group-hover/in:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      className="opacity-0 text-muted-foreground hover:text-foreground group-hover/in:opacity-100 focus-visible:opacity-100"
       onClick={(e) => {
         e.stopPropagation();
         void navigator.clipboard.writeText(text).then(() => {
@@ -34,7 +29,7 @@ function CopyButton({ text }: { text: string }) {
       aria-label="Copy command"
     >
       {copied ? <CheckCircle2Icon className="size-3" /> : <CopyIcon className="size-3" />}
-    </button>
+    </Button>
   );
 }
 
@@ -111,23 +106,15 @@ function TerminalCollapsible({ command, output, isRunning, hasError }: TerminalB
       onOpenChange={setIsOpen}
       className="not-prose w-full"
     >
-      <CollapsibleTrigger className="group/trigger flex w-fit items-center gap-2 text-sm transition-colors">
-        <span className="text-left">
-          {isRunning ? (
-            <Shimmer as="span" duration={1}>Running command...</Shimmer>
-          ) : hasError ? (
-            <span className="font-semibold text-destructive">Command failed</span>
-          ) : (
-            <span className="font-semibold text-foreground">Command</span>
-          )}
-        </span>
-        <ChevronDownIcon
-          className={cn(
-            "size-4 shrink-0 transition-transform",
-            isOpen ? "rotate-180" : "rotate-0",
-          )}
-        />
-      </CollapsibleTrigger>
+      <CollapsibleHeader className="-ml-2 w-fit max-w-full">
+        {isRunning ? (
+          <Shimmer as="span" duration={1}>Running command...</Shimmer>
+        ) : hasError ? (
+          <span className="font-medium text-destructive">Command failed</span>
+        ) : (
+          <span className="font-medium text-foreground">Command</span>
+        )}
+      </CollapsibleHeader>
       <CollapsibleContent
         className={cn(
           "mt-2 overflow-hidden",

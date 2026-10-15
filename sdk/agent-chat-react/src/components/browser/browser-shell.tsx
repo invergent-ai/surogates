@@ -1,4 +1,11 @@
 import { Button } from "@invergent/ui-sdk/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@invergent/ui-sdk/dropdown-menu";
+import { Toggle } from "@invergent/ui-sdk/toggle";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
@@ -106,7 +113,6 @@ export function BrowserShell({
   const [frame, setFrame] = useState<string | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [nav, setNav] = useState({ url: "", title: "" });
-  const [menuOpen, setMenuOpen] = useState(false);
   // The address bar is editable: the user types a URL and presses Enter to
   // navigate (the server protocol carries `navigate`). While the field is
   // focused, server-side updates must not clobber what is being typed —
@@ -277,21 +283,22 @@ export function BrowserShell({
         >
           <Reload />
         </Button>
-        {/* Offered where it takes or returns control, or says the viewer holds it. */}
+        {/* Offered where it takes or returns control, or says the viewer holds it.
+            The kit's toggle has no icon size, so it takes icon-xs's box here:
+            square at 28px with a mouse, 44px on touch. */}
         {(onToggleControl || hasControl) && (
-          <Button
-            type="button"
-            variant={hasControl ? "default" : "ghost"}
-            size="icon-xs"
+          <Toggle
+            size="sm"
             data-testid="browser-shell-control"
             aria-label={hasControl ? "Return control" : "Take control"}
-            aria-pressed={hasControl}
-            onClick={onToggleControl}
+            pressed={hasControl}
+            onPressedChange={() => onToggleControl?.()}
+            className="size-7 min-h-11 min-w-11 px-0 pointer-fine:min-h-0 pointer-fine:min-w-0"
           >
             {/* One glyph in both states: a second, circular one beside Reload
                 would read as another refresh button. Colour is the mode. */}
             <Pointer />
-          </Button>
+          </Toggle>
         )}
         <div
           data-testid="browser-shell-url"
@@ -334,48 +341,21 @@ export function BrowserShell({
             }}
           />
         </div>
-        <div className="relative">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            aria-label="More"
-            onClick={() => setMenuOpen((open) => !open)}
-          >
-            <Ellipsis />
-          </Button>
-          {menuOpen && (
-            <div
-              data-testid="browser-shell-menu"
-              className="absolute right-0 top-8 z-10 min-w-36 rounded-md border border-line bg-card py-1 text-xs shadow-md"
-            >
-              {onMaximize && (
-                <button
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left hover:bg-secondary"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onMaximize();
-                  }}
-                >
-                  Maximize
-                </button>
-              )}
-              {onClose && (
-                <button
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left hover:bg-secondary"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onClose();
-                  }}
-                >
-                  Close browser
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="ghost" size="icon-xs" aria-label="More">
+              <Ellipsis />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent data-testid="browser-shell-menu" align="end">
+            {onMaximize && (
+              <DropdownMenuItem onSelect={onMaximize}>Maximize</DropdownMenuItem>
+            )}
+            {onClose && (
+              <DropdownMenuItem onSelect={onClose}>Close browser</DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {showTabs && (

@@ -6,7 +6,6 @@
 // tool's collapsible shell.
 import { useState } from "react";
 import AnsiImport from "ansi-to-react";
-import { ChevronDownIcon } from "lucide-react";
 
 // ansi-to-react is a CJS module ({ default: Component, __esModule: true }).
 // Under the SDK's tsup -> consumer-bundler interop the default import can
@@ -15,11 +14,8 @@ import { ChevronDownIcon } from "lucide-react";
 // defensively so it works regardless of how the consumer bundles us.
 const Ansi = ((AnsiImport as unknown as { default?: unknown }).default ??
   AnsiImport) as typeof AnsiImport;
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@invergent/ui-sdk/collapsible";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { Shimmer } from "../../ai-elements/shimmer";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";
@@ -88,23 +84,15 @@ export function CodeRunToolBlock({
       onOpenChange={setIsOpen}
       className="not-prose w-full"
     >
-      <CollapsibleTrigger className="group/trigger flex w-fit items-center gap-2 text-sm transition-colors">
-        <span className="text-left">
-          {isRunning ? (
-            <Shimmer as="span" duration={1}>{`Running ${label}...`}</Shimmer>
-          ) : hasError ? (
-            <span className="font-semibold text-destructive">{`${label} failed`}</span>
-          ) : (
-            <span className="font-semibold text-foreground">{`Ran ${label}`}</span>
-          )}
-        </span>
-        <ChevronDownIcon
-          className={cn(
-            "size-4 shrink-0 transition-transform",
-            isOpen ? "rotate-180" : "rotate-0",
-          )}
-        />
-      </CollapsibleTrigger>
+      <CollapsibleHeader className="-ml-2 w-fit max-w-full">
+        {isRunning ? (
+          <Shimmer as="span" duration={1}>{`Running ${label}...`}</Shimmer>
+        ) : hasError ? (
+          <span className="font-medium text-destructive">{`${label} failed`}</span>
+        ) : (
+          <span className="font-medium text-foreground">{`Ran ${label}`}</span>
+        )}
+      </CollapsibleHeader>
       <CollapsibleContent
         className={cn(
           "mt-2 overflow-hidden",

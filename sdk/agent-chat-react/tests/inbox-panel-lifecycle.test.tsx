@@ -173,7 +173,7 @@ describe("InboxPanel lifecycle", () => {
     const items = [inboxItem({ id: 1, title: "Old news", status: "responded" })];
     const harness = createHarness(items);
     const view = await mount(harness.adapter);
-    await clickText("history");
+    await clickText("History");
     expect(view.textContent).toContain("Old news");
 
     items.push(inboxItem({ id: 2, title: "Brand new" }));
@@ -208,7 +208,7 @@ describe("InboxPanel lifecycle", () => {
     // Open a pending item, then switch tabs while its read receipt is
     // still in flight.
     await click('button[aria-label="Open inbox item Still pending"]');
-    await clickText("history");
+    await clickText("History");
     expect(view.textContent).toContain("Old news");
 
     await act(async () => {
@@ -284,7 +284,7 @@ describe("InboxPanel lifecycle", () => {
     expect(view.textContent).toContain("Live");
     expect(view.textContent).not.toContain("Gone");
 
-    await clickText("history");
+    await clickText("History");
 
     expect(harness.listInputs[1]?.status).toEqual([
       "acknowledged",

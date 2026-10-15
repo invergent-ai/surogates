@@ -9,9 +9,14 @@
 // the panel so the target row is visible.
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronRightIcon } from "lucide-react";
 
-import { cn } from "../../lib/utils";
+import {
+  Collapsible,
+  CollapsibleContent,
+} from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+
 import type { AgentChatResearchSource } from "../../types";
 
 export function ResearchSourcesPanel({
@@ -46,52 +51,47 @@ export function ResearchSourcesPanel({
   if (sources.length === 0) return null;
 
   return (
-    <div
+    <Collapsible
       ref={rootRef}
-      className="rounded-md border border-line bg-card"
+      open={expanded}
+      onOpenChange={setExpanded}
+      className="rounded-[10px] border border-foreground/[0.08] bg-card"
     >
-      <button
-        type="button"
-        onClick={() => setExpanded((prev) => !prev)}
-        aria-expanded={expanded}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left hover:bg-muted/40"
-      >
-        <ChevronRightIcon
-          className={cn(
-            "size-3 shrink-0 text-muted-foreground transition-transform duration-150",
-            expanded && "rotate-90",
-          )}
-        />
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-          Sources · {sources.length}
-        </span>
-      </button>
-      {expanded && (
-        <ul className="max-h-35 overflow-y-auto border-t border-line py-1">
+      <CollapsibleHeader variant="section">
+        Sources · {sources.length}
+      </CollapsibleHeader>
+      <CollapsibleContent>
+        <ul className="max-h-35 overflow-y-auto border-t border-foreground/[0.08] p-1">
           {sources.map((s) => (
             <li key={s.sourceId}>
-              <a
-                id={`source-${s.sourceId}`}
-                href={s.url}
-                target="_blank"
-                rel="noreferrer"
-                className="group flex items-baseline gap-2 px-2 py-1 hover:bg-muted/60"
+              <ListRow
+                asChild
+                size="sm"
+                label={s.title || s.url}
+                // Capped: an unparseable URL comes back whole and would
+                // otherwise squeeze the title out of the row.
+                meta={
+                  <span className="block max-w-40 truncate">
+                    {hostname(s.url)}
+                  </span>
+                }
               >
-                <span className="shrink-0 text-[10px] font-semibold text-primary tabular-nums">
-                  {s.sourceId}
-                </span>
-                <span className="truncate text-xs text-foreground group-hover:underline">
-                  {s.title || s.url}
-                </span>
-                <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground max-w-[40%]">
-                  {hostname(s.url)}
-                </span>
-              </a>
+                <a
+                  id={`source-${s.sourceId}`}
+                  href={s.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <span className="shrink-0 text-[12px] font-medium text-amber-500 tabular-nums">
+                    {s.sourceId}
+                  </span>
+                </a>
+              </ListRow>
             </li>
           ))}
         </ul>
-      )}
-    </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

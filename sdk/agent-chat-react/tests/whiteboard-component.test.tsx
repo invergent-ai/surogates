@@ -160,8 +160,9 @@ describe("AgentWhiteboard", () => {
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
-    expect(byLabel(el, "Pen")?.getAttribute("aria-pressed")).toBe("true");
-    expect(byLabel(el, "Pan")?.getAttribute("aria-pressed")).toBe("false");
+    // The tools are one single-choice group: each item is a radio.
+    expect(byLabel(el, "Pen")?.getAttribute("aria-checked")).toBe("true");
+    expect(byLabel(el, "Pan")?.getAttribute("aria-checked")).toBe("false");
   });
 
   it("switches the active tool on click", async () => {
@@ -172,8 +173,8 @@ describe("AgentWhiteboard", () => {
     await act(async () => {
       byLabel(el, "Pan")?.click();
     });
-    expect(byLabel(el, "Pan")?.getAttribute("aria-pressed")).toBe("true");
-    expect(byLabel(el, "Pen")?.getAttribute("aria-pressed")).toBe("false");
+    expect(byLabel(el, "Pan")?.getAttribute("aria-checked")).toBe("true");
+    expect(byLabel(el, "Pen")?.getAttribute("aria-checked")).toBe("false");
   });
 
   it("offers the four actions and Work it out", async () => {

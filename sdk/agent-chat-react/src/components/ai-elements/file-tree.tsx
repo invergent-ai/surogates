@@ -3,6 +3,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@invergent/ui-sdk/collapsible";
+import { listRowVariants } from "@invergent/ui-sdk/list-row";
 import { cn } from "../../lib/utils";
 import {
   ChevronRightIcon,
@@ -147,12 +148,10 @@ export function FileTreeFolder({
   return (
     <Collapsible onOpenChange={handleOpenChange} open={isExpanded}>
       <div className={cn("", className)} role="treeitem" tabIndex={0} {...props}>
-        <div
-          className={cn(
-            "flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-accent",
-            isSelected && "bg-accent",
-          )}
-        >
+        {/* The kit's small list row, as a div: it holds two targets (the
+            chevron that folds, the name that selects), and a ListRow is one
+            button. */}
+        <div className={listRowVariants({ size: "sm", active: isSelected })}>
           <CollapsibleTrigger asChild>
             <button
               className="flex shrink-0 cursor-pointer items-center border-none bg-transparent p-0"
@@ -224,9 +223,12 @@ export function FileTreeFile({
 
   return (
     <div
+      // The kit's small list row, kept a div: the caller lays out the content
+      // (name, size, row actions) itself, which ListRow's label, meta and
+      // trailing slots would rearrange.
       className={cn(
-        "group flex h-9 cursor-pointer items-center gap-2 rounded-lg px-2 transition-colors hover:bg-accent",
-        isSelected && "bg-accent",
+        listRowVariants({ size: "sm", active: isSelected }),
+        "group cursor-pointer",
         className,
       )}
       onClick={handleClick}

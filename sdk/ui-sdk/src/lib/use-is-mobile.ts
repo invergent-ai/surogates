@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * The `md` breakpoint, matching the Tailwind default the rest of the SDK's
+ * The `md` breakpoint, matching the Tailwind default the components'
  * responsive classes use. Anything that needs to *render* differently on a
  * phone (rather than just restyle) reads this; a media query alone cannot
  * swap a popover for a sheet, because they are different components.
@@ -30,7 +30,7 @@ export function useIsMobile(): boolean {
   return useSyncExternalStore(
     subscribe,
     () => window.matchMedia(MOBILE_QUERY).matches,
-    // No viewport when server-rendered; assume desktop, as the SDK does.
+    // No viewport when server-rendered; assume desktop, as the components do.
     () => false,
   );
 }

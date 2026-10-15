@@ -4,9 +4,9 @@
 // Generic collapsible tool call renderer — used for tools without
 // a dedicated renderer.
 
-import { useState } from "react";
-import { ChevronRightIcon, CheckCircle2Icon, Loader2Icon, XCircleIcon } from "lucide-react";
-import { cn } from "../../../lib/utils";
+import { CheckCircle2Icon, Loader2Icon, XCircleIcon } from "lucide-react";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { formatArgs, truncate, effectiveStatus } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 
@@ -48,50 +48,36 @@ function StatusIcon({ tc }: { tc: ToolCallInfo }) {
 }
 
 export function DefaultToolBlock({ tc }: { tc: ToolCallInfo }) {
-  const [expanded, setExpanded] = useState(false);
   const summary = toolSummary(tc);
 
   return (
-    <div className="rounded-lg border border-border/60 bg-muted/20 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className={cn(
-          "flex w-full items-center gap-2 px-3 py-2",
-          "text-sm hover:bg-muted/40 transition-colors cursor-pointer",
-        )}
-      >
-        <StatusIcon tc={tc} />
-        <span className="font-medium text-foreground">{toolLabel(tc.toolName)}</span>
-        {summary && (
-          <span className="text-muted-foreground/70 truncate text-xs flex-1 text-left">
-            {summary}
-          </span>
-        )}
-        <ChevronRightIcon
-          className={cn(
-            "size-3.5 shrink-0 text-muted-foreground/50 transition-transform duration-150 ml-auto",
-            expanded && "rotate-90",
+    <Collapsible className="overflow-hidden rounded-[10px] border border-foreground/[0.08]">
+      <CollapsibleHeader variant="section">
+        <span className="flex min-w-0 items-center gap-2">
+          <StatusIcon tc={tc} />
+          <span className="shrink-0">{toolLabel(tc.toolName)}</span>
+          {summary && (
+            <span className="min-w-0 truncate text-xs font-normal text-muted-foreground/70">
+              {summary}
+            </span>
           )}
-        />
-      </button>
+        </span>
+      </CollapsibleHeader>
 
-      {expanded && (
-        <div className="border-t border-border/40 px-3 py-2 space-y-2">
-          <pre className="overflow-x-auto rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground font-mono whitespace-pre-wrap break-all">
-            {formatArgs(tc.args)}
+      <CollapsibleContent className="space-y-2 border-t border-foreground/[0.08] px-3 py-2">
+        <pre className="overflow-x-auto rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground font-mono whitespace-pre-wrap break-all">
+          {formatArgs(tc.args)}
+        </pre>
+        {tc.result && (
+          <pre className="overflow-x-auto rounded-md bg-muted/50 px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
+            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+              Result
+            </span>
+            {"\n"}
+            <span className="text-muted-foreground">{truncate(tc.result, 2000)}</span>
           </pre>
-          {tc.result && (
-            <pre className="overflow-x-auto rounded-md bg-muted/50 px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
-              <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                Result
-              </span>
-              {"\n"}
-              <span className="text-muted-foreground">{truncate(tc.result, 2000)}</span>
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

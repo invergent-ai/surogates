@@ -5,7 +5,9 @@
 // Completed / In-flight counts computed from the mission tasks
 // grouped by agentDefName; spawn_worker / delegate_task children
 // (no Task rows) show session status + latest event only.
-import { Badge } from "@invergent/ui-sdk/badge";
+import { Chip, TonePill } from "@invergent/ui-sdk/chip";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@invergent/ui-sdk/tooltip";
 
 import type {
@@ -18,6 +20,7 @@ import {
   formatMissionTimestamp,
   missionWorkerTaskCounts,
 } from "./mission-derive";
+import { missionTaskStatusTone } from "./mission-tasks-tab";
 
 
 export interface MissionWorkersTabProps {
@@ -30,17 +33,6 @@ export interface MissionWorkersTabProps {
 // Order of mention matches the durability gradient: ``task`` is
 // durable + retried, ``worker`` durable + one-shot, ``delegation``
 // ephemeral.
-const MISSION_WORKER_KIND_BADGE_CLASS: Record<
-  AgentChatMissionWorker["kind"],
-  string
-> = {
-  task: "border-primary/40 bg-primary/10 text-primary uppercase tracking-wide text-[10px]",
-  worker:
-    "border-foreground/30 bg-foreground/5 text-foreground/80 uppercase tracking-wide text-[10px]",
-  delegation:
-    "border-foreground/20 bg-foreground/[0.03] text-foreground/60 uppercase tracking-wide text-[10px]",
-};
-
 const MISSION_WORKER_KIND_TOOLTIP: Record<
   AgentChatMissionWorker["kind"],
   string
@@ -60,9 +52,10 @@ export function MissionWorkersTab({
 }: MissionWorkersTabProps) {
   if (workers.length === 0) {
     return (
-      <div className="py-8 text-center text-sm text-muted-foreground/60">
-        No workers attached to this mission right now.
-      </div>
+      <EmptyState
+        className="py-8"
+        title="No workers attached to this mission right now"
+      />
     );
   }
   return (
@@ -107,22 +100,21 @@ function WorkerCard({
             {worker.agentDefName ?? "worker"}
           </div>
           <Tooltip>
+            {/* Chip, not TonePill: the trigger hands its props and ref to
+                the child, and only Chip passes them through. */}
             <TooltipTrigger asChild>
-              <Badge
-                variant="outline"
-                className={`mt-1 ${MISSION_WORKER_KIND_BADGE_CLASS[worker.kind]}`}
-              >
+              <Chip size="sm" className="mt-1 capitalize">
                 {worker.kind}
-              </Badge>
+              </Chip>
             </TooltipTrigger>
             <TooltipContent className="max-w-xs">
               {MISSION_WORKER_KIND_TOOLTIP[worker.kind]}
             </TooltipContent>
           </Tooltip>
         </div>
-        <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
+        <TonePill tone={missionTaskStatusTone(statusLabel)} className="capitalize">
           {statusLabel}
-        </span>
+        </TonePill>
       </div>
 
       {counts ? (
@@ -162,15 +154,15 @@ function WorkerCard({
         <div className="truncate text-xs text-foreground/80">
           {deriveMissionWorkerActivityLabel(worker)}
         </div>
-        <a
+        <TextLink
+          size="sm"
           href={worker.transcriptUrl}
           target="_blank"
           rel="noreferrer"
           onClick={onTranscriptClick}
-          className="inline-block text-xs text-primary hover:underline"
         >
           View session
-        </a>
+        </TextLink>
       </div>
     </div>
   );

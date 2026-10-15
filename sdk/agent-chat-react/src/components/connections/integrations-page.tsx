@@ -1,11 +1,12 @@
-import {
-  ArrowLeftIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  Loader2Icon,
-} from "lucide-react";
+import { ArrowLeftIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@invergent/ui-sdk/button";
+import { TagPill } from "@invergent/ui-sdk/chip";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
+import { Input } from "@invergent/ui-sdk/input";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { openOAuthPopup } from "../../lib/oauth-popup";
 import type { AgentChatAdapter } from "../../types";
 
@@ -152,26 +153,23 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6">
-      <button
-        type="button"
-        onClick={onBack}
-        className="-mx-2 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-lg px-2 text-sm text-muted-foreground pointer-fine:mx-0 pointer-fine:min-h-0 pointer-fine:px-0 pointer-fine:hover:text-foreground"
-      >
-        <ArrowLeftIcon className="h-4 w-4" />
-        Back
-      </button>
+      <TextLink asChild variant="muted">
+        <button type="button" onClick={onBack}>
+          <ArrowLeftIcon className="size-4" />
+          Back
+        </button>
+      </TextLink>
       <div>
         <h1 className="text-2xl font-bold text-foreground">Integrations</h1>
         <p className="text-sm text-muted-foreground">
           Connect third-party services to enhance your agent's capabilities
         </p>
       </div>
-      <input
+      <Input
         type="search"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search integrations..."
-        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
       />
       {error && (
         <div role="alert" className="text-xs text-red-500">
@@ -180,9 +178,7 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
       )}
       {grouped.map(([category, items]) => (
         <section key={category} className="flex flex-col gap-2">
-          <h2 className="text-base font-semibold uppercase tracking-wide text-muted-foreground/70">
-            {category}
-          </h2>
+          <SectionLabel label={category} role="heading" aria-level={2} className="pl-0" />
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {items.map((r) => (
               <ToolkitRow
@@ -215,47 +211,47 @@ function ToolkitRow({
   const [broken, setBroken] = useState(false);
   const name = row.name ?? titleCase(row.toolkit);
   return (
-    <div className="rounded-lg border border-border p-3">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
+    // A boxed disclosure: the header names the toolkit and opens its
+    // description; Connect sits beside it, outside the trigger, since a
+    // button cannot hold another.
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className="rounded-[10px] border border-foreground/[0.08]"
+    >
+      <div className="flex items-center gap-2 pr-3">
+        <CollapsibleHeader
+          variant="section"
           aria-label={open ? "Collapse" : "Expand"}
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="min-w-0 flex-1"
         >
-          {open ? (
-            <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-          ) : (
-            <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-          )}
-          {broken || !row.logo ? (
-            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-muted text-sm font-semibold uppercase">
-              {name.charAt(0)}
-            </span>
-          ) : (
-            <img
-              src={row.logo}
-              alt={name}
-              className="h-5 w-5 rounded object-contain"
-              onError={() => setBroken(true)}
-            />
-          )}
-          <span className="truncate font-medium text-foreground">
-            {name}
+          <span className="flex min-w-0 items-center gap-2">
+            {broken || !row.logo ? (
+              <span className="inline-flex size-5 shrink-0 items-center justify-center rounded bg-muted text-sm font-semibold uppercase">
+                {name.charAt(0)}
+              </span>
+            ) : (
+              <img
+                src={row.logo}
+                alt={name}
+                className="size-5 shrink-0 rounded object-contain"
+                onError={() => setBroken(true)}
+              />
+            )}
+            <span className="truncate">{name}</span>
           </span>
-        </button>
+        </CollapsibleHeader>
         <Button
           type="button"
           variant="outline"
           size="xs"
           disabled={busy}
           onClick={row.connected ? onDisconnect : onConnect}
-          className="ml-auto min-w-[6rem]"
+          className="min-w-[6rem]"
         >
           {busy ? (
             <>
-              <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+              <Loader2Icon className="size-3.5 animate-spin" />
               {row.connected ? "Disconnecting" : "Connecting"}
             </>
           ) : row.connected ? (
@@ -265,14 +261,13 @@ function ToolkitRow({
           )}
         </Button>
       </div>
-      {open && (
-        <div className="mt-2 pl-7 text-sm text-muted-foreground">
-          {row.description && <p>{row.description}</p>}
-          <span className="mt-1 inline-block rounded bg-primary/10 px-1.5 py-0.5 text-sm font-semibold text-primary">
-            {row.auth_mode === "api_key" ? "API Key" : "OAuth"}
-          </span>
-        </div>
-      )}
-    </div>
+      <CollapsibleContent className="border-t border-foreground/[0.08] px-3 py-2.5 text-[13px] text-muted-foreground">
+        {row.description && <p>{row.description}</p>}
+        <TagPill
+          label={row.auth_mode === "api_key" ? "API key" : "OAuth"}
+          className="mt-1.5"
+        />
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

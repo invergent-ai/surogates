@@ -157,9 +157,10 @@ describe("composer session context", () => {
     const percent = panel.querySelector("p")!;
     expect(percent.textContent).toBe("93.8%");
     expect(percent.className).toContain("text-destructive");
-    expect(panel.querySelector("[data-slot='progress']")?.className).toContain(
-      "[&>[data-slot=progress-indicator]]:bg-destructive",
+    const fill = panel.querySelector<HTMLElement>(
+      "[data-slot='progress-bar'] > div",
     );
+    expect(fill?.style.backgroundColor).toBe("var(--destructive)");
   });
 
   it("keeps the readout unalarmed below that", async () => {

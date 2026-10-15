@@ -7,7 +7,7 @@ import {
 } from "react"
 import { Slot } from "radix-ui"
 
-import { cn } from "../../lib/utils"
+import { cn } from "./lib/utils"
 
 // Types
 type TimelineContextValue = {
