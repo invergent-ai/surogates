@@ -5,6 +5,7 @@ import {
   classifyViewResult,
   formatPackageSpec,
   planPackagePublish,
+  pinWorkspaceDependencies,
   preparePackageManifest,
   resolveReleaseVersion,
 } from "./publish-sdk-packages.mjs";
@@ -132,4 +133,34 @@ test("package manifest is prepared with release version before publish", async (
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("workspace ranges are pinned to the version released with them", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "publish-sdk-packages-"));
+  const manifestPath = join(dir, "package.json");
+  try {
+    await writeFile(manifestPath, "{}");
+    const prepared = await preparePackageManifest({
+      dir,
+      manifest: {
+        name: "@invergent/agent-chat-react",
+        version: "1.4.0",
+        dependencies: { "@invergent/ui-sdk": "workspace:*", react: "^19.0.0" },
+      },
+      releaseVersion: "1.4.0",
+    });
+
+    assert.deepEqual(prepared.dependencies, { "@invergent/ui-sdk": "1.4.0", react: "^19.0.0" });
+    assert.equal(
+      JSON.parse(await readFile(manifestPath, "utf8")).dependencies["@invergent/ui-sdk"],
+      "1.4.0",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a manifest with no workspace ranges is left alone", () => {
+  const manifest = { name: "@invergent/website-widget", dependencies: { react: "^19.0.0" } };
+  assert.equal(pinWorkspaceDependencies(manifest, "1.4.0"), manifest);
 });

@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { XIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
-import { Input } from "../../ui/input";
+import { Input } from "@invergent/ui-sdk/input";
 import { MessageResponse } from "../../ai-elements/message";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
 import { parseArgs } from "./shared";

@@ -10,7 +10,7 @@ import { useTheme } from "next-themes";
 import { SunIcon, MoonIcon, Loader2Icon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { authFetch } from "@/api/auth";
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { errorDetailMessage } from "@/api/_errors";
 import {
   InputOTP,

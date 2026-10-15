@@ -9,7 +9,7 @@ import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "../../ui/tooltip";
+} from "@invergent/ui-sdk/tooltip";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";
 

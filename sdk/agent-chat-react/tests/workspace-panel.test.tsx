@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspacePanel } from "../src/components/workspace/workspace-panel";
 import { forgetChatFiles } from "../src/components/workspace/chat-files";
 import { forgetChatFiles as forgetOnSignOut } from "../src";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import type { AgentChatAdapter } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =

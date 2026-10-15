@@ -1,6 +1,6 @@
 import * as sessionsApi from "@/api/sessions";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@invergent/ui-sdk/alert";
+import { Button } from "@invergent/ui-sdk/button";
 import { ShieldCheckIcon } from "lucide-react";
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -79,13 +79,15 @@ export function TransparencyBanner({
 
   return (
     // h-fit keeps the card at its content height inside the scrolling
-    // phone overlay rather than stretching to fill it.
+    // phone overlay rather than stretching to fill it. min-w-0 on the title
+    // and description: the alert's `1fr` grid track otherwise lets long copy
+    // widen the column past the card instead of wrapping.
     <Alert className="h-fit w-full max-w-2xl border-primary/30 bg-primary/5 shadow-lg">
       <ShieldCheckIcon className="text-primary" />
-      <AlertTitle className="text-base font-semibold">
+      <AlertTitle className="min-w-0 text-base font-semibold">
         AI System Disclosure
       </AlertTitle>
-      <AlertDescription className="mt-2 space-y-3">
+      <AlertDescription className="mt-2 min-w-0 space-y-3">
         <p>{texts.body}</p>
         <p className="text-xs text-muted-foreground">{texts.legal}</p>
         <div className="flex flex-wrap items-center gap-2 pt-1">

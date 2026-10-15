@@ -34,8 +34,8 @@ import {
   type ChannelIdentity,
 } from "@/api/auth";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Button } from "@invergent/ui-sdk/button";
+import { Input } from "@invergent/ui-sdk/input";
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import {
@@ -43,12 +43,12 @@ import {
   TabsList,
   TabsTrigger,
   TabsContent,
-} from "@/components/ui/tabs";
+} from "@invergent/ui-sdk/tabs";
 import {
   Field,
   FieldGroup,
   FieldLabel,
-} from "@/components/ui/field";
+} from "@invergent/ui-sdk/field";
 import {
   Table,
   TableHeader,
@@ -56,9 +56,9 @@ import {
   TableHead,
   TableRow,
   TableCell,
-} from "@/components/ui/table";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Badge } from "@/components/ui/badge";
+} from "@invergent/ui-sdk/table";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
+import { Badge } from "@invergent/ui-sdk/badge";
 
 const PLATFORM_LABELS: Record<string, string> = {
   slack: "Slack",

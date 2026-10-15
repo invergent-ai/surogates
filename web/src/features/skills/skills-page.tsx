@@ -29,23 +29,23 @@ import {
 } from "@/api/skills";
 import { useAppStore } from "@/stores/app-store";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@invergent/ui-sdk/button";
+import { Input } from "@invergent/ui-sdk/input";
+import { Textarea } from "@invergent/ui-sdk/textarea";
+import { Badge } from "@invergent/ui-sdk/badge";
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
-} from "@/components/ui/input-group";
+} from "@invergent/ui-sdk/input-group";
 import {
   Tabs,
   TabsList,
   TabsTrigger,
-} from "@/components/ui/tabs";
+} from "@invergent/ui-sdk/tabs";
 import {
   Dialog,
   DialogContent,
@@ -53,12 +53,12 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@invergent/ui-sdk/dialog";
 import {
   Field,
   FieldGroup,
   FieldLabel,
-} from "@/components/ui/field";
+} from "@invergent/ui-sdk/field";
 
 const SOURCE_LABELS: Record<SkillSource, string> = {
   platform: "Platform",

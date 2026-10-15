@@ -8,8 +8,8 @@ import {
 } from "lucide-react";
 import { formatFileSize, getLanguageHint } from "../../lib/format";
 import { cn } from "../../lib/utils";
-import { ScrollArea } from "../ui/scroll-area";
-import { Skeleton } from "../ui/skeleton";
+import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
+import { Skeleton } from "@invergent/ui-sdk/skeleton";
 import type { AgentChatWorkspaceFile } from "../../types";
 
 const SKELETON_WIDTHS = [70, 85, 55, 90, 60, 78, 45, 82, 65, 72];

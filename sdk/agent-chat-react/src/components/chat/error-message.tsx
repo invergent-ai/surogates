@@ -17,7 +17,7 @@ import {
   CreditCard,
   RefreshCw,
 } from "lucide-react";
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { cn } from "../../lib/utils";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import type { ErrorInfo } from "../../types";

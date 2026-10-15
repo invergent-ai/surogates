@@ -15,9 +15,9 @@ import {
   listSignIns,
   revokeDevice,
 } from "@/api/devices";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Badge } from "@invergent/ui-sdk/badge";
+import { Button } from "@invergent/ui-sdk/button";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import { getDesktop } from "@/lib/desktop-bridge";
 import { deviceHistory, deviceState } from "@/lib/devices";
 

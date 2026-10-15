@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentChatAdapterProvider, NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { ChatThread } from "../src/components/chat/chat-thread";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import { applyAgentChatEvent, createInitialAgentChatState } from "../src/runtime/reducer";
 import type { AgentChatAdapter, AgentChatRuntimeEvent, AgentChatState, AgentChatThreadRow } from "../src/types";
 

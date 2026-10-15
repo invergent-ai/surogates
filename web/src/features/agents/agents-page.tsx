@@ -36,9 +36,9 @@ import {
 } from "@/api/agents";
 import { useAppStore } from "@/stores/app-store";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Badge } from "@invergent/ui-sdk/badge";
+import { Button } from "@invergent/ui-sdk/button";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import {
   Dialog,
   DialogContent,
@@ -46,19 +46,19 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@invergent/ui-sdk/dialog";
 import {
   Field,
   FieldGroup,
   FieldLabel,
-} from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+} from "@invergent/ui-sdk/field";
+import { Input } from "@invergent/ui-sdk/input";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
-} from "@/components/ui/input-group";
-import { Textarea } from "@/components/ui/textarea";
+} from "@invergent/ui-sdk/input-group";
+import { Textarea } from "@invergent/ui-sdk/textarea";
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 

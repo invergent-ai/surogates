@@ -10,9 +10,9 @@
 import { BrandBeam } from "@invergent/agent-chat-react";
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "@/api/auth";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert, AlertDescription } from "@invergent/ui-sdk/alert";
+import { Button } from "@invergent/ui-sdk/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@invergent/ui-sdk/card";
 import { approxMessagesLabel } from "@/lib/usage-units";
 
 interface CommerceOffer {

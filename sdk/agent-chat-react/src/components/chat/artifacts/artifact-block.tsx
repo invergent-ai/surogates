@@ -17,14 +17,14 @@ import {
   ArtifactTitle,
 } from "../../ai-elements/artifact";
 import { Shimmer } from "../../ai-elements/shimmer";
-import { BrandBeam } from "../../ui/brand-beam";
+import { BrandBeam } from "@invergent/ui-sdk/brand-beam";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "../../ui/dialog";
+} from "@invergent/ui-sdk/dialog";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
 import type { ArtifactKind, ArtifactPayload } from "../../../types";
 import { ArtifactMarkdown } from "./artifact-markdown";
@@ -225,7 +225,7 @@ export function ArtifactBlock({
       <Dialog open={expanded} onOpenChange={setExpanded}>
         <DialogContent className="flex h-[95vh] w-[95vw] max-w-[95vw] flex-col gap-4 overflow-hidden p-6 sm:max-w-[95vw]">
           <DialogHeader>
-            <DialogTitle className="truncate pr-10">{name}</DialogTitle>
+            <DialogTitle className="truncate">{name}</DialogTitle>
             <DialogDescription>{description}</DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col overflow-auto">

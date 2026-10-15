@@ -10,11 +10,11 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "./dialog"
+} from "@invergent/ui-sdk/dialog"
 import {
   InputGroup,
   InputGroupAddon,
-} from "./input-group"
+} from "@invergent/ui-sdk/input-group"
 import { SearchIcon, CheckIcon } from "lucide-react"
 
 function Command({

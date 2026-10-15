@@ -15,7 +15,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import type { ComponentProps, ReactNode } from "react";
 import { useIsMobile } from "../../lib/use-is-mobile";
 import { cn } from "../../lib/utils";
-import { Popover, PopoverContent, PopoverTrigger } from "./popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@invergent/ui-sdk/popover";
 
 export interface ResponsivePanelProps {
   open: boolean;

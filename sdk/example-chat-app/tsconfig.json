@@ -17,7 +17,8 @@
     "jsx": "react-jsx",
     "types": ["node", "vitest/globals"],
     "paths": {
-      "@invergent/agent-chat-react": ["../agent-chat-react/src/index.ts"]
+      "@invergent/agent-chat-react": ["../agent-chat-react/src/index.ts"],
+      "@invergent/ui-sdk/*": ["../ui-sdk/src/*"]
     }
   },
   "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"]

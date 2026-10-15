@@ -13,7 +13,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-} from "../ui/dropdown-menu";
+} from "@invergent/ui-sdk/dropdown-menu";
 import {
   HoverCard,
   HoverCardContent,
@@ -24,20 +24,20 @@ import {
   InputGroupAddon,
   InputGroupButton,
   InputGroupTextarea,
-} from "../ui/input-group";
+} from "@invergent/ui-sdk/input-group";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "../ui/select";
-import { Spinner } from "../ui/spinner";
+} from "@invergent/ui-sdk/select";
+import { Spinner } from "@invergent/ui-sdk/spinner";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "../ui/tooltip";
+} from "@invergent/ui-sdk/tooltip";
 import { cn } from "../../lib/utils";
 import type { ChatStatus, FileUIPart, SourceDocumentUIPart } from "ai";
 
@@ -66,7 +66,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { nanoid } from "nanoid";
-import { BrandBeam } from "../ui/brand-beam";
+import { BrandBeam } from "@invergent/ui-sdk/brand-beam";
 import type {
   ChangeEvent,
   ChangeEventHandler,

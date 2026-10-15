@@ -11,8 +11,8 @@ import { toast } from "sonner";
 
 import { changePassword, fetchAuthConfig } from "@/api/auth";
 import { sendFirebasePasswordReset } from "@/features/auth";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Button } from "@invergent/ui-sdk/button";
+import { Input } from "@invergent/ui-sdk/input";
 
 const MIN_PASSWORD_LENGTH = 8;
 

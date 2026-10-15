@@ -56,6 +56,11 @@ before(async () => {
     logLevel: "error",
     appType: "custom",
     server: { middlewareMode: true, hmr: false, ws: false },
+    // The shared UI from its source, as the web's own config has it, and one React for both.
+    resolve: {
+      alias: { "@invergent/ui-sdk": new URL("../sdk/ui-sdk/src", import.meta.url).pathname },
+      dedupe: ["react", "react-dom"],
+    },
     ssr: { noExternal: ["@tanstack/react-router", "@invergent/agent-chat-react"] },
     oxc: { jsx: { runtime: "automatic" } },
     plugins: [{

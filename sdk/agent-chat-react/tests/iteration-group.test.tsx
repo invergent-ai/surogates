@@ -18,7 +18,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { IterationGroup } from "../src/components/chat/chat-thread";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import type { ChatMessage } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =

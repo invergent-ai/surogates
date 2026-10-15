@@ -5,8 +5,8 @@
 // Completed / In-flight counts computed from the mission tasks
 // grouped by agentDefName; spawn_worker / delegate_task children
 // (no Task rows) show session status + latest event only.
-import { Badge } from "../ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { Badge } from "@invergent/ui-sdk/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@invergent/ui-sdk/tooltip";
 
 import type {
   AgentChatMissionTask,

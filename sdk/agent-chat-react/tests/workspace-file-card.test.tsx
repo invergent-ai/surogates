@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentChatAdapterProvider, NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { WorkspaceFileCard } from "../src/components/chat/workspace-file-card";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import type { AgentChatAdapter } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =

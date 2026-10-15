@@ -12,18 +12,18 @@ import type {
   AgentChatRuntimeApi,
   AgentChatViewMode,
 } from "../../types";
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { ButtonGroup } from "../ui/button-group";
-import { Checkbox } from "../ui/checkbox";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
+import { Checkbox } from "@invergent/ui-sdk/checkbox";
+import { Input } from "@invergent/ui-sdk/input";
+import { Label } from "@invergent/ui-sdk/label";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "../ui/tooltip";
-import { Spinner } from "../ui/spinner";
+} from "@invergent/ui-sdk/tooltip";
+import { Spinner } from "@invergent/ui-sdk/spinner";
 import {
   type AtlasExtras,
   type Rect,

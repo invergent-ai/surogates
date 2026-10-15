@@ -23,6 +23,7 @@
     "paths": {
       "@/*": ["./src/*"],
       "@invergent/agent-chat-react": ["../sdk/agent-chat-react/src/index.ts"],
+      "@invergent/ui-sdk/*": ["../sdk/ui-sdk/src/*"],
       "react": ["./node_modules/@types/react"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
       "react-dom": ["./node_modules/@types/react-dom"]

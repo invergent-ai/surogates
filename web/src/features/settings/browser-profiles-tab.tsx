@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Globe, Play, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@invergent/ui-sdk/button";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import {
   type BrowserProfile,
   createBrowserProfile,

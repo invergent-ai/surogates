@@ -2,13 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { BrowserShell } from "@invergent/agent-chat-react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@invergent/ui-sdk/dialog";
 import { captureProfile, createSetupSession } from "@/api/browser-profiles";
 import { surogatesWebChatAdapter } from "@/features/chat/surogates-web-chat-adapter";
 

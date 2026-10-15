@@ -10,6 +10,7 @@ export default defineConfig({
       "@invergent/agent-chat-react": fileURLToPath(
         new URL("../agent-chat-react/src/index.ts", import.meta.url),
       ),
+      "@invergent/ui-sdk": fileURLToPath(new URL("../ui-sdk/src", import.meta.url)),
     },
   },
   server: {

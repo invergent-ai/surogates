@@ -1,33 +1,26 @@
 /* The desktop's own pages: the main window's sidebar, the centre's header and pages,
-   and the Overview pane, and Settings. One set of tokens, each with its light and dark
-   value; data-theme picks one, and before the page's script sets it, prefers-color-scheme
-   does, which the main process sets from the user's choice. */
+   and the Overview pane, and Settings. Their colours are Surogate's shared tokens
+   (tokens.css, from @invergent/ui-sdk), so the shell and the web client inside it share
+   one palette; the roles below name them as the shell uses them. The tokens follow
+   prefers-color-scheme until the page's script sets data-theme, which the main process
+   sets from the user's choice. */
+@import "tokens.css";
+
 :root {
-  color-scheme: light dark;
-  --sidebar: light-dark(#f5f4ed, #111111);
-  --centre: light-dark(#faf9f5, #151515);
-  --panel: light-dark(#f5f4ed, #1a1a19);
-  --row: light-dark(#f0eee6, #262625);
-  --raised: light-dark(#ffffff, #1f1f1e);
-  --fg: light-dark(#141413, #faf9f5);
-  --fg-2: light-dark(#3d3d3a, #c2c0b6);
-  --dim: light-dark(#73726c, #9c9a92);
-  --border: light-dark(rgb(31 30 29 / 0.15), rgb(222 220 209 / 0.12));
-  --hover: light-dark(rgb(31 30 29 / 0.06), rgb(222 220 209 / 0.07));
-  --danger: light-dark(#b53333, #dd5353);
-  --accent: #f59e0b;
-  --accent-fg: #0b0e14;
+  --centre: var(--background);
+  --panel: var(--card);
+  --row: var(--accent);
+  --raised: var(--popover);
+  --fg: var(--foreground);
+  /* Claude's secondary text, between the foreground and the muted tone. */
+  --fg-2: light-dark(#52514e, #c3c2b7);
+  --dim: var(--muted-foreground);
+  --hover: var(--muted);
+  --danger: var(--destructive);
+  --accent-fg: var(--primary-foreground);
   --top: 36px;
   --sidebar-width: clamp(240px, 19vw, 370px);
   --panel-width: clamp(300px, 32vw, 640px);
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
 }
 
 * {
@@ -114,7 +107,7 @@ p {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-amber);
   outline-offset: 1px;
 }
 
@@ -217,7 +210,7 @@ body.main.first {
   padding: 10px;
   border-radius: 12px;
   background: var(--row);
-  color: var(--accent);
+  color: var(--accent-amber);
 }
 
 .connect {
@@ -443,7 +436,7 @@ body.main.first {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent-amber);
   box-shadow: 0 0 0 2px var(--under, var(--sidebar));
 }
 
@@ -478,7 +471,7 @@ body.main.first {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: var(--accent-amber);
   font: inherit;
   text-decoration: underline;
   cursor: pointer;
@@ -599,7 +592,7 @@ body.main.first {
 
 .project-icon {
   display: inline-flex;
-  color: var(--accent);
+  color: var(--accent-amber);
 }
 
 /* A thread open in the centre: its project, as the way back. */
@@ -646,7 +639,7 @@ body.main.first {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent-amber);
 }
 
 .hole {
@@ -903,7 +896,7 @@ body.main.first {
 }
 
 .thread[data-group="waiting"] .state {
-  color: var(--accent);
+  color: var(--accent-amber);
 }
 
 /* A thread's mark: amber waiting on you, blue working, grey idle, green resolved. */
@@ -918,7 +911,7 @@ body.main.first {
 }
 
 .thread[data-group="waiting"] .mark {
-  background: var(--accent);
+  background: var(--accent-amber);
 }
 
 .thread[data-group="working"] .mark {
@@ -1460,16 +1453,16 @@ body.prompt-page {
 .settings-content .special {
   padding: 0 3px;
   border-radius: 4px;
-  background: var(--accent);
+  background: var(--accent-amber);
   color: var(--accent-fg);
   font: 11px/1.4 ui-monospace, "Noto Sans Mono", monospace;
 }
 
 .prompt .note {
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-amber) 40%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
   font-size: 12.5px;
 }
 
@@ -1676,7 +1669,7 @@ body.quick-page {
 
 .history .failure {
   margin: 4px 12px;
-  color: var(--accent);
+  color: var(--accent-amber);
   font-size: 13px;
 }
 

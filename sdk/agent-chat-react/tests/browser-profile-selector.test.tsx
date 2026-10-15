@@ -7,7 +7,7 @@ import {
   NO_BROWSER_ADAPTER,
 } from "../src/adapter-context";
 import { ChatComposer } from "../src/components/chat/chat-composer";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import type { AgentChatAdapter } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =

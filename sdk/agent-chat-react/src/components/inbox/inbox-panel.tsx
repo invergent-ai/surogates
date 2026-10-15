@@ -31,8 +31,8 @@ import {
   parseInboxQuestions,
 } from "./inbox-answers";
 import { useAnswerWindow } from "./inbox-expiry";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
+import { Badge } from "@invergent/ui-sdk/badge";
+import { Button } from "@invergent/ui-sdk/button";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,

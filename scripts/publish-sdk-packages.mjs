@@ -73,14 +73,45 @@ export function planPackagePublish({ dir, manifest, viewResult, releaseVersion }
   };
 }
 
+// ``npm publish`` ships ``workspace:`` ranges verbatim, and no registry can
+// resolve one: a sibling SDK package is pinned to the version released with
+// it, since the SDK packages release in lockstep.
+const DEPENDENCY_FIELDS = [
+  "dependencies",
+  "peerDependencies",
+  "optionalDependencies",
+  "devDependencies",
+];
+
+export function pinWorkspaceDependencies(manifest, version) {
+  let changed = false;
+  const pinned = { ...manifest };
+  for (const field of DEPENDENCY_FIELDS) {
+    const deps = manifest[field];
+    if (!deps) continue;
+    pinned[field] = Object.fromEntries(
+      Object.entries(deps).map(([name, range]) => {
+        if (typeof range === "string" && range.startsWith("workspace:")) {
+          changed = true;
+          return [name, version];
+        }
+        return [name, range];
+      }),
+    );
+  }
+  return changed ? pinned : manifest;
+}
+
 export function preparePackageManifest({ dir, manifest, releaseVersion }) {
-  if (!releaseVersion || releaseVersion === manifest.version) {
+  const version = releaseVersion ?? manifest.version;
+  const pinned = pinWorkspaceDependencies(manifest, version);
+  if (version === manifest.version && pinned === manifest) {
     return manifest;
   }
 
   const preparedManifest = {
-    ...manifest,
-    version: releaseVersion,
+    ...pinned,
+    version,
   };
   writeFileSync(
     join(dir, "package.json"),

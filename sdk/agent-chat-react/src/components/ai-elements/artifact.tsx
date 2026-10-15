@@ -1,12 +1,12 @@
 "use client";
 
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "../ui/tooltip";
+} from "@invergent/ui-sdk/tooltip";
 import { cn } from "../../lib/utils";
 import type { LucideIcon } from "lucide-react";
 import { XIcon } from "lucide-react";

@@ -6,7 +6,7 @@
 // Settings → Browser where it has none. The window on that computer is the live view.
 import { useEffect, useRef, useSyncExternalStore } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   type BrowserAction,
   computerBrowser,

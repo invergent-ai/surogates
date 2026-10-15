@@ -22,15 +22,15 @@ import {
 
 import { MessageResponse } from "../ai-elements/message";
 import { renderInlineMarkdown } from "../chat/inline-markdown";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
+import { Badge } from "@invergent/ui-sdk/badge";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   Card,
   CardAction,
   CardContent,
   CardHeader,
   CardTitle,
-} from "../ui/card";
+} from "@invergent/ui-sdk/card";
 
 import type {
   AgentChatMissionEvent,
@@ -523,7 +523,8 @@ function deriveTaskOutcome({
 function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
   // The base Card ships without a radius; the outcome callout is a
   // freestanding tinted block, so it gets rounded corners and a small
-  // horizontal inset from the pane edges (mirrors the design mock).
+  // horizontal inset from the pane edges (mirrors the design mock). The
+  // card's own py-4 pads it, so title and content drop their default py.
   return (
     <Card
       data-testid="task-outcome"
@@ -532,7 +533,7 @@ function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
     >
       <CardHeader>
         <CardTitle
-          className={`flex items-center gap-1.5 font-mono text-[11px] font-semibold tracking-widest ${outcome.labelTone}`}
+          className={`flex items-center gap-1.5 py-0 font-mono text-[11px] font-semibold tracking-widest ${outcome.labelTone}`}
         >
           {outcome.icon}
           {outcome.label}
@@ -543,7 +544,7 @@ function OutcomeCard({ outcome }: { outcome: TaskOutcome }) {
           </CardAction>
         ) : null}
       </CardHeader>
-      <CardContent>
+      <CardContent className="py-0">
         {outcome.markdown ? (
           <MessageResponse className="font-mono text-xs leading-relaxed text-foreground/90">
             {outcome.markdown}

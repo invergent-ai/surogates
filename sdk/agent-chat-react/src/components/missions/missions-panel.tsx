@@ -26,7 +26,7 @@ import {
   Play,
   TargetIcon,
 } from "lucide-react";
-import { Badge } from "../ui/badge";
+import { Badge } from "@invergent/ui-sdk/badge";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
