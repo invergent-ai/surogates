@@ -616,12 +616,6 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
     if not changes:
         return "Nothing to update."
 
-    before = {
-        r.protocol: r.status for r in await followup_store.enrollments(
-            sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=await ctx.person_user_id(sf),
-            protocol=protocol,
-        )
-    }
     try:
         row = await followup_store.update_enrollment(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=await ctx.person_user_id(sf),
@@ -648,7 +642,7 @@ async def handle_followup_update(arguments: dict, **kwargs: Any) -> str:
         result += f", preferred channel {row.preferred_channel}"
     result += "."
     # Already so (a stop the platform honoured first): the team was told.
-    if status in ("paused", "ended") and before.get(protocol) != status:
+    if status in ("paused", "ended") and row.previous_status != status:
         journey = await followup_store.journey_names(
             sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[protocol],
         )

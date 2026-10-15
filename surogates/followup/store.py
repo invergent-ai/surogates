@@ -332,7 +332,8 @@ async def update_enrollment(
 
     ``None`` is a real value here (clear the phase, forget the start date),
     which is why "not passed" has its own sentinel.  Returns ``None`` when
-    the person is not enrolled in that protocol.
+    the person is not enrolled in that protocol; the row returned carries
+    ``previous_status``, so a caller tells a real transition from a no-op.
     """
     if status is not _UNSET and status not in ENROLLMENT_STATUSES:
         raise ValueError(f"status must be one of {', '.join(ENROLLMENT_STATUSES)}")
@@ -363,6 +364,7 @@ async def update_enrollment(
             row.answered_by = (answered_by or "").strip() or None
         if phase is not _UNSET:
             row.phase = phase or None
+        previous_status = row.status
         if status is not _UNSET:
             row.status = status
             if status == "active" and status_reason is _UNSET:
@@ -372,6 +374,7 @@ async def update_enrollment(
         row.updated_at = _utcnow()
         await db.commit()
         await db.refresh(row)
+        row.previous_status = previous_status
         return row
 
 

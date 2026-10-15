@@ -1231,28 +1231,28 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             return refused
     status = arguments.get("status")
     reason = str(arguments.get("reason") or "").strip()
-    if status is not None:
-        if status not in followup_store.ENROLLMENT_STATUSES:
-            return (
-                "Nothing changed: status must be one of "
-                f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
-            )
-        # Checked before asking for a reason: a team member asked why they
-        # want to pause someone whose follow-up is over was left with a
-        # question about nothing, and a pause still pending in later turns.
-        if row.status == status or (row.status == "ended" and status in ("paused", "active")):
-            verb = "pause" if status == "paused" else "change"
-            if not changes:
-                return (
-                    f"Nothing changed: {person.label}'s {row.protocol} is already {row.status}, "
-                    f"so there is nothing to {verb}. Tell the team member so in one sentence; "
-                    "do not ask for a reason, nothing is waiting for their confirmation."
-                    + (" To follow them again, enrol them again." if row.status == "ended" else "")
-                )
-            # The details asked for alongside still change.
-            described.append(f"status stays {row.status} (nothing to {verb})")
-            status = None
-    if status is not None:
+    if status is not None and status not in followup_store.ENROLLMENT_STATUSES:
+        return (
+            "Nothing changed: status must be one of "
+            f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
+        )
+    # Checked before asking for a reason: a team member asked why they want
+    # to pause someone whose follow-up is over was left with a question about
+    # nothing, and a pause still pending in later turns.
+    moot = status is not None and (
+        row.status == status or (row.status == "ended" and status in ("paused", "active"))
+    )
+    verb = "pause" if status == "paused" else "change"
+    if moot and not changes:
+        return (
+            f"Nothing changed: {person.label}'s {row.protocol} is already {row.status}, "
+            f"so there is nothing to {verb}. Tell the team member so in one sentence; "
+            "do not ask for a reason, nothing is waiting for their confirmation."
+            + (" To follow them again, enrol them again." if row.status == "ended" else "")
+        )
+    if moot:
+        described.append(f"status stays {row.status} (nothing to {verb})")
+    elif status is not None:
         if status in ("paused", "ended") and not reason:
             return "Nothing changed: ask the team member why before pausing or ending."
         refused = _not_allowed(settings, ctx, "pause_resume_end")
@@ -1290,7 +1290,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if updated.start_date:
         result += f", start {start_text(updated)}"
     result += "."
-    if status in ("paused", "ended"):
+    if status in ("paused", "ended") and updated.previous_status != status:
         label = followup_store.person_label(person.display_name, updated, settings)
         notice = followup_store.wording(
             settings, f"notice_{status}_by", member=_member(ctx), reason=reason,
