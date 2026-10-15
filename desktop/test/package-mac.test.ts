@@ -108,7 +108,7 @@ describe.skipIf(process.platform === "darwin")("scripts/package-mac.sh, elsewher
   it("has sign-mac.sh sign on a Mac alone, and say its usage to a verb, a signer or a Team ID it does not take", () => {
     const signing = (...args: string[]) => spawnSync("bash", [join(DESKTOP, "scripts", "sign-mac.sh"), ...args], { encoding: "utf8" });
     expect(signing("sign", join(dir, "Surogate.app"), "-")).toMatchObject({ status: 1, stderr: "sign-mac.sh: it signs on a Mac, with Apple's own tools\n" });
-    for (const args of [[], ["seal", dir], ["sign", dir], ["verify", dir, "someone"], ["verify", dir, "adhoc", "more"], ["verify", dir, "trial"], ["verify", dir, "developer-id", "abcde12345"], ["dmg-check", "x.dmg", dir, "developer-id"], ["notarize"], ["forget"]]) {
+    for (const args of [[], ["seal", dir], ["sign", dir], ["verify", dir, "someone"], ["verify", dir, "adhoc", "more"], ["verify", dir, "trial"], ["verify", dir, "developer-id", "abcde12345"], ["dmg-check", "x.dmg", dir, "developer-id"], ["notarize"], ["forget"], ["staged", dir]]) {
       expect(signing(...args), args.join(" ")).toMatchObject({ status: 2, stderr: expect.stringMatching(/^usage: sign-mac\.sh /) });
     }
   });

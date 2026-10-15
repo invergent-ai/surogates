@@ -35,9 +35,13 @@
 #                                              API key in APPLE_NOTARY_KEY_P8 (base64), APPLE_NOTARY_KEY_ID and
 #                                              APPLE_NOTARY_ISSUER_ID
 #   sign-mac.sh assess <app> <dmg>             Gatekeeper's own assessment of both, as a Mac that downloaded them makes it
+#   sign-mac.sh staged <app> <version>         <app> as its updater takes an update of <version>: copied to the name an
+#                                              update is staged under, .Surogate-<version>.staging, beside an app of an
+#                                              older version; assessed there by Gatekeeper; and taken there by <app>'s own
+#                                              surogate-helper verify for that app's update
 #
-# notarize and assess are the release's alone (release.yml's desktop-mac-sign, with the Developer ID): Apple notarizes
-# no other signature, and Gatekeeper accepts none. Nothing here runs npm or node.
+# notarize, assess and staged are the release's alone (release.yml's desktop-mac-sign, with the Developer ID): Apple
+# notarizes no other signature, Gatekeeper accepts none, and surogate-helper verify takes no update but its own team's. Nothing here runs npm or node.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -162,7 +166,7 @@ requirement() {
 VERB="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$VERB" in
-  trial | import | pack | assess) [ "$#" -eq 2 ] || usage ;;
+  trial | import | pack | assess | staged) [ "$#" -eq 2 ] || usage ;;
   forget | notarize) [ "$#" -eq 1 ] || usage ;;
   sign) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage ;;
   dmg) [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || usage ;;
@@ -393,5 +397,24 @@ case "$VERB" in
       xcrun stapler validate "$file" >/dev/null || fail "$file has no notarization ticket stapled to it"
     done
     echo "assessed $1 and $2: notarized Developer ID software"
+    ;;
+  staged)
+    app="$1"
+    version="$2"
+    [ "$(basename "$app")" = Surogate.app ] && [ -d "$app" ] || fail "an update is Surogate.app, which $app is not"
+    [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] && [ "$version" != 0.0.0 ] || fail "$version is no release's version"
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    # The app it updates, as surogate-helper reads one: the version its Info.plist names, 0.0.0, before every release's.
+    mkdir -p "$work/Surogate.app/Contents"
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>CFBundleIdentifier</key>\n\t<string>%s</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>0.0.0</string>\n</dict>\n</plist>\n' "$IDENTIFIER" >"$work/Surogate.app/Contents/Info.plist"
+    # The update under the name the updater stages it under beside the app, which Launch Services takes for no app.
+    staging="$work/.Surogate-$version.staging"
+    ditto "$app" "$staging"
+    said="$(spctl --assess --type execute --verbose=4 "$staging" 2>&1)" || fail "Gatekeeper refuses the staged update: $said"
+    grep -qx 'source=Notarized Developer ID' <<<"$said" || fail "Gatekeeper takes the staged update for other than notarized Developer ID software: $said"
+    said="$("$app/Contents/MacOS/surogate-helper" verify --staged "$staging" --app "$work/Surogate.app" --version "$version" 2>&1)" \
+      || fail "the app's surogate-helper takes the staged copy for no update of Surogate to $version: $said"
+    echo "checked $app staged as an update to $version: Gatekeeper's, and its own surogate-helper's"
     ;;
 esac

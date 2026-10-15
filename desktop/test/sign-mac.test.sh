@@ -203,6 +203,10 @@ grep -q "beside the volume's own: " <<<"$said" && ok "says what of the volume's 
 
 refuses "notarizes nothing without the notary service's key" "APPLE_NOTARY_KEY_P8" env -u APPLE_NOTARY_KEY_P8 "$SIGN" notarize "$signed"
 refuses "takes no bundle but a notarized one for Gatekeeper's" "Gatekeeper" "$SIGN" assess "$signed" "$work/Surogate.dmg"
+refuses "stages no bundle but a notarized one as its updater's update" "Gatekeeper" "$SIGN" staged "$signed" 1.2.3
+for version in 1.2 0.0.0 01.2.3; do
+  refuses "stages an update of no version but a release's: $version" "is no release's version" "$SIGN" staged "$signed" "$version"
+done
 refuses "imports no identity without the certificate" "MACOS_SIGNING_CERTIFICATE_P12" env -u MACOS_SIGNING_CERTIFICATE_P12 "$SIGN" import "$work/developer-id.keychain-db" ABCDE12345
 refuses "imports for no Team ID but one of ten capitals and digits" "is no Team ID" "$SIGN" import "$work/developer-id.keychain-db" abcde
 # A certificate that is a code signing identity, but no Developer ID: refused, as no valid identity of Apple's issuing.
