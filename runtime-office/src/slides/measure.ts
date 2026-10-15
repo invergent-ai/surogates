@@ -203,9 +203,10 @@ async function drawShot(page: Page, n: number, kind: Shot, shape: { x: number; y
 // The page a slide is measured in. No script of the content runs and nothing it names is fetched (its CSP; the
 // context also aborts every request); an x-embed's own content is hidden here and runs on a page of its own. Text is
 // laid out as the editor lays it out: no kerning, no ligatures, precise advances, 1.2 lines as single spacing. Tags
-// start with Claude Slides' defaults (format.md): a section or div with no display is a column; h1–h3 and p sizes,
-// weights and line heights; cell padding 0.35em 0.6em. A connector given points is placed by them, not laid out, and
-// its border only says how its line is drawn.
+// start with Claude Slides' defaults (format.md): a section or div with no display is a column, and one whose style
+// sets display takes CSS's own direction (display:flex is a row); h1–h3 and p sizes, weights and line heights; cell
+// padding 0.35em 0.6em. A connector given points is placed by them, not laid out, and its border only says how its line
+// is drawn.
 function documentOf(html: string, canvas: Canvas): string {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:">
@@ -216,6 +217,7 @@ section { position: relative; overflow: hidden; display: flex; flex-direction: c
   height: ${canvas.height}px !important; font-family: Arial; font-size: 32px; line-height: 1.4; color: #000000; }
 section[hidden] { display: flex !important; }
 div { display: flex; flex-direction: column; }
+:is(section, div):is([style*="display:"], [style*="display :"]) { flex-direction: row; }
 h1 { font-size: 96px; font-weight: 600; line-height: 1.1; } h2 { font-size: 64px; font-weight: 600; line-height: 1.15; }
 h3 { font-size: 44px; font-weight: 600; line-height: 1.2; } p { font-size: 32px; font-weight: 400; line-height: 1.4; }
 td, th { padding: 0.35em 0.6em; } table { border-collapse: collapse; }

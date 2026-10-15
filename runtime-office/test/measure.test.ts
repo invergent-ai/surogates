@@ -71,6 +71,15 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes.map((s: Any) => s.fill?.color.hex ?? s.text?.paras[0].runs[0].text)).toEqual(["#14285a", "Over the band", "#c81e1e"]);
   });
 
+  // Claude Slides' format: a section or div with no display is a column; display:flex takes CSS's own default, a row.
+  it("lays a display:flex section or div out as a row, and a div with no display as a column", async () => {
+    const two = `<div style="width:200px;height:100px;background:#c81e1e"></div><div style="width:200px;height:100px;background:#14285A"></div>`;
+    const at = (spec: Any) => spec.shapes.map((s: Any) => [s.x / E, s.y / E]);
+    expect(at(await measure(`<section style="background:#ffffff;padding:128px"><div style="display:flex;gap:20px">${two}</div></section>`))).toEqual([[128, 128], [348, 128]]);
+    expect(at(await measure(`<section style="background:#ffffff;padding:128px;display:flex;gap:20px">${two}</section>`))).toEqual([[128, 128], [348, 128]]);
+    expect(at(await measure(`<section style="background:#ffffff;padding:128px"><div style="gap:20px">${two}</div></section>`))).toEqual([[128, 128], [128, 248]]);
+  });
+
   it("reads a list and a div of paragraphs as one text box each", async () => {
     const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
       <ul style="font-size:32px"><li>North grew fastest</li><li>East held</li></ul>
