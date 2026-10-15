@@ -577,6 +577,8 @@ async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session
     await _send(sf, _Store(), _Delivery())
     [reminder] = await _alerts(sf, "reminder")
     assert open_.hex in reminder.dedupe_key
+    # Out of the reminder's batch for good.
+    assert all(r.reminded_at is not None for r in await _alerts(sf, "agent"))
 
 
 @pytest.mark.asyncio

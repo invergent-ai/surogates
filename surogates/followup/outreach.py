@@ -763,6 +763,17 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
     handled = await _handled_escalations(session_factory, groups)
 
     reminded = 0
+    # Marked, not just passed over: left unmarked they would keep filling the
+    # batch, and a newer unread alert behind them would never be reached.
+    taken = [r.id for key, members in groups.items() if key.rsplit(":", 1)[1] in handled for r, _ in members]
+    if taken:
+        async with session_factory() as db:
+            await db.execute(
+                sa.update(OutreachMessageRow)
+                .where(OutreachMessageRow.id.in_(taken))
+                .values(reminded_at=now)
+            )
+            await db.commit()
     for escalation, members in groups.items():
         if escalation.rsplit(":", 1)[1] in handled:
             continue
