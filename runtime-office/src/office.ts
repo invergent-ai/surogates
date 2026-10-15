@@ -1,4 +1,4 @@
-import type { EditorPage, UndoState } from "./connector.js";
+import { withTimeout, type EditorPage, type UndoState } from "./connector.js";
 import { Stalled, type EditContext, type Format, type Outcome, type Scope } from "./formats/format.js";
 import { formatsFor } from "./formats/index.js";
 import { PageGone, type PagePool, type OpenRequest } from "./pages.js";
@@ -30,6 +30,9 @@ const stalled = (reply: Reply): boolean => (reply.value as { __timeout?: true } 
 
 export class Office {
   private readonly formats: Record<string, Format>;
+  // Each page's calls, one after another: between a failed command and its Undo nothing else may run, and in a PDF
+  // even a read is an undo point.
+  private readonly queues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly pool: PagePool, formats?: Record<string, Format>) {
     this.formats = formats ?? formatsFor(pool);
@@ -39,22 +42,26 @@ export class Office {
     return this.pool.open(request);
   }
 
-  async read(id: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const page = await this.pool.get(id);
-    const scope = this.formatOf(page).readScope(body);
-    return (await this.readOnly(id, () => this.context(page, "the editor could not run the request").run(scope))) as Record<string, unknown>;
+  read(id: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.serial(id, async () => {
+      const page = await this.pool.get(id);
+      const scope = this.formatOf(page).readScope(body);
+      return (await this.readOnly(id, () => this.context(page, "the editor could not run the request").run(scope))) as Record<string, unknown>;
+    });
   }
 
   /** Applies the batch, all of it or none; then waits until the editor has sent it to the document server. */
-  async edit(id: string, raw: unknown): Promise<Record<string, unknown>> {
-    const page = await this.pool.get(id);
-    const format = this.formatOf(page);
-    const context = this.context(page, "the editor could not run the edit; nothing of it applied");
-    const ops = await this.readOnly(id, () => format.compile(raw, context));
-    const work = () => format.edit(context, ops);
-    const { outcome, sentAt } = format.grouped ? await this.inGroup(id, page, work) : await this.undoing(id, page, work);
-    if ("refused" in outcome) return { applied: false, refused: outcome.refused };
-    return { applied: true, results: outcome.results, flushed: await this.flushed(page, sentAt) };
+  edit(id: string, raw: unknown): Promise<Record<string, unknown>> {
+    return this.serial(id, async () => {
+      const page = await this.pool.get(id);
+      const format = this.formatOf(page);
+      const context = this.context(page, "the editor could not run the edit; nothing of it applied");
+      const ops = await this.readOnly(id, () => format.compile(raw, context));
+      const work = () => format.edit(context, ops);
+      const { outcome, sentAt } = format.grouped ? await this.inGroup(id, page, work) : await this.undoing(id, page, work);
+      if ("refused" in outcome) return { applied: false, refused: outcome.refused };
+      return { applied: true, results: outcome.results, flushed: await this.flushed(page, sentAt) };
+    });
   }
 
   /** Whether everything the agent's editor changed has reached the document server. */
@@ -79,6 +86,16 @@ export class Office {
       reply = await page.command(script, scope);
     }
     return reply;
+  }
+
+  private serial<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.queues.get(id) ?? Promise.resolve()).then(work);
+    const settled = run.catch(() => undefined);
+    this.queues.set(id, settled);
+    void settled.then(() => {
+      if (this.queues.get(id) === settled) this.queues.delete(id);
+    });
+    return run;
   }
 
   private formatOf(page: EditorPage): Format {
@@ -164,9 +181,10 @@ export class Office {
   private async undo(page: EditorPage): Promise<boolean> {
     const before = await waitUndoState(page, (state) => state.ready);
     if (!before || stalled(await page.method("Undo", []))) return false;
-    const after = await page.undoState();
+    const after = await undoStateWithin(page, UNDO_WAIT_MS);
     if (!after) return false;
-    if (after.index < before.index) return true;
+    // A save under way clears the history and declines the Undo: the index drops then too, with the points gone.
+    if (after.index < before.index && after.points === before.points) return true;
     return after.queued && (await waitUndoState(page, (state) => !state.queued && !state.locked)) !== null;
   }
 
@@ -187,10 +205,15 @@ export class Office {
   }
 }
 
+// A frame that does not answer counts as a state not known.
+function undoStateWithin(page: EditorPage, ms: number): Promise<UndoState | null> {
+  return withTimeout(page.undoState(), ms, "the editor's frame did not answer").catch(() => null);
+}
+
 async function waitUndoState(page: EditorPage, until: (state: UndoState) => boolean): Promise<UndoState | null> {
   const end = Date.now() + UNDO_WAIT_MS;
   for (;;) {
-    const state = await page.undoState();
+    const state = await undoStateWithin(page, Math.max(end - Date.now(), UNDO_POLL_MS));
     if (state && until(state)) return state;
     if (Date.now() >= end) return null;
     await new Promise((resolve) => setTimeout(resolve, UNDO_POLL_MS));

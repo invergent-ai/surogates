@@ -16,8 +16,9 @@ export interface EditorPageOptions {
 
 type Reply = { sentAt: number; value: unknown };
 
-/** Whether an Undo sent now would run, and what shows that it did: the history's index drops, or the Undo is queued. */
-export type UndoState = { ready: boolean; locked: boolean; index: number; queued: boolean };
+/** Whether an Undo sent now would run, and what shows that it did: the history's index drops with its points kept (a
+ * save clears them), or the Undo is queued. */
+export type UndoState = { ready: boolean; locked: boolean; index: number; points: number; queued: boolean };
 
 // For a moment after a PDF editor opens, the document server answers its fetch of the PDF 400 and serves it on the
 // next try. Opening again meets the same moment, so the fetch itself is tried again.
@@ -127,12 +128,15 @@ export class EditorPage {
     if (!frame) return null;
     return frame.evaluate(() => {
       type Editor = { canSave?: boolean; forceSaveUndoRequest?: boolean };
-      type Common = { CollaborativeEditing?: { Get_GlobalLock(): boolean; CanUndo(): boolean }; History?: { Index: number; Can_Undo(): boolean } };
+      type Common = { CollaborativeEditing?: { Get_GlobalLock(): boolean; CanUndo(): boolean }; History?: { Index: number; Points: unknown[]; Can_Undo(): boolean } };
       const w = window as unknown as { editor?: Editor; Asc?: { editor?: Editor }; AscCommon?: Common };
       const editor = w.editor ?? w.Asc?.editor, co = w.AscCommon?.CollaborativeEditing, history = w.AscCommon?.History;
       if (!editor || !co || !history) return null;
       const locked = co.Get_GlobalLock();
-      return { ready: !locked && (history.Can_Undo() || (co.CanUndo() && editor.canSave === true)), locked, index: history.Index, queued: editor.forceSaveUndoRequest === true };
+      return {
+        ready: !locked && (history.Can_Undo() || (co.CanUndo() && editor.canSave === true)), locked,
+        index: history.Index, points: history.Points.length, queued: editor.forceSaveUndoRequest === true,
+      };
     }).catch(() => null);
   }
 
@@ -188,7 +192,7 @@ export class EditorPage {
   }
 }
 
-function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+export function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     work,
