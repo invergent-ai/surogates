@@ -208,6 +208,8 @@ export function inspect(args: InspectArgs): Inspected {
             if (own.includes(name) && CHOICES[name] && !CHOICES[name].includes(value)) fail(`${describe(el)}: ${name} is one of ${CHOICES[name].join(", ")}.`);
             if (/^data-build-(in|out)$/.test(name) && !BUILDS.test(value)) fail(`${describe(el)}: ${name} is "fade|rise|drop|left|right|scale|pop [order N] [auto]".`);
             if (/^data-build-(in|out)$/.test(name) && !pinned(el)) fail(`${describe(el)}: builds go on pinned elements (position:absolute).`);
+            // A transition is a slide's: the editor plays it as the slide is entered.
+            if (name === "data-transition" && tag !== "SECTION") fail(`${describe(el)}: data-transition belongs on the <section> of the slide it leads into.`);
             if (tag === "IMG" && name === "data-crop" && !(/^\d+(\.\d+)?(\s+-?\d+(\.\d+)?%){0,2}$/.test(value) && parseFloat(value) >= 1)) fail(`${describe(el)}: data-crop is "ZOOM X% Y%", ZOOM at least 1.`);
             if (["style", "id", "class", "data-build-in", "data-build-out"].includes(name) || own.includes(name) || name.startsWith("data-")) continue;
             fail(`${describe(el)} has the attribute ${name}, which the slide format does not take there.`);
