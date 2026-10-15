@@ -71,6 +71,7 @@ import { newerData } from "./state-schema.js";
 import { appTools, appVm, BWRAP } from "./tools.js";
 import { asShown } from "./text.js";
 import { keepChecked, updateLine, Updates, type UpdatesOptions } from "./updates.js";
+import { type QuitQuestion, removeAction, startDuringApply, updateAction as handOffUpdate } from "./handoff.js";
 import { ownPage, sameOrigin, webClientPath } from "./window-policy.js";
 import { type Bounds, WindowStates } from "./window-state.js";
 
@@ -384,45 +385,71 @@ function startUpdates(): void {
   powerMonitor.on("resume", keepChecked(updates, stopDelivery.signal, report));
 }
 
-// The update line's button: the update downloaded installed by the root helper, then the app restarted
-// into it; or, installed already, the restart alone. Only while the line shows a button.
-async function updateAction(): Promise<void> {
-  if (!updates || !updateLine(updates.state)?.button) return;
-  // On a Mac whose app's folder this user may not change: the release's disk image, which an administrator installs.
-  if (updates.state.state === "administrator") return void shell.openExternal(updates.state.download);
-  // Where the downloaded files were no longer the app's own, the release is looked for again: one
-  // that cannot be found is said in the log, as a check's is.
-  await updates.install().catch(report);
-  if (updates.state.state === "installed") restart();
-  // Approved on Windows: the app quits for the MSI, and the helper starts it again once it has run. Checked on macOS:
-  // the app quits for its helper to swap the bundle, which opens the app again.
-  if (updates.state.state === "restarting") app.quit();
+// The quit's own question where threads work on this computer, asked before a helper that goes on once the app has
+// quit is started (handoff.ts): the threads' wait is the quit's own, which Quit now and the threads' end both end.
+const quitQuestion: QuitQuestion = {
+  working: () => device?.stack?.working() ?? 0,
+  ask: (working) => confirmQuit(working),
+  threadsDone: () => new Promise<void>((resume) => {
+    waiting = resume;
+    changed();
+  }).finally(() => {
+    waiting = null;
+    changed();
+  }),
+};
+
+// The quit once its question was settled before a helper was handed the rest: it asks nothing more.
+function quitHandedOff(): void {
+  handedOff = true;
+  app.quit();
 }
 
-// Remove Surogate from This Computer, or from This Mac, where the installed app can remove itself: confirmed first, with
-// whether to delete this user's own data asked beside it; the login item turned off; then the helper. On Windows, the
-// MSI's uninstall, for every user, through UAC, which removes the data after it where asked. On macOS, once the app has
-// quit, its key in the user's Keychain, the data and caches where asked, and the app itself to the Trash where this user
-// may change its folder. Once the helper goes on, the app quits, which stops its hosts and its VM, as the helper waits
-// for it. It never touches a chat's folder, nor another user's data: what it deletes is this user's own.
+// What a start that found an update being put in place says as it quits (handoff.ts): its words in a notification,
+// which outlives the app, a moment before the quit; and the single-instance lock left at once to the app the helper
+// opens once it is done.
+function tellInstalling(message: string, detail: string): void {
+  app.releaseSingleInstanceLock();
+  if (Notification.isSupported()) new Notification({ title: message, body: detail }).show();
+}
+
+// The update line's button (handoff.ts): the update downloaded installed by its OS's helper, after the quit's question
+// where the helper goes on once the app has quit; or, installed already, the restart alone. Only while the line shows a
+// button.
+async function updateAction(): Promise<void> {
+  if (!updates) return;
+  await handOffUpdate(updates, INSTALLER, { question: quitQuestion, quit: quitHandedOff, restart, open: (url) => void shell.openExternal(url), report });
+}
+
+// Remove Surogate from This Computer, or from This Mac, where the installed app can remove itself (handoff.ts):
+// confirmed first, with whether to delete this user's own data asked beside it; the quit's question, where threads
+// work; the login item turned off; then the helper. On Windows, the MSI's uninstall, for every user, through UAC, which
+// removes the data after it where asked. On macOS, once the app has quit, its key in the user's Keychain, the data and
+// caches where asked, and the app itself to the Trash where this user may change its folder. Once the helper goes on,
+// the app quits, which stops its hosts and its VM, as the helper waits for it. It never touches a chat's folder, nor
+// another user's data: what it deletes is this user's own.
 async function uninstall(): Promise<void> {
-  const removal = INSTALLER.uninstall;
-  if (!removal || !app.isPackaged) return;
-  const asked = removal.asked();
-  const { response, checkboxChecked: forget } = await messageBoxResult({
-    type: "warning", message: asked.message, detail: asked.detail, checkboxLabel: asked.checkbox, checkboxChecked: false,
-    buttons: ["Remove", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
-  });
-  if (response !== 0) return;
-  await Promise.resolve(loginItem.set(false, loginCommand())).catch(report);
-  const { code, said, restarts } = await removal.run(forget ? removal.forget(places) : []);
-  if (code === 0 && restarts) return void app.quit();
-  if (said) report(new Error(`Surogate was not removed${code === null ? "" : ` (exit ${code})`}: ${said}`));
-  const dismissed = code === 1223;
-  await messageBox({
-    type: dismissed ? "info" : "error", message: dismissed ? "An administrator needs to remove Surogate." : "Surogate could not be removed.",
-    detail: dismissed ? "Nothing was changed. Choose Remove Surogate from This Computer again to ask for an administrator." : said || "Nothing was changed.",
-    buttons: ["OK"], noLink: true,
+  if (!app.isPackaged) return;
+  await removeAction(INSTALLER.uninstall, places, {
+    question: quitQuestion,
+    confirm: async (asked) => {
+      const { response, checkboxChecked } = await messageBoxResult({
+        type: "warning", message: asked.message, detail: asked.detail, checkboxLabel: asked.checkbox, checkboxChecked: false,
+        buttons: ["Remove", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
+      });
+      return { remove: response === 0, forget: checkboxChecked };
+    },
+    loginOff: () => Promise.resolve(loginItem.set(false, loginCommand())).catch(report),
+    quit: quitHandedOff,
+    failed: async ({ code, said }) => {
+      if (said) report(new Error(`Surogate was not removed${code === null ? "" : ` (exit ${code})`}: ${said}`));
+      const dismissed = code === 1223;
+      await messageBox({
+        type: dismissed ? "info" : "error", message: dismissed ? "An administrator needs to remove Surogate." : "Surogate could not be removed.",
+        detail: dismissed ? "Nothing was changed. Choose Remove Surogate from This Computer again to ask for an administrator." : said || "Nothing was changed.",
+        buttons: ["OK"], noLink: true,
+      });
+    },
   });
 }
 
@@ -2783,6 +2810,9 @@ let leaving = false;
 // A quit that restarts the app into its update once it is done: the installed app started again from
 // its launcher, never process.execPath, which is the old version's own folder.
 let restarting = false;
+// A quit whose question was asked, and answered to go, before a helper was handed the rest (handoff.ts): it asks it
+// no more.
+let handedOff = false;
 
 // A quit the user asked for stays a quit: once one is under way, an update that ends installed does
 // not turn it into a restart, nor ask "Quit now?" of a quit that waits. The update stays installed,
@@ -2810,7 +2840,7 @@ async function quitNow(): Promise<void> {
 
 async function quit(): Promise<void> {
   const working = device?.stack?.working() ?? 0;
-  if (working > 0) {
+  if (working > 0 && !handedOff) {
     const answer = await confirmQuit(working);
     if (answer === "cancel") {
       // The update stays installed: the line's Restart asks again.
@@ -2906,6 +2936,12 @@ if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
     });
   });
   void app.whenReady().then(() => {
+    // A start while its OS's helper puts an update in place (handoff.ts): it touches nothing of it, the update's folders
+    // and its result alike, says so, and quits at once, leaving the single-instance lock to the app the helper opens.
+    if (app.isPackaged && startDuringApply(INSTALLER, join(places.cache, "updates"), { tell: tellInstalling, quit: () => setTimeout(() => app.quit(), 500) })) {
+      stopped = true;
+      return;
+    }
     // An older app put over a newer one, on macOS and Windows: it reads none of the newer one's data, and says what to install.
     const refused = newerData(root, STATE_SCHEMA, VERSION);
     if (refused) {

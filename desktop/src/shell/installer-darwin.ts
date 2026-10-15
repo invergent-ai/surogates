@@ -230,9 +230,41 @@ export async function checkStaged(staged: string, app: string, release: { versio
   if (code !== 0) throw new Error(lastLine(said, `its helper's check of it ended ${code ?? "with no exit code"}`));
 }
 
+// The locks of flock(2)'s kind that macOS's open(2) takes as it opens a file (Apple, open(2): O_SHLOCK and O_EXLOCK, and
+// with O_NONBLOCK, EAGAIN where the file is locked), which Node names neither of and has no flock for. A lock is the
+// open file's, and lasts while any descriptor of it is open: the helper's descriptor 3 keeps the app's. Linux takes
+// none: there the start's check finds none.
+const LOCKS = forThisOs({ darwin: { shared: 0x10, exclusive: 0x20 } }) ?? { shared: 0, exclusive: 0 };
+
+/**
+ * Whether surogate-helper is applying an update downloaded into *cache*, the updates folder: a result file there that
+ * is locked, as the app locks the one it hands the helper's apply (started), for as long as the helper holds it. A
+ * start that finds one touches nothing of the update's, and leaves the helper to open the app (handoff.ts).
+ */
+export function applyingUnder(cache: string): boolean {
+  let names: string[];
+  try {
+    names = readdirSync(cache);
+  } catch {
+    return false; // no updates folder: nothing downloaded, nothing applied
+  }
+  for (const name of names) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(join(cache, name, RESULT), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | LOCKS.shared);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EAGAIN") return true;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  return false;
+}
+
 // *helper* started with *args* to go on once the app has quit, as its own process, which outlives the app: answered once
 // it says it waits, with restarts, as the app may then quit; or, where it ends first, as it ended. Where *result* names a
-// file, made afresh, the helper's descriptor 3 is that file, where it keeps how it ended for the app's next start.
+// file, made afresh and locked as it is made (applyingUnder), the helper's descriptor 3 is that file, where it keeps how
+// it ended for the app's next start.
 function started(helper: string, args: string[], env: NodeJS.ProcessEnv, result: string | null = null): Promise<Applied> {
   return new Promise((resolve) => {
     let kept: number | undefined;
@@ -240,7 +272,7 @@ function started(helper: string, args: string[], env: NodeJS.ProcessEnv, result:
     try {
       if (result !== null) {
         rmSync(result, { recursive: true, force: true });
-        kept = openSync(result, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+        kept = openSync(result, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | LOCKS.exclusive, 0o600);
       }
       child = spawnClean(helper, args, { stdio: ["ignore", "pipe", "pipe", ...(kept === undefined ? [] : [kept])], detached: true, env });
     } catch (error) {

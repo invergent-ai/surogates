@@ -36,12 +36,20 @@ export interface Installer {
   uninstall: Removal | null;
   /** What an installed app does once a start of it reaches its main window: on macOS, what an update left beside it goes. */
   reachedWindow(): Promise<void>;
+  /** Whether an update, and the removal, go on in a helper once the app has quit: Windows's and macOS's (handoff.ts). */
+  afterQuit: boolean;
+  /** Whether the helper is applying an update downloaded into *cache*, the updates folder, as a start finds it: macOS's. */
+  applying(cache: string): boolean;
 }
 
 const nothing = (): Promise<void> => Promise.resolve();
+const never = (): boolean => false;
 
 export const INSTALLER: Installer = forThisOs<Installer>({
-  linux: { record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun, uninstall: null, reachedWindow: nothing },
+  linux: {
+    record: () => linux.ROOT_RECORD, updates: linux.installedUpdates, helper: linux.helperRun, uninstall: null, reachedWindow: nothing, afterQuit: false,
+    applying: never,
+  },
   win32: {
     record: () => windows.machineRecord(), updates: windows.installedUpdates, helper: ([helper]) => windows.updateRun(helper!),
     uninstall: {
@@ -49,6 +57,8 @@ export const INSTALLER: Installer = forThisOs<Installer>({
       run: windows.removeRun(win32.join(dirname(process.execPath), "bin", "surogate-helper.exe")),
     },
     reachedWindow: nothing,
+    afterQuit: true,
+    applying: never,
   },
   darwin: {
     record: () => darwin.MACHINE_RECORD, updates: darwin.installedUpdates, helper: ([helper]) => darwin.updateRun(helper!, darwin.bundleOf() ?? ""),
@@ -57,8 +67,10 @@ export const INSTALLER: Installer = forThisOs<Installer>({
       run: (forget) => darwin.removeRun(HELPER, darwin.bundleOf())(forget),
     },
     reachedWindow: () => darwin.reachedWindow(darwin.bundleOf()),
+    afterQuit: true,
+    applying: darwin.applyingUnder,
   },
 }) ?? {
   record: () => notBuilt("Surogate Desktop's install"), updates: () => notBuilt("Surogate Desktop's updates"), helper: () => notBuilt("Surogate Desktop's updates"),
-  uninstall: null, reachedWindow: nothing,
+  uninstall: null, reachedWindow: nothing, afterQuit: false, applying: never,
 };

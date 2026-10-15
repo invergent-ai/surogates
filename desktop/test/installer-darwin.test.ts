@@ -5,9 +5,10 @@
 // helper, on any OS; on a Mac also with the helper built for it (native/helper/build.sh), on bundles of the test's own
 // signed ad hoc, which it takes by the test's requirement, the swap on the Mac's own disk.
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
-  chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, closeSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,8 +17,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  bundleOf, checkStaged, DISK_IMAGE, forgotten, heldAt, installedUpdates, MACHINE_RECORD, reachedWindow, removalAsked, removeRun, stage, stagingOf, treeRefusal,
-  updateRun,
+  applyingUnder, bundleOf, checkStaged, DISK_IMAGE, forgotten, heldAt, installedUpdates, MACHINE_RECORD, reachedWindow, removalAsked, removeRun, stage, stagingOf,
+  treeRefusal, updateRun,
 } from "../src/shell/installer-darwin.js";
 import { HELPER } from "../src/native-helper.js";
 import { importedOn } from "./platforms.js";
@@ -198,8 +199,9 @@ describe("a release staged beside the app", () => {
 });
 
 // A stand-in for surogate-helper, a script: it writes each run's arguments down, a line each, in <dir>/ran; its verify
-// ends as <dir>/verify holds, a code and words; its apply and remove say they wait, then keep <dir>/result on their
-// descriptor 3 where they have one, and end; and a run of <dir>/early's command says something else, and ends 2.
+// ends as <dir>/verify holds, a code and words; its apply and remove say they wait, then, once <dir>/hold is gone, keep
+// <dir>/result on their descriptor 3 where they have one, and end; and a run of <dir>/early's command says something
+// else, and ends 2.
 function standIn(): string {
   const script = join(dir, "surogate-helper");
   writeFileSync(script, [
@@ -208,6 +210,7 @@ function standIn(): string {
     `if [ -e ${dir}/early ] && [ "$1" = "$(cat ${dir}/early)" ]; then echo starting; echo "usage: surogate-helper $1 ..." >&2; exit 2; fi`,
     `if [ "$1" = verify ]; then read -r code words <${dir}/verify; [ -z "$words" ] || echo "$words" >&2; exit "$code"; fi`,
     "echo waiting",
+    `while [ -e ${dir}/hold ]; do sleep 0.1; done`,
     `if [ -e ${dir}/result ]; then cat ${dir}/result >&3; fi`,
     "",
   ].join("\n"));
@@ -277,6 +280,37 @@ describe("an update's install", () => {
     writeFileSync(join(dir, "early"), "apply");
     expect(await updateRun(helper, app, 4242)(downloaded())).toEqual({ code: 2, said: "usage: surogate-helper apply ..." });
     expect(await updateRun(join(dir, "missing"), app, 4242)(downloaded())).toMatchObject({ code: null });
+  });
+});
+
+describe("an apply under way, as a start finds it", () => {
+  it("is never found on Linux, which takes no lock, though the result file is there", () => {
+    mkdirSync(join(dir, "cache", "1.2.4"), { recursive: true });
+    writeFileSync(join(dir, "cache", "1.2.4", "result.json"), "");
+    expect(applyingUnder(join(dir, "cache"))).toBe(false);
+    expect(applyingUnder(join(dir, "none"))).toBe(false);
+  });
+
+  it.runIf(process.platform === "darwin")("is the result file locked, as the app locks the one it hands the helper's apply, for as long as the helper holds it", async () => {
+    const cache = join(dir, "cache");
+    mkdirSync(join(cache, "1.2.3"), { recursive: true });
+    writeFileSync(join(cache, "1.2.3", "result.json"), "");
+    expect(applyingUnder(cache)).toBe(false);
+    // macOS's O_EXLOCK, as the app opens it.
+    const held = openSync(join(cache, "1.2.3", "result.json"), constants.O_RDONLY | 0x20);
+    expect(applyingUnder(cache)).toBe(true);
+    closeSync(held);
+    expect(applyingUnder(cache)).toBe(false);
+    // Through an install: locked while the helper's apply holds its descriptor 3, and not once it has ended.
+    const helper = standIn();
+    const app = join(dir, "Surogate.app");
+    mkdirSync(app);
+    const files = downloaded();
+    writeFileSync(join(dir, "hold"), "");
+    expect(await updateRun(helper, app, 4242)(files)).toEqual({ code: 0, said: "", restarts: true });
+    expect(applyingUnder(join(dir, "cache"))).toBe(true);
+    rmSync(join(dir, "hold"));
+    await expect.poll(() => applyingUnder(join(dir, "cache")), { timeout: 5_000 }).toBe(false);
   });
 });
 
@@ -401,6 +435,18 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("surogate-he
     await expect(checkStaged(older, newer, release, HELPER, REQUIREMENT)).rejects.toThrow("Surogate 1.2.4 is not newer than the version installed, 1.2.5");
     writeFileSync(join(staged, "Contents/Resources/app/package.json"), `${JSON.stringify({ ...release, changed: true })}\n`);
     await expect(checkStaged(staged, app, release, HELPER, REQUIREMENT)).rejects.toThrow("is not Surogate's, signed whole");
+  });
+
+  it("refuses an apply before it says it waits where it may not take its requirement, so the app stays up and says why", () => {
+    const app = bundle(join(dir, "Surogate.app"), "1.2.3");
+    const staged = bundle(join(dir, ".Surogate-1.2.4.staging"), "1.2.4");
+    const quitting = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+    try {
+      const done = spawnSync(HELPER, ["apply", "--wait", String(quitting.pid), "--staged", staged, "--app", app, "--version", "1.2.4"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" }, timeout: 20_000 });
+      expect(done).toMatchObject({ status: 3, stdout: "", stderr: "this helper is not signed, and no test requirement is named, so nothing was installed\n" });
+    } finally {
+      quitting.kill();
+    }
   });
 
   it("swaps the bundle in once the app has quit, keeps the version it replaced beside it, and keeps how it ended for the next start", { timeout: 60_000 }, async () => {
