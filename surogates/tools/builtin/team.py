@@ -393,6 +393,8 @@ class _Person:
         digits = "".join(c for c in fragment if c.isdigit())
         if len(digits) >= 4 and digits in self.phone:
             return True
+        if _masked_match(fragment, [self.phone, *(h for h in self.contact_handles if h.isdigit())]):
+            return True
         handle = fragment.strip().lstrip("@").casefold()
         if len(handle) >= 3 and any(
             handle in h.casefold()
@@ -409,12 +411,41 @@ class _Person:
         return bool(needle) and any(needle in fold_label(n) for n in names)
 
 
-async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> list[_Person]:
-    """Everyone enrolled with this agent, never the team itself."""
+def _masked_match(fragment: str, phones: list[str]) -> bool:
+    """*fragment* is a number as the model sees it masked (``+40…842``):
+    its leading and trailing digits around the ellipsis."""
+    head, sep, tail = fragment.replace("...", "…").partition("…")
+    head = "".join(c for c in head if c.isdigit())
+    tail = "".join(c for c in tail if c.isdigit())
+    return bool(sep and head and tail) and any(
+        p and p.startswith(head) and p.endswith(tail) for p in phones
+    )
+
+
+async def _people(
+    sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any, *, escalated: bool = False,
+) -> list[_Person]:
+    """Everyone enrolled with this agent, never the team itself.  With
+    *escalated*, also whoever has an open escalation without being enrolled:
+    the team must be able to reach a stranger who asked for help."""
     by_user: dict[uuid.UUID, list] = {}
     for row in await followup_store.enrollments(sf, org_id=org_id, agent_id=agent_id):
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
+    if escalated:
+        async with sf() as db:
+            open_ = (
+                await db.execute(
+                    sa.select(EscalationRow.user_id).distinct()
+                    .where(EscalationRow.org_id == org_id)
+                    .where(EscalationRow.agent_id == agent_id)
+                    .where(EscalationRow.resolved_at.is_(None))
+                    .where(EscalationRow.user_id.isnot(None))
+                )
+            ).scalars().all()
+        for user_id in open_:
+            if user_id not in by_user and not followup_store.is_team_member(settings, user_id):
+                by_user[user_id] = []
     described = await describe_people(sf, org_id=org_id, agent_id=agent_id, rows_by_user=by_user)
     out = [_Person(d) for d in described.values()]
     links = await followup_store.contacts(sf, org_id=org_id, agent_id=agent_id)
@@ -477,11 +508,11 @@ def _ago(at: datetime | None, now: datetime) -> str:
 async def _one_person(sf: Any, ctx: Any, settings: Any, fragment: str) -> _Person | str:
     """The one enrolled person *fragment* names, or why there is not one."""
     matches = [
-        p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings)
+        p for p in await _people(sf, ctx.org_id, ctx.agent_id, settings, escalated=True)
         if p.matches(fragment)
     ]
     if not matches:
-        return f"nobody enrolled with this business matches '{fragment}'."
+        return f"nobody enrolled with this business or with an open escalation matches '{fragment}'."
     if len(matches) > 1:
         return (
             f"'{fragment}' matches more than one person. Ask the team member which "
@@ -800,12 +831,12 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=since_hours)
 
-    people = await _people(sf, ctx.org_id, ctx.agent_id, settings)
     fragment = str(arguments.get("person") or arguments.get("patient") or "").strip()
+    people = await _people(sf, ctx.org_id, ctx.agent_id, settings, escalated=bool(fragment))
     if fragment:
         people = [p for p in people if p.matches(fragment)]
         if not people:
-            return f"Nobody enrolled with this business matches '{fragment}'."
+            return f"Nobody enrolled with this business or with an open escalation matches '{fragment}'."
     if not people:
         return "Nobody is enrolled with this business's follow-up yet."
 
@@ -845,6 +876,8 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
         head = person.label
         head += f" · {person.contact}"
         lines = [f"• {head}"]
+        if not person.rows:
+            lines.append("  not enrolled; has an open escalation")
         for row in person.rows:
             index = day_today(row, zones)
             text = f"  {row.protocol}: " + (f"day {index}" if index is not None else "no start date")
@@ -1026,7 +1059,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
         status = "; ".join(
             f"{r.protocol} {r.status}" + (f" ({r.status_reason})" if r.status_reason else "")
             for r in person.rows
-        )
+        ) or "not enrolled"
         return (
             f"Nothing sent: {person.label}'s follow-up is not active ({status}). "
             "Ask the team member whether to message them anyway; only if they say "

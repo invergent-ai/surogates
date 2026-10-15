@@ -815,3 +815,33 @@ async def test_a_person_on_slack_is_found_by_handle_and_messaged_there(sf, pract
     [row] = await _outreach(sf)
     assert (row.user_id, row.platform, row.channel_identifier) == (ioana, "slack", "T1")
     assert row.template_name is None
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_with_an_open_escalation_is_found_and_their_number_sent(sf, practice):
+    stranger, _ = await _person(sf, "Maria Stan", "40700000842", enrol=False)
+    kw = _kw(sf, practice.doctor_session)
+    assert "Nobody" in await team.handle_team_overview({"person": "Maria"}, **kw)
+
+    await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=stranger, kind="alert", reason="Needs a call",
+    )
+    out = await team.handle_team_overview({"person": "+40…842", "include_phone": True}, **kw)
+    assert "Maria Stan" in out and "not enrolled; has an open escalation" in out
+    async with sf() as db:
+        [notice] = (await db.execute(
+            sa.select(OutreachMessageRow).where(OutreachMessageRow.created_by == "team-overview")
+        )).scalars().all()
+    assert "+40 700 000 842" in notice.text
+
+    result = await team.handle_team_escalation({"action": "claim", "person": "Maria"}, **kw)
+    assert "has no open escalation" not in result and not result.startswith("Nothing changed")
+    # The full list stays the people followed.
+    assert "Maria" not in await team.handle_team_overview({}, **kw)
+
+
+def test_a_masked_number_matches_its_leading_and_trailing_digits():
+    assert team._masked_match("+40…842", ["40700000842"])
+    assert team._masked_match("+40...842", ["40700000842"])
+    assert not team._masked_match("+40…843", ["40700000842"])
+    assert not team._masked_match("+41…842", ["40700000842"])
