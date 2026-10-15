@@ -476,6 +476,22 @@ async def test_pausing_needs_a_reason(sf, practice):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["paused", "active"])
+async def test_an_ended_follow_up_has_nothing_to_pause_or_resume(sf, practice, status):
+    await store.update_enrollment(
+        sf, org_id=ORG, agent_id=AGENT, user_id=practice.ioana[0], protocol="post-op",
+        status="ended", status_reason="asked to stop",
+    )
+    out = await team.handle_team_update_person(
+        {"person": "Ioana", "status": status}, **_kw(sf, practice.doctor_session),
+    )
+    assert out.startswith("Nothing changed: Ioana Popa's post-op is already ended")
+    assert "do not ask for a reason" in out and "confirmation=" not in out
+    assert _redis.data == {}
+    assert (await _enrollment(sf, practice.ioana[0])).status == "ended"
+
+
+@pytest.mark.asyncio
 async def test_update_preview_changes_nothing(sf, practice):
     ioana, _ = practice.ioana
     out = await team.handle_team_update_person(

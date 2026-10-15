@@ -1223,6 +1223,17 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
                 "Nothing changed: status must be one of "
                 f"{', '.join(followup_store.ENROLLMENT_STATUSES)}."
             )
+        # Checked before asking for a reason: a team member asked why they
+        # want to pause someone whose follow-up is over was left with a
+        # question about nothing, and a pause still pending in later turns.
+        if row.status == status or (row.status == "ended" and status in ("paused", "active")):
+            return (
+                f"Nothing changed: {person.label}'s {row.protocol} is already {row.status}, "
+                "so there is nothing to " + ("pause" if status == "paused" else "change")
+                + ". Tell the team member so in one sentence; do not ask for a reason, "
+                "nothing is waiting for their confirmation."
+                + (" To follow them again, enrol them again." if row.status == "ended" else "")
+            )
         if status in ("paused", "ended") and not reason:
             return "Nothing changed: ask the team member why before pausing or ending."
         refused = _not_allowed(settings, ctx, "pause_resume_end")
