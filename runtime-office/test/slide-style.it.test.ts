@@ -1,6 +1,10 @@
+import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { formatsFor } from "../src/formats/index.js";
+import { slideFormat } from "../src/formats/slide.js";
 import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
+import { Measurer, type ShapeSpec, type SlideSpec } from "../src/slides/measure.js";
 import { eventually, itEnabled, pair, startFixture, type Fixture } from "./support/office.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -27,16 +31,54 @@ const REPLACEMENT = `<section style="background:#ffffff;font-family:Arial;paddin
   <div data-build-out="rise" style="position:absolute;left:1200px;top:600px;width:400px;height:200px;background:#2f5597;box-shadow:0 8px 24px rgba(0,0,0,0.25)"></div>
 </section>`;
 
+// Two slides sharing a pinned card that moves: a painted div with a blurred shadow and two lines of text of its own.
+const fixtureHtml = (name: string) => readFileSync(new URL(`fixtures/${name}`, import.meta.url), "utf8");
+const TEAM = fixtureHtml("lisbon-team.html");
+const BUDGET = fixtureHtml("lisbon-budget.html");
+
+// Every drawing of a slide, a group's children after it, at its place on the slide in canvas px, worked out from the
+// frames each editor holds and saves (editor internals: the builder reads no group child's frame).
+const PLACES = `function () {
+  var s = Api.GetPresentation().GetAllSlides().filter(function (x) { return String(x.Slide.Get_Id()) === scope.id; })[0];
+  if (!s) return null;
+  var mmPerPx = Api.GetPresentation().GetWidth() / 1920 / 36000, out = [];
+  function walk(list, at) {
+    list.forEach(function (sp) {
+      var x = sp.spPr.xfrm, group = sp instanceof AscFormat.CGroupShape;
+      var left = at.x + (x.offX - at.chX) * at.sx, top = at.y + (x.offY - at.chY) * at.sy, w = x.extX * at.sx, h = x.extY * at.sy;
+      out.push({ kind: group ? "group" : sp instanceof AscFormat.CImageShape ? "picture" : "shape", x: Math.round(left / mmPerPx), y: Math.round(top / mmPerPx),
+        w: Math.round(w / mmPerPx), h: Math.round(h / mmPerPx), text: sp.txBody ? sp.txBody.content.GetText ? String(sp.txBody.content.GetText()).trim() : "" : "" });
+      if (group) walk(sp.spTree, { x: left, y: top, chX: x.chOffX, chY: x.chOffY, sx: at.sx * (x.chExtX ? x.extX / x.chExtX : 1), sy: at.sy * (x.chExtY ? x.extY / x.chExtY : 1) });
+    });
+  }
+  walk(s.Slide.cSld.spTree, { x: 0, y: 0, chX: 0, chY: 0, sx: 1, sy: 1 });
+  return JSON.stringify(out);
+}`;
+// What a measured shape draws, a group's children after it, in canvas px.
+const leaves = (shapes: ShapeSpec[], emuPerPx: number): { kind: string; x: number; y: number; w: number; h: number }[] =>
+  shapes.flatMap((s) => [
+    { kind: s.kind, x: Math.round(s.x / emuPerPx), y: Math.round(s.y / emuPerPx), w: Math.round(s.w / emuPerPx), h: Math.round(s.h / emuPerPx) },
+    ...(s.kind === "group" ? leaves(s.children, emuPerPx) : []),
+  ]);
+
 describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
   let fixture: Fixture;
   let pool: PagePool;
   let office: Office;
   let opened: string[] = [];
+  // The specs the slides measured to, in order.
+  const measured: SlideSpec[] = [];
 
   beforeAll(async () => {
     fixture = await startFixture();
     pool = new PagePool({ hostUrl: fixture.hostUrl, maxPages: 4, idleMs: 600_000, openTimeoutMs: 60_000, commandTimeoutMs: 20_000, ignoreTls: true });
-    office = new Office(pool);
+    const measurer = new Measurer(() => pool.measuringPage()), measure = measurer.measure.bind(measurer);
+    measurer.measure = async (...args) => {
+      const spec = await measure(...args);
+      measured.push(spec);
+      return spec;
+    };
+    office = new Office(pool, { ...formatsFor(pool), slide: slideFormat(measurer) });
   });
   afterEach(async () => {
     for (const id of opened) await pool.close(id);
@@ -81,6 +123,34 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
       expect(state.effects.map((e: Any) => e[1])).toEqual(["onclick", "afterprevious", "onclick"]);
       expect(state.transition).toBe("effectFadeSmoothly");
     });
+  });
+
+  it("places a moving card's shadow, box and text where they measured, on both editors", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pptx");
+    measured.length = 0;
+    const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ html: TEAM }, { html: BUDGET }] }]);
+    expect(result).toMatchObject({ applied: true, flushed: true });
+    const E = 12192000 / 1920;
+    for (const [n, slide] of result.results[0].slides.entries()) {
+      // The card moves, so it is one group: its blurred shadow grouped behind its box, then its two lines of text.
+      const card = measured[n]!.shapes.find((s) => s.magic === "handoff-card")!;
+      expect(card.kind).toBe("group");
+      expect(leaves([card], E).map((s) => s.kind)).toEqual(["group", "group", "picture", "shape", "shape", "shape"]);
+      // The editor frames a group round its children, so what is compared is what each child draws.
+      const want = leaves([card], E).filter((s) => s.kind !== "group");
+      for (const page of [agent, user]) {
+        await eventually(async () => {
+          const places: Any[] = JSON.parse(((await (await pool.get(page)).command(PLACES, { id: slide.id })).value as string | null) ?? "null");
+          expect(places).not.toBeNull();
+          const drawn = places.filter((p) => p.kind !== "group");
+          const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+          const at = drawn.findIndex((_, i) => want.every((w, j) => drawn[i + j]?.kind === w.kind && near(drawn[i + j].w, w.w) && near(drawn[i + j].h, w.h)));
+          expect(at, JSON.stringify({ want, drawn })).toBeGreaterThanOrEqual(0);
+          const got = drawn.slice(at, at + want.length);
+          expect(got.map((g) => [g.x, g.y]), JSON.stringify({ want, got })).toEqual(want.map((w, j) => [near(got[j].x, w.x) ? got[j].x : w.x, near(got[j].y, w.y) ? got[j].y : w.y]));
+        });
+      }
+    }
   });
 
   it("replaces a slide that is not the current one: its group lands on it, its exit rises out the top, its old transition goes", async () => {

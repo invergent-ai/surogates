@@ -444,7 +444,14 @@
       return placed(shape, s);
     },
     group: function (s) {
-      return Api.CreateGroup(s.children.map(function (child) { return BUILD[child.kind](child); }));
+      return Api.CreateGroup(s.children.map(function (child) {
+        var drawing = BUILD[child.kind](child);
+        // CreateGroup places each drawing by its computed place, which the editor computes for a group only once it is
+        // on a slide: a group grouped again would count as at the slide's corner, and land there. (internal: the
+        // builder has no call that computes it)
+        if (child.kind === "group") drawing.Drawing.recalculateTransform();
+        return drawing;
+      }));
     },
   };
   function blankLayout() { var master = pres.GetMaster(0); return master ? master.GetLayoutByType("blank") : null; }
