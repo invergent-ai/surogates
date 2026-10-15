@@ -118,13 +118,16 @@ export default defineConfig(({ mode }) => {
       },
     },
     resolve: {
-      dedupe: ["react", "react-dom"],
+      // One copy of each, wherever the aliased SDK sources would find their own: the Toaster
+      // (ui-sdk) must hear this app's toast() calls and read its ThemeProvider.
+      dedupe: ["react", "react-dom", "next-themes", "sonner"],
       alias: {
         "@": path.resolve(__dirname, "./src"),
         "@invergent/agent-chat-react": path.resolve(
           __dirname,
           "../sdk/agent-chat-react/src",
         ),
+        "@invergent/ui-sdk": path.resolve(__dirname, "../sdk/ui-sdk/src"),
       },
     },
     build: {

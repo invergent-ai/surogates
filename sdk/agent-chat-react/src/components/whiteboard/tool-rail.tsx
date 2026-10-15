@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { cn } from "../../lib/utils";
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { RabbitMark } from "../ui/rabbit-mark";
 
 export type WbTool = "pen" | "eraser" | "text" | "slot" | "select" | "pan";

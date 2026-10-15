@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type Device, listDevices } from "@/api/devices";
 import { getSession } from "@/api/sessions";
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { type DesktopBinding, getDesktop } from "@/lib/desktop-bridge";
 import {
   type FolderCalls,

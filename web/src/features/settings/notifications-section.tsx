@@ -7,7 +7,7 @@ import { BellIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { Switch } from "@/components/ui/switch";
+import { Switch } from "@invergent/ui-sdk/switch";
 import {
   type PushState,
   disablePush,

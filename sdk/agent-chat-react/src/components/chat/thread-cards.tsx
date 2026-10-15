@@ -13,8 +13,8 @@ import type {
   AgentChatAdapter, AgentChatChangedBy, AgentChatThreadProposal, AgentChatThreadRow, AgentChatUndoResult, AgentChatWorker,
   ChatMessage,
 } from "../../types";
-import { Button } from "../ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
+import { Button } from "@invergent/ui-sdk/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@invergent/ui-sdk/dropdown-menu";
 
 const GROUP_LABEL: Record<NonNullable<AgentChatThreadRow["group"]>, string> = {
   waiting: "Waiting on you",

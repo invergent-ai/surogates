@@ -1,6 +1,6 @@
 import { PlugZapIcon } from "lucide-react";
 import { openOAuthPopup } from "../../lib/oauth-popup";
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 
 export interface ComposioConnectCardProps {
   /** The Composio hosted connect URL (connect.composio.dev/link/…). */

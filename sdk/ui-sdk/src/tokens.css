@@ -1,0 +1,77 @@
+/* Surogate's design tokens: plain CSS custom properties, read by every app.
+   The Tailwind apps map them to utilities in theme.css; the desktop shell,
+   which has no Tailwind, reads them directly.
+
+   Colours are Claude Desktop's neutrals (its cds tokens), with our amber as
+   the brand where Claude has its orange. Surfaces climb from the sidebar to
+   the page to panels and raised fields; fills and borders are the text
+   colour at 5, 10 and 20%.
+
+   Each colour is defined once, as light-dark(<light>, <dark>), and the
+   root's color-scheme picks the half: the system's by default, so the first
+   frame already follows it; the `light`/`dark` class (next-themes) or
+   data-theme (the desktop shell) once the app has chosen. It also paints
+   browser UI — a native <select>'s list, scrollbars — to match. */
+
+:root {
+  color-scheme: light dark;
+
+  --serif: "Fraunces Variable", "Fraunces", "Times New Roman", serif;
+  --sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --mono: "JetBrains Mono Variable", "JetBrains Mono", "Courier New", monospace;
+  --radius: 0.625rem;
+
+  /* Sidebar #f9f9f7 / #0b0b0b, page #fcfcfb / #151515, panels #fff /
+     #1a1a19, raised fields and popovers #fff / #20201f. */
+  --background: light-dark(#fcfcfb, #151515);
+  --foreground: light-dark(#0b0b0b, #f0efec);
+  --card: light-dark(#ffffff, #1a1a19);
+  --card-foreground: light-dark(#0b0b0b, #f0efec);
+  /* App chrome: the navbar and page headers. */
+  --surface: light-dark(#f9f9f7, #0b0b0b);
+  --popover: light-dark(#ffffff, #20201f);
+  --popover-foreground: light-dark(#0b0b0b, #f0efec);
+  --primary: #f59e0b;
+  --primary-foreground: #0b0e14;
+  --secondary: light-dark(rgb(11 11 11 / 5%), rgb(255 255 255 / 5%));
+  --secondary-foreground: light-dark(#0b0b0b, #f0efec);
+  --muted: light-dark(rgb(11 11 11 / 5%), rgb(255 255 255 / 5%));
+  /* Claude's muted tone; its gray-500 in light, kept at AA contrast there. */
+  --muted-foreground: light-dark(#6d6b67, #898781);
+  --accent: light-dark(rgb(11 11 11 / 10%), rgb(255 255 255 / 10%));
+  --accent-foreground: light-dark(#0b0b0b, #f0efec);
+  --accent-amber: #f59e0b;
+  --destructive: #ef4444;
+  --border: light-dark(rgb(11 11 11 / 10%), rgb(255 255 255 / 10%));
+  --input: light-dark(rgb(11 11 11 / 20%), rgb(255 255 255 / 20%));
+  --ring: #898781;
+  --chart-1: #ffdf20;
+  --chart-2: #f0b100;
+  --chart-3: #d08700;
+  --chart-4: #a65f00;
+  --chart-5: #894b00;
+  --sidebar: light-dark(#f9f9f7, #0b0b0b);
+  --sidebar-foreground: light-dark(#0b0b0b, #f0efec);
+  --sidebar-primary: light-dark(#20201f, #f59e0b);
+  --sidebar-primary-foreground: light-dark(#fcfcfb, #0b0e14);
+  --sidebar-accent: light-dark(rgb(11 11 11 / 10%), rgb(255 255 255 / 10%));
+  --sidebar-accent-foreground: light-dark(#0b0b0b, #f0efec);
+  --sidebar-border: light-dark(rgb(11 11 11 / 10%), rgb(255 255 255 / 10%));
+  --sidebar-ring: #898781;
+  --line: light-dark(rgb(11 11 11 / 10%), rgb(255 255 255 / 10%));
+  --subtle: light-dark(#6d6b67, #898781);
+  --faint: light-dark(#898781, #6d6b67);
+  --success: #22c55e;
+}
+
+/* Not only on the root: light-dark() resolves on each element against its
+   own color-scheme, so a region marked dark inside a light page turns too. */
+.light,
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+}

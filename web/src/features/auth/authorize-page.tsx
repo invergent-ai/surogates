@@ -8,8 +8,8 @@
 // desktop's request with it.
 import { useEffect, useMemo, useState } from "react";
 import { refreshSession } from "@/api/auth";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Button } from "@invergent/ui-sdk/button";
+import { Card } from "@invergent/ui-sdk/card";
 import { getDesktop } from "@/lib/desktop-bridge";
 import { consentRequest, decide, recentSignIn } from "@/lib/oauth-consent";
 import { LoginPage } from "./login-page";

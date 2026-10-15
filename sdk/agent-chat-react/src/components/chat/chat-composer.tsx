@@ -42,7 +42,7 @@ import {
   ContextIcon,
   ContextValueProvider,
 } from "../ai-elements/context";
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { cn } from "../../lib/utils";
 import {
   Item,
@@ -63,7 +63,7 @@ import {
   PromptInputProvider,
   usePromptInputController,
 } from "../ai-elements/prompt-input";
-import { Popover, PopoverAnchor } from "../ui/popover";
+import { Popover, PopoverAnchor } from "@invergent/ui-sdk/popover";
 import {
   Command,
   CommandGroup,

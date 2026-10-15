@@ -12,8 +12,8 @@
 import { useState } from "react";
 import { ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { Textarea } from "../ui/textarea";
-import { Button } from "../ui/button";
+import { Textarea } from "@invergent/ui-sdk/textarea";
+import { Button } from "@invergent/ui-sdk/button";
 import type {
   AgentChatExpertFeedbackRating,
   ChatMessage as ChatMessageType,

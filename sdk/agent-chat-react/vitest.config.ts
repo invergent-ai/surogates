@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "src"),
+      "@invergent/ui-sdk": resolve(__dirname, "../ui-sdk/src"),
     },
   },
   test: {

@@ -3,7 +3,7 @@
 //
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 
 export function App() {
   return (

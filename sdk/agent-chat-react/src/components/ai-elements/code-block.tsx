@@ -1,13 +1,13 @@
 "use client";
 
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "../ui/select";
+} from "@invergent/ui-sdk/select";
 import { cn } from "../../lib/utils";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import type { ComponentProps, CSSProperties, HTMLAttributes } from "react";

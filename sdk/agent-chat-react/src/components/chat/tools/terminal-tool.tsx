@@ -11,7 +11,7 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "../../ui/collapsible";
+} from "@invergent/ui-sdk/collapsible";
 import { Shimmer } from "../../ai-elements/shimmer";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";

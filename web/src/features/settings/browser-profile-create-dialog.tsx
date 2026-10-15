@@ -1,14 +1,14 @@
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+} from "@invergent/ui-sdk/dialog";
+import { Input } from "@invergent/ui-sdk/input";
 
 interface Props {
   open: boolean;

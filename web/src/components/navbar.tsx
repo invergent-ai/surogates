@@ -25,7 +25,7 @@ import {
 import { useTheme } from "next-themes";
 
 import { logout } from "@/api/auth";
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { getDesktop } from "@/lib/desktop-bridge";
 import { cn } from "@/lib/utils";

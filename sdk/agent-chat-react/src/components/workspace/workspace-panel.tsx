@@ -25,7 +25,7 @@ import {
 	FileTreeFile,
 	FileTreeFolder,
 } from "../ai-elements/file-tree";
-import { Button } from "../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
 	Dialog,
 	DialogContent,
@@ -33,10 +33,10 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "../ui/dialog";
-import { ScrollArea } from "../ui/scroll-area";
-import { Skeleton } from "../ui/skeleton";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+} from "@invergent/ui-sdk/dialog";
+import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
+import { Skeleton } from "@invergent/ui-sdk/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@invergent/ui-sdk/tooltip";
 import { changeChatFiles, leaveChatFiles, useChatFiles } from "./chat-files";
 
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BrowserShell } from "./browser-shell";
 import { useBrowserControl } from "./use-browser-control";
-import { ConfirmDialog } from "../ui/confirm-dialog";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-} from "../ui/dialog";
+} from "@invergent/ui-sdk/dialog";
 import type {
   AgentChatAdapter,
   AgentChatBrowserState,
@@ -205,7 +205,7 @@ export function BrowserPane({
       <Dialog open={fullscreenOpen} onOpenChange={handleFullscreenOpenChange}>
         <DialogContent
           aria-describedby={undefined}
-          className="flex h-dvh w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-none ring-0 sm:max-w-none"
+          className="flex h-dvh max-h-none w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-none ring-0 sm:max-w-none"
         >
           <DialogHeader className="sr-only">
             <DialogTitle>Browser</DialogTitle>

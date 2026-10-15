@@ -14,11 +14,14 @@ FROM node:22-slim AS web-build
 WORKDIR /build
 COPY web/package.json web/package-lock.json ./
 COPY sdk/agent-chat-react/package.json /sdk/agent-chat-react/package.json
+COPY sdk/ui-sdk/package.json /sdk/ui-sdk/package.json
 RUN npm ci
 
 COPY sdk/agent-chat-react/ /sdk/agent-chat-react/
-RUN rm -rf /sdk/agent-chat-react/node_modules \
-    && ln -s /build/node_modules /sdk/agent-chat-react/node_modules
+COPY sdk/ui-sdk/ /sdk/ui-sdk/
+RUN rm -rf /sdk/agent-chat-react/node_modules /sdk/ui-sdk/node_modules \
+    && ln -s /build/node_modules /sdk/agent-chat-react/node_modules \
+    && ln -s /build/node_modules /sdk/ui-sdk/node_modules
 COPY web/ ./
 # Skip tsc type-checking — Vite transpiles TS on its own.
 # Type errors are caught in CI / local `npm run build`, not at image build time.

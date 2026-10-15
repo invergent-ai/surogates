@@ -16,7 +16,7 @@ import {
   Trash2Icon,
   UsersIcon,
 } from "lucide-react";
-import { Badge } from "../ui/badge";
+import { Badge } from "@invergent/ui-sdk/badge";
 import { sessionComputer } from "../../lib/sessions";
 import { cn } from "../../lib/utils";
 import type {

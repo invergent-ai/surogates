@@ -7,12 +7,12 @@ import { useNavigate } from "@tanstack/react-router";
 import { SunIcon, MoonIcon } from "lucide-react";
 import type { User as FirebaseUser } from "firebase/auth";
 import { cn } from "@/lib/utils";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Spinner } from "@/components/ui/spinner";
+import { Alert, AlertDescription } from "@invergent/ui-sdk/alert";
+import { Button } from "@invergent/ui-sdk/button";
+import { Card } from "@invergent/ui-sdk/card";
+import { Input } from "@invergent/ui-sdk/input";
+import { Label } from "@invergent/ui-sdk/label";
+import { Spinner } from "@invergent/ui-sdk/spinner";
 import {
   exchangeFirebaseToken,
   fetchAuthConfig,

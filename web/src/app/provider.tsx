@@ -1,11 +1,12 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { Toaster } from "@/components/ui/sonner";
+import { Toaster } from "@invergent/ui-sdk/sonner";
 import { takesDesktopLook } from "@/lib/appearance";
 import { getDesktop } from "@/lib/desktop-bridge";
 import { ThemeProvider } from "next-themes";
 import { type ReactNode, useSyncExternalStore } from "react";
+import type { ToasterProps } from "sonner";
 
 interface AppProviderProps {
   children: ReactNode;
@@ -44,7 +45,13 @@ export function AppProvider({ children }: AppProviderProps) {
       forcedTheme={forcedTheme}
     >
       {children}
-      <Toaster position="bottom-right" visibleToasts={2} expand={true} />
+      <Toaster
+        position="bottom-right"
+        visibleToasts={2}
+        expand={true}
+        // The Toaster follows the theme the user last chose; one the page forces wins over it.
+        {...(forcedTheme ? { theme: forcedTheme as ToasterProps["theme"] } : {})}
+      />
     </ThemeProvider>
   );
 }

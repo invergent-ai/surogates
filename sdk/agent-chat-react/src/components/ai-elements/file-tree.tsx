@@ -2,7 +2,7 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "../ui/collapsible";
+} from "@invergent/ui-sdk/collapsible";
 import { cn } from "../../lib/utils";
 import {
   ChevronRightIcon,

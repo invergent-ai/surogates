@@ -5,7 +5,7 @@
 // person has written something themselves (never on a first load), and
 // never again for a while after "Not now".
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   type PushState,
   dismissOffer,

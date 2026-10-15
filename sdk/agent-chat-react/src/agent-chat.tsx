@@ -9,7 +9,7 @@ import {
 import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
 import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
-import { TooltipProvider } from "./components/ui/tooltip";
+import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import { WorkspaceFileDrawer } from "./components/workspace/workspace-file-drawer";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { isOfficeDocument, officeEventFor } from "./lib/office";
@@ -144,34 +144,6 @@ const RIGHT_STACK_STYLE = {
   // page, and page layouts are unusable in a 440px strip.
   ["--right-stack-w" as string]: "50%",
 } as React.CSSProperties;
-
-// Claude Desktop's neutrals on the chat pane, whichever host draws it: its
-// surface ladder (page #fcfcfb / #151515, panels #fff / #1a1a19, raised
-// #fff / #20201f), its text tones, and fills and borders as 5/10/20% of the
-// text colour. The brand stays the host's — primary, and the amber accents
-// the SDK sets itself. Portalled menus and dialogs keep the host's palette.
-const PANE_PALETTE = [
-  "[--background:#fcfcfb] dark:[--background:#151515]",
-  "[--foreground:#0b0b0b] dark:[--foreground:#f0efec]",
-  "[--card:#ffffff] dark:[--card:#1a1a19]",
-  "[--card-foreground:#0b0b0b] dark:[--card-foreground:#f0efec]",
-  "[--popover:#ffffff] dark:[--popover:#20201f]",
-  "[--popover-foreground:#0b0b0b] dark:[--popover-foreground:#f0efec]",
-  "[--secondary:rgb(11_11_11/5%)] dark:[--secondary:rgb(255_255_255/5%)]",
-  "[--secondary-foreground:#0b0b0b] dark:[--secondary-foreground:#f0efec]",
-  "[--muted:rgb(11_11_11/5%)] dark:[--muted:rgb(255_255_255/5%)]",
-  // Claude's gray-500 in light, gray-400 in dark: its muted tone, kept
-  // at AA contrast on the light page.
-  "[--muted-foreground:#6d6b67] dark:[--muted-foreground:#898781]",
-  "[--accent:rgb(11_11_11/10%)] dark:[--accent:rgb(255_255_255/10%)]",
-  "[--accent-foreground:#0b0b0b] dark:[--accent-foreground:#f0efec]",
-  "[--border:rgb(11_11_11/10%)] dark:[--border:rgb(255_255_255/10%)]",
-  "[--input:rgb(11_11_11/20%)] dark:[--input:rgb(255_255_255/20%)]",
-  "[--ring:#898781]",
-  "[--line:rgb(11_11_11/10%)] dark:[--line:rgb(255_255_255/10%)]",
-  "[--subtle:#6d6b67] dark:[--subtle:#898781]",
-  "[--faint:#898781] dark:[--faint:#6d6b67]",
-].join(" ");
 
 /** The panes the phone layout shows one at a time. The files *tree* is not
  *  one — it expands as an accordion inside the chat column at every width —
@@ -496,7 +468,6 @@ export function AgentChat({
           className={cn(
             // Phone: flex column, tab toggle on top, then either chat or
             // right stack visible based on `data-mobile-view`.
-            PANE_PALETTE,
             "flex min-h-0 flex-1 flex-col overflow-hidden bg-background text-sm text-foreground",
             // md+: restore desktop two-pane layout when the right stack
             // is visible. With both panes, absolute positioning lets the

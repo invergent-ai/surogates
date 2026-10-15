@@ -1,11 +1,11 @@
 "use client";
 
-import { Badge } from "../ui/badge";
+import { Badge } from "@invergent/ui-sdk/badge";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "../ui/collapsible";
+} from "@invergent/ui-sdk/collapsible";
 import { cn } from "../../lib/utils";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import {

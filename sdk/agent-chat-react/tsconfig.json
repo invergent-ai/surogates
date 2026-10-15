@@ -25,7 +25,8 @@
     "types": ["node", "react", "react-dom"],
     "baseUrl": "src",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@invergent/ui-sdk/*": ["../../ui-sdk/src/*"]
     }
   },
   "include": ["src/**/*", "tests/**/*"],

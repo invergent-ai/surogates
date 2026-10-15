@@ -18,8 +18,8 @@ import {
   AlertCircle,
 } from "lucide-react";
 
-import { Button } from "../ui/button";
-import { Card, CardContent } from "../ui/card";
+import { Button } from "@invergent/ui-sdk/button";
+import { Card, CardContent } from "@invergent/ui-sdk/card";
 import {
   Dialog,
   DialogContent,
@@ -27,15 +27,15 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "../ui/dialog";
+} from "@invergent/ui-sdk/dialog";
 import { Progress } from "../ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@invergent/ui-sdk/tabs";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "../ui/tooltip";
+} from "@invergent/ui-sdk/tooltip";
 
 import type {
   AgentChatAdapter,

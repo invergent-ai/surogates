@@ -19,14 +19,14 @@ import {
   Terminal,
   TerminalHeader,
 } from "../../ai-elements/terminal";
-import { Button } from "../../ui/button";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-} from "../../ui/dialog";
-import { ScrollArea } from "../../ui/scroll-area";
+} from "@invergent/ui-sdk/dialog";
+import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
 import { cn } from "../../../lib/utils";
 import type { ToolCallInfo } from "../../../types";
 

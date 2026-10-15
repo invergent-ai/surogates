@@ -39,9 +39,12 @@ export {
 } from "./runtime/simple-mode";
 export { OrbShimmerLabel } from "./components/ai-elements/orb-label";
 export type { OrbShimmerLabelProps } from "./components/ai-elements/orb-label";
-export { BrandBeam } from "./components/ui/brand-beam";
-export type { BrandBeamProps } from "./components/ui/brand-beam";
-export type { BorderBeamSize } from "./components/ui/border-beam";
+export { BrandBeam } from "@invergent/ui-sdk/brand-beam";
+import type { BrandBeamProps } from "@invergent/ui-sdk/brand-beam";
+export type { BrandBeamProps };
+// ui-sdk ships border-beam only through brand-beam, so the preset union is
+// read off BrandBeam's props.
+export type BorderBeamSize = NonNullable<BrandBeamProps["size"]>;
 export { MessageResponse } from "./components/ai-elements/message";
 export { BrowserShell } from "./components/browser/browser-shell";
 export { useBrowserControl } from "./components/browser/use-browser-control";
