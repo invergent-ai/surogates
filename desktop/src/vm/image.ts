@@ -104,17 +104,30 @@ export function imageArchOf(folder: string): ImageArch | null {
  * holds it open and asks of what it reads, not of what its name leads to by then.
  */
 export function rootsOwn(path: string, run = false, found: Stats = lstatSync(path)): void {
-  if (found.isSymbolicLink()) throw new Error(`${path} is not the install script's: it is a link`);
-  if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not the install script's: only root may write it`);
-  if (!found.isFile()) throw new Error(`${path} is not the install script's: it is no file`);
-  if (run && (found.mode & 0o111) === 0) throw new Error(`${path} is not the install script's: it cannot be run`);
-  if (run && (found.mode & 0o004) === 0) throw new Error(`${path} is not the install script's: its user cannot read it`);
+  if (found.isSymbolicLink()) throw new Error(`${path} is not ${WHOSE}: it is a link`);
+  if (found.uid !== 0 || (found.mode & 0o022) !== 0) throw new Error(`${path} is not ${WHOSE}: only root may write it`);
+  if (!found.isFile()) throw new Error(`${path} is not ${WHOSE}: it is no file`);
+  if (run && (found.mode & 0o111) === 0) throw new Error(`${path} is not ${WHOSE}: it cannot be run`);
+  if (run && (found.mode & 0o004) === 0) throw new Error(`${path} is not ${WHOSE}: its user cannot read it`);
 }
+
+// Whose word a file that root alone may write is: the install script's on Linux; on macOS, which has none, an
+// administrator's, as an enterprise's kit or its MDM places the install record.
+const WHOSE = forThisOs({ darwin: "an administrator's" }) ?? "the install script's";
 
 // How the words for a record that is not there, or names a base no request may go to, say what put it there.
 const NOT_INSTALLED = forThisOs({ win32: "Surogate was not installed by its installer, so it does not know where it was installed from" })
   ?? "Surogate was not installed by its install script, so it does not know where it was installed from";
-const ANOTHER_BASE = forThisOs({ win32: "install Surogate again with a SUROGATE_BASE that has none" }) ?? "run the install script again with a --base that has none";
+const ANOTHER_BASE = forThisOs({
+  win32: "install Surogate again with a SUROGATE_BASE that has none", darwin: "an administrator writes the record again with a base that has none",
+}) ?? "run the install script again with a --base that has none";
+
+/**
+ * Where an installed app on macOS updates from when no administrator has placed an install record: the public base and
+ * channel, built into the app. The record, where one is placed, says otherwise (installBase). Null elsewhere: Linux's
+ * install script and Windows's MSI always leave one.
+ */
+export const BUILT_IN: Readonly<{ base: string; channel: string }> | null = forThisOs({ darwin: { base: "https://surogate.ai", channel: "stable" } });
 
 // Whose word an installed app's record, and its installed version's mark, must be: an administrator's on Windows, root's elsewhere.
 export const installersOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn }) ?? rootsOwn;
@@ -124,7 +137,8 @@ export const installersOwn: (path: string) => void = forThisOs<(path: string) =>
  * {"base": "https://surogate.ai"}. Throws when there is none to read. *rootOwned*, as an
  * installed app's /etc/surogate/install.json is: a record that is not root's own word
  * (rootsOwn) is not taken, as it would say where each of this computer's users downloads from.
- * On Windows the MSI writes it, and it must be an administrator's word (adminsOwn).
+ * On Windows the MSI writes it, and it must be an administrator's word (adminsOwn). On macOS an
+ * installed app with no record at all takes the base built into it (BUILT_IN).
  */
 export function installBase(path: string, rootOwned = false): string {
   let text: string;
@@ -135,6 +149,7 @@ export function installBase(path: string, rootOwned = false): string {
     const { code } = error as NodeJS.ErrnoException;
     if (code === undefined) throw error;
     if (code !== "ENOENT") throw new Error(`${path} could not be read: ${code}`);
+    if (rootOwned && BUILT_IN) return BUILT_IN.base;
     throw new Error(NOT_INSTALLED);
   }
   let base: unknown;

@@ -134,6 +134,47 @@ name, removes the app for every user once an administrator approves it, and asks
 deletes your own `%LOCALAPPDATA%\Surogate\`. It never touches the folders your chats work on, or
 another user's data.
 
+## What it writes on a Mac
+
+On a Mac, Surogate Desktop is the app you dragged from its disk image to Applications, and it
+writes these places, and no others:
+
+- **`Surogate.app`**, where you put it, and beside it while an update installs:
+  `.Surogate-<version>.staging`, the new version, checked there before it takes the app's place;
+  and after an update, `.Surogate-<version>.previous`, the version it replaced, until the new one's
+  first start opens its window.
+- **`/Library/Application Support/Surogate/install.json`**, which the app only reads: where updates
+  come from and their channel, as an administrator, an enterprise's kit or its MDM placed it, root's
+  own. Without it, the app updates from surogate.ai.
+- **`~/Library/Application Support/Surogate/`, for each user**: everything the app keeps for you,
+  your sign-in, your settings, the sandbox's disks, your folders' histories and the agent's browser
+  profiles. Time Machine leaves its sandbox's disks out.
+- **`~/Library/Caches/Surogate/`, for each user**: the updates it downloads.
+- **Your login Keychain**: Surogate Safe Storage, the key that seals your sign-in and this Mac's
+  link to the agent.
+- **Start at login**, when you turn it on: macOS's list of your login items.
+- **Your temporary folder**, which macOS empties: the sandbox's sockets while it runs.
+
+macOS itself also keeps what it keeps of any app you open: the permissions you gave it, in System
+Settings → Privacy & Security, and its preferences and saved windows under
+`~/Library/Preferences` and `~/Library/Saved Application State`, named `ai.invergent.surogate`.
+
+**Restart to update** quits the app, puts the new version in its place in one step and opens it.
+Where your account may not change the folder Surogate is in, as a standard account cannot change
+`/Applications`, it says "An administrator needs to install this update", and **Download** opens
+the disk image for an administrator to install. If a new version does not open its window, the one
+it replaced is still beside it; to go back to it, quit Surogate and, in Terminal:
+
+    mv /Applications/Surogate.app ~/.Trash/
+    mv /Applications/.Surogate-<version>.previous /Applications/Surogate.app
+
+**Remove Surogate from This Mac…**, in the menu under your name, quits the app, deletes its key in
+your Keychain, turns its login item off, asks before it deletes your own
+`~/Library/Application Support/Surogate/` and `~/Library/Caches/Surogate/`, and moves the app to the
+Trash. Where your account may not change the folder Surogate is in, it removes your own data alone,
+and an administrator removes the app. It never touches the folders your chats work on, or another
+user's data.
+
 ## Building from source
 
     ../images/guest/build.sh     # the sandbox's image, once

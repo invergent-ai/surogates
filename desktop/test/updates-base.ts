@@ -56,7 +56,11 @@ export interface Base {
   publish(version: string, fields?: Record<string, unknown>, key?: KeyObject): Buffer;
   /** latest.json as *manifest*'s bytes, signed by *key* where the version it names says its signature is. */
   offer(manifest: Buffer, key?: KeyObject): void;
-  /** An app at 1.2.3 that reads the test's record and helper, with *options* in place of its own. */
+  /**
+   * An app at 1.2.3 that reads the test's record and helper, with *options* in place of its own. It takes Linux's
+   * release as its own, as the base publishes it, on whatever OS the test runs: Linux's app on Linux, and on a Mac its
+   * app in all but the release it looks for.
+   */
   updates(options?: Partial<UpdatesOptions>, changed?: () => void): Updates;
 }
 
@@ -85,7 +89,8 @@ export function servedBase(): Base {
     },
     updates: (options = {}, changed = () => {}) => new Updates({
       version: "1.2.3", record: base.record, rootOwned: false, helper: base.helper, installed: null,
-      cache: base.cache(), fetch: (url, init) => fetch(url, init), signal: new AbortController().signal, apply: () => Promise.resolve({ code: 0, said: "" }), ...options,
+      cache: base.cache(), fetch: (url, init) => fetch(url, init), signal: new AbortController().signal, apply: () => Promise.resolve({ code: 0, said: "" }),
+      target: "linux-x64", ...options,
     }, changed),
   };
   beforeEach(async () => {

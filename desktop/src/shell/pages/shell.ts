@@ -88,7 +88,7 @@ interface State {
   device: { text: string; status: string | null } | null;
   account: { name: string; email: string; userId: string; orgId: string } | null;
   links: string[]; // the user menu's links the app knows for this agent
-  uninstall: boolean; // whether the installed app can remove itself from this computer, as Windows's can
+  uninstall: string | null; // the item that removes the installed app from this computer, in this OS's words, where it can: Windows's and macOS's
   unreachable: string | null;
   notice: string | null;
   copying: string | null; // while threads' copies of their folders are being made, what the sidebar says of them
@@ -632,8 +632,10 @@ function draw(state: State): void {
   for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
     row.hidden = !state.links.includes(row.dataset.link ?? "");
   }
-  // Removing the app itself is an installed app's, where its OS's install can be removed from inside it.
-  byId("user-menu").querySelector<HTMLElement>('[data-action="uninstall"]')!.hidden = !state.uninstall;
+  // Removing the app itself is an installed app's, where its OS's install can be removed from inside it: from This
+  // Computer on Windows, from This Mac on macOS.
+  byId("user-menu").querySelector<HTMLElement>('[data-action="uninstall"]')!.hidden = state.uninstall === null;
+  byId("uninstall-item").textContent = state.uninstall ?? "";
   // Devices is the web client's Settings tab, which only an agent with local folders has.
   byId("user-menu").querySelector<HTMLElement>('[data-action="devices"]')!.hidden = state.agent?.desktopSessions !== true;
   // The divider under Plans and billing goes with it: no two dividers meet.

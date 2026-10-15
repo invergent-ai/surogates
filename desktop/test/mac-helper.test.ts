@@ -85,8 +85,11 @@ describe.runIf(process.platform === "darwin" && existsSync(HELPER))("surogate-he
     expect(done.stdout.replace(/-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n/g, "")).toBe("");
   });
 
-  it("answers no other command", () => {
-    expect(run("apply")).toMatchObject({ status: 2, stdout: "", stderr: "usage: surogate-helper name | trust | procs\n" });
-    expect(run("name", "again").status).toBe(2);
+  it("answers no other command, nor one of its own in another form", () => {
+    const usage = "usage: surogate-helper name | trust | procs | verify --staged <path> --app <path> --version <x.y.z>"
+      + " | apply --wait <pid> --staged <path> --app <path> --version <x.y.z> | remove --wait <pid> [--app <path>] [--forget <folder>]...\n";
+    for (const args of [["install"], ["apply"], ["apply", "--wait", "1"], ["verify", "--staged", "/a"], ["remove"], ["remove", "--wait", "1", "--forget"], ["name", "again"]]) {
+      expect(run(...args), args.join(" ")).toMatchObject({ status: 2, stdout: "", stderr: usage });
+    }
   });
 });
