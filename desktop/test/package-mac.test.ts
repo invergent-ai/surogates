@@ -6,7 +6,7 @@
 // where it looks, every program in it Apple silicon's alone, and each signed ad hoc with its own entitlements.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -230,11 +230,15 @@ describe.runIf(process.platform === "darwin" && LAYOUT)("Surogate.app's layout",
     expect(readFileSync(at("Contents", "Resources", "vm", "manifest.json")).equals(readFileSync(process.env.SUROGATE_MAC_VM_MANIFEST!))).toBe(true);
   });
 
-  it("has install.sh's release keys, key for key, as the app reads them", () => {
+  it("has install.sh's release keys, key for key, as the app reads them, in one file that only its owner writes", () => {
     const pem = (keys: ReturnType<typeof listedKeys>) => keys.map((key) => key.export({ type: "spki", format: "pem" }).toString());
     const theirs = pem(listedKeys(readFileSync(join(DESKTOP, "release", "install.sh"), "utf8")));
     expect(theirs.length).toBeGreaterThan(0);
-    expect(pem(listedKeys(readFileSync(at("Contents", "Resources", "release-keys"), "utf8")))).toEqual(theirs);
+    const keys = at("Contents", "Resources", "release-keys");
+    expect(pem(listedKeys(readFileSync(keys, "utf8")))).toEqual(theirs);
+    // The app takes its keys only from a regular file of one name, with no group or other write.
+    const held = lstatSync(keys);
+    expect([held.isFile(), held.isSymbolicLink(), held.nlink, held.mode & 0o777]).toEqual([true, false, 1, 0o644]);
   });
 
   it("has these programs and libraries and no other, each Apple silicon's alone, and no link that leads out of it", () => {
@@ -273,5 +277,9 @@ describe.runIf(process.platform === "darwin" && LAYOUT)("Surogate.app's layout",
     for (const file of ["Contents/MacOS/surogate-helper", "Contents/Resources/app/bin/rg", "Contents/Resources/app/bin/surogate-spawn", "Contents/Resources/app/dist/native/fsat.node"]) {
       expect(held(file), file).not.toContain("<key>");
     }
+    // surogate-helper checks an update's bundle by its own signer's Team ID: it is signed as the app is.
+    const signer = (file: string) => spawnSync("codesign", ["-dvvv", at(file)], { encoding: "utf8" }).stderr.split("\n").filter((line) => /^(Authority|TeamIdentifier|Signature)=/.test(line)).sort();
+    expect(signer("Contents/MacOS/Surogate")).toEqual(["Signature=adhoc", "TeamIdentifier=not set"]);
+    expect(signer("Contents/MacOS/surogate-helper")).toEqual(signer("Contents/MacOS/Surogate"));
   });
 });

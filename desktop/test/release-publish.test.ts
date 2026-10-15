@@ -4,7 +4,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign, verify } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -460,9 +460,11 @@ describe("the desktop's release manifest", () => {
       writeFileSync(join(app, "Contents", "Info.plist"), infoPlist("1.2.3"));
       writeFileSync(join(app, "Contents", "Resources", "app", "package.json"), JSON.stringify({ version: "1.2.3", stateSchema: 2 }));
       writeFileSync(join(app, "Contents", "Resources", "release-keys"), `RELEASE_KEYS=(\n  '${PUBLIC}'\n)\n`);
+      // Of the mode the bundle's layout gives it, whatever this computer's umask.
+      chmodSync(join(app, "Contents", "Resources", "release-keys"), 0o644);
       change(app, tree);
       const listed = readdirSync(tree);
-      expect(spawnSync("tar", ["-C", tree, "-czf", bundle(), ...listed]).status).toBe(0);
+      expect(spawnSync("tar", ["--sort=name", "-C", tree, "-czf", bundle(), ...listed]).status).toBe(0);
       spawnSync("chmod", ["-R", "u+rwX", tree]);
       rmSync(tree, { recursive: true, force: true });
       return { DESKTOP_TARGET: "darwin-arm64", DESKTOP_TARBALL_SHA256: sha256(readFileSync(bundle())), DESKTOP_TARBALL_SIZE: String(statSync(bundle()).size) };
@@ -519,6 +521,8 @@ describe("the desktop's release manifest", () => {
         ["a link out of it", (app) => symlinkSync("/etc/passwd", join(app, "Contents", "Resources", "outside")), `${at} holds a link that leads out of Surogate.app, or to nothing: Surogate.app/Contents/Resources/outside\n`],
         ["a link up and out of it", (app) => symlinkSync("../../..", join(app, "Contents", "Resources", "up")), `${at} holds a link that leads out of Surogate.app, or to nothing: Surogate.app/Contents/Resources/up\n`],
         ["a link to nothing", (app) => symlinkSync("gone", join(app, "Contents", "Resources", "dangling")), `${at} holds a link that leads out of Surogate.app, or to nothing: Surogate.app/Contents/Resources/dangling\n`],
+        // A tar of macOS's keeps a file's extended attributes in a file beside it, whose name breaks the bundle's seal.
+        ["an AppleDouble file", (app) => writeFileSync(join(app, "Contents", "Resources", "._release-keys"), "attributes"), `${at} holds an AppleDouble file, which breaks the bundle's seal: Surogate.app/Contents/Resources/._release-keys\n`],
       ];
       for (const [name, change, said] of refusals) {
         expect([name, publish("describe", "1.2.3", packedApp(change))]).toMatchObject([name, { status: 1, stdout: "", stderr: said }]);
@@ -526,11 +530,33 @@ describe("the desktop's release manifest", () => {
       }
     });
 
+    it("writes no manifest of a bundle whose release keys are not one regular file that only its owner writes, as the archive has them", () => {
+      const keys = (top: string) => join(top, "Contents", "Resources", "release-keys");
+      const said = "publish.sh: the tarball's Surogate.app/Contents/Resources/release-keys is not one regular file that only its owner may write\n";
+      const refusals: Array<[string, (top: string) => void]> = [
+        ["a group's to write", (top) => chmodSync(keys(top), 0o664)],
+        ["anyone's to write", (top) => chmodSync(keys(top), 0o646)],
+        ["a link", (top) => {
+          renameSync(keys(top), join(top, "Contents", "Resources", "keys"));
+          symlinkSync("keys", keys(top));
+        }],
+        // Archived after the name it shares a file with, it is that name's hard link.
+        ["a second name of another file", (top) => linkSync(keys(top), join(top, "Contents", "Resources", "a-keys"))],
+        ["none", (top) => rmSync(keys(top))],
+      ];
+      for (const [name, change] of refusals) {
+        expect([name, publish("describe", "1.2.3", packedApp(change))]).toMatchObject([name, { status: 1, stdout: "", stderr: said }]);
+        expect([name, existsSync(manifest())]).toEqual([name, false]);
+      }
+      // Its owner's alone to write, and stricter than the layout's: taken.
+      expect(publish("describe", "1.2.3", packedApp((top) => chmodSync(keys(top), 0o600))).status).toBe(0);
+    });
+
     it("writes no manifest of a bundle whose release keys are not install.sh's, key for key", () => {
       const other = pem(generateKeyPairSync("ed25519").publicKey);
       const said = "the tarball's Surogate.app/Contents/Resources/release-keys is not install.sh's list of release keys, key for key: its app would check its updates by others";
-      for (const [name, listed] of [["another key", `RELEASE_KEYS=(\n  '${other}'\n)\n`], ["a key more", `RELEASE_KEYS=(\n  '${PUBLIC}'\n  '${other}'\n)\n`], ["no key", "RELEASE_KEYS=(\n)\n"], ["none", null]] as const) {
-        const words = packedApp((top) => (listed === null ? rmSync(join(top, "Contents", "Resources", "release-keys")) : writeFileSync(join(top, "Contents", "Resources", "release-keys"), listed)));
+      for (const [name, listed] of [["another key", `RELEASE_KEYS=(\n  '${other}'\n)\n`], ["a key more", `RELEASE_KEYS=(\n  '${PUBLIC}'\n  '${other}'\n)\n`], ["no key", "RELEASE_KEYS=(\n)\n"]] as const) {
+        const words = packedApp((top) => writeFileSync(join(top, "Contents", "Resources", "release-keys"), listed));
         expect([name, publish("describe", "1.2.3", words)]).toMatchObject([name, { status: 1, stdout: "", stderr: `publish.sh: ${said}\n` }]);
         expect([name, existsSync(manifest())]).toEqual([name, false]);
       }

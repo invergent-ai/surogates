@@ -18,7 +18,8 @@
 #                                   never runs; and bin/: the app's node (scripts/node.sh darwin-arm64), its rg
 #                                   (scripts/rg.sh) and surogate-spawn (native/spawn/build.sh)
 #     Resources/vm/                 agent.img, the agent disk, and the guest image's manifest, the arm64 image's
-#     Resources/release-keys        install.sh's release keys, as the app reads them (scripts/release-keys.mjs)
+#     Resources/release-keys        install.sh's release keys, as the app reads them (scripts/release-keys.mjs), a file of
+#                                   mode 0644
 #     Resources/surogate.icns       the app's icon, Surogate's mark, in place of Electron's
 #
 # Signed ad hoc, inside out, so that it runs on the Mac that built it and on the runner (scripts/sign-mac.sh sign); the
@@ -115,6 +116,8 @@ cp native/out/surogate-vm native/helper/.build/surogate-helper "$contents/MacOS/
 cp "$AGENT_DISK" "$contents/Resources/vm/agent.img"
 cp "$VM_MANIFEST" "$contents/Resources/vm/manifest.json"
 node scripts/release-keys.mjs release/install.sh "$contents/Resources/release-keys"
+# A file only its owner writes: the app takes its keys only so.
+chmod 0644 "$contents/Resources/release-keys"
 
 # Nothing in it writable but by its owner, whatever umask built it, and nothing with a set-id or sticky bit.
 chmod -R u+w,go-w,a+rX,a-st "$top"

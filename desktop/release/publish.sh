@@ -217,6 +217,9 @@ describe_bundle() {
     target="$(realpath -e "$link" 2>/dev/null)" || target=
     case "$target" in "$tree/Surogate.app"/*) ;; *) fail "$OUT/$ARCHIVE holds a link that leads out of Surogate.app, or to nothing: ${link#"$unpacked"/}" ;; esac
   done < <(find "$unpacked/Surogate.app" -type l -print0)
+  # No AppleDouble file, which a tar of macOS's leaves for a file's extended attributes: its name would break the seal.
+  shown="$(find "$unpacked/Surogate.app" -name '._*' -print -quit)"
+  [ -z "$shown" ] || fail "$OUT/$ARCHIVE holds an AppleDouble file, which breaks the bundle's seal: ${shown#"$unpacked"/}"
   # Each a file of the bundle's own: no link, and under no folder that is one.
   package=Surogate.app/Contents/Resources/app/package.json
   [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's $package names no stateSchema"
@@ -227,7 +230,11 @@ describe_bundle() {
   # The version the bundle says of itself, in the XML that plutil keeps it in: its updater takes no other.
   shown="$(sed -n '/^[[:space:]]*<key>CFBundleShortVersionString<\/key>$/{n;s/^[[:space:]]*<string>\(.*\)<\/string>$/\1/p;}' "$unpacked/Surogate.app/Contents/Info.plist" 2>/dev/null)" || shown=
   [ "$shown" = "$VERSION" ] || fail "the tarball's Surogate.app is not version $VERSION, by its Info.plist's CFBundleShortVersionString"
+  # The release keys' member as the archive has it, whose mode the unpacking here did not keep: one regular file, of
+  # one name, that no group and no other may write, as the app takes its keys only so.
   keys=Surogate.app/Contents/Resources/release-keys
+  shown="$(tar -tvzf "$OUT/$ARCHIVE" "$keys" 2>/dev/null)" || shown=
+  [[ "$shown" == -????[!w]??[!w]?\ * && "$shown" != *$'\n'* ]] || fail "the tarball's $keys is not one regular file that only its owner may write"
   [ -f "$unpacked/$keys" ] && [ "$(realpath "$unpacked/$keys")" = "$tree/$keys" ] \
     && bash -c '. <(sed "\$d" "$1") && settings && listed read "$2" && [ "${#read[@]}" -gt 0 ] && [ "${#read[@]}" -eq "${#RELEASE_KEYS[@]}" ] || exit 1
       for at in "${!read[@]}"; do [ "${read[at]}" = "${RELEASE_KEYS[at]}" ] || exit 1; done' _ "$HERE/install.sh" "$unpacked/$keys" \

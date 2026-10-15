@@ -103,6 +103,10 @@ done
   && ok "gives surogate-vm the Virtualization framework's entitlement alone" || not_ok "gives surogate-vm other entitlements"
 [ -z "$(codesign -d --entitlements - --xml "$signed/Contents/MacOS/surogate-helper" 2>/dev/null)" ] \
   && ok "gives surogate-helper no entitlement" || not_ok "gives surogate-helper an entitlement"
+# surogate-helper reads its own Team ID to check an update's bundle by: it is the app's own signer's, Team ID and all.
+signers() { codesign -dvvv "$1" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)=' || :; }
+[ -n "$(signers "$signed/Contents/MacOS/Surogate")" ] && [ "$(signers "$signed/Contents/MacOS/surogate-helper")" = "$(signers "$signed/Contents/MacOS/Surogate")" ] \
+  && ok "signs surogate-helper by the app's own signer, its Team ID the app's" || not_ok "signs surogate-helper by another signer than the app's: $(signers "$signed/Contents/MacOS/surogate-helper")"
 refuses "takes no other signer's bundle for the test's" "is not signed by $OTHER alone" "$SIGN" verify "$signed" trial "$OTHER"
 refuses "takes a trial's bundle for no ad hoc one" "is not signed ad hoc" "$SIGN" verify "$signed" adhoc
 refuses "takes a trial's bundle for no Developer ID's" "Developer ID Application certificate" "$SIGN" verify "$signed" developer-id ABCDE12345
@@ -112,6 +116,11 @@ refuses "is told a Team ID of ten capitals and digits" "usage:" "$SIGN" verify "
 copy "$signed" "$work/other-signed"
 codesign --force --sign "$other" --keychain "$work/other.keychain-db" --options runtime --timestamp "$work/other-signed/Surogate.app/Contents/Resources/app/bin/rg"
 refuses "refuses a bundle one of whose programs another signed" "Contents/Resources/app/bin/rg is not signed by $SIGNER alone" "$SIGN" verify "$work/other-signed/Surogate.app" trial "$SIGNER"
+
+copy "$signed" "$work/other-helper"
+codesign --force --sign "$other" --keychain "$work/other.keychain-db" --options runtime --timestamp "$work/other-helper/Surogate.app/Contents/MacOS/surogate-helper"
+refuses "refuses a bundle whose surogate-helper another signed, which would check updates by another Team ID" "Contents/MacOS/surogate-helper is not signed by $SIGNER alone" \
+  "$SIGN" verify "$work/other-helper/Surogate.app" trial "$SIGNER"
 
 copy "$signed" "$work/no-runtime"
 codesign --force --sign "$identity" --keychain "$work/test.keychain-db" --timestamp "$work/no-runtime/Surogate.app/Contents/MacOS/surogate-helper"
@@ -148,12 +157,22 @@ takes "signs a development build ad hoc" "$SIGN" sign "$work/adhoc/Surogate.app"
 takes "checks it as signed ad hoc" "$SIGN" verify "$work/adhoc/Surogate.app" adhoc
 refuses "takes an ad hoc bundle for no trial's" "is not signed by $SIGNER alone" "$SIGN" verify "$work/adhoc/Surogate.app" trial "$SIGNER"
 info="$(codesign -dvvv "$work/adhoc/Surogate.app/Contents/MacOS/Surogate" 2>&1)"
-grep -Eq 'flags=0x[0-9a-f]+\([a-z,-]*runtime' <<<"$info" && not_ok "signs a development build with the hardened runtime, which keeps it from loading its frameworks" \
-  || ok "signs a development build without the hardened runtime, so it loads its own frameworks"
+grep -Eq 'flags=0x[0-9a-f]+\([a-z,-]*runtime' <<<"$info" && not_ok "signs a development build with the hardened runtime" \
+  || ok "signs a development build without the hardened runtime, as Electron's own build is signed"
+[ "$(signers "$work/adhoc/Surogate.app/Contents/MacOS/surogate-helper")" = "$(signers "$work/adhoc/Surogate.app/Contents/MacOS/Surogate")" ] \
+  && ok "signs a development build's surogate-helper ad hoc, as its app" || not_ok "signs a development build's surogate-helper otherwise than its app"
 
+# An extended attribute on a file of the bundle, as macOS leaves some: the payload carries none, in no AppleDouble file
+# and in no header, as either would break the seal of the bundle the updater unpacks.
+xattr -w ai.invergent.surogate.test kept "$signed/Contents/Resources/app/package.json"
+[ -n "$(xattr -p ai.invergent.surogate.test "$signed/Contents/Resources/app/package.json" 2>/dev/null)" ] || not_ok "the test's extended attribute was set"
 takes "packs the update payload" "$SIGN" pack "$signed" "$work/payload.tar.gz"
 mkdir "$work/unpacked"
 tar -xzf "$work/payload.tar.gz" -C "$work/unpacked"
+[ -z "$(xattr -lr "$work/unpacked" 2>/dev/null)" ] && ok "packs no extended attribute: unpacked, no file of it has one" || not_ok "packs extended attributes: $(xattr -lr "$work/unpacked" | head -3)"
+[ "$(gzip -dc "$work/payload.tar.gz" | LC_ALL=C grep -a -c 'ai.invergent.surogate.test' || :)" = 0 ] \
+  && ok "packs no header that names an extended attribute" || not_ok "packs a header that names an extended attribute"
+xattr -d ai.invergent.surogate.test "$signed/Contents/Resources/app/package.json"
 [ "$(ls -A "$work/unpacked")" = Surogate.app ] && ok "packs Surogate.app as its one top folder" || not_ok "packs another top folder: $(ls -A "$work/unpacked")"
 [ -z "$(tar -tzf "$work/payload.tar.gz" | grep -E '(^|/)\._' || :)" ] && ok "packs no AppleDouble file" || not_ok "packs AppleDouble files"
 takes "packs the bundle as it was signed: unpacked, it checks out as the test's" "$SIGN" verify "$work/unpacked/Surogate.app" trial "$SIGNER"
