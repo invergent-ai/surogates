@@ -5,7 +5,6 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
-  ChevronRightIcon,
   Code2Icon,
   CreditCardIcon,
   GlobeIcon,
@@ -58,7 +57,10 @@ import {
   TableCell,
 } from "@invergent/ui-sdk/table";
 import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
-import { Badge } from "@invergent/ui-sdk/badge";
+import { Chip } from "@invergent/ui-sdk/chip";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { ListGroup, ListRow } from "@invergent/ui-sdk/list-row";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 
 const PLATFORM_LABELS: Record<string, string> = {
   slack: "Slack",
@@ -129,37 +131,22 @@ function SettingsIndex({
 }) {
   return (
     <nav aria-label="Settings sections" className="md:hidden">
-      <ul className="overflow-hidden rounded-2xl border border-line bg-card">
-        {tabs.map((id, index) => {
+      <ListGroup>
+        {tabs.map((id) => {
           const { label, blurb, Icon } = TAB_META[id];
           return (
-            <li key={id}>
-              {index > 0 && (
-                <div
-                  aria-hidden="true"
-                  className="ml-[52px] h-px bg-foreground/[0.06]"
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => onSelect(id)}
-                className="flex min-h-14 w-full items-center gap-3 px-4 py-3 text-left active:bg-foreground/[0.04]"
-              >
-                <Icon className="size-5 shrink-0 text-muted-foreground" />
-                <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-[15px] font-medium text-foreground">
-                    {label}
-                  </span>
-                  <span className="truncate text-[12px] text-muted-foreground">
-                    {blurb}
-                  </span>
-                </span>
-                <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground/60" />
-              </button>
-            </li>
+            <ListRow
+              key={id}
+              size="lg"
+              icon={Icon}
+              label={label}
+              description={blurb}
+              chevron
+              onClick={() => onSelect(id)}
+            />
           );
         })}
-      </ul>
+      </ListGroup>
     </nav>
   );
 }
@@ -337,14 +324,12 @@ export function SettingsPage() {
               <SettingsIndex tabs={availableTabs} onSelect={selectTab} />
             )}
             {sectionOpen && (
-              <button
-                type="button"
-                onClick={() => setSectionOpen(false)}
-                className="-ml-2 mb-4 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-muted-foreground active:bg-foreground/[0.04] md:hidden"
-              >
-                <ArrowLeftIcon className="size-4" />
-                Settings
-              </button>
+              <TextLink asChild variant="muted" className="mb-4 md:hidden">
+                <button type="button" onClick={() => setSectionOpen(false)}>
+                  <ArrowLeftIcon className="size-4" />
+                  Settings
+                </button>
+              </TextLink>
             )}
 
             {/* Radix renders only the active section; on a phone it stays
@@ -439,22 +424,19 @@ export function SettingsPage() {
                   Loading...
                 </div>
               ) : channels.length === 0 ? (
-                <div className="text-center py-12 space-y-3">
-                  <LinkIcon className="w-8 h-8 text-muted-foreground/40 mx-auto" />
-                  <p className="text-sm text-muted-foreground">
-                    No connected channels yet.
-                  </p>
-                  <p className="text-sm text-faint">
-                    Use a pairing code from Slack or Telegram to link your
-                    account.
-                  </p>
-                  <Button
-                    variant="outline"
-                    onClick={() => void navigate({ to: "/link" })}
-                  >
-                    Link a channel
-                  </Button>
-                </div>
+                <EmptyState
+                  className="py-12"
+                  title="No connected channels yet"
+                  description="Use a pairing code from Slack or Telegram to link your account."
+                  action={
+                    <Button
+                      variant="outline"
+                      onClick={() => void navigate({ to: "/link" })}
+                    >
+                      Link a channel
+                    </Button>
+                  }
+                />
               ) : (
                 <>
                   <Table>
@@ -469,9 +451,9 @@ export function SettingsPage() {
                       {channels.map((ch) => (
                         <TableRow key={ch.id}>
                           <TableCell>
-                            <Badge variant="default" className="text-sm">
+                            <Chip size="lg">
                               {PLATFORM_LABELS[ch.platform] ?? ch.platform}
-                            </Badge>
+                            </Chip>
                           </TableCell>
                           <TableCell className="">
                             {ch.platform_user_id}

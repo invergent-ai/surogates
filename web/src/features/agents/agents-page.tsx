@@ -7,7 +7,7 @@
 // user-scoped agents.  Platform and org agents are read-only from
 // this UI.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { dump as yamlDump } from "js-yaml";
 import {
   BotIcon,
@@ -19,7 +19,6 @@ import {
   SearchIcon,
   SaveIcon,
   TrashIcon,
-  UsersIcon,
 } from "lucide-react";
 import { MessageResponse } from "@invergent/agent-chat-react";
 import { toast } from "sonner";
@@ -36,8 +35,8 @@ import {
 } from "@/api/agents";
 import { useAppStore } from "@/stores/app-store";
 import { cn } from "@/lib/utils";
-import { Badge } from "@invergent/ui-sdk/badge";
 import { Button } from "@invergent/ui-sdk/button";
+import { TagPill, TonePill } from "@invergent/ui-sdk/chip";
 import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import {
   Dialog,
@@ -52,12 +51,16 @@ import {
   FieldGroup,
   FieldLabel,
 } from "@invergent/ui-sdk/field";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
 import { Input } from "@invergent/ui-sdk/input";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
 } from "@invergent/ui-sdk/input-group";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { Textarea } from "@invergent/ui-sdk/textarea";
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
@@ -69,6 +72,9 @@ const SOURCE_LABELS: Record<AgentSource, string> = {
 };
 
 const SOURCE_ORDER: AgentSource[] = ["user", "org", "platform"];
+
+// The list's first group label starts right under the header, whose rule it would double.
+const FIRST_GROUP = "first:mt-0 first:border-t-0 first:pt-1";
 
 const AGENT_TEMPLATE =
   "---\n" +
@@ -259,28 +265,30 @@ export function AgentsPage() {
                 Loading...
               </div>
             ) : filtered.length === 0 ? (
-              <div className="text-center py-12 px-4 space-y-2">
-                <BotIcon className="w-8 h-8 text-muted-foreground/40 mx-auto" />
-                <p className="text-sm text-muted-foreground">
-                  {search
-                    ? "No sub-agents match your search."
-                    : "No sub-agents configured yet."}
-                </p>
-              </div>
+              <EmptyState
+                className="px-4 py-12"
+                title={
+                  search
+                    ? "No sub-agents match your search"
+                    : "No sub-agents configured yet"
+                }
+              />
             ) : (
-              SOURCE_ORDER.map((source) => {
-                const items = grouped[source];
-                if (items.length === 0) return null;
-                return (
-                  <AgentGroup
-                    key={source}
-                    label={SOURCE_LABELS[source]}
-                    items={items}
-                    selectedName={selectedName}
-                    onSelect={setSelectedName}
-                  />
-                );
-              })
+              <div className="flex flex-col gap-0.5 p-2">
+                {SOURCE_ORDER.map((source) => {
+                  const items = grouped[source];
+                  if (items.length === 0) return null;
+                  return (
+                    <AgentGroup
+                      key={source}
+                      label={SOURCE_LABELS[source]}
+                      items={items}
+                      selectedName={selectedName}
+                      onSelect={setSelectedName}
+                    />
+                  );
+                })}
+              </div>
             )}
           </div>
         </section>
@@ -292,15 +300,17 @@ export function AgentsPage() {
           )}
         >
           {selectedName && (
-            <div className="md:hidden flex items-center border-b border-line px-2 py-2">
-              <button
-                type="button"
-                onClick={() => setSelectedName(null)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-md text-subtle hover:bg-input hover:text-foreground"
-                aria-label="Back to sub-agents list"
-              >
-                <ChevronLeftIcon className="h-5 w-5" />
-              </button>
+            <div className="md:hidden flex items-center border-b border-line px-4 py-1">
+              <TextLink asChild variant="muted">
+                <button
+                  type="button"
+                  onClick={() => setSelectedName(null)}
+                  aria-label="Back to sub-agents list"
+                >
+                  <ChevronLeftIcon className="size-4" />
+                  Sub-agents
+                </button>
+              </TextLink>
             </div>
           )}
           {detailLoading ? (
@@ -309,7 +319,11 @@ export function AgentsPage() {
               Loading sub-agent...
             </div>
           ) : !detail ? (
-            <EmptyState />
+            <EmptyState
+              className="h-full justify-center px-8"
+              title="Select a sub-agent"
+              description="Sub-agents are preset bundles of system prompt, tool filter, model, and iteration cap.  A coordinator session spawns children with ``agent_type=<name>`` to apply the bundle."
+            />
           ) : (
             <AgentDetailView
               detail={detail}
@@ -365,59 +379,20 @@ function AgentGroup({
   onSelect: (name: string) => void;
 }) {
   return (
-    <div className="py-1">
-      <div className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide text-faint">
-        {label}
-      </div>
-      {items.map((agent) => {
-        const isActive = agent.name === selectedName;
-        return (
-          <button
-            type="button"
-            key={`${agent.source}-${agent.name}`}
-            onClick={() => onSelect(agent.name)}
-            className={cn(
-              "w-full text-left px-4 py-2 border-l-2 transition-colors",
-              isActive
-                ? "bg-line text-foreground border-l-primary"
-                : "border-l-transparent hover:bg-input text-subtle hover:text-foreground",
-            )}
-          >
-            <div className="flex items-center gap-1.5 min-w-0">
-              <div className="font-medium text-sm truncate flex-1">
-                {agent.name}
-              </div>
-              {!agent.enabled && (
-                <Badge variant="outline" className="text-[10px]">
-                  disabled
-                </Badge>
-              )}
-            </div>
-            {agent.description && (
-              <div className="text-xs text-faint truncate mt-0.5">
-                {agent.description}
-              </div>
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center justify-center h-full text-center px-8 gap-3">
-      <UsersIcon className="w-10 h-10 text-muted-foreground/40" />
-      <div className="space-y-1">
-        <p className="text-sm text-muted-foreground">Select a sub-agent</p>
-        <p className="text-sm text-faint max-w-sm">
-          Sub-agents are preset bundles of system prompt, tool filter,
-          model, and iteration cap.  A coordinator session spawns
-          children with ``agent_type=&lt;name&gt;`` to apply the bundle.
-        </p>
-      </div>
-    </div>
+    <>
+      <SectionLabel label={label} className={FIRST_GROUP} />
+      {items.map((agent) => (
+        <ListRow
+          key={`${agent.source}-${agent.name}`}
+          icon={BotIcon}
+          label={agent.name}
+          description={agent.description || undefined}
+          badge={!agent.enabled && <TonePill>Disabled</TonePill>}
+          isActive={agent.name === selectedName}
+          onClick={() => onSelect(agent.name)}
+        />
+      ))}
+    </>
   );
 }
 
@@ -442,9 +417,7 @@ function AgentDetailView({
               <h2 className="text-2xl font-bold tracking-tight truncate">
                 {detail.name}
               </h2>
-              {!detail.enabled && (
-                <Badge variant="outline">disabled</Badge>
-              )}
+              {!detail.enabled && <TonePill>Disabled</TonePill>}
             </div>
             {detail.description && (
               <p className="text-sm text-muted-foreground">
@@ -494,12 +467,21 @@ function AgentDetailView({
 }
 
 function MetaRow({ detail }: { detail: AgentDetail }) {
-  const items: { label: string; value: string }[] = [
+  const items: { label: string; value: ReactNode }[] = [
     { label: "Source", value: SOURCE_LABELS[detail.source] },
   ];
   if (detail.category) items.push({ label: "Category", value: detail.category });
   if (detail.tags && detail.tags.length > 0) {
-    items.push({ label: "Tags", value: detail.tags.join(", ") });
+    items.push({
+      label: "Tags",
+      value: (
+        <span className="flex flex-wrap gap-1">
+          {detail.tags.map((tag) => (
+            <TagPill key={tag} label={tag} />
+          ))}
+        </span>
+      ),
+    });
   }
 
   return (

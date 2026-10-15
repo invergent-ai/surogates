@@ -13,6 +13,7 @@ import { authFetch } from "@/api/auth";
 import { Alert, AlertDescription } from "@invergent/ui-sdk/alert";
 import { Button } from "@invergent/ui-sdk/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@invergent/ui-sdk/card";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
 import { approxMessagesLabel } from "@/lib/usage-units";
 
 interface CommerceOffer {
@@ -320,9 +321,7 @@ export function PlanUsageTab() {
         .filter((s) => s.items.length > 0)
         .map((section) => (
           <div key={section.label} className="flex flex-col gap-2.5">
-            <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
-              {section.label}
-            </p>
+            <SectionLabel label={section.label} className="mt-0 pl-0 pointer-coarse:mt-0" />
             {section.items === packs && packsLocked ? (
               <p
                 className="text-xs text-muted-foreground"

@@ -9,7 +9,7 @@ import {
   useChatViewMode,
   useInboxUnreadCount,
 } from "@invergent/agent-chat-react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   BookOpenIcon,
   InboxIcon,
@@ -25,25 +25,23 @@ import {
 import { useTheme } from "next-themes";
 
 import { logout } from "@/api/auth";
-import { Button } from "@invergent/ui-sdk/button";
+import { Badge } from "@invergent/ui-sdk/badge";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import {
+  SidebarAction,
+  SidebarBrand,
+  SidebarUserBar,
+  useSidebar,
+} from "@invergent/ui-sdk/sidebar";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { getDesktop } from "@/lib/desktop-bridge";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
 
-// Width and density are owned by the parent (`AppShell`):
-//   - desktop aside : `data-mode="aside"`, compact (w-14) at `md` or when its
-//     rail is collapsed, expanded (w-80) on a wide screen otherwise.
-//   - phone sheet   : `data-mode="sheet"` always renders expanded.
-// We use Tailwind v4's `group-data-[mode=sheet]:*` variants together with
-// `rail-open:*` (index.css) to flip between compact (icons only) and
-// expanded (full content).
-const showExpanded = "hidden rail-open:flex group-data-[mode=sheet]:flex";
-const showExpandedInline = "hidden rail-open:inline group-data-[mode=sheet]:inline";
-const showExpandedBlock = "hidden rail-open:block group-data-[mode=sheet]:block";
-const hideOnExpanded = "block rail-open:hidden group-data-[mode=sheet]:hidden";
-
+// Width and the rail are owned by the parent (`AppShell`): in its `Sidebar`
+// the rows shrink to their icons when the rail is collapsed; in the phone
+// sheet everything draws open.
 export function SessionSidebar() {
   const navigate = useNavigate();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -61,6 +59,9 @@ export function SessionSidebar() {
   const { unreadCount } = useInboxUnreadCount(surogatesWebChatAdapter);
   const viewMode = useChatViewMode();
   const isSimpleMode = viewMode === "simple";
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { collapsed } = useSidebar();
+  const userName = user ? (user.display_name ?? user.email) : "Account";
 
   function handleNewSession() {
     setActiveSession(null);
@@ -114,116 +115,79 @@ export function SessionSidebar() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      {/* Brand — the ops console's strip: its mark, a title and a muted
-          subtitle, no rule under it. In the icon rail the mark alone,
-          centred. */}
-      <Link
-        to="/"
-        className={cn(
-          "flex shrink-0 items-center pt-5 pb-3 text-foreground no-underline",
-          "justify-center px-1.5",
-          "rail-open:justify-start rail-open:gap-2.5 rail-open:px-4",
-          "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:gap-2.5 group-data-[mode=sheet]:px-4",
-          // The sheet's close button floats over the end of this row — see
-          // AppShell — so the brand keeps clear of it.
-          "group-data-[mode=sheet]:pe-12",
-        )}
-      >
-        <img src="/login.svg" alt="Surogate" className="size-9 shrink-0 rounded-full" />
-        <div className={cn("min-w-0 whitespace-nowrap", showExpandedBlock)}>
-          <div className="text-[15px] font-semibold leading-tight">Surogate</div>
-          <div className="text-xs text-muted-foreground">Agent Chat</div>
-        </div>
-      </Link>
+      <SidebarBrand title="Surogate" subtitle="Agent Chat" link={<Link to="/" />} />
 
-      {/* Nav buttons */}
+      {/* Nav rows. Each names itself (aria-label): in the rail its label
+          hides with the rest of it. */}
       <div
         className={cn(
           "flex flex-col gap-0.5 border-b border-line",
-          "p-1.5 rail-open:p-2.5 group-data-[mode=sheet]:p-2.5",
+          collapsed ? "p-1.5" : "p-2.5",
         )}
       >
         {singleSession ? (
           // One dedicated conversation per user: no "New chat", but the
           // sidebar must still offer a way back into it from other pages.
-          <Button
-            variant="outline"
+          <ListRow
+            icon={MessageSquareIcon}
+            label="Chat"
+            aria-label="Chat"
+            isActive={pathname.startsWith("/chat")}
             onClick={handleOpenChat}
-            className={cn(
-              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 rail-open:justify-start rail-open:px-3",
-              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-            )}
-          >
-            <MessageSquareIcon className="w-4 h-4" />
-            <span className={showExpandedInline}>Chat</span>
-          </Button>
+          />
         ) : (
-          <Button
-            variant="outline"
+          <ListRow
+            icon={PlusIcon}
+            label="New chat"
+            aria-label="New chat"
             onClick={handleNewSession}
-            className={cn(
-              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 rail-open:justify-start rail-open:px-3",
-              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-            )}
-          >
-            <PlusIcon className="w-4 h-4" />
-            <span className={showExpandedInline}>New chat</span>
-          </Button>
+          />
         )}
         {!isSimpleMode && (
-          <Button
-            variant="ghost"
-            onClick={() => void navigate({ to: "/skills" })}
-            className={cn(
-              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 rail-open:justify-start rail-open:px-3",
-              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-            )}
+          <ListRow
+            asChild
+            icon={BookOpenIcon}
+            label="Skills"
+            aria-label="Skills"
+            isActive={pathname.startsWith("/skills")}
           >
-            <BookOpenIcon className="w-4 h-4" />
-            <span className={showExpandedInline}>Skills</span>
-          </Button>
+            <Link to="/skills" />
+          </ListRow>
         )}
         {!isSimpleMode && (
-          <Button
-            variant="ghost"
-            onClick={() => void navigate({ to: "/agents" })}
-            className={cn(
-              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 rail-open:justify-start rail-open:px-3",
-              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-            )}
+          <ListRow
+            asChild
+            icon={UsersIcon}
+            label="Sub-agents"
+            aria-label="Sub-agents"
+            isActive={pathname.startsWith("/agents")}
           >
-            <UsersIcon className="w-4 h-4" />
-            <span className={showExpandedInline}>Sub-agents</span>
-          </Button>
+            <Link to="/agents" />
+          </ListRow>
         )}
-        <Button
-          variant="ghost"
-          onClick={() => void navigate({ to: "/inbox" })}
-          className={cn(
-            "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px] relative",
-            "justify-center px-0 rail-open:justify-start rail-open:px-3",
-            "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-          )}
-        >
-          <InboxIcon className="w-4 h-4" />
-          <span className={showExpandedInline}>Inbox</span>
-          {unreadCount > 0 && (
-            <span
-              className={cn(
-                "inline-flex items-center justify-center bg-primary px-1 text-[0.625rem] font-semibold text-primary-foreground",
-                "absolute right-1 top-0 h-4 min-w-4 px-0.5 text-[0.55rem]",
-                "rail-open:static rail-open:ml-auto rail-open:h-5 rail-open:min-w-5 rail-open:px-1 rail-open:text-[0.625rem]",
-                "group-data-[mode=sheet]:static group-data-[mode=sheet]:ml-auto group-data-[mode=sheet]:h-5 group-data-[mode=sheet]:min-w-5 group-data-[mode=sheet]:px-1 group-data-[mode=sheet]:text-[0.625rem]",
-              )}
+        <div className="relative">
+          <ListRow
+            asChild
+            icon={InboxIcon}
+            label="Inbox"
+            aria-label={unreadCount > 0 ? `Inbox, ${unreadCount} unread` : "Inbox"}
+            isActive={pathname.startsWith("/inbox")}
+            badge={unreadCount > 0 && <Badge>{unreadCount > 99 ? "99+" : unreadCount}</Badge>}
+          >
+            <Link to="/inbox" />
+          </ListRow>
+          {/* The rail has no room for the count beside the label: it sits
+              on the icon's corner, solid so the icon under it cannot show
+              through. */}
+          {collapsed && unreadCount > 0 && (
+            <Badge
+              aria-hidden="true"
+              className="pointer-events-none absolute top-0 right-0.5 h-4 min-w-4 bg-primary px-1 py-0 text-[10px] font-semibold text-primary-foreground"
             >
               {unreadCount > 99 ? "99+" : unreadCount}
-            </span>
+            </Badge>
           )}
-        </Button>
+        </div>
       </div>
 
       {/* Sessions list — hidden entirely in single-session mode: the one
@@ -232,35 +196,27 @@ export function SessionSidebar() {
       <div className="min-h-0 flex-1 flex flex-col">
         {!singleSession && (
           <div className="min-h-0 flex-1 overflow-y-auto py-1">
-            {/* Compact (md only, not sheet): icon-only list */}
-            <div className={hideOnExpanded}>
+            {/* The rail: an icon per session. Both lists stay mounted, hidden
+                in turn, so hovering the rail open does not reload the tree. */}
+            <div className={cn("space-y-0.5 px-1.5", !collapsed && "hidden")}>
               {sessions.map((session) => {
-                const isActive = session.id === activeSessionId;
                 // A chat on a folder of the user's computer shows a laptop, and says which.
                 const computer = sessionComputer(session.config);
-                const Icon = computer ? LaptopIcon : MessageSquareIcon;
                 const title = session.title ?? "New session";
                 return (
-                  <button
+                  <ListRow
                     key={session.id}
-                    type="button"
-                    onClick={() => handleSelectSession(session.id)}
+                    icon={computer ? LaptopIcon : MessageSquareIcon}
+                    label={title}
                     aria-label={computer ? `${title}, on ${computer}` : title}
-                    className={cn(
-                      "flex items-center justify-center w-full py-2 transition-colors border-l-2",
-                      isActive
-                        ? "bg-line text-foreground border-l-primary"
-                        : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
-                    )}
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                  </button>
+                    isActive={session.id === activeSessionId}
+                    onClick={() => handleSelectSession(session.id)}
+                          />
                 );
               })}
             </div>
 
-            {/* Expanded (lg+ or sheet): SessionTreePanel */}
-            <div className={showExpandedBlock}>
+            <div className={cn(collapsed && "hidden")}>
               <SessionTreePanel
                 adapter={surogatesWebChatAdapter}
                 loadList
@@ -283,7 +239,7 @@ export function SessionSidebar() {
         <div
           className={cn(
             "shrink-0 max-h-[45%] overflow-y-auto",
-            showExpandedBlock,
+            collapsed && "hidden",
           )}
         >
           {slashCommandEnabled(slashCommands, "mission") && (
@@ -303,54 +259,29 @@ export function SessionSidebar() {
         </div>
       </div>
 
-      {/* Footer — expanded only (icon-mode hides it entirely) */}
-      <div
-        className={cn(
-          "border-t border-line flex-col gap-1",
-          "p-3",
-          showExpanded,
-        )}
+      <SidebarUserBar
+        avatar={
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/20 text-xs font-bold text-primary">
+            {userName[0]?.toUpperCase() ?? "?"}
+          </span>
+        }
+        name={userName}
       >
-        {user && (
-          <button
-            type="button"
-            onClick={() => void navigate({ to: "/settings" })}
-            className="flex items-center gap-2 px-1 py-1.5 mb-1.5 w-full rounded-md hover:bg-input transition-colors cursor-pointer min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12"
-          >
-            <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center font-bold text-primary text-xs shrink-0">
-              {(user.display_name ?? user.email)?.[0]?.toUpperCase() ?? "?"}
-            </div>
-            <div className="flex-1 min-w-0 text-left">
-              <div className="text-subtle font-medium text-sm truncate">
-                {user.display_name ?? user.email}
-              </div>
-            </div>
-            <SettingsIcon className="w-3.5 h-3.5 text-faint shrink-0" />
-          </button>
-        )}
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="flex items-center gap-2 flex-1 px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]"
-          >
-            <LogOutIcon className="w-4 h-4" />
-            Sign out
-          </button>
-          <button
-            type="button"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            className="p-1.5 rounded-md text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 rail-open:min-h-9 min-w-11 rail-open:min-w-0 group-data-[mode=sheet]:min-h-11 group-data-[mode=sheet]:min-w-11"
-            aria-label="Toggle theme"
-          >
-            {theme === "dark" ? (
-              <SunIcon className="w-4 h-4" />
-            ) : (
-              <MoonIcon className="w-4 h-4" />
-            )}
-          </button>
-        </div>
-      </div>
+        <SidebarAction
+          label={theme === "dark" ? "Light mode" : "Dark mode"}
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+        >
+          {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+        </SidebarAction>
+        <SidebarAction asChild label="Settings">
+          <Link to="/settings">
+            <SettingsIcon />
+          </Link>
+        </SidebarAction>
+        <SidebarAction label="Sign out" onClick={handleLogout}>
+          <LogOutIcon className="size-4" />
+        </SidebarAction>
+      </SidebarUserBar>
     </div>
   );
 }

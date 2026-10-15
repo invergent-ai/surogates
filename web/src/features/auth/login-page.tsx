@@ -10,9 +10,12 @@ import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@invergent/ui-sdk/alert";
 import { Button } from "@invergent/ui-sdk/button";
 import { Card } from "@invergent/ui-sdk/card";
+import { Chip } from "@invergent/ui-sdk/chip";
 import { Input } from "@invergent/ui-sdk/input";
 import { Label } from "@invergent/ui-sdk/label";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
 import { Spinner } from "@invergent/ui-sdk/spinner";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import {
   exchangeFirebaseToken,
   fetchAuthConfig,
@@ -468,7 +471,9 @@ export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?
   };
 
   return (
-    <div className="bg-background text-foreground min-h-dvh flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative px-4 py-6">
+    // The bottom padding keeps the copyright line, pinned to the page's foot, clear of the tags
+    // when the page is taller than a phone's screen.
+    <div className="bg-background text-foreground min-h-dvh flex flex-col items-center justify-center overflow-hidden text-sm leading-normal antialiased relative px-4 pt-6 pb-14">
       {/* animated grid */}
       <canvas
         ref={canvasRef}
@@ -639,24 +644,26 @@ export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?
                 placeholder="••••••••••••"
                 aria-invalid={!!loginError && !password}
               />
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-2 top-1/2 h-7 -translate-y-1/2 rounded-md px-2 text-xs font-medium tracking-normal text-faint normal-case hover:bg-transparent hover:text-foreground"
+              <TextLink
+                asChild
+                variant="muted"
+                size="sm"
+                className="absolute top-1/2 right-2 -translate-y-1/2"
               >
-                {showPassword ? "Hide" : "Show"}
-              </Button>
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {showPassword ? "Hide" : "Show"}
+                </button>
+              </TextLink>
             </div>
             {firebaseMode === "sign-in" && firebasePasswordEnabled && (
-              <button
-                type="button"
-                onClick={handleForgotPassword}
-                className="mt-1.5 text-xs text-faint hover:text-foreground hover:underline"
-              >
-                Forgot password?
-              </button>
+              <TextLink asChild variant="muted" size="sm" className="mt-1.5">
+                <button type="button" onClick={handleForgotPassword}>
+                  Forgot password?
+                </button>
+              </TextLink>
             )}
           </div>
 
@@ -676,16 +683,17 @@ export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?
               <AlertDescription className="text-sm text-foreground">
                 {loginNotice}
                 {pendingVerificationUser && (
-                  <button
-                    type="button"
-                    disabled={resendingVerification}
-                    onClick={handleResendVerification}
-                    className="ml-1 inline text-primary hover:underline disabled:opacity-50 disabled:hover:no-underline"
-                  >
-                    {resendingVerification
-                      ? "Resending…"
-                      : "Resend verification email"}
-                  </button>
+                  <TextLink asChild size="inline" className="ml-1">
+                    <button
+                      type="button"
+                      disabled={resendingVerification}
+                      onClick={handleResendVerification}
+                    >
+                      {resendingVerification
+                        ? "Resending…"
+                        : "Resend verification email"}
+                    </button>
+                  </TextLink>
                 )}
               </AlertDescription>
             </Alert>
@@ -720,28 +728,36 @@ export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?
               !!authConfig.commerce_buy_url;
             if (monetized) {
               return (
-                <a
-                  href={authConfig.commerce_buy_url ?? "#"}
-                  className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
-                >
-                  New here? Get access →
-                </a>
+                <div className="mt-3 flex justify-center">
+                  <TextLink
+                    variant="muted"
+                    size="sm"
+                    href={authConfig.commerce_buy_url ?? "#"}
+                  >
+                    New here? Get access →
+                  </TextLink>
+                </div>
               );
             }
             if (!firebasePasswordEnabled) return null;
             return (
-              <button
-                type="button"
-                className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
-                onClick={() => {
-                  clearError();
-                  setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
-                }}
-              >
-                {firebaseMode === "create"
-                  ? "Already have an account? Sign in"
-                  : "New here? Create an account"}
-              </button>
+              <div className="mt-3 flex justify-center">
+                <TextLink asChild variant="muted" size="sm">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearError();
+                      setFirebaseMode((m) =>
+                        m === "create" ? "sign-in" : "create",
+                      );
+                    }}
+                  >
+                    {firebaseMode === "create"
+                      ? "Already have an account? Sign in"
+                      : "New here? Create an account"}
+                  </button>
+                </TextLink>
+              </div>
             );
           })()}
         </form>
@@ -753,10 +769,11 @@ export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?
           // a non-null assertion that the lint rule forbids).
           const firebase = authConfig.firebase;
           return (
-            <div className="mt-6 border-t border-line pt-5">
-              <p className="mb-3 text-[11px] uppercase tracking-widest text-faint">
-                Or continue with
-              </p>
+            <div className="mt-6">
+              <SectionLabel
+                label="Or continue with"
+                className="mt-0 mb-3 pt-5 pl-0 pointer-coarse:mt-0 pointer-coarse:mb-3 pointer-coarse:pt-5"
+              />
 
               {firebaseProviders.includes("google") && (
                 <Button
@@ -806,13 +823,10 @@ export function LoginPage({ notice, onSignedIn }: { notice?: string; onSignedIn?
       >
         <div className="flex flex-wrap justify-center gap-2">
           {TAGS.map((tag) => (
-            <div
-              key={tag.label}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-card/50 border border-line/50 backdrop-blur-sm"
-            >
-              <span className="text-xs text-primary">{tag.icon}</span>
-              <span className="text-xs text-faint">{tag.label}</span>
-            </div>
+            <Chip key={tag.label} className="gap-1.5 backdrop-blur-sm">
+              <span className="text-primary">{tag.icon}</span>
+              {tag.label}
+            </Chip>
           ))}
         </div>
       </div>
