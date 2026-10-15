@@ -287,10 +287,11 @@ export function inspect(args: InspectArgs): Inspected {
         if (tag === "TR" && Array.from((el as HTMLTableRowElement).cells).some((c) => c.colSpan > 1 || c.rowSpan > 1)) fail(`${describe(el)}: no colspan or rowspan.`);
         // A cell's shading is one colour without alpha: the editor draws a translucent one opaque, over the text's own
         // colour as often as not, and a gradient or picture would be lost. A table and its row groups have no shading at
-        // all. A background clipped to the text is the text's gradient.
+        // all. A cell's background clipped to its text is the text's gradient; a row's or a table's reaches no run.
         if (["TABLE", "THEAD", "TBODY", "TR", "TD", "TH"].includes(tag)) {
           const cs = getComputedStyle(el), translucent = (color(cs.backgroundColor)?.alpha ?? 1) < 1;
-          const painted = cs.backgroundClip !== "text" && (!!color(cs.backgroundColor) || cs.backgroundImage !== "none");
+          const textual = cs.backgroundClip === "text" && (tag === "TD" || tag === "TH");
+          const painted = !textual && (!!color(cs.backgroundColor) || cs.backgroundImage !== "none");
           if (painted && ["TABLE", "THEAD", "TBODY"].includes(tag)) fail(`${describe(el)}: the editor draws no background on a <${el.tagName.toLowerCase()}>: put the background on the table's rows (<tr>).`);
           if (painted && (translucent || cs.backgroundImage !== "none")) {
             fail(`${describe(el)}: a table ${tag === "TR" ? "row" : "cell"}'s background must be a solid colour (the editor draws ${translucent ? "it opaque" : "no gradient or picture there"}).`);

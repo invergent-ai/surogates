@@ -257,6 +257,17 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes[0].rows[0].cells[0].paras[0].runs[0].gradient).toMatchObject({ type: "linear", angle: 90 });
   });
 
+  it("refuses gradient text set on a row or a table: only a cell's reaches its text", async () => {
+    const clipped = "background:linear-gradient(90deg,#c81e1e,#2f5597);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent";
+    for (const [table, row, said] of [
+      ["", clipped, "tr> (\"North120\"): a table row's background must be a solid colour"],
+      [clipped, "", "<section > table> (\"North120\"): the editor draws no background on a <table>"],
+    ]) {
+      const html = `<section style="background:#fff;padding:128px"><table style="width:1200px;font-size:32px;${table}"><tr style="${row}"><td>North</td><td>120</td></tr></table></section>`;
+      await expect(measure(html), html).rejects.toThrow(said!);
+    }
+  });
+
   it("refuses a background on a table or its row groups, which the editor does not draw", async () => {
     for (const [table, body, said] of [
       ["background:#14213D", "", "<section > table> (\"North120\"): the editor draws no background on a <table>: put the background on the table's rows (<tr>)."],
