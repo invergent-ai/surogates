@@ -337,7 +337,7 @@ function TaskDetail({
 
       {task.resultMetadata ? (
         <Collapsible className="rounded-[10px] border border-foreground/[0.08]">
-          <CollapsibleHeader variant="section">Result metadata</CollapsibleHeader>
+          <CollapsibleHeader variant="section" size="sm">Result metadata</CollapsibleHeader>
           <CollapsibleContent>
             <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-foreground/[0.08] px-3 py-2 text-[11px] text-foreground/90">
               {JSON.stringify(task.resultMetadata, null, 2)}

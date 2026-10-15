@@ -57,7 +57,7 @@ export function ResearchSourcesPanel({
       onOpenChange={setExpanded}
       className="rounded-[10px] border border-foreground/[0.08] bg-card"
     >
-      <CollapsibleHeader variant="section">
+      <CollapsibleHeader variant="section" size="sm">
         Sources · {sources.length}
       </CollapsibleHeader>
       <CollapsibleContent>

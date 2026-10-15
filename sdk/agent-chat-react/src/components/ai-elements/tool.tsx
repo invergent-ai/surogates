@@ -58,7 +58,7 @@ const statusLabels: Record<ToolPart["state"], string> = {
 
 const statusTones: Record<ToolPart["state"], Tone> = {
   "approval-requested": "warn",
-  "approval-responded": "muted",
+  "approval-responded": "info",
   "input-available": "muted",
   "input-streaming": "muted",
   "output-available": "ok",

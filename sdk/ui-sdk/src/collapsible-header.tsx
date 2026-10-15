@@ -14,7 +14,9 @@ import { cn } from "./lib/utils"
 //   section — a disclosure on a settings page ("What the agent knows about
 //             them"): a 44px 13px header with a down chevron that flips.
 //             Sits in a bordered box (`rounded-[10px] border
-//             border-foreground/[0.08]`) whose content has a top rule.
+//             border-foreground/[0.08]`) whose content has a top rule. `sm`
+//             is the compact one a card in a thread or a strip above the
+//             composer takes: 32px with a mouse, still 44px on touch.
 const collapsibleHeaderVariants = cva(
   "group/collapsible-header flex w-full items-center text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50",
   {
@@ -24,26 +26,36 @@ const collapsibleHeaderVariants = cva(
         section:
           "min-h-11 gap-2 rounded-[10px] px-3 text-[13px] font-medium text-foreground",
       },
+      size: {
+        default: "",
+        sm: "",
+      },
     },
-    defaultVariants: { variant: "nav" },
+    compoundVariants: [
+      { variant: "section", size: "sm", className: "gap-1.5 px-2.5 pointer-fine:min-h-8" },
+    ],
+    defaultVariants: { variant: "nav", size: "default" },
   }
 )
 
 function CollapsibleHeader({
   icon: Icon,
   variant = "nav",
+  size = "default",
   className,
   children,
   ...props
 }: React.ComponentProps<typeof CollapsiblePrimitive.CollapsibleTrigger> & {
   icon?: LucideIcon
   variant?: "nav" | "section"
+  /** `section` only: the compact header. */
+  size?: "default" | "sm"
 }) {
   return (
     <CollapsiblePrimitive.CollapsibleTrigger
       data-slot="collapsible-header"
       data-variant={variant}
-      className={cn(collapsibleHeaderVariants({ variant }), className)}
+      className={cn(collapsibleHeaderVariants({ variant, size }), className)}
       {...props}
     >
       {Icon && (
@@ -62,7 +74,10 @@ function CollapsibleHeader({
       ) : (
         <ChevronDown
           aria-hidden={true}
-          className="size-4 shrink-0 text-muted-foreground transition-transform group-aria-expanded/collapsible-header:rotate-180"
+          className={cn(
+            "shrink-0 text-muted-foreground transition-transform group-aria-expanded/collapsible-header:rotate-180",
+            size === "sm" ? "size-3.5" : "size-4"
+          )}
         />
       )}
     </CollapsiblePrimitive.CollapsibleTrigger>

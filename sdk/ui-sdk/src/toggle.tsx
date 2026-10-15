@@ -23,6 +23,10 @@ const toggleVariants = cva(
         default: "min-h-10 px-3 text-[13px] pointer-fine:min-h-8",
         sm: "min-h-9 px-3 text-[12px] pointer-fine:min-h-7",
         lg: "min-h-11 px-4 text-sm pointer-fine:min-h-9",
+        // Square, as the Button's icon sizes: 44px on touch.
+        icon: "size-9 min-h-11 min-w-11 px-0 pointer-fine:min-h-0 pointer-fine:min-w-0",
+        "icon-xs":
+          "size-7 min-h-11 min-w-11 px-0 pointer-fine:min-h-0 pointer-fine:min-w-0",
       },
     },
     defaultVariants: {

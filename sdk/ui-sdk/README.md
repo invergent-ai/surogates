@@ -48,12 +48,13 @@ the kit carries Work's own components:
 | `sidebar` | `Sidebar`, `SidebarBrand`, `SidebarUserBar`, `SidebarAction`, `useSidebar` | The desktop sidebar: open, or an icon rail that opens on hover, with the pin toggle at its bottom. `ListRow` and `SectionLabel` inside it collapse with the rail; outside it (a phone drawer) the parts draw open. |
 | `list-row` | `ListRow`, `ListGroup` | A list entry (icon, label, description, count, chevron) in three densities; a button, or any link via `asChild`. |
 | `section-label` | `SectionLabel` | A rule and a quiet word starting a group of rows. |
-| `collapsible-header` | `CollapsibleHeader` | A styled `CollapsibleTrigger`: `nav` (a group in a list of rows) or `section` (a disclosure). |
-| `chip` | `Chip`, `TonePill`, `TagPill`, `TONE` | Round chips by tone (`ok`, `warn`, `bad`, `muted`), removable with `onRemove`. |
+| `collapsible-header` | `CollapsibleHeader` | A styled `CollapsibleTrigger`: `nav` (a group in a list of rows) or `section` (a disclosure; `size="sm"` for the compact one). |
+| `chip` | `Chip`, `TonePill`, `TagPill`, `TONE` | Round chips by tone (`ok`, `warn`, `bad`, `info`, `muted`), removable with `onRemove`. |
 | `choice-card` | `ChoiceCard` | A selectable option card (`aria-pressed`), amber when picked. |
 | `text-link` | `TextLink` | Amber or muted text link; `asChild` for router links. |
 | `segmented-control` | `SegmentedControl` | The Work / Dev mode switch, for any two or three peers. |
 | `toggle`, `toggle-group` | `FilterPill`, `ViewSwitch`, `useRememberedView` | A list filter pill; a tab's view switch. |
+| `tab-strip` | `TabStrip`, `TabStripTab` | A compact strip of tabs that close (a browser's open pages). |
 | `pill-tabs` | `PillTabs` | A page's section tabs as a bare strip (`tabs` draws the same over Radix). |
 | `empty-state` | `EmptyState`, `EmptyStateLogo` | The brand badge, a heading, copy and actions for an empty list. |
 | `stat-card` | `StatCard`, `InfoHint`, `ChannelChip` | A stat tile: label, value, hint, detail. |

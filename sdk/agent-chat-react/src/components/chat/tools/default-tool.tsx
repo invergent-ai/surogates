@@ -52,7 +52,7 @@ export function DefaultToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   return (
     <Collapsible className="overflow-hidden rounded-[10px] border border-foreground/[0.08]">
-      <CollapsibleHeader variant="section">
+      <CollapsibleHeader variant="section" size="sm">
         <span className="flex min-w-0 items-center gap-2">
           <StatusIcon tc={tc} />
           <span className="shrink-0">{toolLabel(tc.toolName)}</span>

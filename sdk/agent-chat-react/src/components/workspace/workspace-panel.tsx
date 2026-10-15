@@ -13,7 +13,6 @@ import {
 	useRef,
 	useState,
 } from "react";
-import type { ReactNode } from "react";
 import { formatFileSize } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import type {
@@ -26,14 +25,7 @@ import {
 	FileTreeFolder,
 } from "../ai-elements/file-tree";
 import { Button } from "@invergent/ui-sdk/button";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@invergent/ui-sdk/dialog";
+import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
 import { EmptyState } from "@invergent/ui-sdk/empty-state";
 import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
 import { Skeleton } from "@invergent/ui-sdk/skeleton";
@@ -570,62 +562,5 @@ export function WorkspacePanel({
 				}}
 			/>
 		</aside>
-	);
-}
-
-interface ConfirmDialogProps {
-	open: boolean;
-	title: string;
-	description: ReactNode;
-	confirmLabel: string;
-	loading: boolean;
-	onConfirm: () => void;
-	onCancel: () => void;
-}
-
-function ConfirmDialog({
-	open,
-	title,
-	description,
-	confirmLabel,
-	loading,
-	onConfirm,
-	onCancel,
-}: ConfirmDialogProps) {
-	return (
-		<Dialog
-			open={open}
-			onOpenChange={(nextOpen) => {
-				if (!nextOpen && !loading) onCancel();
-			}}
-		>
-			{/* Drawn as the kit's ConfirmDialog draws it. That one keeps its own
-			    busy state, and a delete here outlives the panel (the chat's
-			    store holds it), so a remounted panel must show it still locked. */}
-			<DialogContent
-				showCloseButton={false}
-				className="gap-3.5 px-6 pt-6 pb-5 sm:max-w-[430px]"
-			>
-				<DialogHeader>
-					<DialogTitle>{title}</DialogTitle>
-					<DialogDescription>{description}</DialogDescription>
-				</DialogHeader>
-				<DialogFooter className="pt-1.5">
-					<Button variant="outline" disabled={loading} onClick={onCancel}>
-						Cancel
-					</Button>
-					<Button
-						variant="destructive"
-						disabled={loading}
-						onClick={onConfirm}
-					>
-						{loading && (
-							<Loader2Icon className="mr-1.5 size-3.5 animate-spin" />
-						)}
-						{confirmLabel}
-					</Button>
-				</DialogFooter>
-			</DialogContent>
-		</Dialog>
 	);
 }
