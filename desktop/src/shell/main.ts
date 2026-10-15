@@ -388,31 +388,34 @@ function startUpdates(): void {
 // into it; or, installed already, the restart alone. Only while the line shows a button.
 async function updateAction(): Promise<void> {
   if (!updates || !updateLine(updates.state)?.button) return;
+  // On a Mac whose app's folder this user may not change: the release's disk image, which an administrator installs.
+  if (updates.state.state === "administrator") return void shell.openExternal(updates.state.download);
   // Where the downloaded files were no longer the app's own, the release is looked for again: one
   // that cannot be found is said in the log, as a check's is.
   await updates.install().catch(report);
   if (updates.state.state === "installed") restart();
-  // Approved on Windows: the app quits for the MSI, and the helper starts it again once it has run.
+  // Approved on Windows: the app quits for the MSI, and the helper starts it again once it has run. Checked on macOS:
+  // the app quits for its helper to swap the bundle, which opens the app again.
   if (updates.state.state === "restarting") app.quit();
 }
 
-// Remove Surogate from This Computer, where the installed app can remove itself, as Windows's does: confirmed first,
-// with whether to delete this user's own data asked beside it; the login item turned off; then the MSI's uninstall, for
-// every user, through UAC, by the helper, which removes the data after it where asked. Once an administrator has
-// approved, the app quits, which stops its hosts and its VM, as the uninstall waits for it. It never touches a chat's
-// folder, nor another user's data: what it deletes is this user's data root alone.
+// Remove Surogate from This Computer, or from This Mac, where the installed app can remove itself: confirmed first, with
+// whether to delete this user's own data asked beside it; the login item turned off; then the helper. On Windows, the
+// MSI's uninstall, for every user, through UAC, which removes the data after it where asked. On macOS, once the app has
+// quit, its key in the user's Keychain, the data and caches where asked, and the app itself to the Trash where this user
+// may change its folder. Once the helper goes on, the app quits, which stops its hosts and its VM, as the helper waits
+// for it. It never touches a chat's folder, nor another user's data: what it deletes is this user's own.
 async function uninstall(): Promise<void> {
-  const remove = INSTALLER.uninstall;
-  if (!remove || !app.isPackaged) return;
+  const removal = INSTALLER.uninstall;
+  if (!removal || !app.isPackaged) return;
+  const asked = removal.asked();
   const { response, checkboxChecked: forget } = await messageBoxResult({
-    type: "warning", message: "Remove Surogate from this computer?",
-    detail: "Surogate is uninstalled for every user of this computer, once an administrator approves it. The folders your chats work on are left as they are.",
-    checkboxLabel: "Also delete your Surogate data on this computer: your sign-in, your settings and the sandbox's disks", checkboxChecked: false,
+    type: "warning", message: asked.message, detail: asked.detail, checkboxLabel: asked.checkbox, checkboxChecked: false,
     buttons: ["Remove", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
   });
   if (response !== 0) return;
   await Promise.resolve(loginItem.set(false, loginCommand())).catch(report);
-  const { code, said, restarts } = await remove(forget ? [root] : []);
+  const { code, said, restarts } = await removal.run(forget ? removal.forget(places) : []);
   if (code === 0 && restarts) return void app.quit();
   if (said) report(new Error(`Surogate was not removed${code === null ? "" : ` (exit ${code})`}: ${said}`));
   const dismissed = code === 1223;
@@ -1806,7 +1809,8 @@ function state() {
     links: Object.keys(links()),
     // The chats in no project, and which of them the centre shows.
     recents: recents && { ...recents, shown: chatShown },
-    uninstall: app.isPackaged && INSTALLER.uninstall !== null,
+    // The menu's item that removes the app from this computer, where the installed app can: its words on this OS.
+    uninstall: app.isPackaged ? INSTALLER.uninstall?.item ?? null : null,
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() || sessionStore.unencrypted()
       ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
@@ -2941,6 +2945,8 @@ if (!app.requestSingleInstanceLock() || quitAsked(process.argv)) {
       hidden: loginItem.startedHidden(process.argv),
     });
     wire(main, page);
+    // Reached: what an update left beside the installed app goes, the version it replaced too (installer.ts).
+    if (app.isPackaged) main.window.webContents.once("did-finish-load", () => void INSTALLER.reachedWindow().catch(report));
     // In the tray where the desktop has one; GNOME without one shows the window at the next launch.
     tray = new Tray(trayImage());
     tray.setToolTip("Surogate");
