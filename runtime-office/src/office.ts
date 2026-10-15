@@ -14,6 +14,7 @@ export const FLUSH_WAIT_MS = 10_000;
 // The editor answers its lock request and finishes a save within a fraction of a second.
 export const UNDO_WAIT_MS = 5_000;
 const UNDO_POLL_MS = 50;
+const FRAME_SILENT = "the editor's frame did not answer";
 const COMMIT = ["GroupActions", ""];
 const CANCEL = ["GroupActions", "", "cancel"];
 const STALLED_EDIT = "the editor stopped answering; the edit may have applied: read the document again before editing";
@@ -175,17 +176,23 @@ export class Office {
     }
   }
 
-  // Sends the Undo once the editor would run it, and whether it ran: from the history at once, or queued behind the
-  // editor's save and run when that ends. Reading the state from the frame is no command, so the Undo is still the
-  // next thing the editor runs.
+  // Undoes the failed command once the editor would run the Undo, and says whether it ran: from the history at once,
+  // or queued behind the editor's save and run when that ends. The Undo is called from the editor's frame, with no
+  // command between the failed one and it (in a PDF even a read is an undo point).
   private async undo(page: EditorPage): Promise<boolean> {
-    const before = await waitUndoState(page, (state) => state.ready);
-    if (!before || stalled(await page.method("Undo", []))) return false;
-    const after = await undoStateWithin(page, UNDO_WAIT_MS);
-    if (!after) return false;
-    // A save under way clears the history and declines the Undo: the index drops then too, with the points gone.
-    if (after.index < before.index && after.points === before.points) return true;
-    return after.queued && (await waitUndoState(page, (state) => !state.queued && !state.locked)) !== null;
+    const end = Date.now() + UNDO_WAIT_MS;
+    for (;;) {
+      // An attempt that got no answer may still have run: nothing more is sent.
+      const attempt = await withTimeout(page.undoNow(), Math.max(end - Date.now(), UNDO_POLL_MS), FRAME_SILENT).catch(() => null);
+      if (!attempt) return false;
+      const { before, after } = attempt;
+      if (after) {
+        if (after.index < before.index && after.points === before.points) return true;
+        return after.queued && (await waitUndoState(page, (state) => !state.queued && !state.locked)) !== null;
+      }
+      if (Date.now() >= end) return false;
+      await new Promise((resolve) => setTimeout(resolve, UNDO_POLL_MS));
+    }
   }
 
   // A page whose registry a failed command left off must never send another change: it is closed, and the next call
@@ -206,14 +213,10 @@ export class Office {
 }
 
 // A frame that does not answer counts as a state not known.
-function undoStateWithin(page: EditorPage, ms: number): Promise<UndoState | null> {
-  return withTimeout(page.undoState(), ms, "the editor's frame did not answer").catch(() => null);
-}
-
 async function waitUndoState(page: EditorPage, until: (state: UndoState) => boolean): Promise<UndoState | null> {
   const end = Date.now() + UNDO_WAIT_MS;
   for (;;) {
-    const state = await undoStateWithin(page, Math.max(end - Date.now(), UNDO_POLL_MS));
+    const state = await withTimeout(page.undoState(), Math.max(end - Date.now(), UNDO_POLL_MS), FRAME_SILENT).catch(() => null);
     if (state && until(state)) return state;
     if (Date.now() >= end) return null;
     await new Promise((resolve) => setTimeout(resolve, UNDO_POLL_MS));

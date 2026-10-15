@@ -20,6 +20,9 @@ type Reply = { sentAt: number; value: unknown };
  * save clears them), or the Undo is queued. */
 export type UndoState = { ready: boolean; locked: boolean; index: number; points: number; queued: boolean };
 
+/** An Undo tried in the editor: the state it found, and the state right after when it ran. */
+export type UndoAttempt = { before: UndoState; after?: UndoState };
+
 // For a moment after a PDF editor opens, the document server answers its fetch of the PDF 400 and serves it on the
 // next try. Opening again meets the same moment, so the fetch itself is tried again.
 const PDF_FILE = /\/origin\.pdf(?:[/?]|$)/;
@@ -119,25 +122,42 @@ export class EditorPage {
     }).catch(() => true);
   }
 
-  /** The editor's undo state, read from its frame (internal names: no builder call reports it), or null when it cannot
-   * be read. With a co-editor connected, the editor drops an Undo while it waits for the server to answer its lock
-   * request (its collaborative lock), and, once its history went to the server, while a save is under way; an Undo it
-   * takes then is queued behind the save. */
+  /** The editor's undo state, read from its frame, or null when it cannot be read. */
   async undoState(): Promise<UndoState | null> {
+    return (await this.undoInFrame(false))?.before ?? null;
+  }
+
+  /** Undoes the editor's last change if it would run now: the state found, and when it ran, the state right after. */
+  undoNow(): Promise<UndoAttempt | null> {
+    return this.undoInFrame(true);
+  }
+
+  // Internal names: no builder call reports the undo state. With a co-editor connected the editor drops an Undo while
+  // it waits for the server to answer its lock request (its collaborative lock). An Undo during a save is undone only
+  // in this editor: co-editors keep the change. Once the history went to the server, an Undo is queued behind a save.
+  // The check, the Undo (the editor's own, which its plugin Undo method calls) and the read after run in one go in the
+  // frame, so no save comes between them: a save that ended would clear the history the read looks at.
+  private async undoInFrame(run: boolean): Promise<UndoAttempt | null> {
     const frame = this.frame();
     if (!frame) return null;
-    return frame.evaluate(() => {
-      type Editor = { canSave?: boolean; forceSaveUndoRequest?: boolean };
+    return frame.evaluate((undo) => {
+      type Editor = { canSave?: boolean; forceSaveUndoRequest?: boolean; Undo(): void };
       type Common = { CollaborativeEditing?: { Get_GlobalLock(): boolean; CanUndo(): boolean }; History?: { Index: number; Points: unknown[]; Can_Undo(): boolean } };
       const w = window as unknown as { editor?: Editor; Asc?: { editor?: Editor }; AscCommon?: Common };
       const editor = w.editor ?? w.Asc?.editor, co = w.AscCommon?.CollaborativeEditing, history = w.AscCommon?.History;
       if (!editor || !co || !history) return null;
-      const locked = co.Get_GlobalLock();
-      return {
-        ready: !locked && (history.Can_Undo() || (co.CanUndo() && editor.canSave === true)), locked,
-        index: history.Index, points: history.Points.length, queued: editor.forceSaveUndoRequest === true,
+      const read = () => {
+        const locked = co.Get_GlobalLock();
+        return {
+          ready: !locked && editor.canSave === true && (history.Can_Undo() || co.CanUndo()), locked,
+          index: history.Index, points: history.Points.length, queued: editor.forceSaveUndoRequest === true,
+        };
       };
-    }).catch(() => null);
+      const before = read();
+      if (!undo || !before.ready) return { before };
+      editor.Undo();
+      return { before, after: read() };
+    }, run).catch(() => null);
   }
 
   /** Whether the editor's object registry was left switched off: a builder call that throws inside the editor's
