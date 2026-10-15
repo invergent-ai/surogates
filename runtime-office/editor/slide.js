@@ -351,6 +351,9 @@
     slide.RemoveAllObjects();   // its builds go with its shapes
     var blank = blankLayout();
     if (blank) slide.ApplyLayout(blank);
+    // A new slide shows its layout's background, else its master's: so does this one, unless its HTML sets its own.
+    // (A layout leaves a background set on the slide itself in place.)
+    if (!slide.FollowLayoutBackground()) slide.FollowMasterBackground();
     var notes = slide.GetNotesPage();
     if (notes && notes.GetBodyShape()) notes.GetBodyShape().GetDocContent().RemoveAllElements();
     build(slide, spec);

@@ -83,6 +83,38 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
     expect((await outline(agent)).slides[1]).toMatchObject({ id: second.id, title: "Hiring plan" });
   });
 
+  it("a replaced slide whose HTML sets no background shows the deck's again", async () => {
+    const { agent, user } = await deck();
+    // The second slide's own background beside its layout's and master's, and the fill the page draws for it and for
+    // the first slide, which never had one (editor internals: the builder reads no background).
+    const backgrounds = async (id: string): Promise<Any> => (await (await pool.get(id)).command(`function () {
+      function d(bg) { if (!bg) return null; var f = bg.bgPr && bg.bgPr.Fill && bg.bgPr.Fill.fill; return f ? "fill " + (f.color && f.color.RGBA ? [f.color.RGBA.R, f.color.RGBA.G, f.color.RGBA.B].join(",") : f.type) : "theme " + bg.bgRef.idx; }
+      function drawn(s) { var f = s.backgroundFill && s.backgroundFill.fill; return f && f.color && f.color.RGBA ? [f.color.RGBA.R, f.color.RGBA.G, f.color.RGBA.B].join(",") : null; }
+      var all = Api.GetPresentation().GetAllSlides(), s = all[1].Slide;
+      return { own: d(s.cSld.Bg), layout: d(s.Layout.cSld.Bg), master: d(s.Layout.Master.cSld.Bg), drawn: drawn(s), first: drawn(all[0].Slide) };
+    }`, {})).value;
+    let second = (await outline(agent)).slides[1];
+    await office.edit(agent, [{ op: "slides", slides: [{ id: second.id, hash: second.hash, html: SLIDE }] }]);
+    await eventually(async () => {
+      expect((await backgrounds(user)).own).toBe("fill 251,251,248");
+    });
+    second = (await outline(agent)).slides[1];
+    const plain = `<section><h2 style="font-size:72px">Plain</h2></section>`;
+    expect(((await office.edit(agent, [{ op: "slides", slides: [{ id: second.id, hash: second.hash, html: plain }] }])) as Any).applied).toBe(true);
+    for (const id of [agent, user]) {
+      await eventually(async () => {
+        const read = await backgrounds(id);
+        expect(read.own).not.toBe("fill 251,251,248");
+        expect(read.own).toBe(read.layout ?? read.master);
+      });
+    }
+    // The person's page draws the deck's background again. (The agent's page draws nothing, and its drawn fill lags.)
+    await eventually(async () => {
+      const read = await backgrounds(user);
+      expect(read.drawn).toBe(read.first);
+    });
+  });
+
   it("a slide the user changed refuses its replace", async () => {
     const { agent, user } = await deck();
     const second = (await outline(agent)).slides[1];
