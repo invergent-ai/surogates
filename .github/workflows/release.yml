@@ -188,9 +188,9 @@ jobs:
   # R2 is never the truth: each release that ships a key attaches its manifest to itself
   # (desktop-vm-manifest, below), and later releases take it from there and check R2's
   # files against it. The manifest is kept for the desktop's tarball, published or found.
-  # The cloud's release does not wait for it; the desktop's does. amd64's image alone, the
-  # Linux app's: arm64's is built by hand (desktop-guest-arm64.yml) until the release ships the
-  # macOS app, as a job that waited for it would hold the Linux app's release.
+  # The cloud's release does not wait for it; the desktop's does. amd64's image, the Linux app's:
+  # arm64's, the macOS app's, has a job of its own (desktop-vm-image-arm64), as a job that waited for
+  # both would hold the Linux app's release on an arm64 runner.
   desktop-vm-image:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # Past a cold build of the guest, and past fetch's wait of up to 15 minutes for a key's manifest.
@@ -278,6 +278,92 @@ jobs:
           key="$(jq -r .key out/manifest.json)"
           cp out/manifest.json "desktop-vm-${key}.json"
           # A re-run finds it attached already: desktop-vm-image's fetch then took these bytes from here.
+          attached="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq "any(.assets[]; .name == \"desktop-vm-${key}.json\")")"
+          if [ "$attached" != true ]; then
+            gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
+          fi
+
+  # arm64's guest image, the macOS app's, as amd64's is, on an arm64 runner, in a concurrency group of its own, and its
+  # manifest attached to the release by a job of its own: only where the run publishes the macOS app (desktop-signing-mode),
+  # so that an arm64 runner that fails, or that never comes, holds nothing of Linux's.
+  desktop-vm-image-arm64:
+    needs: desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.mac-signing == 'developer-id'
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.published.outputs.state }}
+    concurrency:
+      group: desktop-vm-image-arm64
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check the guest's kernel pin is current
+        run: images/guest/kernel-current.sh --arch arm64
+
+      - name: Look for the image's key in our releases, and check R2 against it
+        id: published
+        env:
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state="$(images/guest/publish.sh --arch arm64 fetch images/guest/out)"
+          echo "state=${state}" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        if: steps.published.outputs.state == 'missing'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache/CodeQL}"
+          df -h /
+
+      - name: Build the image
+        if: steps.published.outputs.state == 'missing'
+        run: images/guest/build.sh --arch arm64 --packed images/guest/out
+
+      - name: Publish the image
+        if: steps.published.outputs.state == 'missing'
+        env:
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: images/guest/publish.sh --arch arm64 send images/guest/out
+
+      - name: Keep the image's manifest for the macOS app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-vm-manifest-arm64
+          path: images/guest/out/manifest.json
+          if-no-files-found: error
+
+  desktop-vm-manifest-arm64:
+    needs:
+      - release
+      - desktop-vm-image-arm64
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-vm-manifest-arm64
+          path: out
+
+      - name: Attach the image's manifest to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          key="$(jq -r .key out/manifest.json)"
+          cp out/manifest.json "desktop-vm-${key}.json"
+          # A re-run finds it attached already: desktop-vm-image-arm64's fetch then took these bytes from here.
           attached="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq "any(.assets[]; .name == \"desktop-vm-${key}.json\")")"
           if [ "$attached" != true ]; then
             gh release upload "$GITHUB_REF_NAME" "desktop-vm-${key}.json" --repo "$GITHUB_REPOSITORY"
@@ -418,6 +504,11 @@ jobs:
   # that signs, makes the MSI, publishes or rolls out takes these from here and never reads the variables again: a job
   # re-run after the variable changed signs, publishes and rolls out as the run began, with what the run's earlier jobs
   # made. It reads nothing of the repository's and holds nothing.
+  # And how it signs the macOS app, by the repository's APPLE_TEAM_ID variable, which says that the Apple Developer
+  # account's Developer ID Application certificate and notary key are in the desktop-macos-signing Environment:
+  # `developer-id`, by that certificate, which must be that team's, or `trial`, by an identity of the trial job's own run;
+  # and the signer each signature must be of, that Team ID or the trial's own name. Every job of macOS's takes these from
+  # here too.
   desktop-signing-mode:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
@@ -426,6 +517,8 @@ jobs:
       signing: ${{ steps.mode.outputs.signing }}
       account: ${{ steps.mode.outputs.account }}
       signer: ${{ steps.mode.outputs.signer }}
+      mac-signing: ${{ steps.mac.outputs.signing }}
+      mac-signer: ${{ steps.mac.outputs.signer }}
     steps:
       - name: Decide how the Windows app is signed
         id: mode
@@ -437,6 +530,17 @@ jobs:
             printf 'signing=account\naccount=%s\nsigner=%s\n' "$ACCOUNT" "$SUBJECT" >>"$GITHUB_OUTPUT"
           else
             printf 'signing=trial\naccount=\nsigner=CN=Surogate trial signer\n' >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide how the macOS app is signed
+        id: mac
+        env:
+          TEAM: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$TEAM" ]; then
+            printf 'signing=developer-id\nsigner=%s\n' "$TEAM" >>"$GITHUB_OUTPUT"
+          else
+            printf 'signing=trial\nsigner=Surogate trial signer\n' >>"$GITHUB_OUTPUT"
           fi
 
   desktop-win-build:
@@ -872,6 +976,435 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
 
+  # Surogate Desktop for macOS (scripts/package-mac.sh): Surogate.app built and laid out on a Mac from this tag, with the
+  # agent disk desktop-build made and arm64's guest image's manifest; signed, notarized and stapled; packed as the tarball
+  # the app updates from, and put in the disk image a person installs it from, which is signed, notarized and stapled
+  # too; each a job of its own, as each job's steps share its runner. The build runs npm's install scripts and holds no
+  # secret, no Environment and no token to sign with. The signing runs no npm, npx or node: in the desktop-macos-signing
+  # Environment, which only a v* tag deploys to, it imports the Developer ID Application certificate
+  # (MACOS_SIGNING_CERTIFICATE_P12, MACOS_SIGNING_CERTIFICATE_PASSWORD) into a keychain of its own, gone at its end, and
+  # signs with it only where it is the one identity of the Team ID desktop-signing-mode names; it notarizes with the
+  # notary service's API key (APPLE_NOTARY_KEY_P8, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID), and has Gatekeeper
+  # assess both. The describe reads the tarball with no secret, and the publish signs its manifest and sends it, with the
+  # disk image, as Linux's and Windows's do, by the signing job's own words for both. Each runs only where
+  # desktop-signing-mode says the Developer ID signs, and so arm64's guest image is built: else each is skipped as soon
+  # as its needs have ended, and desktop-mac-trial is macOS's part of the release. The Environment has no required
+  # reviewers, as the release's has none.
+  desktop-mac-build:
+    needs:
+      - desktop-build
+      - desktop-vm-image-arm64
+      - desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.mac-signing == 'developer-id'
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          # The app's node, its rg and its spelling dictionary are fetched and checked against their pins, never ones a runner kept.
+          rm -rf bin dictionaries
+          npm ci
+
+      - name: Build the app for a Mac, with every native program of it
+        run: scripts/mac-build.sh
+
+      - name: Take the agent disk
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-agent-disk
+          path: out/agent
+
+      - name: Take arm64's guest image's manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-vm-manifest-arm64
+          path: out/vm
+
+      - name: Lay out Surogate.app
+        run: scripts/package-mac.sh "${GITHUB_REF_NAME#v}" ../out/vm/manifest.json ../out/agent/agent.img ../out/mac
+
+      - name: Check the layout
+        env:
+          SUROGATE_MAC_LAYOUT: ${{ github.workspace }}/out/mac/Surogate.app
+          SUROGATE_MAC_AGENT_DISK: ${{ github.workspace }}/out/agent/agent.img
+          SUROGATE_MAC_VM_MANIFEST: ${{ github.workspace }}/out/vm/manifest.json
+        run: SUROGATE_MAC_VERSION="${GITHUB_REF_NAME#v}" npx vitest run --project unit --reporter=verbose test/package-mac.test.ts
+
+      # A tarball, which keeps the frameworks' links that an artifact would not.
+      - name: Pack the layout for its signing
+        run: scripts/sign-mac.sh pack ../out/mac/Surogate.app ../out/desktop-mac-unsigned.tar.gz
+
+      - name: Keep the layout for its signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-mac-unsigned
+          path: out/desktop-mac-unsigned.tar.gz
+          if-no-files-found: error
+
+  desktop-mac-sign:
+    needs:
+      - desktop-mac-build
+      - desktop-signing-mode
+    runs-on: macos-15
+    # Two submissions to the notary service, each waited for.
+    timeout-minutes: 120
+    environment: desktop-macos-signing
+    permissions:
+      contents: read
+    # The tarball's hash and its size, and the disk image's hash, which the publish job signs for and sends by, and no
+    # others: an artifact is the run's, and a job's outputs are its own.
+    outputs:
+      sha256: ${{ steps.made.outputs.sha256 }}
+      size: ${{ steps.made.outputs.size }}
+      dmg-sha256: ${{ steps.made.outputs.dmg-sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Take the layout
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-mac-unsigned
+          path: out
+
+      - name: Unpack the layout
+        run: mkdir out/mac && tar -xzf out/desktop-mac-unsigned.tar.gz -C out/mac
+
+      # The keychain's path is said before anything is put in it, so that it is gone at the job's end however it ends.
+      - name: Import the Developer ID into a keychain of this job's own
+        id: identity
+        env:
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+          TEAM: ${{ needs.desktop-signing-mode.outputs.mac-signer }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "keychain=$keychain" >>"$GITHUB_OUTPUT"
+          identity="$(desktop/scripts/sign-mac.sh import "$keychain" "$TEAM")"
+          echo "identity=$identity" >>"$GITHUB_OUTPUT"
+
+      - name: Sign the app, inside out
+        env:
+          IDENTITY: ${{ steps.identity.outputs.identity }}
+          KEYCHAIN: ${{ steps.identity.outputs.keychain }}
+        run: desktop/scripts/sign-mac.sh sign out/mac/Surogate.app "$IDENTITY" "$KEYCHAIN"
+
+      - name: Check every program's signature
+        env:
+          TEAM: ${{ needs.desktop-signing-mode.outputs.mac-signer }}
+        run: desktop/scripts/sign-mac.sh verify out/mac/Surogate.app developer-id "$TEAM"
+
+      - name: Notarize the app, and staple its ticket to it
+        env:
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: desktop/scripts/sign-mac.sh notarize out/mac/Surogate.app
+
+      - name: Pack the app the updates are made of
+        run: |
+          mkdir out/release
+          desktop/scripts/sign-mac.sh pack out/mac/Surogate.app "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz"
+
+      - name: Make the disk image, and sign it
+        env:
+          IDENTITY: ${{ steps.identity.outputs.identity }}
+          KEYCHAIN: ${{ steps.identity.outputs.keychain }}
+        run: desktop/scripts/sign-mac.sh dmg out/mac/Surogate.app "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg" "$IDENTITY" "$KEYCHAIN"
+
+      - name: Notarize the disk image, and staple its ticket to it
+        env:
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: desktop/scripts/sign-mac.sh notarize "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg"
+
+      - name: Check the disk image
+        env:
+          TEAM: ${{ needs.desktop-signing-mode.outputs.mac-signer }}
+        run: desktop/scripts/sign-mac.sh dmg-check "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg" out/mac/Surogate.app developer-id "$TEAM"
+
+      # As a Mac that downloaded them assesses them: notarized Developer ID software, its ticket stapled to it.
+      - name: Ask Gatekeeper of the app and the disk image
+        run: desktop/scripts/sign-mac.sh assess out/mac/Surogate.app "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg"
+
+      - name: Forget the keychain
+        if: always() && steps.identity.outputs.keychain != ''
+        env:
+          KEYCHAIN: ${{ steps.identity.outputs.keychain }}
+        run: desktop/scripts/sign-mac.sh forget "$KEYCHAIN"
+
+      - name: Say the tarball's hash and size, and the disk image's hash, to the publish job
+        id: made
+        run: |
+          echo "sha256=$(shasum -a 256 <"out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          echo "size=$(stat -f %z "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz")" >>"$GITHUB_OUTPUT"
+          echo "dmg-sha256=$(shasum -a 256 <"out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the tarball for the describe and the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-mac-tarball
+          path: out/release/surogate-desktop-*-darwin-arm64.tar.gz
+          if-no-files-found: error
+
+      - name: Keep the disk image for the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-mac-dmg
+          path: out/release/surogate-desktop-*-darwin-arm64.dmg
+          if-no-files-found: error
+
+  # The tarball, read as desktop-describe reads Linux's, in a job with no secret: Surogate.app its one folder, of files,
+  # folders and links that stay inside it, its app's state schema, which must be the Linux app's, and its release keys,
+  # install.sh's. Its one word handed on is that schema.
+  desktop-mac-describe:
+    needs:
+      - desktop-describe
+      - desktop-mac-sign
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      schema: ${{ steps.manifest.outputs.schema }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-mac-tarball
+          path: out/mac
+
+      - name: Write its manifest, and say the app's state schema to the publish job
+        id: manifest
+        env:
+          DESKTOP_TARGET: darwin-arm64
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-mac-sign.outputs.sha256 }}
+          DESKTOP_TARBALL_SIZE: ${{ needs.desktop-mac-sign.outputs.size }}
+          LINUX_STATE_SCHEMA: ${{ needs.desktop-describe.outputs.schema }}
+        run: |
+          desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/mac
+          schema="$(jq -r .stateSchema out/mac/manifest.json)"
+          [ "$schema" = "$LINUX_STATE_SCHEMA" ] || { echo "::error::The macOS app keeps state of schema $schema, and the Linux app of $LINUX_STATE_SCHEMA"; exit 1; }
+          echo "schema=$schema" >>"$GITHUB_OUTPUT"
+
+  # macOS's publish, as Linux's and Windows's, in the same Environment and with the same steps, under macOS's names
+  # (release/publish.sh, target_files): the tarball and the disk image the Developer ID signed, by the signing job's words
+  # for them, and of the schema the macOS describe read. Linux's publish never waits for it.
+  desktop-mac-publish:
+    needs:
+      - desktop-mac-sign
+      - desktop-mac-describe
+      - desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.mac-signing == 'developer-id'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # The disk image is sent and read back.
+    timeout-minutes: 30
+    environment: desktop-release
+    permissions:
+      contents: read
+    # One macOS release at a time, so its latest.json names the newest of tags pushed close together.
+    concurrency:
+      group: desktop-release-darwin-arm64
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-mac-tarball
+          path: out/desktop
+
+      - name: Take the disk image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-mac-dmg
+          path: out/desktop
+
+      - name: Sign its manifest
+        env:
+          DESKTOP_TARGET: darwin-arm64
+          DESKTOP_RELEASE_KEY: ${{ secrets.DESKTOP_RELEASE_KEY }}
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-mac-sign.outputs.sha256 }}
+          DESKTOP_TARBALL_SIZE: ${{ needs.desktop-mac-sign.outputs.size }}
+          DESKTOP_STATE_SCHEMA: ${{ needs.desktop-mac-describe.outputs.schema }}
+        run: desktop/release/publish.sh sign "${GITHUB_REF_NAME#v}" out/desktop
+
+      - name: Publish the release
+        env:
+          DESKTOP_TARGET: darwin-arm64
+          DESKTOP_DMG_SHA256: ${{ needs.desktop-mac-sign.outputs.dmg-sha256 }}
+          S3_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: desktop/release/publish.sh send "${GITHUB_REF_NAME#v}" out/desktop
+
+  # macOS's part of the release while desktop-signing-mode says no Developer ID signs: Surogate.app built and laid out
+  # as desktop-mac-build lays it out, with a stand-in for arm64's guest image's manifest, as no arm64 image is built
+  # then; checked; signed with an identity of this job's run, self-signed in a keychain of this job's own, and checked as
+  # the release checks its own; packed, and put in a disk image that is checked too. Nothing of it is notarized or
+  # published, and no job waits for it, nor for its describe: a trial that fails, or a Mac runner that never comes,
+  # holds nothing of the release. It holds no secret, no Environment and no token to sign with: its identity is made and
+  # forgotten here. Its tarball is kept for its describe alone.
+  desktop-mac-trial:
+    needs:
+      - desktop-build
+      - desktop-signing-mode
+    if: needs.desktop-signing-mode.outputs.mac-signing == 'trial'
+    runs-on: macos-15
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.made.outputs.sha256 }}
+      size: ${{ steps.made.outputs.size }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          # The app's node, its rg and its spelling dictionary are fetched and checked against their pins, never ones a runner kept.
+          rm -rf bin dictionaries
+          npm ci
+
+      - name: Build the app for a Mac, with every native program of it
+        run: scripts/mac-build.sh
+
+      - name: Take the agent disk
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-agent-disk
+          path: out/agent
+
+      - name: Lay out Surogate.app
+        run: |
+          mkdir -p ../out/vm
+          printf '{"key":"%s","arch":"arm64","files":[]}\n' "$(printf '0%.0s' $(seq 64))" > ../out/vm/manifest.json
+          scripts/package-mac.sh "${GITHUB_REF_NAME#v}" ../out/vm/manifest.json ../out/agent/agent.img ../out/mac
+
+      - name: Check the layout
+        env:
+          SUROGATE_MAC_LAYOUT: ${{ github.workspace }}/out/mac/Surogate.app
+          SUROGATE_MAC_AGENT_DISK: ${{ github.workspace }}/out/agent/agent.img
+          SUROGATE_MAC_VM_MANIFEST: ${{ github.workspace }}/out/vm/manifest.json
+        run: SUROGATE_MAC_VERSION="${GITHUB_REF_NAME#v}" npx vitest run --project unit --reporter=verbose test/package-mac.test.ts
+
+      - name: Sign the app with this run's identity, check it as the release checks its own, pack it, and make its disk image
+        id: trial
+        env:
+          SIGNER: ${{ needs.desktop-signing-mode.outputs.mac-signer }}
+        run: |
+          keychain="$RUNNER_TEMP/trial.keychain-db"
+          echo "keychain=$keychain" >>"$GITHUB_OUTPUT"
+          identity="$(scripts/sign-mac.sh trial "$keychain" "$SIGNER")"
+          scripts/sign-mac.sh sign ../out/mac/Surogate.app "$identity" "$keychain"
+          scripts/sign-mac.sh verify ../out/mac/Surogate.app trial "$SIGNER"
+          mkdir ../out/release
+          scripts/sign-mac.sh pack ../out/mac/Surogate.app "../out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz"
+          scripts/sign-mac.sh dmg ../out/mac/Surogate.app "../out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg" "$identity" "$keychain"
+          scripts/sign-mac.sh dmg-check "../out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg" ../out/mac/Surogate.app trial "$SIGNER"
+
+      - name: Forget the keychain
+        if: always() && steps.trial.outputs.keychain != ''
+        env:
+          KEYCHAIN: ${{ steps.trial.outputs.keychain }}
+        run: scripts/sign-mac.sh forget "$KEYCHAIN"
+
+      - name: Say the tarball's hash and size to its describe
+        id: made
+        run: |
+          echo "sha256=$(shasum -a 256 <"../out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          echo "size=$(stat -f %z "../out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz")" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the tarball for its describe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-mac-trial-tarball
+          path: out/release/surogate-desktop-*-darwin-arm64.tar.gz
+          if-no-files-found: error
+
+  # The trial's tarball read as macOS's describe reads the release's, in a job with no secret, which no job waits for.
+  desktop-mac-trial-describe:
+    needs:
+      - desktop-describe
+      - desktop-mac-trial
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Take the tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-mac-trial-tarball
+          path: out/mac
+
+      - name: Write its manifest, and check the app's state schema against the Linux app's
+        env:
+          DESKTOP_TARGET: darwin-arm64
+          DESKTOP_TARBALL_SHA256: ${{ needs.desktop-mac-trial.outputs.sha256 }}
+          DESKTOP_TARBALL_SIZE: ${{ needs.desktop-mac-trial.outputs.size }}
+          LINUX_STATE_SCHEMA: ${{ needs.desktop-describe.outputs.schema }}
+        run: |
+          desktop/release/publish.sh describe "${GITHUB_REF_NAME#v}" out/mac
+          schema="$(jq -r .stateSchema out/mac/manifest.json)"
+          [ "$schema" = "$LINUX_STATE_SCHEMA" ] || { echo "::error::The macOS app keeps state of schema $schema, and the Linux app of $LINUX_STATE_SCHEMA"; exit 1; }
+
+  # Whether the macOS app is this release's, for the cluster's rollout: published, where desktop-signing-mode says the
+  # Developer ID signs, with arm64's guest image's manifest attached to the release; or not asked for, in a trial. One
+  # job for the platform, which each rollout waits for, so that a platform added is a job more and not twice the
+  # rollouts: in a trial every job of macOS's publishing is skipped as soon as its needs have ended, which are Linux's
+  # and the cloud's, and this runs then; the trial's own jobs it never waits for.
+  desktop-mac-released:
+    needs:
+      - desktop-signing-mode
+      - desktop-mac-publish
+      - desktop-vm-manifest-arm64
+    if: ${{ !cancelled() && (needs.desktop-signing-mode.outputs.mac-signing == 'trial' || (needs.desktop-mac-publish.result == 'success' && needs.desktop-vm-manifest-arm64.result == 'success')) }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Say whether the release publishes the macOS app
+        env:
+          SIGNING: ${{ needs.desktop-signing-mode.outputs.mac-signing }}
+        run: if [ "$SIGNING" = developer-id ]; then echo "The macOS app is published"; else echo "The macOS app is a trial, and the release publishes none"; fi
+
   release:
     needs:
       - wheel
@@ -920,7 +1453,9 @@ jobs:
   # of the two runs, by desktop-signing-mode's word for the run. While Windows publishes nothing (a
   # trial), the Windows jobs are none of the release's: rollout needs none of them, and runs once
   # Linux's desktop is published, whatever Windows's trial does. Where the account signs, Windows's
-  # publish is the release's too, and rollout-with-windows waits for it as for Linux's.
+  # publish is the release's too, and rollout-with-windows waits for it as for Linux's. Each waits for
+  # macOS through desktop-mac-released alone: macOS's publish where the Developer ID signs, and none of
+  # macOS's trial.
   rollout:
     needs:
       - release
@@ -928,6 +1463,7 @@ jobs:
       - desktop-publish
       - desktop-vm-manifest
       - desktop-signing-mode
+      - desktop-mac-released
     if: needs.desktop-signing-mode.outputs.signing == 'trial'
     # It holds the cluster's SSH key and reads nothing of the repository's.
     permissions: {}
@@ -945,6 +1481,7 @@ jobs:
       - desktop-vm-manifest
       - desktop-win-publish
       - desktop-signing-mode
+      - desktop-mac-released
     if: needs.desktop-signing-mode.outputs.signing == 'account'
     permissions: {}
     uses: ./.github/workflows/update-images.yml
