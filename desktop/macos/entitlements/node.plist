@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The entitlements of the app's own node, which runs the file host and the other hosts, under the hardened runtime:
+     com.apple.security.cs.allow-jit, "whether the app may create writable and executable memory using the MAP_JIT
+     flag" (Apple, Hardened Runtime), which V8 needs, and nothing else. -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

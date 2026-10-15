@@ -1,0 +1,18 @@
+{
+  "CFBundleDisplayName": "Surogate",
+  "CFBundleExecutable": "Surogate",
+  "CFBundleIconFile": "surogate.icns",
+  "CFBundleIdentifier": "ai.invergent.surogate",
+  "CFBundleName": "Surogate",
+  "CFBundleShortVersionString": "@VERSION@",
+  "CFBundleURLTypes": [{ "CFBundleURLName": "Surogate link", "CFBundleURLSchemes": ["surogate"] }],
+  "CFBundleVersion": "@VERSION@",
+  "LSApplicationCategoryType": "public.app-category.productivity",
+  "LSMinimumSystemVersion": "14.0",
+  "NSDesktopFolderUsageDescription": "Surogate's agent reads and changes the files of a folder on your Desktop that you bind to a chat.",
+  "NSDocumentsFolderUsageDescription": "Surogate's agent reads and changes the files of a folder in your Documents that you bind to a chat.",
+  "NSDownloadsFolderUsageDescription": "Surogate's agent reads and changes the files of a folder in your Downloads that you bind to a chat.",
+  "NSLocalNetworkUsageDescription": "Surogate's agent reaches the addresses on your local network that you approve for a chat's commands and browser.",
+  "NSNetworkVolumesUsageDescription": "Surogate's agent reads and changes the files of a folder on a network volume that you bind to a chat.",
+  "NSRemovableVolumesUsageDescription": "Surogate's agent reads and changes the files of a folder on a removable volume that you bind to a chat."
+}

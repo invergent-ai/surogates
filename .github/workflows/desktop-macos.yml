@@ -224,3 +224,85 @@ jobs:
           SUROGATE_BROWSER_TESTS_MAC: "1"
           SUROGATE_TEST_BROWSER: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
         run: npx vitest run --project macos test/browser-host-darwin.test.ts
+
+  # Surogate.app as the release makes it: built with every native program, laid out (scripts/package-mac.sh) with a disk
+  # of zeros in the agent disk's place and a manifest of the arm64 image's form, and checked; scripts/sign-mac.sh's own
+  # tests; then the app signed with an identity of this run's own, self-signed in a keychain of the job's, and checked as
+  # the release checks its own, packed as the update payload, and put in a disk image that is checked too. The signed
+  # node is run under the hardened runtime with its one entitlement. Notarization and Gatekeeper's assessment are the
+  # release's alone: they take only Apple's Developer ID. The keychain is gone at the job's end, however it ends.
+  app:
+    runs-on: macos-15
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.14.0"
+
+      - name: Install the desktop's packages
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: npm ci
+
+      - name: Build the app for a Mac, with every native program of it
+        run: scripts/mac-build.sh
+
+      - name: Lay out Surogate.app
+        run: |
+          mkdir -p ../out/stand-in
+          head -c 16777216 /dev/zero > ../out/stand-in/agent.img
+          printf '{"key":"%s","arch":"arm64","files":[]}\n' "$(printf '0%.0s' $(seq 64))" > ../out/stand-in/manifest.json
+          scripts/package-mac.sh 0.1.0 ../out/stand-in/manifest.json ../out/stand-in/agent.img ../out/mac
+
+      - name: Check the layout
+        env:
+          SUROGATE_MAC_LAYOUT: ${{ github.workspace }}/out/mac/Surogate.app
+          SUROGATE_MAC_VERSION: "0.1.0"
+          SUROGATE_MAC_AGENT_DISK: ${{ github.workspace }}/out/stand-in/agent.img
+          SUROGATE_MAC_VM_MANIFEST: ${{ github.workspace }}/out/stand-in/manifest.json
+        run: npx vitest run --project unit --reporter=verbose test/package-mac.test.ts
+
+      - name: Run sign-mac.sh's own tests
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: test/sign-mac.test.sh
+
+      - name: Sign the app with this run's identity, check it as the release checks its own, pack it, and make its disk image
+        id: trial
+        run: |
+          keychain="$RUNNER_TEMP/trial.keychain-db"
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+          identity="$(scripts/sign-mac.sh trial "$keychain" 'Surogate trial signer')"
+          scripts/sign-mac.sh sign ../out/mac/Surogate.app "$identity" "$keychain"
+          scripts/sign-mac.sh verify ../out/mac/Surogate.app trial 'Surogate trial signer'
+          scripts/sign-mac.sh pack ../out/mac/Surogate.app ../out/mac/surogate-desktop-0.1.0-darwin-arm64.tar.gz
+          scripts/sign-mac.sh dmg ../out/mac/Surogate.app ../out/mac/surogate-desktop-0.1.0-darwin-arm64.dmg "$identity" "$keychain"
+          scripts/sign-mac.sh dmg-check ../out/mac/surogate-desktop-0.1.0-darwin-arm64.dmg ../out/mac/Surogate.app trial 'Surogate trial signer'
+
+      # V8 under the hardened runtime with allow-jit alone: its compilers and WebAssembly's, in the signed node.
+      - name: Run the signed node under the hardened runtime
+        run: |
+          node=../out/mac/Surogate.app/Contents/Resources/app/bin/node
+          codesign -dvvv "$node" 2>&1 | grep -E '^(CodeDirectory|Authority|Timestamp)'
+          "$node" -e 'let sum = 0; const add = (a, b) => a + b; for (let i = 0; i < 5e7; i += 1) sum = add(sum, i & 7); const wasm = new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 127, 127, 1, 127, 3, 2, 1, 0, 7, 7, 1, 3, 97, 100, 100, 0, 0, 10, 9, 1, 7, 0, 32, 0, 32, 1, 106, 11])); const { exports } = new WebAssembly.Instance(wasm); if (sum !== 175000000 || exports.add(2, 3) !== 5) process.exit(1); console.log("V8 ran its compilers and WebAssembly under the hardened runtime")'
+
+      # Recorded, never gating: whether the signed node loads fsat under library validation, which a self-signed
+      # identity has no Team ID for. The release's Developer ID gives both the same Team ID.
+      - name: Record whether the signed node loads fsat
+        continue-on-error: true
+        run: ../out/mac/Surogate.app/Contents/Resources/app/bin/node -e 'require(process.argv[1]); console.log("loaded")' "$PWD/../out/mac/Surogate.app/Contents/Resources/app/dist/native/fsat.node"
+
+      - name: Forget this run's keychain
+        if: always()
+        env:
+          KEYCHAIN: ${{ steps.trial.outputs.keychain }}
+        run: if [ -n "$KEYCHAIN" ]; then scripts/sign-mac.sh forget "$KEYCHAIN"; fi

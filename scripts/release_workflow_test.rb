@@ -743,7 +743,7 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal ["jobs", "name", "permissions", "true"], macos.keys.map(&:to_s).sort
     assert_equal({ "contents" => "read" }, macos.fetch("permissions"))
     jobs = macos.fetch("jobs")
-    assert_equal %w[unit file-host vm-native shell], jobs.keys
+    assert_equal %w[unit file-host vm-native shell app], jobs.keys
     jobs.each do |name, job|
       assert_equal "macos-15", job.fetch("runs-on"), name
       assert job.key?("timeout-minutes"), "#{name} is not bounded"
@@ -758,6 +758,49 @@ class ReleaseWorkflowTest < Minitest::Test
     steps = jobs.fetch("unit").fetch("steps")
     # The files of the desktop's vitest project for macOS, which each part built for macOS joins.
     assert_equal "npx vitest run --project macos", steps.last.fetch("run").strip
+  end
+
+  def test_the_macos_app_is_laid_out_checked_and_signed_by_the_run_s_own_identity_and_nothing_but_the_release_notarizes_or_assesses_it
+    jobs = YAML.load_file(MACOS).fetch("jobs")
+    app = jobs.fetch("app")
+    steps = app.fetch("steps")
+    runs = steps.map { |step| step["run"].to_s }
+    # The bundle as the release makes it, with a disk of zeros and an arm64 manifest's form in the guest's place, then
+    # its layout's test, the signing script's own tests, and the app signed with the run's identity and checked as the
+    # release checks its own, packed, and put in a disk image that is checked: in that order, each step gating.
+    order = [
+      "scripts/mac-build.sh", "scripts/package-mac.sh 0.1.0 ../out/stand-in/manifest.json ../out/stand-in/agent.img ../out/mac",
+      "test/package-mac.test.ts", "test/sign-mac.test.sh",
+      %(identity="$(scripts/sign-mac.sh trial "$keychain" 'Surogate trial signer')"),
+      'scripts/sign-mac.sh sign ../out/mac/Surogate.app "$identity" "$keychain"',
+      "scripts/sign-mac.sh verify ../out/mac/Surogate.app trial 'Surogate trial signer'",
+      "scripts/sign-mac.sh pack ../out/mac/Surogate.app ../out/mac/surogate-desktop-0.1.0-darwin-arm64.tar.gz",
+      'scripts/sign-mac.sh dmg ../out/mac/Surogate.app ../out/mac/surogate-desktop-0.1.0-darwin-arm64.dmg "$identity" "$keychain"',
+      "scripts/sign-mac.sh dmg-check ../out/mac/surogate-desktop-0.1.0-darwin-arm64.dmg ../out/mac/Surogate.app trial 'Surogate trial signer'",
+      "WebAssembly.Module",
+    ].map { |part| runs.index { |run| run.include?(part) } }
+    refute_includes order, nil
+    assert_equal order.sort, order
+    assert_includes runs[order.first], "scripts/mac-build.sh"
+    refute app.key?("continue-on-error")
+    # The layout's test is told the bundle and what it was made of.
+    check = steps.find { |step| step["run"].to_s.include?("test/package-mac.test.ts") }
+    assert_equal %w[SUROGATE_MAC_AGENT_DISK SUROGATE_MAC_LAYOUT SUROGATE_MAC_VERSION SUROGATE_MAC_VM_MANIFEST], check.fetch("env").keys.sort
+    # Whether the signed node loads fsat is recorded, never gating, and is the one step that does not gate.
+    assert_equal ["Record whether the signed node loads fsat"], steps.select { |step| step["continue-on-error"] }.map { |step| step["name"] }
+    # The run's keychain is gone at the job's end, however it ends.
+    assert_equal "always()", steps.last.fetch("if")
+    assert_includes steps.last.fetch("run"), 'scripts/sign-mac.sh forget "$KEYCHAIN"'
+    assert_equal({ "KEYCHAIN" => "${{ steps.trial.outputs.keychain }}" }, steps.last.fetch("env"))
+    # Notarization, Gatekeeper's assessment and the Developer ID's import are the release's signing job's alone, in
+    # every workflow file: a run of a branch's code is never handed Apple's keys.
+    workflows.each do |file, workflow|
+      workflow.fetch("jobs").each do |name, job|
+        used = job.fetch("steps", []).flat_map { |step| step["run"].to_s.scan(/sign-mac\.sh (notarize|assess|import)\b/).flatten }.uniq.sort
+        expected = file == "release.yml" && name == "desktop-mac-sign" ? %w[assess import notarize] : []
+        assert_equal expected, used, "#{file}: #{name}"
+      end
+    end
   end
 
   def test_the_windows_suites_run_by_hand_or_for_the_release_on_windows_on_the_ref_they_are_given_and_hold_nothing_to_leak
@@ -1061,6 +1104,7 @@ class ReleaseWorkflowTest < Minitest::Test
         "file-host" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 af11daf312d88a9c cef9c04da9316c5d b6677173b7a766d9 65c59a548203f2a3 4aaeb9cc7e06d889]],
         "vm-native" => ["d5e8d2ae7f990c0b", %w[4a90b485a7208e36 5f09c6834194b464 52c04af5d542ff2d aa9be0ef548ec62e 196c921f1237fc02 fb5acba9341bb560]],
         "shell" => ["6e1d22587a09112c", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 926d4e956f967fed d57a229d162b158b 82ea49c2e002c4eb bb26d389f9d8b55f 2734cf3c0643d000 512eb34e3e8c1e1d bea3be8dc0d7d250]],
+        "app" => ["ae8e071452550d33", %w[4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 5b86e1c519cf457a 021891c04ae48470 ddaf78ce5b4faa4c c5f950b2471bf664 2211ef10baa6e3dc 169fd889d47c83b7 4da2b501c8e59078 4e6849a8a58355bd]],
       },
       "desktop-windows.yml" => {
         "unit" => ["943604becd7dec07", %w[fff07e32632a765a 4a90b485a7208e36 d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d db6273944f5b635b 3a48c3294046bd31 a2a1334e455b966d]],
