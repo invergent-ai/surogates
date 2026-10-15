@@ -109,7 +109,8 @@ export class EditorPage {
   }
 
   /** Whether the editor holds changes the document server has not acknowledged, read from its frame: `true` when it
-   * cannot be read. (Inside a command the spreadsheet editor's flag always reads true.) */
+   * cannot be read. (Inside a command the spreadsheet editor's flag always reads true.) Internal names: no builder call
+   * reports the flag. */
   async modified(): Promise<boolean> {
     const frame = this.frame();
     if (!frame) return true;
@@ -162,7 +163,7 @@ export class EditorPage {
 
   /** Whether the editor's object registry was left switched off: a builder call that throws inside the editor's
    * no-history section leaves it so, every object made after is unregistered, the next change drops co-editors into
-   * view mode and the document never saves again. */
+   * view mode and the document never saves again. Internal name: no builder call reports the registry's state. */
   async poisoned(): Promise<boolean> {
     const frame = this.frame();
     if (!frame) return false;
