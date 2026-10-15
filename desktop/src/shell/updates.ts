@@ -3,7 +3,8 @@
 // release keys this computer trusts, the ones the helper pkexec runs lists; a newer release for
 // this computer and the recorded channel downloaded as the user into their cache, resumed; then
 // Update available. Installing it runs the root helper on the downloaded files, under polkit in
-// an installed app; the helper checks all of them again before it applies anything.
+// an installed app; the helper checks all of them again before it applies anything. Windows's
+// and macOS's are each a row of the same (installer-win32.ts, installer-darwin.ts).
 // Electron-free.
 
 import { createPublicKey, type KeyObject, verify } from "node:crypto";
@@ -16,7 +17,7 @@ import { download, type Fetch, hashOf, sizeOf } from "../download.js";
 import { adminsOwn } from "../files/admins-own-win32.js";
 import { ntat } from "../files/ntat.js";
 import { forThisOs, type Target, type TargetFiles, TARGETS, targetOf } from "../platform.js";
-import { installBase, installersOwn, rootsOwn } from "../vm/image.js";
+import { BUILT_IN, installBase, installersOwn, rootsOwn } from "../vm/image.js";
 
 export const CHECK_MS = 6 * 60 * 60 * 1000;
 // A check that failed is tried again sooner: after a minute, and each time it fails again after
@@ -109,8 +110,15 @@ export type UpdateState =
   | { state: "failed"; version: string; files: Staged; why: string }
   // Installed for every user of this computer: the app runs it once it restarts.
   | { state: "installed"; version: string }
-  // Approved by an administrator on Windows: the app quits for the MSI to replace it, and is started again after.
+  // Approved by an administrator on Windows: the app quits for the MSI to replace it, and is started again after. On
+  // macOS, staged and checked: the app quits for its helper to swap the bundle, which then opens the app.
   | { state: "restarting"; version: string }
+  // On macOS, where this user may not change the app's folder: an administrator installs the release's disk image,
+  // *download*, over the app. Nothing of the release is downloaded meanwhile.
+  | { state: "administrator"; version: string; download: string }
+  // Nor can anyone update the app where it runs, a read-only disk or the copy macOS runs of an app opened where it was
+  // downloaded: *why*, and where to put the app instead.
+  | { state: "held"; version: string; why: string }
   // The helper pkexec would run is not one the app can take: nothing is installed until the
   // install script has put it right.
   | { state: "broken" }
@@ -120,7 +128,7 @@ export type UpdateState =
 
 // What the root helper's run came to: its exit code, null when it did not run or a signal ended
 // it; and the last of what it said, with how it ended where no exit code says. *restarts*: the
-// install goes on once the app has quit, as Windows's does, which starts the app again after.
+// install goes on once the app has quit, as Windows's and macOS's do, which start the app again after.
 export interface Applied {
   code: number | null;
   said: string;
@@ -198,9 +206,10 @@ export const UNSIGNED_CHECKS = 8;
 export const UNSIGNED_MS = 24 * 60 * 60 * 1000;
 
 // What a person does on this OS: on Windows the next try asks UAC for an administrator itself, and an
-// install is put right by the MSI; elsewhere by the install script.
+// install is put right by the MSI, as a Mac's is by its disk image; elsewhere by the install script.
 const TRY_AGAIN = forThisOs({ win32: "Install as an administrator…" }) ?? "Try again";
-const BROKEN = forThisOs({ win32: "Surogate cannot update itself. Install Surogate again." }) ?? "Surogate cannot update itself. Run the install script again.";
+const INSTALL_AGAIN = "Surogate cannot update itself. Install Surogate again.";
+const BROKEN = forThisOs({ win32: INSTALL_AGAIN, darwin: INSTALL_AGAIN }) ?? "Surogate cannot update itself. Run the install script again.";
 
 /** The sidebar's line for *state*, or null for none. */
 export function updateLine(state: UpdateState | null): UpdateLine | null {
@@ -217,6 +226,10 @@ export function updateLine(state: UpdateState | null): UpdateLine | null {
       return { text: `Surogate ${state.version} is installed.`, button: "Restart" };
     case "restarting":
       return { text: `Surogate restarts to install ${state.version}…`, button: null };
+    case "administrator":
+      return { text: "An administrator needs to install this update.", button: "Download" };
+    case "held":
+      return { text: `Surogate cannot install ${state.version} where it runs: ${state.why}`, button: null };
     case "broken":
       return { text: BROKEN, button: null };
     case "unsigned":
@@ -249,8 +262,22 @@ export function releaseKeys(helper: string, rootOwned = false): KeyObject[] {
 }
 
 // Whose word the release keys must be: on Windows the install's resources\release-keys, an
-// administrator's (adminsOwn); elsewhere the helper pkexec runs, root's and a program.
-const keysOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn }) ?? ((path) => rootsOwn(path, true));
+// administrator's (adminsOwn); on macOS the bundle's Contents/Resources/release-keys, the app's own
+// (bundled); elsewhere the helper pkexec runs, root's and a program.
+const keysOwn: (path: string) => void = forThisOs<(path: string) => void>({ win32: adminsOwn, darwin: bundled }) ?? ((path) => rootsOwn(path, true));
+
+/**
+ * Throws unless *path* is a file of the app's own bundle on macOS, as its release keys and its version's mark are: the
+ * bundle's code signature seals it, and macOS keeps an app's bundle from being changed by other apps (the bundle's
+ * integrity is its signature and Gatekeeper, in place of a folder only root may change). Of the file itself: a regular
+ * file of one name and no link, that no one but its owner may write.
+ */
+export function bundled(path: string): void {
+  const found = lstatSync(path);
+  if (found.isSymbolicLink()) throw new Error(`${path} is not Surogate's own: it is a link`);
+  if (!found.isFile() || found.nlink !== 1) throw new Error(`${path} is not Surogate's own: it is no file of its own`);
+  if ((found.mode & 0o022) !== 0) throw new Error(`${path} is not Surogate's own: others may write it`);
+}
 
 const BEGIN_KEY = "-----BEGIN PUBLIC KEY-----";
 const END_KEY = "-----END PUBLIC KEY-----";
@@ -388,12 +415,21 @@ export function signedRelease(url: string, manifest: Buffer, signature: Buffer, 
 
 // The channel the install script recorded beside the base: only its releases are taken. It is the
 // one *helper* installs, or nothing is asked of the base: the helper would refuse what came. On
-// Windows the MSI's record alone names it, and surogate-admin.exe reads the same.
-// Whether the helper names the channel it installs: Linux's root helper does; Windows's MSI writes it in the record alone.
-const HELPER_NAMES_CHANNEL = forThisOs({ win32: false }) ?? true;
+// Windows the MSI's record alone names it, and surogate-admin.exe reads the same. On macOS the
+// record alone names it too, and an installed app with no record takes the channel built into it.
+// Whether the helper names the channel it installs: Linux's root helper does; Windows's MSI writes it in the record
+// alone, and macOS's release keys are a list alone.
+const HELPER_NAMES_CHANNEL = forThisOs({ win32: false, darwin: false }) ?? true;
 
-function channelOf(record: string, helper: string): string {
-  const { channel } = JSON.parse(readFileSync(record, "utf8")) as { channel?: unknown };
+function channelOf(record: string, helper: string, rootOwned: boolean): string {
+  let text: string;
+  try {
+    text = readFileSync(record, "utf8");
+  } catch (error) {
+    if (rootOwned && BUILT_IN && (error as NodeJS.ErrnoException).code === "ENOENT") return BUILT_IN.channel;
+    throw error;
+  }
+  const { channel } = JSON.parse(text) as { channel?: unknown };
   if (typeof channel !== "string" || channel === "") throw new Error(`${record} names no update channel`);
   if (!HELPER_NAMES_CHANNEL) return channel;
   const installs = /^[ \t]*CHANNEL=([A-Za-z0-9_-]+)$/m.exec(readFileSync(helper, "utf8"))?.[1];
@@ -519,21 +555,31 @@ function staged(cache: string, files: Staged, took: { home: string | null }): bo
   return updates !== null && dirname(folder) === updates && ownFolder(folder, false) && [files.manifest, files.signature, files.tarball].every(regular);
 }
 
-// Where Windows's helper keeps how an install ended (surogate-helper update, native/windows/helper):
-// the app has quit by then, and reads it at its next start.
+// Where Windows's helper keeps how an install ended (surogate-helper update, native/windows/helper), and macOS's
+// (surogate-helper apply, native/helper), in the release's own folder of the cache: the app has quit by then, and reads
+// it at its next start.
 export const RESULT = "result.json";
 
-// What surogate-admin.exe's exit says, as the helper kept it: 3, the release was not this app's; 4,
-// Windows Installer failed and rolled back; 5, the app did not quit within its minute.
-const ADMIN_SAYS: Readonly<Record<number, string>> = {
-  3: "it is not a release of Surogate that this install takes, so nothing was installed",
-  4: "Windows Installer could not install it, and nothing was changed",
-  5: "Surogate did not quit in time for it, and nothing was changed",
+// What the apply's exit says, as its helper kept it: 3, the release was not this app's; 4, it was not put in place, and
+// nothing changed: Windows Installer failed and rolled back, or macOS's swap of the bundles did not happen; 5, the app
+// did not quit within its minute. By the release's platform: only Windows's and macOS's apply after the app has quit.
+const APPLY_SAYS: Readonly<Partial<Record<TargetFiles["platform"], Readonly<Record<number, string>>>>> = {
+  win32: {
+    3: "it is not a release of Surogate that this install takes, so nothing was installed",
+    4: "Windows Installer could not install it, and nothing was changed",
+    5: "Surogate did not quit in time for it, and nothing was changed",
+  },
+  darwin: {
+    3: "it is not a release of Surogate that this app takes, so nothing was installed",
+    4: "Surogate.app could not be replaced by it, and nothing was changed",
+    5: "Surogate did not quit in time for it, and nothing was changed",
+  },
 };
 
-// How the install of *version* that the result file *path* keeps ended: refused, failed with why, or
-// null for none to say. Read once: the file goes. One that is no regular file is not read.
-function applied(path: string, version: string): { state: "refused" } | { state: "failed"; why: string } | null {
+// How the install of *version* that the result file *path* keeps ended, by *says*' words: refused, failed with why, or
+// null for none to say; with all its helper said of it, where it kept that. Read once: the file goes. One that is no
+// regular file is not read.
+function applied(path: string, version: string, says: Readonly<Record<number, string>>): ({ state: "refused" } | { state: "failed"; why: string }) & { said: string | null } | null {
   if (!regular(path)) return null;
   let read: unknown;
   try {
@@ -543,14 +589,28 @@ function applied(path: string, version: string): { state: "refused" } | { state:
   } finally {
     rmSync(path, { force: true });
   }
-  const { version: of, code } = (typeof read === "object" && read !== null ? read : {}) as { version?: unknown; code?: unknown };
+  const { version: of, code, said } = (typeof read === "object" && read !== null ? read : {}) as { version?: unknown; code?: unknown; said?: unknown };
   if (of !== version || !Number.isSafeInteger(code) || code === 0) return null;
-  if (code === UAC_DISMISSED) return { state: "refused" };
-  return { state: "failed", why: ADMIN_SAYS[code as number] ?? `its install ended ${code as number}` };
+  const words = typeof said === "string" && said !== "" ? said : null;
+  if (code === UAC_DISMISSED) return { state: "refused", said: words };
+  return { state: "failed", why: says[code as number] ?? `its install ended ${code as number}`, said: words };
 }
 
-// How the installed version's mark is read: as the root helper reads one, or on Windows the MSI's record, JSON.
-const MARK: (bytes: Buffer) => Record<string, unknown> | null = forThisOs({ win32: (bytes: Buffer) => JSON.parse(bytes.toString("utf8")) as Record<string, unknown> | null }) ?? oneObject;
+// How the installed version's mark is read, and whose word it must be: as the root helper reads one, root's; on Windows
+// the MSI's record, JSON, an administrator's; on macOS the installed bundle's own package.json, JSON, the bundle's.
+interface Mark {
+  own(path: string): void;
+  read(bytes: Buffer): Record<string, unknown> | null;
+}
+const json = (bytes: Buffer) => JSON.parse(bytes.toString("utf8")) as Record<string, unknown> | null;
+const MARK: Mark = forThisOs<Mark>({ win32: { own: installersOwn, read: json }, darwin: { own: bundled, read: json } }) ?? { own: installersOwn, read: oneObject };
+
+/**
+ * Why this app cannot install an update where it is, on macOS (installer-darwin.ts): its folder is not this user's to
+ * change, and an administrator installs the release's disk image, *download* under <base>/desktop/; or *why* nobody can
+ * where it runs.
+ */
+export type Held = { download: string } | { why: string };
 
 export interface UpdatesOptions {
   version: string; // the running app's
@@ -567,6 +627,7 @@ export interface UpdatesOptions {
   standing?: string; // a file of the app's own, where it keeps how long the newest release has been unsigned; in memory without
   now?: () => number; // the clock: Date.now
   target?: Target | null; // the releases taken, and where on the base they are: this computer's (targetOf)
+  held?: () => Held | null; // why this app cannot install a newer release where it is, asked before one is downloaded: macOS's
 }
 
 /** The app's updates: one check at a time, each change told. */
@@ -644,7 +705,7 @@ export class Updates {
     try {
       base = installBase(record, rootOwned);
       keys = releaseKeys(helper, rootOwned);
-      channel = channelOf(record, helper);
+      channel = channelOf(record, helper, rootOwned);
     } catch (error) {
       // The record or the helper is not one the app can take. Of the helper, an install would say
       // so itself, or pkexec would for it; of the record no one would, and updates would stop
@@ -692,6 +753,15 @@ export class Updates {
       if (earlier) rmSync(earlier, { recursive: true, force: true });
       return this.set({ state: "none" });
     }
+    // Newer, and not this app's to install where it is: said, and nothing of it downloaded, nor kept of an earlier one,
+    // since nobody here would install it.
+    const held = this.options.held?.() ?? null;
+    if (held) {
+      const earlier = updatesFolder(this.options.cache, false, this.took, this.options.log);
+      if (earlier) rmSync(earlier, { recursive: true, force: true });
+      return this.set("why" in held ? { state: "held", version: release.version, why: held.why }
+        : { state: "administrator", version: release.version, download: `${base}/desktop/${held.download}` });
+    }
     const cache = updatesFolder(this.options.cache, true, this.took, this.options.log)!;
     const folder = join(cache, release.version);
     ownFolder(folder, true);
@@ -700,9 +770,11 @@ export class Updates {
     for (const name of readdirSync(folder)) if (!regular(join(folder, name))) rmSync(join(folder, name), { recursive: true, force: true });
     const windows = at.platform === "win32";
     const files = { manifest: join(folder, "manifest.json"), signature: join(folder, "manifest.json.sig"), tarball: join(folder, windows ? "release.msi" : "release.tar.gz") };
-    // How an earlier install of it ended, as Windows's helper kept it once the app had quit for it: said
-    // once, at the first check after, and gone.
-    const ended = windows ? applied(join(folder, RESULT), release.version) : null;
+    // How an earlier install of it ended, as Windows's or macOS's helper kept it once the app had quit for it: said
+    // once, at the first check after, and gone; what the helper said of it goes to the log whole.
+    const says = APPLY_SAYS[at.platform];
+    const ended = says ? applied(join(folder, RESULT), release.version, says) : null;
+    if (ended?.said) this.options.log?.(`Surogate ${release.version} was not installed: ${ended.said}`);
     keep(files.manifest, manifest);
     keep(files.signature, signature);
     // One downloaded already is taken by its size and hash: the user's processes can change it.
@@ -786,12 +858,13 @@ export class Updates {
 
   // The version installed for every user now, as its root helper recorded it; null when none can be
   // read. Its mark is read as the helper reads one: root's own in an installed app, and one object.
+  // On macOS, the installed bundle's own package, which another user's update may have replaced.
   private installedVersion(): string | null {
     const { installed, rootOwned } = this.options;
     if (!installed || !existsSync(installed)) return null;
     try {
-      if (rootOwned) installersOwn(installed);
-      const version = MARK(readFileSync(installed))?.version;
+      if (rootOwned) MARK.own(installed);
+      const version = MARK.read(readFileSync(installed))?.version;
       return typeof version === "string" && VERSION.test(version) ? version : null;
     } catch {
       return null;

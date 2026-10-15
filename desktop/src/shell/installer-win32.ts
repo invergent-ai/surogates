@@ -65,6 +65,13 @@ export function updateRun(helper: string, pid: number = process.pid): (files: St
   };
 }
 
+/** What the removal asks first on Windows: it is for every user, and an administrator's to approve. */
+export const REMOVAL = {
+  message: "Remove Surogate from this computer?",
+  detail: "Surogate is uninstalled for every user of this computer, once an administrator approves it. The folders your chats work on are left as they are.",
+  checkbox: "Also delete your Surogate data on this computer: your sign-in, your settings and the sandbox's disks",
+};
+
 /**
  * What removes the app with *helper*: `remove`, for this app's process *pid*, which uninstalls it for every user once an
  * administrator approved and the app has quit, and then removes the user's own folders it is given, *forget*.
