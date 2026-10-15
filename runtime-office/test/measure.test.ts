@@ -160,6 +160,66 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes[1].text.paras.map((p: Any) => p.before)).toEqual([0, 10]);
   });
 
+  it("refuses a div whose own flex or grid layout keeps its pieces apart, and takes them as separate p's", async () => {
+    const APART = "lays out its pieces apart (gap, space-between or columns), which one text box cannot: put each in its own <p>.";
+    for (const div of [
+      `<div style="display:flex;justify-content:space-between;width:600px;font-size:32px"><b>Q1</b><span>$4.2M</span></div>`,
+      `<div style="display:grid;grid-template-columns:1fr 1fr;width:600px;font-size:32px"><span>North</span><span>120</span><span>South</span><span>90</span></div>`,
+      `<div style="display:flex;flex-direction:column;font-size:32px">Revenue<b>up</b></div>`,
+      `<div style="display:flex;gap:16px;font-size:32px">Revenue <b>up</b></div>`,
+    ]) {
+      await expect(measure(`<section style="background:#fff;padding:128px">${div}</section>`), div).rejects.toThrow(`<section > div> ${"("}`);
+      await expect(measure(`<section style="background:#fff;padding:128px">${div}</section>`), div).rejects.toThrow(APART);
+    }
+    const spec: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial">
+      <div style="display:flex;justify-content:space-between;width:600px"><p style="font-size:32px">Q1</p><p style="font-size:32px">$4.2M</p></div></section>`);
+    expect(spec.shapes.map((s: Any) => s.text.paras[0].runs[0].text)).toEqual(["Q1", "$4.2M"]);
+    expect(spec.shapes[1].x).toBeGreaterThan(spec.shapes[0].x + spec.shapes[0].w);
+  });
+
+  it("refuses a negative margin, which fits text the editor cannot", async () => {
+    for (const html of [
+      `<p style="width:400px;font-size:32px">Left words <span style="margin-left:-80px">pulled back over them</span></p>`,
+      `<div data-text style="font-size:32px"><p>One</p><p style="margin-top:-30px">Two</p></div>`,
+      `<ul style="font-size:32px"><li>One</li><li style="margin-top:-30px">Two</li></ul>`,
+    ]) {
+      await expect(measure(`<section style="background:#fff;padding:128px">${html}</section>`), html).rejects.toThrow("no negative margin: use gap or padding.");
+    }
+  });
+
+  it("says to draw an empty inline element beside blocks as a div, which then goes in", async () => {
+    await expect(measure(`<section style="background:#fff;padding:128px"><div style="display:flex;gap:12px"><span style="display:inline-block;width:16px;height:16px;background:#ff0000"></span><p>Revenue</p></div></section>`))
+      .rejects.toThrow('<section > div > span> sits beside blocks in <section > div> ("Revenue"): draw it as a <div>.');
+    const spec: Any = await measure(`<section style="background:#fff;padding:128px"><div style="display:flex;gap:12px"><div style="width:16px;height:16px;background:#ff0000"></div><p>Revenue</p></div></section>`);
+    expect(spec.shapes.map((s: Any) => s.fill?.color.hex ?? s.text.paras[0].runs[0].text)).toEqual(["#ff0000", "Revenue"]);
+  });
+
+  it("refuses a painted span inside text, saying to draw it as a div beside the text, which then goes in", async () => {
+    const DRAW = "a painted <span> inside text can't be drawn: draw it as a <div> beside the text.";
+    for (const html of [
+      `<p style="font-size:32px">Status: <span style="background:#22c55e;color:#ffffff;padding:4px 12px">Live</span></p>`,
+      `<div style="font-size:32px">Status: <span style="background:#22c55e;color:#ffffff;padding:4px 12px">Live</span></div>`,
+      `<div style="display:flex;gap:12px;align-items:center;font-size:32px"><span style="display:inline-block;width:16px;height:16px;background:#ff0000"></span>Revenue</div>`,
+      `<p style="font-size:32px"><span style="border:2px solid #000000">Boxed</span></p>`,
+    ]) {
+      await expect(measure(`<section style="background:#fff;padding:128px">${html}</section>`), html).rejects.toThrow(DRAW);
+    }
+    const spec: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial">
+      <div style="display:flex;gap:12px;align-items:center"><p style="font-size:32px">Status:</p><div style="font-size:32px;background:#22c55e;color:#ffffff;padding:4px 12px">Live</div></div></section>`);
+    expect(spec.shapes.map((s: Any) => [s.fill?.color.hex ?? null, s.text.paras[0].runs[0].text])).toEqual([[null, "Status:"], ["#22c55e", "Live"]]);
+  });
+
+  it("leaves out a hidden list item, paragraph or span", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+      <ul style="font-size:32px"><li>North</li><li style="display:none">Hidden</li><li>East</li></ul>
+      <div data-text style="font-size:32px"><p>One</p><p style="display:none">Hidden</p><p>Two</p></div>
+      <p style="font-size:32px">Shown <span style="display:none">hidden </span>text</p></section>`);
+    const texts = (shape: Any) => shape.text.paras.map((p: Any) => [p.runs.map((r: Any) => r.text).join(""), p.before]);
+    expect(texts(spec.shapes[0])).toEqual([["North", 0], ["East", 0]]);
+    expect(texts(spec.shapes[1])).toEqual([["One", 0], ["Two", 0]]);
+    expect(texts(spec.shapes[2])).toEqual([["Shown text", 0]]);
+  });
+
   it("lays out a table with its row backgrounds", async () => {
     const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
       <table style="width:1200px;font-size:32px"><tr style="background:#14285A"><th style="width:50%;color:#ffffff">Region</th><th style="width:25%;color:#ffffff">Q1</th><th style="width:25%;color:#ffffff">Q2</th></tr>
@@ -225,8 +285,8 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     ["an external href", quoted(svg('<image href="http://169.254.169.254/latest" width="8" height="8"/>')), "links to http://169.254.169.254/latest"],
     ["an external xlink:href", quoted(svg("<use xlink:href='https://example.com/a.svg#b'/>")), "links to https://example.com/a.svg#b"],
     ["an escaped external url()", quoted(svg('<rect width="8" height="8" style="fill:u\\72l(http://example.com/x)"/>')), "links to http://example.com/x"],
-    ["an ENTITY", quoted(svg("<text>&x;</text>", '<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>')), "declares an ENTITY"],
-    ["a DOCTYPE with declarations", quoted(svg("<rect width='8' height='8'/>", '<!DOCTYPE svg [<!ATTLIST svg width CDATA "8">]>')), "DOCTYPE declares"],
+    ["an ENTITY", quoted(svg("<text>&x;</text>", '<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>')), "declares <!ENTITY>"],
+    ["a DOCTYPE with declarations", quoted(svg("<rect width='8' height='8'/>", '<!DOCTYPE svg [<!ATTLIST svg width CDATA "8">]>')), "declares <!ATTLIST>"],
     // The same script however the img writes its src.
     ["an unquoted src", `<img src=data:image/svg+xml;base64,${b64} ${sized}>`, "holds a script"],
     ["a src after a decoy", `<img data-src="data:," src="data:image/svg+xml;base64,${b64}" ${sized}>`, "holds a script"],
@@ -234,6 +294,9 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     ["UTF-16 data", `<img src="data:image/svg+xml;base64,${Buffer.from(`\ufeff${script}`, "utf16le").toString("base64")}" ${sized}>`, "holds a script"],
     ["percent-encoded data", `<img src="data:image/svg+xml,${encodeURIComponent(script)}" ${sized}>`, "holds a script"],
     ["an inline svg's onload", `<svg aria-label="x" onload="alert(1)" width="8" height="8"><rect width="8" height="8"/></svg>`, "the attribute onload"],
+    // Data inside an SVG is a PNG or JPEG by its declared type and its whole signature.
+    ["a nested SVG starting like a PNG", quoted(svg(`<image width="8" height="8" href="data:image/svg+xml;base64,${Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.from(script)]).toString("base64")}"/>`)), "links to data:image/svg+xml"],
+    ["a nested PNG with half a signature", quoted(svg(`<image width="8" height="8" href="data:image/png;base64,${Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.from(script)]).toString("base64")}"/>`)), "links to data:image/png"],
   ])("refuses an SVG picture with %s, naming the picture", async (_what, img, said) => {
     const refusal = await measure(`<section style="background:#fff">${img}</section>`).then(() => "measured", (error: Error) => error.message);
     expect(refusal).toContain(said);
@@ -243,6 +306,21 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
   it("refuses a picture whose data is not the PNG or JPEG it says", async () => {
     const svgAsPng = "data:image/png;base64," + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>').toString("base64");
     await expect(measure(`<section style="background:#fff"><img src="${svgAsPng}" alt="x" style="width:8px;height:8px"></section>`)).rejects.toThrow("is not a PNG or JPEG");
+    const halfSigned = "data:image/png;base64," + Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.from(script)]).toString("base64");
+    await expect(measure(`<section style="background:#fff"><img src="${halfSigned}" alt="x" style="width:8px;height:8px"></section>`)).rejects.toThrow("is not a PNG or JPEG");
+  });
+
+  it("checks an SVG holding thousands of DOCTYPE look-alikes in well under a second", async () => {
+    const doc = `${svg("")}<!--${"<!DOCTYPE a".repeat(30_000)}-->`;
+    const started = Date.now();
+    await measure(`<section style="background:#fff">${quoted(doc)}</section>`);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it("checks thousands of svgs nested in one inline svg quickly", async () => {
+    const started = Date.now();
+    await expect(measure(`<section style="background:#fff"><svg aria-label="x" width="8" height="8">${"<svg>".repeat(10_000)}</svg></section>`)).rejects.toThrow("an svg is at most 52 KB");
+    expect(Date.now() - started).toBeLessThan(3000);
   });
 
   it("refuses text that overflows its box, and a word wider than its box", async () => {

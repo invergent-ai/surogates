@@ -74,11 +74,18 @@ export function inspect(args: InspectArgs): Inspected {
   // A div holding only text and inline elements is one text box of one paragraph, as a p is.
   const textOnly = (el: Element): boolean => tagOf(el) === "DIV" && !!(el.textContent ?? "").trim()
     && Array.from(el.childNodes).every((n) => n.nodeType !== Node.ELEMENT_NODE || INLINE.has(tagOf(n as Element)));
+  // A box an inline element paints, which a run of text cannot carry: a background (not one clipped to the text), a
+  // border or a shadow.
+  const paintsBox = (el: Element): boolean => {
+    const cs = getComputedStyle(el);
+    return (cs.backgroundClip !== "text" && (!!color(cs.backgroundColor) || cs.backgroundImage !== "none")) || cs.boxShadow !== "none"
+      || (["Top", "Right", "Bottom", "Left"] as const).some((side) => cs[`border${side}Style`] !== "none" && parseFloat(cs[`border${side}Width`]) > 0);
+  };
   const isText = (el: Element): boolean => TEXT.has(tagOf(el)) || ["UL", "OL"].includes(tagOf(el)) || (tagOf(el) === "DIV" && (el.hasAttribute("data-text") || textOnly(el)));
 
   // The document server keeps a slide's SVG picture and draws it itself, so it holds shapes, never code or a reference
   // to anything outside it. Each is read as this page parsed it: an img's src as the browser decoded it, an svg's tree.
-  const PLAIN = "A slide's SVG is plain shapes: no script, foreignObject or on… attribute, no ENTITY or <!DOCTYPE […]>, and no link but to #… or to a PNG or JPEG as data.";
+  const PLAIN = "A slide's SVG is plain shapes: no script, foreignObject or on… attribute, no <!ENTITY> or other DTD declaration, and no link but to #… or to a PNG or JPEG as data.";
   // A data URL's bytes, as the browser reads them: percent-decoded, then base64-decoded when it says so.
   const dataBytes = (url: string): Uint8Array | null => {
     const comma = url.indexOf(",");
@@ -104,29 +111,33 @@ export function inspect(args: InspectArgs): Inspected {
     }
     return Uint8Array.from(bytes);
   };
-  // The document server tells a picture's kind by its bytes, whatever its data URL says.
-  const raster = (b: Uint8Array | null): boolean => !!b && ((b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) || (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff));
-  const reference = (target: string, who: string): void => {
+  // The document server tells a picture's kind by its bytes, whatever its data URL says: a PNG's whole signature, or
+  // a JPEG's.
+  const SIGNATURES = [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], [0xff, 0xd8, 0xff]];
+  const raster = (b: Uint8Array | null): boolean => !!b && SIGNATURES.some((signature) => signature.every((byte, i) => b[i] === byte));
+  // The picture's name, built only for a refusal: building it walks the page.
+  type Who = () => string;
+  const reference = (target: string, who: Who): void => {
     const to = target.trim();
-    if (to.startsWith("#") || (/^data:/i.test(to) && raster(dataBytes(to)))) return;
-    fail(`${who}: the SVG links to ${to.slice(0, 80)}. ${PLAIN}`);
+    if (to.startsWith("#") || (/^data:image\/(png|jpeg)[;,]/i.test(to) && raster(dataBytes(to)))) return;
+    fail(`${who()}: the SVG links to ${to.slice(0, 80)}. ${PLAIN}`);
   };
   // url() and @import, CSS escapes read as CSS reads them.
-  const styleOf = (css: string, who: string): void => {
+  const styleOf = (css: string, who: Who): void => {
     const plain = css.replace(/\\(?:([\da-f]{1,6})\s?|([^]))/gi, (_, hex: string | undefined, char: string | undefined) => (hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : char!));
-    if (/@import/i.test(plain)) fail(`${who}: the SVG's style imports a sheet. ${PLAIN}`);
+    if (/@import/i.test(plain)) fail(`${who()}: the SVG's style imports a sheet. ${PLAIN}`);
     for (const m of plain.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))/gi)) reference(m[1] ?? m[2] ?? m[3]!, who);
   };
-  const svgTree = (root: Element, who: string): void => {
+  const svgTree = (root: Element, who: Who): void => {
     for (const node of [root, ...Array.from(root.querySelectorAll("*"))]) {
       const name = node.localName.toLowerCase();
-      if (name === "script" || name === "foreignobject") fail(`${who}: the SVG holds a ${node.localName}. ${PLAIN}`);
+      if (name === "script" || name === "foreignobject") fail(`${who()}: the SVG holds a ${node.localName}. ${PLAIN}`);
       if (name === "style") styleOf(node.textContent ?? "", who);
       for (const attribute of Array.from(node.attributes)) {
         const at = attribute.localName.toLowerCase();
-        if (at.startsWith("on")) fail(`${who}: the SVG has the attribute ${attribute.name}. ${PLAIN}`);
+        if (at.startsWith("on")) fail(`${who()}: the SVG has the attribute ${attribute.name}. ${PLAIN}`);
         if (at === "href" || attribute.name === "xml:base") reference(attribute.value, who);
-        if (at === "attributename" && /^\s*([\w.-]+:)?(href|on)/i.test(attribute.value)) fail(`${who}: the SVG animates ${attribute.value.trim()}. ${PLAIN}`);
+        if (at === "attributename" && /^\s*([\w.-]+:)?(href|on)/i.test(attribute.value)) fail(`${who()}: the SVG animates ${attribute.value.trim()}. ${PLAIN}`);
         styleOf(attribute.value, who);
       }
     }
@@ -137,13 +148,15 @@ export function inspect(args: InspectArgs): Inspected {
     const bytes = dataBytes(src) ?? fail(`${who}: the SVG's data is not base64.`);
     const le = bytes[0] === 0xff && bytes[1] === 0xfe, be = bytes[0] === 0xfe && bytes[1] === 0xff;
     const text = new TextDecoder(le ? "utf-16le" : be ? "utf-16be" : "utf-8").decode(bytes);
-    if (/<!ENTITY/i.test(text)) fail(`${who}: the SVG declares an ENTITY. ${PLAIN}`);
-    if (/<!DOCTYPE(?:[^>["']|"[^"]*"|'[^']*')*\[/i.test(text)) fail(`${who}: the SVG's DOCTYPE declares things of its own. ${PLAIN}`);
+    // A DOCTYPE's internal subset does nothing without one of these; a scan for them is linear, as parsing a DOCTYPE
+    // by regex is not.
+    const declared = /<!(ENTITY|ATTLIST|ELEMENT|NOTATION)/i.exec(text);
+    if (declared) fail(`${who}: the SVG declares <!${declared[1]!.toUpperCase()}>. ${PLAIN}`);
     const doc = new DOMParser().parseFromString(text, "image/svg+xml");
     if (doc.getElementsByTagName("parsererror").length || doc.documentElement?.localName !== "svg") fail(`${who}: the SVG does not parse. ${PLAIN}`);
     const instruction = doc.createTreeWalker(doc, NodeFilter.SHOW_PROCESSING_INSTRUCTION).nextNode() as ProcessingInstruction | null;
     if (instruction) fail(`${who}: the SVG holds <?${instruction.target} …?>. ${PLAIN}`);
-    svgTree(doc.documentElement, who);
+    svgTree(doc.documentElement, () => who);
     // The root alone: no XML declaration naming another encoding, no DOCTYPE.
     const utf8 = new TextEncoder().encode(new XMLSerializer().serializeToString(doc.documentElement));
     let binary = "";
@@ -180,7 +193,8 @@ export function inspect(args: InspectArgs): Inspected {
     // Checked once: the measurer then writes each element's resolved family inline, which the format refuses on a span.
     if (args.phase === "check") {
       if (elements.length > 200) fail("A slide has at most 200 elements: split it.");
-      for (const el of Array.from(section.querySelectorAll("svg"))) svgTree(el, describe(el));
+      // An svg inside another is walked with it.
+      for (const el of Array.from(section.querySelectorAll("svg"))) if (!el.parentElement?.closest("svg")) svgTree(el, () => describe(el));
       let embeds = 0;
       for (const el of elements) {
         const tag = tagOf(el);
@@ -235,7 +249,9 @@ export function inspect(args: InspectArgs): Inspected {
             const words = (node.textContent ?? "").trim().split(/\s+/).slice(0, 6).join(" ");
             const what = child ? describe(child) : `Text "${words}"`;
             if (tag === "UL" || tag === "OL") fail(`${what} sits directly in ${describe(el)}: put it in an <li>.`);
-            fail(`${what} sits ${blocks ? "beside blocks in" : "directly in"} ${describe(el)}: put it in a <p>.`);
+            // In a p, an inline element with no text would be an empty text box, and the box it paints would be lost.
+            const fix = child && !(child.textContent ?? "").trim() ? "draw it as a <div>" : "put it in a <p>";
+            fail(`${what} sits ${blocks ? "beside blocks in" : "directly in"} ${describe(el)}: ${fix}.`);
           }
         }
         if (tag === "DIV" && el.hasAttribute("data-text") && !textOnly(el)) {
@@ -245,7 +261,26 @@ export function inspect(args: InspectArgs): Inspected {
           const holder = tag === "TD" || tag === "TH" ? "a table cell holds plain text" : tag === "DIV" ? "a div of text holds text" : "a heading, paragraph or list item holds text";
           for (const child of Array.from(el.querySelectorAll("*"))) {
             if (!INLINE.has(tagOf(child))) fail(`${describe(child)}: ${holder} (b, i, u, a, span and br), not <${child.tagName.toLowerCase()}>.`);
+            if (paintsBox(child)) fail(`${describe(child)}: a painted <${child.tagName.toLowerCase()}> inside text can't be drawn: draw it as a <div> beside the text.`);
           }
+        }
+        // One text box sets a div's pieces in one line of runs: a flex or grid layout of its own that keeps them apart
+        // would glue their words together.
+        if (textOnly(el) && /flex|grid/.test((el as HTMLElement).style.display)) {
+          let pieces = 0, inText = false;
+          for (const node of Array.from(el.childNodes)) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              pieces++;
+              inText = false;
+            } else if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim() && !inText) {
+              pieces++;
+              inText = true;
+            }
+          }
+          const cs = getComputedStyle(el);
+          // A grid puts each piece in a cell of its own, across or down.
+          const apart = /grid/.test(cs.display) || cs.flexDirection !== "row" || /space/.test(cs.justifyContent) || parseFloat(cs.rowGap) > 0 || parseFloat(cs.columnGap) > 0;
+          if (pieces > 1 && apart) fail(`${describe(el)} lays out its pieces apart (gap, space-between or columns), which one text box cannot: put each in its own <p>.`);
         }
         if (tag === "TR" && Array.from((el as HTMLTableRowElement).cells).some((c) => c.colSpan > 1 || c.rowSpan > 1)) fail(`${describe(el)}: no colspan or rowspan.`);
         const style = (el as HTMLElement).style;
@@ -255,6 +290,8 @@ export function inspect(args: InspectArgs): Inspected {
           // A shorthand sets its other longhands to their initial value.
           if (value === "initial") continue;
           if (!STYLE.test(property)) fail(`${describe(el)} uses ${property}, which is not in the slide format.`);
+          // Pulled back, a box lets Chromium fit text where the editor's runs and paragraphs need more room.
+          if (/^margin-/.test(property) && parseFloat(getComputedStyle(el).getPropertyValue(property)) < 0) fail(`${describe(el)}: no negative margin: use gap or padding.`);
           if (/var\(|currentcolor/i.test(value)) fail(`${describe(el)}: no var() or currentcolor.`);
           if (UNITS.test(value) || (property !== "letter-spacing" && /\d(?:\.\d+)?em\b/i.test(value))) fail(`${describe(el)} sets ${property} to ${value}: lengths are px (no em, rem, vw or vh).`);
           if (tag === "SPAN" && /^font-(size|family)$/.test(property)) fail(`${describe(el)}: no sizes or fonts on a span (use two blocks).`);
@@ -665,6 +702,7 @@ export function inspect(args: InspectArgs): Inspected {
             const text = (child.textContent ?? "").replace(/[ \t\n\r\f]+/g, " ");
             if (text) add(text, child.parentElement!);
           } else if (child.nodeType === Node.ELEMENT_NODE) {
+            if (getComputedStyle(child as Element).display === "none") continue;
             if (tagOf(child as Element) === "BR") add("\n", child as Element);
             else walk(child);
           }
@@ -693,10 +731,12 @@ export function inspect(args: InspectArgs): Inspected {
       // the paragraphs of one box, textShape gives it as spacing before.
       return { align, line: Number.isFinite(lineHeight) ? Math.round((lineHeight / (1.2 * size)) * 1000) / 1000 : 1, before: 0, after: 0, runs: runs(el) };
     };
+    // What a text box holds: a hidden item draws nothing and takes no room.
+    const shownChildren = (el: Element): Element[] => Array.from(el.children).filter((child) => getComputedStyle(child).display !== "none");
     const listParas = (list: Element, left: number, indent?: number): Para[] => {
       const cs = getComputedStyle(list);
       const ordered = tagOf(list) === "OL";
-      return Array.from(list.children).map((li) => {
+      return shownChildren(list).map((li) => {
         const para = paragraph(li);
         // The item's text starts where its box does; its marker hangs in the list's left padding.
         para.indent = twips(indent ?? box(li).x - left);
@@ -723,11 +763,11 @@ export function inspect(args: InspectArgs): Inspected {
       let items: Element[] = [];
       if (tag === "UL" || tag === "OL") {
         paras = listParas(el, b.x);
-        items = Array.from(el.children);
+        items = shownChildren(el);
       } else if (tag === "DIV" && !textOnly(el)) {
         const indent = Number(el.getAttribute("data-text")) || undefined;
-        paras = Array.from(el.children).flatMap((child) => (["UL", "OL"].includes(tagOf(child)) ? listParas(child, b.x, indent) : [paragraph(child)]));
-        items = Array.from(el.children).flatMap((child) => (["UL", "OL"].includes(tagOf(child)) ? Array.from(child.children) : [child]));
+        paras = shownChildren(el).flatMap((child) => (["UL", "OL"].includes(tagOf(child)) ? listParas(child, b.x, indent) : [paragraph(child)]));
+        items = shownChildren(el).flatMap((child) => (["UL", "OL"].includes(tagOf(child)) ? shownChildren(child) : [child]));
       } else paras = [paragraph(el)];
       // The space margins or a gap leave above each paragraph of the box, as Chromium laid it out.
       let top = b.y + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop);

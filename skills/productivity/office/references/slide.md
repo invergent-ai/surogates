@@ -48,21 +48,22 @@ push|magic"` is how it leaves.
 
 **Text:** `<h1>` `<h2>` `<h3>` `<p>` (start at 96/64/44/32 px; set `font-size` yourself, **never under 24 px**),
 `<ul>`/`<ol>` of plain `<li>` (one level), `<br>`, and inline `<b>` `<i>` `<u>` `<a href="https://…">` `<span
-style="color:…">` (no sizes or fonts on a span). A `<div>` holding only text and those inline tags is one text box,
-set by its own font, colour, alignment, background, border and padding; `<div data-text>` of plain `<p>`/`<ul>`/`<ol>`
-is one text box of several paragraphs. Text beside blocks in one div, or directly in the section, is refused: put it in
-a `<p>`. Inside a heading, paragraph, list item, table cell or div of text go only `<b>` `<i>` `<u>` `<a>` `<span>`
-`<br>`: no icon, picture or other block. A label is a `<p>` with `background` and `padding`: it stays one shape. Text
-wraps only at spaces, so size a box to its longest word (about 0.6 × the font size per character). **Too much for its
-box? The slide is refused: split it. Nothing shrinks.**
+style="color:…">` (no size, font, background or border on them: a badge is a `<div>` of its own). A `<div>` holding only
+text and those inline tags is one text box of one paragraph, set by its own font, colour, alignment, background, border
+and padding; pieces its own flex or grid layout sets apart go in a `<p>` each. `<div data-text>` of plain
+`<p>`/`<ul>`/`<ol>` is one text box of several paragraphs. Text beside blocks in one div, or directly in the section, is
+refused: put it in a `<p>`. Inside a heading, paragraph, list item, table cell or div of text go only `<b>` `<i>` `<u>`
+`<a>` `<span>` `<br>`: no icon, picture or other block. A label is a `<p>` with `background` and `padding`: it stays one
+shape. Text wraps only at spaces, so size a box to its longest word (about 0.6 × the font size per character). **Too
+much for its box? The slide is refused: split it. Nothing shrinks.**
 
 **Containers:** `<div>` is a flex column unless it says `display:flex` (a row) or `display:grid`; it is invisible unless
 painted (`background`, `border`, `box-shadow`). An empty `<div style="flex:1">` is a spacer. At most 15 nested divs.
 
 **Pictures:** `<img src="<workspace path>" alt="…" style="width; height; object-fit:cover|contain">`, a PNG, JPEG or
 SVG from the workspace. `data-crop="ZOOM X% Y%"` crops. `<svg aria-label>` (at most 52 KB) is drawn as a picture. An
-SVG, from a file or inline, is plain shapes: no script, foreignObject or `on…` attribute, no ENTITY or `<!DOCTYPE […]>`,
-and no link but to `#…` or to a PNG or JPEG as data. matplotlib's SVGs go in as they are.
+SVG, from a file or inline, is plain shapes: no script, foreignObject or `on…` attribute, no `<!ENTITY>` or other DTD
+declaration, and no link but to `#…` or to a PNG or JPEG as data. matplotlib's SVGs go in as they are.
 
 **Tables:** `<table>` of `<tr>` with `<th>` (the first row) and `<td>`, plain text, no colspan or rowspan. Column widths:
 `width:N%` on every cell of the first row. A `<tr>` may carry `background`. A row is about 2.1 × the font size per line.
@@ -79,12 +80,12 @@ shows. Scripts in it do not run: draw a chart as an inline `<svg>`.
 **Styles:** lengths in px (no `em`, `rem`, `vw`, `%` only where a box's share is meant); colours as hex or `rgb[a]()`;
 `linear-gradient` and `repeating-linear-gradient` backgrounds; `border` (solid, dashed, dotted, double); `box-shadow`;
 `opacity`; `transform: rotate()`, `translate()`, `scale()`; `letter-spacing`, `text-transform`, `text-decoration`,
-`-webkit-text-stroke`, gradient text (`background-clip:text`); `margin`, which moves a box as CSS does. No `z-index`,
-no classes or `<style>`. A radial gradient is a picture behind its box's text. A filter or a blend mode on anything,
-opacity on a div that holds children, and a turn, a scale or a skew on such a div or on a table make the element and
-everything in it one picture, which looks right but which the user cannot edit: keep them for decoration, and fade or
-turn single shapes and text boxes instead (a turned text box stays native; a scaled or skewed one is a picture). A
-blurred shadow is a picture behind its shape, which stays editable.
+`-webkit-text-stroke`, gradient text (`background-clip:text`); `margin` (not negative), which moves a box as CSS does.
+No `z-index`, no classes or `<style>`. A radial gradient is a picture behind its box's text. A filter or a blend mode
+on anything, opacity on a div that holds children, and a turn, a scale or a skew on such a div or on a table make the
+element and everything in it one picture, which looks right but which the user cannot edit: keep them for decoration,
+and fade or turn single shapes and text boxes instead (a turned text box stays native; a scaled or skewed one is a
+picture). A blurred shadow is a picture behind its shape, which stays editable.
 
 **Motion:** `data-build-in` / `data-build-out="fade|rise|drop|left|right|scale|pop [order N] [auto]"` on the section's
 pinned children; `data-transition="magic"` with the same `id` on matching pinned elements of two slides moves them
