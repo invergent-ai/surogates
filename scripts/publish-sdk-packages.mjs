@@ -102,6 +102,30 @@ export function pinWorkspaceDependencies(manifest, version) {
   return changed ? pinned : manifest;
 }
 
+// A package goes out after the sibling packages it depends on: published
+// first, it would pin a version the registry does not have yet, and keep it
+// if a sibling's publish then failed.
+export function orderByWorkspaceDependencies(packages) {
+  const byName = new Map(packages.map((pkg) => [pkg.manifest.name, pkg]));
+  const ordered = [];
+  const seen = new Set();
+  const visit = (pkg) => {
+    if (seen.has(pkg)) return;
+    seen.add(pkg);
+    for (const field of DEPENDENCY_FIELDS) {
+      for (const [name, range] of Object.entries(pkg.manifest[field] ?? {})) {
+        const sibling = byName.get(name);
+        if (sibling && typeof range === "string" && range.startsWith("workspace:")) {
+          visit(sibling);
+        }
+      }
+    }
+    ordered.push(pkg);
+  };
+  packages.forEach(visit);
+  return ordered;
+}
+
 export function preparePackageManifest({ dir, manifest, releaseVersion }) {
   const version = releaseVersion ?? manifest.version;
   const pinned = pinWorkspaceDependencies(manifest, version);
@@ -184,7 +208,7 @@ export function parseCliArgs(args) {
 
 function main() {
   const { dryRun, skipExistingCheck, registry, version } = parseCliArgs(process.argv.slice(2));
-  const packages = discoverSdkPackages("sdk");
+  const packages = orderByWorkspaceDependencies(discoverSdkPackages("sdk"));
 
   if (packages.length === 0) {
     console.log("No SDK packages found.");
