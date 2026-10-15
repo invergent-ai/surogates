@@ -251,6 +251,22 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     }
   });
 
+  it("takes gradient text in a table cell: its background is the text's", async () => {
+    const spec: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial"><table style="width:1200px;font-size:32px">
+      <tr><td style="background:linear-gradient(90deg,#c81e1e,#2f5597);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">North</td><td>120</td></tr></table></section>`);
+    expect(spec.shapes[0].rows[0].cells[0].paras[0].runs[0].gradient).toMatchObject({ type: "linear", angle: 90 });
+  });
+
+  it("refuses a background on a table or its row groups, which the editor does not draw", async () => {
+    for (const [table, body, said] of [
+      ["background:#14213D", "", "<section > table> (\"North120\"): the editor draws no background on a <table>: put the background on the table's rows (<tr>)."],
+      ["", "background:linear-gradient(90deg, #14213D, #1A5C9A)", "<section > table > tbody> (\"North120\"): the editor draws no background on a <tbody>: put the background on the table's rows (<tr>)."],
+    ]) {
+      const html = `<section style="background:#fff;padding:128px"><table style="width:1200px;font-size:32px;${table}"><tbody style="${body}"><tr><td>North</td><td>120</td></tr></tbody></table></section>`;
+      await expect(measure(html), html).rejects.toThrow(said!);
+    }
+  });
+
   it("fits a picture by object-fit: contain as a smaller box, cover as a crop", async () => {
     const wide = "data:image/svg+xml;base64," + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"/>').toString("base64");
     const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;display:flex;flex-direction:row;gap:40px">
