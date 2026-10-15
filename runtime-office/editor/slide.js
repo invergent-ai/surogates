@@ -570,14 +570,16 @@
     });
   }
   // A new deck is the blank template's one empty title slide. Slides added to it take its place, as Word writes a new
-  // document's first blocks in place of its one empty line. A slide anyone has typed in, or one this call replaces,
-  // stays.
+  // document's first blocks in place of its one empty line. A slide anyone has typed in or changed (its background,
+  // transition or comments), or one this call replaces, stays.
   function emptyTemplate(ops) {
     var all = pres.GetAllSlides(), slide = all[0];
     if (all.length !== 1 || !ops.some(function (op) { return op.op === "slides" && op.slides.some(function (s) { return s.id === undefined; }); })) return null;
     if (ops.some(function (op) { return op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
-    var layout = slide.GetLayout();
+    var layout = slide.GetLayout(), transition = slide.GetSlideShowTransition();
     if (!layout || layout.GetName() !== "Title Slide" || !slide.GetVisible() || notesOf(slide) || connectorsOf(slide).length) return null;
+    // internal: the builder reads no background; a slide that follows its layout has none of its own
+    if (slide.Slide.cSld.Bg || (transition && transition.GetEntryEffect() !== "effectNone") || pres.GetAllComments().length) return null;
     return slide.GetAllDrawings().every(function (d) { return d.GetPlaceholder && d.GetPlaceholder() && !textOf(d); }) ? slide : null;
   }
   function edit(ops) {

@@ -10,13 +10,16 @@ const SCRIPT = readFileSync(new URL("../editor/slide.js", import.meta.url), "utf
 const EMPTY_SPEC = { background: null, shapes: [], notes: "", hidden: false, transition: null };
 
 interface Box { placeholder?: string; text?: string; name?: string }
-function deck(slides: { layout?: string; boxes?: Box[]; notes?: string }[]) {
+// A slide's own background, transition and comments are what a person can give it without typing.
+interface SlideStub { layout?: string; boxes?: Box[]; notes?: string; background?: true; transition?: string; comments?: number }
+function deck(slides: SlideStub[]) {
   let next = 100;
   const all: Any[] = [];
-  const makeSlide = ({ layout = "Blank", boxes = [], notes = "" }: { layout?: string; boxes?: Box[]; notes?: string }) => {
+  const makeSlide = ({ layout = "Blank", boxes = [], notes = "", background, transition = "effectNone", comments = 0 }: SlideStub) => {
     const id = String(next++);
     const slide: Any = {
-      Slide: { Get_Id: () => id, cSld: { spTree: [] } },
+      Slide: { Get_Id: () => id, cSld: { spTree: [], Bg: background ? {} : null } }, comments,
+      GetSlideShowTransition: () => ({ GetEntryEffect: () => transition }),
       GetAllDrawings: () => boxes.map((b) => ({
         GetClassType: () => "shape", Shape: { txBody: {} }, GetDocContent: () => ({ GetText: () => b.text ?? "" }),
         GetPlaceholder: () => (b.placeholder ? { GetType: () => b.placeholder } : null), GetName: () => b.name ?? "",
@@ -36,6 +39,7 @@ function deck(slides: { layout?: string; boxes?: Box[]; notes?: string }[]) {
   const pres = {
     GetWidth: () => 12192000, GetHeight: () => 6858000, GetAllSlides: () => all.slice(), GetSlidesCount: () => all.length,
     AddSlide: (slide: Any, index: number) => all.splice(index, 0, slide), GetMaster: () => null,
+    GetAllComments: () => all.flatMap((slide) => Array.from({ length: slide.comments }, () => ({}))),
   };
   const Api = {
     GetPresentation: () => pres, CreateSlide: () => makeSlide({}),
@@ -60,7 +64,7 @@ describe("a new deck's empty slide", () => {
     expect(ids()).toEqual(["101", "102", "103"]);
   });
 
-  it("stays when anyone typed in it, when it is not the deck's only slide, or when the call replaces it", () => {
+  it("stays when anyone typed in it or changed it, when it is not the deck's only slide, or when the call replaces it", () => {
     const typed = deck([{ ...TEMPLATE, boxes: [{ placeholder: "ctrTitle", text: "Lisbon" }, { placeholder: "subTitle" }] }]);
     typed.run({ action: "edit", ops: [add(1)] });
     expect(typed.ids()).toEqual(["100", "101"]);
@@ -70,6 +74,11 @@ describe("a new deck's empty slide", () => {
     const drawn = deck([{ ...TEMPLATE, boxes: [...TEMPLATE.boxes, {}] }]);
     drawn.run({ action: "edit", ops: [add(1)] });
     expect(drawn.ids()).toEqual(["100", "101"]);
+    for (const changed of [{ background: true as const }, { transition: "effectFadeSmoothly" }, { comments: 1 }]) {
+      const touched = deck([{ ...TEMPLATE, ...changed }]);
+      touched.run({ action: "edit", ops: [add(1)] });
+      expect(touched.ids(), JSON.stringify(changed)).toEqual(["100", "101"]);
+    }
     const two = deck([TEMPLATE, TEMPLATE]);
     two.run({ action: "edit", ops: [add(1)] });
     expect(two.ids()).toEqual(["100", "101", "102"]);
