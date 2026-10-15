@@ -87,6 +87,8 @@ export class Measurer {
     const args = (phase: InspectArgs["phase"]): InspectArgs => ({ phase, canvas, minPx: MIN_TEXT_PX, icons: ICON_NAMES });
     step.now = "checking the slide";
     const checked = await this.inspect(page, args("check"));
+    // The check gives each SVG picture the data it checked: the pictures load again before anything is measured.
+    await page.evaluate(() => Promise.all(Array.from(document.images, (img) => img.decode().catch(() => undefined))));
     // Each font stack lays text out in its first family the document server has: Chromium measures with that one.
     step.now = "reading the document server's font list";
     const list = await this.fonts.list(editor);

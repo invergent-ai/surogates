@@ -126,6 +126,64 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes[0]).toMatchObject({ kind: "picture", w: 400 * E, h: 200 * E });
   });
 
+  const svgData = (svg: string) => "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64");
+  const handedOn = (src: string) => Buffer.from(src.split(",")[1]!, "base64").toString();
+
+  it("measures matplotlib's SVG, and hands it on without its DOCTYPE", async () => {
+    const svg = `<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="400pt" height="200pt" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+  <linearGradient id="g"><stop offset="0" stop-color="#14285a"/></linearGradient>
+  <path id="a" d="M 0 0 L 10 0 L 10 10 z"/>
+ </defs>
+ <rect width="400" height="200" style="fill: url(#g)"/>
+ <use xlink:href="#a" x="20" y="20" style="fill: #c81e1e"/>
+ <text x="40" y="100">online = 34%</text>
+</svg>`;
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px"><img src="${svgData(svg)}" alt="chart" style="width:400px;height:200px"></section>`);
+    expect(spec.shapes[0]).toMatchObject({ kind: "picture", w: 400 * E, h: 200 * E });
+    const sent = handedOn(spec.shapes[0].src);
+    expect(sent).not.toContain("DOCTYPE");
+    expect(sent).toContain('xlink:href="#a"');
+    expect(sent).toContain("online = 34%");
+  });
+
+  const svg = (inside: string, head = "") => `${head}<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8">${inside}</svg>`;
+  const script = svg("<script>alert(1)</script>");
+  const sized = 'alt="x" style="width:8px;height:8px"';
+  const quoted = (body: string) => `<img src="${svgData(body)}" ${sized}>`;
+  const b64 = Buffer.from(script).toString("base64");
+  it.each([
+    ["a script", quoted(script), "holds a script"],
+    ["a prefixed script", quoted(svg("<s:script xmlns:s='http://www.w3.org/2000/svg'>alert(1)</s:script>")), "holds a script"],
+    ["a foreignObject", quoted(svg('<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject>')), "holds a foreignObject"],
+    ["an onload", quoted(svg('<rect width="8" height="8" onload="alert(1)"/>')), "the attribute onload"],
+    ["an external href", quoted(svg('<image href="http://169.254.169.254/latest" width="8" height="8"/>')), "links to http://169.254.169.254/latest"],
+    ["an external xlink:href", quoted(svg("<use xlink:href='https://example.com/a.svg#b'/>")), "links to https://example.com/a.svg#b"],
+    ["an escaped external url()", quoted(svg('<rect width="8" height="8" style="fill:u\\72l(http://example.com/x)"/>')), "links to http://example.com/x"],
+    ["an ENTITY", quoted(svg("<text>&x;</text>", '<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>')), "declares an ENTITY"],
+    ["a DOCTYPE with declarations", quoted(svg("<rect width='8' height='8'/>", '<!DOCTYPE svg [<!ATTLIST svg width CDATA "8">]>')), "DOCTYPE declares"],
+    // The same script however the img writes its src.
+    ["an unquoted src", `<img src=data:image/svg+xml;base64,${b64} ${sized}>`, "holds a script"],
+    ["a src after a decoy", `<img data-src="data:," src="data:image/svg+xml;base64,${b64}" ${sized}>`, "holds a script"],
+    ["a character reference in the data", `<img src="data:image/svg+xml;base64,${b64.slice(0, 8)}&#${b64.charCodeAt(8)};${b64.slice(9)}" ${sized}>`, "holds a script"],
+    ["UTF-16 data", `<img src="data:image/svg+xml;base64,${Buffer.from(`\ufeff${script}`, "utf16le").toString("base64")}" ${sized}>`, "holds a script"],
+    ["percent-encoded data", `<img src="data:image/svg+xml,${encodeURIComponent(script)}" ${sized}>`, "holds a script"],
+    ["an inline svg's onload", `<svg aria-label="x" onload="alert(1)" width="8" height="8"><rect width="8" height="8"/></svg>`, "the attribute onload"],
+  ])("refuses an SVG picture with %s, naming the picture", async (_what, img, said) => {
+    const refusal = await measure(`<section style="background:#fff">${img}</section>`).then(() => "measured", (error: Error) => error.message);
+    expect(refusal).toContain(said);
+    expect(refusal).toMatch(/^<section > (img|svg)>: .*is plain shapes/);
+  });
+
+  it("refuses a picture whose data is not the PNG or JPEG it says", async () => {
+    const svgAsPng = "data:image/png;base64," + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>').toString("base64");
+    await expect(measure(`<section style="background:#fff"><img src="${svgAsPng}" alt="x" style="width:8px;height:8px"></section>`)).rejects.toThrow("is not a PNG or JPEG");
+  });
+
   it("refuses text that overflows its box, and a word wider than its box", async () => {
     await expect(measure(`<section style="background:#fff"><p style="position:absolute;left:0;top:0;width:300px;height:40px;font-size:32px">This sentence is far too long for a box this small.</p></section>`))
       .rejects.toThrow(/overflows its box by \d+ px/);

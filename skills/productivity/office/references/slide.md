@@ -59,8 +59,9 @@ Nothing shrinks.**
 painted (`background`, `border`, `box-shadow`). An empty `<div style="flex:1">` is a spacer. At most 15 nested divs.
 
 **Pictures:** `<img src="<workspace path>" alt="…" style="width; height; object-fit:cover|contain">`, a PNG, JPEG or
-SVG from the workspace (an SVG of plain shapes: no script, foreignObject or link outside itself). `data-crop="ZOOM X%
-Y%"` crops. `<svg aria-label>` (at most 52 KB, no script) is drawn as a picture.
+SVG from the workspace. `data-crop="ZOOM X% Y%"` crops. `<svg aria-label>` (at most 52 KB) is drawn as a picture. An
+SVG, from a file or inline, is plain shapes: no script, foreignObject or `on…` attribute, no ENTITY or `<!DOCTYPE […]>`,
+and no link but to `#…` or to a PNG or JPEG as data. matplotlib's SVGs go in as they are.
 
 **Tables:** `<table>` of `<tr>` with `<th>` (the first row) and `<td>`, plain text, no colspan or rowspan. Column widths:
 `width:N%` on every cell of the first row. A `<tr>` may carry `background`. A row is about 2.1 × the font size per line.

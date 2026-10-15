@@ -33,19 +33,6 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_PICTURES_BYTES = 12 * 1024 * 1024
 # A slide's <img src="…">: a workspace path the measuring page could not fetch (it fetches nothing), made a data URL.
 _IMG_SRC = re.compile(r"""(<img\b[^>]*?\bsrc\s*=\s*)(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
-_SVG_DATA = "data:image/svg+xml;base64,"
-# The document server keeps a slide's SVG and draws it itself: it may hold shapes, never code or a reference to anything
-# outside it (a reference inside it is "#…", or data).
-_SVG_REFUSED = tuple((re.compile(pattern, re.IGNORECASE), what) for pattern, what in (
-    (rb"<!\s*(?:DOCTYPE|ENTITY)", "declares a DOCTYPE or an ENTITY"),
-    (rb"<\s*(?:[\w.-]+:)?script\b", "carries a script"),
-    (rb"<\s*(?:[\w.-]+:)?foreignObject\b", "carries a foreignObject"),
-    (rb"""[\s"'/]on[a-z]+\s*=""", "carries an on…= handler"),
-    (rb"""\bhref\s*=\s*(?:["']\s*(?![\s#]|data:)|(?![\s"'#]|data:))""", "links outside itself"),
-    (rb"""url\(\s*(?:["']\s*(?![\s#]|data:)|(?![\s"'#]|data:))|@import""", "links outside itself"),
-    (rb"""attributeName\s*=\s*["']\s*(?:[\w.-]+:)?(?:href|on)""", "animates a link or a handler"),
-    (rb"""^\s*<\?xml[^>]*\bencoding\s*=\s*["'](?!utf-8["'])""", "is not UTF-8"),
-))
 _NAME_TTL_S = 300.0
 # The agent's display name by agent id, read from its runtime config at most every five minutes.
 _names: dict[str, tuple[float, str]] = {}
@@ -268,12 +255,6 @@ async def _slide_pictures(html: str, session: Any, kwargs: dict[str, Any], budge
     last = 0
     for match in _IMG_SRC.finditer(html):
         src = match.group(3).strip()
-        if src[:len(_SVG_DATA)].lower() == _SVG_DATA:
-            try:
-                inline = base64.b64decode(src[len(_SVG_DATA):])
-            except ValueError:
-                raise AgentDocumentError("An inline SVG's data is not base64.") from None
-            _check_svg(inline, "An inline SVG")
         if src.startswith("data:"):
             continue
         data, mime = await _picture_bytes(src, session, kwargs, svg=True)
@@ -303,7 +284,7 @@ async def _picture_bytes(raw: str, session: Any, kwargs: dict[str, Any], *, svg:
     if svg and path.lower().endswith(".svg"):
         if not data[:512].lstrip().lower().startswith((b"<svg", b"<?xml")):
             raise AgentDocumentError(f"{path} is not {kinds}.")
-        _check_svg(data, path)
+        # runtime-office checks what it holds, as it checks every SVG picture on a slide.
         return data, "image/svg+xml"
     try:
         with Image.open(io.BytesIO(data)) as image:
@@ -313,15 +294,6 @@ async def _picture_bytes(raw: str, session: Any, kwargs: dict[str, Any], *, svg:
     if mime not in ("image/png", "image/jpeg"):
         raise AgentDocumentError(f"{path} is not {kinds}.")
     return data, mime
-
-
-def _check_svg(data: bytes, name: str) -> None:
-    for pattern, what in _SVG_REFUSED:
-        if pattern.search(data):
-            raise AgentDocumentError(
-                f"{name} {what}. A slide's SVG is plain shapes: no DOCTYPE or ENTITY, script, foreignObject, on…= "
-                "handler, or link outside itself. Take that out, or use a PNG."
-            )
 
 
 async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:

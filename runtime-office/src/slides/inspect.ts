@@ -73,6 +73,81 @@ export function inspect(args: InspectArgs): Inspected {
   const isHost = (el: Element): boolean => tagOf(el) === "SECTION" || ["relative", "absolute"].includes(getComputedStyle(el).position);
   const isText = (el: Element): boolean => TEXT.has(tagOf(el)) || ["UL", "OL"].includes(tagOf(el)) || (tagOf(el) === "DIV" && el.hasAttribute("data-text"));
 
+  // The document server keeps a slide's SVG picture and draws it itself, so it holds shapes, never code or a reference
+  // to anything outside it. Each is read as this page parsed it: an img's src as the browser decoded it, an svg's tree.
+  const PLAIN = "A slide's SVG is plain shapes: no script, foreignObject or on… attribute, no ENTITY or <!DOCTYPE […]>, and no link but to #… or to a PNG or JPEG as data.";
+  // A data URL's bytes, as the browser reads them: percent-decoded, then base64-decoded when it says so.
+  const dataBytes = (url: string): Uint8Array | null => {
+    const comma = url.indexOf(",");
+    const body = url.slice(comma + 1);
+    if (/;\s*base64\s*$/i.test(url.slice(0, comma))) {
+      let binary: string;
+      try {
+        binary = atob(body.replace(/%([\da-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))));
+      } catch {
+        return null;
+      }
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+    const raw = new TextEncoder().encode(body), bytes: number[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const hex = raw[i] === 0x25 ? String.fromCharCode(raw[i + 1] ?? 0, raw[i + 2] ?? 0) : "";
+      if (/^[\da-f]{2}$/i.test(hex)) {
+        bytes.push(parseInt(hex, 16));
+        i += 2;
+      } else bytes.push(raw[i]!);
+    }
+    return Uint8Array.from(bytes);
+  };
+  // The document server tells a picture's kind by its bytes, whatever its data URL says.
+  const raster = (b: Uint8Array | null): boolean => !!b && ((b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) || (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff));
+  const reference = (target: string, who: string): void => {
+    const to = target.trim();
+    if (to.startsWith("#") || (/^data:/i.test(to) && raster(dataBytes(to)))) return;
+    fail(`${who}: the SVG links to ${to.slice(0, 80)}. ${PLAIN}`);
+  };
+  // url() and @import, CSS escapes read as CSS reads them.
+  const styleOf = (css: string, who: string): void => {
+    const plain = css.replace(/\\(?:([\da-f]{1,6})\s?|([^]))/gi, (_, hex: string | undefined, char: string | undefined) => (hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : char!));
+    if (/@import/i.test(plain)) fail(`${who}: the SVG's style imports a sheet. ${PLAIN}`);
+    for (const m of plain.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))/gi)) reference(m[1] ?? m[2] ?? m[3]!, who);
+  };
+  const svgTree = (root: Element, who: string): void => {
+    for (const node of [root, ...Array.from(root.querySelectorAll("*"))]) {
+      const name = node.localName.toLowerCase();
+      if (name === "script" || name === "foreignobject") fail(`${who}: the SVG holds a ${node.localName}. ${PLAIN}`);
+      if (name === "style") styleOf(node.textContent ?? "", who);
+      for (const attribute of Array.from(node.attributes)) {
+        const at = attribute.localName.toLowerCase();
+        if (at.startsWith("on")) fail(`${who}: the SVG has the attribute ${attribute.name}. ${PLAIN}`);
+        if (at === "href" || attribute.name === "xml:base") reference(attribute.value, who);
+        if (at === "attributename" && /^\s*([\w.-]+:)?(href|on)/i.test(attribute.value)) fail(`${who}: the SVG animates ${attribute.value.trim()}. ${PLAIN}`);
+        styleOf(attribute.value, who);
+      }
+    }
+  };
+  // An img's SVG, checked, as the document server is handed it: the tree this page parsed, as UTF-8, without its
+  // DOCTYPE. A DOCTYPE that only names a DTD (matplotlib writes one) is allowed; nothing ever reads that DTD.
+  const svgPicture = (src: string, who: string): string => {
+    const bytes = dataBytes(src) ?? fail(`${who}: the SVG's data is not base64.`);
+    const le = bytes[0] === 0xff && bytes[1] === 0xfe, be = bytes[0] === 0xfe && bytes[1] === 0xff;
+    const text = new TextDecoder(le ? "utf-16le" : be ? "utf-16be" : "utf-8").decode(bytes);
+    if (/<!ENTITY/i.test(text)) fail(`${who}: the SVG declares an ENTITY. ${PLAIN}`);
+    if (/<!DOCTYPE(?:[^>["']|"[^"]*"|'[^']*')*\[/i.test(text)) fail(`${who}: the SVG's DOCTYPE declares things of its own. ${PLAIN}`);
+    const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+    if (doc.getElementsByTagName("parsererror").length || doc.documentElement?.localName !== "svg") fail(`${who}: the SVG does not parse. ${PLAIN}`);
+    const instruction = doc.createTreeWalker(doc, NodeFilter.SHOW_PROCESSING_INSTRUCTION).nextNode() as ProcessingInstruction | null;
+    if (instruction) fail(`${who}: the SVG holds <?${instruction.target} …?>. ${PLAIN}`);
+    svgTree(doc.documentElement, who);
+    // The root alone: no XML declaration naming another encoding, no DOCTYPE.
+    const utf8 = new TextEncoder().encode(new XMLSerializer().serializeToString(doc.documentElement));
+    let binary = "";
+    for (let i = 0; i < utf8.length; i += 0x8000) binary += String.fromCharCode(...utf8.subarray(i, i + 0x8000));
+    return `data:image/svg+xml;base64,${btoa(binary)}`;
+  };
+
   try {
     const root = document.body.firstElementChild as HTMLElement | null;
     const bodyText = Array.from(document.body.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim());
@@ -102,9 +177,7 @@ export function inspect(args: InspectArgs): Inspected {
     // Checked once: the measurer then writes each element's resolved family inline, which the format refuses on a span.
     if (args.phase === "check") {
       if (elements.length > 200) fail("A slide has at most 200 elements: split it.");
-      for (const el of Array.from(section.querySelectorAll("svg *"))) {
-        if (["foreignobject", "script"].includes(el.tagName.toLowerCase())) fail(`${describe(el)}: an svg holds no script or foreignObject.`);
-      }
+      for (const el of Array.from(section.querySelectorAll("svg"))) svgTree(el, describe(el));
       let embeds = 0;
       for (const el of elements) {
         const tag = tagOf(el);
@@ -125,7 +198,13 @@ export function inspect(args: InspectArgs): Inspected {
         }
         if (tag === "ASIDE" && (el.parentElement !== section || el !== section.lastElementChild)) fail("The <aside> of speaker notes is the section's last child.");
         if (tag === "A" && !/^(https?:|mailto:)/i.test(el.getAttribute("href") ?? "")) fail(`${describe(el)}: a link goes to an http(s) or mailto address.`);
-        if (tag === "IMG" && !/^data:image\/(png|jpeg|svg\+xml);base64,/i.test(el.getAttribute("src") ?? "")) fail(`${describe(el)}: a picture from the workspace (a PNG, JPEG or SVG).`);
+        if (tag === "IMG") {
+          const src = el.getAttribute("src") ?? "";
+          // Drawn and handed on as checked.
+          if (/^data:image\/svg\+xml[;,]/i.test(src)) el.setAttribute("src", svgPicture(src, describe(el)));
+          else if (!/^data:image\/(png|jpeg);base64,/i.test(src)) fail(`${describe(el)}: a picture from the workspace (a PNG, JPEG or SVG).`);
+          else if (!raster(dataBytes(src))) fail(`${describe(el)}: its data is not a PNG or JPEG.`);
+        }
         if (tag === "X-SHAPE" && !SHAPES.includes(el.getAttribute("kind") ?? "")) fail(`${describe(el)}: kind is one of ${SHAPES.join(", ")}.`);
         if (EMPTY.has(tag) && (el.children.length || (el.textContent ?? "").trim())) fail(`${describe(el)}: a <${el.tagName.toLowerCase()}> draws nothing inside it; text goes in a text element beside it.`);
         if (tag === "X-CONNECTOR") {
