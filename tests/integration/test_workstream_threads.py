@@ -24,7 +24,7 @@ from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.harness.landing import name_turn
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
-from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
+from surogates.harness.turn_summarizer import TurnArtifact
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime import SlashCommandConfig
 from surogates.runtime.governance import build_governance_gate
@@ -606,18 +606,13 @@ async def test_a_master_reads_a_report_as_information_not_instructions(api):
 
 
 class Delivered:
-    """A turn summarizer whose recap names *files* as the turn's deliverables."""
+    """A turn summarizer whose pick names *files* as the turn's deliverables."""
 
     def __init__(self, files: list[str]) -> None:
         self.files = files
 
-    async def pick_deliverables(self, *, artifacts, **_):
-        return artifacts
-
-    async def summarize_turn(self, **_):
-        return TurnSummary(recap="Did the work.", artifacts=[
-            TurnArtifact(kind="file", label=path, ref=path) for path in self.files
-        ])
+    async def pick_deliverables(self, **_):
+        return [TurnArtifact(kind="file", label=path, ref=path) for path in self.files]
 
 
 def harness_of(api):
@@ -1280,9 +1275,10 @@ async def test_list_threads_says_where_each_thread_stands(api):
             "Convert the old reports": ("waiting", "failed", "The PDF could not be opened: it is encrypted"),
             "Draft the summary": ("working", None, None),
             "Tidy the shared folder": ("working", "computer", "Waiting for thinkpad"),
-            "Collect the sales data": ("idle", None, "Did the work."),
-            "Book the room": ("resolved", None, "Did the work."),
-            "Book the review meeting": ("resolved", None, "Did the work."),
+            # No recap is written: a finished thread stands where its answer begins.
+            "Collect the sales data": ("idle", None, "All done."),
+            "Book the room": ("resolved", None, "All done."),
+            "Book the review meeting": ("resolved", None, "All done."),
         }.items()
     }
 

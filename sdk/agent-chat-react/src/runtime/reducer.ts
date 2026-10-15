@@ -1059,7 +1059,7 @@ function applyTurnSummary(
   const artifacts = parseTurnArtifacts(event.data.artifacts);
 
   // Attach to the LAST assistant message in this turn.  The last
-  // iteration of the turn is what the SDK renders the TurnSummaryCard
+  // iteration of the turn is what the SDK lists the turn's downloads
   // under.
   let idx = -1;
   for (let i = state.messages.length - 1; i >= 0; i--) {

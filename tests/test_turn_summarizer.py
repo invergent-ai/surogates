@@ -33,15 +33,11 @@ async def caption(s):
 
 
 @pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
-async def test_reasoning_is_never_used_as_a_caption_or_recap(field, caplog):
+async def test_reasoning_is_never_used_as_a_caption(field, caplog):
     # Even reasoning that happens to be valid caption JSON stays private.
     private = '{"caption":"Private reasoning accidentally shaped like a caption"}'
     s = summarizer(AsyncMock(return_value=response(**{field: private})))
     assert await caption(s) is None
-    assert await s.summarize_turn(
-        turn_id="turn-1", user_message="Weather?",
-        iteration_summaries=["Searched the forecast"], artifacts=[],
-    ) is None
     assert private not in caplog.text
     assert "summary returned no content" in caplog.text
     assert "finish_reason=length" in caplog.text
@@ -51,16 +47,10 @@ async def test_reasoning_is_never_used_as_a_caption_or_recap(field, caplog):
 async def test_short_summary_calls_disable_reasoning():
     create = AsyncMock(side_effect=[
         response('{"caption":"Found the Bucharest forecast"}'),
-        response("Found today's weather."),
         response("report.pdf"),
     ])
     s = summarizer(create)
     assert await caption(s) == "Found the Bucharest forecast"
-    recap = await s.summarize_turn(
-        turn_id="turn-1", user_message="Weather?",
-        iteration_summaries=["Found the forecast"], artifacts=[],
-    )
-    assert recap.recap == "Found today's weather."
     files = [TurnArtifact(kind="file", label=name, ref=name) for name in ("report.pdf", "scratch.txt")]
     assert await s.pick_deliverables(turn_id="turn-1", user_message="Make a report", artifacts=files) == files[:1]
     for call in create.await_args_list:

@@ -2077,15 +2077,14 @@ async def run_worker(settings: Settings) -> None:
                     agent_id=session.agent_id,
                 )
 
-        # Build a TurnSummarizer when the kill-switch is on. The
-        # per-turn recap + artifact curation runs on the agent's base
-        # model (curating deliverables needs the strong model);
-        # iteration one-liners reuse the cheap summary client already
-        # constructed for context compression, and are skipped when no
-        # summary model is configured.
+        # Build a TurnSummarizer when the kill-switch is on. Iteration
+        # one-liners reuse the cheap summary client already constructed
+        # for context compression, and are skipped when no summary model
+        # is configured; picking among several delivered files runs on
+        # the agent's base model, which that needs.
         from surogates.harness.turn_summarizer import TurnSummarizer
 
-        # A phone call skips recaps (see wants_turn_summary): no summarizer, no summary calls.
+        # A phone call skips summaries (see wants_turn_summary): no summarizer, no summary calls.
         if settings.worker.emit_turn_summaries and session.channel not in REALTIME_CHANNELS:
             turn_summarizer: TurnSummarizer | None = TurnSummarizer(
                 base_client=llm_client,
@@ -2096,7 +2095,6 @@ async def run_worker(settings: Settings) -> None:
                 summary_model=(
                     summary_slot.model if summary_slot is not None else ""
                 ),
-                recap_enabled=settings.worker.emit_turn_recap,
             )
         else:
             turn_summarizer = None

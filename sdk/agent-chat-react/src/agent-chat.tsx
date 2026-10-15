@@ -296,18 +296,18 @@ export function AgentChat({
 
   const effectiveDisabled = disabled || readOnly.readOnly;
   const disabledReason = readOnly.reason;
-  // The TurnSummaryCard renders an LLM-generated recap of the just-
-  // completed turn.  Suppress it on:
+  // TurnDownloads lists the files the just-completed turn delivered.
+  // Suppress it on:
   //   * sub-agent sessions (already gated below) -- nobody is reading
-  //     the recap in those, the parent's LLM polls the final result.
+  //     the list in those, the parent's LLM polls the final result.
   //   * root sessions that orchestrate a deep-research workflow.  The
   //     base agent's "turn" there is a single ``delegate_task`` call;
-  //     the final artifact IS the recap.  An extra summary card just
-  //     repeats the work in a less useful form.
+  //     the final artifact is already the answer, and a card for it
+  //     just repeats it in a less useful form.
   //   * boards.  The canvas is the deliverable and it is already on
-  //     screen, so the card's only content is ``_whiteboard/canvas.json``
-  //     -- the board's own backing file, named with the ``_`` prefix
-  //     precisely to keep it out of the user's way.
+  //     screen, so the only file is ``_whiteboard/canvas.json`` -- the
+  //     board's own backing file, named with the ``_`` prefix precisely
+  //     to keep it out of the user's way.
   const orchestratesDeepResearch = useMemo(
     () => runtime.messages.some(
       (m) => m.toolCalls?.some(

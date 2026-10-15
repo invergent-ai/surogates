@@ -15,7 +15,7 @@ import surogates.harness.loop as loop_module
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import ScheduledSession, Session, SessionCursor, Workstream
 from surogates.harness.prompt import PromptBuilder
-from surogates.harness.turn_summarizer import TurnSummary
+from surogates.harness.turn_summarizer import TurnArtifact
 from surogates.runtime import (
     SLASH_COMMAND_IDS,
     SlashCommandConfig,
@@ -675,21 +675,18 @@ async def test_a_coordinator_chat_keeps_its_delegation_prompt(api):
     assert "# Running a project" not in prompt
 
 
-class Recap:
-    """A turn summarizer that always has something to say."""
+class Delivers:
+    """A turn summarizer whose pick always names one delivered file."""
 
-    async def pick_deliverables(self, *, artifacts, **_):
-        return artifacts
-
-    async def summarize_turn(self, **_):
-        return TurnSummary(recap="Answered the question.", artifacts=[])
+    async def pick_deliverables(self, **_):
+        return [TurnArtifact(kind="file", label="q3.md", ref="q3.md")]
 
 
 async def turn_summaries(api, session) -> list:
     store = api.app.state.session_store
     lease = await store.try_acquire_lease(session.id, "worker-projects", ttl_seconds=60)
     harness = _make_harness(session_store=store, sandbox_pool=None)
-    harness._turn_summarizer = Recap()
+    harness._turn_summarizer = Delivers()
     await harness._complete_session(
         session, [{"role": "assistant", "content": "Q3 revenue was 4.2M."}], lease,
         reason="completed", turn_id="turn-1", user_message="What was Q3 revenue?",
@@ -697,14 +694,15 @@ async def turn_summaries(api, session) -> list:
     return await store.get_events(session.id, types=[EventType.TURN_SUMMARY])
 
 
-async def test_a_masters_turn_ends_without_a_recap(api):
+async def test_a_masters_turn_ends_without_a_summary(api):
     master = await master_of(api, await create(api))
     assert await turn_summaries(api, master) == []
     assert (await api.app.state.session_store.get_session(master.id)).status == "completed"
 
 
-async def test_a_chats_turn_ends_with_a_recap(api):
+async def test_a_chats_turn_ends_with_its_files_and_no_recap(api):
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
     [summary] = await turn_summaries(api, session)
-    assert summary.data["recap"] == "Answered the question."
+    assert summary.data["artifacts"] == [{"kind": "file", "label": "q3.md", "ref": "q3.md"}]
+    assert summary.data["recap"] == ""

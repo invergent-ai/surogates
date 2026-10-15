@@ -145,7 +145,7 @@ describe("artifact single-render", () => {
     });
   }
 
-  it("renders the summary's artifact as a reference card, not a second block", () => {
+  it("lists no second copy of the artifact under the answer", () => {
     const dom = mount(
       <ChatThread
         sessionId="s-1"
@@ -157,12 +157,9 @@ describe("artifact single-render", () => {
         viewMode="simple"
       />,
     );
-    // The recap card still surfaces the artifact — as a compact
-    // clickable reference with the artifact's name and kind label.
-    const refButtons = [...dom.querySelectorAll("button")].filter((b) =>
-      b.textContent?.includes("HTML preview"),
-    );
-    expect(refButtons).toHaveLength(1);
-    expect(refButtons[0]?.textContent).toContain("Particle box");
+    // The turn's downloads are its files; the artifact is already live
+    // in the thread, so nothing under the answer repeats it.
+    expect(dom.querySelector('[data-testid="turn-downloads"]')).toBeNull();
+    expect(dom.querySelectorAll("[data-artifact-anchor]")).toHaveLength(1);
   });
 });

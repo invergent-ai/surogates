@@ -21,9 +21,7 @@ class _StubTurnSummarizer:
 
     def __init__(self) -> None:
         self.iteration_responses: list[str | None] = []
-        self.turn_response: Any = "MISSING"
         self.iteration_calls: list[dict[str, Any]] = []
-        self.turn_calls: list[dict[str, Any]] = []
         self._iter_idx = 0
 
     async def summarize_iteration(self, **kwargs: Any) -> str | None:
@@ -33,12 +31,6 @@ class _StubTurnSummarizer:
         out = self.iteration_responses[self._iter_idx]
         self._iter_idx += 1
         return out
-
-    async def summarize_turn(self, **kwargs: Any) -> Any:
-        self.turn_calls.append(kwargs)
-        if self.turn_response == "MISSING":
-            return None
-        return self.turn_response
 
 
 @pytest.fixture

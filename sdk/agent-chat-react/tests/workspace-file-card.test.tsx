@@ -84,7 +84,7 @@ function mount(
 
 
 describe("WorkspaceFileCard", () => {
-  it("renders the file label and a human type label derived from the extension", () => {
+  it("renders the file label over its kind and extension", () => {
     const adapter = adapterStub();
     const dom = mount(
       <WorkspaceFileCard
@@ -95,7 +95,7 @@ describe("WorkspaceFileCard", () => {
       adapter,
     );
     expect(dom.textContent).toContain("Financial Analysis");
-    expect(dom.textContent).toContain("Word document");
+    expect(dom.textContent).toContain("Document · DOCX");
   });
 
   it("renders an anchor whose href + download attributes come from the adapter", () => {
@@ -167,7 +167,7 @@ describe("WorkspaceFileCard", () => {
     expect(getWorkspaceFile).not.toHaveBeenCalled();
   });
 
-  it("falls back to the generic 'File' type label for unknown extensions", () => {
+  it("names an unknown extension alone, and a file without one as a file", () => {
     const adapter = adapterStub();
     const dom = mount(
       <WorkspaceFileCard
@@ -177,7 +177,14 @@ describe("WorkspaceFileCard", () => {
       />,
       adapter,
     );
-    expect(dom.textContent).toContain("File");
+    expect(dom.textContent).toContain("XYZ");
+    act(() => root?.unmount());
+    root = null;
+    const bare = mount(
+      <WorkspaceFileCard sessionId="s-1" path="Makefile" label="Makefile" />,
+      adapter,
+    );
+    expect(bare.textContent).toContain("File");
   });
 
   it("uses the basename when the label is missing", () => {
