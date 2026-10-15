@@ -12,7 +12,7 @@
 // run from a read-only disk, or from the copy macOS makes of one opened where it was downloaded, says so. Electron-free.
 
 import type { ChildProcess } from "node:child_process";
-import { accessSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -194,11 +194,22 @@ export async function stage(tarball: string, app: string, version: string): Prom
     if (readdirSync(work).length !== 1 || !found?.isDirectory()) throw new Error(`the release's archive holds more than ${APP}/`);
     const why = treeRefusal(top);
     if (why) throw new Error(why);
+    settleModes(top);
     renameSync(top, staged);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
   return staged;
+}
+
+// Each file and folder of the tree at *path* its user's to write and no one else's (u+w,go-w): tar gives it the user's
+// umask, and the code signature seals no mode. So the next version's own files are its own (updates.ts, bundled), and
+// the version it replaces can be removed in turn. A link has no mode of its own.
+function settleModes(path: string): void {
+  const found = lstatSync(path);
+  if (found.isSymbolicLink()) return;
+  chmodSync(path, ((found.mode & 0o7777) | 0o200) & ~0o022);
+  if (found.isDirectory()) for (const name of readdirSync(path)) settleModes(join(path, name));
 }
 
 // The version and state schema the release's manifest, as the check kept it, names.

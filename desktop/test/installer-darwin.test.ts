@@ -20,6 +20,7 @@ import {
   applyingUnder, bundleOf, checkStaged, DISK_IMAGE, forgotten, heldAt, installedUpdates, MACHINE_RECORD, reachedWindow, removalAsked, removeRun, stage, stagingOf,
   treeRefusal, updateRun,
 } from "../src/shell/installer-darwin.js";
+import { bundled } from "../src/shell/updates.js";
 import { HELPER } from "../src/native-helper.js";
 import { importedOn } from "./platforms.js";
 
@@ -45,6 +46,7 @@ function tree(path: string, version = "1.2.4"): string {
   }
   writeFileSync(join(path, "Contents/Info.plist"), "<plist/>\n");
   writeFileSync(join(path, "Contents/Resources/app/package.json"), `${JSON.stringify({ version, stateSchema: 1 })}\n`);
+  writeFileSync(join(path, "Contents/Resources/release-keys"), "RELEASE_KEYS=(\n  )\n");
   writeFileSync(join(path, "Contents/Frameworks/Kit.framework/Versions/A/Kit"), "code");
   symlinkSync("A", join(path, "Contents/Frameworks/Kit.framework/Versions/Current"));
   symlinkSync("Versions/Current/Kit", join(path, "Contents/Frameworks/Kit.framework/Kit"));
@@ -178,6 +180,29 @@ describe("a release staged beside the app", () => {
     // Its programs keep their mode, and are the user's.
     expect(statSync(join(staged, "Contents/MacOS/Surogate")).mode & 0o777).toBe(0o755);
     expect(statSync(join(staged, "Contents/MacOS/Surogate")).uid).toBe(uid);
+  });
+
+  it("is its user's alone to write, whatever the umask: the next version's release keys are its own, and the tree can be removed", async () => {
+    const app = join(dir, "Surogate.app");
+    mkdirSync(app);
+    const built = tree(join(dir, "built", "Surogate.app"));
+    // As a build whose own umask let its group write: and a folder no one may write.
+    chmodSync(join(built, "Contents/Resources/release-keys"), 0o664);
+    chmodSync(join(built, "Contents/MacOS/Surogate"), 0o775);
+    chmodSync(join(built, "Contents/Resources/app"), 0o555);
+    const release = tarball(dirname(built), join(dir, "release.tar.gz"));
+    chmodSync(join(built, "Contents/Resources/app"), 0o755);
+    const umask = process.umask(0o002);
+    let staged: string;
+    try {
+      staged = await stage(release, app, "1.2.4");
+    } finally {
+      process.umask(umask);
+    }
+    expect(() => bundled(join(staged, "Contents/Resources/release-keys"))).not.toThrow();
+    for (const [path, mode] of [["Contents/Resources/release-keys", 0o644], ["Contents/MacOS/Surogate", 0o755], ["Contents/Resources/app", 0o755], ["Contents", 0o755]] as const) {
+      expect(statSync(join(staged, path)).mode & 0o7777, path).toBe(mode);
+    }
   });
 
   it("is refused, leaving nothing, where the archive is no release's", async () => {
