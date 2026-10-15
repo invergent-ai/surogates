@@ -242,6 +242,8 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     for (const [row, cell, said] of [
       ["background:rgba(255,255,255,0.08)", "", 'tr:nth-of-type(2)> ("North120"): a table row\'s background must be a solid colour (the editor draws it opaque).'],
       ["", "background:rgba(20,40,90,0.5)", 'td:nth-of-type(1)> ("North"): a table cell\'s background must be a solid colour (the editor draws it opaque).'],
+      ["background:linear-gradient(90deg, #14213D, #1A5C9A)", "", 'tr:nth-of-type(2)> ("North120"): a table row\'s background must be a solid colour'],
+      ["", "background:linear-gradient(90deg, #14213D, #1A5C9A)", 'td:nth-of-type(1)> ("North"): a table cell\'s background must be a solid colour'],
     ]) {
       const html = `<section style="background:#14213D;color:#ffffff;padding:128px"><table style="width:1200px;font-size:32px">
         <tr style="background:#14213D"><th>Region</th><th>Q1</th></tr><tr style="${row}"><td style="${cell}">North</td><td>120</td></tr></table></section>`;

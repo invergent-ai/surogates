@@ -285,9 +285,13 @@ export function inspect(args: InspectArgs): Inspected {
           if (pieces > 1 && apart) fail(`${describe(el)} lays out its pieces apart (gap, space-between or columns), which one text box cannot: put each in its own <p>.`);
         }
         if (tag === "TR" && Array.from((el as HTMLTableRowElement).cells).some((c) => c.colSpan > 1 || c.rowSpan > 1)) fail(`${describe(el)}: no colspan or rowspan.`);
-        // A cell's shading takes no alpha: the editor draws it opaque, over the text's own colour as often as not.
-        if (["TR", "TD", "TH"].includes(tag) && (color(getComputedStyle(el).backgroundColor)?.alpha ?? 1) < 1) {
-          fail(`${describe(el)}: a table ${tag === "TR" ? "row" : "cell"}'s background must be a solid colour (the editor draws it opaque).`);
+        // A cell's shading is one colour without alpha: the editor draws a translucent one opaque, over the text's own
+        // colour as often as not, and a gradient or picture would be lost.
+        if (["TR", "TD", "TH"].includes(tag)) {
+          const cs = getComputedStyle(el), translucent = (color(cs.backgroundColor)?.alpha ?? 1) < 1;
+          if (translucent || cs.backgroundImage !== "none") {
+            fail(`${describe(el)}: a table ${tag === "TR" ? "row" : "cell"}'s background must be a solid colour (the editor draws ${translucent ? "it opaque" : "no gradient or picture there"}).`);
+          }
         }
         const style = (el as HTMLElement).style;
         for (let i = 0; i < (style?.length ?? 0); i++) {
