@@ -65,7 +65,6 @@ import {
   cancelledToolLabel,
   deriveSingleToolLabel,
   extractToolDetail,
-  sameToolGroupLabel,
   skillViewLabel,
   toolRowLabel,
 } from "./simple-labels";
@@ -1088,42 +1087,6 @@ export interface IterationGroupProps {
 }
 
 /**
- * Short, human-ish label derived from an iteration's tool calls when
- * no LLM-generated summary is available (summary_model unconfigured,
- * summarizer timed out, replay of pre-feature history, etc.).
- *
- * Returns ``null`` when nothing useful can be derived — caller renders
- * a generic "Iteration" pill or falls through to the shimmer.
- */
-function deriveIterationLabel(message: ChatMessageType): string | null {
-  // Internal/exploration tools and failed calls collapse into
-  // background noise that Simple mode suppresses.
-  const calls = visibleToolCalls(message);
-  if (calls.length === 0) {
-    return message.reasoning || message.reasoningTokens
-      ? reasoningTokenLabel(message, false)
-      : null;
-  }
-  // Skill loads name themselves, one or many, so they never fall
-  // through to the generic "Skill × 3".
-  if (calls.every((tc) => tc.toolName === "skill_view")) {
-    return skillViewLabel(calls);
-  }
-  if (calls.length === 1) {
-    const tc = calls[0]!;
-    return deriveSingleToolLabel(tc);
-  }
-  // Multiple tool calls: collapse same-tool runs, summarize mixed.
-  const firstName = calls[0]!.toolName;
-  const allSame = calls.every((tc) => tc.toolName === firstName);
-  if (allSame) {
-    return sameToolGroupLabel(firstName, calls.length);
-  }
-  return `Used ${calls.length} tools`;
-}
-
-
-/**
  * The subset of an iteration's tool calls that should surface in
  * Simple mode: skips internal/infrastructure tools and any call
  * that errored or was cancelled. Used by every Simple-mode
@@ -1188,6 +1151,14 @@ function hasInlineRunningIndicator(
   return false;
 }
 
+/** A call still running, in the words its finished row will use. */
+function runningCallLabel(tc: ToolCallInfo): string {
+  if (tc.toolName === "skill_view") return `${skillViewLabel([tc])}…`;
+  const name = cancelledToolLabel(tc.toolName);
+  const detail = extractToolDetail(tc);
+  return detail ? `Running ${name} · ${detail}…` : `Running ${name}…`;
+}
+
 /**
  * Shimmer label for a live iteration. Derives a useful name from
  * currently-running tools so the user sees "Running List Files…"
@@ -1205,12 +1176,7 @@ function liveIterationLabel(message: ChatMessageType): string {
   if (running.every((tc) => tc.toolName === "skill_view")) {
     return `${skillViewLabel(running)}…`;
   }
-  if (running.length === 1) {
-    const tc = running[0]!;
-    const name = cancelledToolLabel(tc.toolName);
-    const detail = extractToolDetail(tc);
-    return detail ? `Running ${name} · ${detail}…` : `Running ${name}…`;
-  }
+  if (running.length === 1) return runningCallLabel(running[0]!);
   const firstName = running[0]!.toolName;
   const allSame = running.every((tc) => tc.toolName === firstName);
   if (allSame) {
@@ -1224,18 +1190,64 @@ function liveIterationLabel(message: ChatMessageType): string {
 // ponytail: a cap, not paging — the Expert view has the whole result.
 const OUTPUT_MAX_CHARS = 20_000;
 
+// Tools whose output is the agent's own instructions — a skill's text, the
+// skill list — not a result anyone opens a row to check.
+const NO_OUTPUT_TOOLS: ReadonlySet<string> = new Set(["skill_view", "skills_list"]);
+
 /**
- * The tool calls of an iteration that have something to show when its row
- * opens: an output, a failure, or a block of their own. Hidden tools count
- * — a command's terminal or browser call is exactly the detail a reader
- * opens the row to check.
+ * The calls that have something to show when their row opens: an output, a
+ * failure, or a block of their own. Hidden tools count — a command's
+ * terminal or browser call is exactly the detail a reader opens the row to
+ * check. Skill reads never do.
  */
-function callsWithOutput(message: ChatMessageType): ToolCallInfo[] {
-  return (message.toolCalls ?? []).filter((tc) => {
-    if (tc.cancelled) return false;
+function callsWithOutput(calls: ToolCallInfo[]): ToolCallInfo[] {
+  return calls.filter((tc) => {
+    if (tc.cancelled || NO_OUTPUT_TOOLS.has(tc.toolName)) return false;
     if (tc.toolName === "todo" || tc.toolName === "code_run") return true;
     return effectiveStatus(tc) === "error" || readableOutput(tc.result) !== "";
   });
+}
+
+/** One row of a command list: what it says, and the calls it opens onto. */
+interface Command {
+  key: string;
+  label: string;
+  calls: ToolCallInfo[];
+  /** The iteration it came from: a group is keyed and timed by its first. */
+  message: ChatMessageType;
+}
+
+/**
+ * The commands of a finished iteration. A summary speaks for all of it, so
+ * it is one row opening onto every call. Without one, each call the user
+ * sees is a row of its own — never a "Used 2 tools" bundle beside them.
+ */
+function iterationCommands(message: ChatMessageType): Command[] {
+  const summary = message.iterationSummary?.summary;
+  if (summary) {
+    return [{
+      key: message.id,
+      label: summary,
+      calls: callsWithOutput(message.toolCalls ?? []),
+      message,
+    }];
+  }
+  return visibleToolCalls(message).map((tc) => ({
+    key: tc.id,
+    label: deriveSingleToolLabel(tc),
+    calls: callsWithOutput([tc]),
+    message,
+  }));
+}
+
+/** The running iteration's calls so far, a running one worded as running. */
+function liveCommands(message: ChatMessageType): Command[] {
+  return visibleToolCalls(message).map((tc) => ({
+    key: tc.id,
+    label: tc.status === "running" ? runningCallLabel(tc) : deriveSingleToolLabel(tc),
+    calls: callsWithOutput([tc]),
+    message,
+  }));
 }
 
 function ToolCallOutput({ tc }: { tc: ToolCallInfo }) {
@@ -1300,44 +1312,28 @@ function iterationKind(message: ChatMessageType, isActive: boolean): IterationKi
   // ends. Without this stricter check, completed iterations would stay in
   // the shimmer state forever (user-reported bug).
   if (isActive && isIterationLive(message)) return "live";
-  // Use the LLM summary when present, else derive a short label from the
-  // tool calls so the row stays informative without the summary_model
-  // auxiliary. Nothing to summarize and nothing to derive: no row at all —
-  // the surrounding SimpleAssistantGroup still renders the final answer.
-  const summary = message.iterationSummary?.summary;
-  if (!(summary ?? deriveIterationLabel(message))) return "none";
-  // A reasoning-only iteration has no details to expand in Simple mode.
-  if (!summary && visibleToolCalls(message).length === 0) return "note";
-  return "command";
-}
-
-function iterationLabel(message: ChatMessageType): string {
-  return message.iterationSummary?.summary ?? deriveIterationLabel(message) ?? "";
-}
-
-/** A live iteration with a tool the user can see under way: a row of its own. */
-function hasVisibleRunningTool(message: ChatMessageType): boolean {
-  return (message.toolCalls ?? []).some(
-    (tc) => tc.status === "running" && !isHiddenSimpleTool(tc),
-  );
+  // A summary, or a call the user sees, makes a command. A reasoning-only
+  // iteration is a quiet line with nothing to open; with neither, no row at
+  // all — the surrounding SimpleAssistantGroup still renders the answer.
+  if (message.iterationSummary?.summary || visibleToolCalls(message).length > 0) {
+    return "command";
+  }
+  return message.reasoning || message.reasoningTokens ? "note" : "none";
 }
 
 interface CommandRowProps {
-  message: ChatMessageType;
   label: string;
+  calls: ToolCallInfo[];
   /** A row of a group's box: padded to the box, which draws its edges. */
   boxed?: boolean;
 }
 
 /** One command: its description, opening onto what it returned. With
  *  nothing returned yet there is nothing to open, so no chevron. */
-function CommandRow({ message, label, boxed = false }: CommandRowProps) {
+function CommandRow({ label, calls, boxed = false }: CommandRowProps) {
   const [open, setOpen] = useState(false);
-  const calls = callsWithOutput(message);
   const rowClass = cn(
-    // Lighter than muted on a dark page: the web client's dark muted tone
-    // is a slate that sinks into the background at this size.
-    "flex w-full items-center gap-1 text-left text-sm text-muted-foreground dark:text-foreground/70",
+    "flex w-full items-center gap-1 text-left text-sm text-muted-foreground",
     boxed ? "py-2" : "py-0.5",
   );
   const text = <span className="min-w-0 truncate">{renderInlineMarkdown(label)}</span>;
@@ -1387,7 +1383,7 @@ function formatElapsed(seconds: number): string {
 
 interface CommandGroupProps {
   /** Finished commands, oldest first. */
-  commands: ChatMessageType[];
+  commands: Command[];
   /** The iteration running at the end of the run, while the run goes on. */
   live?: ChatMessageType;
 }
@@ -1403,8 +1399,8 @@ function CommandGroup({ commands, live }: CommandGroupProps) {
   const open = chosen ?? live !== undefined;
   // ponytail: createdAt is when this client saw the event, so a reload
   // mid-run restarts the clock; needs the event's own timestamp to fix.
-  const elapsed = useElapsedSeconds(live ? (commands[0] ?? live).createdAt : undefined);
-  const rows = live && hasVisibleRunningTool(live) ? [...commands, live] : commands;
+  const elapsed = useElapsedSeconds(live ? (commands[0]?.message ?? live).createdAt : undefined);
+  const rows = live ? [...commands, ...liveCommands(live)] : commands;
   return (
     <div className="space-y-1.5">
       <button
@@ -1447,12 +1443,7 @@ function CommandGroup({ commands, live }: CommandGroupProps) {
           )}
         >
           {rows.map((row) => (
-            <CommandRow
-              key={row.id}
-              message={row}
-              label={row === live ? liveIterationLabel(row) : iterationLabel(row)}
-              boxed
-            />
+            <CommandRow key={row.key} label={row.label} calls={row.calls} boxed />
           ))}
         </div>
       )}
@@ -1491,12 +1482,18 @@ export function IterationGroup({
     );
   }
   if (kind === "none") return null;
-  const label = iterationLabel(message);
   if (kind === "note") {
-    return <p className="py-0.5 text-sm text-muted-foreground">{label}</p>;
+    return (
+      <p className="py-0.5 text-sm text-muted-foreground">
+        {reasoningTokenLabel(message, false)}
+      </p>
+    );
   }
-  return (
-<CommandRow message={message} label={label} />
+  const commands = iterationCommands(message);
+  return commands.length === 1 ? (
+    <CommandRow label={commands[0]!.label} calls={commands[0]!.calls} />
+  ) : (
+    <CommandGroup commands={commands} />
   );
 }
 
@@ -1696,33 +1693,21 @@ function SimpleAssistantGroup({
   // running one's label with a clock while it goes. Anything said or shown
   // between two commands — narration, a marker, a question — ends the run.
   const rows: ReactNode[] = [];
-  let run: ChatMessageType[] = [];
+  let run: Command[] = [];
   const endRun = (live?: ChatMessageType) => {
-    if (live && (run.length > 0 || hasVisibleRunningTool(live))) {
-      rows.push(
-        <CommandGroup
-          key={(run[0] ?? live).id}
-          commands={run}
-          live={live}
-        />,
-      );
+    // Keyed by its first iteration, so a run keeps its open state as the
+    // running iteration finishes and its calls settle into rows.
+    const key = (run[0]?.message ?? live)?.id;
+    if (live && (run.length > 0 || liveCommands(live).length > 0)) {
+      rows.push(<CommandGroup key={key} commands={run} live={live} />);
     } else {
       if (run.length > 1) {
-        rows.push(
-          <CommandGroup
-            key={run[0].id}
-            commands={run}
-          />,
-        );
+        rows.push(<CommandGroup key={key} commands={run} />);
       } else if (run.length === 1) {
         // One command is a row of its own: a group of one says nothing a
         // row does not.
         rows.push(
-          <IterationGroup
-            key={run[0].id}
-            message={run[0]}
-            isActive={false}
-          />,
+          <CommandRow key={run[0]!.key} label={run[0]!.label} calls={run[0]!.calls} />,
         );
       }
       if (live) {
@@ -1799,7 +1784,7 @@ function SimpleAssistantGroup({
     const kind = iterationKind(message, isActive);
     if (kind === "none") continue;
     if (kind === "command") {
-      run.push(message);
+      run.push(...iterationCommands(message));
       continue;
     }
     if (kind === "live") {
