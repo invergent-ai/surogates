@@ -64,7 +64,7 @@ export const MessageContent = ({
   <div
     className={cn(
       "flex w-full min-w-0 max-w-full flex-col gap-2 overflow-hidden break-words",
-      "group-[.is-user]:ml-auto group-[.is-user]:rounded-2xl group-[.is-user]:bg-primary/10 group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground group-[.is-user]:border group-[.is-user]:border-primary/15",
+      "group-[.is-user]:ml-auto group-[.is-user]:rounded-2xl group-[.is-user]:bg-muted group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
       "group-[.is-assistant]:text-foreground",
       className
     )}

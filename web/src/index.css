@@ -64,85 +64,88 @@
 }
 
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.147 0.004 49.3);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.147 0.004 49.3);
+  /* Claude Desktop's neutrals (its cds tokens), the brand kept ours: primary
+     is the amber Claude has its orange for. Surfaces climb from the sidebar
+     (#f9f9f7) to the page (#fcfcfb) to panels and raised fields (#fff); fills
+     and borders are the text colour at 5, 10 and 20%. The SDK's chat pane
+     carries the same palette (agent-chat.tsx), so it matches in other hosts. */
+  --background: #fcfcfb;
+  --foreground: #0b0b0b;
+  --card: #ffffff;
+  --card-foreground: #0b0b0b;
+  --popover: #ffffff;
+  --popover-foreground: #0b0b0b;
   --primary: #f59e0b;
   --primary-foreground: #0b0e14;
-  --secondary: oklch(0.96 0.002 17.2);
-  --secondary-foreground: oklch(0.214 0.009 43.1);
-  --muted: oklch(0.96 0.002 17.2);
-  --muted-foreground: #64748b;
-  --accent: oklch(0.96 0.002 17.2);
-  --accent-foreground: oklch(0.214 0.009 43.1);
+  --secondary: rgb(11 11 11 / 5%);
+  --secondary-foreground: #0b0b0b;
+  --muted: rgb(11 11 11 / 5%);
+  /* Claude's gray-500: its muted tone, kept at AA contrast on this page. */
+  --muted-foreground: #6d6b67;
+  --accent: rgb(11 11 11 / 10%);
+  --accent-foreground: #0b0b0b;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0.005 34.3);
-  --input: oklch(0.922 0.005 34.3);
-  --ring: oklch(0.714 0.014 41.2);
+  --border: rgb(11 11 11 / 10%);
+  --input: rgb(11 11 11 / 20%);
+  --ring: #898781;
   --chart-1: oklch(0.905 0.182 98.111);
   --chart-2: oklch(0.795 0.184 86.047);
   --chart-3: oklch(0.681 0.162 75.834);
   --chart-4: oklch(0.554 0.135 66.442);
   --chart-5: oklch(0.476 0.114 61.907);
   --radius: 0.625rem;
-  --sidebar: oklch(0.986 0.002 67.8);
-  --sidebar-foreground: oklch(0.147 0.004 49.3);
-  --sidebar-primary: oklch(0.214 0.009 43.1);
-  --sidebar-primary-foreground: oklch(0.986 0.002 67.8);
-  --sidebar-accent: oklch(0.96 0.002 17.2);
-  --sidebar-accent-foreground: oklch(0.214 0.009 43.1);
-  --sidebar-border: oklch(0.922 0.005 34.3);
-  --sidebar-ring: oklch(0.714 0.014 41.2);
-  --line: #f1f5f9;
-  --subtle: #475569;
-  --faint: #94a3b8;
+  --sidebar: #f9f9f7;
+  --sidebar-foreground: #0b0b0b;
+  --sidebar-primary: #20201f;
+  --sidebar-primary-foreground: #fcfcfb;
+  --sidebar-accent: rgb(11 11 11 / 10%);
+  --sidebar-accent-foreground: #0b0b0b;
+  --sidebar-border: rgb(11 11 11 / 10%);
+  --sidebar-ring: #898781;
+  --line: rgb(11 11 11 / 10%);
+  --subtle: #6d6b67;
+  --faint: #898781;
   --success: #22c55e;
-  --hat-fill: #cbd5e1;
+  --hat-fill: #c3c2b7;
 }
 
 .dark {
-  --background: oklch(0.147 0.004 49.3);
-  --foreground: oklch(0.986 0.002 67.8);
-  --card: oklch(0.214 0.009 43.1);
-  --card-foreground: oklch(0.986 0.002 67.8);
-  --popover: oklch(0.214 0.009 43.1);
-  --popover-foreground: oklch(0.986 0.002 67.8);
-  --primary: oklch(0.922 0.005 34.3);
-  --primary-foreground: oklch(0.214 0.009 43.1);
-  --secondary: oklch(0.268 0.011 36.5);
-  --secondary-foreground: oklch(0.986 0.002 67.8);
-  --muted: oklch(0.268 0.011 36.5);
-  --muted-foreground: oklch(0.714 0.014 41.2);
-  --accent: oklch(0.268 0.011 36.5);
-  --accent-foreground: oklch(0.986 0.002 67.8);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.547 0.021 43.1);
+  /* The dark ladder: sidebar #0b0b0b, page #151515, panels #1a1a19, raised
+     fields and popovers #20201f. */
+  --background: #151515;
+  --foreground: #f0efec;
+  --card: #1a1a19;
+  --card-foreground: #f0efec;
+  --popover: #20201f;
+  --popover-foreground: #f0efec;
+  --primary: #f59e0b;
+  --primary-foreground: #0b0e14;
+  --secondary: rgb(255 255 255 / 5%);
+  --secondary-foreground: #f0efec;
+  --muted: rgb(255 255 255 / 5%);
+  --muted-foreground: #898781;
+  --accent: rgb(255 255 255 / 10%);
+  --accent-foreground: #f0efec;
+  --destructive: #ef4444;
+  --border: rgb(255 255 255 / 10%);
+  --input: rgb(255 255 255 / 20%);
+  --ring: #898781;
   --chart-1: oklch(0.905 0.182 98.111);
   --chart-2: oklch(0.795 0.184 86.047);
   --chart-3: oklch(0.681 0.162 75.834);
   --chart-4: oklch(0.554 0.135 66.442);
   --chart-5: oklch(0.476 0.114 61.907);
-  --sidebar: oklch(0.214 0.009 43.1);
-  --sidebar-foreground: oklch(0.986 0.002 67.8);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.986 0.002 67.8);
-  --sidebar-accent: oklch(0.268 0.011 36.5);
-  --sidebar-accent-foreground: oklch(0.986 0.002 67.8);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.547 0.021 43.1);
-  --foreground: #e8ecf2;
-  --muted-foreground: #4b5468;
-  --primary: #f59e0b;
-  --primary-foreground: #0b0e14;
-  --destructive: #ef4444;
-  --line: #151a24;
-  --subtle: #6b7585;
-  --faint: #747a8a;
+  --sidebar: #0b0b0b;
+  --sidebar-foreground: #f0efec;
+  --sidebar-primary: #f59e0b;
+  --sidebar-primary-foreground: #0b0e14;
+  --sidebar-accent: rgb(255 255 255 / 10%);
+  --sidebar-accent-foreground: #f0efec;
+  --sidebar-border: rgb(255 255 255 / 10%);
+  --sidebar-ring: #898781;
+  --line: rgb(255 255 255 / 10%);
+  --subtle: #898781;
+  --faint: #6d6b67;
   --success: #22c55e;
   --hat-fill: #f59e0b;
 }
