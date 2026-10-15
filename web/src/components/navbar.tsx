@@ -9,7 +9,7 @@ import {
   useChatViewMode,
   useInboxUnreadCount,
 } from "@invergent/agent-chat-react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BookOpenIcon,
   InboxIcon,
@@ -114,30 +114,27 @@ export function SessionSidebar() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      {/* Header */}
-      <div
+      {/* Brand — the ops console's strip: its mark, a title and a muted
+          subtitle, no rule under it. In the icon rail the mark alone,
+          centred. */}
+      <Link
+        to="/"
         className={cn(
-          "flex items-center border-b border-line min-h-14",
-          "justify-center py-4",
-          "rail-open:justify-start rail-open:px-4 rail-open:py-4 rail-open:gap-2.5",
-          "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-4 group-data-[mode=sheet]:py-3 group-data-[mode=sheet]:gap-2.5",
+          "flex shrink-0 items-center pt-5 pb-3 text-foreground no-underline",
+          "justify-center px-1.5",
+          "rail-open:justify-start rail-open:gap-2.5 rail-open:px-4",
+          "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:gap-2.5 group-data-[mode=sheet]:px-4",
           // The sheet's close button floats over the end of this row — see
           // AppShell — so the brand keeps clear of it.
           "group-data-[mode=sheet]:pe-12",
         )}
       >
-        <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center shrink-0">
-          <MessageSquareIcon className="w-4 h-4 text-primary-foreground" />
+        <img src="/login.svg" alt="Surogate" className="size-9 shrink-0 rounded-full" />
+        <div className={cn("min-w-0 whitespace-nowrap", showExpandedBlock)}>
+          <div className="text-[15px] font-semibold leading-tight">Surogate</div>
+          <div className="text-xs text-muted-foreground">Agent Chat</div>
         </div>
-        <div className={showExpandedBlock}>
-          <div className="font-bold text-foreground tracking-tight">
-            Surogate
-          </div>
-          <div className="text-xs text-muted-foreground tracking-wide uppercase">
-            Agent Chat
-          </div>
-        </div>
-      </div>
+      </Link>
 
       {/* Nav buttons */}
       <div
