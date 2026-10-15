@@ -70,8 +70,9 @@ arrow-left|arrow-up|arrow-down|line">` fills its box. `<x-connector x1 y1 x2 y2 
 head-end="open|filled">` draws a line between points. `<x-icon name="…" style="color; width; height">`, name one of
 Activity Book Chart Chat Check CheckCircle Clock Cloud Code Database Globe GraduationCap Home Key Lightbulb Lightning
 Link Lock PaperPlane Play Search Settings Star ThumbsUp Tool Trust Users Verified Warning Wrench. Nothing goes inside an
-`<x-shape>`, `<x-icon>`, `<x-connector>` or `<hr>`: a label goes in a text element beside it. `<x-embed>` (a small live
-page, pinned as a direct child of the section, at most 16 KB and 8 per slide) goes in as a picture of what it shows.
+`<x-shape>`, `<x-icon>`, `<x-connector>` or `<hr>`: a label goes in a text element beside it. `<x-embed>` (a static HTML
+and CSS snippet, pinned as a direct child of the section, at most 16 KB and 8 per slide) goes in as a picture of what it
+shows. Scripts in it do not run: draw a chart as an inline `<svg>`.
 
 **Styles:** lengths in px (no `em`, `rem`, `vw`, `%` only where a box's share is meant); colours as hex or `rgb[a]()`;
 `linear-gradient` and `repeating-linear-gradient` backgrounds; `border` (solid, dashed, dotted, double); `box-shadow`;

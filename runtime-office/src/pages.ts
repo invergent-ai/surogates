@@ -121,11 +121,18 @@ export class PagePool {
   async measuringPage(): Promise<Page> {
     const current = this.measuring && (await this.measuring.catch(() => null));
     if (!current || current.isClosed()) {
-      this.measuring = (async () => {
+      const opening: Promise<Page> = (async () => {
         const context = await (await this.launch()).newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 2 });
         await context.route("**/*", (route) => route.abort());
-        return context.newPage();
+        const page = await context.newPage();
+        // A crashed renderer leaves its page open, answering nothing: the next slide gets a fresh one.
+        page.on("crash", () => {
+          if (this.measuring === opening) this.measuring = null;
+          void context.close().catch(() => undefined);
+        });
+        return page;
       })();
+      this.measuring = opening;
     }
     return this.measuring!;
   }
@@ -141,7 +148,10 @@ export class PagePool {
 
   private launch(): Promise<Browser> {
     if (!this.browser) {
-      // ponytail: Chromium's sandbox is off (pods have no user namespaces); the pages load only the document server's editor.
+      // ponytail: Chromium's sandbox is off (pods have no user namespaces). The editor pages load the document server's
+      // editor; the agent's slide HTML is measured under a CSP that runs no script, its embeds with JavaScript off, and
+      // every request of either aborted, so none of the agent's code runs in this browser. A sandbox again if pods get
+      // user namespaces.
       const launching = chromium.launch({ headless: true, executablePath: this.options.executablePath, chromiumSandbox: false });
       this.browser = launching;
       launching.then(

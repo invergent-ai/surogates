@@ -28,6 +28,7 @@ export type UndoAttempt = { before: UndoState; after?: UndoState };
 const PDF_FILE = /\/origin\.pdf(?:[/?]|$)/;
 const PDF_FILE_ATTEMPTS = 10;
 const PDF_FILE_RETRY_MS = 500;
+const FETCH_TIMEOUT_MS = 10_000;
 
 async function fetchPdfFile(route: Route): Promise<void> {
   try {
@@ -180,14 +181,15 @@ export class EditorPage {
   async fetchBytes(url: string): Promise<Buffer> {
     const frame = this.frame();
     if (!frame) throw new Error("the editor's frame is gone");
-    const base64 = await frame.evaluate(async (target) => {
+    // A fetch has no deadline of its own: one that never ends would hold every slide that waits for the file.
+    const base64 = await withTimeout(frame.evaluate(async (target) => {
       const response = await fetch(target);
       if (!response.ok) throw new Error(`${target}: ${response.status}`);
       const bytes = new Uint8Array(await response.arrayBuffer());
       let text = "";
       for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
       return btoa(text);
-    }, url);
+    }, url), FETCH_TIMEOUT_MS, `the document server did not send ${url} within ${FETCH_TIMEOUT_MS / 1000} s`);
     return Buffer.from(base64, "base64");
   }
 
@@ -213,10 +215,13 @@ export class EditorPage {
   }
 }
 
+/** *work* did not end in the time it had. */
+export class TimedOut extends Error {}
+
 export function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     work,
-    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TimedOut(message)), ms); }),
   ]).finally(() => clearTimeout(timer));
 }

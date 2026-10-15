@@ -1,6 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { EditorPage } from "../src/connector.js";
-import { Measurer, type Canvas } from "../src/slides/measure.js";
+import { EventEmitter } from "node:events";
+import { errors, type Page } from "playwright-core";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { TimedOut, type EditorPage } from "../src/connector.js";
+import { ContentError } from "../src/markdown.js";
+import { PagePool } from "../src/pages.js";
+import { Measurer, SLIDE_TIMEOUT_MS, type Canvas, type FontSource } from "../src/slides/measure.js";
 import { chromiumThere, measuringPage, systemFonts } from "./support/chromium.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -223,7 +227,7 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     const spec: Any = await measure(`<section style="background:#fff">
       <svg aria-label="bar" style="position:absolute;left:10px;top:10px" width="200" height="100" viewBox="0 0 200 100"><rect width="200" height="100" fill="#c81e1e"/></svg>
       <x-icon name="Check" style="position:absolute;left:300px;top:10px;width:96px;height:96px;color:#14285A"></x-icon>
-      <x-embed style="position:absolute;left:500px;top:10px;width:400px;height:200px"><div id="n" style="font:48px Arial">…</div><script>document.getElementById("n").textContent = "Live";</script></x-embed>
+      <x-embed style="position:absolute;left:500px;top:10px;width:400px;height:200px"><div style="font:48px Arial">Live</div></x-embed>
     </section>`);
     expect(spec.shapes.map((s: Any) => [s.kind, s.x / E, s.w / E])).toEqual([["picture", 10, 200], ["picture", 300, 96], ["picture", 500, 400]]);
     expect(spec.shapes[0].src).toMatch(/^data:image\/png;base64,/);
@@ -243,7 +247,115 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([400, 200]);
   });
 
+  it("draws an embed as static HTML and CSS: its script does not run", async () => {
+    const embed = (script: string) => measure(`<section style="background:#fff">
+      <x-embed style="position:absolute;left:500px;top:10px;width:400px;height:200px"><div id="n" style="width:400px;height:200px;background:#c81e1e"></div>${script}</x-embed>
+    </section>`);
+    const ran: Any = await embed(`<script>document.getElementById("n").style.background = "#00ff00";</script>`);
+    const plain: Any = await embed("");
+    expect(ran.shapes[0].src).toBe(plain.shapes[0].src);
+  });
+
+  it("refuses an embed that does not draw in time, naming it", async () => {
+    // The embed's browser context answers its page's load with a timeout, as a page that never finishes loading does.
+    const timeouts: (number | undefined)[] = [];
+    const stalled = { route: async () => undefined, close: async () => undefined, newPage: async () => ({
+      setContent: async (_html: string, options?: { timeout?: number }) => {
+        timeouts.push(options?.timeout);
+        throw new errors.TimeoutError("page.setContent: Timeout exceeded.");
+      },
+    }) };
+    // *target* with *swap*'s members in place of its own.
+    const swapped = <T extends object>(target: T, swap: Record<string, unknown>): T => new Proxy(target, {
+      get: (object, key) => {
+        if (typeof key === "string" && key in swap) return swap[key];
+        const value: unknown = Reflect.get(object, key);
+        return typeof value === "function" ? value.bind(object) : value;
+      },
+    });
+    const real = await measuringPage();
+    const browser = swapped(real.page.context().browser()!, { newContext: async () => stalled });
+    const context = swapped(real.page.context(), { browser: () => browser });
+    const page = swapped(real.page, { context: () => context });
+    try {
+      const refused = new Measurer(async () => page, systemFonts).measure(`<section style="background:#fff">
+        <x-embed style="position:absolute;left:500px;top:10px;width:400px;height:200px"><div>Live</div></x-embed></section>`, WIDE, editor);
+      await expect(refused).rejects.toThrow(ContentError);
+      await expect(refused).rejects.toThrow("The x-embed at 500,10 px did not draw within 5 s");
+      expect(timeouts).toEqual([5_000]);
+    } finally {
+      await real.close();
+    }
+  });
+
   it("reads a hidden slide", async () => {
     expect((await measure(`<section hidden style="background:#fff"><p style="font-size:32px">x</p></section>`)).hidden).toBe(true);
+  });
+});
+
+// A measuring page that passes every check; with *hang* "load" its slide never finishes loading.
+function fakePage(hang: "load" | "none") {
+  const context = { close: vi.fn(async () => undefined) };
+  const page = {
+    setViewportSize: async () => undefined,
+    setContent: () => (hang === "load" ? new Promise(() => undefined) : Promise.resolve()),
+    evaluate: async () => ({ stacks: [], faces: [] }),
+    context: () => context,
+  };
+  return { page: page as unknown as Page, context };
+}
+
+describe("a slide that does not measure in time", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is stopped at its deadline, saying the step it was at, and the slide after it still measures", async () => {
+    vi.useFakeTimers();
+    const pages = [fakePage("load"), fakePage("none")];
+    const fonts: FontSource = { list: () => new Promise(() => undefined), css: async () => "" };
+    const page = vi.fn(async () => pages.shift()!.page);
+    const measurer = new Measurer(page, fonts);
+    const first = measurer.measure("<section></section>", WIDE, editor);
+    const stopped = expect(first).rejects.toThrow(new TimedOut(`measuring the slide took over ${SLIDE_TIMEOUT_MS / 1000} s; it was loading the slide`));
+    const second = measurer.measure("<section></section>", WIDE, editor);
+    const named = expect(second).rejects.toThrow("it was reading the document server's font list");
+    await vi.advanceTimersByTimeAsync(SLIDE_TIMEOUT_MS);
+    await stopped;
+    await vi.advanceTimersByTimeAsync(SLIDE_TIMEOUT_MS);
+    await named;
+    expect(page).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes the page it stopped on", async () => {
+    vi.useFakeTimers();
+    const { page, context } = fakePage("load");
+    const stopped = expect(new Measurer(async () => page, systemFonts).measure("<section></section>", WIDE, editor)).rejects.toThrow(TimedOut);
+    await vi.advanceTimersByTimeAsync(SLIDE_TIMEOUT_MS);
+    await stopped;
+    expect(context.close).toHaveBeenCalled();
+  });
+});
+
+describe("the measuring page", () => {
+  it("is made again after its renderer crashes", async () => {
+    const made: { page: EventEmitter & { isClosed(): boolean }; close: ReturnType<typeof vi.fn> }[] = [];
+    const browser = {
+      on: () => undefined,
+      newContext: async () => {
+        const page = Object.assign(new EventEmitter(), { isClosed: () => false });
+        const close = vi.fn(async () => undefined);
+        made.push({ page, close });
+        return { route: async () => undefined, newPage: async () => page, close };
+      },
+    };
+    const pool = new PagePool({ hostUrl: "", maxPages: 1, idleMs: 1, openTimeoutMs: 1, commandTimeoutMs: 1, ignoreTls: false });
+    (pool as unknown as { browser: Promise<unknown> }).browser = Promise.resolve(browser);
+    const first = await pool.measuringPage();
+    expect(await pool.measuringPage()).toBe(first);
+    made[0]!.page.emit("crash");
+    const second = await pool.measuringPage();
+    expect(second).not.toBe(first);
+    expect(made[0]!.close).toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
-import type { Page } from "playwright-core";
-import type { EditorPage } from "../connector.js";
+import { errors, type Page } from "playwright-core";
+import { TimedOut, withTimeout, type EditorPage } from "../connector.js";
 import { ContentError } from "../markdown.js";
 import { Fonts, resolveFamily, type Face, type FontList } from "./fonts.js";
 import { ICON_NAMES, iconSvg } from "./icons.js";
@@ -46,6 +46,13 @@ export interface FontSource {
 const MAX_HTML = 200_000;
 export const MIN_TEXT_PX = 24;
 const EMBED_SETTLE_MS = 800;
+// An embed draws in well under a second: one that has not in this long never will.
+const EMBED_TIMEOUT_MS = 5_000;
+// A slide measures in about a second, eight embeds and its fonts' first fetch in several more.
+export const SLIDE_TIMEOUT_MS = 20_000;
+
+/** What a measurement is doing, for the error that says where it stopped. */
+type Step = { now: string };
 
 export class Measurer {
   private queue: Promise<unknown> = Promise.resolve();
@@ -54,19 +61,34 @@ export class Measurer {
 
   /** *html*, one slide, checked and measured on *canvas* with the fonts of the document server *editor* loaded from. */
   measure(html: string, canvas: Canvas, editor: EditorPage): Promise<SlideSpec> {
-    const run = this.queue.then(() => this.now(html, canvas, editor), () => this.now(html, canvas, editor));
+    const run = this.queue.then(() => this.timed(html, canvas, editor), () => this.timed(html, canvas, editor));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  private async now(html: string, canvas: Canvas, editor: EditorPage): Promise<SlideSpec> {
+  // Slides are measured one at a time, every document's on one page: one not measured in time is stopped, and the page,
+  // in a state not known (a renderer stuck in a layout, a font that never came), is closed so the next gets a fresh one.
+  private async timed(html: string, canvas: Canvas, editor: EditorPage): Promise<SlideSpec> {
     if (html.replace(/data:[^"')\s]+/g, "data:").length > MAX_HTML) throw new ContentError(`A slide's HTML is at most ${MAX_HTML} characters.`);
     const page = await this.page();
+    const step: Step = { now: "loading the slide" };
+    try {
+      return await withTimeout(this.now(page, html, canvas, editor, step), SLIDE_TIMEOUT_MS, "");
+    } catch (error) {
+      if (!(error instanceof TimedOut)) throw error;
+      await page.context().close().catch(() => undefined);
+      throw new TimedOut(`measuring the slide took over ${SLIDE_TIMEOUT_MS / 1000} s; it was ${step.now}`);
+    }
+  }
+
+  private async now(page: Page, html: string, canvas: Canvas, editor: EditorPage, step: Step): Promise<SlideSpec> {
     await page.setViewportSize({ width: canvas.width, height: canvas.height });
     await page.setContent(documentOf(html, canvas));
     const args = (phase: InspectArgs["phase"]): InspectArgs => ({ phase, canvas, minPx: MIN_TEXT_PX, icons: ICON_NAMES });
+    step.now = "checking the slide";
     const checked = await this.inspect(page, args("check"));
     // Each font stack lays text out in its first family the document server has: Chromium measures with that one.
+    step.now = "reading the document server's font list";
     const list = await this.fonts.list(editor);
     const has = new Map([...list.faces.values()].map((faces) => [faces.name.toLowerCase(), faces.name]));
     const resolved = Object.fromEntries((checked as { stacks: string[] }).stacks.map((stack) => [stack, resolveFamily(stack, has)]));
@@ -79,6 +101,7 @@ export class Measurer {
     }, resolved);
     // Its faces read again, now the resolved families.
     const faces = ((await this.inspect(page, args("faces"))) as { faces: Face[] }).faces;
+    step.now = "loading the slide's fonts from the document server";
     const css = await this.fonts.css(editor, list, faces);
     if (css) {
       await page.addStyleTag({ content: css });
@@ -88,9 +111,11 @@ export class Measurer {
         return Promise.all(loads).then(() => true);
       });
     }
+    step.now = "measuring the shapes";
     const { spec, icons, embeds, shots } = (await this.inspect(page, args("shapes"))) as Extract<Inspected, { spec: SlideSpec }>;
+    step.now = "painting the icons";
     if (shots.length) await paintIcons(page);
-    await this.drawPictures(page, canvas, spec, { icons, embeds, shots });
+    await this.drawPictures(page, canvas, spec, { icons, embeds, shots }, step);
     return spec;
   }
 
@@ -100,9 +125,9 @@ export class Measurer {
     return answer;
   }
 
-  // Each placeholder picture made what it shows: an svg drawn by Chromium, an icon from the icon set, an embed run on a
-  // page of its own (scripts on, network off, as Claude Slides' sandboxed iframe) and drawn, and a shot taken in turn.
-  private async drawPictures(page: Page, canvas: Canvas, spec: SlideSpec, drawn: Omit<Extract<Inspected, { spec: SlideSpec }>, "spec">): Promise<void> {
+  // Each placeholder picture made what it shows: an svg drawn by Chromium, an icon from the icon set, an embed drawn on
+  // a page of its own, and a shot taken in turn.
+  private async drawPictures(page: Page, canvas: Canvas, spec: SlideSpec, drawn: Omit<Extract<Inspected, { spec: SlideSpec }>, "spec">, step: Step): Promise<void> {
     const { icons, embeds, shots } = drawn;
     const visit = async (shapes: ShapeSpec[]): Promise<void> => {
       for (const shape of shapes) {
@@ -110,27 +135,39 @@ export class Measurer {
         if (shape.kind !== "picture" || shape.src.startsWith("data:")) continue;
         const [kind, n] = shape.src.split(":");
         const i = Number(n);
+        const where = `at ${Math.round(shape.x / canvas.emuPerPx)},${Math.round(shape.y / canvas.emuPerPx)} px`;
+        step.now = `drawing the ${kind === "shot" ? "picture" : kind === "embed" ? "x-embed" : kind} ${where}`;
         if (kind === "svg") shape.src = png(await page.locator(`section svg[data-draw="${i}"]`).screenshot({ type: "png", omitBackground: true }));
         else if (kind === "icon") shape.src = iconSvg(icons[i]!.name, icons[i]!.color, Math.round(icons[i]!.px));
-        else if (kind === "embed") shape.src = await this.drawEmbed(page, embeds[i]!);
+        else if (kind === "embed") shape.src = await drawEmbed(page, embeds[i]!, where);
         else if (kind === "shot") shape.src = await drawShot(page, i, shots[i]!, shape, canvas);
       }
     };
     await visit(spec.shapes);
   }
+}
 
-  private async drawEmbed(page: Page, embed: { html: string; w: number; h: number }): Promise<string> {
-    const own = await page.context().newPage();
-    try {
-      await own.setViewportSize({ width: Math.ceil(embed.w), height: Math.ceil(embed.h) });
-      await own.setContent(`<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:">
-<style>html,body{margin:0;background:transparent}</style></head><body>${embed.html}</body></html>`);
-      await own.waitForTimeout(EMBED_SETTLE_MS);
-      return `data:image/png;base64,${(await own.screenshot({ type: "png", omitBackground: true })).toString("base64")}`;
-    } finally {
-      await own.close();
+// An embed is the agent's HTML: it is drawn as a static page, in a browser context of its own with JavaScript off and
+// every request aborted (a meta refresh would otherwise load any address). Its CSS settles, and it is drawn.
+async function drawEmbed(page: Page, embed: { html: string; w: number; h: number }, where: string): Promise<string> {
+  const context = await page.context().browser()!.newContext({
+    javaScriptEnabled: false, viewport: { width: Math.ceil(embed.w), height: Math.ceil(embed.h) }, deviceScaleFactor: 2,   // the measuring page's
+  });
+  try {
+    await context.route("**/*", (route) => route.abort());
+    const own = await context.newPage();
+    await own.setContent(`<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:">
+<style>html,body{margin:0;background:transparent}</style></head><body>${embed.html}</body></html>`, { timeout: EMBED_TIMEOUT_MS });
+    await own.waitForTimeout(EMBED_SETTLE_MS);
+    return png(await own.screenshot({ type: "png", omitBackground: true, timeout: EMBED_TIMEOUT_MS }));
+  } catch (error) {
+    if (error instanceof errors.TimeoutError) {
+      throw new ContentError(`The x-embed ${where} did not draw within ${EMBED_TIMEOUT_MS / 1000} s: keep an embed to plain HTML and CSS.`);
     }
+    throw error;
+  } finally {
+    await context.close().catch(() => undefined);
   }
 }
 
