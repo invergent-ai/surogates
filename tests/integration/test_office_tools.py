@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 from contextlib import asynccontextmanager
@@ -149,6 +150,44 @@ async def test_a_slides_pictures_are_read_from_the_workspace(session_factory, st
     await storage.write("b", session_workspace_key(session.id, "notes.txt"), b"hello")
     bad = '<section><img src="notes.txt" alt="x"></section>'
     assert "not a PNG, JPEG or SVG" in json.loads(await office_tools._office_edit({"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": bad}]}]}, **kwargs))["error"]
+
+
+SVG = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8">{}</svg>'
+
+
+@pytest.mark.parametrize("inside", [
+    '<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><text>&x;</text>',
+    "<script>alert(1)</script>",
+    "<svg:script>alert(1)</svg:script>",
+    "<foreignObject><div>x</div></foreignObject>",
+    '<rect width="8" height="8" onload="alert(1)"/>',
+    '<image href="http://169.254.169.254/latest" width="8" height="8"/>',
+    "<use xlink:href='https://example.com/a.svg#b'/>",
+    '<rect width="8" height="8" style="fill:url(http://example.com/x)"/>',
+    '<a href="javascript:alert(1)"><rect width="8" height="8"/></a>',
+    '<set attributeName="href" to="javascript:alert(1)"/>',
+])
+async def test_a_slide_svg_that_is_more_than_plain_shapes_is_refused(session_factory, storage, redis_client, inside):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    svg = SVG.format(inside).encode()
+    await storage.write("b", session_workspace_key(session.id, "bad.svg"), svg)
+    inline = "data:image/svg+xml;base64," + base64.b64encode(svg).decode()
+    for src in ("bad.svg", inline):
+        html = f'<section><img src="{src}" alt="x"></section>'
+        answer = json.loads(await office_tools._office_edit({"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": html}]}]}, **kwargs))
+        assert "is plain shapes" in answer["error"], src[:40]
+    assert "edit" not in [call[0] for call in FakeRuntime.calls]
+
+
+async def test_a_slide_svg_of_shapes_linking_only_inside_itself_goes_in(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    inside = ('<defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient></defs>'
+              '<rect width="8" height="8" fill="url(#g)"/><use href="#g"/><image href="data:image/png;base64,AA==" width="1" height="1"/>'
+              '<text>Hand on heart</text>')
+    await storage.write("b", session_workspace_key(session.id, "ok.svg"), ('<?xml version="1.0" encoding="UTF-8"?>' + SVG.format(inside)).encode())
+    html = '<section><img src="ok.svg" alt="x"></section>'
+    answer = json.loads(await office_tools._office_edit({"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": html}]}]}, **kwargs))
+    assert answer["applied"] is True
 
 
 async def test_edit_creates_a_missing_document_and_reads_pictures_for_the_editor(session_factory, storage, redis_client):
