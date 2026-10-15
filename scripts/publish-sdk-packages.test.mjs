@@ -4,6 +4,7 @@ import {
   buildPublishCommand,
   classifyViewResult,
   formatPackageSpec,
+  orderByWorkspaceDependencies,
   planPackagePublish,
   pinWorkspaceDependencies,
   preparePackageManifest,
@@ -163,4 +164,18 @@ test("workspace ranges are pinned to the version released with them", async () =
 test("a manifest with no workspace ranges is left alone", () => {
   const manifest = { name: "@invergent/website-widget", dependencies: { react: "^19.0.0" } };
   assert.equal(pinWorkspaceDependencies(manifest, "1.4.0"), manifest);
+});
+
+test("sibling packages publish after the packages they depend on", () => {
+  const pkg = (name, dependencies) => ({ dir: `sdk/${name}`, manifest: { name, dependencies } });
+  const ordered = orderByWorkspaceDependencies([
+    pkg("@invergent/agent-chat-react", { "@invergent/ui-sdk": "workspace:*", react: "^19.0.0" }),
+    pkg("@invergent/example-chat-app", { "@invergent/agent-chat-react": "workspace:*" }),
+    pkg("@invergent/ui-sdk", { clsx: "^2.1.1" }),
+  ]);
+
+  assert.deepEqual(
+    ordered.map((p) => p.manifest.name),
+    ["@invergent/ui-sdk", "@invergent/agent-chat-react", "@invergent/example-chat-app"],
+  );
 });
