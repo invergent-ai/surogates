@@ -230,6 +230,13 @@
     if (r.font) run.SetFontFamily(r.font);
     var c = rgb(r.color.hex);
     run.SetColor(c[0], c[1], c[2]);
+    if (r.spacing) run.SetSpacing(Math.round(r.spacing * 20));   // points to twips
+    if (r.caps) run.SetCaps(true);
+    if (r.s) run.SetStrikeout(true);
+    if (r.outline) run.SetOutLine(strokeOf(r.outline));
+    // SetFill, not SetTextFill: the saved file keeps only SetFill's.
+    if (r.gradient) run.SetFill(fillOf(r.gradient));
+    else if (r.color.alpha < 1) run.SetFill(fillOf({ type: "solid", color: r.color }));
   }
   function addText(run, text) {
     var lines = String(text).split("\n");
@@ -243,7 +250,7 @@
     for (var k = 0; k < pp.runs.length; k++) {
       var r = pp.runs[k], run = Api.CreateRun();
       addText(run, r.text);
-      STYLE_RUN.forEach(function (style) { style(run, r); });
+      styleRun(run, r);
       if (r.href) {
         // SetDisplayedText throws in the slide editor: the run goes into the link itself (internal: no builder call
         // puts a run in a link).
@@ -270,16 +277,6 @@
     if (pp.level) p.Paragraph.Set_PresentationLevel(pp.level);
     return p;
   }
-  // Run styles, each applied in turn.
-  var STYLE_RUN = [styleRun, function (run, r) {
-    if (r.spacing) run.SetSpacing(Math.round(r.spacing * 20));   // points to twips
-    if (r.caps) run.SetCaps(true);
-    if (r.s) run.SetStrikeout(true);
-    if (r.outline) run.SetOutLine(strokeOf(r.outline));
-    // SetFill, not SetTextFill: the saved file keeps only SetFill's.
-    if (r.gradient) run.SetFill(fillOf(r.gradient));
-    else if (r.color.alpha < 1) run.SetFill(fillOf({ type: "solid", color: r.color }));
-  }];
   function fillContent(content, paras) {
     content.RemoveAllElements();   // leaves one empty paragraph
     for (var i = 0; i < paras.length; i++) content.Push(paragraphOf(paras[i]));
@@ -451,14 +448,8 @@
     },
   };
   function blankLayout() { var master = pres.GetMaster(0); return master ? master.GetLayoutByType("blank") : null; }
-  // Run after each shape joins its slide, in turn.
+  // The shapes whose builds go on their slide once all its shapes are on it.
   var pendingBuilds = [];
-  var AFTER_ADD = [function (slide, drawing, s) {
-    // Morph pairs shapes by one "!!" name on two slides, which the public SetName will not give: it renames the
-    // other holder (internal setName does not). A group's name goes after it joins the slide, or it is lost.
-    if (s.magic) drawing.Drawing.setName("!!" + s.magic);
-    if (s.build) pendingBuilds.push({ slide: slide, drawing: drawing, build: s.build });
-  }];
   // Builds, by order and then as listed. Fade, scale and pop are public effects; the fly-ins take a direction (a preset
   // subtype) AddEffect does not pass, so they take its own three internal steps with it.
   // A fly-in's subtype is where the shape comes from, a fly-out's where it goes: a rise comes up from the bottom and
@@ -491,11 +482,14 @@
   function build(slide, spec) {
     if (spec.background) slide.SetBackground(fillOf(spec.background));
     for (var i = 0; i < spec.shapes.length; i++) {
-      var maker = BUILD[spec.shapes[i].kind];
-      if (!maker) throw new Error("no builder for a " + spec.shapes[i].kind);
-      var drawing = maker(spec.shapes[i]);
+      var shape = spec.shapes[i], maker = BUILD[shape.kind];
+      if (!maker) throw new Error("no builder for a " + shape.kind);
+      var drawing = maker(shape);
       if (!slide.AddObject(drawing)) throw new Error("the slide refused shape " + i);
-      for (var a = 0; a < AFTER_ADD.length; a++) AFTER_ADD[a](slide, drawing, spec.shapes[i]);
+      // Morph pairs shapes by one "!!" name on two slides, which the public SetName will not give: it renames the
+      // other holder (internal setName does not). A group's name goes after it joins the slide, or it is lost.
+      if (shape.magic) drawing.Drawing.setName("!!" + shape.magic);
+      if (shape.build) pendingBuilds.push({ slide: slide, drawing: drawing, build: shape.build });
     }
     if (spec.notes) slide.AddNotesText(spec.notes);
     slide.SetVisible(!spec.hidden);
