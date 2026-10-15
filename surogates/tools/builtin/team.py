@@ -1148,6 +1148,11 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
 
 
 def _enrollment_of(person: _Person, protocol: str) -> Any:
+    if not person.rows:
+        return (
+            f"{person.label} is not enrolled in anything; they only have an open "
+            "escalation. Enrol them first to change a follow-up."
+        )
     if protocol:
         row = next((r for r in person.rows if r.protocol == protocol), None)
         return row or (
@@ -1227,13 +1232,18 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
         # want to pause someone whose follow-up is over was left with a
         # question about nothing, and a pause still pending in later turns.
         if row.status == status or (row.status == "ended" and status in ("paused", "active")):
-            return (
-                f"Nothing changed: {person.label}'s {row.protocol} is already {row.status}, "
-                "so there is nothing to " + ("pause" if status == "paused" else "change")
-                + ". Tell the team member so in one sentence; do not ask for a reason, "
-                "nothing is waiting for their confirmation."
-                + (" To follow them again, enrol them again." if row.status == "ended" else "")
-            )
+            verb = "pause" if status == "paused" else "change"
+            if not changes:
+                return (
+                    f"Nothing changed: {person.label}'s {row.protocol} is already {row.status}, "
+                    f"so there is nothing to {verb}. Tell the team member so in one sentence; "
+                    "do not ask for a reason, nothing is waiting for their confirmation."
+                    + (" To follow them again, enrol them again." if row.status == "ended" else "")
+                )
+            # The details asked for alongside still change.
+            described.append(f"status stays {row.status} (nothing to {verb})")
+            status = None
+    if status is not None:
         if status in ("paused", "ended") and not reason:
             return "Nothing changed: ask the team member why before pausing or ending."
         refused = _not_allowed(settings, ctx, "pause_resume_end")

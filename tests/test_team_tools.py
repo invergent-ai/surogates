@@ -492,6 +492,30 @@ async def test_an_ended_follow_up_has_nothing_to_pause_or_resume(sf, practice, s
 
 
 @pytest.mark.asyncio
+async def test_a_status_it_already_has_does_not_drop_the_other_changes(sf, practice):
+    args = {"person": "Ioana", "status": "active", "person_name": "Ioana M. Popa"}
+    out = await _confirmed(team.handle_team_update_person, args, _kw(sf, practice.doctor_session))
+    assert out.startswith("Updated")
+    row = await _enrollment(sf, practice.ioana[0])
+    assert (row.status, row.patient_name) == ("active", "Ioana M. Popa")
+
+
+@pytest.mark.asyncio
+async def test_someone_with_only_an_escalation_has_no_follow_up_to_change(sf, practice):
+    stranger, _ = await _person(sf, "Maria Stan", "40700000842", enrol=False)
+    await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=stranger, kind="alert", reason="Call me",
+    )
+    out = await team.handle_team_update_person(
+        {"person": "Maria", "status": "paused", "reason": "x"}, **_kw(sf, practice.doctor_session),
+    )
+    assert out == (
+        "Nothing changed: Maria Stan is not enrolled in anything; they only have an "
+        "open escalation. Enrol them first to change a follow-up."
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_preview_changes_nothing(sf, practice):
     ioana, _ = practice.ioana
     out = await team.handle_team_update_person(
