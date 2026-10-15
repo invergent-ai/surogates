@@ -53,7 +53,7 @@ from surogates.followup.wording import wording
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
-from surogates.session.events import OUTREACH_OPENER_MARKER, EventType
+from surogates.session.events import OUTREACH_OPENER_MARKER, PLATFORM_NOTE, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -148,30 +148,8 @@ def window_open(last_inbound_at: datetime | None, now: datetime) -> bool:
     return as_utc(now) - as_utc(last_inbound_at) < WINDOW - WINDOW_MARGIN
 
 
-async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> bool:
-    """Whether a worker holds this conversation right now."""
-    async with session_factory() as db:
-        expires = (
-            await db.execute(
-                sa.select(SessionLease.expires_at)
-                .where(SessionLease.session_id == session_id)
-            )
-        ).scalar_one_or_none()
-    # ``session_leases.expires_at`` is naive UTC.
-    return expires is not None and as_utc(expires) > as_utc(now)
-
-
-async def busy_safety_line(
-    session_factory: Any, redis: Any, *, org_id: uuid.UUID, agent_id: str,
-    session_id: uuid.UUID, now: datetime | None = None,
-) -> str | None:
-    """The business's ``busy_safety_line`` when a worker is mid-turn in this
-    conversation, once per turn; ``None`` when it is unset or nobody is."""
-    settings = await followup_store.get_settings(session_factory, org_id=org_id, agent_id=agent_id)
-    line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
-    if not line:
-        return None
-    now = now or datetime.now(timezone.utc)
+async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> uuid.UUID | None:
+    """The token of the turn holding this conversation right now, if any."""
     async with session_factory() as db:
         lease = (
             await db.execute(
@@ -179,10 +157,27 @@ async def busy_safety_line(
                 .where(SessionLease.session_id == session_id)
             )
         ).one_or_none()
-    if lease is None or as_utc(lease.expires_at) <= as_utc(now):
+    # ``session_leases.expires_at`` is naive UTC.
+    return lease.lease_token if lease is not None and as_utc(lease.expires_at) > as_utc(now) else None
+
+
+async def busy_safety_line(
+    session_factory: Any, redis: Any, *, org_id: uuid.UUID, agent_id: str,
+    session_id: uuid.UUID, user_id: uuid.UUID, now: datetime | None = None,
+) -> str | None:
+    """The business's ``busy_safety_line`` for *user_id* when a worker is
+    mid-turn in this conversation, once per turn; ``None`` when it is unset,
+    nobody is, or they are on the team (they talk to the agent, nobody is
+    waiting on it for them)."""
+    settings = await followup_store.get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
+    if not line or followup_store.is_team_member(settings, user_id):
+        return None
+    token = await _busy(session_factory, session_id, now or datetime.now(timezone.utc))
+    if token is None:
         return None
     first = await redis.set(
-        f"surogates:followup:busy-line:{session_id}:{lease.lease_token}", "1",
+        f"surogates:followup:busy-line:{session_id}:{token}", "1",
         ex=int(timedelta(hours=6).total_seconds()), nx=True,
     )
     return line if first else None
@@ -246,19 +241,22 @@ async def _write_text(
     logged = mask_readable_phones(text)
     # Without these the model, seeing only the masked log, told a team
     # member it could not give them the number and never closed the case.
-    if logged != text:
-        logged += f"\n\n{MASKED_NOTE}"
+    notes = [MASKED_NOTE] if logged != text else []
     if row.kind == "alert" and (row.dedupe_key or "").startswith("escalation:"):
-        logged += f"\n\n{ESCALATION_NOTE}"
+        notes.append(ESCALATION_NOTE)
     data = {
         "message": {"role": "assistant", "content": logged},
         "synthetic": "outreach",
         "outreach_id": str(row.id),
         "outreach_kind": row.kind,
+        **({PLATFORM_NOTE: "\n\n".join(notes)} if notes else {}),
     }
     await session_store.emit_event(
         session_id, EventType.LLM_RESPONSE, data,
-        delivery_data={**data, "message": {"role": "assistant", "content": text}},
+        delivery_data={
+            **{k: v for k, v in data.items() if k != PLATFORM_NOTE},
+            "message": {"role": "assistant", "content": text},
+        },
     )
 
 

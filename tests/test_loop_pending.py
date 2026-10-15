@@ -738,3 +738,18 @@ def test_the_model_reads_the_ai_disclosure_the_platform_sent():
         {"role": "user", "content": disclosure_note("You are talking to an AI.")},
         {"role": "user", "content": "Hello"},
     ]
+
+
+def test_a_platform_note_on_a_reply_follows_it_for_the_model_alone():
+    events = [
+        event(1, EventType.LLM_RESPONSE, message={"role": "assistant", "content": "Alert: +40…111"},
+              platform_note="[Numbers are masked in this log only.]"),
+        event(2, EventType.USER_MESSAGE, content="Give me the number"),
+    ]
+    for each in events:
+        each.type = each.type.value
+    assert ContextReplayMixin._rebuild_messages(SimpleNamespace(), events) == [
+        {"role": "assistant", "content": "Alert: +40…111"},
+        {"role": "user", "content": "[Numbers are masked in this log only.]"},
+        {"role": "user", "content": "Give me the number"},
+    ]

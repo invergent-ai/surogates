@@ -25,6 +25,11 @@ OPENER_SYNTHETIC_MARKERS = (CHECKIN_OPENER_MARKER, OUTREACH_OPENER_MARKER)
 #: platform woke (a journey step) is the agent's to stay quiet in.
 SILENT_REPLY = "NO_MESSAGE"
 
+#: An event's model-only note from the platform: on a ``user.message`` it is
+#: folded into the message, on an ``llm.response`` it follows the reply as its
+#: own note.  Transcripts and channels never show it.
+PLATFORM_NOTE = "platform_note"
+
 
 @unique
 class EventType(str, Enum):

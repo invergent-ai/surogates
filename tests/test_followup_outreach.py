@@ -934,8 +934,10 @@ async def test_the_log_keeps_a_number_masked_and_only_the_delivery_has_it_whole(
     session_store = _Store()
     await _send(sf, session_store, _Delivery())
     [(_, _, data)] = session_store.events
-    assert data["message"]["content"] == f"Faint\n\nAbout: Ion Pop · +40…111\n\n{outreach.MASKED_NOTE}"
+    assert data["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40…111"
+    assert data["platform_note"] == outreach.MASKED_NOTE
     assert session_store.delivered["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40 711 111 111"
+    assert "platform_note" not in session_store.delivered
 
 
 @pytest.mark.asyncio
@@ -949,7 +951,8 @@ async def test_an_escalation_alert_reminds_the_model_to_close_it_and_delivers_un
     session_store = _Store()
     await _send(sf, session_store, _Delivery())
     [(_, _, data)] = session_store.events
-    assert data["message"]["content"] == f"Faint\n\n{outreach.ESCALATION_NOTE}"
+    assert data["message"]["content"] == "Faint"
+    assert data["platform_note"] == outreach.ESCALATION_NOTE
     assert session_store.delivered["message"]["content"] == "Faint"
 
 

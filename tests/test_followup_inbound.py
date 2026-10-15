@@ -103,7 +103,7 @@ async def test_other_people_and_agents_keep_their_held_texts(sf):
             assert (await db.get(OutreachMessageRow, row_id)).state == "queued"
 
 
-async def _busy_line_case(sf, *, line, busy, messages=2):
+async def _busy_line_case(sf, *, line, busy, messages=2, keep_deps=False):
     from datetime import datetime, timedelta, timezone
 
     from surogates.db.models import SessionLease
@@ -132,7 +132,7 @@ async def _busy_line_case(sf, *, line, busy, messages=2):
             routing=_whatsapp_routing(), config=_make_config(), deps=deps,
         )
         assert result == InboundOutcome.PROCESSED
-    return nudges
+    return [(e[1], e[2]) for e in deps.session_store.events] if keep_deps else nudges
 
 
 @pytest.mark.asyncio
@@ -140,6 +140,25 @@ async def test_the_busy_line_goes_out_once_while_a_turn_is_running(sf):
     assert await _busy_line_case(sf, line="If it cannot wait, call the front desk.", busy=True) == [
         "If it cannot wait, call the front desk."
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_model_reads_that_the_busy_line_went_out(sf):
+    from surogates.harness.loop_context_replay import build_user_message_dict
+
+    deps_events = await _busy_line_case(sf, line="Call the desk if urgent.", busy=True, keep_deps=True)
+    noted = [d for t, d in deps_events if t == EventType.USER_MESSAGE and d.get("platform_note")]
+    assert len(noted) == 1
+    assert "«Call the desk if urgent.»" in build_user_message_dict(noted[0])["content"]
+
+
+@pytest.mark.asyncio
+async def test_no_busy_line_for_a_team_member(sf):
+    await store.update_settings(
+        sf, org_id=AGENT_ORG_ID, agent_id=_whatsapp_routing().agent_id,
+        alert_recipient_user_ids=[USER_ID],
+    )
+    assert await _busy_line_case(sf, line="Call the desk if urgent.", busy=True) == []
 
 
 @pytest.mark.asyncio

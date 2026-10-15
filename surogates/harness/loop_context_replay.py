@@ -25,7 +25,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
-from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.session.events import MESSAGE_TYPES, PLATFORM_NOTE, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,9 @@ def build_user_message_dict(
     attachments_note = _attachments_note_from_data(event_data)
     if attachments_note:
         note_parts.append(attachments_note)
+    platform_note = event_data.get(PLATFORM_NOTE)
+    if isinstance(platform_note, str) and platform_note:
+        note_parts.append(platform_note)
     if note_parts:
         notes_block = "\n\n".join(note_parts)
         content = f"{notes_block}\n\n{content}" if content else notes_block
@@ -793,6 +796,8 @@ class ContextReplayMixin:
                 if stored_message is not None:
                     messages.append(stored_message)
                 tool_calls = (stored_message or {}).get("tool_calls") or []
+                if event.data.get(PLATFORM_NOTE) and not tool_calls:
+                    messages.append({"role": "user", "content": str(event.data[PLATFORM_NOTE])})
                 ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
                 made_calls |= ids
                 if "answers" not in event.data:

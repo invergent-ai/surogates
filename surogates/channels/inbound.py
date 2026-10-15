@@ -48,7 +48,7 @@ from surogates.channels.source import (
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
 from surogates.followup.outreach import busy_safety_line, deliver_pending
-from surogates.session.events import EventType
+from surogates.session.events import PLATFORM_NOTE, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -1027,19 +1027,6 @@ class ChannelInboundPipeline:
                 runtime_payload=runtime_payload,
             ) or _content
 
-        # The agent reads this message only when its current turn ends; a
-        # business that set a line tells the person what to do meanwhile.
-        if msg.is_dm and deps.session_factory is not None and deps.input_nudge is not None:
-            try:
-                _line = await busy_safety_line(
-                    deps.session_factory, deps.redis, org_id=UUID(str(routing.org_id)),
-                    agent_id=routing.agent_id, session_id=session_id,
-                )
-                if _line:
-                    await deps.input_nudge(session_id, msg, _line)
-            except Exception:  # noqa: BLE001
-                logger.warning("[followup] busy line not sent for %s", session_id, exc_info=True)
-
         # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.
         # ------------------------------------------------------------------
@@ -1051,6 +1038,25 @@ class ChannelInboundPipeline:
             "media_types": msg.media_types,
             "source": _source,
         }
+        # A message that lands mid-turn is read when the turn reaches its
+        # next step, which can be long: a business that set a line tells the
+        # person what to do meanwhile.  Not for one that ended a pending
+        # question, which the turn reads at once.
+        if msg.is_dm and not _unanswered and deps.session_factory is not None and deps.input_nudge is not None:
+            try:
+                _line = await busy_safety_line(
+                    deps.session_factory, deps.redis, org_id=UUID(str(routing.org_id)),
+                    agent_id=routing.agent_id, session_id=session_id, user_id=identity.user_id,
+                )
+                if _line:
+                    await deps.input_nudge(session_id, msg, _line)
+                    event_data[PLATFORM_NOTE] = (
+                        "[Sent by the platform to the person when this message came in, "
+                        f"while you were still answering them: «{_line}»]"
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning("[followup] busy line not sent for %s", session_id, exc_info=True)
+
         if _unanswered:
             from surogates.tools.builtin.ask_user_question import DISMISSES_QUESTION
             event_data[DISMISSES_QUESTION] = _unanswered
