@@ -1612,7 +1612,8 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
     for row in escalations:
         # The latest is taken whoever had it; the rest only when nobody had,
         # and a case resolved before anyone took it is the resolver's.
-        if not row.owner or (action == "claim" and row is escalation):
+        taken = not row.owner or (action == "claim" and row is escalation)
+        if taken:
             await followup_store.claim_escalation(
                 sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
                 escalation_id=row.id, owner=member,
@@ -1621,7 +1622,10 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
             await followup_store.resolve_escalation(
                 sf, org_id=ctx.org_id, agent_id=ctx.agent_id, escalation_id=row.id,
             )
-        alerted |= await _alerted_with(sf, row)
+        # Someone else's case stays theirs: its alert's recipients are not
+        # told this member took it.
+        if taken or action == "resolve":
+            alerted |= await _alerted_with(sf, row)
     key = "escalation_taken" if action == "claim" else "escalation_resolved"
     text = followup_store.wording(settings, key, member=member, name=label, reason=escalation.reason[:300])
     colleagues_told = 0

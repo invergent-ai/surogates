@@ -871,3 +871,24 @@ async def test_a_stop_tells_the_team_once_by_the_journeys_name(sf, clinic):
     )
     notices = {(o.text) for o in await _all(sf, OutreachMessageRow) if o.kind == "alert"}
     assert notices == {"Ion asked to stop messages on WhatsApp: Recovery ended. stop please"}
+
+
+@pytest.mark.asyncio
+async def test_taking_a_case_tells_nobody_whose_alert_was_someone_elses_case(sf, clinic):
+    doctor, doctor_session, nurse = clinic
+    ion, session = await _user(sf, "Ion Popescu", "40711111111")
+    await followup.handle_escalate(
+        {"reason": "Fell", "severity": "red", "to": ["Asistenta Maria"]}, **_kw(sf, session),
+    )
+    await followup.handle_escalate(
+        {"reason": "Dizzy", "severity": "yellow", "to": ["Dr. Ionescu"]}, **_kw(sf, session),
+    )
+    ages = {"Fell": 2, "Dizzy": 1}
+    async with sf() as db:
+        for row in (await db.execute(sa.select(EscalationRow))).scalars().all():
+            row.created_at = datetime.now(timezone.utc) - timedelta(minutes=ages[row.reason])
+            row.owner = "Asistenta Maria" if row.reason == "Fell" else None
+        await db.commit()
+
+    await team.handle_team_escalation({"action": "claim", "person": "Popescu"}, **_kw(sf, doctor_session))
+    assert [o for o in await _all(sf, OutreachMessageRow) if o.kind == "notice"] == []
