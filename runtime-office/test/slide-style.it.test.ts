@@ -125,36 +125,6 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
     });
   });
 
-  it("places a moving card's shadow, box and text where they measured, on both editors", async () => {
-    const { agent, user } = await pair(office, opened, "sample.pptx");
-    measured.length = 0;
-    const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ html: TEAM }, { html: BUDGET }] }]);
-    expect(result).toMatchObject({ applied: true, flushed: true });
-    // Neither section says data-transition="magic", the second least of all: the agent is told nothing will move.
-    expect(result.results[0].note).toBe('ids match across slides but slide 4 has no data-transition="magic": nothing will move.');
-    const E = 12192000 / 1920;
-    for (const [n, slide] of result.results[0].slides.entries()) {
-      // The card moves, so it is one group: its blurred shadow grouped behind its box, then its two lines of text.
-      const card = measured[n]!.shapes.find((s) => s.magic === "handoff-card")!;
-      expect(card.kind).toBe("group");
-      expect(leaves([card], E).map((s) => s.kind)).toEqual(["group", "group", "picture", "shape", "shape", "shape"]);
-      // The editor frames a group round its children, so what is compared is what each child draws.
-      const want = leaves([card], E).filter((s) => s.kind !== "group");
-      for (const page of [agent, user]) {
-        await eventually(async () => {
-          const places: Any[] = JSON.parse(((await (await pool.get(page)).command(PLACES, { id: slide.id })).value as string | null) ?? "null");
-          expect(places).not.toBeNull();
-          const drawn = places.filter((p) => p.kind !== "group");
-          const near = (a: number, b: number) => Math.abs(a - b) <= 2;
-          const at = drawn.findIndex((_, i) => want.every((w, j) => drawn[i + j]?.kind === w.kind && near(drawn[i + j].w, w.w) && near(drawn[i + j].h, w.h)));
-          expect(at, JSON.stringify({ want, drawn })).toBeGreaterThanOrEqual(0);
-          const got = drawn.slice(at, at + want.length);
-          expect(got.map((g) => [g.x, g.y]), JSON.stringify({ want, got })).toEqual(want.map((w, j) => [near(got[j].x, w.x) ? got[j].x : w.x, near(got[j].y, w.y) ? got[j].y : w.y]));
-        });
-      }
-    }
-  });
-
   it("replaces a slide that is not the current one: its group lands on it, its exit rises out the top, its old transition goes", async () => {
     const { agent, user } = await pair(office, opened, "sample.pptx");
     // Two slides added: the last one is current.
@@ -188,6 +158,36 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
         expect(state.effects).toEqual([["exitFlyOut", 1]]);
         expect(state.transition).toBe("effectNone");
       });
+    }
+  });
+
+  it("places a moving card's shadow, box and text where they measured, on both editors", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pptx");
+    measured.length = 0;
+    const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ html: TEAM }, { html: BUDGET }] }]);
+    expect(result).toMatchObject({ applied: true, flushed: true });
+    // Neither section says data-transition="magic", the second least of all: the agent is told nothing will move.
+    expect(result.results[0].note).toBe('ids match across slides but slide 4 has no data-transition="magic": nothing will move.');
+    const E = 12192000 / 1920;
+    for (const [n, slide] of result.results[0].slides.entries()) {
+      // The card moves, so it is one group: its blurred shadow grouped behind its box, then its two lines of text.
+      const card = measured[n]!.shapes.find((s) => s.magic === "handoff-card")!;
+      expect(card.kind).toBe("group");
+      expect(leaves([card], E).map((s) => s.kind)).toEqual(["group", "group", "picture", "shape", "shape", "shape"]);
+      // The editor frames a group round its children, so what is compared is what each child draws.
+      const want = leaves([card], E).filter((s) => s.kind !== "group");
+      for (const page of [agent, user]) {
+        await eventually(async () => {
+          const places: Any[] = JSON.parse(((await (await pool.get(page)).command(PLACES, { id: slide.id })).value as string | null) ?? "null");
+          expect(places).not.toBeNull();
+          const drawn = places.filter((p) => p.kind !== "group");
+          const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+          const at = drawn.findIndex((_, i) => want.every((w, j) => drawn[i + j]?.kind === w.kind && near(drawn[i + j].w, w.w) && near(drawn[i + j].h, w.h)));
+          expect(at, JSON.stringify({ want, drawn })).toBeGreaterThanOrEqual(0);
+          const got = drawn.slice(at, at + want.length);
+          expect(got.map((g) => [g.x, g.y]), JSON.stringify({ want, got })).toEqual(want.map((w, j) => [near(got[j].x, w.x) ? got[j].x : w.x, near(got[j].y, w.y) ? got[j].y : w.y]));
+        });
+      }
     }
   });
 });
