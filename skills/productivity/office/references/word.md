@@ -1,5 +1,18 @@
 # office_edit for Word documents: formats and examples
 
+## Working on a Word document
+
+- Target blocks by the `id` and `hash` the outline gives. Quote words with `find` only for a phrase inside a block.
+- A new document: one call inserts the title and every section's heading, each followed by a pending block saying what
+  it will hold. The user sees the whole shape at once and can delete a section before you write it. Then fill one
+  section per call, replacing its pending block. A pending block the user deleted is a section they do not want: leave
+  it out.
+- Re-word with `replace` on quoted words; replace a whole block only when it all changes.
+- Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced, moved or deleted is
+  gone for the later ones (a moved block gets a new id, found in that op's result `ids`), and one it re-worded has a
+  new hash.
+- For a length the user asks for, count words: about 450 words of body text fill a page.
+
 ## Read
 
 ```json
