@@ -25,7 +25,7 @@ At most ten slides per call; one or two per call lets the user watch the deck gr
 ```
 
 ```json
-{"op": "slides", "slides": [{"html": "<section style=\"background:#FBFBF8;color:#1A1A1A;font-family:Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">Three numbers</h2><div style=\"display:flex;flex-direction:row;gap:32px\"><div style=\"flex:1;background:#FFFFFF;border:2px solid #E3E6E4;padding:40px;display:flex;flex-direction:column;gap:12px\"><p style=\"font-size:96px;font-weight:600;color:#2F5597\">12</p><p style=\"font-size:32px\">engineers by June</p></div><div style=\"flex:1;background:#FFFFFF;border:2px solid #E3E6E4;padding:40px;display:flex;flex-direction:column;gap:12px\"><p style=\"font-size:96px;font-weight:600;color:#2F5597\">€1.2M</p><p style=\"font-size:32px\">first-year cost</p></div></div><p style=\"position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179\">Source: finance plan, March</p></section>"}]}
+{"op": "slides", "slides": [{"html": "<section style=\"background:#FBFBF8;color:#1A1A1A;font-family:Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:48px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">Two numbers</h2><div style=\"display:flex;flex-direction:row;gap:32px\"><div style=\"flex:1;background:#FFFFFF;border:2px solid #E3E6E4;padding:40px;display:flex;flex-direction:column;gap:12px\"><p style=\"font-size:96px;font-weight:600;color:#2F5597\">12</p><p style=\"font-size:32px\">engineers by June</p></div><div style=\"flex:1;background:#FFFFFF;border:2px solid #E3E6E4;padding:40px;display:flex;flex-direction:column;gap:12px\"><p style=\"font-size:96px;font-weight:600;color:#2F5597\">€1.2M</p><p style=\"font-size:32px\">first-year cost</p></div></div><p style=\"position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7179\">Source: finance plan, March</p></section>"}]}
 ```
 
 ```json
@@ -70,21 +70,24 @@ arrow-left|arrow-up|arrow-down|line">` fills its box. `<x-connector x1 y1 x2 y2 
 head-end="open|filled">` draws a line between points. `<x-icon name="…" style="color; width; height">`, name one of
 Activity Book Chart Chat Check CheckCircle Clock Cloud Code Database Globe GraduationCap Home Key Lightbulb Lightning
 Link Lock PaperPlane Play Search Settings Star ThumbsUp Tool Trust Users Verified Warning Wrench. Nothing goes inside an
-`<x-shape>`, `<x-icon>`, `<x-connector>` or `<hr>`: a label goes in a text element beside it. `<x-embed>` (pinned, a
-small live page, at most 16 KB) goes in as a picture of what it shows.
+`<x-shape>`, `<x-icon>`, `<x-connector>` or `<hr>`: a label goes in a text element beside it. `<x-embed>` (a small live
+page, pinned as a direct child of the section, at most 16 KB and 8 per slide) goes in as a picture of what it shows.
 
 **Styles:** lengths in px (no `em`, `rem`, `vw`, `%` only where a box's share is meant); colours as hex or `rgb[a]()`;
 `linear-gradient` and `repeating-linear-gradient` backgrounds; `border` (solid, dashed, dotted, double); `box-shadow`;
 `opacity`; `transform: rotate()`, `translate()`, `scale()`; `letter-spacing`, `text-transform`, `text-decoration`,
 `-webkit-text-stroke`, gradient text (`background-clip:text`). No `margin` (use `gap` and `padding`), no `z-index`, no
-classes or `<style>`. A radial gradient, a filter or a blend mode goes in as a picture: it looks right but is not
-editable, so keep them for decoration. A blurred shadow is a picture behind its shape, which stays editable.
+classes or `<style>`. A radial gradient is a picture behind its box's text. A filter or a blend mode on anything,
+opacity on a div that holds children, and a turn, a scale or a skew on such a div or on a table make the element and
+everything in it one picture, which looks right but which the user cannot edit: keep them for decoration, and fade or
+turn single shapes and text boxes instead (a turned text box stays native; a scaled or skewed one is a picture). A
+blurred shadow is a picture behind its shape, which stays editable.
 
 **Motion:** `data-build-in` / `data-build-out="fade|rise|drop|left|right|scale|pop [order N] [auto]"` on the section's
 pinned children; `data-transition="magic"` with the same `id` on matching pinned elements of two slides moves them
-between the slides. A build inside another moving element is refused, and so is a table inside a moving box: give the
-table its own motion. A connector or a build inside a translucent, turned or filtered box is refused too: that box goes
-in as one picture.
+between the slides. A build or a magic-move `id` inside another moving element is refused, and so is a table inside a
+moving box: give the table its own motion. A connector or a build inside a box that goes in as one picture (see Styles)
+is refused too.
 
 **Notes:** one `<aside>` of plain text, the section's last child.
 
