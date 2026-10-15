@@ -3,23 +3,29 @@ import type { EditorPage } from "../src/connector.js";
 import type { Format } from "../src/formats/format.js";
 import { word } from "../src/formats/word.js";
 import { ContentError } from "../src/markdown.js";
-import { EditorError, FLUSH_WAIT_MS, Office } from "../src/office.js";
+import { EditorError, FLUSH_WAIT_MS, Office, UNDO_WAIT_MS } from "../src/office.js";
 import { PageGone, type PagePool } from "../src/pages.js";
 
 type Reply = { sentAt: number; value: unknown };
+type UndoState = { ready: boolean; locked: boolean; index: number; queued: boolean };
+
+const ready = (index: number): UndoState => ({ ready: true, locked: false, index, queued: false });
 
 // An office over a fake pool whose one page answers *values* to its commands in turn.
-function officeAnswering(values: unknown[], options: { kind?: string; formats?: Record<string, Format>; flushed?: boolean[]; modified?: boolean; poisoned?: boolean } = {}) {
+function officeAnswering(values: unknown[], options: { kind?: string; formats?: Record<string, Format>; flushed?: boolean[]; modified?: boolean; poisoned?: boolean; undoStates?: (UndoState | null)[] } = {}) {
   const command = vi.fn(async (): Promise<Reply> => ({ sentAt: 0, value: values.shift() }));
   const method = vi.fn(async (_name: string, _args: unknown[] = []): Promise<Reply> => ({ sentAt: 0, value: undefined }));
   const flushed = [...(options.flushed ?? [true])];
   const waitFlushed = vi.fn(async (_since: number, _ms: number) => flushed.shift() ?? false);
   const modified = vi.fn(async () => options.modified ?? false);
   const poisoned = vi.fn(async () => options.poisoned ?? false);
-  const page = { kind: options.kind ?? "word", command, method, waitFlushed, modified, poisoned, user: { id: "a", name: "Agent" } } as unknown as EditorPage;
+  // By default the Undo runs from the editor's history at once.
+  const undoStates = [...(options.undoStates ?? [ready(1), ready(0)])];
+  const undoState = vi.fn(async () => (undoStates.length > 1 ? undoStates.shift()! : undoStates[0] ?? null));
+  const page = { kind: options.kind ?? "word", command, method, waitFlushed, modified, poisoned, undoState, user: { id: "a", name: "Agent" } } as unknown as EditorPage;
   const pool = { get: vi.fn(async () => page), close: vi.fn(async () => undefined) };
   const office = new Office(pool as unknown as PagePool, options.formats ?? { word });
-  return { office, command, method, pool, waitFlushed, modified };
+  return { office, command, method, pool, waitFlushed, modified, undoState };
 }
 
 const ops = [{ op: "insert", target: { end: true }, content: { markdown: "Hi." } }];
@@ -186,6 +192,44 @@ describe("Office edits without a group", () => {
     method.mockResolvedValueOnce({ sentAt: 0, value: { __timeout: true } });
     await expect(office.edit("p", ops)).rejects.toThrow(/^the editor stopped answering; the edit may have applied: read the document again before editing$/);
     expect(pool.close).toHaveBeenCalledWith("p");
+  });
+
+  it("waits for the editor's lock on the failed command to clear before the Undo, and sees the Undo run", async () => {
+    const locked = { ready: false, locked: true, index: 1, queued: false };
+    const { office, method, pool, undoState } = officeAnswering([{ __error: "the stamp failed" }], { kind: "loose", formats: { loose }, undoStates: [locked, locked, ready(1), ready(0)] });
+    await expect(office.edit("p", ops)).rejects.toEqual(new EditorError("the stamp failed; what it changed was undone"));
+    expect(method.mock.calls).toEqual([["Undo", []]]);
+    expect(undoState).toHaveBeenCalledTimes(4);
+    expect(pool.close).not.toHaveBeenCalled();
+  });
+
+  it("waits for an Undo the editor queued behind its save to run", async () => {
+    const queued = { ready: false, locked: true, index: -1, queued: true };
+    const { office, pool, undoState } = officeAnswering([{ __error: "the stamp failed" }], { kind: "loose", formats: { loose }, undoStates: [ready(-1), queued, queued, ready(-1)] });
+    await expect(office.edit("p", ops)).rejects.toEqual(new EditorError("the stamp failed; what it changed was undone"));
+    expect(undoState).toHaveBeenCalledTimes(4);
+    expect(pool.close).not.toHaveBeenCalled();
+  });
+
+  it("closes a page whose Undo did nothing, and says the edit may have applied", async () => {
+    const { office, method, pool } = officeAnswering([{ __error: "the stamp failed" }], { kind: "loose", formats: { loose }, undoStates: [ready(-1), ready(-1)] });
+    await expect(office.edit("p", ops)).rejects.toThrow(/^the editor stopped answering; the edit may have applied: read the document again before editing$/);
+    expect(method.mock.calls).toEqual([["Undo", []]]);
+    expect(pool.close).toHaveBeenCalledWith("p");
+  });
+
+  it("closes a page whose lock never cleared, sending no Undo", async () => {
+    vi.useFakeTimers();
+    try {
+      const { office, method, pool } = officeAnswering([{ __error: "the stamp failed" }], { kind: "loose", formats: { loose }, undoStates: [{ ready: false, locked: true, index: 1, queued: false }] });
+      const edit = office.edit("p", ops).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(UNDO_WAIT_MS + 1_000);
+      expect(await edit).toEqual(new EditorError("the editor stopped answering; the edit may have applied: read the document again before editing"));
+      expect(method).not.toHaveBeenCalled();
+      expect(pool.close).toHaveBeenCalledWith("p");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes a page that stopped answering, sending nothing more", async () => {

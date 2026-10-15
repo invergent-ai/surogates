@@ -1,4 +1,4 @@
-import type { EditorPage } from "./connector.js";
+import type { EditorPage, UndoState } from "./connector.js";
 import { Stalled, type EditContext, type Format, type Outcome, type Scope } from "./formats/format.js";
 import { formatsFor } from "./formats/index.js";
 import { PageGone, type PagePool, type OpenRequest } from "./pages.js";
@@ -11,6 +11,9 @@ const RETRY_MS = 300;
 // changed nothing fires no state change, so the editor's flag decides after this long without one.
 const QUICK_FLUSH_MS = 1_500;
 export const FLUSH_WAIT_MS = 10_000;
+// The editor answers its lock request and finishes a save within a fraction of a second.
+export const UNDO_WAIT_MS = 5_000;
+const UNDO_POLL_MS = 50;
 const COMMIT = ["GroupActions", ""];
 const CANCEL = ["GroupActions", "", "cancel"];
 const STALLED_EDIT = "the editor stopped answering; the edit may have applied: read the document again before editing";
@@ -145,7 +148,7 @@ export class Office {
         throw new EditorError(STALLED_EDIT);
       }
       if (error instanceof NotRun || !(error instanceof EditorError)) throw error;
-      if (stalled(await page.method("Undo", []))) {
+      if (!(await this.undo(page))) {
         // The change already reached co-editors and may still stand.
         await this.pool.close(id);
         throw new EditorError(STALLED_EDIT);
@@ -153,6 +156,18 @@ export class Office {
       await this.recycleIfPoisoned(id, page);
       throw new EditorError(`${error.message}; what it changed was undone`);
     }
+  }
+
+  // Sends the Undo once the editor would run it, and whether it ran: from the history at once, or queued behind the
+  // editor's save and run when that ends. Reading the state from the frame is no command, so the Undo is still the
+  // next thing the editor runs.
+  private async undo(page: EditorPage): Promise<boolean> {
+    const before = await waitUndoState(page, (state) => state.ready);
+    if (!before || stalled(await page.method("Undo", []))) return false;
+    const after = await page.undoState();
+    if (!after) return false;
+    if (after.index < before.index) return true;
+    return after.queued && (await waitUndoState(page, (state) => !state.queued && !state.locked)) !== null;
   }
 
   // A page whose registry a failed command left off must never send another change: it is closed, and the next call
@@ -169,6 +184,16 @@ export class Office {
     if (await page.waitFlushed(since, QUICK_FLUSH_MS)) return true;
     if (!(await page.modified())) return true;
     return page.waitFlushed(since, FLUSH_WAIT_MS);
+  }
+}
+
+async function waitUndoState(page: EditorPage, until: (state: UndoState) => boolean): Promise<UndoState | null> {
+  const end = Date.now() + UNDO_WAIT_MS;
+  for (;;) {
+    const state = await page.undoState();
+    if (state && until(state)) return state;
+    if (Date.now() >= end) return null;
+    await new Promise((resolve) => setTimeout(resolve, UNDO_POLL_MS));
   }
 }
 

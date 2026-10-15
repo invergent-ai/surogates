@@ -82,11 +82,35 @@ describe.skipIf(!itEnabled)("a PDF", () => {
     expect((await outline(agent)).pages[0].fields.find((f: Any) => f.name === "client").value).toBeNull();
   });
 
+  it("refuses a fill whose field the user changed since the agent read it, and keeps the user's value", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pdf");
+    expect(await office.edit(user, [{ op: "fill", fields: { client: "The person wrote this" } }])).toMatchObject({ applied: true });
+    await eventually(async () => expect(fieldValues(await outline(agent)).client).toBe("The person wrote this"));
+    const result: Any = await office.edit(agent, [{ op: "fill", fields: { client: "ACME Lisbon Lda" }, expect: { client: null } }]);
+    expect(result).toMatchObject({ applied: false, refused: { op: 0 } });
+    expect(result.refused.reason).toContain('"The person wrote this"');
+    for (const id of [agent, user]) expect(fieldValues(await outline(id)).client).toBe("The person wrote this");
+  });
+
+  // A batch whose edit runs and then fails, as one that throws partway does.
+  const failingOffice = () => new Office(pool, {
+    ...formatsFor(pool),
+    pdf: { ...pdf, edit: async (context, ops) => { await pdf.edit(context, ops); throw new EditorError("the command failed partway"); } },
+  });
+
+  it("undoes a failed batch that filled a field, in both editors", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pdf");
+    expect(await office.edit(user, [{ op: "fill", fields: { client: "The person wrote this" } }])).toMatchObject({ applied: true });
+    await eventually(async () => expect(fieldValues(await outline(agent)).client).toBe("The person wrote this"));
+    await expect(failingOffice().edit(agent, [{ op: "fill", fields: { client: "Should not stay" } }])).rejects.toEqual(
+      new EditorError("the command failed partway; what it changed was undone"));
+    for (const id of [agent, user]) {
+      await eventually(async () => expect(fieldValues(await outline(id)).client).toBe("The person wrote this"));
+    }
+  });
+
   it("undoes a batch that failed after changing the document, in both editors, and keeps the person's own edit", async () => {
-    const failing = new Office(pool, {
-      ...formatsFor(pool),
-      pdf: { ...pdf, edit: async (context, ops) => { await pdf.edit(context, ops); throw new EditorError("the command failed partway"); } },
-    });
+    const failing = failingOffice();
     const { agent, user } = await pair(office, opened, "sample.pdf");
     expect(await office.edit(user, [{ op: "fill", fields: { client: "The person wrote this" } }])).toMatchObject({ applied: true });
     await eventually(async () => expect(fieldValues(await outline(agent)).client).toBe("The person wrote this"));

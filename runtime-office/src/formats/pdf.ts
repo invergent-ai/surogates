@@ -15,7 +15,7 @@ export type PdfOp =
   | { op: "pages"; action: "add"; page: number }
   | { op: "pages"; action: "remove"; page: number }
   | { op: "pages"; action: "rotate"; page: number; degrees: number }
-  | { op: "fill"; fields: Record<string, string | boolean> }
+  | { op: "fill"; fields: Record<string, string | boolean>; expect?: Record<string, string | boolean> }
   | { op: "add_field"; type: "text" | "checkbox"; page: number; rect: number[]; name: string; value?: string | boolean }
   | { op: "redact"; text: string; match_case: boolean; whole_words: boolean }
   | { op: "annotate"; kind: "free_text"; page: number; rect: number[]; text: string }
@@ -31,6 +31,25 @@ function rect(value: unknown): number[] {
 function name(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim() || value.length > 100) throw new ContentError(`"${label}" is a name of up to 100 characters.`);
   return value;
+}
+
+// A fill's fields as the agent read them, as the outline shows them: text, null when empty, or true/false.
+function expected(value: unknown, fields: Record<string, string | boolean>): Record<string, string | boolean> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ContentError('"expect" maps field names to their values as you read them: text (null when empty), or true/false for a checkbox.');
+  }
+  const out: Record<string, string | boolean> = {};
+  for (const [field, was] of Object.entries(value)) {
+    if (!Object.hasOwn(fields, field)) throw new ContentError('"expect" names only fields in "fields".');
+    if (typeof fields[field] === "boolean") {
+      if (typeof was !== "boolean") throw new ContentError(`expect ${field} as true or false, as the outline showed it.`);
+      out[field] = was;
+    } else {
+      if (was !== null && typeof was !== "string") throw new ContentError(`expect ${field} as text, as the outline showed it (null when empty).`);
+      out[field] = was ?? "";
+    }
+  }
+  return out;
 }
 
 function compileOp(raw: Raw): PdfOp {
@@ -53,7 +72,9 @@ function compileOp(raw: Raw): PdfOp {
       for (const [field, value] of Object.entries(fields)) {
         if (!(typeof value === "boolean" || (typeof value === "string" && value.length <= 1000))) throw new ContentError(`field ${field} takes text or true/false.`);
       }
-      return { op: "fill", fields: fields as Record<string, string | boolean> };
+      const op: Extract<PdfOp, { op: "fill" }> = { op: "fill", fields: fields as Record<string, string | boolean> };
+      if (raw.expect !== undefined) op.expect = expected(raw.expect, op.fields);
+      return op;
     }
     case "add_field": {
       if (raw.type !== "text" && raw.type !== "checkbox") throw new ContentError('"type" is "text" or "checkbox".');
@@ -91,7 +112,11 @@ function compileOp(raw: Raw): PdfOp {
 }
 
 export function compilePdfOps(input: unknown): PdfOp[] {
-  return checkBatch(input, MAX_OPS, compileOp);
+  const ops = checkBatch(input, MAX_OPS, compileOp);
+  // Marking a redaction runs an editor action of its own. With a co-editor connected it refuses a second one in the
+  // command, and beside other changes it makes a second undo point, which the one Undo after a failure leaves standing.
+  if (ops.some((op) => op.op === "redact") && ops.length > 1) throw new ContentError("send each redaction as a call of its own, with no other op beside it.");
+  return ops;
 }
 
 function readScope(body: Raw): Scope {

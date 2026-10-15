@@ -16,6 +16,9 @@ export interface EditorPageOptions {
 
 type Reply = { sentAt: number; value: unknown };
 
+/** Whether an Undo sent now would run, and what shows that it did: the history's index drops, or the Undo is queued. */
+export type UndoState = { ready: boolean; locked: boolean; index: number; queued: boolean };
+
 // For a moment after a PDF editor opens, the document server answers its fetch of the PDF 400 and serves it on the
 // next try. Opening again meets the same moment, so the fetch itself is tried again.
 const PDF_FILE = /\/origin\.pdf(?:[/?]|$)/;
@@ -25,10 +28,12 @@ const PDF_FILE_RETRY_MS = 500;
 async function fetchPdfFile(route: Route): Promise<void> {
   try {
     let response = await route.fetch();
-    for (let attempt = 1; response.status() === 400 && attempt < PDF_FILE_ATTEMPTS; attempt++) {
+    let attempts = 1;
+    for (; response.status() === 400 && attempts < PDF_FILE_ATTEMPTS; attempts++) {
       await new Promise((resolve) => setTimeout(resolve, PDF_FILE_RETRY_MS));
       response = await route.fetch();
     }
+    if (attempts > 1) console.warn(`the document server answered a PDF editor's fetch of the file 400; after ${attempts} tries it answered ${response.status()}`);
     await route.fulfill({ response });
   } catch {
     await route.abort().catch(() => undefined);
@@ -60,7 +65,8 @@ export class EditorPage {
   static async open(browser: Browser, options: EditorPageOptions): Promise<EditorPage> {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: options.ignoreTls });
     try {
-      await context.route(PDF_FILE, fetchPdfFile);
+      // Only for a PDF: any route sends every request of the context through Node, with no cache.
+      if (options.config.documentType === "pdf") await context.route(PDF_FILE, fetchPdfFile);
       const page = await context.newPage();
       await page.goto(options.hostUrl);
       await withTimeout(
@@ -110,6 +116,24 @@ export class EditorPage {
       const read = editor.asc_isDocumentModified ?? editor.isDocumentModified;
       return typeof read === "function" ? Boolean(read.call(editor)) : true;
     }).catch(() => true);
+  }
+
+  /** The editor's undo state, read from its frame (internal names: no builder call reports it), or null when it cannot
+   * be read. With a co-editor connected, the editor drops an Undo while it waits for the server to answer its lock
+   * request (its collaborative lock), and, once its history went to the server, while a save is under way; an Undo it
+   * takes then is queued behind the save. */
+  async undoState(): Promise<UndoState | null> {
+    const frame = this.frame();
+    if (!frame) return null;
+    return frame.evaluate(() => {
+      type Editor = { canSave?: boolean; forceSaveUndoRequest?: boolean };
+      type Common = { CollaborativeEditing?: { Get_GlobalLock(): boolean; CanUndo(): boolean }; History?: { Index: number; Can_Undo(): boolean } };
+      const w = window as unknown as { editor?: Editor; Asc?: { editor?: Editor }; AscCommon?: Common };
+      const editor = w.editor ?? w.Asc?.editor, co = w.AscCommon?.CollaborativeEditing, history = w.AscCommon?.History;
+      if (!editor || !co || !history) return null;
+      const locked = co.Get_GlobalLock();
+      return { ready: !locked && (history.Can_Undo() || (co.CanUndo() && editor.canSave === true)), locked, index: history.Index, queued: editor.forceSaveUndoRequest === true };
+    }).catch(() => null);
   }
 
   /** Whether the editor's object registry was left switched off: a builder call that throws inside the editor's

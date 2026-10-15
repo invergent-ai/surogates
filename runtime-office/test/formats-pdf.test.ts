@@ -19,16 +19,31 @@ describe("PDF ops", () => {
       { op: "pages", action: "rotate", page: 2, degrees: 90 },
       { op: "fill", fields: { client: "ACME Lisbon Lda", signed: true } },
       { op: "add_field", type: "text", page: 1, rect: [170, 250, 420, 270], name: "po_number" },
-      { op: "redact", text: "thirty" },
       { op: "annotate", kind: "stamp", page: 1, rect: [300, 360, 450, 410], stamp: "approved" },
     ])).toEqual([
       { op: "pages", action: "add", page: 1 },
       { op: "pages", action: "rotate", page: 2, degrees: 90 },
       { op: "fill", fields: { client: "ACME Lisbon Lda", signed: true } },
       { op: "add_field", type: "text", page: 1, rect: [170, 250, 420, 270], name: "po_number" },
-      { op: "redact", text: "thirty", match_case: false, whole_words: false },
       { op: "annotate", kind: "stamp", page: 1, rect: [300, 360, 450, 410], stamp: "SB_Approved" },
     ]);
+    expect(compilePdfOps([{ op: "redact", text: "thirty" }])).toEqual([{ op: "redact", text: "thirty", match_case: false, whole_words: false }]);
+  });
+
+  it("sends a redaction in a call of its own", () => {
+    const own = "send each redaction as a call of its own";
+    expect(() => compilePdfOps([{ op: "redact", text: "thirty" }, { op: "pages", action: "add", page: 1 }])).toThrow(own);
+    expect(() => compilePdfOps([{ op: "redact", text: "thirty" }, { op: "redact", text: "supplier" }])).toThrow(own);
+  });
+
+  it("checks a fill's expected values against its fields", () => {
+    expect(compilePdfOps([{ op: "fill", fields: { client: "ACME", signed: true }, expect: { client: null, signed: false } }])).toEqual([
+      { op: "fill", fields: { client: "ACME", signed: true }, expect: { client: "", signed: false } },
+    ]);
+    expect(() => compilePdfOps([{ op: "fill", fields: { client: "ACME" }, expect: { signed: false } }])).toThrow('"expect" names only fields in "fields"');
+    expect(() => compilePdfOps([{ op: "fill", fields: { client: "ACME" }, expect: { client: true } }])).toThrow("expect client as text");
+    expect(() => compilePdfOps([{ op: "fill", fields: { signed: true }, expect: { signed: "Off" } }])).toThrow("expect signed as true or false");
+    expect(() => compilePdfOps([{ op: "fill", fields: { client: "ACME" }, expect: ["x"] }])).toThrow('"expect" maps field names');
   });
 
   it("names what is wrong", () => {

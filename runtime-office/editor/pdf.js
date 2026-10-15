@@ -20,8 +20,9 @@
   function fieldsOf(page) {
     return page.GetAllWidgets().map(function (w) {
       var f = w.Field;   // internal: the builder has no call from a widget to its field, which holds the name and value
-      return { name: f.GetFullName(), type: w.GetClassType() === "checkboxWidget" ? "checkbox" : w.GetClassType().replace(/Widget$/, ""),
-        value: f.GetParentValue ? (f.GetParentValue() === undefined ? null : f.GetParentValue()) : null, rect: w.GetRect() };
+      var checkbox = w.GetClassType() === "checkboxWidget";
+      return { name: f.GetFullName(), type: checkbox ? "checkbox" : w.GetClassType().replace(/Widget$/, ""),
+        value: checkbox ? w.IsChecked() : f.GetParentValue ? (f.GetParentValue() === undefined ? null : f.GetParentValue()) : null, rect: w.GetRect() };
     });
   }
   function annotationsOf(page) {
@@ -107,6 +108,11 @@
           if (!type) throw new Refusal(index, "There is no field " + field + ". The fields are: " + Object.keys(fields).join(", ") + ".");
           var checkbox = type === "checkboxField";
           if (checkbox !== (typeof op.fields[field] === "boolean")) throw new Refusal(index, field + (checkbox ? " is a checkbox: give it true or false." : " is a text field: give it text."));
+        });
+        // The user's edit wins: a field that changed since the agent read it is left as it is.
+        Object.keys(op.expect || {}).forEach(function (field) {
+          var f = doc.GetFieldByName(field), now = typeof op.expect[field] === "boolean" ? f.GetAllWidgets()[0].IsChecked() : String(f.GetValue() == null ? "" : f.GetValue());
+          if (now !== op.expect[field]) throw new Refusal(index, "Field " + field + " changed since you read it: it is " + JSON.stringify(now) + " now. Work from it.");
         });
       } else if (op.op === "add_field") {
         page(op.page);
