@@ -52,15 +52,18 @@ export function ConfirmDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o && !loading) onCancel(); }}>
-      <DialogContent className="rounded-xl sm:max-w-md">
+      {/* Work's confirm: compact, no close button — Cancel and Escape do it. */}
+      <DialogContent
+        showCloseButton={false}
+        className="gap-3.5 px-6 pt-6 pb-5 sm:max-w-[430px]"
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        <DialogFooter>
+        <DialogFooter className="pt-1.5">
           <Button
             variant="outline"
-            className="rounded-lg"
             disabled={loading}
             onClick={onCancel}
           >
@@ -68,7 +71,6 @@ export function ConfirmDialog({
           </Button>
           <Button
             variant={variant}
-            className="rounded-lg"
             disabled={loading || confirmDisabled}
             onClick={handleConfirm}
           >
