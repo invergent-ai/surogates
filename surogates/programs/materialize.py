@@ -149,40 +149,18 @@ async def _already_reached(
     are tried again on the next matching day."""
     if not people:
         return set()
+    whose = sa.func.coalesce(ProgramInvitationRow.person_user_id, ProgramInvitationRow.user_id)
     async with session_factory() as db:
-        rows = (
-            await db.execute(
-                sa.select(ProgramInvitationRow.user_id, ProgramInvitationRow.person_user_id)
-                .where(ProgramInvitationRow.program_id == program_id)
-                .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled", "failed")))
-                .where(sa.or_(
-                    ProgramInvitationRow.user_id.in_(people),
-                    ProgramInvitationRow.person_user_id.in_(people),
-                ))
-            )
-        ).all()
-    return {person or user_id for user_id, person in rows} & set(people)
-
-
-def _reached_through_contacts(copies: list, chosen: dict | None) -> set[uuid.UUID]:
-    """The followed people a contact's copy actually reaches this occurrence:
-    one written (the first copy per recipient wins, as below) to a contact
-    with a channel that may be written to."""
-    seen: set[uuid.UUID] = set()
-    reached: set[uuid.UUID] = set()
-    for user_id, identity, _enrollment, person in copies:
-        if user_id in seen:
-            continue
-        seen.add(user_id)
-        if not person or user_id == person:
-            continue
-        if chosen is not None:
-            reachable = chosen.get(user_id) is not None
-        else:
-            reachable = identity is not None and followup_store.permission_status(identity) == "granted"
-        if reachable:
-            reached.add(person)
-    return reached
+        return set(
+            (
+                await db.execute(
+                    sa.select(whose).distinct()
+                    .where(ProgramInvitationRow.program_id == program_id)
+                    .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled", "failed")))
+                    .where(whose.in_(people))
+                )
+            ).scalars().all()
+        )
 
 
 async def materialize_occurrence(
@@ -234,23 +212,36 @@ async def materialize_occurrence(
                 await identity_lookup(schedule.org_id, platform, recipient.user_id),
                 None, enrollment.user_id,
             ))
+    # One row per recipient per occurrence: the first copy wins.
+    first: dict[uuid.UUID, tuple] = {}
+    for copy in copies:
+        first.setdefault(copy[0], copy)
+    copies = list(first.values())
     chosen: dict[uuid.UUID, Any] = {}
     if per_person:
         for user_id, _identity, enrollment, _person in copies:
-            if user_id not in chosen:
-                chosen[user_id] = await choose_channel(
-                    config, org_id=schedule.org_id, user_id=user_id,
-                    enrollment=enrollment, identity_lookup=identity_lookup,
-                    session_factory=session_factory, agent_id=schedule.agent_id,
-                )
+            chosen[user_id] = await choose_channel(
+                config, org_id=schedule.org_id, user_id=user_id,
+                enrollment=enrollment, identity_lookup=identity_lookup,
+                session_factory=session_factory, agent_id=schedule.agent_id,
+            )
+
+    def reachable(user_id: uuid.UUID, identity: Any) -> Any:
+        """The identity this occurrence may write to *user_id* on, if any."""
+        if per_person:
+            return chosen[user_id][1] if chosen[user_id] is not None else None
+        return identity if identity is not None and followup_store.permission_status(identity) == "granted" else None
+
+    # The followed people a contact's copy reaches: they need no row of their own.
+    through_contacts = {
+        person for user_id, identity, _enrollment, person in copies
+        if person and user_id != person and reachable(user_id, identity) is not None
+    }
     paused: set[uuid.UUID] = set()
     if pause:
         for user_id, identity, _enrollment, _person in copies:
-            if per_person and chosen[user_id] is not None:
-                identity = chosen[user_id][1]
             if (
-                identity is not None
-                and followup_store.permission_status(identity) == "granted"
+                reachable(user_id, identity) is not None
                 and await paused_by_silence(
                     session_factory, program_id=schedule.program_id,
                     user_id=user_id, count=pause,
@@ -278,14 +269,9 @@ async def materialize_occurrence(
 
         open_configs: dict = {}
         open_people: dict[uuid.UUID, bool] = {}
-        written: set[uuid.UUID] = set()
-        through_contacts = _reached_through_contacts(copies, chosen if per_person else None)
         for user_id, identity, _enrollment, person in copies:
-            if user_id in written:
-                continue  # one row per recipient per occurrence
-            written.add(user_id)
-            unreachable = chosen.get(user_id) is None if per_person else identity is None
-            if user_id == person and person in through_contacts and unreachable:
+            no_channel = chosen[user_id] is None if per_person else identity is None
+            if user_id == person and person in through_contacts and no_channel:
                 # Reached through their contacts: no channel of their own is
                 # not a step that failed to go out.
                 continue
