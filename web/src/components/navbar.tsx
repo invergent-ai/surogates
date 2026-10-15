@@ -33,15 +33,16 @@ import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
 
 // Width and density are owned by the parent (`AppShell`):
-//   - desktop aside : `data-mode="aside"` + breakpoints `md` (compact, w-14)
-//     and `lg` (expanded, w-80).
+//   - desktop aside : `data-mode="aside"`, compact (w-14) at `md` or when its
+//     rail is collapsed, expanded (w-80) on a wide screen otherwise.
 //   - phone sheet   : `data-mode="sheet"` always renders expanded.
 // We use Tailwind v4's `group-data-[mode=sheet]:*` variants together with
-// `lg:*` to flip between compact (icons only) and expanded (full content).
-const showExpanded = "hidden lg:flex group-data-[mode=sheet]:flex";
-const showExpandedInline = "hidden lg:inline group-data-[mode=sheet]:inline";
-const showExpandedBlock = "hidden lg:block group-data-[mode=sheet]:block";
-const hideOnExpanded = "block lg:hidden group-data-[mode=sheet]:hidden";
+// `rail-open:*` (index.css) to flip between compact (icons only) and
+// expanded (full content).
+const showExpanded = "hidden rail-open:flex group-data-[mode=sheet]:flex";
+const showExpandedInline = "hidden rail-open:inline group-data-[mode=sheet]:inline";
+const showExpandedBlock = "hidden rail-open:block group-data-[mode=sheet]:block";
+const hideOnExpanded = "block rail-open:hidden group-data-[mode=sheet]:hidden";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
@@ -118,7 +119,7 @@ export function SessionSidebar() {
         className={cn(
           "flex items-center border-b border-line min-h-14",
           "justify-center py-4",
-          "lg:justify-start lg:px-4 lg:py-4 lg:gap-2.5",
+          "rail-open:justify-start rail-open:px-4 rail-open:py-4 rail-open:gap-2.5",
           "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-4 group-data-[mode=sheet]:py-3 group-data-[mode=sheet]:gap-2.5",
           // The sheet's close button floats over the end of this row — see
           // AppShell — so the brand keeps clear of it.
@@ -142,7 +143,7 @@ export function SessionSidebar() {
       <div
         className={cn(
           "flex flex-col gap-0.5 border-b border-line",
-          "p-1.5 lg:p-2.5 group-data-[mode=sheet]:p-2.5",
+          "p-1.5 rail-open:p-2.5 group-data-[mode=sheet]:p-2.5",
         )}
       >
         {singleSession ? (
@@ -152,8 +153,8 @@ export function SessionSidebar() {
             variant="outline"
             onClick={handleOpenChat}
             className={cn(
-              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 lg:justify-start lg:px-3",
+              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
+              "justify-center px-0 rail-open:justify-start rail-open:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
           >
@@ -165,8 +166,8 @@ export function SessionSidebar() {
             variant="outline"
             onClick={handleNewSession}
             className={cn(
-              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 lg:justify-start lg:px-3",
+              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
+              "justify-center px-0 rail-open:justify-start rail-open:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
           >
@@ -179,8 +180,8 @@ export function SessionSidebar() {
             variant="ghost"
             onClick={() => void navigate({ to: "/skills" })}
             className={cn(
-              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 lg:justify-start lg:px-3",
+              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
+              "justify-center px-0 rail-open:justify-start rail-open:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
           >
@@ -193,8 +194,8 @@ export function SessionSidebar() {
             variant="ghost"
             onClick={() => void navigate({ to: "/agents" })}
             className={cn(
-              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
-              "justify-center px-0 lg:justify-start lg:px-3",
+              "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
+              "justify-center px-0 rail-open:justify-start rail-open:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
           >
@@ -206,8 +207,8 @@ export function SessionSidebar() {
           variant="ghost"
           onClick={() => void navigate({ to: "/inbox" })}
           className={cn(
-            "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px] relative",
-            "justify-center px-0 lg:justify-start lg:px-3",
+            "w-full gap-2 min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px] relative",
+            "justify-center px-0 rail-open:justify-start rail-open:px-3",
             "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
           )}
         >
@@ -218,7 +219,7 @@ export function SessionSidebar() {
               className={cn(
                 "inline-flex items-center justify-center bg-primary px-1 text-[0.625rem] font-semibold text-primary-foreground",
                 "absolute right-1 top-0 h-4 min-w-4 px-0.5 text-[0.55rem]",
-                "lg:static lg:ml-auto lg:h-5 lg:min-w-5 lg:px-1 lg:text-[0.625rem]",
+                "rail-open:static rail-open:ml-auto rail-open:h-5 rail-open:min-w-5 rail-open:px-1 rail-open:text-[0.625rem]",
                 "group-data-[mode=sheet]:static group-data-[mode=sheet]:ml-auto group-data-[mode=sheet]:h-5 group-data-[mode=sheet]:min-w-5 group-data-[mode=sheet]:px-1 group-data-[mode=sheet]:text-[0.625rem]",
               )}
             >
@@ -317,7 +318,7 @@ export function SessionSidebar() {
           <button
             type="button"
             onClick={() => void navigate({ to: "/settings" })}
-            className="flex items-center gap-2 px-1 py-1.5 mb-1.5 w-full rounded-md hover:bg-input transition-colors cursor-pointer min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12"
+            className="flex items-center gap-2 px-1 py-1.5 mb-1.5 w-full rounded-md hover:bg-input transition-colors cursor-pointer min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12"
           >
             <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center font-bold text-primary text-xs shrink-0">
               {(user.display_name ?? user.email)?.[0]?.toUpperCase() ?? "?"}
@@ -334,7 +335,7 @@ export function SessionSidebar() {
           <button
             type="button"
             onClick={handleLogout}
-            className="flex items-center gap-2 flex-1 px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]"
+            className="flex items-center gap-2 flex-1 px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 rail-open:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]"
           >
             <LogOutIcon className="w-4 h-4" />
             Sign out
@@ -342,7 +343,7 @@ export function SessionSidebar() {
           <button
             type="button"
             onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            className="p-1.5 rounded-md text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 lg:min-h-9 min-w-11 lg:min-w-0 group-data-[mode=sheet]:min-h-11 group-data-[mode=sheet]:min-w-11"
+            className="p-1.5 rounded-md text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 rail-open:min-h-9 min-w-11 rail-open:min-w-0 group-data-[mode=sheet]:min-h-11 group-data-[mode=sheet]:min-w-11"
             aria-label="Toggle theme"
           >
             {theme === "dark" ? (

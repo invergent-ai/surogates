@@ -1,7 +1,14 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useRouterState } from "@tanstack/react-router";
-import { MenuIcon, MoonIcon, SunIcon, XIcon } from "lucide-react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  MenuIcon,
+  MoonIcon,
+  SunIcon,
+  XIcon,
+} from "lucide-react";
 import { useTheme } from "next-themes";
 import type * as React from "react";
 import { useState } from "react";
@@ -15,6 +22,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { getDesktop } from "@/lib/desktop-bridge";
+import { useAppStore } from "@/stores/app-store";
 
 type AppShellProps = {
   sidebar: React.ReactNode;
@@ -31,6 +39,12 @@ type AppShellProps = {
 export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
   const [sheetOpen, setSheetOpen] = useState(false);
   const { theme, setTheme } = useTheme();
+  // Pinned, the sidebar stays open; unpinned, it is an icon rail that opens
+  // while the pointer is over it — the ops console's rail.
+  const pinned = useAppStore((s) => s.sidebarPinned);
+  const setPinned = useAppStore((s) => s.setSidebarPinned);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const railOpen = pinned || hoverOpen;
 
   // Close the sheet on route change so a sidebar navigation doesn't leave
   // the drawer open over the new page. React's documented "store info from
@@ -62,9 +76,29 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
           in the sidebar component. */}
       <aside
         data-mode="aside"
-        className="group hidden md:flex md:w-14 md:min-w-14 lg:w-80 lg:min-w-80 bg-card border-r border-line flex-col overflow-hidden z-10"
+        data-collapsed={railOpen ? undefined : ""}
+        onMouseEnter={() => setHoverOpen(true)}
+        onMouseLeave={() => setHoverOpen(false)}
+        className="group hidden md:flex md:w-14 md:min-w-14 lg:w-80 lg:min-w-80 lg:data-collapsed:w-14 lg:data-collapsed:min-w-14 bg-card border-r border-line flex-col overflow-hidden z-10 transition-[width,min-width] duration-200"
       >
-        {sidebar}
+        <div className="min-h-0 flex-1">{sidebar}</div>
+        {/* Only where there is a full sidebar to keep: below lg it is the
+            icon rail regardless. */}
+        <button
+          type="button"
+          onClick={() => {
+            if (pinned) setHoverOpen(false);
+            setPinned(!pinned);
+          }}
+          aria-label={pinned ? "Collapse sidebar" : "Expand sidebar"}
+          className="hidden shrink-0 items-center justify-center border-t border-line py-2.5 text-faint transition-colors hover:text-foreground lg:flex"
+        >
+          {pinned ? (
+            <ChevronLeftIcon className="size-4" strokeWidth={1.75} />
+          ) : (
+            <ChevronRightIcon className="size-4" strokeWidth={1.75} />
+          )}
+        </button>
       </aside>
 
       {/* Phone: sheet drawer. It owns the device insets — the footer used to

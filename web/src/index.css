@@ -8,6 +8,15 @@
 @import "@fontsource-variable/noto-sans";
 
 @custom-variant dark (&:is(.dark *));
+/* The sidebar's full layout: a wide screen, and its rail not collapsed (AppShell). Narrower, or
+   collapsed, the sidebar is the icon rail. */
+@custom-variant rail-open {
+  @media (width >= 64rem) {
+    &:where([data-mode="aside"]:not([data-collapsed]) *) {
+      @slot;
+    }
+  }
+}
 
 @theme inline {
   --font-heading: var(--font-sans);
