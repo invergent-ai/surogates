@@ -930,12 +930,27 @@ async def test_an_answer_after_expiry_is_told_kindly_and_the_requester_hears(sf,
 @pytest.mark.asyncio
 async def test_the_log_keeps_a_number_masked_and_only_the_delivery_has_it_whole(sf, doctor_session):
     await _wrote(sf, NOW - timedelta(hours=2))
-    await _queue(sf, uuid.uuid4(), text="Faint\n\n— Ion Pop · +40 711 111 111")
+    await _queue(sf, uuid.uuid4(), text="Faint\n\nAbout: Ion Pop · +40 711 111 111")
     session_store = _Store()
     await _send(sf, session_store, _Delivery())
     [(_, _, data)] = session_store.events
-    assert data["message"]["content"] == "Faint\n\n— Ion Pop · +40…111"
-    assert session_store.delivered["message"]["content"].endswith("+40 711 111 111")
+    assert data["message"]["content"] == f"Faint\n\nAbout: Ion Pop · +40…111\n\n{outreach.MASKED_NOTE}"
+    assert session_store.delivered["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40 711 111 111"
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_alert_reminds_the_model_to_close_it_and_delivers_unchanged(sf, doctor_session):
+    await _wrote(sf, NOW - timedelta(hours=2))
+    await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=uuid.uuid4(), platform="whatsapp",
+        channel_identifier=SENDER, kind="alert", text="Faint", template_name="alert", template_language="ro",
+        dedupe_key=f"escalation:-:{uuid.uuid4().hex}:x",
+    )
+    session_store = _Store()
+    await _send(sf, session_store, _Delivery())
+    [(_, _, data)] = session_store.events
+    assert data["message"]["content"] == f"Faint\n\n{outreach.ESCALATION_NOTE}"
+    assert session_store.delivered["message"]["content"] == "Faint"
 
 
 

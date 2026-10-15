@@ -180,6 +180,17 @@ async def _fail(session_factory: Any, row_id: uuid.UUID, reason: str) -> int:
     return 1
 
 
+#: Model-only notes on an outreach message in the log; never delivered.
+MASKED_NOTE = (
+    "[Numbers are masked in this log only; the recipient's copy shows them "
+    "in full and can be tapped to call.]"
+)
+ESCALATION_NOTE = (
+    "[Open escalation: when the team member takes it or says it is done, "
+    "call team_escalation with action claim or resolve.]"
+)
+
+
 async def _write_text(
     session_store: Any, session_id: uuid.UUID, row: Any, text: str | None = None,
 ) -> None:
@@ -189,8 +200,15 @@ async def _write_text(
     # which the model reads, keeps phone numbers masked; only the outbox
     # carries them whole, for the team member who has to call.
     text = text or row.text
+    logged = mask_readable_phones(text)
+    # Without these the model, seeing only the masked log, told a team
+    # member it could not give them the number and never closed the case.
+    if logged != text:
+        logged += f"\n\n{MASKED_NOTE}"
+    if row.kind == "alert" and (row.dedupe_key or "").startswith("escalation:"):
+        logged += f"\n\n{ESCALATION_NOTE}"
     data = {
-        "message": {"role": "assistant", "content": mask_readable_phones(text)},
+        "message": {"role": "assistant", "content": logged},
         "synthetic": "outreach",
         "outreach_id": str(row.id),
         "outreach_kind": row.kind,
