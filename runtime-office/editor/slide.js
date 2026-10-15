@@ -565,28 +565,42 @@
       }
     });
   }
+  // A new deck is the blank template's one empty title slide. Slides added to it take its place, as Word writes a new
+  // document's first blocks in place of its one empty line. A slide anyone has typed in, or one this call replaces,
+  // stays.
+  function emptyTemplate(ops) {
+    var all = pres.GetAllSlides(), slide = all[0];
+    if (all.length !== 1 || !ops.some(function (op) { return op.op === "slides" && op.slides.some(function (s) { return s.id === undefined; }); })) return null;
+    if (ops.some(function (op) { return op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
+    var layout = slide.GetLayout();
+    if (!layout || layout.GetName() !== "Title Slide" || !slide.GetVisible() || notesOf(slide) || connectorsOf(slide).length) return null;
+    return slide.GetAllDrawings().every(function (d) { return d.GetPlaceholder && d.GetPlaceholder() && !textOf(d); }) ? slide : null;
+  }
   function edit(ops) {
     check(ops);
-    return {
-      results: ops.map(function (op, index) {
-        if (op.op === "slides") {
-          var last = {}, slides = op.slides.map(function (s) {
-            if (s.id !== undefined) return replaced(slideById(s.id), s.spec);
-            // Several slides after one place keep their order: each goes after the one added before it.
-            var key = String(s.after), slide = added(last[key] !== undefined ? last[key] : s.after, s.spec);
-            last[key] = idOf(slide);
-            return slide;
-          });
-          return { op: index, slides: slides.map(function (slide) { return { id: idOf(slide), number: slide.GetSlideIndex() + 1 }; }) };
-        }
-        if (op.op === "remove") {
-          op.slides.forEach(function (s) { slideById(s.id).Delete(); });
-          return { op: index };
-        }
-        op.ids.forEach(function (id, at) { var slide = slideById(id); if (slide.GetSlideIndex() !== at) slide.MoveTo(at); });
-        return { op: index, order: pres.GetAllSlides().map(idOf) };
-      }),
-    };
+    var empty = emptyTemplate(ops);
+    var results = ops.map(function (op, index) {
+      if (op.op === "slides") {
+        var last = {};
+        return { op: index, slides: op.slides.map(function (s) {
+          if (s.id !== undefined) return replaced(slideById(s.id), s.spec);
+          // Several slides after one place keep their order: each goes after the one added before it.
+          var key = String(s.after), slide = added(last[key] !== undefined ? last[key] : s.after, s.spec);
+          last[key] = idOf(slide);
+          return slide;
+        }) };
+      }
+      if (op.op === "remove") {
+        op.slides.forEach(function (s) { slideById(s.id).Delete(); });
+        return { op: index };
+      }
+      op.ids.forEach(function (id, at) { var slide = slideById(id); if (slide.GetSlideIndex() !== at) slide.MoveTo(at); });
+      return { op: index, order: pres.GetAllSlides().map(idOf) };
+    });
+    if (empty) empty.Delete();
+    // Numbered once every change is made.
+    results.forEach(function (r) { if (r.slides) r.slides = r.slides.map(function (slide) { return { id: idOf(slide), number: slide.GetSlideIndex() + 1 }; }); });
+    return { results: results };
   }
 
   try {

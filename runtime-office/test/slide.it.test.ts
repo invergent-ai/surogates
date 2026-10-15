@@ -75,6 +75,17 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
     expect(view.shapes.map((s: Any) => s.fill ?? null)).toEqual(["#14285a", "none", "#ffffff", "none"]);
   });
 
+  it("builds a new deck of three slides as those three: its template's empty slide gives way", async () => {
+    const { agent, user } = await pair(office, opened, "blank.pptx");
+    expect((await outline(agent)).slides.map((s: Any) => [s.layout, s.title])).toEqual([["Title Slide", ""]]);
+    const titled = (title: string) => `<section style="background:#ffffff"><h2 style="font-size:64px">${title}</h2></section>`;
+    const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ html: titled("One") }, { html: titled("Two") }, { html: titled("Three") }] }]);
+    expect(result.results[0].slides.map((s: Any) => s.number)).toEqual([1, 2, 3]);
+    await eventually(async () => {
+      expect((await outline(user)).slides.map((s: Any) => s.title)).toEqual(["One", "Two", "Three"]);
+    });
+  });
+
   it("replaces a slide in place, keeping its id", async () => {
     const { agent } = await deck();
     const second = (await outline(agent)).slides[1];

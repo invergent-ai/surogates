@@ -15,6 +15,7 @@ pictures and tables at the measured places: the user gets a slide they can click
 
 - `slides`: add slides from HTML (`after` a slide id, `"start"`, or last), or replace one in place with its `id` and
   the `hash` the outline gave. A slide the user changed since you read it refuses the call: read it again.
+  A new deck's one empty title slide gives way to the first slides you add.
 - `order`: every slide's id, in the order wanted (a call of its own).
 - `remove`: slides by `id` and `hash`.
 
