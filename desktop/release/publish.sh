@@ -179,8 +179,8 @@ describe_layout() {
 
 # macOS's describe: the update payload, the tarball of the signed and stapled Surogate.app that the signing job packed
 # (scripts/sign-mac.sh pack), by that job's two words for it, DESKTOP_TARBALL_SHA256 and DESKTOP_TARBALL_SIZE, unpacked
-# whole as linux-x64's is: one top folder, Surogate.app, of files, folders and links that each lead inside it, which is
-# all the app's updater takes. Its app's state schema and version by the install script's own reader, the version its
+# whole as linux-x64's is: one top folder, Surogate.app, of files of one name each, folders and links that each lead
+# inside it, which is all the app's updater takes. Its app's state schema and version by the install script's own reader, the version its
 # Info.plist says, and its release keys, which the app checks its updates by, install.sh's key for key. What it writes
 # is this job's own check of the release, as linux-x64's is.
 describe_bundle() {
@@ -220,6 +220,10 @@ describe_bundle() {
   # No AppleDouble file, which a tar of macOS's leaves for a file's extended attributes: its name would break the seal.
   shown="$(find "$unpacked/Surogate.app" -name '._*' -print -quit)"
   [ -z "$shown" ] || fail "$OUT/$ARCHIVE holds an AppleDouble file, which breaks the bundle's seal: ${shown#"$unpacked"/}"
+  # No file of two names, which a hard link of the archive's unpacks as: the updater takes a file of one name alone, and
+  # the app its release keys only so.
+  shown="$(find "$unpacked/Surogate.app" -type f -links +1 -print -quit)"
+  [ -z "$shown" ] || fail "$OUT/$ARCHIVE holds a file of more than one name, which the app's updater takes for none of its own: ${shown#"$unpacked"/}"
   # Each a file of the bundle's own: no link, and under no folder that is one.
   package=Surogate.app/Contents/Resources/app/package.json
   [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's $package names no stateSchema"

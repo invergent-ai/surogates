@@ -528,6 +528,19 @@ describe("the desktop's release manifest", () => {
         expect([name, publish("describe", "1.2.3", packedApp(change))]).toMatchObject([name, { status: 1, stdout: "", stderr: said }]);
         expect([name, existsSync(manifest())]).toEqual([name, false]);
       }
+      // A file of two names, either of which the archive may list first: the app's updater takes a file of one name alone.
+      const linked: Array<[string, (app: string) => void, RegExp]> = [
+        ["a program with a second name", (app) => linkSync(join(app, "Contents", "MacOS", "Surogate"), join(app, "Contents", "MacOS", "Surogate again")), /Surogate\.app\/Contents\/MacOS\/Surogate( again)?$/],
+        // Archived after the release keys, as a hard link to them: their own member is a regular file, and unpacks as one of two names.
+        ["a later name of the release keys", (app) => linkSync(join(app, "Contents", "Resources", "release-keys"), join(app, "Contents", "Resources", "z-keys")), /Surogate\.app\/Contents\/Resources\/(release|z)-keys$/],
+      ];
+      for (const [name, change, named] of linked) {
+        const said = publish("describe", "1.2.3", packedApp(change));
+        expect([name, said.status, said.stdout]).toEqual([name, 1, ""]);
+        expect(said.stderr.startsWith(`${at} holds a file of more than one name, which the app's updater takes for none of its own: `), name).toBe(true);
+        expect(said.stderr.trimEnd(), name).toMatch(named);
+        expect([name, existsSync(manifest())]).toEqual([name, false]);
+      }
     });
 
     it("writes no manifest of a bundle whose release keys are not one regular file that only its owner writes, as the archive has them", () => {
@@ -540,8 +553,6 @@ describe("the desktop's release manifest", () => {
           renameSync(keys(top), join(top, "Contents", "Resources", "keys"));
           symlinkSync("keys", keys(top));
         }],
-        // Archived after the name it shares a file with, it is that name's hard link.
-        ["a second name of another file", (top) => linkSync(keys(top), join(top, "Contents", "Resources", "a-keys"))],
         ["none", (top) => rmSync(keys(top))],
       ];
       for (const [name, change] of refusals) {
