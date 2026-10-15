@@ -222,6 +222,18 @@ ESCALATION_NOTE = (
 )
 
 
+def _opener_note(row: Any) -> str:
+    """What the model reads for a template it cannot see the text of."""
+    note = f"[Outreach opener sent: template '{row.template_name}'"
+    if row.subject_user_id is not None and row.subject_user_id != row.user_id:
+        # A model once read the name under an alert as the team member's own.
+        note += (
+            ". This conversation is with a team member of the business; the "
+            "message that follows is about another person, not about them"
+        )
+    return note + "]"
+
+
 async def _write_text(
     session_store: Any, session_id: uuid.UUID, row: Any, text: str | None = None,
 ) -> None:
@@ -1237,7 +1249,7 @@ async def _reopen(
     try:
         event_id = await session_store.emit_synthetic_user_message(
             session_id,
-            content=f"[Outreach opener sent: template '{row.template_name}']",
+            content=_opener_note(row),
             synthetic=OUTREACH_OPENER_MARKER,
             metadata={"outreach_id": str(row.id), "template_name": row.template_name},
         )

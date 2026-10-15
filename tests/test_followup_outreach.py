@@ -1034,3 +1034,11 @@ async def test_telegram_outreach_fails_for_someone_who_never_started_the_bot(sf)
     saved = await _row(sf, row.id)
     assert saved.state == "failed"
     assert "has not written" in saved.reason
+
+
+def test_the_opener_note_says_a_team_members_alert_is_about_someone_else():
+    member, subject = uuid.uuid4(), uuid.uuid4()
+    about_other = SimpleNamespace(template_name="alert", user_id=member, subject_user_id=subject)
+    own = SimpleNamespace(template_name="msg", user_id=subject, subject_user_id=subject)
+    assert "about another person, not about them" in outreach._opener_note(about_other)
+    assert outreach._opener_note(own) == "[Outreach opener sent: template 'msg']"
