@@ -24,6 +24,9 @@ interface ConfirmDialogProps {
    *  to be invalid (e.g. an in-use entity) and the dialog only
    *  exists to explain why. */
   confirmDisabled?: boolean;
+  /** Busy from outside: work that outlives the dialog (held in a store a
+   *  remounted dialog reads) keeps it locked, as its own pending confirm does. */
+  loading?: boolean;
   onConfirm: () => Promise<void> | void;
   onCancel: () => void;
 }
@@ -36,17 +39,19 @@ export function ConfirmDialog({
   confirmIcon,
   variant = "destructive",
   confirmDisabled = false,
+  loading: busy = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState(false);
+  const loading = busy || pending;
 
   const handleConfirm = async () => {
-    setLoading(true);
+    setPending(true);
     try {
       await onConfirm();
     } finally {
-      setLoading(false);
+      setPending(false);
     }
   };
 

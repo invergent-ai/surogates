@@ -4,7 +4,7 @@ import { XIcon } from "lucide-react"
 
 import { cn } from "./lib/utils"
 
-export type Tone = "ok" | "warn" | "bad" | "muted"
+export type Tone = "ok" | "warn" | "bad" | "info" | "muted"
 
 // The Work console's status tones: a faint wash of the colour with text a
 // step darker in light mode and a step lighter in dark.
@@ -12,6 +12,7 @@ export const TONE: Record<Tone, string> = {
   ok: "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300",
   warn: "bg-amber-500/14 text-amber-700 dark:text-amber-300",
   bad: "bg-red-500/12 text-red-700 dark:text-red-300",
+  info: "bg-sky-500/12 text-sky-700 dark:text-sky-300",
   muted: "bg-foreground/[0.06] text-muted-foreground",
 }
 
@@ -77,18 +78,9 @@ function Chip({
 /** A status chip ("Active", "Paused") in one of the tones. */
 function TonePill({
   tone,
-  className,
-  children,
-}: {
-  tone?: Tone
-  className?: string
-  children: React.ReactNode
-}) {
-  return (
-    <Chip tone={tone} size="sm" className={className}>
-      {children}
-    </Chip>
-  )
+  ...props
+}: Omit<React.ComponentProps<"span">, "onRemove"> & { tone?: Tone }) {
+  return <Chip tone={tone} size="sm" {...props} />
 }
 
 /** A tag, removable when `onRemove` is given. */

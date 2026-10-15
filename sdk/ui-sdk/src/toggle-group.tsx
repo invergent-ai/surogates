@@ -100,6 +100,8 @@ function ToggleGroupItem({
         "shrink-0 focus:z-10 focus-visible:z-10",
         toggleVariants({ variant: itemVariant, size: itemSize }),
         context.spacing === 0 && JOINED_ITEM[itemVariant ?? "default"],
+        // A joined segment pads its label; an icon segment stays square.
+        itemSize?.startsWith("icon") && "px-0",
         className
       )}
       {...props}
