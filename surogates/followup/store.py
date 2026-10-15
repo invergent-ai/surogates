@@ -484,13 +484,16 @@ async def active_program_configs(
 
 async def journey_names(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str, protocols: Iterable[str],
+    configs: list[dict] | None = None,
 ) -> str:
     """*protocols* as the team knows them: each journey's display name, its
     slug only where no step names a journey for it."""
     from surogates.programs.journey import journey_of, protocol_of
 
     names: dict[str, str] = {}
-    for config in await active_program_configs(session_factory, org_id=org_id, agent_id=agent_id):
+    if configs is None:
+        configs = await active_program_configs(session_factory, org_id=org_id, agent_id=agent_id)
+    for config in configs:
         name = str(journey_of(config).get("name") or "").strip()
         protocol = protocol_of(config)
         if name and protocol:

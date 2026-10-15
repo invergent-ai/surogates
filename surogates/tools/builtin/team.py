@@ -1191,8 +1191,9 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if isinstance(row, str):
         return f"Nothing changed: {row}"
 
+    configs = await followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
     zones = await followup_store.protocol_timezones(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
     changes: dict[str, Any] = {}
     described: list[str] = []
@@ -1295,7 +1296,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
         notice = followup_store.wording(
             settings, f"notice_{status}_by", member=_member(ctx), reason=reason,
             journey=await followup_store.journey_names(
-                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[row.protocol],
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[row.protocol], configs=configs,
             ),
         )
         queued, why_not = await _tell_team(
@@ -1359,8 +1360,9 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
     name = str(arguments.get("person_name") or arguments.get("patient_name") or "").strip()
     if not name and not existing:
         return "Not enrolled: ask the team member for the person's full name."
+    configs = await followup_store.active_program_configs(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
     zones = await followup_store.protocol_timezones(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
     protocol = str(arguments.get("protocol") or "").strip()
     if not protocol and len(zones) == 1:
@@ -1505,7 +1507,7 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
             followup_store.wording(
                 settings, "notice_enrolled_by", name=name, member=_member(ctx),
                 journey=await followup_store.journey_names(
-                    sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[protocol],
+                    sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[protocol], configs=configs,
                 ),
             ),
             followup_store.person_label(name, row, settings)
