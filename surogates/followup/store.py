@@ -382,6 +382,7 @@ TEAM_TEXTS = {
     "label_answered_by": "via {answered_by}",
     "label_reported_by": "reported by {contact} ({relation})",
     "label_contact": "contact",
+    "label_footer": "About: {label}",
     "label_contact_for": "{contact} ({relation}), for {name}",
     "notice_paused": "{journey} paused: {reason}",
     "notice_ended": "{journey} ended: {reason}",
@@ -402,6 +403,11 @@ TEAM_TEXTS = {
         "Confirm or refuse it."
     ),
 }
+
+
+def signed(text: str, label: str, texts: Any = None) -> str:
+    """*text* to the team, with who it is about underneath."""
+    return f"{text.strip()}\n\n{wording(texts, 'label_footer', label=label)}"
 
 
 def person_label(display_name: str | None, enrollment: Any = None, texts: Any = None) -> str:

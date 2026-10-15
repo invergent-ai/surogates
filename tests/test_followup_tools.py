@@ -490,7 +490,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     )
     assert "for Petre Marin (answered by Ana, fiica)" in result
     [note] = await _outreach(sf)
-    assert note.text.endswith("— Petre Marin · via Ana, fiica · +40 700 000 001")
+    assert note.text.endswith("About: Petre Marin · via Ana, fiica · +40 700 000 001")
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert "name Petre Marin, answered by Ana, fiica" in status

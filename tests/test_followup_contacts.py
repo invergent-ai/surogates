@@ -594,7 +594,7 @@ def test_every_platform_sentence_has_a_key():
     for key, default in store.TEAM_TEXTS.items():
         assert store.wording(None, key, **{k: "x" for k in (
             "answered_by", "contact", "relation", "name", "journey", "reason", "member", "who",
-            "channel", "what", "journeys", "writer_name", "writer")}) != default or "{" not in default
+            "channel", "what", "journeys", "writer_name", "writer", "label")}) != default or "{" not in default
 
 
 @pytest.mark.asyncio

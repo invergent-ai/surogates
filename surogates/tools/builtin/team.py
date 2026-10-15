@@ -1233,7 +1233,7 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
             settings, f"notice_{status}_by", journey=row.protocol, member=_member(ctx), reason=reason,
         )
         queued, why_not = await _tell_team(
-            sf, ctx, settings, kind="alert", text=f"{notice}\n\n— {label or person.label}",
+            sf, ctx, settings, kind="alert", text=followup_store.signed(notice, label or person.label, settings),
             reason=notice, subject_user_id=person.user_id, exclude_user_id=ctx.user_id,
             topic="attention",
         )
@@ -1435,12 +1435,13 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         result += f" No welcome sent: {channel_names([platform])} is not switched on for this business."
     queued, why_not = await _tell_team(
         sf, ctx, settings, kind="enrolment",
-        text=(
+        text=followup_store.signed(
             followup_store.wording(
                 settings, "notice_enrolled_by", name=name, journey=protocol, member=_member(ctx),
-            )
-            + f"\n\n— {followup_store.person_label(name, row, settings)}"
-            + (f" · {readable_phone(handle)}" if platform == "whatsapp" else "")
+            ),
+            followup_store.person_label(name, row, settings)
+            + (f" · {readable_phone(handle)}" if platform == "whatsapp" else ""),
+            settings,
         ),
         subject_user_id=user_id, exclude_user_id=ctx.user_id, topic="new_enrolments",
     )

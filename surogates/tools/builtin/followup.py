@@ -341,7 +341,8 @@ async def _tell_team(
     extra.setdefault("reason", text)
     return await followup_store.notify_team(
         sf, settings, org_id=ctx.org_id, agent_id=ctx.agent_id, kind=kind,
-        text=f"{text.strip()}\n\n— {await ctx.person_label(sf, settings)}", created_by="agent",
+        text=followup_store.signed(text, await ctx.person_label(sf, settings), settings),
+        created_by="agent",
         subject_user_id=await ctx.person_user_id(sf), exclude_user_id=ctx.user_id,
         fallback_senders={ctx.channel: ctx.sender},
         **extra,
