@@ -143,9 +143,10 @@ async def _is_open(db, schedule, person, configs: dict, seen: dict) -> bool:
 async def _already_reached(
     session_factory: Any, program_id: uuid.UUID, people: list[uuid.UUID],
 ) -> set[uuid.UUID]:
-    """Who of *people* this Program already sent its step to, themselves or
-    through a contact.  A skipped, canceled or failed row reached nobody, so
-    they are tried again on the next matching day."""
+    """Who of *people* this Program already sent their own step to, to them
+    or to a contact of theirs; a copy they got as someone else's contact is
+    not theirs.  A skipped, canceled or failed row reached nobody, so they
+    are tried again on the next matching day."""
     if not people:
         return set()
     async with session_factory() as db:
@@ -160,7 +161,28 @@ async def _already_reached(
                 ))
             )
         ).all()
-    return {uid for row in rows for uid in row if uid is not None} & set(people)
+    return {person or user_id for user_id, person in rows} & set(people)
+
+
+def _reached_through_contacts(copies: list, chosen: dict | None) -> set[uuid.UUID]:
+    """The followed people a contact's copy actually reaches this occurrence:
+    one written (the first copy per recipient wins, as below) to a contact
+    with a channel that may be written to."""
+    seen: set[uuid.UUID] = set()
+    reached: set[uuid.UUID] = set()
+    for user_id, identity, _enrollment, person in copies:
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+        if not person or user_id == person:
+            continue
+        if chosen is not None:
+            reachable = chosen.get(user_id) is not None
+        else:
+            reachable = identity is not None and followup_store.permission_status(identity) == "granted"
+        if reachable:
+            reached.add(person)
+    return reached
 
 
 async def materialize_occurrence(
@@ -257,7 +279,7 @@ async def materialize_occurrence(
         open_configs: dict = {}
         open_people: dict[uuid.UUID, bool] = {}
         written: set[uuid.UUID] = set()
-        through_contacts = {person for user_id, _i, _e, person in copies if person and user_id != person}
+        through_contacts = _reached_through_contacts(copies, chosen if per_person else None)
         for user_id, identity, _enrollment, person in copies:
             if user_id in written:
                 continue  # one row per recipient per occurrence
