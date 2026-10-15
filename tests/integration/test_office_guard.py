@@ -37,11 +37,11 @@ def office_on(monkeypatch):
     monkeypatch.setattr(guard, "load_settings", lambda: SimpleNamespace(office=OFFICE))
 
 
-async def _session_with_open(session_factory, path="docs/a.docx"):
+async def _session_with_open(session_factory, path="docs/a.docx", *, channel="web", config=None):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = await SessionStore(session_factory).create_session(
-        user_id=user_id, org_id=org_id, agent_id="writer", channel="web", config={"storage_bucket": "b"},
+        user_id=user_id, org_id=org_id, agent_id="writer", channel=channel, config={"storage_bucket": "b", **(config or {})},
     )
     await office_sessions.open_or_reuse(session_factory, location=location_of(session, path), path=path, session_id=session.id)
     return session
@@ -78,6 +78,21 @@ async def test_a_closed_office_document_is_office_edits_to_change(session_factor
     assert await guard.open_document_note({"path": path}, session, session_factory=session_factory) == (
         f"{path} is {noun}: to change it, read it with office_read and edit it with office_edit."
     )
+
+
+@pytest.mark.parametrize(("channel", "config"), [
+    ("api", {}),
+    ("web", {"coordinator": True, "strict_coordinator": True, "active_research_run_id": "run"}),
+])
+async def test_where_the_office_tools_are_not_offered_a_closed_document_is_left_alone(session_factory, channel, config):
+    # Without a file pane, or as a strict coordinator, the session has no office tools to be sent to. A document open
+    # in the editor is still the editor's alone.
+    session = await _session_with_open(session_factory, channel=channel, config=config)
+    assert await guard.refused_open_document("write_file", {"path": "docs/b.pdf", "content": "x"}, session,
+                                             session_factory=session_factory) is None
+    assert await guard.open_document_note({"path": "docs/b.pdf"}, session, session_factory=session_factory) is None
+    assert await guard.refused_open_document("write_file", {"path": "docs/a.docx", "content": "x"}, session,
+                                             session_factory=session_factory)
 
 
 async def test_a_threads_change_to_an_open_document_is_held_for_a_redo(session_factory):

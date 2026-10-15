@@ -60,8 +60,10 @@ EDIT_DESCRIPTION = (
     "terminal.\n"
     "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
     "result shows it as it is now: the user's edit wins; read again and work from it.\n"
-    "Word: insert {target, side: before|after, content}, replace {target, content}, delete {target}, move {target, "
-    'to, side}, comment {anchor: {find}, body}, reply {thread, body}, resolve {thread}. Targets: {"block": "<id>", '
+    "Word: insert {target, side: before|after, content}, replace {target, content} (on quoted words, "
+    '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side} (loses the '
+    'comments anchored in it), comment {anchor: {find}, body}, reply {thread, body}, resolve {thread}. Targets: '
+    '{"block": "<id>", '
     '"hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, {"end": true}. Content: {"markdown": '
     '"…", "blocks": {…}}; a line <?block k?> places blocks[k]: {"type": "pending", "intent": "…"}, {"type": "chart", '
     '"chart": "bar|column|line|pie|…", "title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG '
