@@ -16,11 +16,18 @@ export type AppState = SessionsSlice &
   CapabilitiesSlice & {
     loading: boolean;
     error: string | null;
+    /** The desktop sidebar stays open; unpinned it is a rail that opens on hover. */
+    sidebarPinned: boolean;
+    setSidebarPinned: (pinned: boolean) => void;
   };
 
 export const useAppStore = create<AppState>((...a) => ({
   loading: false,
   error: null,
+  // In the store, not the shell: every page draws its own AppShell, so state
+  // held there would reset on each navigation.
+  sidebarPinned: true,
+  setSidebarPinned: (sidebarPinned) => a[0]({ sidebarPinned }),
   ...createSessionsSlice(...a),
   ...createUserSlice(...a),
   ...createWorkspaceSlice(...a),
