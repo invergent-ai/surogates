@@ -1,4 +1,4 @@
-import type { Browser, BrowserContext, Page } from "playwright-core";
+import type { Browser, BrowserContext, Page, Route } from "playwright-core";
 
 export interface EditorUser {
   id: string;
@@ -15,6 +15,25 @@ export interface EditorPageOptions {
 }
 
 type Reply = { sentAt: number; value: unknown };
+
+// For a moment after a PDF editor opens, the document server answers its fetch of the PDF 400 and serves it on the
+// next try. Opening again meets the same moment, so the fetch itself is tried again.
+const PDF_FILE = /\/origin\.pdf(?:[/?]|$)/;
+const PDF_FILE_ATTEMPTS = 10;
+const PDF_FILE_RETRY_MS = 500;
+
+async function fetchPdfFile(route: Route): Promise<void> {
+  try {
+    let response = await route.fetch();
+    for (let attempt = 1; response.status() === 400 && attempt < PDF_FILE_ATTEMPTS; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, PDF_FILE_RETRY_MS));
+      response = await route.fetch();
+    }
+    await route.fulfill({ response });
+  } catch {
+    await route.abort().catch(() => undefined);
+  }
+}
 
 // The host page's functions, as page.evaluate sees them.
 type HostWindow = {
@@ -41,6 +60,7 @@ export class EditorPage {
   static async open(browser: Browser, options: EditorPageOptions): Promise<EditorPage> {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: options.ignoreTls });
     try {
+      await context.route(PDF_FILE, fetchPdfFile);
       const page = await context.newPage();
       await page.goto(options.hostUrl);
       await withTimeout(
