@@ -594,6 +594,14 @@ def unread_reports(events: list) -> list[dict]:
     return held
 
 
+def disclosure_note(text: str) -> str:
+    """What the model reads of the AI disclosure the platform sent."""
+    return (
+        "[From the platform, not the person: it already sent them this AI "
+        f"disclosure, in this conversation: «{text}»]"
+    )
+
+
 def coalesce_user_messages(messages: list[dict]) -> dict:
     """Merge one or more rendered user-message dicts into a single user turn.
 
@@ -818,6 +826,17 @@ class ContextReplayMixin:
                         if not awaiting_tool_ids:
                             iteration_open = False
                             _flush_deferred()
+
+            elif etype == EventType.DISCLOSURE_PRESENTED.value and (event.data or {}).get("text"):
+                # Sent in the agent's name before the person's first message:
+                # without it the model introduced itself as if nobody had.
+                # A user-role note, as a conversation may not open on the
+                # assistant; from the event's own text, so replay is stable.
+                note = build_user_message_dict({"content": disclosure_note(event.data["text"])})
+                if iteration_open:
+                    deferred_users.append(note)
+                else:
+                    messages.append(note)
 
             elif (
                 etype == EventType.BOARD_UPDATE.value

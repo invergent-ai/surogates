@@ -1319,6 +1319,7 @@ class ChannelInboundPipeline:
                     "level": cfg["level"],
                     "channel": routing.platform,
                     "delivery": "channel_message",
+                    "text": cfg["text"],
                 },
             )
         except Exception:

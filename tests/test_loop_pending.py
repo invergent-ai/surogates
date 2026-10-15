@@ -720,3 +720,21 @@ async def test_a_hand_backs_wake_expands_no_skill_for_a_follow_up_with_the_words
 def test_replay_takes_a_users_message_whatever_names_its_source(source, reads):
     said_so = SimpleNamespace(id=1, type=EventType.USER_MESSAGE.value, data={"content": "Go on.", "source": source})
     assert ContextReplayMixin._rebuild_messages(SimpleNamespace(), [said_so]) == [{"role": "user", "content": reads}]
+
+
+def test_the_model_reads_the_ai_disclosure_the_platform_sent():
+    from surogates.harness.loop_context_replay import disclosure_note
+
+    events = [
+        event(1, EventType.DISCLOSURE_PRESENTED, level="first", text="You are talking to an AI."),
+        event(2, EventType.USER_MESSAGE, content="Hello"),
+        # Written before the text was kept: nothing to show.
+        event(3, EventType.DISCLOSURE_PRESENTED, level="first"),
+    ]
+    for each in events:
+        each.type = each.type.value
+    replayed = ContextReplayMixin._rebuild_messages(SimpleNamespace(), events)
+    assert replayed == [
+        {"role": "user", "content": disclosure_note("You are talking to an AI.")},
+        {"role": "user", "content": "Hello"},
+    ]
