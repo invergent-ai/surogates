@@ -90,10 +90,16 @@ and fade or turn single shapes and text boxes instead (a turned text box stays n
 picture). A blurred shadow is a picture behind its shape, which stays editable.
 
 **Motion:** `data-build-in` / `data-build-out="fade|rise|drop|left|right|scale|pop [order N] [auto]"` on the section's
-pinned children; `data-transition="magic"` with the same `id` on matching pinned elements of two slides moves them
-between the slides. A build or a magic-move `id` inside another moving element is refused, and so is a table inside a
-moving box: give the table its own motion. A connector or a build inside a box that goes in as one picture (see Styles)
-is refused too.
+pinned children. A magic move takes both of these: `data-transition="magic"` on the **first** slide's `<section>` (it
+is how that slide leaves; on an element it does nothing), and the same `id` on a pinned element of each slide. The
+element then moves from its place on the first slide to its place on the next:
+
+```json
+{"op": "slides", "slides": [{"html": "<section data-transition=\"magic\" style=\"background:#14213D;color:#FBFBF8;font-family:Georgia, serif;padding:128px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">Where we are</h2><div id=\"next-step\" style=\"position:absolute;left:128px;top:760px;width:560px;background:#F2C14E;color:#14213D;padding:32px\"><p style=\"font-size:32px\">Next: the budget</p></div></section>"}, {"html": "<section style=\"background:#14213D;color:#FBFBF8;font-family:Georgia, serif;padding:128px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">The budget</h2><div id=\"next-step\" style=\"position:absolute;left:1232px;top:760px;width:560px;background:#F2C14E;color:#14213D;padding:32px\"><p style=\"font-size:32px\">Next: the budget</p></div></section>"}]}
+```
+
+A build or a magic-move `id` inside another moving element is refused, and so is a table inside a moving box: give the
+table its own motion. A connector or a build inside a box that goes in as one picture (see Styles) is refused too.
 
 **Notes:** one `<aside>` of plain text, the section's last child.
 
