@@ -313,6 +313,25 @@ async def test_a_channel_message_that_is_not_the_answer_dismisses_it(looks_often
 
 
 @pytest.mark.asyncio
+async def test_a_step_that_comes_due_ends_the_wait_so_its_wake_runs(looks_often):
+    result = await _asked_while(
+        FakeSessionStore(),
+        {"content": "[Step context] deadline", "synthetic": "checkin", "step_event": "deadline"},
+    )
+    assert (result["reason"], result["detail"]) == (
+        ask_module.STEP_CAME_DUE, ask_module.STEP_CAME_DUE_DETAIL,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_persons_reply_to_a_step_is_no_reason_to_end_the_wait(looks_often):
+    result = await _asked_while(
+        FakeSessionStore(), {"content": "x", "synthetic": "checkin", "step_event": "reply"},
+    )
+    assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")
+
+
+@pytest.mark.asyncio
 async def test_a_message_that_dismissed_another_question_does_not_dismiss_this_one(looks_often):
     result = await _asked_while(FakeSessionStore(), {"content": "x", "dismisses_question": "older"})
     assert (result["cancelled"], result["responses"][0]["answer"]) == (False, "Q3")

@@ -89,6 +89,15 @@ WROTE_SOMETHING_ELSE_DETAIL = (
     "only for what is still missing."
 )
 
+#: Why a question went unanswered when one of the business's scheduled steps
+#: came due for this conversation (its deadline, say) while it waited.
+STEP_CAME_DUE = "step_came_due"
+STEP_CAME_DUE_DETAIL = (
+    "A scheduled step came due while you waited, so the question was not "
+    "answered; the step follows. Deal with it, then ask again only for what "
+    "is still missing."
+)
+
 #: Set on a channel ``user.message`` to the ``tool_call_id`` of the question it
 #: did not answer.
 DISMISSES_QUESTION = "dismisses_question"
@@ -334,6 +343,14 @@ def _typed_a_command(event: Any) -> bool:
     return not data.get("synthetic") and isinstance(content, str) and names_builtin_command(content)
 
 
+def _a_step_came_due(data: dict) -> bool:
+    """Whether a ``user.message``'s *data* is a scheduled step the platform
+    wrote in, not the person's answer to one."""
+    from surogates.programs.step_context import REPLY, STEP_MARKER
+
+    return data.get("synthetic") == STEP_MARKER and data.get("step_event") != REPLY
+
+
 async def _wait_for_response(
     *,
     session_id: UUID,
@@ -413,11 +430,13 @@ async def _wait_for_response(
             )
             commanded = False
             wrote_else = False
+            step_due = False
             for event in events:
                 data = event.data or {}
                 if event.type == EventType.USER_MESSAGE.value:
                     commanded = commanded or (event.id > said and _typed_a_command(event))
                     wrote_else = wrote_else or data.get(DISMISSES_QUESTION) == tool_call_id
+                    step_due = step_due or (event.id > said and _a_step_came_due(data))
                 elif data.get("tool_call_id") == tool_call_id:
                     responses = data.get("responses")
                     if isinstance(responses, list):
@@ -427,6 +446,10 @@ async def _wait_for_response(
                 return {"cancelled": True, "reason": DISMISSED}
             if wrote_else:
                 return {"cancelled": True, "reason": WROTE_SOMETHING_ELSE}
+            if step_due:
+                # Its wake waits for this turn, so a question nobody answers
+                # would hold it for the whole wait.
+                return {"cancelled": True, "reason": STEP_CAME_DUE}
             cursor = said = max([cursor, said, *(event.id for event in events)])
 
             # 2. Has the session been stopped?  Status is the authoritative
@@ -541,6 +564,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
                 "reason": reason,
                 **({"detail": DISMISSED_BY_A_COMMAND} if reason == DISMISSED else {}),
                 **({"detail": WROTE_SOMETHING_ELSE_DETAIL} if reason == WROTE_SOMETHING_ELSE else {}),
+                **({"detail": STEP_CAME_DUE_DETAIL} if reason == STEP_CAME_DUE else {}),
                 "questions_asked": questions,
             },
             ensure_ascii=False,
