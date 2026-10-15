@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Under a new chat's composer, in Surogate Desktop: where the chat will work (Section 8).
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { CloudIcon, LaptopIcon } from "lucide-react";
 
 export function NewChatPlace({
@@ -20,13 +21,14 @@ export function NewChatPlace({
       <span>{place.text}</span>
       {place.local && (
         // The desktop's own picker opens when the message is sent: the page names no folder before then.
-        <button
-          type="button"
-          className="font-medium text-foreground underline-offset-2 hover:underline"
-          onClick={() => onChoice(choice === "last" ? "pick" : "last")}
-        >
-          {choice === "last" ? "Choose another folder" : "Use the last folder"}
-        </button>
+        <TextLink asChild size="inline">
+          <button
+            type="button"
+            onClick={() => onChoice(choice === "last" ? "pick" : "last")}
+          >
+            {choice === "last" ? "Choose another folder" : "Use the last folder"}
+          </button>
+        </TextLink>
       )}
     </p>
   );

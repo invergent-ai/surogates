@@ -22,13 +22,16 @@ function Tabs({
   )
 }
 
+// The ops console's tab bar: sentence-case pills, the active one on the
+// chrome surface with an amber edge along its bottom. Both variants draw it;
+// `default` sits the pills on a faint track, `line` on nothing.
 const tabsListVariants = cva(
-  "group/tabs-list inline-flex w-fit items-center justify-center p-1 text-muted-foreground group-data-horizontal/tabs:h-10 group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col",
+  "group/tabs-list inline-flex w-fit items-center gap-1.5 text-muted-foreground group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:items-stretch",
   {
     variants: {
       variant: {
-        default: "bg-muted",
-        line: "gap-6 bg-transparent px-0",
+        default: "rounded-[12px] bg-foreground/[0.04] p-1",
+        line: "bg-transparent",
       },
     },
     defaultVariants: {
@@ -53,26 +56,48 @@ function TabsList({
   )
 }
 
+// Bright along the bottom edge, fading upward round the corners: a ring cut
+// out of a gradient by the mask; the blurred copy adds the bloom.
+const RING_MASK: React.CSSProperties = {
+  WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+  WebkitMaskComposite: "xor",
+  maskComposite: "exclude",
+}
+
 function TabsTrigger({
   className,
+  children,
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
   return (
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-2 border border-transparent px-4 py-1.5 text-xs font-semibold tracking-wider whitespace-nowrap text-foreground/60 uppercase transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:px-4 group-data-vertical/tabs:py-2 hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-2.5 has-data-[icon=inline-start]:pl-2.5 dark:text-muted-foreground dark:hover:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
-        "group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
-        // Left-aligned labels for the line variant: centred text inside a
-        // padded, stretched trigger read as a row of pills with the pill
-        // missing. Each tab hugs its label; the list's gap spaces them.
-        "group-data-[variant=line]/tabs-list:flex-none group-data-[variant=line]/tabs-list:justify-start group-data-[variant=line]/tabs-list:px-0",
-        "data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground",
-        "after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",
+        "group/tabs-trigger relative inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-[10px] px-3.5 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors outline-none pointer-fine:min-h-0 md:px-3 md:py-1.5 hover:bg-surface/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 data-active:bg-surface data-active:text-foreground group-data-vertical/tabs:justify-start [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       {...props}
-    />
+    >
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 hidden rounded-[10px] blur-[2px] group-data-active/tabs-trigger:block"
+        style={{
+          padding: "2px",
+          background: "linear-gradient(to top, rgba(245,158,11,0.75) 10%, rgba(245,158,11,0) 40%)",
+          ...RING_MASK,
+        }}
+      />
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 hidden rounded-[10px] group-data-active/tabs-trigger:block"
+        style={{
+          padding: "1px",
+          background: "linear-gradient(to top, rgba(245,158,11,1) 10%, rgba(245,158,11,0) 40%)",
+          ...RING_MASK,
+        }}
+      />
+      <span className="relative inline-flex items-center gap-2">{children}</span>
+    </TabsPrimitive.Trigger>
   )
 }
 

@@ -6,6 +6,7 @@
 // never again for a while after "Not now".
 
 import { Button } from "@invergent/ui-sdk/button";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import {
   type PushState,
   dismissOffer,
@@ -59,16 +60,17 @@ export function NotifyOptIn({ engaged }: { engaged: boolean }) {
       >
         Notify me
       </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => {
-          dismissOffer();
-          setHidden(true);
-        }}
-      >
-        Not now
-      </Button>
+      <TextLink asChild variant="muted">
+        <button
+          type="button"
+          onClick={() => {
+            dismissOffer();
+            setHidden(true);
+          }}
+        >
+          Not now
+        </button>
+      </TextLink>
     </div>
   );
 }

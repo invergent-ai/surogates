@@ -5,6 +5,7 @@ import {
   Loader2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@invergent/ui-sdk/button";
 import { openOAuthPopup } from "../../lib/oauth-popup";
 import type { AgentChatAdapter } from "../../types";
 
@@ -244,13 +245,13 @@ function ToolkitRow({
             {name}
           </span>
         </button>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="xs"
           disabled={busy}
           onClick={row.connected ? onDisconnect : onConnect}
-          className={`ml-auto inline-flex min-w-[6rem] items-center justify-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-60 ${
-            row.connected ? "text-muted-foreground" : "text-foreground"
-          }`}
+          className="ml-auto min-w-[6rem]"
         >
           {busy ? (
             <>
@@ -262,7 +263,7 @@ function ToolkitRow({
           ) : (
             "Connect"
           )}
-        </button>
+        </Button>
       </div>
       {open && (
         <div className="mt-2 pl-7 text-sm text-muted-foreground">

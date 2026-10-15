@@ -9,6 +9,7 @@
 // same-origin download via the adapter's getWorkspaceDownloadUrl.
 
 import { useCallback } from "react";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   CodeIcon,
   FileArchiveIcon,
@@ -129,16 +130,17 @@ export function WorkspaceFileCard({
         <div className="truncate text-sm text-foreground">{title}</div>
         <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
       </div>
-      <a
-        href={downloadUrl}
-        download={downloadName}
-        // Stop the click from opening the pane viewer.
-        onClick={(e) => e.stopPropagation()}
-        className="inline-flex h-8 shrink-0 items-center rounded-md bg-accent px-3 text-sm text-foreground transition-colors hover:bg-foreground/15"
-        aria-label={`Download ${downloadName}`}
-      >
-        Download
-      </a>
+      <Button asChild variant="secondary" size="sm">
+        <a
+          href={downloadUrl}
+          download={downloadName}
+          // Stop the click from opening the pane viewer.
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Download ${downloadName}`}
+        >
+          Download
+        </a>
+      </Button>
     </div>
   );
 }

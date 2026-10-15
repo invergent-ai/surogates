@@ -4,18 +4,24 @@ import { Slot } from "radix-ui"
 
 import { cn } from "./lib/utils"
 
+// The Work console's counters and labels: a 6px box at 12px, sentence case,
+// on a faint foreground fill. `default` is its unread/active count (amber on
+// the fill), `secondary` its quiet count, `destructive` the bad tone,
+// `outline` a bordered label, `ghost` bare muted text, `link` its amber link.
 const badgeVariants = cva(
-  "group/badge inline-flex w-fit shrink-0 items-center justify-center gap-1.5 overflow-hidden rounded-none border-0 bg-transparent px-0 py-0 text-[0.625rem] font-semibold tracking-widest whitespace-nowrap uppercase transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 has-data-[icon=inline-end]:pr-0 has-data-[icon=inline-start]:pl-0 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3!",
+  "group/badge inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-[6px] border border-transparent px-[7px] py-[2px] text-[12px] font-medium whitespace-nowrap tabular-nums transition-colors focus-visible:ring-2 focus-visible:ring-ring/40 outline-none aria-invalid:border-destructive [&>svg]:pointer-events-none [&>svg]:size-3!",
   {
     variants: {
       variant: {
-        default: "text-foreground [a]:hover:text-foreground/70",
-        secondary: "text-muted-foreground [a]:hover:text-foreground",
+        default: "bg-foreground/[0.08] text-amber-500 [a]:hover:bg-foreground/[0.12]",
+        secondary:
+          "bg-foreground/[0.08] text-muted-foreground [a]:hover:text-foreground",
         destructive:
-          "text-destructive focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 [a]:hover:text-destructive/70",
-        outline: "text-foreground [a]:hover:text-foreground/70",
-        ghost: "text-muted-foreground hover:text-foreground",
-        link: "text-foreground underline-offset-4 hover:underline",
+          "bg-red-500/12 text-red-700 dark:text-red-300 [a]:hover:bg-red-500/20",
+        outline:
+          "border-foreground/15 text-muted-foreground [a]:hover:text-foreground",
+        ghost: "px-0 text-muted-foreground hover:text-foreground",
+        link: "px-0 text-amber-500 hover:text-amber-400",
       },
     },
     defaultVariants: {

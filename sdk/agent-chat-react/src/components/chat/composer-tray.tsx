@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { useState } from "react";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   ChevronDownIcon,
   FolderIcon,
@@ -44,8 +45,7 @@ export interface ComposerTrayProps {
 type TrayTab = "files" | "browser";
 
 // 44px targets, the size every control in the card is built to.
-const ICON_BUTTON =
-  "grid size-11 shrink-0 place-items-center rounded-xl text-foreground/80 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400";
+const ICON_BUTTON = "size-11";
 
 export function ComposerTray({ browser, files, open, onOpenChange }: ComposerTrayProps) {
   const [picked, setPicked] = useState<TrayTab>("files");
@@ -81,18 +81,20 @@ export function ComposerTray({ browser, files, open, onOpenChange }: ComposerTra
             onClick={() => pick("browser")}
           />
         )}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-lg"
           aria-expanded={open}
           aria-label={open ? "Hide panel" : "Show panel"}
           onClick={() => onOpenChange(!open)}
-          className={cn(ICON_BUTTON, "ml-auto text-muted-foreground")}
+          className={cn(ICON_BUTTON, "ml-auto")}
         >
           <ChevronDownIcon
             className={cn("size-4 transition-transform", open && "rotate-180")}
             aria-hidden="true"
           />
-        </button>
+        </Button>
       </div>
       {open && tab === "files" && files && (
         // A fixed height, not content height: the tree scrolls inside it, and
@@ -163,8 +165,10 @@ function BrowserFold({
             </span>
           )}
         </span>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-lg"
           aria-label={openLabel}
           aria-pressed={showing}
           onClick={onOpen}
@@ -175,16 +179,18 @@ function BrowserFold({
           ) : (
             <Maximize2Icon className="size-4.5" aria-hidden="true" />
           )}
-        </button>
+        </Button>
         {onRefresh && (
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-lg"
             aria-label="Refresh screenshot"
             onClick={onRefresh}
             className={ICON_BUTTON}
           >
             <RefreshCwIcon className="size-4.5" aria-hidden="true" />
-          </button>
+          </Button>
         )}
       </div>
       <div className="flex h-44 border-t border-border px-[18px] pt-3 pb-3.5">

@@ -9,7 +9,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type Device, listDevices } from "@/api/devices";
 import { getSession } from "@/api/sessions";
-import { Button } from "@invergent/ui-sdk/button";
+import { SegmentedControl } from "@invergent/ui-sdk/segmented-control";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { type DesktopBinding, getDesktop } from "@/lib/desktop-bridge";
 import {
   type FolderCalls,
@@ -113,6 +114,11 @@ export function useLocalChat(sessionId: string): {
   };
 }
 
+const MODES = [
+  { value: "ask", label: "Asks every time" },
+  { value: "free", label: "Works freely" },
+] as const;
+
 export function LocalChatBar({ sessionId }: { sessionId: string }) {
   const [failure, setFailure] = useState<string | null>(null);
   const { chat, desktop } = useLocalChat(sessionId);
@@ -142,41 +148,28 @@ export function LocalChatBar({ sessionId }: { sessionId: string }) {
         </span>
       </span>
       {desktop && chat.here && (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => run(() => desktop.revealFolder(chat.root))}
-        >
-          Show folder
-        </Button>
+        <TextLink asChild>
+          <button
+            type="button"
+            onClick={() => run(() => desktop.revealFolder(chat.root))}
+          >
+            Show folder
+          </button>
+        </TextLink>
       )}
       {chat.revoked ? (
         <span className="text-destructive">Local access revoked</span>
       ) : (
         desktop &&
         mode && (
-          <>
-            <span className="text-muted-foreground">
-              {mode === "free" ? "Works freely" : "Asks every time"}
-            </span>
-            {/* One button, acted on when pressed: the desktop's own window confirms Work freely. */}
-            <Button
-              variant="ghost"
-              size="sm"
-              // The desktop keeps the mode it allows, and tells of each change: the mode shown is its.
-              onClick={() =>
-                run(() =>
-                  switchMode(
-                    desktop,
-                    chat.root,
-                    mode === "free" ? "ask" : "free",
-                  ),
-                )
-              }
-            >
-              {mode === "free" ? "Ask every time" : "Let it work freely…"}
-            </Button>
-          </>
+          // Acted on when picked: the desktop's own window confirms Works freely. The desktop
+          // keeps the mode it allows, and tells of each change: the mode shown is its.
+          <SegmentedControl
+            aria-label="On this folder"
+            segments={MODES}
+            value={mode}
+            onChange={(next) => run(() => switchMode(desktop, chat.root, next))}
+          />
         )
       )}
       <span className="flex items-center gap-1.5 text-muted-foreground">

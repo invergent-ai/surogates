@@ -2,7 +2,7 @@ import * as React from "react"
 import { Accordion as AccordionPrimitive } from "radix-ui"
 
 import { cn } from "./lib/utils"
-import { ChevronDownIcon, ChevronUpIcon } from "lucide-react"
+import { ChevronDownIcon } from "lucide-react"
 
 function Accordion({
   className,
@@ -24,7 +24,7 @@ function AccordionItem({
   return (
     <AccordionPrimitive.Item
       data-slot="accordion-item"
-      className={cn("not-last:border-b", className)}
+      className={cn("not-last:border-b not-last:border-foreground/[0.06]", className)}
       {...props}
     />
   )
@@ -43,19 +43,20 @@ function AccordionTrigger({
       <AccordionPrimitive.Trigger
         data-slot="accordion-trigger"
         className={cn(
-          // min-w-0: as a flex item the trigger defaults to min-width:auto, so it
-// keeps its content's minimum width and overflows the header that
-// contains it — which pushed the chevron outside the card on any row
-// with a long name. The header already carries the constraint; the
-// trigger needs it too.
-          "group/accordion-trigger relative flex min-w-0 flex-1 items-start justify-between gap-3 rounded-none md:gap-6 border border-transparent py-4 text-left text-sm font-semibold transition-all outline-none hover:underline focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 **:data-[slot=accordion-trigger-icon]:ml-auto **:data-[slot=accordion-trigger-icon]:size-3.5 **:data-[slot=accordion-trigger-icon]:text-muted-foreground",
+          // min-w-0: as a flex item the trigger defaults to min-width:auto, so
+          // it keeps its content's minimum width and overflows the header
+          // that contains it — which pushed the chevron outside the card on
+          // any row with a long name. The header already carries the
+          // constraint; the trigger needs it too.
+          // The rest is the Work disclosure header: 44px, sentence case at
+          // 13px, one chevron that flips open rather than an underline.
+          "group/accordion-trigger relative flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 rounded-[7px] py-2.5 text-left text-[13px] font-medium text-foreground transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 **:data-[slot=accordion-trigger-icon]:ml-auto **:data-[slot=accordion-trigger-icon]:size-4 **:data-[slot=accordion-trigger-icon]:text-muted-foreground",
           className
         )}
         {...props}
       >
         {children}
-        <ChevronDownIcon data-slot="accordion-trigger-icon" className="pointer-events-none shrink-0 group-aria-expanded/accordion-trigger:hidden" />
-        <ChevronUpIcon data-slot="accordion-trigger-icon" className="pointer-events-none hidden shrink-0 group-aria-expanded/accordion-trigger:inline" />
+        <ChevronDownIcon data-slot="accordion-trigger-icon" className="pointer-events-none shrink-0 transition-transform group-aria-expanded/accordion-trigger:rotate-180" />
       </AccordionPrimitive.Trigger>
     </AccordionPrimitive.Header>
   )

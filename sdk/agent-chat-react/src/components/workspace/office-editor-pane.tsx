@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useTheme } from "next-themes";
+import { Button } from "@invergent/ui-sdk/button";
 import { AlertCircleIcon, DownloadIcon, FileTextIcon, Maximize2Icon, Minimize2Icon, XIcon } from "lucide-react";
 import { type DocEditorInstance, loadDocsApi } from "../../lib/office";
 import type { AgentChatAdapter, AgentChatOfficeEvent } from "../../types";
@@ -89,32 +90,29 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 			<div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
 				<FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
 				<div className="min-w-0 flex-1 truncate font-medium">{fileName}</div>
-				<a
-					href={adapter.getWorkspaceDownloadUrl({ sessionId, path })}
-					download={fileName}
-					aria-label={`Download ${fileName}`}
-					title="Download"
-					className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-				>
-					<DownloadIcon className="size-4" />
-				</a>
-				<button
+				<Button asChild variant="ghost" size="icon-xs">
+					<a
+						href={adapter.getWorkspaceDownloadUrl({ sessionId, path })}
+						download={fileName}
+						aria-label={`Download ${fileName}`}
+						title="Download"
+					>
+						<DownloadIcon className="size-4" />
+					</a>
+				</Button>
+				<Button
 					type="button"
+					variant="ghost"
+					size="icon-xs"
 					onClick={() => void (fullScreen ? document.exitFullscreen() : paneRef.current?.requestFullscreen())}
 					aria-label={fullScreen ? "Exit full screen" : "Full screen"}
 					title={fullScreen ? "Exit full screen" : "Full screen"}
-					className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 				>
 					{fullScreen ? <Minimize2Icon className="size-4" /> : <Maximize2Icon className="size-4" />}
-				</button>
-				<button
-					type="button"
-					onClick={onClose}
-					aria-label="Close file"
-					className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-				>
+				</Button>
+				<Button type="button" variant="ghost" size="icon-xs" onClick={onClose} aria-label="Close file">
 					<XIcon className="size-4" />
-				</button>
+				</Button>
 			</div>
 			{error && (
 				<div role="alert" className="flex items-start gap-2 p-3 text-xs text-destructive">
