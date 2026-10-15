@@ -43,11 +43,6 @@ const TOOLS: {
   { id: "pan", label: "Pan", Icon: Hand },
 ];
 
-// The kit's toggles have no icon size: each picker's items take a square
-// box, 44px on touch like the Buttons below them.
-const TOOL_ITEM = "size-9 px-0 pointer-coarse:size-11";
-const SWATCH_ITEM = "size-7 px-0 pointer-coarse:size-11";
-
 export interface ToolRailProps {
   tool: WbTool;
   onToolChange(tool: WbTool): void;
@@ -102,7 +97,7 @@ export function ToolRail({
         disabled={disabled}
       >
         {TOOLS.map(({ id, label, Icon }) => (
-          <ToggleGroupItem key={id} value={id} aria-label={label} className={TOOL_ITEM}>
+          <ToggleGroupItem key={id} value={id} aria-label={label} size="icon">
             <Icon className="size-4" />
           </ToggleGroupItem>
         ))}
@@ -123,7 +118,7 @@ export function ToolRail({
         disabled={disabled}
       >
         {INK_COLORS.map((c) => (
-          <ToggleGroupItem key={c} value={c} aria-label={`Colour ${c}`} className={SWATCH_ITEM}>
+          <ToggleGroupItem key={c} value={c} aria-label={`Colour ${c}`} size="icon-xs">
             {/* The swatch is the colour itself; the item's fill marks the pick. */}
             <span className="size-5 rounded-full" style={{ backgroundColor: c }} />
           </ToggleGroupItem>
@@ -145,7 +140,7 @@ export function ToolRail({
         disabled={disabled}
       >
         {INK_WIDTHS.map((w) => (
-          <ToggleGroupItem key={w} value={String(w)} aria-label={`Width ${w}`} className={SWATCH_ITEM}>
+          <ToggleGroupItem key={w} value={String(w)} aria-label={`Width ${w}`} size="icon-xs">
             <span
               className="rounded-full bg-foreground"
               style={{ width: w + 2, height: w + 2 }}

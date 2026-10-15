@@ -5,6 +5,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@invergent/ui-sdk/dropdown-menu";
+import { TabStrip, TabStripTab } from "@invergent/ui-sdk/tab-strip";
 import { Toggle } from "@invergent/ui-sdk/toggle";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -283,17 +284,14 @@ export function BrowserShell({
         >
           <Reload />
         </Button>
-        {/* Offered where it takes or returns control, or says the viewer holds it.
-            The kit's toggle has no icon size, so it takes icon-xs's box here:
-            square at 28px with a mouse, 44px on touch. */}
+        {/* Offered where it takes or returns control, or says the viewer holds it. */}
         {(onToggleControl || hasControl) && (
           <Toggle
-            size="sm"
+            size="icon-xs"
             data-testid="browser-shell-control"
             aria-label={hasControl ? "Return control" : "Take control"}
             pressed={hasControl}
             onPressedChange={() => onToggleControl?.()}
-            className="size-7 min-h-11 min-w-11 px-0 pointer-fine:min-h-0 pointer-fine:min-w-0"
           >
             {/* One glyph in both states: a second, circular one beside Reload
                 would read as another refresh button. Colour is the mode. */}
@@ -359,48 +357,23 @@ export function BrowserShell({
       </div>
 
       {showTabs && (
-        <div
+        <TabStrip
           data-testid="browser-shell-tabs"
-          className="flex min-h-[34px] items-center gap-0.5 border-b border-line bg-card px-1.5"
+          className="min-h-[34px] border-b border-line bg-card px-1.5"
         >
           {tabs.map((tab) => (
-            // A div, not a button: the close control nests inside, and a
-            // button inside a button is invalid markup.
-            <div
+            <TabStripTab
               key={tab.id}
-              role="tab"
-              tabIndex={0}
-              aria-selected={tab.active}
+              active={tab.active}
               data-testid="browser-shell-tab"
-              onClick={() => send({ t: "switch_tab", id: tab.id })}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") send({ t: "switch_tab", id: tab.id });
-              }}
-              className={`flex h-6 max-w-33 cursor-pointer items-center gap-1 truncate rounded px-2 text-[11px] ${
-                tab.active
-                  ? "bg-secondary text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
+              onSelect={() => send({ t: "switch_tab", id: tab.id })}
+              onClose={hasControl ? () => command({ t: "close_tab", id: tab.id }) : undefined}
+              closeLabel={`Close ${tab.title || tab.url}`}
             >
-              <span className="truncate">{tab.title || tab.url}</span>
-              {hasControl && (
-                <button
-                  type="button"
-                  data-testid="browser-shell-tab-close"
-                  aria-label={`Close ${tab.title || tab.url}`}
-                  onClick={(event) => {
-                    // Closing is not switching.
-                    event.stopPropagation();
-                    command({ t: "close_tab", id: tab.id });
-                  }}
-                  className="flex size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-secondary hover:text-foreground"
-                >
-                  <XSmall />
-                </button>
-              )}
-            </div>
+              {tab.title || tab.url}
+            </TabStripTab>
           ))}
-        </div>
+        </TabStrip>
       )}
 
       <div
@@ -494,13 +467,6 @@ const Pointer = () => (
   <svg {...svg}>
     <path d="M12.586 12.586 19 19" />
     <path d="M3.688 3.037a.497.497 0 0 0-.651.651l6.5 15.999a.501.501 0 0 0 .947-.062l1.569-6.083a2 2 0 0 1 1.448-1.479l6.124-1.579a.5.5 0 0 0 .063-.947z" />
-  </svg>
-);
-
-const XSmall = () => (
-  <svg {...svg} width={10} height={10} className="size-2.5">
-    <path d="M18 6 6 18" />
-    <path d="m6 6 12 12" />
   </svg>
 );
 

@@ -45,6 +45,7 @@ function compareNodes(a: AgentChatIdeaNode, b: AgentChatIdeaNode): number {
 // behind, so it stays untinted with the queued ones.
 const IDEA_STATUS_TONE: Record<string, Tone> = {
   merged: "ok",
+  done: "info",
   running: "warn",
   failed: "bad",
 };

@@ -158,7 +158,7 @@ describe("BrowserShell", () => {
     await push({ t: "tabs", tabs: TABS });
 
     const closes = node.querySelectorAll<HTMLButtonElement>(
-      "[data-testid='browser-shell-tab-close']",
+      "[data-slot='tab-strip-close']",
     );
     expect(closes).toHaveLength(2);
 
@@ -178,7 +178,7 @@ describe("BrowserShell", () => {
     );
     await push({ t: "tabs", tabs: TABS });
     expect(
-      node.querySelectorAll("[data-testid='browser-shell-tab-close']"),
+      node.querySelectorAll("[data-slot='tab-strip-close']"),
     ).toHaveLength(0);
   });
 
