@@ -101,3 +101,55 @@ async def test_other_people_and_agents_keep_their_held_texts(sf):
     async with sf() as db:
         for row_id in (other.id, someone_else.id):
             assert (await db.get(OutreachMessageRow, row_id)).state == "queued"
+
+
+async def _busy_line_case(sf, *, line, busy, messages=2):
+    from datetime import datetime, timedelta, timezone
+
+    from surogates.db.models import SessionLease
+
+    await store.update_settings(
+        sf, org_id=AGENT_ORG_ID, agent_id=_whatsapp_routing().agent_id,
+        channel_identifier="pn1", texts={"busy_safety_line": line} if line else {},
+    )
+    if busy:
+        async with sf() as db:
+            db.add(SessionLease(
+                session_id=SESSION_ID, owner_id="worker-1", lease_token=uuid.uuid4(),
+                expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).replace(tzinfo=None),
+            ))
+            await db.commit()
+    deps = dataclasses.replace(_make_deps(), session_factory=sf)
+    nudges: list[str] = []
+
+    async def _nudge(_session_id, _msg, text):
+        nudges.append(text)
+
+    deps.input_nudge = _nudge
+    for text in ("one", "two")[:messages]:
+        result = await ChannelInboundPipeline().handle(
+            _make_msg(is_dm=True, platform_user_id="40711111111", text=text),
+            routing=_whatsapp_routing(), config=_make_config(), deps=deps,
+        )
+        assert result == InboundOutcome.PROCESSED
+    return nudges
+
+
+@pytest.mark.asyncio
+async def test_the_busy_line_goes_out_once_while_a_turn_is_running(sf):
+    assert await _busy_line_case(sf, line="If it cannot wait, call the front desk.", busy=True) == [
+        "If it cannot wait, call the front desk."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_busy_line_when_idle(sf):
+    assert await _busy_line_case(sf, line="If it cannot wait, call the front desk.", busy=False) == []
+
+
+@pytest.mark.asyncio
+async def test_no_busy_line_unless_the_business_wrote_one(sf):
+    from surogates.followup.wording import all_default_texts
+
+    assert all_default_texts()["busy_safety_line"] == ""
+    assert await _busy_line_case(sf, line=None, busy=True) == []

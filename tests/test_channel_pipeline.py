@@ -72,8 +72,11 @@ class _FakeRedis:
             self.zsets[key] = {}
         self.zsets[key].update(mapping)
 
-    async def set(self, key: str, value: Any, ex: int | None = None) -> None:
+    async def set(self, key: str, value: Any, ex: int | None = None, nx: bool = False) -> bool | None:
+        if nx and key in self.kv:
+            return None
         self.kv[key] = value
+        return True
 
     async def get(self, key: str) -> Any:
         return self.kv.get(key)

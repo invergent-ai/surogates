@@ -47,7 +47,7 @@ from surogates.channels.source import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
-from surogates.followup.outreach import deliver_pending
+from surogates.followup.outreach import busy_safety_line, deliver_pending
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -1026,6 +1026,19 @@ class ChannelInboundPipeline:
                 msg, deps=deps, agent_id=routing.agent_id, session_id=session_id,
                 runtime_payload=runtime_payload,
             ) or _content
+
+        # The agent reads this message only when its current turn ends; a
+        # business that set a line tells the person what to do meanwhile.
+        if msg.is_dm and deps.session_factory is not None and deps.input_nudge is not None:
+            try:
+                _line = await busy_safety_line(
+                    deps.session_factory, deps.redis, org_id=UUID(str(routing.org_id)),
+                    agent_id=routing.agent_id, session_id=session_id,
+                )
+                if _line:
+                    await deps.input_nudge(session_id, msg, _line)
+            except Exception:  # noqa: BLE001
+                logger.warning("[followup] busy line not sent for %s", session_id, exc_info=True)
 
         # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.

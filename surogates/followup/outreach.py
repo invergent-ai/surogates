@@ -128,6 +128,10 @@ DEFAULT_TEXTS = {
     "why_setup": "the channel is not set up correctly for this business",
     "why_stopped": "the step was stopped before it was sent",
     "why_undelivered": "it could not be delivered",
+    # Off unless the business words it: what someone who writes again while
+    # the agent is still answering them reads at once (where to get help if
+    # it cannot wait), since their message is only read when the turn ends.
+    "busy_safety_line": "",
 }
 #: Rows handled per pass; the rest wait for the next tick.
 BATCH = 200
@@ -155,6 +159,33 @@ async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> b
         ).scalar_one_or_none()
     # ``session_leases.expires_at`` is naive UTC.
     return expires is not None and as_utc(expires) > as_utc(now)
+
+
+async def busy_safety_line(
+    session_factory: Any, redis: Any, *, org_id: uuid.UUID, agent_id: str,
+    session_id: uuid.UUID, now: datetime | None = None,
+) -> str | None:
+    """The business's ``busy_safety_line`` when a worker is mid-turn in this
+    conversation, once per turn; ``None`` when it is unset or nobody is."""
+    settings = await followup_store.get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
+    if not line:
+        return None
+    now = now or datetime.now(timezone.utc)
+    async with session_factory() as db:
+        lease = (
+            await db.execute(
+                sa.select(SessionLease.lease_token, SessionLease.expires_at)
+                .where(SessionLease.session_id == session_id)
+            )
+        ).one_or_none()
+    if lease is None or as_utc(lease.expires_at) <= as_utc(now):
+        return None
+    first = await redis.set(
+        f"surogates:followup:busy-line:{session_id}:{lease.lease_token}", "1",
+        ex=int(timedelta(hours=6).total_seconds()), nx=True,
+    )
+    return line if first else None
 
 
 async def _transition(
