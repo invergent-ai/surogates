@@ -10,6 +10,7 @@
 import { memo, useMemo, useState, useCallback } from "react";
 import { diffLines, diffWordsWithSpace } from "diff";
 import type { Change } from "diff";
+import { Button } from "@invergent/ui-sdk/button";
 import { cn } from "../../lib/utils";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -265,13 +266,14 @@ function CollapsedBlock({
   return (
     <div className="flex text-sm leading-5 bg-muted/30 border-y border-border/30">
       <span className="w-10 shrink-0" />
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="xs"
         onClick={onExpand}
-        className="flex-1 text-left px-3 py-0.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors cursor-pointer"
+        className="flex-1 justify-start rounded-none font-normal text-muted-foreground hover:text-foreground"
       >
         ↕ {count} unchanged line{count !== 1 ? "s" : ""}
-      </button>
+      </Button>
     </div>
   );
 }

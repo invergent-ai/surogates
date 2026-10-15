@@ -7,12 +7,8 @@
 // text for replace / remove).
 
 import { useState } from "react";
-import { ChevronDownIcon } from "lucide-react";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@invergent/ui-sdk/collapsible";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { cn } from "../../../lib/utils";
 import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
@@ -64,9 +60,9 @@ export function MemoryToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen} className="not-prose w-full">
-      <CollapsibleTrigger className="group/trigger flex w-fit items-center gap-2 text-sm transition-colors">
-        <span className="text-left">
-          <span className="font-semibold text-foreground">{verb}</span>{" "}
+      <CollapsibleHeader className="-ml-2 w-fit max-w-full">
+        <span>
+          <span className="font-medium text-foreground">{verb}</span>{" "}
           <span className="text-muted-foreground">
             {prep} {targetLabel}
           </span>
@@ -79,13 +75,7 @@ export function MemoryToolBlock({ tc }: { tc: ToolCallInfo }) {
             <span className="text-red-500 ml-1.5">· failed</span>
           )}
         </span>
-        <ChevronDownIcon
-          className={cn(
-            "size-4 shrink-0 transition-transform",
-            isOpen ? "rotate-180" : "rotate-0",
-          )}
-        />
-      </CollapsibleTrigger>
+      </CollapsibleHeader>
       <CollapsibleContent
         className={cn(
           "mt-2 overflow-hidden",

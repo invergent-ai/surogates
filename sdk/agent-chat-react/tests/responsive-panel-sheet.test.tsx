@@ -10,7 +10,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ResponsivePanel } from "../src/components/ui/responsive-panel";
+import { ResponsivePanel } from "@invergent/ui-sdk/responsive-panel";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;

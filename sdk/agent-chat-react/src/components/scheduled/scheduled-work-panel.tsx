@@ -11,13 +11,13 @@ import {
   useState,
 } from "react";
 import { formatDistanceToNow } from "date-fns";
-import {
-  CalendarClockIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { CalendarClockIcon, Trash2Icon } from "lucide-react";
 import { Badge } from "@invergent/ui-sdk/badge";
+import { Button } from "@invergent/ui-sdk/button";
+import { type Tone, TonePill } from "@invergent/ui-sdk/chip";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
+import { ListRow } from "@invergent/ui-sdk/list-row";
 import { cn } from "../../lib/utils";
 import type {
   AgentChatAdapter,
@@ -99,6 +99,14 @@ function scheduleDisplay(item: AgentChatScheduledWorkItem): string | null {
   return item.scheduleDisplay;
 }
 
+// A stopped schedule's status as a pill tone (an active one shows none): a
+// paused one warns, a failed one is bad, and a finished one is quiet.
+function statusTone(status: string): Tone {
+  if (status === "paused") return "warn";
+  if (status === "failed") return "bad";
+  return "muted";
+}
+
 function sortScheduledWork(
   items: AgentChatScheduledWorkItem[],
 ): AgentChatScheduledWorkItem[] {
@@ -157,94 +165,90 @@ function ScheduledWorkRow({
     e.stopPropagation();
   };
 
+  // The kit row, drawn onto a div: the row holds the action buttons, and a
+  // button inside a button would be invalid HTML. Top-aligned, as the
+  // description stacks the kind, the meta lines and the last error under the
+  // title. It is only a button when there is a last run to open.
   return (
-    <div
-      className={cn(
-        "group flex min-w-0 items-start gap-2 border-l-2 border-l-transparent px-3 py-2 text-sm transition-colors hover:border-l-primary hover:bg-input",
-        "min-h-11 md:min-h-0",
-        lastSessionId && "cursor-pointer",
-      )}
-      onClick={openLastRun}
-      onKeyDown={handleRowKeyDown}
-      role={lastSessionId ? "button" : undefined}
-      tabIndex={lastSessionId ? 0 : undefined}
-      aria-label={lastSessionId ? `Open last run for ${title}` : undefined}
-      title={lastSessionId ? "Open last run" : undefined}
-    >
-      <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-faint">
-        <CalendarClockIcon className="size-3.5" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-start gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-foreground">{title}</div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-2">
-              <Badge variant="secondary" className="shrink-0">
-                {formatKind(item.kind)}
-              </Badge>
-            </div>
-            {meta.length > 0 && (
-              <div className="mt-0.5 space-y-0.5 text-xs text-faint">
-                {meta.map((line) => (
-                  <div key={line} className="truncate">
-                    {line}
-                  </div>
-                ))}
-              </div>
+    <ListRow
+      asChild
+      size="sm"
+      icon={CalendarClockIcon}
+      label={title}
+      description={
+        <>
+          <span className="mt-0.5 flex gap-1">
+            <TonePill>{formatKind(item.kind)}</TonePill>
+            {statusText && (
+              <TonePill tone={statusTone(statusText)}>{statusText}</TonePill>
             )}
-          </div>
-          {statusText && (
-            <Badge variant="destructive" className="shrink-0">
-              {statusText}
-            </Badge>
+          </span>
+          {meta.map((line) => (
+            <span key={line} className="mt-0.5 block truncate">
+              {line}
+            </span>
+          ))}
+          {item.lastError && (
+            <span className="mt-1 line-clamp-2 whitespace-normal text-destructive">
+              {item.lastError}
+            </span>
           )}
-        </div>
-        {item.lastError && (
-          <div className="mt-1 line-clamp-2 text-xs text-destructive">
-            {item.lastError}
-          </div>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center gap-1">
-        {showRunNow && (
-          <button
-            type="button"
-            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
-            onClick={(e) => {
-              stopActionClick(e);
-              onRunNow(item.id);
-            }}
-            aria-label="Run schedule now"
-            title="Run schedule now"
-            disabled={disabled}
-          >
-            <CalendarClockIcon className="size-3.5" />
-          </button>
-        )}
-        {canCancel && isActive && (
-          <button
-            type="button"
-            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
-            onClick={(e) => {
-              stopActionClick(e);
-              onCancel(item.id);
-            }}
-            aria-label="Cancel schedule"
-            title="Cancel schedule"
-            disabled={disabled}
-          >
-            <Trash2Icon className="size-3.5" />
-          </button>
-        )}
-      </div>
-    </div>
+        </>
+      }
+      className={cn("items-start", lastSessionId && "cursor-pointer")}
+      trailing={
+        <>
+          {showRunNow && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground hover:text-foreground md:opacity-70 md:group-hover/list-row:opacity-100"
+              onClick={(e) => {
+                stopActionClick(e);
+                onRunNow(item.id);
+              }}
+              aria-label="Run schedule now"
+              title="Run schedule now"
+              disabled={disabled}
+            >
+              <CalendarClockIcon className="size-3.5" />
+            </Button>
+          )}
+          {canCancel && isActive && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:opacity-70 md:group-hover/list-row:opacity-100"
+              onClick={(e) => {
+                stopActionClick(e);
+                onCancel(item.id);
+              }}
+              aria-label="Cancel schedule"
+              title="Cancel schedule"
+              disabled={disabled}
+            >
+              <Trash2Icon className="size-3.5" />
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div
+        onClick={openLastRun}
+        onKeyDown={handleRowKeyDown}
+        role={lastSessionId ? "button" : undefined}
+        tabIndex={lastSessionId ? 0 : undefined}
+        aria-label={lastSessionId ? `Open last run for ${title}` : undefined}
+        title={lastSessionId ? "Open last run" : undefined}
+      />
+    </ListRow>
   );
 }
 
 export function ScheduledWorkPanel({
   adapter,
   agentId,
-  title = "Scheduled Work",
+  title = "Scheduled work",
   limit = DEFAULT_LIMIT,
   status = "active",
   hideHeader = false,
@@ -257,7 +261,6 @@ export function ScheduledWorkPanel({
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
   const [actionScheduleId, setActionScheduleId] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
   const mounted = useRef(true);
   const requestId = useRef(0);
   const lastFingerprint = useRef("");
@@ -373,52 +376,43 @@ export function ScheduledWorkPanel({
   if (!hasEverLoaded) return null;
   if (!adapter.listScheduledWork) return null;
 
-  const showBody = hideHeader || !collapsed;
+  const body = error ? (
+    <div className="px-2 py-1.5 text-xs text-destructive">{error}</div>
+  ) : items.length === 0 ? (
+    <div className="px-2 py-1.5 text-xs text-faint">No scheduled work</div>
+  ) : (
+    <div>
+      {items.map((item) => (
+        <ScheduledWorkRow
+          key={item.id}
+          item={item}
+          canRunNow={Boolean(adapter.runScheduledWorkNow)}
+          canCancel={Boolean(adapter.cancelScheduledWork)}
+          actionScheduleId={actionScheduleId}
+          onOpenLastRun={handleOpenLastRun}
+          onRunNow={handleRunNow}
+          onCancel={handleCancel}
+        />
+      ))}
+    </div>
+  );
 
   return (
-    <section className="min-w-0 border-t border-line">
-      {!hideHeader && (
-        <button
-          type="button"
-          className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-foreground transition-colors hover:bg-input"
-          onClick={() => setCollapsed((current) => !current)}
-          aria-expanded={!collapsed}
-        >
-          <CalendarClockIcon className="size-3.5" />
-          <span className="truncate">{title}</span>
-          {activeCount > 0 && (
-            <Badge variant="default" className="ml-auto">
-              {activeCount}
-            </Badge>
-          )}
-          {collapsed ? (
-            <ChevronRightIcon className="size-3.5 shrink-0 text-faint" />
-          ) : (
-            <ChevronDownIcon className="size-3.5 shrink-0 text-faint" />
-          )}
-        </button>
-      )}
-      {showBody && error && (
-        <div className="px-3 py-2 text-xs text-destructive">{error}</div>
-      )}
-      {showBody && !error && items.length === 0 && (
-        <div className="px-3 py-2 text-xs text-faint">No scheduled work</div>
-      )}
-      {showBody && !error && items.length > 0 && (
-        <div className={cn("pb-2", hideHeader && "pt-1")}>
-          {items.map((item) => (
-            <ScheduledWorkRow
-              key={item.id}
-              item={item}
-              canRunNow={Boolean(adapter.runScheduledWorkNow)}
-              canCancel={Boolean(adapter.cancelScheduledWork)}
-              actionScheduleId={actionScheduleId}
-              onOpenLastRun={handleOpenLastRun}
-              onRunNow={handleRunNow}
-              onCancel={handleCancel}
-            />
-          ))}
-        </div>
+    <section className="min-w-0 border-t border-line p-1">
+      {hideHeader ? (
+        body
+      ) : (
+        <Collapsible defaultOpen>
+          <CollapsibleHeader icon={CalendarClockIcon}>
+            {title}
+            {activeCount > 0 && (
+              <Badge variant="default" className="ml-1.5">
+                {activeCount}
+              </Badge>
+            )}
+          </CollapsibleHeader>
+          <CollapsibleContent>{body}</CollapsibleContent>
+        </Collapsible>
       )}
     </section>
   );

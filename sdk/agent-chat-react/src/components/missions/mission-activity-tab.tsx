@@ -7,6 +7,10 @@
 // the tab otherwise).
 import { useMemo, useState } from "react";
 
+import { type Tone, TagPill, TonePill } from "@invergent/ui-sdk/chip";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { FilterPill } from "@invergent/ui-sdk/toggle";
+
 import type { AgentChatMissionEvent } from "../../types";
 
 import {
@@ -27,12 +31,12 @@ export interface MissionActivityTabProps {
 }
 
 
-const CATEGORY_BADGE_CLASS: Record<MissionEventCategory, string> = {
-  spawn: "border-primary/30 bg-primary/10 text-primary",
-  output: "border-foreground/20 bg-foreground/5 text-foreground/80",
-  done: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
-  verdict: "border-amber-500/30 bg-amber-500/10 text-amber-600",
-  system: "border-border bg-muted text-muted-foreground",
+const CATEGORY_TONE: Record<MissionEventCategory, Tone> = {
+  spawn: "warn",
+  output: "muted",
+  done: "ok",
+  verdict: "warn",
+  system: "muted",
 };
 
 
@@ -47,9 +51,7 @@ export function MissionActivityTab({ feed }: MissionActivityTabProps) {
 
   if (feed.events.length === 0) {
     return (
-      <div className="py-8 text-center text-sm text-muted-foreground/60">
-        No mission activity yet.
-      </div>
+      <EmptyState className="py-8" title="No mission activity yet" />
     );
   }
 
@@ -57,18 +59,14 @@ export function MissionActivityTab({ feed }: MissionActivityTabProps) {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-1.5">
         {(["all", ...MISSION_EVENT_CATEGORIES] as const).map((cat) => (
-          <button
+          <FilterPill
             key={cat}
-            type="button"
+            on={filter === cat}
             onClick={() => setFilter(cat)}
-            className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${
-              filter === cat
-                ? "border-foreground bg-foreground text-background"
-                : "border-border/60 bg-background text-muted-foreground hover:bg-muted/40"
-            }`}
+            className="capitalize"
           >
             {cat}
-          </button>
+          </FilterPill>
         ))}
       </div>
 
@@ -98,18 +96,14 @@ function ActivityRow({
       </span>
       <div className="space-y-0.5">
         <div className="flex gap-2 items-center">
-          <span
-              className={`shrink-0 rounded border px-1.5 font-mono uppercase ${CATEGORY_BADGE_CLASS[category]}`}
-            >
+          <TonePill tone={CATEGORY_TONE[category]} className="capitalize">
             {category}
-          </span>
+          </TonePill>
           <p className="shrink-0 text-xs text-foreground font-mono">
             {missionEventActorLabel(event, feed.sessions)}
           </p>
           {taskId ? (
-            <p className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/70">
-              {taskId.slice(0, 8)}
-            </p>
+            <TagPill label={taskId.slice(0, 8)} className="font-mono" />
           ) : null}
         </div>
 

@@ -17,7 +17,9 @@ import {
   CreditCard,
   RefreshCw,
 } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@invergent/ui-sdk/alert";
 import { Button } from "@invergent/ui-sdk/button";
+import { TextLink } from "@invergent/ui-sdk/text-link";
 import { cn } from "../../lib/utils";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import type { ErrorInfo } from "../../types";
@@ -70,37 +72,25 @@ export const ErrorMessage = memo(function ErrorMessage({
   };
 
   return (
-    <div
-      role="alert"
-      className={cn(
-        "flex w-full gap-3 rounded-none border-l-4 border-destructive bg-destructive/5 p-4",
-        className,
-      )}
-    >
-      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <div className="text-sm font-semibold text-destructive">
-          {errorInfo.title}
-        </div>
-
+    <Alert variant="destructive" className={cn("gap-y-2", className)}>
+      <AlertTriangle />
+      <AlertTitle>{errorInfo.title}</AlertTitle>
+      <AlertDescription className="flex min-w-0 flex-col items-start gap-2">
         {errorInfo.detail && (
-          <button
-            type="button"
-            onClick={() => setDetailOpen((open) => !open)}
-            className="flex items-center gap-1 self-start text-xs text-muted-foreground hover:text-foreground"
-            aria-expanded={detailOpen}
-          >
-            {detailOpen ? (
-              <ChevronDown className="size-3" />
-            ) : (
-              <ChevronRight className="size-3" />
-            )}
-            {detailOpen ? "Hide details" : "Show details"}
-          </button>
+          <TextLink variant="muted" size="sm" asChild>
+            <button
+              type="button"
+              onClick={() => setDetailOpen((open) => !open)}
+              aria-expanded={detailOpen}
+            >
+              {detailOpen ? <ChevronDown /> : <ChevronRight />}
+              {detailOpen ? "Hide details" : "Show details"}
+            </button>
+          </TextLink>
         )}
 
         {detailOpen && errorInfo.detail && (
-          <pre className="overflow-x-auto rounded-none border border-destructive/20 bg-background p-2 font-mono text-xs whitespace-pre-wrap wrap-break-word text-muted-foreground">
+          <pre className="w-full overflow-x-auto rounded-[6px] border border-destructive/20 bg-background p-2 font-mono text-xs whitespace-pre-wrap wrap-break-word text-muted-foreground">
             {errorInfo.detail}
           </pre>
         )}
@@ -133,8 +123,8 @@ export const ErrorMessage = memo(function ErrorMessage({
             Retry failed: {retryError}
           </div>
         )}
-      </div>
-    </div>
+      </AlertDescription>
+    </Alert>
   );
 });
 
@@ -160,19 +150,11 @@ const InsufficientCreditsCard = memo(function InsufficientCreditsCard({
   const { onOpenBilling } = useAgentChatAdapterContext();
   const requested = parseRequestedTokens(detail);
   return (
-    <div
-      role="alert"
-      className={cn(
-        "flex w-full gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-4",
-        className,
-      )}
-    >
-      <CreditCard className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-400" />
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <div className="text-sm font-semibold text-foreground">
-          You're out of credits
-        </div>
-        <p className="text-sm text-muted-foreground">
+    <Alert variant="warning" className={cn("gap-y-2", className)}>
+      <CreditCard />
+      <AlertTitle>You're out of credits</AlertTitle>
+      <AlertDescription className="flex flex-col items-start gap-2">
+        <p>
           This run was blocked by the token-credit limit
           {requested ? ` (it needed ~${requested.toLocaleString()} tokens)` : ""}.
           Buy additional credits or upgrade your plan to keep your agents
@@ -191,7 +173,7 @@ const InsufficientCreditsCard = memo(function InsufficientCreditsCard({
             </Button>
           )}
         </div>
-      </div>
-    </div>
+      </AlertDescription>
+    </Alert>
   );
 });

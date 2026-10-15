@@ -9,6 +9,7 @@ import {
 import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
 import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
+import { SegmentedControl } from "@invergent/ui-sdk/segmented-control";
 import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import { WorkspaceFileDrawer } from "./components/workspace/workspace-file-drawer";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
@@ -482,24 +483,17 @@ export function AgentChat({
           {showMobileToggle && (
             <div
               data-testid="mobile-pane-toggle"
-              className="md:hidden flex shrink-0 border-b border-line bg-card"
+              className="md:hidden flex shrink-0 justify-center border-b border-line bg-card px-3 py-2"
             >
-              {mobilePanes.map((pane) => (
-                <button
-                  key={pane}
-                  type="button"
-                  onClick={() => setMobileView(pane)}
-                  aria-pressed={activeMobilePane === pane}
-                  className={cn(
-                    "flex-1 min-h-11 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors",
-                    activeMobilePane === pane
-                      ? "border-primary text-foreground"
-                      : "border-transparent text-subtle hover:text-foreground",
-                  )}
-                >
-                  {MOBILE_PANE_LABELS[pane]}
-                </button>
-              ))}
+              <SegmentedControl
+                aria-label="Show"
+                segments={mobilePanes.map((pane) => ({
+                  value: pane,
+                  label: MOBILE_PANE_LABELS[pane],
+                }))}
+                value={activeMobilePane}
+                onChange={setMobileView}
+              />
             </div>
           )}
 

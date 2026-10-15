@@ -3,8 +3,8 @@
 import {
   Collapsible,
   CollapsibleContent,
-  CollapsibleTrigger,
 } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import {
   Tabs,
   TabsContent,
@@ -13,7 +13,7 @@ import {
 } from "@invergent/ui-sdk/tabs";
 import { cn } from "../../lib/utils";
 import type { ToolUIPart } from "ai";
-import { ChevronDownIcon, Code } from "lucide-react";
+import { Code } from "lucide-react";
 import type { ComponentProps } from "react";
 
 import { getStatusBadge } from "./tool";
@@ -23,7 +23,7 @@ export type SandboxRootProps = ComponentProps<typeof Collapsible>;
 export const Sandbox = ({ className, ...props }: SandboxRootProps) => (
   <Collapsible
     className={cn(
-      "not-prose group mb-4 w-full overflow-hidden rounded-md border border-foreground/20",
+      "not-prose mb-4 w-full overflow-hidden rounded-[10px] border border-foreground/[0.08]",
       className
     )}
     defaultOpen
@@ -43,20 +43,17 @@ export const SandboxHeader = ({
   state,
   ...props
 }: SandboxHeaderProps) => (
-  <CollapsibleTrigger
-    className={cn(
-      "flex w-full items-center justify-between gap-4 p-3",
-      className
-    )}
+  <CollapsibleHeader
+    variant="section"
+    icon={Code}
+    className={className}
     {...props}
   >
-    <div className="flex items-center gap-2">
-      <Code className="size-4 text-muted-foreground" />
-      <span className="font-medium text-sm">{title}</span>
+    <span className="flex items-center gap-2">
+      {title}
       {getStatusBadge(state)}
-    </div>
-    <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-  </CollapsibleTrigger>
+    </span>
+  </CollapsibleHeader>
 );
 
 export type SandboxContentProps = ComponentProps<typeof CollapsibleContent>;
@@ -88,7 +85,7 @@ export const SandboxTabsBar = ({
 }: SandboxTabsBarProps) => (
   <div
     className={cn(
-      "flex w-full items-center border-border border-t border-b",
+      "flex w-full items-center border-foreground/[0.08] border-t border-b px-2 py-1.5",
       className
     )}
     {...props}
@@ -101,10 +98,7 @@ export const SandboxTabsList = ({
   className,
   ...props
 }: SandboxTabsListProps) => (
-  <TabsList
-    className={cn("h-auto rounded-none border-0 bg-transparent p-0", className)}
-    {...props}
-  />
+  <TabsList variant="line" className={className} {...props} />
 );
 
 export type SandboxTabsTriggerProps = ComponentProps<typeof TabsTrigger>;
@@ -113,13 +107,7 @@ export const SandboxTabsTrigger = ({
   className,
   ...props
 }: SandboxTabsTriggerProps) => (
-  <TabsTrigger
-    className={cn(
-      "rounded-none border-0 border-transparent border-b-2 px-4 py-2 font-medium text-muted-foreground text-sm transition-colors data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none",
-      className
-    )}
-    {...props}
-  />
+  <TabsTrigger className={className} {...props} />
 );
 
 export type SandboxTabContentProps = ComponentProps<typeof TabsContent>;

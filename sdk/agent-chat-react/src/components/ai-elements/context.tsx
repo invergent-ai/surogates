@@ -1,6 +1,6 @@
 "use client";
 
-import { Progress } from "../ui/progress";
+import { ProgressBar } from "@invergent/ui-sdk/progress-bar";
 import { cn } from "../../lib/utils";
 import type { LanguageModelUsage } from "ai";
 import type { ComponentProps, ReactNode } from "react";
@@ -150,20 +150,14 @@ export const ContextContentHeader = ({
               {used} / {total}
             </p>
           </div>
-          <Progress
-            className={cn(
-              // The primitive only clips its x-axis, which leaves the fill's
-              // square end poking out of the pill at both ends.
-              "h-1 overflow-hidden rounded-full bg-muted",
-              // Amber, not `bg-primary`: primary is the host app's colour, and
-              // the two hosts disagree — the agent web app is amber, Studio is
-              // near-black — so the same bar came out black beside a Send
-              // button the composer hardcodes amber. This is the composer's
-              // own accent, so it reads the same wherever it is embedded.
-              "[&>[data-slot=progress-indicator]]:bg-amber-500",
-              nearlyFull &&
-                "[&>[data-slot=progress-indicator]]:bg-destructive",
-            )}
+          <ProgressBar
+            // Amber, not the bar's `--primary` default: primary is the host
+            // app's colour, and the hosts disagree — the agent web app is
+            // amber, Studio is near-black — so the same bar came out black
+            // beside a Send button the composer hardcodes amber. This is the
+            // composer's own accent, so it reads the same wherever it is
+            // embedded.
+            color={nearlyFull ? "var(--destructive)" : "var(--color-amber-500)"}
             value={usedPercent * PERCENT_MAX}
           />
         </>

@@ -87,6 +87,8 @@ function clickByText(dom: HTMLElement, text: string): void {
   );
   if (!target) throw new Error(`No button containing "${text}"`);
   act(() => {
+    // A real click presses first: the question tabs select on the press.
+    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
     target.click();
   });
 }

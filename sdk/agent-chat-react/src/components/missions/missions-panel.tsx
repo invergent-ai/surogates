@@ -18,16 +18,13 @@ import {
   useState,
 } from "react";
 import { formatDistanceToNow } from "date-fns";
-import {
-  Ban,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  Pause,
-  Play,
-  TargetIcon,
-} from "lucide-react";
+import { Ban, Pause, Play, TargetIcon } from "lucide-react";
 import { Badge } from "@invergent/ui-sdk/badge";
-import { cn } from "../../lib/utils";
+import { Button } from "@invergent/ui-sdk/button";
+import { type Tone, TonePill } from "@invergent/ui-sdk/chip";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
+import { ListRow } from "@invergent/ui-sdk/list-row";
 import type {
   AgentChatAdapter,
   AgentChatMissionSummary,
@@ -75,6 +72,16 @@ function sortMissions(
     if (diff !== 0) return diff;
     return (a.updatedAt ?? "") > (b.updatedAt ?? "") ? -1 : 1;
   });
+}
+
+
+// A mission's status as a pill tone: a running mission reads ok, one waiting
+// on someone warns, one that gave up is bad, and a settled one is quiet.
+function missionTone(status: string): Tone {
+  if (status === "active") return "ok";
+  if (status === "paused" || status === "blocked") return "warn";
+  if (status === "failed" || status === "max_iterations_reached") return "bad";
+  return "muted";
 }
 
 
@@ -126,94 +133,90 @@ function MissionRow({
     openMission();
   };
 
+  // The kit row, drawn onto a div: the row holds the action buttons, and a
+  // button inside a button would be invalid HTML. Top-aligned, as the
+  // description stacks the status and the meta lines under the title.
   return (
-    <div
-      className={cn(
-        "group flex min-w-0 items-start gap-2 border-l-2 border-l-transparent px-3 py-2 text-sm transition-colors cursor-pointer hover:border-l-primary hover:bg-input",
-        "min-h-11 md:min-h-0",
-      )}
-      onClick={openMission}
-      onKeyDown={handleRowKeyDown}
-      role="button"
-      tabIndex={0}
-      aria-label={`Open mission ${description}`}
-      title="Open mission dashboard"
+    <ListRow
+      asChild
+      size="sm"
+      icon={TargetIcon}
+      label={description}
+      description={
+        <>
+          <span className="mt-0.5 flex">
+            <TonePill tone={missionTone(mission.status)}>{mission.status}</TonePill>
+          </span>
+          {meta.map((line) => (
+            <span key={line} className="mt-0.5 block truncate">
+              {line}
+            </span>
+          ))}
+        </>
+      }
+      className="cursor-pointer items-start"
+      trailing={
+        <>
+          {isActive && canMutate.pause && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground hover:text-foreground md:opacity-70 md:group-hover/list-row:opacity-100"
+              onClick={(e) => {
+                stopActionClick(e);
+                onPause(mission.id);
+              }}
+              aria-label="Pause mission"
+              title="Pause mission"
+              disabled={busy}
+            >
+              <Pause className="size-3.5" />
+            </Button>
+          )}
+          {isPaused && canMutate.resume && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground hover:text-foreground md:opacity-70 md:group-hover/list-row:opacity-100"
+              onClick={(e) => {
+                stopActionClick(e);
+                onResume(mission.id);
+              }}
+              aria-label="Resume mission"
+              title="Resume mission"
+              disabled={busy}
+            >
+              <Play className="size-3.5" />
+            </Button>
+          )}
+          {(isActive || isPaused) && canMutate.cancel && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:opacity-70 md:group-hover/list-row:opacity-100"
+              onClick={(e) => {
+                stopActionClick(e);
+                onCancel(mission.id);
+              }}
+              aria-label="Cancel mission"
+              title="Cancel mission"
+              disabled={busy}
+            >
+              <Ban className="size-3.5" />
+            </Button>
+          )}
+        </>
+      }
     >
-      <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-faint">
-        <TargetIcon className="size-3.5" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-start gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-foreground">{description}</div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-2">
-              <Badge
-                variant={isActive ? "default" : "secondary"}
-                className="shrink-0"
-              >
-                {mission.status}
-              </Badge>
-            </div>
-            {meta.length > 0 && (
-              <div className="mt-0.5 space-y-0.5 text-xs text-faint">
-                {meta.map((line) => (
-                  <div key={line} className="truncate">
-                    {line}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-1">
-        {isActive && canMutate.pause && (
-          <button
-            type="button"
-            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
-            onClick={(e) => {
-              stopActionClick(e);
-              onPause(mission.id);
-            }}
-            aria-label="Pause mission"
-            title="Pause mission"
-            disabled={busy}
-          >
-            <Pause className="size-3.5" />
-          </button>
-        )}
-        {isPaused && canMutate.resume && (
-          <button
-            type="button"
-            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-line hover:text-foreground disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
-            onClick={(e) => {
-              stopActionClick(e);
-              onResume(mission.id);
-            }}
-            aria-label="Resume mission"
-            title="Resume mission"
-            disabled={busy}
-          >
-            <Play className="size-3.5" />
-          </button>
-        )}
-        {(isActive || isPaused) && canMutate.cancel && (
-          <button
-            type="button"
-            className="rounded p-2 md:p-1 text-faint opacity-100 md:opacity-70 transition-all hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-40 md:group-hover:opacity-100"
-            onClick={(e) => {
-              stopActionClick(e);
-              onCancel(mission.id);
-            }}
-            aria-label="Cancel mission"
-            title="Cancel mission"
-            disabled={busy}
-          >
-            <Ban className="size-3.5" />
-          </button>
-        )}
-      </div>
-    </div>
+      <div
+        onClick={openMission}
+        onKeyDown={handleRowKeyDown}
+        role="button"
+        tabIndex={0}
+        aria-label={`Open mission ${description}`}
+        title="Open mission dashboard"
+      />
+    </ListRow>
   );
 }
 
@@ -234,7 +237,6 @@ export function MissionsPanel({
   const [error, setError] = useState<string | null>(null);
   const [hasEverLoaded, setHasEverLoaded] = useState(false);
   const [busyMissionId, setBusyMissionId] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
   const mounted = useRef(true);
   const requestId = useRef(0);
   const lastFingerprint = useRef("");
@@ -365,57 +367,49 @@ export function MissionsPanel({
   if (!hasEverLoaded) return null;
   if (!adapter.listMissions) return null;
 
-  const showBody = hideHeader || !collapsed;
   const canMutate = {
     pause: Boolean(adapter.pauseMission),
     resume: Boolean(adapter.resumeMission),
     cancel: Boolean(adapter.cancelMission),
   };
 
+  const body = error ? (
+    <div className="px-2 py-1.5 text-xs text-destructive">{error}</div>
+  ) : items.length === 0 ? (
+    <div className="px-2 py-1.5 text-xs text-faint">No missions</div>
+  ) : (
+    <div>
+      {items.map((mission) => (
+        <MissionRow
+          key={mission.id}
+          mission={mission}
+          busy={busyMissionId === mission.id}
+          canMutate={canMutate}
+          onOpen={handleOpen}
+          onPause={handlePause}
+          onResume={handleResume}
+          onCancel={handleCancel}
+        />
+      ))}
+    </div>
+  );
+
   return (
-    <section className="min-w-0 border-t border-line">
-      {!hideHeader && (
-        <button
-          type="button"
-          className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-foreground transition-colors hover:bg-input"
-          onClick={() => setCollapsed((c) => !c)}
-          aria-expanded={!collapsed}
-        >
-          <TargetIcon className="size-3.5" />
-          <span className="truncate">{title}</span>
-          {activeCount > 0 && (
-            <Badge variant="default" className="ml-auto">
-              {activeCount}
-            </Badge>
-          )}
-          {collapsed ? (
-            <ChevronRightIcon className="size-3.5 shrink-0 text-faint" />
-          ) : (
-            <ChevronDownIcon className="size-3.5 shrink-0 text-faint" />
-          )}
-        </button>
-      )}
-      {showBody && error && (
-        <div className="px-3 py-2 text-xs text-destructive">{error}</div>
-      )}
-      {showBody && !error && items.length === 0 && (
-        <div className="px-3 py-2 text-xs text-faint">No missions</div>
-      )}
-      {showBody && !error && items.length > 0 && (
-        <div className={cn("pb-2", hideHeader && "pt-1")}>
-          {items.map((mission) => (
-            <MissionRow
-              key={mission.id}
-              mission={mission}
-              busy={busyMissionId === mission.id}
-              canMutate={canMutate}
-              onOpen={handleOpen}
-              onPause={handlePause}
-              onResume={handleResume}
-              onCancel={handleCancel}
-            />
-          ))}
-        </div>
+    <section className="min-w-0 border-t border-line p-1">
+      {hideHeader ? (
+        body
+      ) : (
+        <Collapsible defaultOpen>
+          <CollapsibleHeader icon={TargetIcon}>
+            {title}
+            {activeCount > 0 && (
+              <Badge variant="default" className="ml-1.5">
+                {activeCount}
+              </Badge>
+            )}
+          </CollapsibleHeader>
+          <CollapsibleContent>{body}</CollapsibleContent>
+        </Collapsible>
       )}
     </section>
   );

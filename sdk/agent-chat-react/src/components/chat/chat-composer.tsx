@@ -51,7 +51,7 @@ import {
   ItemDescription,
   ItemMedia,
   ItemTitle,
-} from "../ui/item";
+} from "@invergent/ui-sdk/item";
 import {
   PromptInput,
   PromptInputBody,
@@ -69,8 +69,8 @@ import {
   CommandGroup,
   CommandItem,
   CommandList,
-} from "../ui/command";
-import { ResponsivePanel } from "../ui/responsive-panel";
+} from "@invergent/ui-sdk/command";
+import { ResponsivePanel } from "@invergent/ui-sdk/responsive-panel";
 import {
   ComposerCommandMenu,
   type ComposerMenuMode,

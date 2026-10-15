@@ -4,6 +4,8 @@
 // Renders inline [S#] citation markers as clickable chips that resolve
 // against the collected research sources.
 
+import { Badge } from "@invergent/ui-sdk/badge";
+
 import type { AgentChatResearchSource } from "../../types";
 
 export type CitationSegment =
@@ -65,16 +67,18 @@ export function CitationText({
           return <span key={i}>{seg.value}</span>;
         }
         const src = byId.get(seg.value);
+        // A Badge, not a Button: the chip sits inside a line of prose, and
+        // a button's 44px touch height would open a gap in the paragraph.
         return (
-          <button
-            key={i}
-            type="button"
-            title={src ? `${src.title} — ${src.url}` : seg.value}
-            onClick={() => onCitationClick?.(seg.value)}
-            className="mx-0.5 inline-flex items-center rounded-sm bg-muted px-1 text-[10px] font-semibold text-primary hover:bg-primary/10"
-          >
-            {seg.value}
-          </button>
+          <Badge key={i} asChild className="mx-0.5 cursor-pointer hover:bg-foreground/[0.12]">
+            <button
+              type="button"
+              title={src ? `${src.title} — ${src.url}` : seg.value}
+              onClick={() => onCitationClick?.(seg.value)}
+            >
+              {seg.value}
+            </button>
+          </Badge>
         );
       })}
     </>

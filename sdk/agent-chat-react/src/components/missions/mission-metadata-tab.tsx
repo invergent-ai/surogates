@@ -6,6 +6,9 @@
 // are intentionally not repeated here.
 import { Fragment } from "react";
 
+import { TONE, type Tone } from "@invergent/ui-sdk/chip";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
+
 import type { AgentChatMissionSummary } from "../../types";
 
 
@@ -14,14 +17,12 @@ export interface MissionMetadataTabProps {
 }
 
 
-function verdictToneClass(result: string): string {
-  if (result === "satisfied") {
-    return "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400";
-  }
-  if (result === "failed" || result === "blocked") {
-    return "border-destructive/30 bg-destructive/5 text-destructive";
-  }
-  return "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-400";
+/** The judge's verdict as a status tone, shared with the dashboard's
+ * header pill so the two never disagree. */
+export function missionVerdictTone(result: string): Tone {
+  if (result === "satisfied") return "ok";
+  if (result === "failed" || result === "blocked") return "bad";
+  return "warn";
 }
 
 
@@ -88,7 +89,7 @@ export function MissionMetadataTab({ mission }: MissionMetadataTabProps) {
     <div className="space-y-6">
       {mission.lastEvaluationResult ? (
         <section
-          className={`space-y-2 rounded-md border p-4 ${verdictToneClass(mission.lastEvaluationResult)}`}
+          className={`space-y-2 rounded-[10px] p-4 ${TONE[missionVerdictTone(mission.lastEvaluationResult)]}`}
         >
           <div className="font-mono text-[10px] uppercase tracking-widest">
             Last verdict — {mission.lastEvaluationResult}
@@ -111,9 +112,7 @@ export function MissionMetadataTab({ mission }: MissionMetadataTabProps) {
         </section>
       ) : null}
       <section>
-        <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-          Identifiers
-        </div>
+        <SectionLabel label="Identifiers" className="mb-2 pl-0" />
         <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
           {rows.map((r) => (
             <Fragment key={r.label}>

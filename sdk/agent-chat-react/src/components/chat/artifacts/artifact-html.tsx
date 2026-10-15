@@ -12,6 +12,8 @@
 // the whole point of this artifact kind is that it renders as-is.
 
 import { useMemo, useState } from "react";
+import { MinusIcon, PlusIcon } from "lucide-react";
+import { Button } from "@invergent/ui-sdk/button";
 import { cn } from "../../../lib/utils";
 import type { HtmlArtifactSpec } from "../../../types";
 
@@ -116,43 +118,47 @@ export function ArtifactHtml({
       </div>
       <div className="flex items-center justify-between">
         {spec.caption ? <span>{spec.caption}</span> : <span />}
-        <div className="flex items-center gap-2 ">
-          <button
-            type="button"
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon-xs"
             onClick={() => setZoom((z) => clamp(z - ZOOM_STEP))}
             disabled={zoom <= MIN_ZOOM}
-            className="hover:text-foreground disabled:opacity-40 cursor-pointer"
+            className="text-muted-foreground hover:text-foreground"
             aria-label="zoom out"
           >
-            −
-          </button>
-          <button
-            type="button"
+            <MinusIcon />
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
             onClick={() => setZoom(1)}
-            className="tabular-nums hover:text-foreground"
+            className="font-normal tabular-nums text-muted-foreground hover:text-foreground"
             aria-label="reset zoom"
           >
             {Math.round(zoom * 100)}%
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-xs"
             onClick={() => setZoom((z) => clamp(z + ZOOM_STEP))}
             disabled={zoom >= MAX_ZOOM}
-            className="hover:text-foreground disabled:opacity-40"
+            className="text-muted-foreground hover:text-foreground"
             aria-label="zoom in"
           >
-            +
-          </button>
+            <PlusIcon />
+          </Button>
           {!fill && (
             <>
-              <span className="text-border">|</span>
-              <button
-                type="button"
+              <span aria-hidden="true" className="h-4 w-px bg-border" />
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => setExpanded((v) => !v)}
-                className="hover:text-foreground"
+                className="font-normal text-muted-foreground hover:text-foreground"
               >
-                {expanded ? "collapse" : "expand"}
-              </button>
+                {expanded ? "Collapse" : "Expand"}
+              </Button>
             </>
           )}
         </div>

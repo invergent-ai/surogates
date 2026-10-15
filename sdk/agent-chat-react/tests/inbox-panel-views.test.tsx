@@ -129,14 +129,14 @@ describe("InboxPanel views", () => {
       kind: ["input_required", "action_required", "governance_gate"],
     });
 
-    await clickText("updates");
+    await clickText("Updates");
     expect(harness.listInputs[1]).toMatchObject({
       status: ["pending"],
       kind: ["task_complete", "progress_checkin"],
     });
 
     // History is about what is finished, whatever kind it was.
-    await clickText("history");
+    await clickText("History");
     expect(harness.listInputs[2]).toMatchObject({
       status: ["acknowledged", "responded", "expired"],
     });
@@ -153,7 +153,7 @@ describe("InboxPanel views", () => {
     expect(view.textContent).toContain("Which colour?");
     expect(view.textContent).not.toContain("Wrote the file");
 
-    await clickText("updates");
+    await clickText("Updates");
     expect(view.textContent).toContain("Wrote the file");
     expect(view.textContent).not.toContain("Which colour?");
   });
@@ -164,7 +164,7 @@ describe("InboxPanel views", () => {
     const items = [inboxItem({ id: 1, kind: "task_complete", title: "First" })];
     const harness = createHarness(items);
     const view = await mount(harness.adapter);
-    await clickText("updates");
+    await clickText("Updates");
 
     items.push(
       inboxItem({ id: 2, kind: "task_complete", title: "Arrived later" }),

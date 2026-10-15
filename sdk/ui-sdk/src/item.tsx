@@ -2,8 +2,12 @@ import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { Slot } from "radix-ui"
 
-import { cn } from "../../lib/utils"
-import { Separator } from "@invergent/ui-sdk/separator"
+import { cn } from "./lib/utils"
+import { Separator } from "./separator"
+
+// A content row (media, title, description, actions) in the Work look:
+// rounded, a hairline border when outlined, sentence-case 13px titles over a
+// muted description. For a navigation row use `list-row` instead.
 
 function ItemGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
@@ -27,20 +31,20 @@ function ItemSeparator({
     <Separator
       data-slot="item-separator"
       orientation="horizontal"
-      className={cn("my-2", className)}
+      className={cn("my-2 bg-foreground/[0.06]", className)}
       {...props}
     />
   )
 }
 
 const itemVariants = cva(
-  "group/item flex w-full flex-wrap items-center rounded-none border text-sm transition-colors duration-100 outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 [a]:transition-colors [a]:hover:bg-muted",
+  "group/item flex w-full flex-wrap items-center rounded-[10px] border text-sm transition-colors duration-100 outline-none focus-visible:ring-2 focus-visible:ring-ring/40 [a]:transition-colors [a]:hover:bg-foreground/[0.04]",
   {
     variants: {
       variant: {
         default: "border-transparent",
-        outline: "border-border",
-        muted: "border-transparent bg-muted/50",
+        outline: "border-foreground/10",
+        muted: "border-transparent bg-foreground/[0.04]",
       },
       size: {
         default: "gap-3.5 px-4 py-3.5",
@@ -82,8 +86,10 @@ const itemMediaVariants = cva(
       variant: {
         default: "bg-transparent",
         icon: "[&_svg:not([class*='size-'])]:size-4",
+        // A thumbnail: the 9px tile of Work's option cards, square at the
+        // inline (xs) size where a corner would eat the picture.
         image:
-          "size-10 overflow-hidden rounded-none group-data-[size=sm]/item:size-8 group-data-[size=xs]/item:size-6 group-data-[size=xs]/item:rounded-none [&_img]:size-full [&_img]:object-cover",
+          "size-10 overflow-hidden rounded-[9px] group-data-[size=sm]/item:size-8 group-data-[size=xs]/item:size-6 group-data-[size=xs]/item:rounded-none [&_img]:size-full [&_img]:object-cover",
       },
     },
     defaultVariants: {
@@ -125,7 +131,7 @@ function ItemTitle({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="item-title"
       className={cn(
-        "line-clamp-1 flex w-fit items-center gap-2 text-xs leading-snug font-semibold uppercase underline-offset-4",
+        "line-clamp-1 flex w-fit items-center gap-2 text-[13px] leading-snug font-medium text-foreground",
         className
       )}
       {...props}
@@ -138,7 +144,7 @@ function ItemDescription({ className, ...props }: React.ComponentProps<"p">) {
     <p
       data-slot="item-description"
       className={cn(
-        "line-clamp-2 text-left text-sm leading-relaxed font-normal text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
+        "line-clamp-2 text-left text-[12.5px] leading-relaxed font-normal text-muted-foreground [&>a]:text-amber-500 [&>a:hover]:text-amber-400",
         className
       )}
       {...props}

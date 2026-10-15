@@ -10,10 +10,12 @@
 // EXPERT_ENDORSE or EXPERT_OVERRIDE into the event log.
 
 import { useState } from "react";
-import { ChevronRightIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
+import { ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { Textarea } from "@invergent/ui-sdk/textarea";
 import { Button } from "@invergent/ui-sdk/button";
+import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
+import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { MessageResponse } from "../../ai-elements/message";
 import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
@@ -94,42 +96,29 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
   const failed = Boolean(result?.error);
 
   return (
-    <div className="space-y-1">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className={cn(
-          "flex w-fit max-w-full items-center gap-1.5 rounded-md px-0 py-0.5",
-          "text-sm text-muted-foreground hover:text-foreground transition-colors"
-        )}
-      >
-        <ChevronRightIcon
-          className={cn(
-            "size-3 shrink-0 transition-transform duration-150",
-            expanded && "rotate-90",
+    <Collapsible open={expanded} onOpenChange={setExpanded} className="space-y-1">
+      <CollapsibleHeader className="-ml-2 w-fit max-w-full">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 font-medium text-foreground">Consulted expert</span>
+          {expertName && (
+            <span className="truncate text-muted-foreground">· {expertName}</span>
           )}
-        />
-        <span className="font-semibold text-foreground">Consulted expert</span>
-        {expertName && (
-          <span className="text-muted-foreground">· {expertName}</span>
-        )}
-        {failed && <span className="text-red-500">· failed</span>}
-      </button>
+          {failed && <span className="shrink-0 text-red-500">· failed</span>}
+        </span>
+      </CollapsibleHeader>
 
-      {expanded && (
-        <div className="ml-6 mt-0.5 space-y-1.5 text-sm">
-          {question && (
-            <ExpertDetail label="Question" content={question} />
-          )}
-          {result?.summary && (
-            <ExpertDetail
-              label={failed ? "Error" : "Response"}
-              content={result.summary}
-              tone={failed ? "error" : "default"}
-            />
-          )}
-        </div>
-      )}
+      <CollapsibleContent className="ml-6 mt-0.5 space-y-1.5 text-sm">
+        {question && (
+          <ExpertDetail label="Question" content={question} />
+        )}
+        {result?.summary && (
+          <ExpertDetail
+            label={failed ? "Error" : "Response"}
+            content={result.summary}
+            tone={failed ? "error" : "default"}
+          />
+        )}
+      </CollapsibleContent>
 
       {canRate && (
         <div className="ml-6 mt-1 space-y-1.5">
@@ -191,7 +180,7 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
           )}
         </div>
       )}
-    </div>
+    </Collapsible>
   );
 }
 
