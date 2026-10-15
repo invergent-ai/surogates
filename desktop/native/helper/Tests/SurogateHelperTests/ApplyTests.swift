@@ -135,16 +135,37 @@ final class VerifyTests: FolderTestCase {
     }
   }
 
-  func testTakesItsRequirementFromItsOwnTeamAndATestsOnlyWhereItNamesNone() throws {
-    XCTAssertEqual(requirement(team: "ABCDE12345"), "identifier \"ai.invergent.surogate\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\"")
+  func testTakesItsRequirementFromItsOwnTeamsDeveloperIDAndATestsOnlyWhereItIsSignedAdHoc() throws {
+    let developerIDForm = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13]"
+      + " and certificate leaf[subject.OU] = \"ABCDE12345\""
+    XCTAssertEqual(developerID(team: "ABCDE12345"), developerIDForm)
+    XCTAssertEqual(requirement(team: "ABCDE12345"), "identifier \"ai.invergent.surogate\" and \(developerIDForm)")
     for team in ["", "ABCDE1234", "abcde12345", "ABCDE12345\"", "ABCDE 2345", "ABCDE123456"] { XCTAssertNil(requirement(team: team), team) }
+    // Each is a requirement the Security framework reads.
+    for text in [developerIDForm, try XCTUnwrap(requirement(team: "ABCDE12345"))] {
+      var read: SecRequirement?
+      XCTAssertEqual(SecRequirementCreateWithString(text as CFString, [], &read), errSecSuccess, text)
+    }
     let given = [testRequirement: "identifier \"x\""]
-    XCTAssertEqual(try policy(team: "ABCDE12345", environment: given), Policy(requirement: requirement(team: "ABCDE12345")!, assess: true))
-    XCTAssertEqual(try policy(team: nil, environment: given), Policy(requirement: "identifier \"x\"", assess: false))
-    XCTAssertThrowsError(try policy(team: nil, environment: [:])) { error in
+    XCTAssertEqual(try policy(signer: .team("ABCDE12345"), environment: given), Policy(requirement: requirement(team: "ABCDE12345")!, assess: true))
+    XCTAssertEqual(try policy(signer: .adHoc, environment: given), Policy(requirement: "identifier \"x\"", assess: false))
+    XCTAssertThrowsError(try policy(signer: .adHoc, environment: [:])) { error in
       XCTAssertEqual("\(error)", "this helper is not signed, and no test requirement is named")
     }
-    XCTAssertThrowsError(try policy(team: "abc", environment: given))
+    XCTAssertThrowsError(try policy(signer: .team("abc"), environment: given))
+  }
+
+  func testTakesItsSignatureForAdHocOnlyWhereItsSigningInformationSaysSo() throws {
+    let (flags, team, certificates) = (kSecCodeInfoFlags as String, kSecCodeInfoTeamIdentifier as String, kSecCodeInfoCertificates as String)
+    XCTAssertEqual(try signer(of: [flags: NSNumber(value: 0x0002)]), .adHoc)
+    XCTAssertEqual(try signer(of: [flags: NSNumber(value: 0x0002 | 0x10000)]), .adHoc)
+    XCTAssertEqual(try signer(of: [team: "ABCDE12345", flags: NSNumber(value: 0x10000), certificates: [NSObject()]]), .team("ABCDE12345"))
+    // No team is not ad hoc: what says neither, a signature with certificates, and an answer of another form are refused.
+    let refused: [[String: Any]] = [
+      [:], [flags: NSNumber(value: 0)], [flags: NSNumber(value: 0x10000)], [flags: NSNumber(value: 0x0002), certificates: [NSObject()]],
+      [flags: "2"], [team: "abc", flags: NSNumber(value: 0x0002)], [team: 42],
+    ]
+    for information in refused { XCTAssertThrowsError(try signer(of: information), "\(information)") }
   }
 
   func testComparesVersionsAsNumbersPartByPart() {

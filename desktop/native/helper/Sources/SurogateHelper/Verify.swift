@@ -4,6 +4,7 @@
 // its nested code too; Surogate's bundle identifier and this helper's own Team ID, by a code requirement; accepted by
 // Gatekeeper; and of the version asked for, newer than the app's, never older or the same.
 
+import Darwin
 import Foundation
 import Security
 
@@ -24,26 +25,72 @@ func words(_ status: OSStatus) -> String {
   (SecCopyErrorMessageString(status, nil) as String?) ?? "OSStatus \(status)"
 }
 
-/// The Team ID this helper's own signature names: SecCodeCopySelf(_:_:), SecCodeCopyStaticCode(_:_:_:) and
-/// SecCodeCopySigningInformation(_:_:_:) with kSecCSSigningInformation, whose kSecCodeInfoTeamIdentifier is the team's
-/// (Apple, Security, Code Signing Services). Nil for a helper signed ad hoc, whose signature names no team.
-public func ownTeam() -> String? {
-  var running: SecCode?
-  guard SecCodeCopySelf([], &running) == errSecSuccess, let running else { return nil }
-  var code: SecStaticCode?
-  guard SecCodeCopyStaticCode(running, [], &code) == errSecSuccess, let code else { return nil }
-  var information: CFDictionary?
-  let flags = SecCSFlags(rawValue: UInt32(kSecCSSigningInformation))
-  guard SecCodeCopySigningInformation(code, flags, &information) == errSecSuccess, let information else { return nil }
-  return ((information as NSDictionary) as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
+/// Who signed a program: a team, by its Team ID; or nobody but the program itself, ad hoc, as a development build's and
+/// the tests' helper is signed.
+public enum Signer: Equatable {
+  case team(String)
+  case adHoc
 }
 
-/// The code requirement an update must meet (Apple, "Code Signing Requirement Language"): Surogate's identifier, signed
-/// by a certificate that chains to Apple and that Apple issued to *team*. Nil for a Team ID that is not one: ten capital
-/// letters and digits.
-public func requirement(team: String) -> String? {
+// The flag of a signature made ad hoc in a code's signature flags: kSecCodeSignatureAdhoc, 0x0002 (Apple, Security,
+// CSCommon.h, SecCodeSignatureFlags).
+let adHocFlag: UInt32 = 0x0002
+
+/// Who signed the code whose signing information, SecCodeCopySigningInformation(_:_:_:)'s with kSecCSSigningInformation
+/// (Apple, Security, Code Signing Services), is *information*: the team its kSecCodeInfoTeamIdentifier names; or ad hoc,
+/// only where it says so, its kSecCodeInfoFlags holding kSecCodeSignatureAdhoc and no kSecCodeInfoCertificates given.
+/// Throws for anything else: no answer is taken as ad hoc for want of a team.
+public func signer(of information: [String: Any]) throws -> Signer {
+  if let named = information[kSecCodeInfoTeamIdentifier as String] {
+    guard let team = named as? String, developerID(team: team) != nil else { throw Refusal("this helper's own signature names a Team ID it cannot take") }
+    return .team(team)
+  }
+  guard let flags = (information[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value, flags & adHocFlag != 0,
+    information[kSecCodeInfoCertificates as String] == nil else {
+    throw Refusal("this helper's own signature names no team, and is not one made ad hoc")
+  }
+  return .adHoc
+}
+
+/// Who signed this helper, as the running code itself says: SecCodeCopySelf(_:_:) and SecCodeCopySigningInformation(_:_:_:)
+/// on that running code, which SecCodeCheckValidity(_:_:_:) then checks as the kernel holds it, valid and, where it
+/// names a team, a Developer ID of that team's (Apple, Security, Code Signing Services). So no copy of it on disk,
+/// changed or unlinked since it started, speaks for it. Any of those calls that fails is a refusal.
+public func ownSigner() throws -> Signer {
+  var running: SecCode?
+  var status = SecCodeCopySelf([], &running)
+  guard status == errSecSuccess, let running else { throw Refusal("this helper's own code cannot be read: \(words(status))") }
+  var information: CFDictionary?
+  let flags = SecCSFlags(rawValue: UInt32(kSecCSSigningInformation))
+  status = SecCodeCopySigningInformation(unsafeBitCast(running, to: SecStaticCode.self), flags, &information)
+  guard status == errSecSuccess, let information, let read = (information as NSDictionary) as? [String: Any] else {
+    throw Refusal("this helper's own signature cannot be read: \(words(status))")
+  }
+  let found = try signer(of: read)
+  var requirement: SecRequirement?
+  if case .team(let team) = found {
+    status = SecRequirementCreateWithString((developerID(team: team) ?? "") as CFString, [], &requirement)
+    guard status == errSecSuccess, requirement != nil else { throw Refusal("this helper's own team cannot be checked: \(words(status))") }
+  }
+  status = SecCodeCheckValidity(running, [], requirement)
+  guard status == errSecSuccess else { throw Refusal("this helper's own signature does not check out: \(words(status))") }
+  return found
+}
+
+/// The code requirement of a Developer ID of *team*'s, in the form codesign writes one: a certificate chain to Apple,
+/// Apple's Developer ID intermediate (1.2.840.113635.100.6.2.6), a Developer ID Application leaf
+/// (1.2.840.113635.100.6.1.13), and the team as the leaf's organizational unit (Apple, "Code Signing Requirement
+/// Language"). Nil for a Team ID that is not one: ten capital letters and digits.
+public func developerID(team: String) -> String? {
   guard team.utf8.count == 10, team.utf8.allSatisfy({ (65...90).contains($0) || (48...57).contains($0) }) else { return nil }
-  return "identifier \"\(bundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+  return "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13]"
+    + " and certificate leaf[subject.OU] = \"\(team)\""
+}
+
+/// The code requirement an update must meet: Surogate's identifier, signed by a Developer ID of *team*'s. Nil for a
+/// Team ID that is not one.
+public func requirement(team: String) -> String? {
+  developerID(team: team).map { "identifier \"\(bundleIdentifier)\" and \($0)" }
 }
 
 /// How this helper checks an update: the requirement it must meet, and whether Gatekeeper is asked of it.
@@ -60,23 +107,26 @@ public struct Policy: Equatable {
 /// The variable a helper signed ad hoc, as a development build's and the tests' are, reads its requirement from.
 public let testRequirement = "SUROGATE_TEST_REQUIREMENT"
 
-/// This helper's policy, by the Team ID its own signature names, *team*: Surogate's identifier and that team, with
-/// Gatekeeper's assessment. A helper whose signature names no team, signed ad hoc, takes the requirement *environment*
-/// names in SUROGATE_TEST_REQUIREMENT, and no other, and asks no Gatekeeper, which accepts nothing signed ad hoc. A
-/// signed helper never reads it.
-public func policy(team: String?, environment: [String: String]) throws -> Policy {
-  if let team {
+/// This helper's policy, by who signed it, *signer*: for a team, Surogate's identifier and that team's Developer ID,
+/// with Gatekeeper's assessment. A helper signed ad hoc takes the requirement *environment* names in
+/// SUROGATE_TEST_REQUIREMENT, and no other, and asks no Gatekeeper, which accepts nothing signed ad hoc. A helper a
+/// team signed never reads it.
+public func policy(signer: Signer, environment: [String: String]) throws -> Policy {
+  switch signer {
+  case .team(let team):
     guard let text = requirement(team: team) else { throw Refusal("this helper's own signature names a Team ID it cannot take, \(team)") }
     return Policy(requirement: text, assess: true)
+  case .adHoc:
+    guard let text = environment[testRequirement], !text.isEmpty else { throw Refusal("this helper is not signed, and no test requirement is named") }
+    return Policy(requirement: text, assess: false)
   }
-  guard let text = environment[testRequirement], !text.isEmpty else { throw Refusal("this helper is not signed, and no test requirement is named") }
-  return Policy(requirement: text, assess: false)
 }
 
 /// Whether the bundle at *path* is signed whole and meets the requirement *text*: SecStaticCodeCreateWithPath(_:_:_:),
 /// SecRequirementCreateWithString(_:_:_:) and SecStaticCodeCheckValidity(_:_:_:), with each architecture, the nested
 /// code and the strict checks that codesign --verify --strict --deep makes (kSecCSCheckAllArchitectures,
-/// kSecCSCheckNestedCode, kSecCSStrictValidate). Throws why not.
+/// kSecCSCheckNestedCode, kSecCSStrictValidate), and no link in it that leads outside it (kSecCSRestrictSymlinks).
+/// Throws why not.
 public func checkSignature(_ path: String, requirement text: String) throws {
   var code: SecStaticCode?
   var status = SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code)
@@ -84,7 +134,8 @@ public func checkSignature(_ path: String, requirement text: String) throws {
   var requirement: SecRequirement?
   status = SecRequirementCreateWithString(text as CFString, [], &requirement)
   guard status == errSecSuccess, let requirement else { throw Refusal("\(text) is no code requirement: \(words(status))") }
-  let flags = SecCSFlags(rawValue: UInt32(kSecCSCheckAllArchitectures) | UInt32(kSecCSCheckNestedCode) | UInt32(kSecCSStrictValidate))
+  let flags = SecCSFlags(rawValue: UInt32(kSecCSCheckAllArchitectures) | UInt32(kSecCSCheckNestedCode) | UInt32(kSecCSStrictValidate)
+    | UInt32(kSecCSRestrictSymlinks))
   status = SecStaticCodeCheckValidity(code, flags, requirement)
   guard status == errSecSuccess else { throw Refusal("\(path) is not Surogate's, signed whole: \(words(status))") }
 }
@@ -146,10 +197,24 @@ public func bundleVersion(_ bundle: String) -> String? {
   return version
 }
 
-/// The bundle at *staged* checked as the update of the app at *app* to *version*, by *policy*: of that version, and
-/// newer than the app's; its signature whole, meeting the policy's requirement; and accepted by Gatekeeper where the
-/// policy asks it (*assessing*). Throws why not.
+/// Why *staged* is not a bundle this user, *uid*, staged beside the app at *app*, or nil: by lstat(2), a real folder and
+/// no link to one, this user's own, and on the volume of the folder that holds the app (st_dev), where a rename keeps
+/// it what it is.
+public func stagedRefusal(_ staged: String, app: String, uid: uid_t = getuid()) -> String? {
+  var found = stat()
+  var parent = stat()
+  guard lstat(staged, &found) == 0, stat(parentOf(app), &parent) == 0 else { return "\(staged) is not there to check" }
+  guard (found.st_mode & S_IFMT) == S_IFDIR else { return "\(staged) is not a folder" }
+  guard found.st_uid == uid else { return "\(staged) is not this user's" }
+  guard found.st_dev == parent.st_dev else { return "\(staged) is not on the disk that holds \(parentOf(app))" }
+  return nil
+}
+
+/// The bundle at *staged* checked as the update of the app at *app* to *version*, by *policy*: this user's own folder
+/// beside it (stagedRefusal); of that version, and newer than the app's; its signature whole, meeting the policy's
+/// requirement; and accepted by Gatekeeper where the policy asks it (*assessing*). Throws why not.
 public func verify(staged: String, app: String, version: String, policy: Policy, assessing: (String) throws -> Void = { try assess($0) }) throws {
+  if let why = stagedRefusal(staged, app: app) { throw Refusal(why) }
   guard let installed = bundleVersion(app) else { throw Refusal("\(app) names no version of its own") }
   guard bundleVersion(staged) == version else { throw Refusal("the staged bundle is not Surogate \(version)") }
   guard isNewer(version, than: installed) else { throw Refusal("Surogate \(version) is not newer than the version installed, \(installed)") }

@@ -82,13 +82,20 @@ public func unmovable(_ app: String, readOnly: (String) -> Bool = mountedReadOnl
   return nil
 }
 
+/// A process of this user's but this one that runs a program from inside the bundle *app*, among *processes*; nil for
+/// none.
+public func runningFrom(_ app: String, among processes: [RunningProcess] = runningProcesses(), except own: pid_t = getpid()) -> RunningProcess? {
+  processes.first { $0.pid != own && $0.path.hasPrefix(app + "/") }
+}
+
 /// *update* put in place by *policy*: once the app's process has ended, within *seconds*; where the app may be updated
-/// where it is; and where the staged bundle is still the update asked for (verify). Then the two bundles' names are
-/// exchanged in one step, renamex_np(2) with RENAME_SWAP (Apple, rename(2): "the two names are exchanged atomically",
-/// on a volume that supports it, as APFS does), and the version replaced, at the staged name now, is renamed
+/// where it is; and where the staged bundle is still the update asked for (verify). Then, where no process of this
+/// user's still runs from the app (*running*), as another start of it would, the two bundles' names are exchanged in
+/// one step, renamex_np(2) with RENAME_SWAP (Apple, rename(2): "the two names are exchanged atomically", on a volume
+/// that supports it, as APFS does), and the version replaced, at the staged name now, is renamed
 /// .Surogate-<its version>.previous beside the app. How it ended, and why where it did not.
 public func apply(_ update: Update, policy: Policy, within seconds: Double = quitSeconds, readOnly: (String) -> Bool = mountedReadOnly,
-  assessing: (String) throws -> Void = { try assess($0) }) -> (ApplyEnd, String) {
+  assessing: (String) throws -> Void = { try assess($0) }, running: (String) -> RunningProcess? = { runningFrom($0) }) -> (ApplyEnd, String) {
   guard ended(update.pid, within: seconds) else { return (.didNotQuit, "Surogate did not quit within \(Int(seconds)) s, so nothing was installed") }
   if let why = unmovable(update.app, readOnly: readOnly) { return (.notSwapped, "\(why), so nothing was installed") }
   let replaced = bundleVersion(update.app)
@@ -96,6 +103,10 @@ public func apply(_ update: Update, policy: Policy, within seconds: Double = qui
     try verify(staged: update.staged, app: update.app, version: update.version, policy: policy, assessing: assessing)
   } catch {
     return (.notThisApps, "\(error), so nothing was installed")
+  }
+  // Last before the swap: an app that runs from its bundle keeps it, as its own files are read by their names.
+  if let other = running(update.app) {
+    return (.didNotQuit, "Surogate still runs from \(update.app), as process \(other.pid), so nothing was installed")
   }
   guard renamex_np(update.staged, update.app, UInt32(RENAME_SWAP)) == 0 else {
     return (.notSwapped, "\(update.app) and its update could not be swapped: \(String(cString: strerror(errno))), so nothing was installed")

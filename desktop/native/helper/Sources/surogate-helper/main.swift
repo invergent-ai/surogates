@@ -6,8 +6,8 @@
 //           whether the bundle staged beside the app is its update to that version (Verify.swift): ends 0, or 3 and why
 //   apply --wait <pid> --staged <path> --app <path> --version <x.y.z>
 //           that update put in the app's place once the app's process has ended, and the app opened (Apply.swift):
-//           "waiting" once it waits; how it ended, a line of JSON on descriptor 3, for the app's next start; ends 0, 3, 4
-//           or 5
+//           "waiting" once it waits, and not where it refuses before that; how it ended, a line of JSON on descriptor 3,
+//           the file the app locked for as long as an apply holds it, for the app's next start; ends 0, 3, 4 or 5
 //   remove --wait <pid> [--app <path>] [--forget <folder>]…
 //           the app removed from this Mac once its process has ended (Remove.swift): "waiting" once it waits
 // It reads no environment and no file of the caller's but the bundles an update's commands are given, and the test's
@@ -64,23 +64,25 @@ case "verify":
   let given = Array(arguments.dropFirst())
   guard given.count == 6, given[0] == "--staged", given[2] == "--app", given[4] == "--version" else { fail(usage, 2) }
   do {
-    let checking = try policy(team: ownTeam(), environment: ProcessInfo.processInfo.environment)
+    let checking = try policy(signer: try ownSigner(), environment: ProcessInfo.processInfo.environment)
     try verify(staged: given[1], app: given[3], version: given[5], policy: checking)
   } catch {
     fail("\(error)", ApplyEnd.notThisApps.rawValue)
   }
 case "apply":
   guard let update = updateArguments(Array(arguments.dropFirst())) else { fail(usage, 2) }
-  waiting()
-  var end = ApplyEnd.notThisApps
-  var why = ""
+  // Who signed this helper is known before the app is told to quit: one that refuses here leaves the app up to say why.
+  let checking: Policy
   do {
-    let checking = try policy(team: ownTeam(), environment: ProcessInfo.processInfo.environment)
-    (end, why) = apply(update, policy: checking)
+    checking = try policy(signer: try ownSigner(), environment: ProcessInfo.processInfo.environment)
   } catch {
-    why = "\(error), so nothing was installed"
+    fail("\(error), so nothing was installed", ApplyEnd.notThisApps.rawValue)
   }
+  waiting()
+  let (end, why) = apply(update, policy: checking)
   keep(resultLine(version: update.version, end: end, said: why))
+  // The file goes, and its lock with it, before the app is opened: a start that finds it locked takes an apply to run.
+  _ = close(3)
   said(why)
   // The app again, whichever version is in its place now; but where it has not quit, which still runs.
   if end != .didNotQuit { openApp(update.app) }
