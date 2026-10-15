@@ -204,3 +204,38 @@ async def test_a_fixed_roster_is_unchanged(sf):
     [row] = await _rows(sf, occ)
     assert row.user_id == user
     assert row.delivery_state == "queued"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("once", [True, False])
+async def test_a_once_per_person_step_reaches_each_person_once_inside_its_window(sf, once):
+    reached = await _enrol(sf, start=LOCAL_TODAY - timedelta(days=21))
+    skipped = await _enrol(sf, start=LOCAL_TODAY - timedelta(days=21))
+    schedule = _schedule({"protocol": "post-op", "day_from": 21, "day_to": 35})
+    if once:
+        schedule.config["once_per_person"] = True
+    phones = {reached: "40700000001", skipped: "40700000002"}
+
+    first = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=_lookup(phones), now=NOW,
+    )
+    async with sf() as db:
+        await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.user_id == skipped)
+            .values(delivery_state="skipped")
+        )
+        await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.user_id == reached)
+            .values(delivery_state="delivered", response_state="completed")
+        )
+        await db.commit()
+    assert {r.user_id for r in await _rows(sf, first)} == {reached, skipped}
+
+    week_later = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=_lookup(phones),
+        now=NOW + timedelta(days=7),
+    )
+    again = {r.user_id for r in await _rows(sf, week_later)}
+    assert again == ({skipped} if once else {reached, skipped})

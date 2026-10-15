@@ -140,6 +140,29 @@ async def _is_open(db, schedule, person, configs: dict, seen: dict) -> bool:
     return seen[person]
 
 
+async def _already_reached(
+    session_factory: Any, program_id: uuid.UUID, people: list[uuid.UUID],
+) -> set[uuid.UUID]:
+    """Who of *people* this Program already sent its step to, themselves or
+    through a contact.  A skipped, canceled or failed row reached nobody, so
+    they are tried again on the next matching day."""
+    if not people:
+        return set()
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(ProgramInvitationRow.user_id, ProgramInvitationRow.person_user_id)
+                .where(ProgramInvitationRow.program_id == program_id)
+                .where(ProgramInvitationRow.delivery_state.notin_(("skipped", "canceled", "failed")))
+                .where(sa.or_(
+                    ProgramInvitationRow.user_id.in_(people),
+                    ProgramInvitationRow.person_user_id.in_(people),
+                ))
+            )
+        ).all()
+    return {uid for row in rows for uid in row if uid is not None} & set(people)
+
+
 async def materialize_occurrence(
     schedule: Any,
     *,
@@ -168,6 +191,11 @@ async def materialize_occurrence(
         session_factory=session_factory, identity_lookup=identity_lookup,
         with_last_inbound=pause is not None,
     )
+    if config.get("once_per_person"):
+        reached = await _already_reached(
+            session_factory, schedule.program_id, [user_id for user_id, *_ in roster],
+        )
+        roster = [entry for entry in roster if entry[0] not in reached]
     # Each followed person's step also goes to every confirmed contact: one
     # row per recipient, all carrying the person.  The person's own rows come
     # first, so a recipient who is also someone else's contact keeps their own.
