@@ -1,8 +1,8 @@
 // The scripts that fetch the app's own node and rg for the computer the app is built on (scripts/node.sh, scripts/rg.sh),
 // each run in a package of its own with every program it starts but the shell's own a fake that writes down how it was
 // started: uname answers as the computer the test names, and nothing is downloaded. So each computer's commands are
-// read one by one, Linux's as they were before Windows had any, and a computer neither script builds for is refused
-// before anything is fetched.
+// read one by one, Linux's as they were before Windows and macOS had any, and a computer neither script builds for is
+// refused before anything is fetched.
 
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,9 +13,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
-const FAKED = ["curl", "sha256sum", "tar", "strip", "unzip", "mv"];
+const FAKED = ["curl", "sha256sum", "shasum", "tar", "strip", "unzip", "mv"];
 const LINUX = ["Linux", "x86_64"] as const;
 const WINDOWS = ["MINGW64_NT-10.0-26100", "x86_64"] as const;
+const MAC = ["Darwin", "arm64"] as const;
 let dir: string;
 
 beforeEach(() => {
@@ -40,7 +41,7 @@ function run(script: string, [system, machine]: readonly [string, string], faili
   copyFileSync(join(PACKAGE, "scripts", script), join(at, "package", "scripts", script));
   writeFileSync(join(fakes, "uname"), `#!/bin/sh\ncase "$1" in -s) echo '${system}' ;; -m) echo '${machine}' ;; esac\n`);
   for (const name of FAKED) {
-    const said = name === "sha256sum" ? `read -r input; echo "${name} $* < $input"` : `echo "${name} $*"`;
+    const said = name === "sha256sum" || name === "shasum" ? `read -r input; echo "${name} $* < $input"` : `echo "${name} $*"`;
     writeFileSync(join(fakes, name), `#!/bin/bash\n{ ${said}; } >>'${log}'\nexit ${name === failing ? 1 : 0}\n`);
   }
   for (const name of ["uname", ...FAKED]) chmodSync(join(fakes, name), 0o755);
@@ -78,12 +79,27 @@ describe("scripts/node.sh", () => {
     expect(run("node.sh", ["MSYS_NT-10.0-26100", "x86_64"], undefined, ["win32-x64"]).ran[0]).toMatch(/node-v22\.23\.3-win-x64\.zip$/);
   });
 
+  it("fetches for darwin-arm64, on a Mac with Apple silicon, the darwin-arm64 node by its pin, checked by macOS's own shasum, and renames it into place", () => {
+    // Never stripped, and never written over the node there: macOS kills a signed program whose file was written over
+    // in place, at its next start. The release signs it again with the app (scripts/sign-mac.sh).
+    expect(run("node.sh", MAC, undefined, ["darwin-arm64"])).toEqual({
+      status: 0, stderr: "", ran: [
+        "curl -q -fsSL --proto =https -o $tmp/node.tar.gz https://nodejs.org/dist/v22.23.3/node-v22.23.3-darwin-arm64.tar.gz",
+        "shasum -a 256 --check --status < 23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53  $tmp/node.tar.gz",
+        "tar -xzf $tmp/node.tar.gz -C $tmp --strip-components=2 node-v22.23.3-darwin-arm64/bin/node",
+        "mv $tmp/node bin/node.new",
+        "mv -f bin/node.new bin/node",
+      ],
+    });
+  });
+
   it("puts no node in place whose archive is not the pinned one", () => {
-    for (const [computer, args] of [[LINUX, []], [WINDOWS, ["win32-x64"]]] as const) {
-      const { status, ran } = run("node.sh", computer, "sha256sum", [...args]);
+    for (const [computer, args, check] of [[LINUX, [], "sha256sum"], [WINDOWS, ["win32-x64"], "sha256sum"], [MAC, ["darwin-arm64"], "shasum"]] as const) {
+      const { status, ran } = run("node.sh", computer, check, [...args]);
       expect(status, computer[0]).not.toBe(0);
-      expect(ran.map((line) => line.split(" ")[0]), computer[0]).toEqual(["curl", "sha256sum"]);
+      expect(ran.map((line) => line.split(" ")[0]), computer[0]).toEqual(["curl", check]);
     }
+    expect(run("node.sh", MAC, "shasum", ["darwin-arm64"]).stderr).toBe("node.sh: the archive is not the pinned one\n");
   });
 
   it("is the Linux app's build's first step alone on Windows, and refuses it there before it fetches anything", () => {
@@ -94,13 +110,17 @@ describe("scripts/node.sh", () => {
     }
   });
 
-  it("refuses every other computer, and Windows's node anywhere but on Windows on x64, before it fetches anything", () => {
-    const refused = "node.sh fetches the Linux app's node on Linux on x64, and with win32-x64 the Windows app's on Windows on x64\n";
+  it("refuses every other computer, and Windows's and macOS's node anywhere but on their own computers, before it fetches anything", () => {
+    const refused = "node.sh fetches the Linux app's node on Linux on x64, with darwin-arm64 the macOS app's on a Mac with Apple silicon, and with win32-x64 the Windows app's on Windows on x64\n";
     for (const computer of [["Linux", "aarch64"], ["Darwin", "arm64"], ["Darwin", "x86_64"]] as const) {
       expect(run("node.sh", computer), computer.join(" ")).toEqual({ status: 1, stderr: refused, ran: [] });
     }
     for (const computer of [LINUX, ["MINGW64_NT-10.0-26100", "aarch64"], ["Darwin", "arm64"]] as const) {
       expect(run("node.sh", computer, undefined, ["win32-x64"]), computer.join(" ")).toEqual({ status: 1, stderr: refused, ran: [] });
+    }
+    // An Intel Mac is not supported, and macOS's node is fetched on a Mac alone.
+    for (const computer of [LINUX, ["Darwin", "x86_64"], WINDOWS] as const) {
+      expect(run("node.sh", computer, undefined, ["darwin-arm64"]), computer.join(" ")).toEqual({ status: 1, stderr: refused, ran: [] });
     }
     expect(run("node.sh", LINUX, undefined, ["linux-x64"])).toEqual({ status: 1, stderr: refused, ran: [] });
   });
@@ -119,6 +139,17 @@ describe("scripts/rg.sh", () => {
         "sha256sum --check --status < 71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5  $tmp/rg.zip",
         "unzip -q $tmp/rg.zip ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe -d $tmp",
         "mv $tmp/ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe bin/rg.exe",
+      ],
+    });
+  });
+
+  it("fetches on a Mac with Apple silicon ripgrep's own aarch64-apple-darwin release by its pin, checked by macOS's own shasum", () => {
+    expect(run("rg.sh", MAC)).toEqual({
+      status: 0, stderr: "", ran: [
+        "curl -q -fsSL --proto =https -o $tmp/rg.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+        "shasum -a 256 --check --status < 3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4  $tmp/rg.tar.gz",
+        "tar -xzf $tmp/rg.tar.gz -C $tmp ripgrep-15.2.0-aarch64-apple-darwin/rg",
+        "mv $tmp/ripgrep-15.2.0-aarch64-apple-darwin/rg bin/rg",
       ],
     });
   });
