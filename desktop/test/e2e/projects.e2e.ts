@@ -357,23 +357,30 @@ describe("the Projects page", () => {
       return own!.left < drawn!.right && drawn!.left < own!.right && own!.top < drawn!.bottom && drawn!.top < own!.bottom;
     })).toBe(true);
     // A ring of 2 px in its row's colour parts it from the mark, whatever the mark's hue: the dot's
-    // ring, and the row's colour as it is seen, over the sidebar's. Found and read in one evaluation:
-    // the sidebar is drawn again when its projects arrive, and a dot found before that is in no page.
+    // ring as it is seen, its first shadow over its second, and the row's colour as it is seen, over
+    // the sidebar's. Found and read in one evaluation: the sidebar is drawn again when its projects
+    // arrive, and a dot found before that is in no page.
     const ringed = () => page.evaluate((selector) => {
       const found = document.querySelector(selector)!;
       const numbers = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
-      const [shadow, sidebar, row] = [found, document.getElementById("sidebar")!, found.closest(".item")!]
-        .map((each, at) => numbers(at === 0 ? getComputedStyle(each).boxShadow : getComputedStyle(each).backgroundColor));
-      const alpha = row![3] ?? 1;
+      const COLOUR = /rgba?\([^)]*\)/;
+      const over = (top: number[], under: number[]) => {
+        const alpha = top[3] ?? 1;
+        return under.slice(0, 3).map((channel, at) => Math.round(top[at]! * alpha + channel * (1 - alpha)));
+      };
+      const shadows = getComputedStyle(found).boxShadow.split(/,(?![^(]*\))/)
+        .map((shadow) => ({ colour: numbers(shadow.match(COLOUR)![0]), spread: numbers(shadow.replace(COLOUR, "")) }));
+      const [sidebar, row] = [document.getElementById("sidebar")!, found.closest(".item")!]
+        .map((each) => numbers(getComputedStyle(each).backgroundColor));
       return {
-        ring: shadow!.slice(0, 3),
-        spread: shadow!.slice(3),
-        row: sidebar!.slice(0, 3).map((under, channel) => Math.round(row![channel]! * alpha + under * (1 - alpha))),
+        ring: shadows.reduceRight((under: number[], shadow) => over(shadow.colour, under), [0, 0, 0]),
+        spread: shadows.map((shadow) => shadow.spread),
+        row: over(row!, sidebar!),
       };
     }, dot);
     const ringIsItsRows = async () => {
       const { ring, spread, row: seen } = await ringed();
-      expect(spread).toEqual([0, 0, 0, 2]);
+      expect(spread).toEqual([[0, 0, 0, 2], [0, 0, 0, 2]]);
       expect(seen.map((channel, at) => Math.abs(channel - ring[at]!) <= 1)).toEqual([true, true, true]);
       return ring;
     };

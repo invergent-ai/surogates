@@ -437,12 +437,16 @@ body.main.first {
   height: 6px;
   border-radius: 50%;
   background: var(--accent-amber);
-  box-shadow: 0 0 0 2px var(--under, var(--sidebar));
+  /* Two rings, the row's colour drawn over the sidebar's, as the row's own is: the rows' colours
+     are see-through, so the ring shows what the row shows. */
+  box-shadow:
+    0 0 0 2px var(--under, transparent),
+    0 0 0 2px var(--sidebar);
 }
 
-/* The row's colour under the ring: --hover over the sidebar's, as the one colour it shows, and the selected row's. */
+/* The row's colour under the ring: the hovered row's, and the selected row's. */
 .projects .item:hover {
-  --under: light-dark(#e8e7e1, #1f1f1e);
+  --under: var(--hover);
 }
 
 .projects .item.selected {
