@@ -880,8 +880,20 @@ async def test_a_stranger_with_an_open_escalation_is_found_and_their_number_sent
     assert "Maria" not in await team.handle_team_overview({}, **kw)
 
 
+@pytest.mark.asyncio
+async def test_a_masked_number_two_people_share_is_ambiguous(sf, practice):
+    await _person(sf, "Ana Pop", "40711111001")
+    out = await team.handle_team_message_person(
+        {"person": "+40…001", "text": "Hello"}, **_kw(sf, practice.doctor_session),
+    )
+    assert "matches more than one person" in out
+
+
 def test_a_masked_number_matches_its_leading_and_trailing_digits():
     assert team._masked_match("+40…842", ["40700000842"])
     assert team._masked_match("+40...842", ["40700000842"])
     assert not team._masked_match("+40…843", ["40700000842"])
     assert not team._masked_match("+41…842", ["40700000842"])
+    # Masked as it was written, in its national form.
+    assert team._masked_match("+07…842", ["40700000842"])
+    assert not team._masked_match("+08…842", ["40700000842"])
