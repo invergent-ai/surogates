@@ -45,7 +45,7 @@ inside on 16:9), `gap`, `align-items`, `justify-content`. Children flow in it. `
 slide (`left`, `top`, `right`, `bottom`, `width`, `height`; give pinned text a `width`). Flow content paints as one
 layer where its first flow child sits: a pinned backdrop listed before it paints below, anything pinned after it above.
 In a `position:relative` div, pinned children paint over its flow. `hidden` skips the slide; `data-transition="fade|
-push|magic"` is how it leaves.
+push|magic"` is how it arrives from the slide before it.
 
 **Text:** `<h1>` `<h2>` `<h3>` `<p>` (start at 96/64/44/32 px; set `font-size` yourself, **never under 24 px**),
 `<ul>`/`<ol>` of plain `<li>` (one level), `<br>`, and inline `<b>` `<i>` `<u>` `<a href="https://…">` `<span
@@ -90,12 +90,12 @@ and fade or turn single shapes and text boxes instead (a turned text box stays n
 picture). A blurred shadow is a picture behind its shape, which stays editable.
 
 **Motion:** `data-build-in` / `data-build-out="fade|rise|drop|left|right|scale|pop [order N] [auto]"` on the section's
-pinned children. A magic move takes both of these: `data-transition="magic"` on the **first** slide's `<section>` (it
-is how that slide leaves; on an element it does nothing), and the same `id` on a pinned element of each slide. The
-element then moves from its place on the first slide to its place on the next:
+pinned children. A magic move takes both of these: `data-transition="magic"` on the **second** slide's `<section>` (it
+is how that slide arrives; it goes on a `<section>` only), and the same `id` on a pinned element of each slide. The
+element then moves from its place on the first slide to its place on the second:
 
 ```json
-{"op": "slides", "slides": [{"html": "<section data-transition=\"magic\" style=\"background:#14213D;color:#FBFBF8;font-family:Georgia, serif;padding:128px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">Where we are</h2><div id=\"next-step\" style=\"position:absolute;left:128px;top:760px;width:560px;background:#F2C14E;color:#14213D;padding:32px\"><p style=\"font-size:32px\">Next: the budget</p></div></section>"}, {"html": "<section style=\"background:#14213D;color:#FBFBF8;font-family:Georgia, serif;padding:128px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">The budget</h2><div id=\"next-step\" style=\"position:absolute;left:1232px;top:760px;width:560px;background:#F2C14E;color:#14213D;padding:32px\"><p style=\"font-size:32px\">Next: the budget</p></div></section>"}]}
+{"op": "slides", "slides": [{"html": "<section style=\"background:#14213D;color:#FBFBF8;font-family:Georgia, serif;padding:128px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">Where we are</h2><div id=\"next-step\" style=\"position:absolute;left:128px;top:760px;width:560px;background:#F2C14E;color:#14213D;padding:32px\"><p style=\"font-size:32px\">Next: the budget</p></div></section>"}, {"html": "<section data-transition=\"magic\" style=\"background:#14213D;color:#FBFBF8;font-family:Georgia, serif;padding:128px\"><h2 style=\"font-size:72px;font-weight:600;line-height:1.1\">The budget</h2><div id=\"next-step\" style=\"position:absolute;left:1232px;top:760px;width:560px;background:#F2C14E;color:#14213D;padding:32px\"><p style=\"font-size:32px\">Next: the budget</p></div></section>"}]}
 ```
 
 A build or a magic-move `id` inside another moving element is refused, and so is a table inside a moving box: give the

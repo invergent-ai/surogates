@@ -83,22 +83,24 @@ describe("a new deck's empty slide", () => {
 });
 
 describe("a magic move that cannot play", () => {
-  // A slide pinning a card by the id "next-step", and leaving by a magic move or not.
+  // A slide pinning a card by the id "next-step", and arriving by a magic move or not.
   const pinning = (magic: boolean) => ({
     after: null, spec: { ...EMPTY_SPEC, transition: magic ? { effect: "magic", ms: 1000 } : null,
       shapes: [{ kind: "picture", src: "icon:0", x: 0, y: 0, w: 100, h: 100, rot: 0, magic: "next-step" }] },
   });
   const typed = { boxes: [{ text: "Agenda" }] };
+  const NOTE = 'ids match across slides but slide 3 has no data-transition="magic": nothing will move.';
 
-  it("is told: two neighbouring slides share an id, and the first does not leave by a magic move", () => {
-    const { run } = deck([typed]);
-    const out = run({ action: "edit", ops: [{ op: "slides", slides: [pinning(false), pinning(false)] }] });
-    expect(out.results[0].note).toBe('ids match across slides but slide 2 has no data-transition="magic": nothing will move.');
+  it("is told: two neighbouring slides share an id, and the second does not arrive by a magic move", () => {
+    for (const first of [false, true]) {
+      const { run } = deck([typed]);
+      expect(run({ action: "edit", ops: [{ op: "slides", slides: [pinning(first), pinning(false)] }] }).results[0].note).toBe(NOTE);
+    }
   });
 
-  it("says nothing when the first leaves by one", () => {
+  it("says nothing when the second arrives by one", () => {
     const { run } = deck([typed]);
-    expect(run({ action: "edit", ops: [{ op: "slides", slides: [pinning(true), pinning(false)] }] }).results[0].note).toBeUndefined();
+    expect(run({ action: "edit", ops: [{ op: "slides", slides: [pinning(false), pinning(true)] }] }).results[0].note).toBeUndefined();
   });
 });
 

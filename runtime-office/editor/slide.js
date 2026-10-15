@@ -611,14 +611,14 @@
     });
     return { results: results };
   }
-  // Morph moves what two neighbouring slides both name only when the first leaves by it: ids shared with the next
-  // slide built here, on a slide that does not, move nothing.
+  // A slide's transition plays as the slide is entered, so Morph moves what two neighbouring slides both name only when
+  // the second arrives by it: ids shared with the slide built before it here, on a slide that does not, move nothing.
   function magicNote(specs, slides) {
     var names = function (spec) { return spec.shapes.map(function (s) { return s.magic; }).filter(Boolean); };
-    for (var i = 0; i + 1 < specs.length; i++) {
-      if (slides[i + 1].number !== slides[i].number + 1 || (specs[i].transition && specs[i].transition.effect === "magic")) continue;
-      var next = names(specs[i + 1]);
-      if (names(specs[i]).some(function (name) { return next.indexOf(name) >= 0; })) return "ids match across slides but slide " + slides[i].number + " has no data-transition=\"magic\": nothing will move.";
+    for (var i = 1; i < specs.length; i++) {
+      if (slides[i].number !== slides[i - 1].number + 1 || (specs[i].transition && specs[i].transition.effect === "magic")) continue;
+      var before = names(specs[i - 1]);
+      if (names(specs[i]).some(function (name) { return before.indexOf(name) >= 0; })) return "ids match across slides but slide " + slides[i].number + " has no data-transition=\"magic\": nothing will move.";
     }
     return null;
   }

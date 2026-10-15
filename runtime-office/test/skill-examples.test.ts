@@ -82,12 +82,13 @@ describe.skipIf(!chromiumThere)("the slide reference's example slides", () => {
     await expect(measurer.measure(html, { width: 1920, height: 1080, emuPerPx: 6350 }, {} as EditorPage)).resolves.toBeTruthy();
   });
 
-  it("show a magic move: the first slide leaves by it, and both pin the element that moves by one id", async () => {
-    const at = slides.findIndex((slide) => /^<section data-transition="magic"/.test(String(slide.html)));
+  it("show a magic move: the second slide arrives by it, and both pin the element that moves by one id", async () => {
+    const at = slides.findIndex((slide) => /^<section data-transition="magic"/.test(String(slide.html))) - 1;
     expect(at).toBeGreaterThanOrEqual(0);
     const measure = (slide: Raw | undefined) => measurer.measure(String(slide?.html), { width: 1920, height: 1080, emuPerPx: 6350 }, {} as EditorPage);
     const first = await measure(slides[at]), second = await measure(slides[at + 1]);
-    expect(first.transition?.effect).toBe("magic");
+    expect(first.transition).toBeNull();
+    expect(second.transition?.effect).toBe("magic");
     const names = (shapes: { magic?: string }[]) => shapes.flatMap((s) => (s.magic ? [s.magic] : []));
     expect(names(first.shapes).filter((name) => names(second.shapes).includes(name))).toHaveLength(1);
   });
