@@ -1106,14 +1106,15 @@ export function InboxPanel({
             );
           })}
           {nextCursor && (
-            <button
+            <Button
               type="button"
-              className="w-full px-3 py-3 text-sm text-muted-foreground hover:bg-input"
+              variant="ghost"
+              className="w-full"
               onClick={() => void load(nextCursor)}
               disabled={loading}
             >
               {loading ? "Loading" : "Load more"}
-            </button>
+            </Button>
           )}
         </div>
       </aside>

@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { XIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
+import { Button } from "@invergent/ui-sdk/button";
 import { Input } from "@invergent/ui-sdk/input";
 import { MessageResponse } from "../../ai-elements/message";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
@@ -497,15 +498,17 @@ function BatchAsk({
             );
           })}
         </div>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-xs"
           onClick={handleCancel}
-          className="ml-2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="ml-2"
           aria-label="Cancel clarification and stop chat"
           title="Esc — cancel and stop the chat"
         >
           <XIcon className="size-4" />
-        </button>
+        </Button>
       </div>
 
       {/* Prompt */}
@@ -554,29 +557,18 @@ function BatchAsk({
           )}
         </div>
         {allAnswered ? (
-          <button
+          <Button
             type="button"
+            size="sm"
             disabled={submitting}
             onClick={() => void handleSubmit()}
-            className={cn(
-              "shrink-0 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors",
-              "hover:bg-primary/80",
-              "disabled:cursor-not-allowed disabled:opacity-50",
-            )}
           >
             {submitting ? "Submitting…" : "Submit"}
-          </button>
+          </Button>
         ) : (
-          <button
-            type="button"
-            onClick={advance}
-            className={cn(
-              "shrink-0 rounded-md border border-border bg-muted/40 px-4 py-1.5 text-sm font-medium text-foreground transition-colors",
-              "hover:bg-muted",
-            )}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={advance}>
             Next question →
-          </button>
+          </Button>
         )}
       </div>
     </div>

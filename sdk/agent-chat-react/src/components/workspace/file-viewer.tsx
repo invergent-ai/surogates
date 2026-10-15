@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { formatFileSize, getLanguageHint } from "../../lib/format";
 import { cn } from "../../lib/utils";
+import { Button } from "@invergent/ui-sdk/button";
 import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
 import { Skeleton } from "@invergent/ui-sdk/skeleton";
 import type { AgentChatWorkspaceFile } from "../../types";
@@ -65,35 +66,39 @@ export function FileViewer({
             </div>
           </div>
           {downloadUrl && (
-            <a
-              href={downloadUrl}
-              download={fileName}
-              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              aria-label={`Download ${fileName}`}
-              title="Download"
-            >
-              <DownloadIcon className="size-4" />
-            </a>
+            <Button asChild variant="ghost" size="icon-xs">
+              <a
+                href={downloadUrl}
+                download={fileName}
+                aria-label={`Download ${fileName}`}
+                title="Download"
+              >
+                <DownloadIcon className="size-4" />
+              </a>
+            </Button>
           )}
           {onDelete && (
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="icon-xs"
               onClick={onDelete}
-              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+              className="hover:bg-destructive/10 hover:text-destructive"
               aria-label={`Delete ${fileName}`}
               title="Delete"
             >
               <TrashIcon className="size-4" />
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-xs"
             onClick={onClose}
-            className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             aria-label="Close file"
           >
             <XIcon className="size-4" />
-          </button>
+          </Button>
         </div>
       )}
 
