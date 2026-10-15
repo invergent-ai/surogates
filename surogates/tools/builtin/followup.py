@@ -23,7 +23,7 @@ from surogates.db.models import (
     ProgramInvitationRow,
     ProgramScheduleRow,
 )
-from surogates.channels.identity import normalize_wa_id
+from surogates.channels.identity import mask_readable_phones, normalize_wa_id
 from surogates.followup import people
 from surogates.followup import store as followup_store
 from surogates.followup.context import (
@@ -759,6 +759,7 @@ def _chosen(settings: Any, names: dict, wanted: Any) -> list[uuid.UUID]:
 async def _inbox(
     sf: Any,
     ctx: Context,
+    settings: Any,
     *,
     service_account_id: uuid.UUID,
     event_type: str,
@@ -786,7 +787,12 @@ async def _inbox(
                 source_event_id=event.id,
                 # An existing InboxKind; the ops Inbox filters on a Literal.
                 kind="action_required",
-                title=f"Needs your attention: {await ctx.person_label(sf)}",
+                # The inbox is a list anyone with access scrolls: the full
+                # number stays on the alert sent to the team member.
+                title=followup_store.wording(
+                    settings, "inbox_attention_title",
+                    name=mask_readable_phones(await ctx.person_label(sf, settings)),
+                ),
                 body=reason,
                 payload={**payload, "user_id": str(ctx.user_id)},
             )
@@ -868,7 +874,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     escalation_id = uuid.uuid4()
     escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{escalation_id.hex}"
     inboxed = target_id is not None and await _inbox(
-        sf, ctx, service_account_id=target_id,
+        sf, ctx, settings, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
         reason=reason, payload={**payload, "escalation": escalation},
     )

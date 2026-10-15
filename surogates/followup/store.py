@@ -383,6 +383,7 @@ TEAM_TEXTS = {
     "label_reported_by": "reported by {contact} ({relation})",
     "label_contact": "contact",
     "label_footer": "About: {label}",
+    "inbox_attention_title": "Needs your attention: {name}",
     "label_contact_for": "{contact} ({relation}), for {name}",
     "notice_paused": "{journey} paused: {reason}",
     "notice_ended": "{journey} ended: {reason}",

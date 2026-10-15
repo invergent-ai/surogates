@@ -337,7 +337,7 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.service_account_id == inbox_sa
-    assert item.title == "Needs your attention: Ion Popescu · +40 700 000 001"
+    assert item.title == "Needs your attention: Ion Popescu · +40…001"
     [alert] = await _outreach(sf)
     assert alert.user_id == doctor
 
@@ -499,7 +499,7 @@ async def test_a_relative_enrols_the_patient_by_name(sf, patient, care_team):
     async with sf() as db:
         item = (await db.execute(sa.select(InboxItem))).scalar_one()
     assert item.title == (
-        "Needs your attention: Petre Marin · via Ana, fiica · +40 700 000 001"
+        "Needs your attention: Petre Marin · via Ana, fiica · +40…001"
     )
 
 
