@@ -740,9 +740,6 @@ def is_team_member(settings: Any, user_id: uuid.UUID | None) -> bool:
     return str(user_id) in {str(r) for r in (settings.alert_recipient_user_ids or [])}
 
 
-NOBODY_RECEIVES = "no team member receives this kind of message"
-
-
 async def notify_team(
     session_factory: Any,
     settings: Any,
@@ -790,7 +787,11 @@ async def notify_team(
         recipients = [only_user_id]
     else:
         if topic is not None:
-            recipients = [r for r in recipients if topic in member_permissions(settings, r)["receives"]]
+            # Someone waits on a human for an escalation: when nobody takes
+            # its kind, the whole team does rather than nobody.
+            recipients = [
+                r for r in recipients if topic in member_permissions(settings, r)["receives"]
+            ] or (recipients if escalation_of(dedupe_prefix) else [])
         chosen = {str(u) for u in to or ()}
         recipients = [r for r in recipients if str(r) in chosen] or recipients
         destinations = [
@@ -799,7 +800,7 @@ async def notify_team(
         ]
     if not recipients and not destinations:
         return 0, (
-            NOBODY_RECEIVES if topic and settings
+            "no team member receives this kind of message" if topic and settings
             and settings.alert_recipient_user_ids else "no team members are configured"
         )
     senders = {

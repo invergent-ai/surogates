@@ -26,7 +26,6 @@ from surogates.db.models import (
 from surogates.channels.identity import mask_readable_phones, normalize_wa_id
 from surogates.followup import people
 from surogates.followup import store as followup_store
-from surogates.followup.store import NOBODY_RECEIVES
 from surogates.followup.context import (
     Context,
     channel_names,
@@ -889,16 +888,12 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     )
     team = [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])]
     to = _chosen(settings, await followup_store.display_names(sf, team), arguments.get("to"))
-    alert = {
-        "kind": "alert", "text": f"🔴 {reason}" if severity == "red" else reason,
-        "reason": reason, "severity": severity, "dedupe_prefix": escalation, "to": to or None,
-    }
     queued, why_not = await _tell_team(
-        sf, ctx, settings, topic="urgent" if severity == "red" else "attention", **alert,
+        sf, ctx, settings, kind="alert",
+        text=f"🔴 {reason}" if severity == "red" else reason, reason=reason,
+        severity=severity, dedupe_prefix=escalation,
+        topic="urgent" if severity == "red" else "attention", to=to or None,
     )
-    if not queued and why_not == NOBODY_RECEIVES:
-        # Someone is waiting on a human: an inbox nobody watches is not one.
-        queued, why_not = await _tell_team(sf, ctx, settings, **alert)
 
     if invitation is not None:
         # One write records what happened, on the check-in's own history.
