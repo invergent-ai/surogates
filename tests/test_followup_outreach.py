@@ -939,7 +939,12 @@ async def test_the_log_keeps_a_number_masked_and_only_the_delivery_has_it_whole(
     assert data["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40…111"
     assert data["platform_note"] == outreach.MASKED_NOTE
     assert session_store.delivered["message"]["content"] == "Faint\n\nAbout: Ion Pop · +40 711 111 111"
-    assert "platform_note" not in session_store.delivered
+    # The channel takes the text alone: the model's note never goes out.
+    from surogates.session.store import _build_channel_payload
+
+    assert _build_channel_payload(EventType.LLM_RESPONSE, session_store.delivered, "whatsapp") == {
+        "content": "Faint\n\nAbout: Ion Pop · +40 711 111 111", "intermediate": False,
+    }
 
 
 @pytest.mark.asyncio

@@ -248,10 +248,7 @@ async def _write_text(
     }
     await session_store.emit_event(
         session_id, EventType.LLM_RESPONSE, data,
-        delivery_data={
-            **{k: v for k, v in data.items() if k != PLATFORM_NOTE},
-            "message": {"role": "assistant", "content": text},
-        },
+        delivery_data={**data, "message": {"role": "assistant", "content": text}},
     )
 
 
