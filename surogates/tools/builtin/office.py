@@ -74,7 +74,9 @@ EDIT_DESCRIPTION = (
     'anchor: "F2"}; sheet {action: add|rename|delete, name, to, after}.\n'
     "Deck: slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]}, each slide one <section> "
     "in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the office skill's slide "
-    "reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}.\n"
+    "reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the first deck edit of a "
+    "session, read that reference (skill_view name office, file_path references/slide.md): the format is strict, and a "
+    "refused slide costs a round trip.\n"
     "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "
     "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
     "text|checkbox, page, rect: [x1, y1, x2, y2] in points from the page's top-left, name}; redact {text}, alone in "

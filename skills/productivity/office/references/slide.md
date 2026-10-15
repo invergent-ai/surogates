@@ -48,12 +48,13 @@ push|magic"` is how it leaves.
 
 **Text:** `<h1>` `<h2>` `<h3>` `<p>` (start at 96/64/44/32 px; set `font-size` yourself, **never under 24 px**),
 `<ul>`/`<ol>` of plain `<li>` (one level), `<br>`, and inline `<b>` `<i>` `<u>` `<a href="https://…">` `<span
-style="color:…">` (no sizes or fonts on a span). `<div data-text>` of plain `<p>`/`<ul>`/`<ol>` is one text box. Text
-goes only in these: words, or a `<b>` or `<span>`, sitting directly in the section or a div are refused. Inside a
-heading, paragraph, list item or table cell go only `<b>` `<i>` `<u>` `<a>` `<span>` `<br>`: no icon, picture or other
-block. A label is a `<p>` with `background` and `padding`: it stays one shape. Text wraps only at spaces, so size a box
-to its longest word (about 0.6 × the font size per character). **Too much for its box? The slide is refused: split it.
-Nothing shrinks.**
+style="color:…">` (no sizes or fonts on a span). A `<div>` holding only text and those inline tags is one text box,
+set by its own font, colour, alignment, background, border and padding; `<div data-text>` of plain `<p>`/`<ul>`/`<ol>`
+is one text box of several paragraphs. Text beside blocks in one div, or directly in the section, is refused: put it in
+a `<p>`. Inside a heading, paragraph, list item, table cell or div of text go only `<b>` `<i>` `<u>` `<a>` `<span>`
+`<br>`: no icon, picture or other block. A label is a `<p>` with `background` and `padding`: it stays one shape. Text
+wraps only at spaces, so size a box to its longest word (about 0.6 × the font size per character). **Too much for its
+box? The slide is refused: split it. Nothing shrinks.**
 
 **Containers:** `<div>` is a flex column unless it says `display:flex` (a row) or `display:grid`; it is invisible unless
 painted (`background`, `border`, `box-shadow`). An empty `<div style="flex:1">` is a spacer. At most 15 nested divs.
@@ -78,8 +79,8 @@ shows. Scripts in it do not run: draw a chart as an inline `<svg>`.
 **Styles:** lengths in px (no `em`, `rem`, `vw`, `%` only where a box's share is meant); colours as hex or `rgb[a]()`;
 `linear-gradient` and `repeating-linear-gradient` backgrounds; `border` (solid, dashed, dotted, double); `box-shadow`;
 `opacity`; `transform: rotate()`, `translate()`, `scale()`; `letter-spacing`, `text-transform`, `text-decoration`,
-`-webkit-text-stroke`, gradient text (`background-clip:text`). No `margin` (use `gap` and `padding`), no `z-index`, no
-classes or `<style>`. A radial gradient is a picture behind its box's text. A filter or a blend mode on anything,
+`-webkit-text-stroke`, gradient text (`background-clip:text`); `margin`, which moves a box as CSS does. No `z-index`,
+no classes or `<style>`. A radial gradient is a picture behind its box's text. A filter or a blend mode on anything,
 opacity on a div that holds children, and a turn, a scale or a skew on such a div or on a table make the element and
 everything in it one picture, which looks right but which the user cannot edit: keep them for decoration, and fade or
 turn single shapes and text boxes instead (a turned text box stays native; a scaled or skewed one is a picture). A

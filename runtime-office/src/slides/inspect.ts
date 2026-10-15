@@ -71,7 +71,10 @@ export function inspect(args: InspectArgs): Inspected {
   const inside = (el: Element): boolean => !!el.parentElement?.closest("svg, x-embed");
   const pinned = (el: Element): boolean => getComputedStyle(el).position === "absolute";
   const isHost = (el: Element): boolean => tagOf(el) === "SECTION" || ["relative", "absolute"].includes(getComputedStyle(el).position);
-  const isText = (el: Element): boolean => TEXT.has(tagOf(el)) || ["UL", "OL"].includes(tagOf(el)) || (tagOf(el) === "DIV" && el.hasAttribute("data-text"));
+  // A div holding only text and inline elements is one text box of one paragraph, as a p is.
+  const textOnly = (el: Element): boolean => tagOf(el) === "DIV" && !!(el.textContent ?? "").trim()
+    && Array.from(el.childNodes).every((n) => n.nodeType !== Node.ELEMENT_NODE || INLINE.has(tagOf(n as Element)));
+  const isText = (el: Element): boolean => TEXT.has(tagOf(el)) || ["UL", "OL"].includes(tagOf(el)) || (tagOf(el) === "DIV" && (el.hasAttribute("data-text") || textOnly(el)));
 
   // The document server keeps a slide's SVG picture and draws it itself, so it holds shapes, never code or a reference
   // to anything outside it. Each is read as this page parsed it: an img's src as the browser decoded it, an svg's tree.
@@ -223,20 +226,23 @@ export function inspect(args: InspectArgs): Inspected {
             if (tagOf(li) !== "LI" || Array.from(li.children).some((c) => !INLINE.has(tagOf(c)))) fail(`${describe(li)}: a list holds plain <li> items, one level.`);
           }
         }
-        // Only h1–h3, p, list items and table cells lay text out: text anywhere else would not be drawn.
-        if (tag === "SECTION" || tag === "DIV" || tag === "UL" || tag === "OL") {
+        // Only text elements lay text out: text anywhere else would not be drawn. A div of text alone is one.
+        if ((tag === "SECTION" || tag === "DIV" || tag === "UL" || tag === "OL") && !textOnly(el)) {
+          const blocks = Array.from(el.children).some((child) => !INLINE.has(tagOf(child)));
           for (const node of Array.from(el.childNodes)) {
             const child = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : null;
             if (child ? !INLINE.has(tagOf(child)) : node.nodeType !== Node.TEXT_NODE || !(node.textContent ?? "").trim()) continue;
             const words = (node.textContent ?? "").trim().split(/\s+/).slice(0, 6).join(" ");
-            fail(`${child ? describe(child) : `Text "${words}"`} sits directly in ${describe(el)}: text goes in h1–h3, p, a list, or a div[data-text] of them.`);
+            const what = child ? describe(child) : `Text "${words}"`;
+            if (tag === "UL" || tag === "OL") fail(`${what} sits directly in ${describe(el)}: put it in an <li>.`);
+            fail(`${what} sits ${blocks ? "beside blocks in" : "directly in"} ${describe(el)}: put it in a <p>.`);
           }
         }
-        if (tag === "DIV" && el.hasAttribute("data-text")) {
-          for (const child of Array.from(el.children)) if (!["P", "UL", "OL"].includes(tagOf(child))) fail(`${describe(child)}: a div[data-text] holds p, ul and ol.`);
+        if (tag === "DIV" && el.hasAttribute("data-text") && !textOnly(el)) {
+          for (const child of Array.from(el.children)) if (!["P", "UL", "OL"].includes(tagOf(child))) fail(`${describe(child)}: a div[data-text] holds p, ul and ol, or only text.`);
         }
-        if (TEXT.has(tag) || tag === "LI" || tag === "TD" || tag === "TH") {
-          const holder = tag === "TD" || tag === "TH" ? "a table cell holds plain text" : "a heading, paragraph or list item holds text";
+        if (TEXT.has(tag) || tag === "LI" || tag === "TD" || tag === "TH" || textOnly(el)) {
+          const holder = tag === "TD" || tag === "TH" ? "a table cell holds plain text" : tag === "DIV" ? "a div of text holds text" : "a heading, paragraph or list item holds text";
           for (const child of Array.from(el.querySelectorAll("*"))) {
             if (!INLINE.has(tagOf(child))) fail(`${describe(child)}: ${holder} (b, i, u, a, span and br), not <${child.tagName.toLowerCase()}>.`);
           }
@@ -249,7 +255,6 @@ export function inspect(args: InspectArgs): Inspected {
           // A shorthand sets its other longhands to their initial value.
           if (value === "initial") continue;
           if (!STYLE.test(property)) fail(`${describe(el)} uses ${property}, which is not in the slide format.`);
-          if (/^margin-/.test(property) && parseFloat(value) !== 0) fail(`${describe(el)}: no margin (use gap or padding).`);
           if (/var\(|currentcolor/i.test(value)) fail(`${describe(el)}: no var() or currentcolor.`);
           if (UNITS.test(value) || (property !== "letter-spacing" && /\d(?:\.\d+)?em\b/i.test(value))) fail(`${describe(el)} sets ${property} to ${value}: lengths are px (no em, rem, vw or vh).`);
           if (tag === "SPAN" && /^font-(size|family)$/.test(property)) fail(`${describe(el)}: no sizes or fonts on a span (use two blocks).`);
@@ -259,6 +264,21 @@ export function inspect(args: InspectArgs): Inspected {
         if (tag === "DIV" && depth >= 15) fail(`${describe(el)}: at most 15 nested divs.`);
       }
       if ((section.textContent ?? "").length > 20_000) fail("A slide holds at most 20,000 characters of text.");
+      // A div of text sets its text in lines, as a p does: as a flex or grid box it would make each inline element a
+      // block of its own. Where that box put its text, the text box aligns it.
+      for (const el of elements as HTMLElement[]) {
+        el.removeAttribute("data-anchor");
+        const cs = getComputedStyle(el);
+        if (!textOnly(el) || !/flex|grid/.test(cs.display)) continue;
+        // A flex box places its line by justify-content and align-items; a grid box also by justify-items and align-content.
+        const flex = /flex/.test(cs.display), column = flex && cs.flexDirection.startsWith("column");
+        const main = flex ? cs.justifyContent : `${cs.justifyContent} ${cs.justifyItems}`, cross = flex ? cs.alignItems : `${cs.alignItems} ${cs.alignContent}`;
+        const side = (value: string) => (/center|around|evenly/.test(value) ? "center" : /end|right/.test(value) ? "end" : "start");
+        const across = side(column ? cross : main), down = side(column ? main : cross);
+        if (across !== "start") el.style.textAlign = across === "center" ? "center" : "right";
+        if (down !== "start") el.setAttribute("data-anchor", down === "center" ? "ctr" : "b");
+        el.style.display = cs.display.startsWith("inline") ? "inline-block" : "block";
+      }
       return fontsUsed();
     }
 
@@ -300,7 +320,7 @@ export function inspect(args: InspectArgs): Inspected {
       const tag = tagOf(el);
       const cs = getComputedStyle(el);
       let over: number;
-      if (tag === "DIV" || tag === "UL" || tag === "OL") {
+      if ((tag === "DIV" && !textOnly(el)) || tag === "UL" || tag === "OL") {
         // A clipping div clips what spills; the text boxes inside it are checked themselves. The editor clips no text box.
         if (tag === "DIV" && !el.hasAttribute("data-text") && cs.overflowX === "hidden") continue;
         // Its children's border boxes, laid by line height, stay in its content box; a pinned child it places, in its
@@ -316,7 +336,7 @@ export function inspect(args: InspectArgs): Inspected {
           const c = child.getBoundingClientRect();
           over = Math.max(over, inner.left - c.left, c.right - inner.right, inner.top - c.top, c.bottom - inner.bottom);
         }
-      } else if (TEXT.has(tag) || tag === "LI" || tag === "TD" || tag === "TH") {
+      } else if (TEXT.has(tag) || tag === "LI" || tag === "TD" || tag === "TH" || textOnly(el)) {
         over = Math.max(el.scrollWidth - el.clientWidth, el.scrollHeight - el.clientHeight - overhang(el));
       } else continue;
       if (over > 1) fail(`The content of ${describe(el)} overflows its box by ${Math.ceil(over)} px: give it room, or split the slide; nothing shrinks.`);
@@ -564,7 +584,7 @@ export function inspect(args: InspectArgs): Inspected {
       [...filter.matchAll(/drop-shadow\((rgba?\([^)]*\)[^)]*)\)/g)].reduce((sum, m) => sum + reach(m[1]!), 0);
 
     // --- what only a picture shows
-    const isContainer = (el: Element): boolean => (tagOf(el) === "DIV" && !el.hasAttribute("data-text")) || tagOf(el) === "SECTION";
+    const isContainer = (el: Element): boolean => (tagOf(el) === "DIV" && !isText(el)) || tagOf(el) === "SECTION";
     const drawnWhole = (el: Element, t: Transform | null): boolean => {
       const tag = tagOf(el), cs = getComputedStyle(el);
       // Drawn from the icon set, on a page of its own, or as a path: nothing of it is painted here to take.
@@ -669,7 +689,8 @@ export function inspect(args: InspectArgs): Inspected {
       const size = parseFloat(cs.fontSize);
       const lineHeight = parseFloat(cs.lineHeight);
       const align = ({ left: "left", start: "left", center: "center", right: "right", end: "right", justify: "justify" } as Record<string, string>)[cs.textAlign] ?? "left";
-      // The editor's single spacing is 1.2 times the font size. No margins in this format: no spacing before or after.
+      // The editor's single spacing is 1.2 times the font size. A margin moves the box, measured where it lands; between
+      // the paragraphs of one box, textShape gives it as spacing before.
       return { align, line: Number.isFinite(lineHeight) ? Math.round((lineHeight / (1.2 * size)) * 1000) / 1000 : 1, before: 0, after: 0, runs: runs(el) };
     };
     const listParas = (list: Element, left: number, indent?: number): Para[] => {
@@ -699,16 +720,27 @@ export function inspect(args: InspectArgs): Inspected {
       const side = (padding: string, border: string) => emu(parseFloat(padding) + (line ? 0 : parseFloat(border) || 0));
       const tag = tagOf(el);
       let paras: Para[];
-      if (tag === "UL" || tag === "OL") paras = listParas(el, b.x);
-      else if (tag === "DIV") {
+      let items: Element[] = [];
+      if (tag === "UL" || tag === "OL") {
+        paras = listParas(el, b.x);
+        items = Array.from(el.children);
+      } else if (tag === "DIV" && !textOnly(el)) {
         const indent = Number(el.getAttribute("data-text")) || undefined;
         paras = Array.from(el.children).flatMap((child) => (["UL", "OL"].includes(tagOf(child)) ? listParas(child, b.x, indent) : [paragraph(child)]));
+        items = Array.from(el.children).flatMap((child) => (["UL", "OL"].includes(tagOf(child)) ? Array.from(child.children) : [child]));
       } else paras = [paragraph(el)];
+      // The space margins or a gap leave above each paragraph of the box, as Chromium laid it out.
+      let top = b.y + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop);
+      items.forEach((item, i) => {
+        const r = box(item);
+        paras[i]!.before = round(Math.max(0, r.y - top) * ptPerPx);
+        top = r.y + r.h;
+      });
       return [{
         kind: "shape", ...at(f), geometry: geometryOf(cs, b.w, b.h), fill: look.fill, stroke: line,
         text: {
           insets: [side(cs.paddingLeft, cs.borderLeftWidth), side(cs.paddingTop, cs.borderTopWidth), side(cs.paddingRight, cs.borderRightWidth), side(cs.paddingBottom, cs.borderBottomWidth)],
-          anchor: "t", wrap: cs.whiteSpace !== "nowrap", paras,
+          anchor: (el.getAttribute("data-anchor") as "ctr" | "b" | null) ?? "t", wrap: cs.whiteSpace !== "nowrap", paras,
         },
       }, ...borders(cs, f, look.line)];
     };

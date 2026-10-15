@@ -99,6 +99,67 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes[1].text.paras[0].runs[1]).toMatchObject({ text: "held", color: { hex: "#c81e1e" } });
   });
 
+  // Models write a figure as a div of text in a card, and a step number as a box that flex centres it in.
+  it("builds a div of text as one text box, styled by the div itself", async () => {
+    for (const div of [
+      `<div style="font-size:48px;font-weight:700;color:#38BDF8;padding-bottom:12px">30%</div>`,
+      `<div data-text style="font-size:48px;font-weight:700;color:#38BDF8;padding-bottom:12px">30%</div>`,
+    ]) {
+      const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+        <div style="background:#F8FAFC;border:2px solid #E2E8F0;padding:32px;width:600px">${div}<p style="font-size:32px">Lower costs</p></div></section>`);
+      const text = spec.shapes[1];
+      expect(text, div).toMatchObject({ kind: "shape", x: 162 * E, y: 162 * E, fill: null, text: { insets: [0, 0, 0, 12 * E] } });
+      expect(text.text.paras, div).toHaveLength(1);
+      expect(text.text.paras[0].runs, div).toEqual([expect.objectContaining({ text: "30%", size: 24, b: true, color: { hex: "#38bdf8", alpha: 1 } })]);
+    }
+  });
+
+  it("lays a div's text and inline elements out as one paragraph", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+      <div style="font-size:32px;width:1200px">Up <b>30%</b> on <span style="color:#c81e1e">cost</span></div></section>`);
+    const text = spec.shapes[0];
+    expect(text.text.paras[0].runs.map((r: Any) => r.text)).toEqual(["Up ", "30%", " on ", "cost"]);
+    // One line, as a p sets it.
+    expect(text.h / E).toBeCloseTo(32 * 1.4, 0);
+  });
+
+  it("centres a div's text where its flex or grid layout centres it", async () => {
+    for (const centred of ["display:flex;align-items:center;justify-content:center", "display:grid;place-items:center"]) {
+      const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+        <div style="background:#38BDF8;color:#0F172A;width:96px;height:96px;${centred};font-size:48px;font-weight:700">1</div></section>`);
+      expect(spec.shapes, centred).toHaveLength(1);
+      expect(spec.shapes[0], centred).toMatchObject({
+        w: 96 * E, h: 96 * E, fill: { type: "solid", color: { hex: "#38bdf8", alpha: 1 } },
+        text: { anchor: "ctr", paras: [{ align: "center", runs: [{ text: "1" }] }] },
+      });
+    }
+  });
+
+  it("refuses text beside blocks in one div, saying to put it in a p, which then goes in", async () => {
+    await expect(measure(`<section style="background:#fff"><div style="font-size:32px">Lead-in <p>Para</p></div></section>`))
+      .rejects.toThrow('Text "Lead-in" sits beside blocks in <section > div> ("Lead-in Para"): put it in a <p>.');
+    await expect(measure(`<section style="background:#fff"><div style="font-size:32px"><p>Lead-in</p><p>Para</p></div></section>`)).resolves.toBeTruthy();
+  });
+
+  it("moves a box by its margin, and keeps margins inside the overflow checks", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+      <h1 style="font-size:96px;margin:0 0 24px 0">Lisbon</h1><p style="font-size:32px;margin:0">Next</p></section>`);
+    const [h1, p] = spec.shapes;
+    expect(h1.y).toBe(128 * E);
+    expect((p.y - h1.y - h1.h) / E).toBeCloseTo(24, 1);
+    await expect(measure(`<section style="background:#fff;font-family:Arial"><div style="position:absolute;left:100px;top:100px;width:400px;height:120px;background:#eeeeee">
+      <p style="font-size:32px;margin-top:100px">Pushed down</p></div></section>`)).rejects.toThrow(/overflows its box by \d+ px/);
+  });
+
+  it("keeps the space margins put between a list's items and between a text box's paragraphs", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+      <ul style="font-size:32px"><li style="margin-bottom:16px">North</li><li>East</li></ul>
+      <div data-text style="font-size:32px"><p style="margin-bottom:20px">One</p><p>Two</p></div></section>`);
+    // 1 px is 0.5 pt on 16:9.
+    expect(spec.shapes[0].text.paras.map((p: Any) => p.before)).toEqual([0, 8]);
+    expect(spec.shapes[1].text.paras.map((p: Any) => p.before)).toEqual([0, 10]);
+  });
+
   it("lays out a table with its row backgrounds", async () => {
     const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
       <table style="width:1200px;font-size:32px"><tr style="background:#14285A"><th style="width:50%;color:#ffffff">Region</th><th style="width:25%;color:#ffffff">Q1</th><th style="width:25%;color:#ffffff">Q2</th></tr>
@@ -238,12 +299,11 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
   });
 
   it("refuses text outside a text element, which nothing would draw", async () => {
-    const OUTSIDE = "text goes in h1–h3, p, a list, or a div[data-text] of them";
     for (const [html, said] of [
-      [`<section style="background:#fff"><div style="background:#eeeeee;padding:24px">Revenue up 12%</div></section>`, OUTSIDE],
-      [`<section style="background:#fff">Revenue up 12%</section>`, OUTSIDE],
-      [`<section style="background:#fff"><div>Lead-in <p>Para</p></div></section>`, OUTSIDE],
-      [`<section style="background:#fff"><div data-text>Hello <b>world</b></div></section>`, OUTSIDE],
+      [`<section style="background:#fff">Revenue up 12%</section>`, 'Text "Revenue up 12%" sits directly in <section> ("Revenue up 12%"): put it in a <p>.'],
+      [`<section style="background:#fff"><div><b>Lead-in</b><p>Para</p></div></section>`, "<section > div > b> (\"Lead-in\") sits beside blocks in <section > div> (\"Lead-inPara\"): put it in a <p>."],
+      [`<section style="background:#fff"><ul style="font-size:32px">Loose<li>Item</li></ul></section>`, 'Text "Loose" sits directly in <section > ul> ("LooseItem"): put it in an <li>.'],
+      [`<section style="background:#fff"><div data-text style="font-size:32px"><p>One</p><div>Two</div></div></section>`, "a div[data-text] holds p, ul and ol, or only text"],
       [`<section style="background:#fff"><table><tr><td><p>One</p><p>Two</p></td></tr></table></section>`, "a table cell holds plain text"],
       [`<section style="background:#fff"><p>Up <svg width="40" height="40"></svg></p></section>`, "a heading, paragraph or list item holds text"],
     ]) {
@@ -256,7 +316,6 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
       [`<section style="background:#fff"><style>p{color:red}</style><p>x</p></section>`, "not <style>"],
       [`<section style="background:#fff"><p onclick="alert(1)">x</p></section>`, "the attribute onclick"],
       [`<section style="background:#fff"><p style="font-size:2em">x</p></section>`, "no em"],
-      [`<section style="background:#fff"><p style="margin:12px;font-size:32px">x</p></section>`, "no margin"],
       [`<section style="background:#fff"><p style="z-index:3;font-size:32px">x</p></section>`, "uses z-index"],
       [`<section style="background:#fff"><p style="font-size:32px"><span style="font-size:40px">x</span></p></section>`, "no sizes or fonts on a span"],
       [`<section style="background:#fff"><img src="https://example.com/a.png" alt=""></section>`, "a picture from the workspace"],
