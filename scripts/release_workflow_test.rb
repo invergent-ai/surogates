@@ -3,6 +3,8 @@
 require "digest"
 require "json"
 require "minitest/autorun"
+require "open3"
+require "tmpdir"
 require "yaml"
 
 class ReleaseWorkflowTest < Minitest::Test
@@ -613,6 +615,74 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_equal "#{MODE} == 'account'", jobs.fetch("desktop-win-publish").fetch("if")
   end
 
+  def test_a_team_id_of_another_form_ends_the_deciding_job_so_every_job_that_needs_it_is_skipped_while_linux_s_jobs_still_publish
+    jobs = @workflow.fetch("jobs")
+    step = jobs.fetch("desktop-signing-mode").fetch("steps").last
+    run = step.fetch("run")
+    # The Team ID's form is checked before anything is said of it: ten capital letters and digits, and nothing else,
+    # a line more among them.
+    assert_operator run.index('[[ "$TEAM" =~ ^[A-Z0-9]{10}$ ]] || {'), :<, run.index("printf 'signing=developer-id")
+    Dir.mktmpdir do |dir|
+      said = lambda do |team|
+        output = File.join(dir, "output")
+        File.write(output, "")
+        _, status = Open3.capture2e({ "TEAM" => team, "GITHUB_OUTPUT" => output }, "bash", "-e", "-c", run)
+        [status.exitstatus, File.read(output)]
+      end
+      assert_equal [0, "signing=developer-id\nsigner=ABCDE12345\n"], said.call("ABCDE12345")
+      assert_equal [0, "signing=trial\nsigner=Surogate trial signer\n"], said.call("")
+      ["abcde12345", "ABCDE1234", "ABCDE123456", " ABCDE12345", "ABCDE12345 ", "ABCDE12345\nsigning=trial", "ABCDE-2345"].each do |team|
+        assert_equal [1, ""], said.call(team), team.inspect
+      end
+    end
+    # Ended there, it holds every job that needs it: arm64's image, macOS's jobs, Windows's from its signing on, and the
+    # rollouts. Windows's build, which holds nothing to sign with, and Linux's own image, build, describe, publish and
+    # attach need it not: they run, and Linux's still publishes.
+    holding = jobs.keys.select { |name| waits_for(name).include?("desktop-signing-mode") }
+    assert_equal (windows_jobs - ["desktop-win-build"] + mac_jobs + rollout_jobs).sort, holding.sort
+    %w[desktop-vm-image desktop-vm-manifest desktop-build desktop-describe desktop-publish].each { |name| refute_includes waits_for(name), "desktop-signing-mode", name }
+  end
+
+  def test_each_signing_job_signs_only_the_layout_its_build_job_said_it_made
+    jobs = @workflow.fetch("jobs")
+    # macOS's: the build says its tarball's sha256, right after it packs it and before it keeps it, and the signing checks
+    # its download by it before it opens it.
+    build = jobs.fetch("desktop-mac-build")
+    assert_equal({ "unsigned-sha256" => "${{ steps.unsigned.outputs.sha256 }}" }, build.fetch("outputs"))
+    steps = build.fetch("steps")
+    said = steps.index { |step| step["id"] == "unsigned" }
+    assert_equal %(sha256="$(shasum -a 256 <../out/desktop-mac-unsigned.tar.gz | cut -d' ' -f1)"\necho "sha256=$sha256" >>"$GITHUB_OUTPUT"\n), steps[said].fetch("run")
+    assert_operator steps.index { |step| step["run"].to_s.include?("sign-mac.sh pack") }, :<, said
+    assert_operator said, :<, steps.index { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    sign = jobs.fetch("desktop-mac-sign").fetch("steps")
+    unpack = sign.find { |step| step["run"].to_s.include?("tar -xzf out/desktop-mac-unsigned.tar.gz") }
+    assert_equal({ "SHA256" => "${{ needs.desktop-mac-build.outputs.unsigned-sha256 }}" }, unpack.fetch("env"))
+    run = unpack.fetch("run")
+    assert_includes run, '[[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || {'
+    assert_operator run.index('echo "$SHA256  out/desktop-mac-unsigned.tar.gz" | shasum -a 256 --check --status'), :<, run.index("tar -xzf")
+    assert_operator sign.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") }, :<, sign.index(unpack)
+    assert_operator sign.index(unpack), :<, sign.index { |step| step["id"] == "identity" }
+    # Windows's: the build says one digest of its layout (scripts/layout-digest.sh), and the signing checks its download
+    # by it before it lists, or signs, anything.
+    build = jobs.fetch("desktop-win-build")
+    assert_equal({ "digest" => "${{ steps.layout.outputs.digest }}" }, build.fetch("outputs"))
+    steps = build.fetch("steps")
+    said = steps.index { |step| step["id"] == "layout" }
+    assert_equal "bash", steps[said].fetch("shell")
+    assert_equal %(digest="$(scripts/layout-digest.sh ../out/win)"\necho "digest=$digest" >>"$GITHUB_OUTPUT"\n), steps[said].fetch("run")
+    assert_operator steps.index { |step| step["run"].to_s.include?("scripts/package-win.sh") }, :<, said
+    assert_operator said, :<, steps.index { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    sign = jobs.fetch("desktop-win-sign").fetch("steps")
+    check = sign.find { |step| step["run"].to_s.include?("layout-digest.sh out/win") }
+    assert_equal "bash", check.fetch("shell")
+    assert_equal({ "DIGEST" => "${{ needs.desktop-win-build.outputs.digest }}" }, check.fetch("env"))
+    assert_includes check.fetch("run"), '[[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]] || {'
+    assert_includes check.fetch("run"), '[ "$found" = "$DIGEST" ] || {'
+    assert_equal sign.index { |step| step["uses"].to_s.start_with?("actions/download-artifact@") } + 1, sign.index(check)
+    assert_equal sign.index(check) + 1, sign.index { |step| step["run"].to_s.include?("sign-win.ps1 list") }
+    assert File.executable?("desktop/scripts/layout-digest.sh")
+  end
+
   def test_the_windows_app_is_built_and_its_msi_made_on_windows_by_jobs_that_hold_nothing_to_sign_with
     jobs = @workflow.fetch("jobs")
     # npm's and Cargo's install scripts, and WiX, run in these: no secret, no Environment, no token to sign with, and a
@@ -848,13 +918,15 @@ class ReleaseWorkflowTest < Minitest::Test
     assert_includes run, 'keychain="$RUNNER_TEMP/signing.keychain-db"'
     forget = steps.find { |step| step["run"].to_s.include?("sign-mac.sh forget") }
     assert_equal "always() && steps.identity.outputs.keychain != ''", forget.fetch("if")
-    # Signed, checked as the team's, notarized and stapled, packed, the disk image made, notarized and checked, and both
-    # assessed by Gatekeeper, in that order and each gating; then its words said.
+    # Signed, checked as the team's, notarized and stapled, packed, the disk image made, notarized and checked, both
+    # assessed by Gatekeeper, and the app staged and taken as its updater takes an update, in that order and each
+    # gating; then its words said, which the publish needs: nothing is published before all of it.
     order = [
       "desktop/scripts/sign-mac.sh import", 'desktop/scripts/sign-mac.sh sign out/mac/Surogate.app "$IDENTITY" "$KEYCHAIN"',
       'desktop/scripts/sign-mac.sh verify out/mac/Surogate.app developer-id "$TEAM"', "desktop/scripts/sign-mac.sh notarize out/mac/Surogate.app",
       "desktop/scripts/sign-mac.sh pack", "desktop/scripts/sign-mac.sh dmg ", "desktop/scripts/sign-mac.sh notarize \"out/release",
-      "desktop/scripts/sign-mac.sh dmg-check", "desktop/scripts/sign-mac.sh assess", "sign-mac.sh forget", "dmg-sha256=",
+      "desktop/scripts/sign-mac.sh dmg-check", "desktop/scripts/sign-mac.sh assess", 'desktop/scripts/sign-mac.sh staged out/mac/Surogate.app "${GITHUB_REF_NAME#v}"',
+      "sign-mac.sh forget", "dmg-sha256=",
     ].map { |part| steps.index { |step| step["run"].to_s.include?(part) } }
     refute_includes order, nil
     assert_equal order.sort, order
@@ -1395,16 +1467,16 @@ class ReleaseWorkflowTest < Minitest::Test
         "desktop-vm-manifest-arm64" => ["741bd6195a396191", %w[4478c395a33b5a5f 87bce91ba340fecf]],
         "desktop-build" => ["e8efdf02c88621d5", %w[87fcdec176307d16 61e8fae8194d2d45 4dc19da678357174 96ec46bd03bed893 18d2126a5450e6bd d8eb498da277e6b9 cc9cc27902be0c44 75ced9156be50298 b76e38f5fbfb4713]],
         "desktop-describe" => ["dcfde8aef5675336", %w[87fcdec176307d16 7f42edae9383c098 70dd0b5fb0038c24]],
-        "desktop-signing-mode" => ["ce55854669b3f975", %w[bc812f6801c0327b b97d4cac6f27bf71]],
-        "desktop-win-build" => ["96928565e2086ccf", %w[fff07e32632a765a 2cbb6c778ee9cf1c d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 96ec46bd03bed893 2b49b547691c5152 3c1d40e7182b4f9e 0dbbd3120ac54992]],
-        "desktop-win-sign" => ["5331c2e7e01683ed", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 8e179919d8dba5d0 8956b5db4a5d9233 d45c1cf5db225c25 5e02861b5f4f1723 ef9eb69984b75079 8d39f0600fb0a5c9 14d765c09ebc5439]],
+        "desktop-signing-mode" => ["ce55854669b3f975", %w[bc812f6801c0327b 047323041118780c]],
+        "desktop-win-build" => ["866c8d2a91bbcd22", %w[fff07e32632a765a 2cbb6c778ee9cf1c d2e7366771aefc4f 32e802ba6b7c55d8 246ce4a71967366d 425e4aed22ec6aa0 96ec46bd03bed893 2b49b547691c5152 3c1d40e7182b4f9e ad08b43461994b0e 0dbbd3120ac54992]],
+        "desktop-win-sign" => ["5331c2e7e01683ed", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c 657c581b6080781d 7c0c54afd8fd92cc 8e179919d8dba5d0 8956b5db4a5d9233 d45c1cf5db225c25 5e02861b5f4f1723 ef9eb69984b75079 8d39f0600fb0a5c9 14d765c09ebc5439]],
         "desktop-win-msi" => ["340222aa30f1a523", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c f3dc7563940f8a17 01d5449a1b1abf81 bcbbe8f0cd626b61 481012fa557cec29]],
         "desktop-win-sign-msi" => ["03bec184cbedddaa", %w[8e0c7ce31c19bfe2 2cbb6c778ee9cf1c a0051ea6afa86484 c8a2f46e9dd8850f 2393d71fab9f2fc9 8956b5db4a5d9233 87dc6abcdae90aa5 23a5585e4c8281f3 4c351d6393cf4dc0 59bd8c5a75ce6cdc 8d39f0600fb0a5c9 f87f5ad2f490be6b 49dfba79af0cbedc]],
         "desktop-win-describe" => ["5b0cc765a071d830", %w[87fcdec176307d16 f3dc7563940f8a17 1260aac792094cce]],
         "desktop-publish" => ["9ed0647b31c3b292", %w[87fcdec176307d16 7f42edae9383c098 d864dc15d699f950 f8b9a39c31acaab5]],
         "desktop-win-publish" => ["d55475461df016fa", %w[87fcdec176307d16 3a3b2f3ed7fe05d1 267e964df473dfd2 c60cfc32944bedee]],
-        "desktop-mac-build" => ["1b4666b8f07de060", %w[2cbb6c778ee9cf1c d2e7366771aefc4f d0000c3cf79cc46e 5b86e1c519cf457a 2b49b547691c5152 47af9ca5a4f571dd fe34d707df436e2e fc20838e54695c31 2a5c1342ed0f75b6 64b21012ad600b9d]],
-        "desktop-mac-sign" => ["30c4a6d8c96d40ee", %w[2cbb6c778ee9cf1c 967e287f380e284d 4c908e32ce4c9744 849ebc0c27f19012 3d8b6fb5b776aba7 577c35d752b20847 f4908908d502641a c3605d586e7cad83 cf4e9fd6d17cd85d eb44ac7e242dd943 840bbbd87e49e37c 28d23aaf383d21c4 440cc89ed8349156 99b4809ea360d9fa 5599a0aa3c381f18 b36359b66dfa07f0]],
+        "desktop-mac-build" => ["e8c2fca2e02ddae7", %w[2cbb6c778ee9cf1c d2e7366771aefc4f d0000c3cf79cc46e 5b86e1c519cf457a 2b49b547691c5152 47af9ca5a4f571dd fe34d707df436e2e fc20838e54695c31 2a5c1342ed0f75b6 61b6305fdb40d23d 64b21012ad600b9d]],
+        "desktop-mac-sign" => ["30c4a6d8c96d40ee", %w[2cbb6c778ee9cf1c 967e287f380e284d 9405428e60c94609 849ebc0c27f19012 3d8b6fb5b776aba7 577c35d752b20847 f4908908d502641a c3605d586e7cad83 cf4e9fd6d17cd85d eb44ac7e242dd943 840bbbd87e49e37c 28d23aaf383d21c4 30b7e8b0b33d0a94 440cc89ed8349156 99b4809ea360d9fa 5599a0aa3c381f18 b36359b66dfa07f0]],
         "desktop-mac-describe" => ["fa2dd27c947c0419", %w[87fcdec176307d16 7fb5320391f81a52 94b3a4c5d5b5e8e6]],
         "desktop-mac-publish" => ["e414ca0907132180", %w[87fcdec176307d16 7cf00c361d2445fd 97f84d9d36f03e7f 7abd7e16a19cd2dd 018ff0ebc90fc137]],
         "desktop-mac-trial" => ["86bec079fb1e05df", %w[2cbb6c778ee9cf1c d2e7366771aefc4f d0000c3cf79cc46e 5b86e1c519cf457a 2b49b547691c5152 d9092a2baf95bb85 fc20838e54695c31 889cfce002b12c3e fee3a388b8d06834 42cbd804475d9d48 a43855a41e838eb5]],

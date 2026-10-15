@@ -532,12 +532,16 @@ jobs:
             printf 'signing=trial\naccount=\nsigner=CN=Surogate trial signer\n' >>"$GITHUB_OUTPUT"
           fi
 
+      # A Team ID is ten capital letters and digits, and this job fails at any other value, before any job that needs it
+      # starts: arm64's image, macOS's jobs, Windows's from its signing on, and the rollouts. Linux's own jobs, and
+      # Windows's build, need it not.
       - name: Decide how the macOS app is signed
         id: mac
         env:
           TEAM: ${{ vars.APPLE_TEAM_ID }}
         run: |
           if [ -n "$TEAM" ]; then
+            [[ "$TEAM" =~ ^[A-Z0-9]{10}$ ]] || { echo "::error::The repository's APPLE_TEAM_ID is not a Team ID, which is ten capital letters and digits"; exit 1; }
             printf 'signing=developer-id\nsigner=%s\n' "$TEAM" >>"$GITHUB_OUTPUT"
           else
             printf 'signing=trial\nsigner=Surogate trial signer\n' >>"$GITHUB_OUTPUT"
@@ -549,6 +553,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    # The layout's digest (scripts/layout-digest.sh), which the signing checks its download by before it signs anything:
+    # an artifact is the run's, and any job of the run may put another file under its name; a job's outputs are its own.
+    outputs:
+      digest: ${{ steps.layout.outputs.digest }}
     defaults:
       run:
         working-directory: desktop
@@ -599,6 +607,13 @@ jobs:
         shell: bash
         run: scripts/package-win.sh "${GITHUB_REF_NAME#v}" ../out/vm/manifest.json ../out/agent/agent.img ../out/win
 
+      - name: Say the layout's digest to its signing
+        id: layout
+        shell: bash
+        run: |
+          digest="$(scripts/layout-digest.sh ../out/win)"
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+
       - name: Keep the layout for its signing
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -629,6 +644,16 @@ jobs:
         with:
           name: desktop-win-unsigned
           path: out/win
+
+      # Only the layout the build made, by its own word for its digest, is signed.
+      - name: Check the layout is the one the build made
+        shell: bash
+        env:
+          DIGEST: ${{ needs.desktop-win-build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::desktop-win-build said no digest of the layout"; exit 1; }
+          found="$(desktop/scripts/layout-digest.sh out/win)"
+          [ "$found" = "$DIGEST" ] || { echo "::error::out/win is not the layout desktop-win-build made: nothing is signed"; exit 1; }
 
       - name: List the programs to sign
         run: desktop/scripts/sign-win.ps1 list out/win out/programs.txt
@@ -1000,6 +1025,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    # The layout's hash, which the signing checks its download by before it opens it: an artifact is the run's, and any
+    # job of the run may put another file under its name; a job's outputs are its own.
+    outputs:
+      unsigned-sha256: ${{ steps.unsigned.outputs.sha256 }}
     defaults:
       run:
         working-directory: desktop
@@ -1050,6 +1079,12 @@ jobs:
       - name: Pack the layout for its signing
         run: scripts/sign-mac.sh pack ../out/mac/Surogate.app ../out/desktop-mac-unsigned.tar.gz
 
+      - name: Say the layout's hash to its signing
+        id: unsigned
+        run: |
+          sha256="$(shasum -a 256 <../out/desktop-mac-unsigned.tar.gz | cut -d' ' -f1)"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+
       - name: Keep the layout for its signing
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -1084,8 +1119,16 @@ jobs:
           name: desktop-mac-unsigned
           path: out
 
+      # Only the layout the build made, by its own word for its hash, is opened, and so signed.
       - name: Unpack the layout
-        run: mkdir out/mac && tar -xzf out/desktop-mac-unsigned.tar.gz -C out/mac
+        env:
+          SHA256: ${{ needs.desktop-mac-build.outputs.unsigned-sha256 }}
+        run: |
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::desktop-mac-build said no sha256 of the layout"; exit 1; }
+          echo "$SHA256  out/desktop-mac-unsigned.tar.gz" | shasum -a 256 --check --status \
+            || { echo "::error::out/desktop-mac-unsigned.tar.gz is not the layout desktop-mac-build made: nothing is signed"; exit 1; }
+          mkdir out/mac
+          tar -xzf out/desktop-mac-unsigned.tar.gz -C out/mac
 
       # The keychain's path is said before anything is put in it, so that it is gone at the job's end however it ends.
       - name: Import the Developer ID into a keychain of this job's own
@@ -1144,6 +1187,11 @@ jobs:
       # As a Mac that downloaded them assesses them: notarized Developer ID software, its ticket stapled to it.
       - name: Ask Gatekeeper of the app and the disk image
         run: desktop/scripts/sign-mac.sh assess out/mac/Surogate.app "out/release/surogate-desktop-${GITHUB_REF_NAME#v}-darwin-arm64.dmg"
+
+      # As the app's updater takes it: staged under its staging name beside an app of an older version, assessed by
+      # Gatekeeper there, and taken by its own surogate-helper verify for that app's update.
+      - name: Check the app as its updater checks a staged update
+        run: desktop/scripts/sign-mac.sh staged out/mac/Surogate.app "${GITHUB_REF_NAME#v}"
 
       - name: Forget the keychain
         if: always() && steps.identity.outputs.keychain != ''
