@@ -3,7 +3,7 @@ import type { EditorPage } from "../connector.js";
 import { ContentError } from "../markdown.js";
 import { Fonts, resolveFamily, type Face, type FontList } from "./fonts.js";
 import { ICON_NAMES, iconSvg } from "./icons.js";
-import { inspect, type InspectArgs, type Inspected } from "./inspect.js";
+import { inspect, type InspectArgs, type Inspected, type Shot } from "./inspect.js";
 
 /** The slide's canvas in px: 1920 wide, as tall as the deck's shape makes it, and the deck's EMU per px. */
 export interface Canvas { width: number; height: number; emuPerPx: number }
@@ -88,8 +88,8 @@ export class Measurer {
         return Promise.all(loads).then(() => true);
       });
     }
-    const { spec, icons, embeds } = (await this.inspect(page, args("shapes"))) as Extract<Inspected, { spec: SlideSpec }>;
-    await this.drawPictures(page, spec, icons, embeds);
+    const { spec, icons, embeds, shots } = (await this.inspect(page, args("shapes"))) as Extract<Inspected, { spec: SlideSpec }>;
+    await this.drawPictures(page, canvas, spec, { icons, embeds, shots });
     return spec;
   }
 
@@ -100,17 +100,19 @@ export class Measurer {
   }
 
   // Each placeholder picture made what it shows: an svg drawn by Chromium, an icon from the icon set, an embed run on a
-  // page of its own (scripts on, network off, as Claude Slides' sandboxed iframe) and drawn.
-  private async drawPictures(page: Page, spec: SlideSpec, icons: { name: string; color: string; px: number }[], embeds: { html: string; w: number; h: number }[]): Promise<void> {
+  // page of its own (scripts on, network off, as Claude Slides' sandboxed iframe) and drawn, and a shot taken in turn.
+  private async drawPictures(page: Page, canvas: Canvas, spec: SlideSpec, drawn: Omit<Extract<Inspected, { spec: SlideSpec }>, "spec">): Promise<void> {
+    const { icons, embeds, shots } = drawn;
     const visit = async (shapes: ShapeSpec[]): Promise<void> => {
       for (const shape of shapes) {
         if (shape.kind === "group") await visit(shape.children);
         if (shape.kind !== "picture" || shape.src.startsWith("data:")) continue;
         const [kind, n] = shape.src.split(":");
         const i = Number(n);
-        if (kind === "svg") shape.src = `data:image/png;base64,${(await page.locator(`section svg[data-draw="${i}"]`).screenshot({ type: "png", omitBackground: true })).toString("base64")}`;
+        if (kind === "svg") shape.src = png(await page.locator(`section svg[data-draw="${i}"]`).screenshot({ type: "png", omitBackground: true }));
         else if (kind === "icon") shape.src = iconSvg(icons[i]!.name, icons[i]!.color, Math.round(icons[i]!.px));
         else if (kind === "embed") shape.src = await this.drawEmbed(page, embeds[i]!);
+        else if (kind === "shot") shape.src = await drawShot(page, i, shots[i]!, shape, canvas);
       }
     };
     await visit(spec.shapes);
@@ -131,11 +133,56 @@ export class Measurer {
   }
 }
 
+const png = (data: Buffer): string => `data:image/png;base64,${data.toString("base64")}`;
+
+// A shot: the page as a style laid over it shows the marked element (see Shot), over the picture's own box. Everything
+// it changes is put back.
+async function drawShot(page: Page, n: number, kind: Shot, shape: { x: number; y: number; w: number; h: number }, canvas: Canvas): Promise<string> {
+  const at = `[data-shot~="${n}"]`;
+  const alone = "html, body { background: transparent !important; } section, section * { visibility: hidden !important; }";
+  const shown = "visibility: visible !important;";
+  const blank = "color: transparent !important; -webkit-text-fill-color: transparent !important; -webkit-text-stroke-color: transparent !important;";
+  const css: Record<Shot, string> = {
+    element: `${alone} ${at}, ${at} * { ${shown} }`,
+    box: `${alone} ${at} { ${shown} ${blank} }`,
+    text: `${alone} ${at}, ${at} * { ${shown} ${blank} }`,
+    shadow: `${alone} [data-shot-copy] { ${shown} }`,
+    region: "",
+  };
+  // A box-shadow alone is a copy of the element's box, transparent, with its shadow, radii, transform and opacity.
+  if (kind === "shadow") {
+    await page.evaluate((selector) => {
+      const el = document.querySelector<HTMLElement>(selector)!, section = document.querySelector("section")!;
+      const cs = getComputedStyle(el), saved = el.style.transform;
+      el.style.transform = "none";
+      const r = el.getBoundingClientRect(), s = section.getBoundingClientRect(), ss = getComputedStyle(section);
+      el.style.transform = saved;
+      const copy = document.createElement("div");
+      copy.setAttribute("data-shot-copy", "");
+      Object.assign(copy.style, {
+        position: "absolute", boxSizing: "border-box", left: `${r.left - s.left - parseFloat(ss.borderLeftWidth)}px`, top: `${r.top - s.top - parseFloat(ss.borderTopWidth)}px`,
+        width: `${r.width}px`, height: `${r.height}px`, boxShadow: cs.boxShadow, transform: cs.transform, opacity: cs.opacity,
+        borderTopLeftRadius: cs.borderTopLeftRadius, borderTopRightRadius: cs.borderTopRightRadius, borderBottomRightRadius: cs.borderBottomRightRadius, borderBottomLeftRadius: cs.borderBottomLeftRadius,
+      });
+      section.appendChild(copy);
+    }, at);
+  }
+  const style = css[kind] ? await page.addStyleTag({ content: css[kind] }) : null;
+  try {
+    const e = canvas.emuPerPx;
+    return png(await page.screenshot({ type: "png", omitBackground: true, clip: { x: shape.x / e, y: shape.y / e, width: shape.w / e, height: shape.h / e } }));
+  } finally {
+    await style?.evaluate((node) => (node as Element).remove());
+    if (kind === "shadow") await page.evaluate(() => document.querySelector("[data-shot-copy]")?.remove());
+  }
+}
+
 // The page a slide is measured in. No script of the content runs and nothing it names is fetched (its CSP; the
 // context also aborts every request); an x-embed's own content is hidden here and runs on a page of its own. Text is
 // laid out as the editor lays it out: no kerning, no ligatures, precise advances, 1.2 lines as single spacing. Tags
 // start with Claude Slides' defaults (format.md): a section or div with no display is a column; h1–h3 and p sizes,
-// weights and line heights; cell padding 0.35em 0.6em.
+// weights and line heights; cell padding 0.35em 0.6em. A connector given points is placed by them, not laid out, and
+// its border only says how its line is drawn.
 function documentOf(html: string, canvas: Canvas): string {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:">
@@ -152,5 +199,6 @@ td, th { padding: 0.35em 0.6em; } table { border-collapse: collapse; }
 ul, ol { padding-left: 1.2em; }
 aside, x-embed > * { display: none; }
 x-icon, x-shape, x-connector, x-embed { display: block; }
+x-connector { border-color: transparent !important; } x-connector[x1] { position: absolute; }
 </style></head><body>${html}</body></html>`;
 }

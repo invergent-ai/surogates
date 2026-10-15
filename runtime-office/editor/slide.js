@@ -177,16 +177,50 @@
 
   // --- building. The order of the calls below matters: each trap named was met in the editor.
 
-  // A fill: solid, with its alpha as the fill's own transparency.
+  function colorOf(c) { var v = rgb(c.hex); return Api.CreateRGBColor(v[0], v[1], v[2]); }
+  // A fill: solid, with its alpha as the fill's own transparency, or a linear gradient with its stops' alpha.
   function fillOf(fill) {
     if (!fill) return Api.CreateNoFill();
-    var c = rgb(fill.color.hex), f = Api.CreateSolidFill(Api.CreateRGBColor(c[0], c[1], c[2]));
-    if (fill.color.alpha < 1) f.UniFill.transparent = Math.round(fill.color.alpha * 255);   // internal: Api.RGBA's alpha is dropped
-    return f;
+    if (fill.type === "linear") {
+      var stops = fill.stops.map(function (s) {
+        var stop = Api.CreateGradientStop(colorOf(s.color), Math.round(s.at * 1000));   // 1/1000 %
+        // internal: the builder's colours take no alpha
+        if (s.color.alpha < 1) stop.Gs.color.addColorMod(new AscFormat.CColorMod("alpha", Math.round(s.color.alpha * 100000)));
+        return stop;
+      });
+      var f = Api.CreateLinearGradientFill(stops, (((fill.angle - 90) % 360 + 360) % 360) * 60000);   // a CSS angle, in 1/60000 deg
+      // internal: the builder leaves the gradient scaled to the box, which only CSS's corner keywords are
+      f.UniFill.fill.lin.scale = !!fill.scaled;
+      return f;
+    }
+    var solidFill = Api.CreateSolidFill(colorOf(fill.color));
+    if (fill.color.alpha < 1) solidFill.UniFill.transparent = Math.round(fill.color.alpha * 255);   // internal: Api.RGBA's alpha is dropped
+    return solidFill;
   }
-  function strokeOf(stroke) {
+  // A line: its width, colour and dashes, and the heads at its start and end. The line setters are plain assignments,
+  // read when the shape takes the line: they go first.
+  function strokeOf(stroke, head, tail) {
     if (!stroke) return Api.CreateStroke(0, Api.CreateNoFill());
-    return Api.CreateStroke(stroke.w, fillOf({ type: "solid", color: stroke.color }));
+    var st = Api.CreateStroke(stroke.w, fillOf({ type: "solid", color: stroke.color }), stroke.dash === "solid" ? undefined : stroke.dash);
+    if (stroke.dash === "sysDot") st.Ln.setCap(1);   // internal: round caps make round dots; the builder sets no cap
+    if (head) st.Ln.setHeadEnd(end(head));            // internal: the builder sets no line ends
+    if (tail) st.Ln.setTailEnd(end(tail));
+    return st;
+  }
+  function end(kind) {
+    if (!kind || kind === "none") return null;
+    var a = new AscFormat.EndArrow();   // internal, as the line ends above
+    a.type = kind === "open" ? AscFormat.LineEndType.Arrow : AscFormat.LineEndType.Triangle;
+    a.w = AscFormat.LineEndSize.Mid;
+    a.len = AscFormat.LineEndSize.Mid;
+    return a;
+  }
+  // A shape's opacity, which OOXML has no property for, multiplied into its fill's and line's alpha.
+  function faded(c, o) { return o === undefined ? c : { hex: c.hex, alpha: c.alpha * o }; }
+  function fadedFill(fill, o) {
+    if (!fill || o === undefined) return fill;
+    if (fill.type === "linear") return { type: "linear", angle: fill.angle, scaled: fill.scaled, stops: fill.stops.map(function (st) { return { color: faded(st.color, o), at: st.at }; }) };
+    return { type: "solid", color: faded(fill.color, o) };
   }
   function styleRun(run, r) {
     if (r.b) run.SetBold(true);
@@ -236,8 +270,16 @@
     if (pp.level) p.Paragraph.Set_PresentationLevel(pp.level);
     return p;
   }
-  // Run styles, each applied in turn; more are added beside this one.
-  var STYLE_RUN = [styleRun];
+  // Run styles, each applied in turn.
+  var STYLE_RUN = [styleRun, function (run, r) {
+    if (r.spacing) run.SetSpacing(Math.round(r.spacing * 20));   // points to twips
+    if (r.caps) run.SetCaps(true);
+    if (r.s) run.SetStrikeout(true);
+    if (r.outline) run.SetOutLine(strokeOf(r.outline));
+    // SetFill, not SetTextFill: the saved file keeps only SetFill's.
+    if (r.gradient) run.SetFill(fillOf(r.gradient));
+    else if (r.color.alpha < 1) run.SetFill(fillOf({ type: "solid", color: r.color }));
+  }];
   function fillContent(content, paras) {
     content.RemoveAllElements();   // leaves one empty paragraph
     for (var i = 0; i < paras.length; i++) content.Push(paragraphOf(paras[i]));
@@ -248,18 +290,76 @@
     for (var id in styles) if (styles[id].Name === "No Style, No Grid") return id;
     return pres.Presentation.DefaultTableStyleId;
   }
-  // A shape's geometry; a rectangle is what CreateShape made.
-  function geometryOf(shape, spec) { return shape; }
+  // A shape's geometry: a preset with its adjust values, or custom paths in EMU. A rectangle is what CreateShape made.
+  function geometryOf(shape, spec) {
+    var g = spec.geometry;
+    if (!g || g.preset === "rect") return shape;
+    if (g.custom) {
+      var geometry = Api.CreateCustomGeometry();
+      g.custom.forEach(function (path) {
+        var p = geometry.AddPath();
+        p.SetWidth(path.w);
+        p.SetHeight(path.h);
+        if (!path.fill) p.SetFill("none");
+        if (!path.stroke) p.SetStroke(false);
+        path.d.forEach(function (step) {
+          if (step[0] === "M") p.MoveTo(step[1], step[2]);
+          else if (step[0] === "L") p.LineTo(step[1], step[2]);
+          else if (step[0] === "A") p.ArcTo(step[1], step[2], step[3], step[4]);
+          else if (step[0] === "Z") p.Close();
+        });
+      });
+      shape.SetGeometry(geometry);
+      return shape;
+    }
+    // Never CreateShape("line") or a connector preset: that makes a connector, which throws once the slide holds shapes
+    // added in the same command and leaves the document unsaveable. A line is a rectangle given the line geometry.
+    shape.SetGeometry(Api.CreatePresetGeometry(g.preset));
+    var current = shape.GetGeometry();
+    if (g.adj !== undefined) current.SetAdjValue("adj", g.adj);
+    if (g.adj1 !== undefined) { current.SetAdjValue("adj1", g.adj1); current.SetAdjValue("adj2", g.adj2); }
+    shape.SetGeometry(current);
+    // CreateShape makes a size of 0 an inch: a line's comes after its geometry.
+    if (g.preset === "line") shape.SetSize(spec.w, spec.h);
+    return shape;
+  }
   function placed(drawing, s) {
     drawing.SetPosition(s.x, s.y);
     return drawing;
   }
+  // Rotation, flips and an unblurred outer shadow. A negative angle would be saved negative.
+  function turned(drawing, s) {
+    if (s.rot) drawing.SetRotation(((s.rot % 360) + 360) % 360);
+    if (s.flipH) drawing.SetFlipH(true);
+    if (s.flipV) drawing.SetFlipV(true);
+    if (s.shadow) drawing.Drawing.spPr.setEffectPr(shadowOf(s.shadow, s));   // internal: the builder sets no shadow
+    return drawing;
+  }
+  // internal: the builder makes no shadow. Blur 0, as the editor draws every shadow (blurred ones are pictures); the
+  // spread grows it about its centre.
+  function shadowOf(sh, s) {
+    var list = new AscFormat.CEffectLst(), e = new AscFormat.COuterShdw(), c = rgb(sh.color.hex), u = AscFormat.CreateUniColorRGB(c[0], c[1], c[2]);
+    var alpha = faded(sh.color, s.opacity).alpha;
+    if (alpha < 1) u.addColorMod(new AscFormat.CColorMod("alpha", Math.round(alpha * 100000)));
+    e.color = u;
+    e.blurRad = 0;
+    e.dist = Math.round(Math.sqrt(sh.x * sh.x + sh.y * sh.y));
+    e.dir = Math.round(((Math.atan2(sh.y, sh.x) * 180 / Math.PI) + 360) % 360 * 60000);
+    e.algn = AscFormat.RECT_ALIGN_CTR;
+    e.rotWithShape = false;
+    if (sh.spread) { e.sx = Math.round((s.w + 2 * sh.spread) / s.w * 100000); e.sy = Math.round((s.h + 2 * sh.spread) / s.h * 100000); }
+    list.outerShdw = e;
+    var pr = new AscFormat.CEffectProperties();
+    pr.EffectLst = list;
+    return pr;
+  }
   var BUILD = {
     shape: function (s) {
       // A CSS border is inside its box; an OOXML line straddles its edge: the geometry is inset by half the width, and
-      // the text keeps its place with the other half added to its insets.
-      var half = s.stroke ? s.stroke.w / 2 : 0;
-      var sh = Api.CreateShape("rect", Math.max(1, s.w - 2 * half), Math.max(1, s.h - 2 * half), fillOf(s.fill), strokeOf(s.stroke));
+      // the text keeps its place with the other half added to its insets. A line shape is its line.
+      var line = s.geometry && s.geometry.preset === "line", half = s.stroke && !line ? s.stroke.w / 2 : 0;
+      var stroke = s.stroke && { w: s.stroke.w, color: faded(s.stroke.color, s.opacity), dash: s.stroke.dash };
+      var sh = Api.CreateShape("rect", Math.max(1, s.w - 2 * half), Math.max(1, s.h - 2 * half), fillOf(fadedFill(s.fill, s.opacity)), strokeOf(stroke));
       sh.Shape.setStyle(null);   // internal: CreateShape gives the theme's style, a shadow and white text, and no call takes it off
       geometryOf(sh, s);
       if (s.text) {
@@ -274,7 +374,7 @@
           sh.Shape.txBody.setBodyPr(body);
         }
       }
-      return placed(sh, { x: s.x + half, y: s.y + half });
+      return turned(placed(sh, { x: s.x + half, y: s.y + half }), s);
     },
     picture: function (s) {
       var picture = Api.CreateImage(s.src, s.w, s.h);
@@ -285,7 +385,10 @@
         fill.srcRect = new AscFormat.CSrcRect(s.crop[0], s.crop[1], 100 - s.crop[2], 100 - s.crop[3]);   // edge positions
         picture.Drawing.setBlipFill(fill);
       }
-      return placed(picture, s);
+      // internal, and as early: the builder gives a picture neither a geometry nor a transparency
+      if (s.radius) { var g = AscFormat.CreateGeometry("roundRect"); g.setAdjValue("adj", s.radius); picture.Drawing.spPr.setGeometry(g); }
+      if (s.opacity !== undefined) picture.Drawing.setTransparent(Math.round(s.opacity * 255));
+      return turned(placed(picture, s), s);
     },
     table: function (s) {
       var t = Api.CreateTable(s.cols.length, s.rows.length), T = t.Table, mm = s.cols.map(function (w) { return w / 36000; });
@@ -320,12 +423,69 @@
       var sum = function (list) { return list.reduce(function (a, b) { return a + b; }, 0); };
       t.Drawing.spPr.xfrm.setExtX(sum(s.cols) / 36000);
       t.Drawing.spPr.xfrm.setExtY(sum(s.rows.map(function (row) { return row.h; })) / 36000);
-      return t;
+      return t;   // a table cannot turn: a turned one was measured as a picture
+    },
+    // A connector: a straight line is the line preset over its box, flipped to run from its first point to its last; a
+    // routed one an open path through its corners. Its heads are at its two ends.
+    path: function (s) {
+      var pts = s.points, a = pts[0], b = pts[pts.length - 1];
+      var shape = Api.CreateShape("rect", Math.max(1, s.w), Math.max(1, s.h), Api.CreateNoFill(), strokeOf(s.stroke, s.head, s.tail));
+      shape.Shape.setStyle(null);   // internal, as for shapes
+      if (pts.length === 2) {
+        shape.SetGeometry(Api.CreatePresetGeometry("line"));
+        if (b[0] < a[0]) shape.SetFlipH(true);
+        if (b[1] < a[1]) shape.SetFlipV(true);
+      } else {
+        var geometry = Api.CreateCustomGeometry(), p = geometry.AddPath();
+        p.SetWidth(s.w);
+        p.SetHeight(s.h);
+        p.SetFill("none");
+        pts.forEach(function (pt, i) { if (i) p.LineTo(pt[0] - s.x, pt[1] - s.y); else p.MoveTo(pt[0] - s.x, pt[1] - s.y); });
+        shape.SetGeometry(geometry);
+      }
+      shape.SetSize(s.w, s.h);   // after the geometry: CreateShape makes a size of 0 an inch
+      return placed(shape, s);
+    },
+    group: function (s) {
+      return Api.CreateGroup(s.children.map(function (child) { return BUILD[child.kind](child); }));
     },
   };
   function blankLayout() { var master = pres.GetMaster(0); return master ? master.GetLayoutByType("blank") : null; }
   // Run after each shape joins its slide, in turn.
-  var AFTER_ADD = [];
+  var pendingBuilds = [];
+  var AFTER_ADD = [function (slide, drawing, s) {
+    // Morph pairs shapes by one "!!" name on two slides, which the public SetName will not give: it renames the
+    // other holder (internal setName does not). A group's name goes after it joins the slide, or it is lost.
+    if (s.magic) drawing.Drawing.setName("!!" + s.magic);
+    if (s.build) pendingBuilds.push({ slide: slide, drawing: drawing, build: s.build });
+  }];
+  // Builds, by order and then as listed. Fade, scale and pop are public effects; the fly-ins take a direction (a preset
+  // subtype) AddEffect does not pass, so they take its own three internal steps with it.
+  var FLY = { rise: 4, drop: 1, left: 8, right: 2 };
+  var PUBLIC = { fade: ["fade", "fade-out"], scale: ["zoom", "zoom-out"], pop: ["bounce", "bounce-out"] };
+  function addBuilds(slide) {
+    var mine = pendingBuilds.filter(function (b) { return b.slide === slide; }), steps = [];
+    pendingBuilds = pendingBuilds.filter(function (b) { return b.slide !== slide; });
+    mine.forEach(function (b, i) {
+      if (b.build.in) steps.push({ drawing: b.drawing, step: b.build.in, cls: 1, at: i });
+      if (b.build.out) steps.push({ drawing: b.drawing, step: b.build.out, cls: 2, at: i });
+    });
+    steps.sort(function (a, b) { return (a.step.order || 0) - (b.step.order || 0) || a.at - b.at || a.cls - b.cls; });
+    if (!steps.length) return;
+    var timeline = slide.GetTimeLine(), seq = timeline.GetMainSequence(), T = timeline.Timing;
+    steps.forEach(function (s) {
+      if (FLY[s.step.effect] !== undefined) {
+        var eff = T.createEffect(s.drawing.Drawing.GetId(), s.cls, 2, FLY[s.step.effect], null);   // internal: preset 2 is fly in/out
+        eff.cTn.setNodeType(s.step.auto ? AscFormat.NODE_TYPE_AFTEREFFECT : AscFormat.NODE_TYPE_CLICKEFFECT);
+        T.addEffectsToMainSequence([eff]);
+      } else {
+        var effect = seq.AddEffect(s.drawing, PUBLIC[s.step.effect][s.cls - 1], s.step.auto ? "afterprevious" : "onclick");
+        // bounce, the nearest preset to a pop, runs 2 s by default
+        if (s.step.effect === "pop" && effect) effect.SetDuration(500);
+      }
+    });
+  }
+  var TRANSITIONS = { fade: "effectFadeSmoothly", push: "effectPushLeft", magic: "effectMorphByObject" };
   function build(slide, spec) {
     if (spec.background) slide.SetBackground(fillOf(spec.background));
     for (var i = 0; i < spec.shapes.length; i++) {
@@ -337,6 +497,13 @@
     }
     if (spec.notes) slide.AddNotesText(spec.notes);
     slide.SetVisible(!spec.hidden);
+    addBuilds(slide);
+    if (spec.transition) {
+      var t = Api.CreateSlideShowTransition();
+      t.SetEntryEffect(TRANSITIONS[spec.transition.effect]);
+      t.SetDuration(spec.transition.ms);
+      slide.SetSlideShowTransition(t);
+    }
   }
   function added(after, spec) {
     var slide = Api.CreateSlide(), blank = blankLayout();
