@@ -114,11 +114,21 @@ describe.skipIf(process.platform === "darwin")("scripts/package-mac.sh, elsewher
   });
 });
 
-// The bundle's own files, each by its path from the bundle's top; and its links, each with where it leads.
-function filesOf(top: string): string[] {
-  return (readdirSync(top, { recursive: true, withFileTypes: true }) as Array<{ isFile(): boolean; parentPath: string; name: string }>)
-    .filter((entry) => entry.isFile()).map((entry) => relative(top, join(entry.parentPath, entry.name)).split(sep).join("/")).sort();
+// The bundle's own files, or its links, each by its path from the bundle's top, never through a link to a folder, as a
+// framework's Versions/Current is.
+function entriesOf(top: string, links = false): string[] {
+  const found: string[] = [];
+  const walk = (folder: string) => {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      const path = join(folder, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (links ? entry.isSymbolicLink() : entry.isFile()) found.push(relative(top, path).split(sep).join("/"));
+    }
+  };
+  walk(top);
+  return found.sort();
 }
+const filesOf = (top: string): string[] => entriesOf(top);
 
 // What a file is, by its first eight bytes: a Mach-O file of one arch and its CPU type, a universal one, or neither.
 function machO(path: string): "arm64" | "other" | "universal" | null {
@@ -244,10 +254,9 @@ describe.runIf(process.platform === "darwin" && LAYOUT)("Surogate.app's layout",
       "Contents/Resources/app/dist/native/fsat.node",
     ].sort());
     for (const file of programs) expect(machO(at(file)), file).toBe("arm64");
-    const links = (readdirSync(top, { recursive: true, withFileTypes: true }) as Array<{ isSymbolicLink(): boolean; parentPath: string; name: string }>)
-      .filter((entry) => entry.isSymbolicLink()).map((entry) => join(entry.parentPath, entry.name));
-    expect(links.length).toBeGreaterThan(0);
-    for (const link of links) expect(relative(realpathSync(top), realpathSync(link)).startsWith(".."), link).toBe(false);
+    const links = entriesOf(top, true);
+    expect(links).toEqual(expect.arrayContaining(["Contents/Frameworks/Electron Framework.framework/Versions/Current", "Contents/Frameworks/Electron Framework.framework/Electron Framework"]));
+    for (const link of links) expect(relative(realpathSync(top), realpathSync(at(link))).startsWith(".."), link).toBe(false);
   });
 
   it("is signed ad hoc, inside out: each program and library by itself with exactly its entitlements, and the whole by codesign's strict check", () => {
