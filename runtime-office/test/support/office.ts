@@ -1,6 +1,8 @@
 import { createHmac, randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { networkInterfaces } from "node:os";
 import { HOST_HTML } from "../../src/host.js";
 import type { Office } from "../../src/office.js";
 
@@ -53,6 +55,13 @@ export interface Fixture {
 
 /** Serves the fixture documents and the host page, and records the document server's callbacks. */
 export async function startFixture(): Promise<Fixture> {
+  // An address this machine no longer has (a VPN that reconnected with another) leaves every editor waiting on a file
+  // the document server cannot fetch, until the test times out saying nothing.
+  const { address } = await lookup(new URL(IT.host).hostname);
+  const own = Object.values(networkInterfaces()).flat().map((each) => each?.address);
+  if (!own.includes(address)) {
+    throw new Error(`OFFICE_IT_HOST ${IT.host} is not an address of this machine (it has ${own.filter((a) => a && !a.includes(":")).join(", ")}): the document server could not fetch the test documents`);
+  }
   const callbacks: Record<string, unknown>[] = [];
   const server = createServer((req, res) => {
     if (req.method === "POST" && req.url === "/callback") {

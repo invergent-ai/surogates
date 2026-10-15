@@ -53,7 +53,8 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
     expect(result).toMatchObject({ applied: true, flushed: true });
     const id = result.results[0].slides[0].id;
     // What the person's editor holds (editor internals for the geometry and the background, which the builder reads
-    // nothing of).
+    // nothing of). The builder's GetTimeLine gives a slide with no timing an empty one, a change of its own: read before
+    // the agent's slide has arrived, it would replace the agent's builds on both editors.
     await eventually(async () => {
       const seen = (await (await pool.get(user)).command(`function () {
         var s = Api.GetPresentation().GetAllSlides().filter(function (x) { return String(x.Slide.Get_Id()) === scope.id; })[0];
@@ -63,7 +64,7 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
           kinds: d.map(function (x) { return x.GetClassType(); }),
           geometry: d.map(function (x) { return x.Drawing && x.Drawing.spPr && x.Drawing.spPr.geometry ? x.Drawing.spPr.geometry.preset || "custom" : null; }),
           rotations: d.map(function (x) { return Math.round(x.GetRotation ? x.GetRotation() : 0); }),
-          effects: s.GetTimeLine().GetAllEffects().map(function (e) { return [e.GetEffectType(), e.GetTriggerType()]; }),
+          effects: s.Slide.timing ? s.GetTimeLine().GetAllEffects().map(function (e) { return [e.GetEffectType(), e.GetTriggerType()]; }) : [],
           transition: s.GetSlideShowTransition ? s.GetSlideShowTransition().GetEntryEffect() : null,
           background: !!(s.Slide.cSld.Bg && s.Slide.cSld.Bg.bgPr && s.Slide.cSld.Bg.bgPr.Fill && s.Slide.cSld.Bg.bgPr.Fill.fill instanceof AscFormat.CGradFill)
         });
@@ -90,7 +91,7 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
     const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ id: fading.id, hash: fading.hash, html: REPLACEMENT }] }]);
     expect(result).toMatchObject({ applied: true, flushed: true });
     // Editor internals: the current slide, a group's children and a fly-out's direction (its preset subtype), which the
-    // builder reads nothing of.
+    // builder reads nothing of; the timeline only where the slide has one, as above.
     const read = `function () {
       var all = Api.GetPresentation().GetAllSlides(), s = all.filter(function (x) { return String(x.Slide.Get_Id()) === scope.id; })[0];
       if (!s) return null;
@@ -99,7 +100,7 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
         current: Api.GetPresentation().Presentation.CurPage, index: s.GetSlideIndex(),
         kinds: s.GetAllDrawings().map(function (x) { return x.GetClassType(); }),
         group: groups.map(function (g) { return g.Drawing.spTree.length; }),
-        effects: s.GetTimeLine().GetAllEffects().map(function (e) { return [e.GetEffectType(), e.Effect.cTn.presetSubtype]; }),
+        effects: s.Slide.timing ? s.GetTimeLine().GetAllEffects().map(function (e) { return [e.GetEffectType(), e.Effect.cTn.presetSubtype]; }) : [],
         transition: s.GetSlideShowTransition().GetEntryEffect(),
         others: all.filter(function (x) { return x !== s; }).map(function (x) { return x.GetAllDrawings().filter(function (d) { return d.GetClassType() === "group"; }).length; })
       });
