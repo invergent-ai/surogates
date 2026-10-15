@@ -297,7 +297,9 @@ async def withdraw_consent(
     else:
         who = (await followup_store.display_names(sf, [user_id])).get(user_id) or "?"
     what = (
-        w(settings, "stop_ended", journeys=", ".join(ended)) if ended
+        w(settings, "stop_ended", journeys=await followup_store.journey_names(
+            sf, org_id=org_id, agent_id=agent_id, protocols=ended,
+        )) if ended
         else w(settings, "stop_contact")
     )
     text = w(settings, "notice_stopped", who=who, channel=channel, what=what, reason=reason).strip()

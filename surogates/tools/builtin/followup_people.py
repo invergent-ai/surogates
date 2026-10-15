@@ -83,7 +83,8 @@ FOLLOWUP_WITHDRAW_CONSENT_SCHEMA = ToolSchema(
         "Stop the business's messages to the one writing, on this channel, the "
         "moment they ask: stop, unsubscribe, do not write to me, in any "
         "language. It records the withdrawal; for the person followed their "
-        "follow-up ends, a contact just stops receiving it. The team is told. "
+        "follow-up ends, a contact just stops receiving it. The team is told, "
+        "once: do not also end the follow-up with followup_update. "
         "Then confirm to them in one sentence that no more messages will come "
         "here, and do not try to change their mind."
     ),

@@ -850,3 +850,24 @@ async def followup_store_mark_owner(sf, owner):
             row.created_at = datetime.now(timezone.utc) - timedelta(minutes=ages[row.reason])
             row.owner = owner if row.reason == "Fell" else None
         await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_tells_the_team_once_by_the_journeys_name(sf, clinic):
+    async with sf() as db:
+        db.add(ProgramScheduleRow(
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=False,
+            config={"audience": {"protocol": "post-op"},
+                    "journey": {"slug": "post-op", "name": "Recovery"}},
+        ))
+        await db.commit()
+    ion, ion_session = await _user(sf, "Ion", "40722222222")
+    await store.upsert_enrollment(sf, org_id=ORG, agent_id=AGENT, user_id=ion, protocol="post-op",
+                                  start_date=date.today(), phase=None, enrolled_by="agent")
+    await followup_people.handle_followup_withdraw_consent({"reason": "stop please"}, **_kw(sf, ion_session))
+    # The agent ending it as well, after the stop, tells nobody again.
+    await followup.handle_followup_update(
+        {"protocol": "post-op", "status": "ended", "reason": "asked to stop"}, **_kw(sf, ion_session),
+    )
+    notices = {(o.text) for o in await _all(sf, OutreachMessageRow) if o.kind == "alert"}
+    assert notices == {"Ion asked to stop messages on WhatsApp: Recovery ended. stop please"}

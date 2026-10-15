@@ -1263,7 +1263,10 @@ async def handle_team_update_person(arguments: dict, **kwargs: Any) -> str:
     if status in ("paused", "ended"):
         label = followup_store.person_label(person.display_name, updated, settings)
         notice = followup_store.wording(
-            settings, f"notice_{status}_by", journey=row.protocol, member=_member(ctx), reason=reason,
+            settings, f"notice_{status}_by", member=_member(ctx), reason=reason,
+            journey=await followup_store.journey_names(
+                sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[row.protocol],
+            ),
         )
         queued, why_not = await _tell_team(
             sf, ctx, settings, kind="alert", text=followup_store.signed(notice, label or person.label, settings),
@@ -1470,7 +1473,10 @@ async def handle_team_enroll_person(arguments: dict, **kwargs: Any) -> str:
         sf, ctx, settings, kind="enrolment",
         text=followup_store.signed(
             followup_store.wording(
-                settings, "notice_enrolled_by", name=name, journey=protocol, member=_member(ctx),
+                settings, "notice_enrolled_by", name=name, member=_member(ctx),
+                journey=await followup_store.journey_names(
+                    sf, org_id=ctx.org_id, agent_id=ctx.agent_id, protocols=[protocol],
+                ),
             ),
             followup_store.person_label(name, row, settings)
             + (f" · {readable_phone(handle)}" if platform == "whatsapp" else ""),
