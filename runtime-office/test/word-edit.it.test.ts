@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { EditorPage } from "../src/connector.js";
-import { compileOps } from "../src/ops.js";
+import type { Scope } from "../src/formats/format.js";
 import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
 import { AGENT, editorConfig, IT, itEnabled, newKey, startFixture, USER, type Fixture } from "./support/office.js";
@@ -13,9 +13,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // Holds an edit's reply before the office acts on it, long enough for a sent change to reach the user: about 0.15 s
 // usually, and a second for the first change on a fresh pair of pages.
 class SlowOffice extends Office {
-  protected override async run(page: EditorPage, scope: unknown): Promise<{ sentAt: number; value: unknown }> {
+  protected override async run(page: EditorPage, scope: Scope): Promise<{ sentAt: number; value: unknown }> {
     const reply = await super.run(page, scope);
-    if ((scope as { action?: string }).action === "edit") await sleep(2_000);
+    if (scope.action === "edit") await sleep(2_000);
     return reply;
   }
 }
@@ -50,7 +50,7 @@ describe.skipIf(!itEnabled)("editing a document", () => {
   const blocks = async (id: string): Promise<Any[]> =>
     ((await office.read(id, { view: "outline" })) as Any).blocks.filter((b: Any) => b.kind !== "paragraph" || b.text);
   const byText = (list: Any[], text: string): Any => list.find((b) => (b.text ?? "").startsWith(text));
-  const edit = async (id: string, ops: unknown[]): Promise<Any> => office.edit(id, compileOps(ops));
+  const edit = async (id: string, ops: unknown[]): Promise<Any> => office.edit(id, ops);
   async function eventually(check: () => Promise<void>, ms = 10_000): Promise<void> {
     const until = Date.now() + ms;
     for (;;) {
@@ -129,10 +129,10 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     const north = byText(await blocks(agent), "North grew");
     let settled = false;
     const editing = new SlowOffice(pool)
-      .edit(agent, compileOps([
+      .edit(agent, [
         { op: "insert", target: { end: true }, content: { markdown: "Should not stay." } },
         { op: "replace", target: { block: north.id, hash: "00000000" }, content: { markdown: "Replaced." } },
-      ]))
+      ])
       .finally(() => { settled = true; });
     const seen: string[] = [];
     while (!settled) {

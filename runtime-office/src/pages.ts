@@ -28,6 +28,14 @@ export function pageId(docKey: string, sessionId: string): string {
   return `${docKey}.${sessionId}`;
 }
 
+// The document server sometimes answers an editor's fetch of the file "Download failed" (-4) and serves the same
+// file on the next try.
+const OPEN_ATTEMPTS = 3;
+
+function downloadFailed(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('"errorCode":-4');
+}
+
 export class PagePool {
   private browser: Promise<Browser> | null = null;
   private readonly pages = new Map<string, EditorPage>();
@@ -60,13 +68,19 @@ export class PagePool {
       throw new Busy(`runtime-office has ${this.options.maxPages} documents open, its limit`);
     }
     const opened = (async () => {
-      const page = await EditorPage.open(await this.launch(), {
-        ...this.options,
-        config: request.config,
-        documentServerUrl: request.documentServerUrl,
-      });
-      this.pages.set(id, page);
-      return id;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const page = await EditorPage.open(await this.launch(), {
+            ...this.options,
+            config: request.config,
+            documentServerUrl: request.documentServerUrl,
+          });
+          this.pages.set(id, page);
+          return id;
+        } catch (error) {
+          if (attempt >= OPEN_ATTEMPTS || !downloadFailed(error)) throw error;
+        }
+      }
     })().finally(() => this.opening.delete(id));
     this.opening.set(id, opened);
     return opened;

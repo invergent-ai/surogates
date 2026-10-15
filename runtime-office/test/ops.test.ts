@@ -47,6 +47,7 @@ describe("compileOps", () => {
 
   it("names the op it refuses", () => {
     expect(() => compileOps([{ op: "delete", target: block }, { op: "paint", target: block }])).toThrow(/^op 1: unknown op/);
+    expect(() => compileOps([{ op: "delete", target: block }, "delete"])).toThrow(/^op 1: an op is an object\.$/);
   });
 
   it("refuses targets that cannot work", () => {

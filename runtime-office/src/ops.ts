@@ -1,3 +1,4 @@
+import { checkBatch } from "./formats/format.js";
 import { compileContent, ContentError, type Block } from "./markdown.js";
 
 export type Found = { find: string; nth: number };
@@ -21,21 +22,10 @@ type Raw = Record<string, unknown>;
 
 /** The agent's batch, checked and compiled; a ContentError names the op it refuses. */
 export function compileOps(input: unknown): EditorOp[] {
-  if (!Array.isArray(input) || input.length === 0) throw new ContentError('"ops" is a non-empty list of ops.');
-  if (input.length > MAX_OPS) throw new ContentError(`One call carries at most ${MAX_OPS} ops.`);
-  return input.map((raw, index) => {
-    try {
-      return compileOp(raw);
-    } catch (error) {
-      if (error instanceof ContentError) throw new ContentError(`op ${index}: ${error.message}`);
-      throw error;
-    }
-  });
+  return checkBatch(input, MAX_OPS, compileOp);
 }
 
-function compileOp(input: unknown): EditorOp {
-  if (typeof input !== "object" || input === null) throw new ContentError("an op is an object.");
-  const raw = input as Raw;
+function compileOp(raw: Raw): EditorOp {
   switch (raw.op) {
     case "insert":
       return { op: "insert", target: target(raw.target, true), side: side(raw.side), blocks: markdownOf(raw.content) };

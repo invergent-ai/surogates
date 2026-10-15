@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { compileOps } from "../src/ops.js";
 import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
 import { AGENT, editorConfig, IT, itEnabled, newKey, startFixture, USER, type Fixture } from "./support/office.js";
@@ -35,7 +34,7 @@ describe.skipIf(!itEnabled)("comments", () => {
     return { agent, user };
   }
   const comments = async (id: string): Promise<Any[]> => ((await office.read(id, { view: "outline" })) as Any).comments;
-  const edit = async (id: string, ops: unknown[]): Promise<Any> => office.edit(id, compileOps(ops));
+  const edit = async (id: string, ops: unknown[]): Promise<Any> => office.edit(id, ops);
   // The user's editor can still be taking in the agent's change.
   async function eventually(check: () => Promise<void>, ms = 10_000): Promise<void> {
     const until = Date.now() + ms;

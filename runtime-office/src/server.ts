@@ -2,8 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { HOST_HTML } from "./host.js";
 import { ContentError } from "./markdown.js";
-import { EditorError, type Office, type ReadRequest } from "./office.js";
-import { compileOps } from "./ops.js";
+import { EditorError, type Office } from "./office.js";
 import { Busy, PageGone } from "./pages.js";
 
 export type OfficeApi = Pick<Office, "open" | "read" | "edit" | "flush" | "close" | "health">;
@@ -45,10 +44,10 @@ export function createServer(office: OfficeApi, options: { token: string; maxBod
     if (req.method === "POST" && url.pathname === "/pages") {
       const body = await readJson(req, maxBody);
       const id = await office.open({
-        docKey: text(body.doc_key, "doc_key"),
-        sessionId: text(body.session_id, "session_id"),
+        docKey: required(body.doc_key, "doc_key"),
+        sessionId: required(body.session_id, "session_id"),
         config: object(body.config, "config"),
-        documentServerUrl: text(body.document_server_url, "document_server_url"),
+        documentServerUrl: required(body.document_server_url, "document_server_url"),
       });
       return send(res, 200, { page_id: id });
     }
@@ -63,25 +62,13 @@ export function createServer(office: OfficeApi, options: { token: string; maxBod
     }
     if (req.method !== "POST" || !action) throw new HttpError(405, "method not allowed");
     const body = await readJson(req, maxBody);
-    if (action === "read") return send(res, 200, await office.read(id, readRequest(body)));
-    if (action === "edit") return send(res, 200, await office.edit(id, compileOps(body.ops)));
+    if (action === "read") return send(res, 200, await office.read(id, body));
+    if (action === "edit") return send(res, 200, await office.edit(id, body.ops));
     return send(res, 200, { flushed: await office.flush(id) });
   }
 }
 
-function readRequest(body: Record<string, unknown>): ReadRequest {
-  if (body.view === "outline") {
-    const start = Number(body.start ?? 0);
-    const limit = Number(body.limit ?? 200);
-    if (!Number.isInteger(start) || start < 0 || !Number.isInteger(limit) || limit < 1) throw new ContentError('"start" and "limit" are whole numbers.');
-    return { view: "outline", start, limit };
-  }
-  if (body.view === "block") return { view: "block", target: text(body.target, "target") };
-  if (body.view === "search") return { view: "search", query: text(body.query, "query") };
-  throw new ContentError('"view" is "outline", "block" or "search".');
-}
-
-function text(value: unknown, name: string): string {
+function required(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new HttpError(400, `"${name}" is required`);
   return value;
 }

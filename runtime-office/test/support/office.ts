@@ -23,12 +23,15 @@ export function sign(payload: object): string {
   return `${unsigned}.${createHmac("sha256", IT.secret).update(unsigned).digest("base64url")}`;
 }
 
+const TYPES: Record<string, string> = { docx: "word", xlsx: "cell", pptx: "slide", pdf: "pdf" };
+
 export function editorConfig(key: string, user: { id: string; name: string }, file = "sample.docx"): Record<string, unknown> {
+  const fileType = file.split(".").pop()!;
   const config = {
     width: "100%",
     height: "100%",
-    document: { fileType: "docx", key, title: file, url: `${IT.host}/files/${file}`, permissions: { edit: true, review: true, comment: true } },
-    documentType: "word",
+    document: { fileType, key, title: file, url: `${IT.host}/files/${file}`, permissions: { edit: true, review: true, comment: true } },
+    documentType: TYPES[fileType],
     editorConfig: {
       callbackUrl: `${IT.host}/callback`,
       mode: "edit",
@@ -68,8 +71,8 @@ export async function startFixture(): Promise<Fixture> {
     const file = /^\/files\/([\w.-]+)$/.exec(req.url ?? "");
     try {
       if (!file) throw new Error("not found");
-      // blank.docx is the document office_edit creates a new one from.
-      const path = file[1] === "blank.docx" ? "../../../surogates/office/templates/blank.docx" : `../fixtures/${file[1]}`;
+      // blank.<type> is the document office_edit creates a new one from.
+      const path = /^blank\.\w+$/.test(file[1]!) ? `../../../surogates/office/templates/${file[1]}` : `../fixtures/${file[1]}`;
       res.end(readFileSync(new URL(path, import.meta.url)));
     } catch {
       res.statusCode = 404;
