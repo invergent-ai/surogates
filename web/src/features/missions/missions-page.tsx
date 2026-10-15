@@ -6,6 +6,7 @@
 
 import { MissionsPanel } from "@invergent/agent-chat-react";
 import { useNavigate } from "@tanstack/react-router";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
 import { useEffect } from "react";
 
 import { AppShell } from "@/components/app-shell";
@@ -39,9 +40,7 @@ export function MissionsPage() {
               onMissionSelect={handleSelect}
             />
           ) : (
-            <p className="px-4 py-8 text-center text-sm text-faint">
-              No missions
-            </p>
+            <EmptyState className="px-4 py-8" title="No missions" />
           )}
         </div>
       </div>

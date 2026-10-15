@@ -7,16 +7,6 @@
 @plugin "@toolwind/corner-shape";
 @source "../../sdk/agent-chat-react/src";
 
-/* The sidebar's full layout: a wide screen, and its rail not collapsed (AppShell). Narrower, or
-   collapsed, the sidebar is the icon rail. */
-@custom-variant rail-open {
-  @media (width >= 64rem) {
-    &:where([data-mode="aside"]:not([data-collapsed]) *) {
-      @slot;
-    }
-  }
-}
-
 @theme inline {
   --animate-fade-up: fade-up 0.5s ease both;
   --animate-fade-in: fade-in 0.8s ease both;

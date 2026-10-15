@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   BookOpenIcon,
   ChevronLeftIcon,
@@ -32,7 +32,12 @@ import { cn } from "@/lib/utils";
 import { Button } from "@invergent/ui-sdk/button";
 import { Input } from "@invergent/ui-sdk/input";
 import { Textarea } from "@invergent/ui-sdk/textarea";
-import { Badge } from "@invergent/ui-sdk/badge";
+import { type Tone, TagPill, TonePill } from "@invergent/ui-sdk/chip";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
+import { TextLink } from "@invergent/ui-sdk/text-link";
+import { FilterPill } from "@invergent/ui-sdk/toggle";
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
@@ -41,11 +46,6 @@ import {
   InputGroupAddon,
   InputGroupInput,
 } from "@invergent/ui-sdk/input-group";
-import {
-  Tabs,
-  TabsList,
-  TabsTrigger,
-} from "@invergent/ui-sdk/tabs";
 import {
   Dialog,
   DialogContent,
@@ -68,17 +68,23 @@ const SOURCE_LABELS: Record<SkillSource, string> = {
 
 const SOURCE_ORDER: SkillSource[] = ["user", "org", "platform"];
 
-const EXPERT_STATUS_VARIANTS: Record<
-  string,
-  "default" | "secondary" | "outline" | "destructive"
-> = {
-  active: "default",
-  collecting: "secondary",
-  draft: "outline",
-  retired: "destructive",
+const EXPERT_STATUS_TONES: Record<string, Tone> = {
+  active: "ok",
+  collecting: "warn",
+  draft: "muted",
+  retired: "bad",
 };
 
 type TypeFilter = "all" | SkillKind;
+
+const TYPE_FILTERS: { id: TypeFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "skill", label: "Skills" },
+  { id: "expert", label: "Experts" },
+];
+
+// The list's first group label starts right under the header, whose rule it would double.
+const FIRST_GROUP = "first:mt-0 first:border-t-0 first:pt-1";
 
 export function SkillsPage() {
   const fetchUser = useAppStore((s) => s.fetchUser);
@@ -244,16 +250,17 @@ export function SkillsPage() {
               />
             </InputGroup>
 
-            <Tabs
-              value={typeFilter}
-              onValueChange={(v) => setTypeFilter(v as TypeFilter)}
-            >
-              <TabsList variant="line" className="w-full">
-                <TabsTrigger value="all">All</TabsTrigger>
-                <TabsTrigger value="skill">Skills</TabsTrigger>
-                <TabsTrigger value="expert">Experts</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <div role="group" aria-label="Type" className="flex gap-1.5">
+              {TYPE_FILTERS.map((filter) => (
+                <FilterPill
+                  key={filter.id}
+                  on={typeFilter === filter.id}
+                  onClick={() => setTypeFilter(filter.id)}
+                >
+                  {filter.label}
+                </FilterPill>
+              ))}
+            </div>
           </header>
 
           <div className="flex-1 overflow-y-auto">
@@ -263,28 +270,28 @@ export function SkillsPage() {
                 Loading...
               </div>
             ) : filtered.length === 0 ? (
-              <div className="text-center py-12 px-4 space-y-2">
-                <BookOpenIcon className="w-8 h-8 text-muted-foreground/40 mx-auto" />
-                <p className="text-sm text-muted-foreground">
-                  {search
-                    ? "No skills match your search."
-                    : "No skills available."}
-                </p>
-              </div>
+              <EmptyState
+                className="px-4 py-12"
+                title={
+                  search ? "No skills match your search" : "No skills available"
+                }
+              />
             ) : (
-              SOURCE_ORDER.map((source) => {
-                const items = grouped[source];
-                if (items.length === 0) return null;
-                return (
-                  <SkillGroup
-                    key={source}
-                    label={SOURCE_LABELS[source]}
-                    items={items}
-                    selectedName={selectedName}
-                    onSelect={setSelectedName}
-                  />
-                );
-              })
+              <div className="flex flex-col gap-0.5 p-2">
+                {SOURCE_ORDER.map((source) => {
+                  const items = grouped[source];
+                  if (items.length === 0) return null;
+                  return (
+                    <SkillGroup
+                      key={source}
+                      label={SOURCE_LABELS[source]}
+                      items={items}
+                      selectedName={selectedName}
+                      onSelect={setSelectedName}
+                    />
+                  );
+                })}
+              </div>
             )}
           </div>
         </section>
@@ -296,15 +303,17 @@ export function SkillsPage() {
           )}
         >
           {selectedName && (
-            <div className="md:hidden flex items-center border-b border-line px-2 py-2">
-              <button
-                type="button"
-                onClick={() => setSelectedName(null)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-md text-subtle hover:bg-input hover:text-foreground"
-                aria-label="Back to skills list"
-              >
-                <ChevronLeftIcon className="h-5 w-5" />
-              </button>
+            <div className="md:hidden flex items-center border-b border-line px-4 py-1">
+              <TextLink asChild variant="muted">
+                <button
+                  type="button"
+                  onClick={() => setSelectedName(null)}
+                  aria-label="Back to skills list"
+                >
+                  <ChevronLeftIcon className="size-4" />
+                  Skills
+                </button>
+              </TextLink>
             </div>
           )}
           {detailLoading ? (
@@ -313,7 +322,11 @@ export function SkillsPage() {
               Loading skill...
             </div>
           ) : !detail ? (
-            <EmptyState />
+            <EmptyState
+              className="h-full justify-center px-8"
+              title="Select a skill"
+              description="Skills are reusable prompts and capabilities. Platform skills are shipped with Surogates, organization skills are shared across your team, and your own skills are visible only to you."
+            />
           ) : (
             <SkillDetailView
               detail={detail}
@@ -369,67 +382,42 @@ function SkillGroup({
   onSelect: (name: string) => void;
 }) {
   return (
-    <div className="py-1">
-      <div className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide text-faint">
-        {label}
-      </div>
-      {items.map((skill) => {
-        const isActive = skill.name === selectedName;
-        return (
-          <button
-            type="button"
-            key={skill.name}
-            onClick={() => onSelect(skill.name)}
-            className={cn(
-              "w-full text-left px-4 py-2 border-l-2 transition-colors",
-              isActive
-                ? "bg-line text-foreground border-l-primary"
-                : "border-l-transparent hover:bg-input text-subtle hover:text-foreground",
-            )}
-          >
-            <div className="flex items-center gap-1.5 min-w-0">
-              {skill.type === "expert" && (
-                <SparklesIcon className="w-3 h-3 text-primary shrink-0" />
-              )}
-              <div className="font-medium text-sm truncate flex-1">
-                {skill.name}
-              </div>
-              {skill.type === "expert" && skill.expert_status && (
-                <Badge
-                  variant={
-                    EXPERT_STATUS_VARIANTS[skill.expert_status] ?? "outline"
-                  }
-                  className="text-[10px]"
-                >
-                  {skill.expert_status}
-                </Badge>
-              )}
-            </div>
-            {skill.description && (
-              <div className="text-xs text-faint truncate mt-0.5">
-                {skill.description}
-              </div>
-            )}
-          </button>
-        );
-      })}
-    </div>
+    <>
+      <SectionLabel label={label} className={FIRST_GROUP} />
+      {items.map((skill) => (
+        <ListRow
+          key={skill.name}
+          icon={skill.type === "expert" ? SparklesIcon : BookOpenIcon}
+          label={skill.name}
+          description={skill.description || undefined}
+          badge={
+            skill.type === "expert" &&
+            skill.expert_status && (
+              <ExpertStatus status={skill.expert_status} />
+            )
+          }
+          isActive={skill.name === selectedName}
+          onClick={() => onSelect(skill.name)}
+        />
+      ))}
+    </>
   );
 }
 
-function EmptyState() {
+function ExpertStatus({
+  status,
+  className,
+}: {
+  status: string;
+  className?: string;
+}) {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-center px-8 gap-3">
-      <FileTextIcon className="w-10 h-10 text-muted-foreground/40" />
-      <div className="space-y-1">
-        <p className="text-sm text-muted-foreground">Select a skill</p>
-        <p className="text-sm text-faint max-w-sm">
-          Skills are reusable prompts and capabilities. Platform skills are
-          shipped with Surogates, organization skills are shared across your
-          team, and your own skills are visible only to you.
-        </p>
-      </div>
-    </div>
+    <TonePill
+      tone={EXPERT_STATUS_TONES[status] ?? "muted"}
+      className={cn("capitalize", className)}
+    >
+      {status}
+    </TonePill>
   );
 }
 
@@ -526,13 +514,22 @@ function SkillDetailView({
 }
 
 function MetaRow({ detail }: { detail: SkillDetail }) {
-  const items: { label: string; value: string }[] = [
+  const items: { label: string; value: ReactNode }[] = [
     { label: "Source", value: SOURCE_LABELS[detail.source] },
   ];
   if (detail.category) items.push({ label: "Category", value: detail.category });
   if (detail.trigger) items.push({ label: "Trigger", value: detail.trigger });
   if (detail.tags && detail.tags.length > 0) {
-    items.push({ label: "Tags", value: detail.tags.join(", ") });
+    items.push({
+      label: "Tags",
+      value: (
+        <span className="flex flex-wrap gap-1">
+          {detail.tags.map((tag) => (
+            <TagPill key={tag} label={tag} />
+          ))}
+        </span>
+      ),
+    });
   }
 
   return (
@@ -562,12 +559,7 @@ function ExpertPanel({ detail }: { detail: SkillDetail }) {
         <h3 className="text-sm font-semibold text-foreground">
           Expert configuration
         </h3>
-        <Badge
-          variant={EXPERT_STATUS_VARIANTS[status] ?? "outline"}
-          className="ml-auto"
-        >
-          {status}
-        </Badge>
+        <ExpertStatus status={status} className="ml-auto" />
       </div>
 
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">

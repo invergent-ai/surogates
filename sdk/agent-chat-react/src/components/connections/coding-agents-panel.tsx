@@ -1,3 +1,4 @@
+import { Button } from "@invergent/ui-sdk/button";
 import { ArrowLeftIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AgentChatAdapter, CodingAgentConnection } from "../../types";
@@ -278,24 +279,26 @@ function ProviderCard({
       )}
 
       <div className="flex items-center gap-2">
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="xs"
           disabled={busy}
           onClick={submit}
-          className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-border px-3 text-xs text-foreground disabled:opacity-60 pointer-fine:min-h-0 pointer-fine:py-1.5 pointer-fine:hover:bg-accent"
         >
           {busy && <Loader2Icon className="h-3.5 w-3.5 animate-spin" />}
           {connected ? "Update" : "Connect"}
-        </button>
+        </Button>
         {connected && (
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="xs"
             disabled={busy}
             onClick={disconnect}
-            className="inline-flex items-center justify-center rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-60"
           >
             Disconnect
-          </button>
+          </Button>
         )}
       </div>
     </section>

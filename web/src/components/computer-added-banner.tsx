@@ -5,7 +5,9 @@
 // the user's for 7 days after a computer is added or reauthorized. Dismissed in this browser
 // only: whoever added a computer cannot hide the notice from the user's other clients.
 
-import { useNavigate } from "@tanstack/react-router";
+import { Button } from "@invergent/ui-sdk/button";
+import { TextLink } from "@invergent/ui-sdk/text-link";
+import { Link } from "@tanstack/react-router";
 import { LaptopIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -28,7 +30,6 @@ const storage = (): Storage | null => {
 };
 
 export function ComputerAddedBanner() {
-  const navigate = useNavigate();
   const [devices, setDevices] = useState<Device[]>([]);
   const [dismissed, setDismissed] = useState(() => dismissedNotices(storage()));
   const desktopSessions = useAppStore((s) => s.desktopSessions);
@@ -79,19 +80,16 @@ export function ComputerAddedBanner() {
             {addedNotice(name, window.location.host)}
           </span>
           {/* Where the user checks the computer, and revokes it if it is not theirs. */}
-          <button
+          <TextLink asChild>
+            <Link to="/settings" search={{ tab: "devices" }}>
+              Review
+            </Link>
+          </TextLink>
+          <Button
             type="button"
-            className="shrink-0 rounded-md px-2 py-1 font-medium text-foreground hover:bg-input"
-            onClick={() =>
-              navigate({ to: "/settings", search: { tab: "devices" } })
-            }
-          >
-            Review
-          </button>
-          <button
-            type="button"
+            variant="ghost"
+            size="icon-sm"
             aria-label="Dismiss"
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-input hover:text-foreground"
             onClick={() => {
               // Kept only while it is told: the dismissals never outgrow the notices.
               dismissNotice(
@@ -105,7 +103,7 @@ export function ComputerAddedBanner() {
             }}
           >
             <XIcon className="size-4" />
-          </button>
+          </Button>
         </output>
       ))}
     </div>

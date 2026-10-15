@@ -7,6 +7,7 @@
 
 import { SessionTreePanel } from "@invergent/agent-chat-react";
 import { Navigate, useNavigate } from "@tanstack/react-router";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
 import { useEffect } from "react";
 
 import { AppShell } from "@/components/app-shell";
@@ -55,9 +56,7 @@ export function ChatsPage() {
             onSessionDelete={removeSession}
           />
           {!sessionsLoading && sessions.length === 0 && (
-            <p className="px-4 py-8 text-center text-sm text-faint">
-              No chats yet
-            </p>
+            <EmptyState className="px-4 py-8" title="No chats yet" />
           )}
         </div>
       </div>
