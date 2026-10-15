@@ -1043,7 +1043,7 @@ class TestNoEarlyStart:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_name", ["ask_user_question", "send_form"])
+@pytest.mark.parametrize("tool_name", ["ask_user_question", "send_form", "escalate", "team_message_person"])
 async def test_a_question_or_form_waits_for_the_response_to_be_saved(tool_name) -> None:
     """Started mid-stream, the question's channel prompt (or the form's) overtook
     the text the model wrote beside it: patients got it before the introduction."""
