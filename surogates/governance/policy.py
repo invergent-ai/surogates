@@ -188,13 +188,42 @@ class GovernanceGate:
         """Whether *tool_name* may be called at all, whatever its arguments:
         the name-level half of :meth:`check`.  A tool that needs approval is
         offered, since approving it is how it runs."""
+        decision = self._name_decision(tool_name)
+        if decision is not None:
+            return decision.allowed or decision.overridable
+        return self._skips_role_check(tool_name) or tool_name in self._engine.state_permissions.get(
+            _DEFAULT_ROLE, set(),
+        )
+
+    def _name_decision(self, tool_name: str) -> PolicyDecision | None:
+        """What the tool's name alone decides, before any argument is read;
+        ``None`` when the rest of the policy decides."""
         if not self._enabled:
-            return True
+            return PolicyDecision(
+                allowed=True, reason="governance disabled", tool_name=tool_name
+            )
         if tool_name in self._denied_tools:
-            return False
-        if tool_name in self._require_approval or self._open_policy or tool_name.startswith("mcp__"):
-            return True
-        return tool_name in self._engine.state_permissions.get(_DEFAULT_ROLE, set())
+            return PolicyDecision(
+                allowed=False,
+                reason=f"denied: tool {tool_name!r} explicitly blocked",
+                tool_name=tool_name,
+            )
+        # After the deny list (an explicit denial is not negotiable and must
+        # not become approvable) and before the open-policy / ``mcp__``
+        # return, which would otherwise let the tools most worth gating by.
+        if tool_name in self._require_approval:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"tool {tool_name!r} requires human approval",
+                tool_name=tool_name,
+                overridable=True,
+            )
+        return None
+
+    def _skips_role_check(self, tool_name: str) -> bool:
+        """Open policy, or an MCP tool: a Studio allow-list names built-in
+        tools only, and MCP access is governed by its own plane."""
+        return self._open_policy or tool_name.startswith("mcp__")
 
     def check(
         self,
@@ -215,29 +244,9 @@ class GovernanceGate:
         - **Workspace sandbox** — path containment via AGT ExecutionSandbox
         - **Egress policy** — network egress control via AGT EgressPolicy
         """
-        if not self._enabled:
-            return PolicyDecision(
-                allowed=True, reason="governance disabled", tool_name=tool_name
-            )
-
-        # Fast deny-list check (before AGT role check).
-        if tool_name in self._denied_tools:
-            return PolicyDecision(
-                allowed=False,
-                reason=f"denied: tool {tool_name!r} explicitly blocked",
-                tool_name=tool_name,
-            )
-
-        # Approval gate.  Deliberately AFTER the deny list (an explicit
-        # denial is not negotiable and must not become approvable) and
-        # BEFORE the open-policy / ``mcp__`` early return below.
-        if tool_name in self._require_approval:
-            return PolicyDecision(
-                allowed=False,
-                reason=f"tool {tool_name!r} requires human approval",
-                tool_name=tool_name,
-                overridable=True,
-            )
+        decision = self._name_decision(tool_name)
+        if decision is not None:
+            return decision
 
         # Path-arg hygiene check — reject shell-variable patterns like
         # ``$HOME`` or ``${HOME}`` in path-typed arguments before they can
@@ -281,7 +290,7 @@ class GovernanceGate:
         # sandbox and argument checks above still apply to them, and
         # every non-MCP name stays subject to the allow-list
         # (fail-closed for built-ins).
-        if self._open_policy or tool_name.startswith("mcp__"):
+        if self._skips_role_check(tool_name):
             violation = self._check_arguments(tool_name, arguments or {})
             if violation:
                 return PolicyDecision(
