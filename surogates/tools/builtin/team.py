@@ -416,24 +416,15 @@ class _Person:
 
 
 def _masked_match(fragment: str, phones: list[str]) -> bool:
-    """*fragment* is a number as the model sees it masked (``+40…842``):
-    its leading and trailing digits around the ellipsis.  A number masked as
-    it was written keeps its national trunk ``0`` (``+07…842``), so that head
-    also matches the digits after the country code."""
-    head, sep, tail = fragment.replace("...", "…").partition("…")
-    head = "".join(c for c in head if c.isdigit())
-    tail = "".join(c for c in tail if c.isdigit())
-
-    def leads(phone: str) -> bool:
-        if phone.startswith(head):
-            return True
-        national = head[1:]
-        return head.startswith("0") and bool(national) and any(
-            phone[k:].startswith(national) for k in (1, 2, 3)
-        )
-
-    return bool(sep and head and tail) and any(
-        p and p.endswith(tail) and leads(p) for p in phones
+    """*fragment* is a number as the model sees it masked: as
+    :func:`masked_phone` masks the stored number (``+40…842``), or as it was
+    written in its national form, trunk ``0`` kept (``+07…842``)."""
+    wanted = "".join(fragment.split()).replace("...", "…")
+    if "…" not in wanted:
+        return False
+    return any(
+        wanted in {masked_phone(p), *(masked_phone("0" + p[k:]) for k in (1, 2, 3))}
+        for p in phones if p
     )
 
 
