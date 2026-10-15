@@ -79,6 +79,13 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes[1].text.paras.map((p: Any) => p.runs.map((r: Any) => r.text).join(""))).toEqual(["First paragraph.", "Second bold one."]);
   });
 
+  it("reads a coloured span in a paragraph and in a list item as its own run", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
+      <p>Revenue <span style="color:#c81e1e">up</span> again</p><ul><li>East <span style="color:#c81e1e">held</span></li></ul></section>`);
+    expect(spec.shapes[0].text.paras[0].runs.map((r: Any) => [r.text, r.color.hex])).toEqual([["Revenue ", "#000000"], ["up", "#c81e1e"], [" again", "#000000"]]);
+    expect(spec.shapes[1].text.paras[0].runs[1]).toMatchObject({ text: "held", color: { hex: "#c81e1e" } });
+  });
+
   it("lays out a table with its row backgrounds", async () => {
     const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
       <table style="width:1200px;font-size:32px"><tr style="background:#14285A"><th style="width:50%;color:#ffffff">Region</th><th style="width:25%;color:#ffffff">Q1</th><th style="width:25%;color:#ffffff">Q2</th></tr>
@@ -143,8 +150,34 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes.map((s: Any) => s.text.paras[0].runs[0].text)).toEqual(["Quarterly gains", "Quarterly gains"]);
   });
 
+  it("refuses a text box too short for its paragraphs, tight line heights and all", async () => {
+    await expect(measure(`<section style="background:#fff;font-family:'DejaVu Sans'"><div data-text style="position:absolute;left:100px;top:100px;width:1200px;height:125px">
+      <p style="font-size:96px;line-height:1">Quarterly gains</p><p style="font-size:32px;line-height:1.2">and one more line</p></div></section>`))
+      .rejects.toThrow(/overflows its box by \d+ px/);
+  });
+
+  it("measures a heading on the slide's bottom edge whose bold words reach past its lines", async () => {
+    const spec: Any = await measure(`<section style="background:#fff;font-family:'DejaVu Sans'">
+      <h1 style="position:absolute;left:128px;bottom:0;font-size:96px;line-height:1">Quarterly <b>gains</b></h1></section>`);
+    expect(spec.shapes[0].text.paras[0].runs.map((r: Any) => r.text).join("")).toBe("Quarterly gains");
+  });
+
   it("refuses text under 24 px", async () => {
     await expect(measure(`<section style="background:#fff"><p style="font-size:20px">Small print</p></section>`)).rejects.toThrow("the least on a slide is 24 px");
+  });
+
+  it("refuses text outside a text element, which nothing would draw", async () => {
+    const OUTSIDE = "text goes in h1–h3, p, a list, or a div[data-text] of them";
+    for (const [html, said] of [
+      [`<section style="background:#fff"><div style="background:#eeeeee;padding:24px">Revenue up 12%</div></section>`, OUTSIDE],
+      [`<section style="background:#fff">Revenue up 12%</section>`, OUTSIDE],
+      [`<section style="background:#fff"><div>Lead-in <p>Para</p></div></section>`, OUTSIDE],
+      [`<section style="background:#fff"><div data-text>Hello <b>world</b></div></section>`, OUTSIDE],
+      [`<section style="background:#fff"><table><tr><td><p>One</p><p>Two</p></td></tr></table></section>`, "a table cell holds plain text"],
+      [`<section style="background:#fff"><p>Up <svg width="40" height="40"></svg></p></section>`, "a heading, paragraph or list item holds text"],
+    ]) {
+      await expect(measure(html!), html).rejects.toThrow(said!);
+    }
   });
 
   it("refuses what is not in the format, and ignores what the format ignores", async () => {
@@ -188,6 +221,17 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(spec.shapes[1].src).toMatch(/^data:image\/svg\+xml;base64,/);
     expect(Buffer.from(spec.shapes[1].src.split(",")[1], "base64").toString()).toContain("#14285a");
     expect(spec.shapes[2].src).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it("draws a slide svg as itself, past an svg inside an embed", async () => {
+    const spec: Any = await measure(`<section style="background:#fff">
+      <x-embed style="position:absolute;left:500px;top:10px;width:400px;height:200px"><svg data-draw="0" width="60" height="60"><rect width="60" height="60" fill="#00ff00"/></svg></x-embed>
+      <svg aria-label="bar" style="position:absolute;left:10px;top:10px" width="200" height="100" viewBox="0 0 200 100"><rect width="200" height="100" fill="#c81e1e"/></svg>
+    </section>`);
+    expect(spec.shapes.map((s: Any) => [s.kind, s.x / E])).toEqual([["picture", 500], ["picture", 10]]);
+    // The PNG's own size, from its header: the 200 by 100 svg at device scale 2.
+    const png = Buffer.from(spec.shapes[1].src.split(",")[1], "base64");
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([400, 200]);
   });
 
   it("reads a hidden slide", async () => {

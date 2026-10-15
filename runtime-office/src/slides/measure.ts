@@ -77,8 +77,8 @@ export class Measurer {
         if (family) node.style.fontFamily = `"${family}"`;
       }
     }, resolved);
-    // Checked again, its faces now the resolved families.
-    const faces = ((await this.inspect(page, args("check"))) as { faces: Face[] }).faces;
+    // Its faces read again, now the resolved families.
+    const faces = ((await this.inspect(page, args("faces"))) as { faces: Face[] }).faces;
     const css = await this.fonts.css(editor, list, faces);
     if (css) {
       await page.addStyleTag({ content: css });
@@ -102,14 +102,13 @@ export class Measurer {
   // Each placeholder picture made what it shows: an svg drawn by Chromium, an icon from the icon set, an embed run on a
   // page of its own (scripts on, network off, as Claude Slides' sandboxed iframe) and drawn.
   private async drawPictures(page: Page, spec: SlideSpec, icons: { name: string; color: string; px: number }[], embeds: { html: string; w: number; h: number }[]): Promise<void> {
-    const svgs = page.locator("section svg:not(svg svg)");
     const visit = async (shapes: ShapeSpec[]): Promise<void> => {
       for (const shape of shapes) {
         if (shape.kind === "group") await visit(shape.children);
         if (shape.kind !== "picture" || shape.src.startsWith("data:")) continue;
         const [kind, n] = shape.src.split(":");
         const i = Number(n);
-        if (kind === "svg") shape.src = `data:image/png;base64,${(await svgs.nth(i).screenshot({ type: "png", omitBackground: true })).toString("base64")}`;
+        if (kind === "svg") shape.src = `data:image/png;base64,${(await page.locator(`section svg[data-draw="${i}"]`).screenshot({ type: "png", omitBackground: true })).toString("base64")}`;
         else if (kind === "icon") shape.src = iconSvg(icons[i]!.name, icons[i]!.color, Math.round(icons[i]!.px));
         else if (kind === "embed") shape.src = await this.drawEmbed(page, embeds[i]!);
       }

@@ -1,14 +1,14 @@
 import type { Canvas, Color, Fill, Para, Run, ShapeSpec, SlideSpec, Stroke } from "./measure.js";
 
-export interface InspectArgs { phase: "check" | "shapes"; canvas: Canvas; minPx: number; icons: string[] }
+export interface InspectArgs { phase: "check" | "faces" | "shapes"; canvas: Canvas; minPx: number; icons: string[] }
 export type Inspected =
   | { error: string }
   | { stacks: string[]; faces: { family: string; bold: boolean; italic: boolean }[] }
   | { spec: SlideSpec; icons: { name: string; color: string; px: number }[]; embeds: { html: string; w: number; h: number }[] };
 
 // Runs in the measuring page. "check" holds the slide to Claude Slides' format and says which font stacks and faces
-// its text uses; "shapes" measures it into a SlideSpec. An svg, an icon or an embed becomes a placeholder picture
-// ("svg:n", "icon:n", "embed:n", in order of appearance) that Node draws afterwards.
+// its text uses; "faces" only says which; "shapes" measures it into a SlideSpec. An svg, an icon or an embed becomes a
+// placeholder picture ("svg:n", "icon:n", "embed:n", in order of appearance) that Node draws afterwards.
 export function inspect(args: InspectArgs): Inspected {
   const TAGS = new Set(["SECTION", "H1", "H2", "H3", "P", "UL", "OL", "LI", "BR", "B", "I", "U", "A", "SPAN", "DIV", "IMG", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "SVG", "HR", "X-SHAPE", "X-ICON", "X-CONNECTOR", "X-EMBED", "ASIDE"]);
   const TEXT = new Set(["H1", "H2", "H3", "P"]);
@@ -63,80 +63,106 @@ export function inspect(args: InspectArgs): Inspected {
     const section = root!;
     const elements = [section, ...Array.from(section.querySelectorAll("*"))].filter((el) => !inside(el));
 
-    // --- the format: tags, attributes, styles and limits (Claude Slides' format.md)
-    if (elements.length > 200) fail("A slide has at most 200 elements: split it.");
-    for (const el of Array.from(section.querySelectorAll("svg *"))) {
-      if (["foreignobject", "script"].includes(el.tagName.toLowerCase())) fail(`${describe(el)}: an svg holds no script or foreignObject.`);
-    }
-    let embeds = 0;
-    for (const el of elements) {
-      const tag = tagOf(el);
-      if (!TAGS.has(tag)) fail(`${describe(el)}: a slide holds h1-h3, p, ul, ol, li, br, b, i, u, a, span, div, img, table, tr, th, td, svg, hr, x-shape, x-icon, x-connector, x-embed and one aside, not <${tag.toLowerCase()}>.`);
-      if (tag !== "SVG") {
-        for (const attribute of Array.from(el.attributes)) {
-          const name = attribute.name;
-          const own = ATTRIBUTES[tag] ?? [];
-          // The format ignores class, and data-* it does not name.
-          if (["style", "id", "class", "data-build-in", "data-build-out"].includes(name) || own.includes(name) || name.startsWith("data-")) continue;
-          fail(`${describe(el)} has the attribute ${name}, which the slide format does not take there.`);
-        }
-      }
-      if (tag === "ASIDE" && (el.parentElement !== section || el !== section.lastElementChild)) fail("The <aside> of speaker notes is the section's last child.");
-      if (tag === "A" && !/^(https?:|mailto:)/i.test(el.getAttribute("href") ?? "")) fail(`${describe(el)}: a link goes to an http(s) or mailto address.`);
-      if (tag === "IMG" && !/^data:image\/(png|jpeg|svg\+xml);base64,/i.test(el.getAttribute("src") ?? "")) fail(`${describe(el)}: a picture from the workspace (a PNG, JPEG or SVG).`);
-      if (tag === "X-SHAPE" && !SHAPES.includes(el.getAttribute("kind") ?? "")) fail(`${describe(el)}: kind is one of ${SHAPES.join(", ")}.`);
-      if (tag === "X-ICON" && !args.icons.includes(el.getAttribute("name") ?? "")) fail(`${describe(el)}: name is one of ${args.icons.join(", ")}.`);
-      if (tag === "X-EMBED") {
-        if (el.parentElement !== section || !pinned(el)) fail(`${describe(el)}: an x-embed is pinned (position:absolute) and a child of the section.`);
-        if (el.innerHTML.length > 16_384) fail(`${describe(el)}: an x-embed is at most 16 KB.`);
-        if (++embeds > 8) fail("A slide has at most 8 x-embeds.");
-      }
-      if (tag === "SVG" && el.outerHTML.length > 53_248) fail(`${describe(el)}: an svg is at most 52 KB.`);
-      if (tag === "UL" || tag === "OL") {
-        for (const li of Array.from(el.children)) {
-          if (tagOf(li) !== "LI" || Array.from(li.children).some((c) => !INLINE.has(tagOf(c)))) fail(`${describe(li)}: a list holds plain <li> items, one level.`);
-        }
-      }
-      if (tag === "TR" && Array.from((el as HTMLTableRowElement).cells).some((c) => c.colSpan > 1 || c.rowSpan > 1)) fail(`${describe(el)}: no colspan or rowspan.`);
-      const style = (el as HTMLElement).style;
-      for (let i = 0; i < (style?.length ?? 0); i++) {
-        const property = style[i]!;
-        const value = style.getPropertyValue(property);
-        // A shorthand sets its other longhands to their initial value.
-        if (value === "initial") continue;
-        if (!STYLE.test(property)) fail(`${describe(el)} uses ${property}, which is not in the slide format.`);
-        if (/^margin-/.test(property) && parseFloat(value) !== 0) fail(`${describe(el)}: no margin (use gap or padding).`);
-        if (/var\(|currentcolor/i.test(value)) fail(`${describe(el)}: no var() or currentcolor.`);
-        if (UNITS.test(value) || (property !== "letter-spacing" && /\d(?:\.\d+)?em\b/i.test(value))) fail(`${describe(el)} sets ${property} to ${value}: lengths are px (no em, rem, vw or vh).`);
-        if (tag === "SPAN" && /^font-(size|family)$/.test(property)) fail(`${describe(el)}: no sizes or fonts on a span (use two blocks).`);
-      }
-      let depth = 0;
-      for (let at = el.parentElement; at && at !== section; at = at.parentElement) if (tagOf(at) === "DIV") depth++;
-      if (tag === "DIV" && depth >= 15) fail(`${describe(el)}: at most 15 nested divs.`);
-    }
-    if ((section.textContent ?? "").length > 20_000) fail("A slide holds at most 20,000 characters of text.");
-
     // --- the text's font stacks and faces, and its size
-    const stacks = new Set<string>();
-    const faces = new Map<string, { family: string; bold: boolean; italic: boolean }>();
-    const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const parent = node.parentElement!;
-      if (!(node.textContent ?? "").trim() || inside(parent) || parent.closest("aside")) continue;
-      const cs = getComputedStyle(parent);
-      if (parseFloat(cs.fontSize) < args.minPx - 0.01) fail(`Text in ${describe(parent)} is ${round(parseFloat(cs.fontSize))} px; the least on a slide is ${args.minPx} px.`);
-      stacks.add(cs.fontFamily);
-      const face = { family: family(cs), bold: parseInt(cs.fontWeight, 10) >= 600, italic: cs.fontStyle === "italic" };
-      faces.set(`${face.family}|${face.bold}|${face.italic}`, face);
+    const fontsUsed = (): Inspected => {
+      const stacks = new Set<string>();
+      const faces = new Map<string, { family: string; bold: boolean; italic: boolean }>();
+      const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const parent = node.parentElement!;
+        if (!(node.textContent ?? "").trim() || inside(parent) || parent.closest("aside")) continue;
+        const cs = getComputedStyle(parent);
+        if (parseFloat(cs.fontSize) < args.minPx - 0.01) fail(`Text in ${describe(parent)} is ${round(parseFloat(cs.fontSize))} px; the least on a slide is ${args.minPx} px.`);
+        stacks.add(cs.fontFamily);
+        const face = { family: family(cs), bold: parseInt(cs.fontWeight, 10) >= 600, italic: cs.fontStyle === "italic" };
+        faces.set(`${face.family}|${face.bold}|${face.italic}`, face);
+      }
+      return { stacks: [...stacks], faces: [...faces.values()] };
+    };
+    if (args.phase === "faces") return fontsUsed();
+
+    // --- the format: tags, attributes, styles and limits (Claude Slides' format.md)
+    // Checked once: the measurer then writes each element's resolved family inline, which the format refuses on a span.
+    if (args.phase === "check") {
+      if (elements.length > 200) fail("A slide has at most 200 elements: split it.");
+      for (const el of Array.from(section.querySelectorAll("svg *"))) {
+        if (["foreignobject", "script"].includes(el.tagName.toLowerCase())) fail(`${describe(el)}: an svg holds no script or foreignObject.`);
+      }
+      let embeds = 0;
+      for (const el of elements) {
+        const tag = tagOf(el);
+        if (!TAGS.has(tag)) fail(`${describe(el)}: a slide holds h1-h3, p, ul, ol, li, br, b, i, u, a, span, div, img, table, tr, th, td, svg, hr, x-shape, x-icon, x-connector, x-embed and one aside, not <${tag.toLowerCase()}>.`);
+        if (tag !== "SVG") {
+          for (const attribute of Array.from(el.attributes)) {
+            const name = attribute.name;
+            const own = ATTRIBUTES[tag] ?? [];
+            // The format ignores class, and data-* it does not name.
+            if (["style", "id", "class", "data-build-in", "data-build-out"].includes(name) || own.includes(name) || name.startsWith("data-")) continue;
+            fail(`${describe(el)} has the attribute ${name}, which the slide format does not take there.`);
+          }
+        }
+        if (tag === "ASIDE" && (el.parentElement !== section || el !== section.lastElementChild)) fail("The <aside> of speaker notes is the section's last child.");
+        if (tag === "A" && !/^(https?:|mailto:)/i.test(el.getAttribute("href") ?? "")) fail(`${describe(el)}: a link goes to an http(s) or mailto address.`);
+        if (tag === "IMG" && !/^data:image\/(png|jpeg|svg\+xml);base64,/i.test(el.getAttribute("src") ?? "")) fail(`${describe(el)}: a picture from the workspace (a PNG, JPEG or SVG).`);
+        if (tag === "X-SHAPE" && !SHAPES.includes(el.getAttribute("kind") ?? "")) fail(`${describe(el)}: kind is one of ${SHAPES.join(", ")}.`);
+        if (tag === "X-ICON" && !args.icons.includes(el.getAttribute("name") ?? "")) fail(`${describe(el)}: name is one of ${args.icons.join(", ")}.`);
+        if (tag === "X-EMBED") {
+          if (el.parentElement !== section || !pinned(el)) fail(`${describe(el)}: an x-embed is pinned (position:absolute) and a child of the section.`);
+          if (el.innerHTML.length > 16_384) fail(`${describe(el)}: an x-embed is at most 16 KB.`);
+          if (++embeds > 8) fail("A slide has at most 8 x-embeds.");
+        }
+        if (tag === "SVG" && el.outerHTML.length > 53_248) fail(`${describe(el)}: an svg is at most 52 KB.`);
+        if (tag === "UL" || tag === "OL") {
+          for (const li of Array.from(el.children)) {
+            if (tagOf(li) !== "LI" || Array.from(li.children).some((c) => !INLINE.has(tagOf(c)))) fail(`${describe(li)}: a list holds plain <li> items, one level.`);
+          }
+        }
+        // Only h1–h3, p, list items and table cells lay text out: text anywhere else would not be drawn.
+        if (tag === "SECTION" || tag === "DIV" || tag === "UL" || tag === "OL") {
+          for (const node of Array.from(el.childNodes)) {
+            const child = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : null;
+            if (child ? !INLINE.has(tagOf(child)) : node.nodeType !== Node.TEXT_NODE || !(node.textContent ?? "").trim()) continue;
+            const words = (node.textContent ?? "").trim().split(/\s+/).slice(0, 6).join(" ");
+            fail(`${child ? describe(child) : `Text "${words}"`} sits directly in ${describe(el)}: text goes in h1–h3, p, a list, or a div[data-text] of them.`);
+          }
+        }
+        if (tag === "DIV" && el.hasAttribute("data-text")) {
+          for (const child of Array.from(el.children)) if (!["P", "UL", "OL"].includes(tagOf(child))) fail(`${describe(child)}: a div[data-text] holds p, ul and ol.`);
+        }
+        if (TEXT.has(tag) || tag === "LI" || tag === "TD" || tag === "TH") {
+          const holder = tag === "TD" || tag === "TH" ? "a table cell holds plain text" : "a heading, paragraph or list item holds text";
+          for (const child of Array.from(el.querySelectorAll("*"))) {
+            if (!INLINE.has(tagOf(child))) fail(`${describe(child)}: ${holder} (b, i, u, a, span and br), not <${child.tagName.toLowerCase()}>.`);
+          }
+        }
+        if (tag === "TR" && Array.from((el as HTMLTableRowElement).cells).some((c) => c.colSpan > 1 || c.rowSpan > 1)) fail(`${describe(el)}: no colspan or rowspan.`);
+        const style = (el as HTMLElement).style;
+        for (let i = 0; i < (style?.length ?? 0); i++) {
+          const property = style[i]!;
+          const value = style.getPropertyValue(property);
+          // A shorthand sets its other longhands to their initial value.
+          if (value === "initial") continue;
+          if (!STYLE.test(property)) fail(`${describe(el)} uses ${property}, which is not in the slide format.`);
+          if (/^margin-/.test(property) && parseFloat(value) !== 0) fail(`${describe(el)}: no margin (use gap or padding).`);
+          if (/var\(|currentcolor/i.test(value)) fail(`${describe(el)}: no var() or currentcolor.`);
+          if (UNITS.test(value) || (property !== "letter-spacing" && /\d(?:\.\d+)?em\b/i.test(value))) fail(`${describe(el)} sets ${property} to ${value}: lengths are px (no em, rem, vw or vh).`);
+          if (tag === "SPAN" && /^font-(size|family)$/.test(property)) fail(`${describe(el)}: no sizes or fonts on a span (use two blocks).`);
+        }
+        let depth = 0;
+        for (let at = el.parentElement; at && at !== section; at = at.parentElement) if (tagOf(at) === "DIV") depth++;
+        if (tag === "DIV" && depth >= 15) fail(`${describe(el)}: at most 15 nested divs.`);
+      }
+      if ((section.textContent ?? "").length > 20_000) fail("A slide holds at most 20,000 characters of text.");
+      return fontsUsed();
     }
-    if (args.phase === "check") return { stacks: [...stacks], faces: [...faces.values()] };
 
     // --- with the resolved fonts loaded: nothing past the slide's edge, nothing overflowing its box
     const origin = section.getBoundingClientRect();
     const shown = elements.filter((el) => tagOf(el) !== "ASIDE" && getComputedStyle(el).display !== "none");
     // The edges first: a box past them also makes the section overflow, which says less.
     for (const el of shown) {
-      if (el === section) continue;
+      // An inline box is as tall as its glyphs, not its lines; the text element holding it is checked.
+      if (el === section || INLINE.has(tagOf(el))) continue;
       const r = el.getBoundingClientRect();
       const past = Math.max(origin.left - r.left, r.right - origin.right, origin.top - r.top, r.bottom - origin.bottom);
       if (past > 0.5) fail(`${describe(el)} reaches ${Math.ceil(past)} px past the slide's edge: move it in, or split the slide.`);
@@ -168,11 +194,11 @@ export function inspect(args: InspectArgs): Inspected {
       const tag = tagOf(el);
       const cs = getComputedStyle(el);
       let over: number;
-      if (tag === "DIV" && !el.hasAttribute("data-text")) {
-        // A clipping div clips what spills; the text boxes inside it are checked themselves.
-        if (cs.overflowX === "hidden") continue;
+      if (tag === "DIV" || tag === "UL" || tag === "OL") {
+        // A clipping div clips what spills; the text boxes inside it are checked themselves. The editor clips no text box.
+        if (tag === "DIV" && !el.hasAttribute("data-text") && cs.overflowX === "hidden") continue;
         // Its children's border boxes, laid by line height, stay in its content box; a pinned child it places, in its
-        // padding box.
+        // padding box. A text box's paragraphs and a list's items are blocks like any other child.
         const r = el.getBoundingClientRect();
         const padding = { left: r.left + parseFloat(cs.borderLeftWidth), right: r.right - parseFloat(cs.borderRightWidth), top: r.top + parseFloat(cs.borderTopWidth), bottom: r.bottom - parseFloat(cs.borderBottomWidth) };
         const content = { left: padding.left + parseFloat(cs.paddingLeft), right: padding.right - parseFloat(cs.paddingRight), top: padding.top + parseFloat(cs.paddingTop), bottom: padding.bottom - parseFloat(cs.paddingBottom) };
@@ -184,16 +210,15 @@ export function inspect(args: InspectArgs): Inspected {
           const c = child.getBoundingClientRect();
           over = Math.max(over, inner.left - c.left, c.right - inner.right, inner.top - c.top, c.bottom - inner.bottom);
         }
-      } else if (TEXT.has(tag) || ["UL", "OL", "LI", "TD", "TH", "DIV"].includes(tag)) {
-        // An item or paragraph inside spills its own glyphs into this box's scroll overflow too.
-        const allowance = Math.max(...[el, ...Array.from(el.querySelectorAll("*"))].map(overhang));
-        over = Math.max(el.scrollWidth - el.clientWidth, el.scrollHeight - el.clientHeight - allowance);
+      } else if (TEXT.has(tag) || tag === "LI" || tag === "TD" || tag === "TH") {
+        over = Math.max(el.scrollWidth - el.clientWidth, el.scrollHeight - el.clientHeight - overhang(el));
       } else continue;
       if (over > 1) fail(`The content of ${describe(el)} overflows its box by ${Math.ceil(over)} px: give it room, or split the slide; nothing shrinks.`);
     }
 
     // --- the shapes
     let svgs = 0;
+    for (const marked of Array.from(section.querySelectorAll("[data-draw]"))) marked.removeAttribute("data-draw");
     const icons: { name: string; color: string; px: number }[] = [];
     const embedded: { html: string; w: number; h: number }[] = [];
     const box = (el: Element) => {
@@ -337,7 +362,11 @@ export function inspect(args: InspectArgs): Inspected {
     const own = (el: Element): ShapeSpec[] => {
       const tag = tagOf(el);
       const cs = getComputedStyle(el);
-      if (tag === "SVG") return [{ kind: "picture", ...place(el), src: `svg:${svgs++}` }];
+      if (tag === "SVG") {
+        // Node finds the svg it draws by this mark: an svg inside an embed or another svg is no picture of its own.
+        el.setAttribute("data-draw", String(svgs));
+        return [{ kind: "picture", ...place(el), src: `svg:${svgs++}` }];
+      }
       if (tag === "X-ICON") {
         icons.push({ name: el.getAttribute("name")!, color: color(cs.color)?.hex ?? "#000000", px: box(el).w });
         return [{ kind: "picture", ...place(el), src: `icon:${icons.length - 1}` }];
