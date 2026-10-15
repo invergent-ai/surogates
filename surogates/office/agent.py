@@ -31,9 +31,15 @@ from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, refus
 from surogates.tools.workspace_io import RevisionConflict, StorageWorkspaceIO
 from surogates.workstreams import is_project_thread
 
-BLANK_DOCX = Path(__file__).with_name("templates") / "blank.docx"
+TEMPLATES = Path(__file__).with_name("templates")
+#: The documents the agent edits live. A new one starts from the document server's own blank of its type.
+AGENT_KINDS = ("docx", "xlsx", "pptx", "pdf")
 # How a path names its user's home folder.
 _HOMES = ("~", "$HOME", "${HOME}")
+
+
+def blank(file_type: str) -> Path:
+    return TEMPLATES / f"blank.{file_type}"
 
 
 class AgentDocumentError(Exception):
@@ -102,8 +108,10 @@ async def open_for_agent(
     A project thread on a computer opens the real file, through its project's master: its own copy is not the
     document."""
     kind = office_kind(path)
-    if kind is None or kind.file_type != "docx":
-        raise AgentDocumentError("office_read and office_edit work on Word documents (.docx) for now.")
+    if kind is None or kind.file_type not in AGENT_KINDS:
+        raise AgentDocumentError(
+            "office_read and office_edit work on Word documents, spreadsheets, slide decks and PDFs (.docx, .xlsx, .pptx, .pdf)."
+        )
     try:
         refuse_nul(path)  # before the open rows are looked up by it
     except ValueError as exc:
@@ -132,7 +140,7 @@ async def open_for_agent(
                         f"No document at {path} in the project's files: one this thread made this turn reaches them when the turn ends."
                         if is_project_thread(session.config) else f"No document at {path}."
                     )
-                created = await _make_blank(target, path, storage=storage, session_factory=session_factory, redis=redis)
+                created = await _make_blank(target, path, kind.file_type, storage=storage, session_factory=session_factory, redis=redis)
     except FolderNotReady as exc:
         raise AgentDocumentError(str(exc)) from None
     except ComputerAway as exc:
@@ -157,14 +165,14 @@ async def open_for_agent(
     return AgentDocument(page_id=page, document=document, path=path, user_id=user_id, created=created)
 
 
-async def _make_blank(target: Any, path: str, *, storage: Any, session_factory: Any, redis: Any) -> bool:
+async def _make_blank(target: Any, path: str, file_type: str, *, storage: Any, session_factory: Any, redis: Any) -> bool:
     """Make *path* a blank document; whether this call made it. On a computer, through the editor's own request,
     which its app asks about once in a folder that asks every time."""
-    blank = BLANK_DOCX.read_bytes()
+    blank_bytes = blank(file_type).read_bytes()
     async with editor_files(target, storage=storage, session_factory=session_factory, redis=redis,
-                            request_id=f"new.{uuid4().hex}", data=blank) as files:
+                            request_id=f"new.{uuid4().hex}", data=blank_bytes) as files:
         try:
-            await files.write_if(await files.resolve(path), blank, expected=None)
+            await files.write_if(await files.resolve(path), blank_bytes, expected=None)
         except RevisionConflict:
             return False  # someone made it meanwhile: open theirs
     return True

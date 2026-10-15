@@ -1,4 +1,4 @@
-"""office_read and office_edit: the agent reads and edits a Word document through its own live editor session.
+"""office_read and office_edit: the agent reads and edits a document through its own live editor session.
 
 The document is the one the user may have open in the chat's file pane: each office_edit call appears there whole,
 under the agent's name. runtime-office holds the agent's editor page; this module opens it and passes the call on.
@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -28,52 +29,65 @@ from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# Within runtime-office's 20 MiB request once base64 makes them a third larger, with room for the rest of the call.
+MAX_PICTURES_BYTES = 12 * 1024 * 1024
+# A slide's <img src="…">: a workspace path the measuring page could not fetch (it fetches nothing), made a data URL.
+_IMG_SRC = re.compile(r"""(<img\b[^>]*?\bsrc\s*=\s*)(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
 _NAME_TTL_S = 300.0
 # The agent's display name by agent id, read from its runtime config at most every five minutes.
 _names: dict[str, tuple[float, str]] = {}
 
 READ_DESCRIPTION = (
-    "Read a Word document (.docx) in the workspace through your own live editor session: the same document the user "
-    "may have open in the file pane, with everyone's latest edits. Read before every office_edit: the outline gives "
-    "each block's id and hash, which office_edit targets.\n"
-    'view "outline" (default) lists the blocks in order (id, hash, kind, first words), with comment threads and '
-    'tracked changes; a long document comes in pages, continue with start=<next>. view "block" shows one block in full '
-    '(target = its id; a table\'s cells). view "search" finds words (query) and the blocks they are in.\n'
-    "The result says who else has the document open."
+    "Read a document in the workspace through your own live editor session: the same one the user may have open in the "
+    "file pane, with everyone's latest edits. Word documents (.docx), spreadsheets (.xlsx), slide decks (.pptx) and "
+    "PDFs (.pdf). Read before every office_edit: what it shows is what office_edit targets.\n"
+    'view "outline" (default): a Word document\'s blocks (id, hash, kind, first words; comment threads, tracked '
+    "changes; a long one in pages: start=<next>); a spreadsheet's sheets (used range, top rows, merged cells, charts); "
+    "a deck's slides (id, number, title, hash); a PDF's pages (first line, form fields, a checkbox as true/false, "
+    "annotations; start=<next>).\n"
+    'One in full: view "block" (Word; target = a block id), "range" (spreadsheet; target = "Sheet!A1:D20": the cells '
+    'as shown, their formulas and number formats), "slide" (deck; target = a slide id; every shape in canvas px), '
+    '"page" (PDF; target = a page number; its text).\n'
+    'view "search" (query) finds words: their blocks, cells, slides or pages.\n'
+    "The result says who else has the document open. The office skill has each type's reference."
 )
 
 EDIT_DESCRIPTION = (
-    "Edit a Word document (.docx) live through your own editor session. The user watches each call's changes appear in "
-    "the file pane under your name, and may be typing in the same document. Make one piece of work per call (a "
-    "section, a list, a table) and say a short line in the chat between calls. A missing document is created blank "
-    "and opens in the user's pane. While a document is open here, change it only with this tool, never with "
-    "write_file, patch or terminal.\n"
-    "All ops of a call apply together or not at all. If a block you target changed since you read it, or quoted words "
-    "are gone, nothing applies and the result shows the block as it is now: the user's edit wins; read again and work "
-    "from it.\n"
-    'Targets: {"block": "<id>", "hash": "<hash>"} from office_read; {"find": "exact words", "nth": 1}; '
-    '{"pending": "<key>"}; {"end": true} (insert only).\n'
-    "Ops: insert {target, side: before|after, content}; replace {target, content}: a block or pending block with "
-    'markdown content, or quoted words with {"text": "…"} content to re-word them in place keeping their formatting; '
-    "delete {target}; move {target, to, side} (a moved block loses the comments anchored in it); "
-    "comment {anchor: {find}, body}; reply {thread, body}; resolve {thread}.\n"
-    'Content: {"markdown": "…", "blocks": {…}}. Headings use the document\'s Heading 1-3, lists its numbering, tables its '
-    "table style. A line <?block k?> places blocks[k]: "
-    '{"type": "pending", "intent": "what this section will say"} (a placeholder the user sees until you replace it: '
-    "plant a new document's sections as pending blocks first, then fill one per call), "
-    '{"type": "chart", "chart": "bar|column|horizontal-bar|line|pie|area|doughnut|scatter", "title": "…", '
-    '"rows": [["", "Series A"], ["Category", 1]]}, or {"type": "image", "path": "<PNG or JPEG in the workspace>", '
-    '"width": <px>}.'
+    "Edit a document live through your own editor session: the user watches each call's changes appear in the file "
+    "pane under your name, and may be editing too. One piece of work per call (a section, a block of cells, a slide), "
+    "with a short line in the chat between calls. A missing .docx, .xlsx, .pptx or .pdf is created blank and opens in "
+    "the user's pane. While a document is open here, change it only with this tool, never with write_file, patch or "
+    "terminal.\n"
+    "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
+    "result shows it as it is now: the user's edit wins; read again and work from it.\n"
+    "Word: insert {target, side: before|after, content}, replace {target, content}, delete {target}, move {target, "
+    'to, side}, comment {anchor: {find}, body}, reply {thread, body}, resolve {thread}. Targets: {"block": "<id>", '
+    '"hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, {"end": true}. Content: {"markdown": '
+    '"…", "blocks": {…}}; a line <?block k?> places blocks[k]: {"type": "pending", "intent": "…"}, {"type": "chart", '
+    '"chart": "bar|column|line|pie|…", "title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG '
+    'or JPEG>", "width": <px>}.\n'
+    'Spreadsheet: set {range: "Sheet!A1", values: [[…]], expect?: [[the range as you read it]]} (each value is typed '
+    'in as into a cell: "=…" is a live formula, a leading \' keeps text); format {range, number_format, bold, italic, '
+    "fill, color, align, valign, wrap, width}; chart {range, type: column|bar|line|pie|area|doughnut|scatter, title, "
+    'anchor: "F2"}; sheet {action: add|rename|delete, name, to, after}.\n'
+    "Deck: slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]}, each slide one <section> "
+    "in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the office skill's slide "
+    "reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}.\n"
+    "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "
+    "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
+    "text|checkbox, page, rect: [x1, y1, x2, y2] in points from the page's top-left, name}; redact {text}, alone in "
+    "its call (gone for good once saved); annotate {kind: free_text|stamp, page, rect, text | stamp}. A PDF's "
+    "existing text cannot be changed."
 )
 
 READ_PARAMETERS = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description": "The document's path in the workspace."},
-        "view": {"type": "string", "enum": ["outline", "block", "search"]},
-        "target": {"type": "string", "description": 'view "block": the block id.'},
+        "view": {"type": "string", "enum": ["outline", "block", "range", "slide", "page", "search"]},
+        "target": {"type": "string", "description": 'The block id, the range ("Sheet!A1:D20"), the slide id or the page number to view.'},
         "query": {"type": "string", "description": 'view "search": the words to find.'},
-        "start": {"type": "integer", "description": 'view "outline": the block to start at (the previous page\'s next).'},
+        "start": {"type": "integer", "description": 'view "outline": where the page starts (the previous page\'s next).'},
     },
     "required": ["path"],
 }
@@ -116,12 +130,12 @@ async def _office_read(arguments: dict[str, Any], **kwargs: Any) -> str:
     view = arguments.get("view") or "outline"
     if view == "outline":
         request: dict[str, Any] = {"view": "outline", "start": int(arguments.get("start") or 0)}
-    elif view == "block" and arguments.get("target"):
-        request = {"view": "block", "target": str(arguments["target"])}
+    elif view in ("block", "range", "slide", "page") and str(arguments.get("target") or "").strip():
+        request = {"view": view, "target": str(arguments["target"]).strip()}
     elif view == "search" and arguments.get("query"):
         request = {"view": "search", "query": str(arguments["query"])}
     else:
-        return _error('view is "outline", "block" (with target) or "search" (with query).')
+        return _error('view is "outline"; "block", "range", "slide" or "page" with a target; or "search" with a query.')
 
     async def call(runtime: RuntimeOffice, document: AgentDocument, session: Any) -> dict[str, Any]:
         return await runtime.read(document.page_id, request)
@@ -210,9 +224,17 @@ async def _agent_name(platform_client: Any, agent_id: str) -> str:
 
 
 async def _with_pictures(ops: list[Any], session: Any, kwargs: dict[str, Any]) -> list[Any]:
-    """*ops* with every picture block's workspace path read into the bytes the editor inserts."""
+    """*ops* with every picture they name in the workspace read into the bytes the editor inserts."""
+    budget = [MAX_PICTURES_BYTES]
     out: list[Any] = []
     for op in ops:
+        if isinstance(op, dict) and op.get("op") == "slides" and isinstance(op.get("slides"), list):
+            out.append({**op, "slides": [
+                {**slide, "html": await _slide_pictures(slide["html"], session, kwargs, budget)}
+                if isinstance(slide, dict) and isinstance(slide.get("html"), str) else slide
+                for slide in op["slides"]
+            ]})
+            continue
         content = op.get("content") if isinstance(op, dict) else None
         blocks = content.get("blocks") if isinstance(content, dict) else None
         if not isinstance(blocks, dict) or not any(isinstance(b, dict) and b.get("type") == "image" for b in blocks.values()):
@@ -226,8 +248,26 @@ async def _with_pictures(ops: list[Any], session: Any, kwargs: dict[str, Any]) -
     return out
 
 
-async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    path = relative_path(str(block.get("path") or ""), session)
+async def _slide_pictures(html: str, session: Any, kwargs: dict[str, Any], budget: list[int]) -> str:
+    parts: list[str] = []
+    last = 0
+    for match in _IMG_SRC.finditer(html):
+        src = match.group(3).strip()
+        if src.startswith("data:"):
+            continue
+        data, mime = await _picture_bytes(src, session, kwargs, svg=True)
+        budget[0] -= len(data)
+        if budget[0] < 0:
+            raise AgentDocumentError("One call's pictures are at most 12 MB together; build the slides over several calls.")
+        parts += [html[last:match.start(3)], f"data:{mime};base64,{base64.b64encode(data).decode()}"]
+        last = match.end(3)
+    parts.append(html[last:])
+    return "".join(parts)
+
+
+async def _picture_bytes(raw: str, session: Any, kwargs: dict[str, Any], *, svg: bool) -> tuple[bytes, str]:
+    """A picture in the workspace, and its type: a PNG or JPEG, or with *svg* an SVG too."""
+    path = relative_path(raw, session)
     try:
         async with session_files(session, storage=kwargs["storage"], session_factory=kwargs["session_factory"],
                                  redis=kwargs["redis"]) as files:
@@ -238,14 +278,25 @@ async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) 
         raise AgentDocumentError(f"Could not read {path}: {said(exc)}") from None
     if len(data) > MAX_IMAGE_BYTES:
         raise AgentDocumentError(f"{path} is over 5 MB; use a smaller picture.")
+    kinds = "a PNG, JPEG or SVG" if svg else "a PNG or JPEG"
+    if svg and path.lower().endswith(".svg"):
+        if not data[:512].lstrip().lower().startswith((b"<svg", b"<?xml")):
+            raise AgentDocumentError(f"{path} is not {kinds}.")
+        return data, "image/svg+xml"
     try:
         with Image.open(io.BytesIO(data)) as image:
             mime = Image.MIME.get(image.format or "")
-            width, height = image.size
     except Exception:
-        raise AgentDocumentError(f"{path} is not a picture.") from None
+        raise AgentDocumentError(f"{path} is not {kinds}.") from None
     if mime not in ("image/png", "image/jpeg"):
-        raise AgentDocumentError(f"{path} is not a PNG or JPEG.")
+        raise AgentDocumentError(f"{path} is not {kinds}.")
+    return data, mime
+
+
+async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    data, mime = await _picture_bytes(str(block.get("path") or ""), session, kwargs, svg=False)
+    with Image.open(io.BytesIO(data)) as image:
+        width, height = image.size
     shown = int(block.get("width") or width)
     return {"type": "image", "data": base64.b64encode(data).decode(), "mime": mime, "width": shown,
             "height": max(1, round(height * shown / width))}

@@ -15,7 +15,7 @@ from surogates.devices.binding import Binding
 from surogates.office import agent as office_agent
 from surogates.office import files as office_files
 from surogates.office import sessions as office_sessions
-from surogates.office.agent import BLANK_DOCX, AgentDocumentError, location_of, open_for_agent
+from surogates.office.agent import AgentDocumentError, blank, location_of, open_for_agent
 from surogates.office.files import DENIED_ON_COMPUTER, EDITOR_REQUEST
 from surogates.office.runtime_office import page_id
 from surogates.session.files import ComputerAway
@@ -91,19 +91,20 @@ async def test_the_agent_joins_the_row_a_users_pane_uses(session_factory, redis_
     assert document.document.user_names == {"user:1": "Flavius", document.user_id: "Writer"}
 
 
-async def test_a_missing_document_is_made_blank_only_when_asked(session_factory, redis_client, storage):
+@pytest.mark.parametrize("name", ["new/Notes.docx", "new/Budget.xlsx", "new/Pitch.pptx", "new/Form.pdf"])
+async def test_a_missing_document_is_made_blank_only_when_asked(session_factory, redis_client, storage, name):
     session = await _chat(session_factory)
-    with pytest.raises(AgentDocumentError, match="No document at new/Notes.docx"):
-        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "new/Notes.docx")
-    document = await _open(session, storage, session_factory, redis_client, FakeRuntime(), "new/Notes.docx", create=True)
+    with pytest.raises(AgentDocumentError, match=f"No document at {name}"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), name)
+    document = await _open(session, storage, session_factory, redis_client, FakeRuntime(), name, create=True)
     assert document.created is True
-    assert await storage.read("b", session_workspace_key(session.id, "new/Notes.docx")) == BLANK_DOCX.read_bytes()
+    assert await storage.read("b", session_workspace_key(session.id, name)) == blank(name.rsplit(".", 1)[1]).read_bytes()
 
 
 async def test_other_files_are_refused(session_factory, redis_client, storage):
     session = await _chat(session_factory)
-    with pytest.raises(AgentDocumentError, match="Word documents"):
-        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a.xlsx", create=True)
+    with pytest.raises(AgentDocumentError, match=r"spreadsheets, slide decks and PDFs \(\.docx, \.xlsx, \.pptx, \.pdf\)"):
+        await _open(session, storage, session_factory, redis_client, FakeRuntime(), "old.doc", create=True)
     with pytest.raises(AgentDocumentError, match="NUL"):
         await _open(session, storage, session_factory, redis_client, FakeRuntime(), "a\x00.docx", create=True)
 
@@ -173,7 +174,7 @@ async def test_a_new_document_on_the_computer_is_made_through_the_editors_own_re
     session = await _chat(session_factory, config=_on_computer(device_id))
     opened = await _open(session, storage, session_factory, redis_client, FakeRuntime(), "notes/Plan.docx", create=True)
     assert opened.created is True
-    assert io.runner.files[f"{FOLDER}/notes/Plan.docx"][0] == BLANK_DOCX.read_bytes()
+    assert io.runner.files[f"{FOLDER}/notes/Plan.docx"][0] == blank("docx").read_bytes()
     made = [kwargs for _, kwargs in asked if kwargs.get("change")]
     assert len(made) == 1 and made[0]["request_id"].startswith(f"{EDITOR_REQUEST}new.")
 
