@@ -634,12 +634,12 @@ describe("SessionTreePanel", () => {
     const parentRow = rows.find((r) => r.textContent?.includes("Parent session"));
     const childRow = rows.find((r) => r.textContent?.includes("Child one"));
 
-    // Parent is the active node — faint/30 background with primary border
-    expect(parentRow?.className).toContain("bg-faint/30");
-    expect(parentRow?.className).not.toContain("bg-line/70");
-    // Child is in the active group but not active — lighter tint
-    expect(childRow?.className).toContain("bg-line/70");
-    expect(childRow?.className).not.toContain("bg-transparent");
+    // Parent is the active node — the kit row's active state, no group tint
+    expect(parentRow?.getAttribute("data-active")).toBe("true");
+    expect(parentRow?.className).not.toContain("bg-foreground/[0.03]");
+    // Child is in the active group but not active — the faint group tint
+    expect(childRow?.getAttribute("data-active")).toBe("false");
+    expect(childRow?.className).toContain("bg-foreground/[0.03]");
   });
 
   it("applies in-group tint to parent and siblings when a child is the active session", async () => {
@@ -724,11 +724,13 @@ describe("SessionTreePanel", () => {
     const child2Row = rows.find((r) => r.textContent?.includes("Child two"));
 
     // child-1 is active
-    expect(child1Row?.className).toContain("bg-faint/30");
-    expect(child1Row?.className).not.toContain("bg-line/70");
+    expect(child1Row?.getAttribute("data-active")).toBe("true");
+    expect(child1Row?.className).not.toContain("bg-foreground/[0.03]");
     // Parent and sibling are in-group
-    expect(parentRow?.className).toContain("bg-line/70");
-    expect(child2Row?.className).toContain("bg-line/70");
+    expect(parentRow?.getAttribute("data-active")).toBe("false");
+    expect(parentRow?.className).toContain("bg-foreground/[0.03]");
+    expect(child2Row?.getAttribute("data-active")).toBe("false");
+    expect(child2Row?.className).toContain("bg-foreground/[0.03]");
   });
 
   it("leaves unrelated top-level sessions transparent when there is an active group", async () => {
@@ -810,8 +812,8 @@ describe("SessionTreePanel", () => {
     const rows = Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'));
     const unrelatedRow = rows.find((r) => r.textContent?.includes("Other session"));
 
-    expect(unrelatedRow?.className).toContain("bg-transparent");
-    expect(unrelatedRow?.className).not.toContain("bg-line");
+    expect(unrelatedRow?.getAttribute("data-active")).toBe("false");
+    expect(unrelatedRow?.className).not.toContain("bg-foreground/[0.03]");
   });
 
   it("collapses an unrelated parent when the active session moves to a different group", async () => {

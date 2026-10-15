@@ -67,18 +67,20 @@ function controlToggle(node: ParentNode): HTMLButtonElement | null {
   );
 }
 
-/** Close and Maximize live behind the shell's overflow menu now. */
+/** Close and Maximize live behind the shell's overflow menu now. It is a
+ *  Radix menu: it opens from the keyboard (or a pointerdown, not a click). */
 async function openOverflow(node: ParentNode): Promise<void> {
   const more = node.querySelector<HTMLButtonElement>('button[aria-label="More"]');
   await act(async () => {
-    more?.click();
+    more?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   });
 }
 
-function menuItem(node: ParentNode, label: string): HTMLButtonElement | undefined {
-  return Array.from(node.querySelectorAll<HTMLButtonElement>("button")).find(
-    (button) => button.textContent?.trim() === label,
-  );
+/** A row of the open menu, which renders in a portal on the body. */
+function menuItem(_node: ParentNode, label: string): HTMLElement | undefined {
+  return Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent?.trim() === label);
 }
 
 function renderPane(element: React.ReactElement) {

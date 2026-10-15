@@ -9,6 +9,10 @@
 // dashboard probes `getMissionResearch` and hides this tab on 404.
 import { useMemo } from "react";
 
+import { type Tone, TonePill } from "@invergent/ui-sdk/chip";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
+
 import type {
   AgentChatIdeaNode,
   AgentChatMissionResearch,
@@ -37,22 +41,13 @@ function compareNodes(a: AgentChatIdeaNode, b: AgentChatIdeaNode): number {
 }
 
 
-function statusToneClass(status: string): string {
-  switch (status) {
-    case "merged":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400";
-    case "done":
-      return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400";
-    case "running":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400";
-    case "failed":
-      return "border-destructive/30 bg-destructive/10 text-destructive";
-    case "pruned":
-      return "border-border bg-muted/40 text-muted-foreground/70 line-through";
-    default:
-      return "border-border bg-muted/30 text-muted-foreground/80";
-  }
-}
+// Only a merged idea reached the trunk; a done one was scored and left
+// behind, so it stays untinted with the queued ones.
+const IDEA_STATUS_TONE: Record<string, Tone> = {
+  merged: "ok",
+  running: "warn",
+  failed: "bad",
+};
 
 
 /** Trim a score to ≤3 decimals; em-dash for missing. */
@@ -195,11 +190,12 @@ function IdeaRow({
         <code className="shrink-0 text-[11px] text-muted-foreground/60">
           {node.nodeKey}
         </code>
-        <span
-          className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider ${statusToneClass(node.status)}`}
+        <TonePill
+          tone={IDEA_STATUS_TONE[node.status] ?? "muted"}
+          className={node.status === "pruned" ? "capitalize line-through" : "capitalize"}
         >
           {node.status}
-        </span>
+        </TonePill>
         {node.score !== null && node.score !== undefined ? (
           <span className="shrink-0 tabular-nums text-xs font-medium text-foreground/90">
             {fmtScore(node.score)}
@@ -241,13 +237,12 @@ export function MissionResearchTab({ research }: MissionResearchTabProps) {
     <div className="space-y-4">
       <RunHeader run={run} />
       <section>
-        <div className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
-          Idea Tree · {sorted.length} node{sorted.length === 1 ? "" : "s"}
-        </div>
+        <SectionLabel
+          label={`Idea tree · ${sorted.length} node${sorted.length === 1 ? "" : "s"}`}
+          className="mb-2 pl-0"
+        />
         {sorted.length === 0 ? (
-          <p className="text-xs text-muted-foreground/60">
-            No hypotheses yet.
-          </p>
+          <EmptyState className="py-8" title="No hypotheses yet" />
         ) : (
           <ul className="rounded-md border">
             {sorted.map((n) => (

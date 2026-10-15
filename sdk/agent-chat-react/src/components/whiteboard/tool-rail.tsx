@@ -9,9 +9,9 @@ import {
   Undo2,
 } from "lucide-react";
 import type { ComponentType } from "react";
-import { cn } from "../../lib/utils";
 import { Button } from "@invergent/ui-sdk/button";
-import { RabbitMark } from "../ui/rabbit-mark";
+import { RabbitMark } from "@invergent/ui-sdk/rabbit-mark";
+import { ToggleGroup, ToggleGroupItem } from "@invergent/ui-sdk/toggle-group";
 
 export type WbTool = "pen" | "eraser" | "text" | "slot" | "select" | "pan";
 
@@ -42,6 +42,11 @@ const TOOLS: {
   { id: "select", label: "Select", Icon: MousePointer2 },
   { id: "pan", label: "Pan", Icon: Hand },
 ];
+
+// The kit's toggles have no icon size: each picker's items take a square
+// box, 44px on touch like the Buttons below them.
+const TOOL_ITEM = "size-9 px-0 pointer-coarse:size-11";
+const SWATCH_ITEM = "size-7 px-0 pointer-coarse:size-11";
 
 export interface ToolRailProps {
   tool: WbTool;
@@ -76,67 +81,80 @@ export function ToolRail({
 }: ToolRailProps) {
   return (
     <div
-      className="flex flex-col gap-1 rounded-lg border bg-background p-1"
+      className="flex flex-col items-center gap-1 rounded-lg border bg-background p-1"
       role="toolbar"
       aria-label="Whiteboard tools"
-              aria-orientation="vertical"
+      aria-orientation="vertical"
     >
-      {TOOLS.map(({ id, label, Icon }) => (
-        <Button
-          key={id}
-          type="button"
-          size="icon"
-          variant={tool === id ? "default" : "ghost"}
-          aria-label={label}
-          aria-pressed={tool === id}
-          disabled={disabled}
-          onClick={() => onToolChange(id)}
-        >
-          <Icon className="size-4" />
-        </Button>
-      ))}
+      {/* One pick in each group: clicking the picked item again keeps it,
+          rather than leaving the board with no tool, colour or width. The
+          tools are modes, amber when picked; colour and width are options,
+          picked with a neutral fill, since an amber one would hide the
+          orange ink. */}
+      <ToggleGroup
+        type="single"
+        orientation="vertical"
+        aria-label="Tool"
+        value={tool}
+        onValueChange={(next) => {
+          if (next) onToolChange(next as WbTool);
+        }}
+        disabled={disabled}
+      >
+        {TOOLS.map(({ id, label, Icon }) => (
+          <ToggleGroupItem key={id} value={id} aria-label={label} className={TOOL_ITEM}>
+            <Icon className="size-4" />
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
 
-      <div className="my-1 h-px bg-border" />
+      <div className="my-1 h-px w-full bg-border" />
 
-      {INK_COLORS.map((c) => (
-        <button
-          key={c}
-          type="button"
-          aria-label={`Colour ${c}`}
-          aria-pressed={color === c}
-          disabled={disabled}
-          onClick={() => onColorChange(c)}
-          className={cn(
-            "mx-auto size-5 rounded-full border-2",
-            color === c ? "border-foreground" : "border-transparent",
-          )}
-          style={{ backgroundColor: c }}
-        />
-      ))}
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        orientation="vertical"
+        aria-label="Colour"
+        value={color}
+        onValueChange={(next) => {
+          if (next) onColorChange(next);
+        }}
+        disabled={disabled}
+      >
+        {INK_COLORS.map((c) => (
+          <ToggleGroupItem key={c} value={c} aria-label={`Colour ${c}`} className={SWATCH_ITEM}>
+            {/* The swatch is the colour itself; the item's fill marks the pick. */}
+            <span className="size-5 rounded-full" style={{ backgroundColor: c }} />
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
 
-      <div className="my-1 h-px bg-border" />
+      <div className="my-1 h-px w-full bg-border" />
 
-      {INK_WIDTHS.map((w) => (
-        <button
-          key={w}
-          type="button"
-          aria-label={`Width ${w}`}
-          aria-pressed={width === w}
-          disabled={disabled}
-          onClick={() => onWidthChange(w)}
-          className={cn(
-            "mx-auto flex size-6 items-center justify-center rounded",
-            width === w ? "bg-accent" : "",
-          )}
-        >
-          <span
-            className="rounded-full bg-foreground"
-            style={{ width: w + 2, height: w + 2 }}
-          />
-        </button>
-      ))}
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        orientation="vertical"
+        aria-label="Width"
+        value={String(width)}
+        onValueChange={(next) => {
+          if (next) onWidthChange(Number(next));
+        }}
+        disabled={disabled}
+      >
+        {INK_WIDTHS.map((w) => (
+          <ToggleGroupItem key={w} value={String(w)} aria-label={`Width ${w}`} className={SWATCH_ITEM}>
+            <span
+              className="rounded-full bg-foreground"
+              style={{ width: w + 2, height: w + 2 }}
+            />
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
 
-      <div className="my-1 h-px bg-border" />
+      <div className="my-1 h-px w-full bg-border" />
 
       <Button
         type="button"

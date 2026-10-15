@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { Button } from "@invergent/ui-sdk/button";
 import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
 import {
   type BrowserProfile,
   createBrowserProfile,
@@ -83,7 +84,7 @@ export function BrowserProfilesTab() {
       {loading && profiles.length === 0 ? (
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : profiles.length === 0 ? (
-        <div className="text-sm text-muted-foreground">No profiles yet.</div>
+        <EmptyState className="py-12" title="No profiles yet" />
       ) : (
         <div className="space-y-3 mt-4">
           {profiles.map((p) => (

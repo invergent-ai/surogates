@@ -28,7 +28,7 @@ import {
   TimelineIndicator,
   TimelineItem,
   TimelineSeparator,
-} from "../reui/timeline";
+} from "@invergent/ui-sdk/timeline";
 import { OrbShimmerLabel } from "../ai-elements/orb-label";
 import {
   deriveOrbActivity,
@@ -84,6 +84,8 @@ import { ErrorMessage } from "./error-message";
 import { TurnDownloads } from "./turn-downloads";
 import { ThreadCards } from "./thread-cards";
 import { cn } from "../../lib/utils";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@invergent/ui-sdk/alert";
+import { Button } from "@invergent/ui-sdk/button";
 import {
   AlertTriangle,
   ChevronDown,
@@ -1871,35 +1873,39 @@ function AssistantGroup({
 }
 
 // Transient banner shown above the composer while the orchestrator is
-// retrying after a provider error.  Collapsible for the raw detail.
+// retrying after a provider error, with the raw detail behind a toggle.
 function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
   const [open, setOpen] = useState(false);
   return (
-    <div
-      role="status"
-      className="flex flex-col gap-1 border-l-2 border-amber-500 bg-amber-500/5 px-3 py-2 text-xs"
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        className="flex items-center gap-2 text-left text-amber-600 hover:text-amber-700"
-        aria-expanded={open}
-      >
-        <AlertTriangle className="size-3 shrink-0" />
-        <span className="flex-1 truncate font-medium">{indicator.title}</span>
-        <span className="text-[10px] text-foreground/60">
+    <Alert variant="warning" role="status">
+      <AlertTriangle />
+      <AlertTitle className="flex min-w-0 items-center gap-2 font-medium">
+        <span className="min-w-0 flex-1 truncate">{indicator.title}</span>
+        <span className="shrink-0 text-[11.5px] font-normal opacity-70">
           attempt {indicator.attempt}
         </span>
-        {indicator.detail && (
-          open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />
-        )}
-      </button>
-      {open && indicator.detail && (
-        <pre className="mt-1 overflow-x-auto rounded-none bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-foreground/60">
-          {indicator.detail}
-        </pre>
+      </AlertTitle>
+      {indicator.detail && (
+        <AlertAction>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setOpen((prev) => !prev)}
+            aria-expanded={open}
+          >
+            {open ? "Hide details" : "Details"}
+            {open ? <ChevronDown /> : <ChevronRight />}
+          </Button>
+        </AlertAction>
       )}
-    </div>
+      {open && indicator.detail && (
+        <AlertDescription>
+          <pre className="mt-1 overflow-x-auto rounded-[6px] bg-background p-2 font-mono text-[11px] whitespace-pre-wrap wrap-break-word text-foreground/60">
+            {indicator.detail}
+          </pre>
+        </AlertDescription>
+      )}
+    </Alert>
   );
 }
 

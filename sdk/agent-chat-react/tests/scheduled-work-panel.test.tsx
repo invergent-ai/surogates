@@ -138,7 +138,7 @@ describe("ScheduledWorkPanel", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("Scheduled Work");
+    expect(container.textContent).toContain("Scheduled work");
     expect(container.textContent).toContain("Bitcoin monitor");
     expect(container.textContent).toContain("Dynamic loop");
     expect(container.textContent).not.toContain(
@@ -184,7 +184,7 @@ describe("ScheduledWorkPanel", () => {
     });
 
     expect(toggle?.getAttribute("aria-expanded")).toBe("false");
-    expect(container.textContent).toContain("Scheduled Work");
+    expect(container.textContent).toContain("Scheduled work");
     expect(container.textContent).not.toContain("Bitcoin monitor");
 
     await act(async () => {

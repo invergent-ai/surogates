@@ -8,7 +8,7 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
-} from "../ui/command";
+} from "@invergent/ui-sdk/command";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,7 +18,7 @@ import {
   HoverCard,
   HoverCardContent,
   HoverCardTrigger,
-} from "../ui/hover-card";
+} from "@invergent/ui-sdk/hover-card";
 import {
   InputGroup,
   InputGroupAddon,

@@ -34,6 +34,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@invergent/ui-sdk/dialog";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
 import { ScrollArea } from "@invergent/ui-sdk/scroll-area";
 import { Skeleton } from "@invergent/ui-sdk/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@invergent/ui-sdk/tooltip";
@@ -160,19 +161,27 @@ function RenderEntries({
 							</span>
 						)}
 						<div className="ml-1 flex shrink-0 items-center gap-0 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
-							<a
-								href={downloadUrlFor(entry.path)}
-								download={fileName}
-								className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-								onClick={(event) => event.stopPropagation()}
-								title="Download"
-								aria-label={`Download ${fileName}`}
+							<Button
+								asChild
+								variant="ghost"
+								size="icon-xs"
+								className="text-muted-foreground hover:text-foreground"
 							>
-								<DownloadIcon className="size-5" />
-							</a>
-							<button
+								<a
+									href={downloadUrlFor(entry.path)}
+									download={fileName}
+									onClick={(event) => event.stopPropagation()}
+									title="Download"
+									aria-label={`Download ${fileName}`}
+								>
+									<DownloadIcon className="size-5" />
+								</a>
+							</Button>
+							<Button
 								type="button"
-								className="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+								variant="ghost"
+								size="icon-xs"
+								className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
 								onClick={(event) => {
 									event.stopPropagation();
 									onDelete(entry.path);
@@ -181,7 +190,7 @@ function RenderEntries({
 								aria-label={`Delete ${fileName}`}
 							>
 								<TrashIcon className="size-5" />
-							</button>
+							</Button>
 						</div>
 					</FileTreeFile>
 				);
@@ -419,7 +428,7 @@ export function WorkspacePanel({
 							type="button"
 							variant="ghost"
 							size="icon-sm"
-							className="rounded-xl text-foreground/80 md:size-11"
+							className="text-foreground/80 md:size-11"
 							onClick={() => fileInputRef.current?.click()}
 							disabled={disabled || !sessionId || uploading}
 							aria-label="Upload files"
@@ -439,7 +448,7 @@ export function WorkspacePanel({
 							type="button"
 							variant="ghost"
 							size="icon-sm"
-							className="rounded-xl text-foreground/80 md:size-11"
+							className="text-foreground/80 md:size-11"
 							onClick={() => void fetchTree()}
 							disabled={!sessionId || loading}
 							aria-label="Refresh workspace"
@@ -502,20 +511,23 @@ export function WorkspacePanel({
 					)}
 
 					{!loading && !error && entries.length === 0 && (
-						<div className="px-4 py-8 text-center text-sm text-faint">
-							<p>No workspace files</p>
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								className="mt-3 gap-1.5"
-								onClick={() => fileInputRef.current?.click()}
-								disabled={disabled || !sessionId}
-							>
-								<UploadIcon className="size-3.5" />
-								Upload files
-							</Button>
-						</div>
+						<EmptyState
+							className="px-4 py-8"
+							logoClassName="size-9"
+							title="No workspace files"
+							action={
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onClick={() => fileInputRef.current?.click()}
+									disabled={disabled || !sessionId}
+								>
+									<UploadIcon className="size-3.5" />
+									Upload files
+								</Button>
+							}
+						/>
 					)}
 
 					{entries.length > 0 && (
@@ -587,12 +599,18 @@ function ConfirmDialog({
 				if (!nextOpen && !loading) onCancel();
 			}}
 		>
-			<DialogContent className="sm:max-w-md">
+			{/* Drawn as the kit's ConfirmDialog draws it. That one keeps its own
+			    busy state, and a delete here outlives the panel (the chat's
+			    store holds it), so a remounted panel must show it still locked. */}
+			<DialogContent
+				showCloseButton={false}
+				className="gap-3.5 px-6 pt-6 pb-5 sm:max-w-[430px]"
+			>
 				<DialogHeader>
 					<DialogTitle>{title}</DialogTitle>
 					<DialogDescription>{description}</DialogDescription>
 				</DialogHeader>
-				<DialogFooter>
+				<DialogFooter className="pt-1.5">
 					<Button variant="outline" disabled={loading} onClick={onCancel}>
 						Cancel
 					</Button>

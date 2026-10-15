@@ -4,7 +4,7 @@
 // Settings → Devices (desktop design, Section 8): the user's computers that can work on their
 // folders through this agent, each with when it was added, reauthorized and last seen, and
 // Revoke; and the sign-ins of Surogate Desktop, each with End. In the browser and the desktop.
-import { LaptopIcon } from "lucide-react";
+import { LaptopIcon, LogInIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import {
@@ -15,11 +15,16 @@ import {
   listSignIns,
   revokeDevice,
 } from "@/api/devices";
-import { Badge } from "@invergent/ui-sdk/badge";
 import { Button } from "@invergent/ui-sdk/button";
+import { TonePill } from "@invergent/ui-sdk/chip";
 import { ConfirmDialog } from "@invergent/ui-sdk/confirm-dialog";
+import { ListGroup, ListRow } from "@invergent/ui-sdk/list-row";
 import { getDesktop } from "@/lib/desktop-bridge";
 import { deviceHistory, deviceState } from "@/lib/devices";
+
+// The rows hold their buttons and do nothing themselves: no hover fill. Their dates wrap on a
+// phone (whitespace-normal) rather than being cut off.
+const STATIC_ROW = "hover:bg-transparent active:bg-transparent";
 
 export function DevicesTab() {
   const [devices, setDevices] = useState<Device[] | null>(null);
@@ -78,37 +83,44 @@ export function DevicesTab() {
           <p className="text-sm text-muted-foreground">No computers yet.</p>
         )}
         {devices !== null && devices.length > 0 && (
-          <ul className="divide-y divide-line rounded-xl border border-line">
+          <ListGroup>
             {devices.map((device) => (
-              <li key={device.id} className="flex items-center gap-3 px-4 py-3">
-                <LaptopIcon
-                  className="size-5 shrink-0 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 font-medium">
+              <ListRow
+                key={device.id}
+                asChild
+                size="lg"
+                icon={LaptopIcon}
+                label={
+                  <span className="flex items-center gap-2">
                     <span className="truncate">{device.name}</span>
                     {device.id === thisComputer && (
-                      <Badge variant="secondary">This computer</Badge>
+                      <TonePill>This computer</TonePill>
                     )}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
+                  </span>
+                }
+                description={
+                  <span className="whitespace-normal">
                     {deviceHistory(device)} · {deviceState(device)}
-                  </div>
-                </div>
-                {!device.revoked_at && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    aria-label={`Revoke ${device.name}`}
-                    onClick={() => setRevoking(device)}
-                  >
-                    Revoke
-                  </Button>
-                )}
-              </li>
+                  </span>
+                }
+                trailing={
+                  !device.revoked_at && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Revoke ${device.name}`}
+                      onClick={() => setRevoking(device)}
+                    >
+                      Revoke
+                    </Button>
+                  )
+                }
+                className={STATIC_ROW}
+              >
+                <div />
+              </ListRow>
             ))}
-          </ul>
+          </ListGroup>
         )}
       </section>
 
@@ -126,38 +138,46 @@ export function DevicesTab() {
         ) : (
           signIns !== null &&
           signIns.length > 0 && (
-            <ul className="divide-y divide-line rounded-xl border border-line">
+            <ListGroup>
               {signIns.map((signIn) => (
-                <li
+                <ListRow
                   key={signIn.id}
-                  className="flex items-center gap-3 px-4 py-3"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 font-medium">
+                  asChild
+                  size="lg"
+                  icon={LogInIcon}
+                  label={
+                    <span className="flex items-center gap-2">
                       <span className="truncate">
                         {signIn.device_name ?? "No computer added"}
                       </span>
                       {signIn.device_id !== null &&
                         signIn.device_id === thisComputer && (
-                          <Badge variant="secondary">This computer</Badge>
+                          <TonePill>This computer</TonePill>
                         )}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
+                    </span>
+                  }
+                  description={
+                    <span className="whitespace-normal">
                       Signed in {new Date(signIn.created_at).toLocaleString()} ·
                       last used {new Date(signIn.last_used_at).toLocaleString()}
-                    </div>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    aria-label={`End the sign-in ${signIn.device_name ? `of ${signIn.device_name}` : "with no computer added"}, made ${new Date(signIn.created_at).toLocaleString()}`}
-                    onClick={() => setEnding(signIn)}
-                  >
-                    End
-                  </Button>
-                </li>
+                    </span>
+                  }
+                  trailing={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label={`End the sign-in ${signIn.device_name ? `of ${signIn.device_name}` : "with no computer added"}, made ${new Date(signIn.created_at).toLocaleString()}`}
+                      onClick={() => setEnding(signIn)}
+                    >
+                      End
+                    </Button>
+                  }
+                  className={STATIC_ROW}
+                >
+                  <div />
+                </ListRow>
               ))}
-            </ul>
+            </ListGroup>
           )
         )}
       </section>

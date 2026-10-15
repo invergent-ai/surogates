@@ -13,7 +13,7 @@
 // button turned every conversational beat into a form receipt.
 //
 // TWO OR MORE questions is a genuine batch decision: tabs for each
-// question, radio choices with labels + descriptions, an optional
+// question, option cards with labels + descriptions, an optional
 // "Other" free-form row, and a single Submit that batches every answer
 // back to the worker.  Picking a choice auto-advances to the next
 // unanswered question ("Other" waits for typed input; Enter advances
@@ -24,7 +24,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { XIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
+import { Button } from "@invergent/ui-sdk/button";
+import { ChoiceCard, choiceCardVariants } from "@invergent/ui-sdk/choice-card";
 import { Input } from "@invergent/ui-sdk/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@invergent/ui-sdk/tabs";
 import { MessageResponse } from "../../ai-elements/message";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
 import { parseArgs } from "./shared";
@@ -240,8 +243,8 @@ function ConversationalAsk({
     [adapter, sessionId, tc.id, question.prompt, submitting],
   );
 
-  // Descriptions need room to read, so they get stacked rows; bare
-  // labels stay compact as inline pills.
+  // Descriptions need room to read, so they get stacked option cards;
+  // bare labels stay compact as a row of buttons.
   const stacked = choices.some((c) => !!c.description);
 
   return (
@@ -293,28 +296,23 @@ function QuickReply({
   disabled: boolean;
   onSelect: () => void;
 }) {
+  // A pick submits at once, so no card is ever left picked.
+  if (stacked) {
+    return (
+      <ChoiceCard
+        size="sm"
+        selected={false}
+        title={choice.label}
+        description={choice.description}
+        disabled={disabled}
+        onClick={onSelect}
+      />
+    );
+  }
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onSelect}
-      className={cn(
-        "border border-border bg-background text-left text-foreground transition-colors",
-        "hover:border-foreground/30 hover:bg-muted",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        "disabled:cursor-not-allowed disabled:opacity-50",
-        stacked
-          ? "rounded-md px-3 py-2"
-          : "rounded-full px-3.5 py-1.5 text-sm",
-      )}
-    >
-      <span className={cn("block", stacked && "text-sm")}>{choice.label}</span>
-      {stacked && choice.description && (
-        <span className="mt-0.5 block text-xs text-muted-foreground">
-          {choice.description}
-        </span>
-      )}
-    </button>
+    <Button variant="outline" size="sm" disabled={disabled} onClick={onSelect}>
+      {choice.label}
+    </Button>
   );
 }
 
@@ -468,79 +466,73 @@ function BatchAsk({
       role="group"
       aria-label="Questions for the user"
     >
-      {/* Tab bar + close */}
-      <div className="flex items-center justify-between border-b border-border px-3 pt-2">
-        <div className="flex items-center gap-3 overflow-x-auto text-sm">
-          {questions.map((_, i) => {
-            const isActive = i === active;
-            const answered = answers[i] !== null;
-            return (
-              <button
-                key={i}
-                type="button"
-                onClick={() => setActive(i)}
-                className={cn(
-                  "relative pb-2 transition-colors whitespace-nowrap",
-                  isActive
-                    ? "text-foreground"
-                    : "text-muted-foreground hover:text-foreground",
+      <Tabs
+        value={String(active)}
+        onValueChange={(value) => setActive(Number(value))}
+        className="gap-0"
+      >
+        {/* Tab bar + close */}
+        <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+          <TabsList variant="line" className="no-scrollbar max-w-full overflow-x-auto">
+            {questions.map((_, i) => (
+              <TabsTrigger key={i} value={String(i)}>
+                Question {i + 1}
+                {answers[i] !== null && (
+                  <span className="text-[10px] text-emerald-500">●</span>
                 )}
-              >
-                <span>Question {i + 1}</span>
-                {answered && (
-                  <span className="ml-1 text-[10px] text-emerald-500">●</span>
-                )}
-                {isActive && (
-                  <span className="absolute inset-x-0 bottom-0 h-px bg-foreground" />
-                )}
-              </button>
-            );
-          })}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={handleCancel}
+            aria-label="Cancel clarification and stop chat"
+            title="Esc — cancel and stop the chat"
+          >
+            <XIcon className="size-4" />
+          </Button>
         </div>
-        <button
-          type="button"
-          onClick={handleCancel}
-          className="ml-2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          aria-label="Cancel clarification and stop chat"
-          title="Esc — cancel and stop the chat"
-        >
-          <XIcon className="size-4" />
-        </button>
-      </div>
 
-      {/* Prompt */}
-      <div className="px-3 pt-3">
-        <p className="text-sm text-foreground">{current.prompt}</p>
-      </div>
+        <TabsContent value={String(active)}>
+          {/* Prompt */}
+          <div className="px-3 pt-3">
+            <p className="text-sm text-foreground">{current.prompt}</p>
+          </div>
 
-      {/* Choices */}
-      <div className="mt-3 px-1 pb-2">
-        {(current.choices ?? []).map((choice, i) => (
-          <ChoiceRow
-            key={i}
-            choice={choice}
-            selected={currentSel.index === i}
-            onSelect={() => selectChoice(i)}
-          />
-        ))}
+          {/* Choices */}
+          <div className="mt-3 flex flex-col gap-1.5 px-3 pb-3">
+            {(current.choices ?? []).map((choice, i) => (
+              <ChoiceCard
+                key={i}
+                size="sm"
+                selected={currentSel.index === i}
+                title={choice.label}
+                description={choice.description}
+                onClick={() => selectChoice(i)}
+              />
+            ))}
 
-        {(current.allow_other ?? true) && (
-          <OtherRow
-            selected={currentSel.index >= OTHER_INDEX_OFFSET}
-            value={currentSel.other}
-            onSelect={() =>
-              updateSelection({ index: OTHER_INDEX_OFFSET })
-            }
-            onChange={(v) =>
-              updateSelection({ index: OTHER_INDEX_OFFSET, other: v })
-            }
-            onCommit={() => {
-              if (allAnswered) void handleSubmit();
-              else advance();
-            }}
-          />
-        )}
-      </div>
+            {(current.allow_other ?? true) && (
+              <OtherRow
+                selected={currentSel.index >= OTHER_INDEX_OFFSET}
+                value={currentSel.other}
+                onSelect={() =>
+                  updateSelection({ index: OTHER_INDEX_OFFSET })
+                }
+                onChange={(v) =>
+                  updateSelection({ index: OTHER_INDEX_OFFSET, other: v })
+                }
+                onCommit={() => {
+                  if (allAnswered) void handleSubmit();
+                  else advance();
+                }}
+              />
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
 
       {/* Footer: progress + the one primary action */}
       <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2">
@@ -554,67 +546,25 @@ function BatchAsk({
           )}
         </div>
         {allAnswered ? (
-          <button
+          <Button
             type="button"
+            size="sm"
             disabled={submitting}
             onClick={() => void handleSubmit()}
-            className={cn(
-              "shrink-0 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors",
-              "hover:bg-primary/80",
-              "disabled:cursor-not-allowed disabled:opacity-50",
-            )}
           >
             {submitting ? "Submitting…" : "Submit"}
-          </button>
+          </Button>
         ) : (
-          <button
-            type="button"
-            onClick={advance}
-            className={cn(
-              "shrink-0 rounded-md border border-border bg-muted/40 px-4 py-1.5 text-sm font-medium text-foreground transition-colors",
-              "hover:bg-muted",
-            )}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={advance}>
             Next question →
-          </button>
+          </Button>
         )}
       </div>
     </div>
   );
 }
 
-// ── Choice row ───────────────────────────────────────────────────────
-
-function ChoiceRow({
-  choice,
-  selected,
-  onSelect,
-}: {
-  choice: AskUserQuestionChoice;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={cn(
-        "flex w-full items-start gap-3 rounded px-2 py-1.5 text-left transition-colors",
-        selected ? "bg-muted" : "hover:bg-muted/40",
-      )}
-    >
-      <Radio selected={selected} />
-      <div className="min-w-0 flex-1">
-        <div className="text-sm text-foreground">{choice.label}</div>
-        {choice.description && (
-          <div className="text-xs text-muted-foreground">
-            {choice.description}
-          </div>
-        )}
-      </div>
-    </button>
-  );
-}
+// ── "Other" row ──────────────────────────────────────────────────────
 
 function OtherRow({
   selected,
@@ -630,59 +580,42 @@ function OtherRow({
   /** Enter in the input: submit when everything is answered, else advance. */
   onCommit: () => void;
 }) {
+  // The choice cards' look, but not a ChoiceCard: a button cannot hold the
+  // input. A click anywhere on it picks it, and so does focusing the input,
+  // which is how the keyboard reaches it.
   return (
     <div
       className={cn(
-        "flex items-start gap-3 rounded px-2 py-1.5 transition-colors",
-        selected ? "bg-muted" : "hover:bg-muted/40",
+        choiceCardVariants({ size: "sm", selected }),
+        "cursor-pointer flex-col gap-1.5 sm:gap-1.5",
       )}
+      onClick={onSelect}
     >
-      <button
-        type="button"
-        onClick={onSelect}
-        className="flex shrink-0 items-center pt-0.5"
-        aria-label="Choose Other"
-      >
-        <Radio selected={selected} />
-      </button>
-      <div className="min-w-0 flex-1">
-        <div className="text-sm text-foreground">Other</div>
-        <Input
-          placeholder="Type your answer…"
-          value={value}
-          onFocus={onSelect}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => {
-            // isComposing: the Enter that finalizes an IME composition
-            // must not double as an answer commit.
-            if (
-              e.key === "Enter" &&
-              !e.shiftKey &&
-              !e.nativeEvent.isComposing &&
-              value.trim()
-            ) {
-              e.preventDefault();
-              onCommit();
-            }
-          }}
-          className="mt-0.5 h-7 px-0 text-xs"
-        />
-      </div>
+      <span className="text-[14px] font-medium text-foreground sm:text-[13px]">
+        Other
+      </span>
+      <Input
+        aria-label="Other answer"
+        placeholder="Type your answer…"
+        value={value}
+        onFocus={onSelect}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          // isComposing: the Enter that finalizes an IME composition
+          // must not double as an answer commit.
+          if (
+            e.key === "Enter" &&
+            !e.shiftKey &&
+            !e.nativeEvent.isComposing &&
+            value.trim()
+          ) {
+            e.preventDefault();
+            onCommit();
+          }
+        }}
+        className="h-8 text-[13px]"
+      />
     </div>
-  );
-}
-
-function Radio({ selected }: { selected: boolean }) {
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "mt-[3px] size-3.5 shrink-0 rounded-full border",
-        selected
-          ? "border-foreground bg-foreground"
-          : "border-muted-foreground/60 bg-transparent",
-      )}
-    />
   );
 }
 

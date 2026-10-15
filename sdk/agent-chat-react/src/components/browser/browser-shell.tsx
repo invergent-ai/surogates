@@ -1,3 +1,11 @@
+import { Button } from "@invergent/ui-sdk/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@invergent/ui-sdk/dropdown-menu";
+import { Toggle } from "@invergent/ui-sdk/toggle";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
@@ -86,10 +94,6 @@ export function normalizePoint(
   return { x, y };
 }
 
-const ICON = "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] " +
-  "text-muted-foreground transition-colors hover:bg-secondary " +
-  "hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
-
 export function BrowserShell({
   src,
   hasControl,
@@ -109,7 +113,6 @@ export function BrowserShell({
   const [frame, setFrame] = useState<string | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [nav, setNav] = useState({ url: "", title: "" });
-  const [menuOpen, setMenuOpen] = useState(false);
   // The address bar is editable: the user types a URL and presses Enter to
   // navigate (the server protocol carries `navigate`). While the field is
   // focused, server-side updates must not clobber what is being typed —
@@ -250,51 +253,52 @@ export function BrowserShell({
       className="flex h-full min-h-0 flex-col bg-background"
     >
       <div className="flex min-h-11 items-center gap-1.5 border-b border-line bg-card px-2.5">
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-xs"
           aria-label="Back"
-          className={ICON}
           disabled={!hasControl}
           onClick={() => command({ t: "back" })}
         >
           <ChevronLeft />
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-xs"
           aria-label="Forward"
-          className={ICON}
           disabled={!hasControl}
           onClick={() => command({ t: "forward" })}
         >
           <ChevronRight />
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-xs"
           aria-label="Reload"
-          className={ICON}
           disabled={!hasControl}
           onClick={() => command({ t: "reload" })}
         >
           <Reload />
-        </button>
-        {/* Offered where it takes or returns control, or says the viewer holds it. */}
+        </Button>
+        {/* Offered where it takes or returns control, or says the viewer holds it.
+            The kit's toggle has no icon size, so it takes icon-xs's box here:
+            square at 28px with a mouse, 44px on touch. */}
         {(onToggleControl || hasControl) && (
-          <button
-            type="button"
+          <Toggle
+            size="sm"
             data-testid="browser-shell-control"
             aria-label={hasControl ? "Return control" : "Take control"}
-            aria-pressed={hasControl}
-            onClick={onToggleControl}
-            className={
-              hasControl
-                ? "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] bg-[#F5A524] text-black"
-                : ICON
-            }
+            pressed={hasControl}
+            onPressedChange={() => onToggleControl?.()}
+            className="size-7 min-h-11 min-w-11 px-0 pointer-fine:min-h-0 pointer-fine:min-w-0"
           >
             {/* One glyph in both states: a second, circular one beside Reload
                 would read as another refresh button. Colour is the mode. */}
             <Pointer />
-          </button>
+          </Toggle>
         )}
         <div
           data-testid="browser-shell-url"
@@ -337,47 +341,21 @@ export function BrowserShell({
             }}
           />
         </div>
-        <div className="relative">
-          <button
-            type="button"
-            aria-label="More"
-            className={ICON}
-            onClick={() => setMenuOpen((open) => !open)}
-          >
-            <Ellipsis />
-          </button>
-          {menuOpen && (
-            <div
-              data-testid="browser-shell-menu"
-              className="absolute right-0 top-8 z-10 min-w-36 rounded-md border border-line bg-card py-1 text-xs shadow-md"
-            >
-              {onMaximize && (
-                <button
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left hover:bg-secondary"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onMaximize();
-                  }}
-                >
-                  Maximize
-                </button>
-              )}
-              {onClose && (
-                <button
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left hover:bg-secondary"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onClose();
-                  }}
-                >
-                  Close browser
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="ghost" size="icon-xs" aria-label="More">
+              <Ellipsis />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent data-testid="browser-shell-menu" align="end">
+            {onMaximize && (
+              <DropdownMenuItem onSelect={onMaximize}>Maximize</DropdownMenuItem>
+            )}
+            {onClose && (
+              <DropdownMenuItem onSelect={onClose}>Close browser</DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {showTabs && (
@@ -488,6 +466,9 @@ const svg = {
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
   "aria-hidden": true,
+  // A size class of its own, so a small Button's default svg size (12px)
+  // leaves the toolbar's 14px glyphs alone.
+  className: "size-3.5",
 };
 
 const ChevronLeft = () => (
@@ -517,7 +498,7 @@ const Pointer = () => (
 );
 
 const XSmall = () => (
-  <svg {...svg} width={10} height={10}>
+  <svg {...svg} width={10} height={10} className="size-2.5">
     <path d="M18 6 6 18" />
     <path d="m6 6 12 12" />
   </svg>
