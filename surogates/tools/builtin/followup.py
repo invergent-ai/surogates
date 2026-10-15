@@ -308,7 +308,9 @@ ESCALATE_SCHEMA = ToolSchema(
                 "description": (
                     "What needs attention, quoting the person where it "
                     "matters, in one to three sentences the team can "
-                    "act on, in their language."
+                    "act on, in their language. Do not state the severity "
+                    "or its colour: the severity field carries it and the "
+                    "platform marks red alerts."
                 ),
             },
             "severity": {

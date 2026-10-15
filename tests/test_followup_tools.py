@@ -372,6 +372,11 @@ def test_escalate_asks_for_every_new_report_even_a_repeat():
     assert "even when a similar one was escalated before" in followup.ESCALATE_SCHEMA.description
 
 
+def test_the_escalation_reason_leaves_the_severity_to_its_field():
+    reason = followup.ESCALATE_SCHEMA.parameters["properties"]["reason"]["description"]
+    assert "Do not state the severity or its colour" in reason
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("given, expected", [
     (" RED ", "red"), ("Rosu", "red"), ("urgent", "red"), ("Critical", "red"),
