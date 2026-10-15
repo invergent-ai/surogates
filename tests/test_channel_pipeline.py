@@ -1482,3 +1482,9 @@ async def test_let_through_the_sender_meets_the_ai_disclosure():
     )
     assert result == InboundOutcome.PROCESSED
     assert "I am an AI." in nudges
+    # The model reads what was sent, on the message it came with.
+    from surogates.harness.loop_context_replay import build_user_message_dict
+    from surogates.session.events import disclosure_note
+
+    [said] = [d for _, t, d in deps.session_store.events if t == EventType.USER_MESSAGE]
+    assert disclosure_note("I am an AI.") in build_user_message_dict(said)["content"]

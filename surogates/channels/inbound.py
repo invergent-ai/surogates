@@ -49,7 +49,7 @@ from surogates.channels.source import (
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
 from surogates.followup.outreach import busy_line_for, deliver_pending, first_busy_line
-from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note
+from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note, disclosure_note
 
 logger = logging.getLogger(__name__)
 
@@ -970,7 +970,7 @@ class ChannelInboundPipeline:
         # gets the notice as its own message before any agent output.
         # After the /stop gate — a control command interrupts a run, it
         # does not open a conversation.
-        await self._maybe_send_disclosure(
+        _disclosed = await self._maybe_send_disclosure(
             msg, routing=routing, deps=deps, session_id=session_id,
             runtime_payload=runtime_payload,
         )
@@ -1063,14 +1063,17 @@ class ChannelInboundPipeline:
         }
         # Read only when the running turn reaches its next step; a message
         # that ended a pending question is read at once and needs no line.
+        _notes = [disclosure_note(_disclosed)] if _disclosed else []
         if _busy_line and not _unanswered:
             try:
                 line, token = _busy_line
                 if await first_busy_line(deps.redis, session_id, token):
                     _in_background(deps.input_nudge(session_id, msg, line))
-                    event_data[PLATFORM_NOTE] = busy_line_note(line)
+                    _notes.append(busy_line_note(line))
             except Exception:  # noqa: BLE001
                 logger.warning("[followup] busy line not sent for %s", session_id, exc_info=True)
+        if _notes:
+            event_data[PLATFORM_NOTE] = "\n\n".join(_notes)
 
         if _unanswered:
             from surogates.tools.builtin.ask_user_question import DISMISSES_QUESTION
@@ -1293,8 +1296,9 @@ class ChannelInboundPipeline:
         deps: PipelineDeps,
         session_id: Any,
         runtime_payload: dict | None,
-    ) -> None:
-        """Deliver the AI disclosure on a conversation's first contact.
+    ) -> str | None:
+        """Deliver the AI disclosure on a conversation's first contact, and
+        return its text so the person's message carries it for the model.
 
         Fires only for agents whose runtime-config governance carries an
         enabled disclosure config.  "First contact" is detected via the
@@ -1315,10 +1319,10 @@ class ChannelInboundPipeline:
         from surogates.runtime.governance import disclosure_config
 
         if runtime_payload is None or deps.input_nudge is None:
-            return
+            return None
         cfg = disclosure_config(runtime_payload.get("governance"))
         if cfg is None or not cfg["enabled"] or not cfg["text"]:
-            return
+            return None
         try:
             session = await deps.session_store.get_session(session_id)
             if getattr(session, "message_count", 0) and (
@@ -1331,7 +1335,7 @@ class ChannelInboundPipeline:
                     session_id, EventType.DISCLOSURE_PRESENTED,
                 )
             ):
-                return
+                return None
             await deps.input_nudge(session_id, msg, cfg["text"])
             await deps.session_store.emit_event(
                 session_id,
@@ -1340,14 +1344,15 @@ class ChannelInboundPipeline:
                     "level": cfg["level"],
                     "channel": routing.platform,
                     "delivery": "channel_message",
-                    "text": cfg["text"],
                 },
             )
+            return cfg["text"]
         except Exception:
             logger.warning(
                 "[channels] AI disclosure delivery failed for session %s",
                 session_id, exc_info=True,
             )
+        return None
 
     @staticmethod
     async def _record_reply_target(
