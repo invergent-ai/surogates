@@ -83,9 +83,14 @@ public func unmovable(_ app: String, readOnly: (String) -> Bool = mountedReadOnl
 }
 
 /// A process of this user's but this one that runs a program from inside the bundle *app*, among *processes*; nil for
-/// none.
+/// none. A process's program is named by its real path (proc_pidpath), so the bundle is taken by its real path too.
 public func runningFrom(_ app: String, among processes: [RunningProcess] = runningProcesses(), except own: pid_t = getpid()) -> RunningProcess? {
-  processes.first { $0.pid != own && $0.path.hasPrefix(app + "/") }
+  var inside = [app + "/"]
+  if let resolved = realpath(app, nil) {
+    inside.append(String(cString: resolved) + "/")
+    free(resolved)
+  }
+  return processes.first { process in process.pid != own && inside.contains { process.path.hasPrefix($0) } }
 }
 
 /// *update* put in place by *policy*: once the app's process has ended, within *seconds*; where the app may be updated

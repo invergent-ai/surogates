@@ -64,7 +64,8 @@ case "verify":
   let given = Array(arguments.dropFirst())
   guard given.count == 6, given[0] == "--staged", given[2] == "--app", given[4] == "--version" else { fail(usage, 2) }
   do {
-    let checking = try policy(signer: try ownSigner(), environment: ProcessInfo.processInfo.environment)
+    let signedBy = try ownSigner()
+    let checking = try policy(signer: signedBy, environment: ProcessInfo.processInfo.environment)
     try verify(staged: given[1], app: given[3], version: given[5], policy: checking)
   } catch {
     fail("\(error)", ApplyEnd.notThisApps.rawValue)
@@ -74,7 +75,8 @@ case "apply":
   // Who signed this helper is known before the app is told to quit: one that refuses here leaves the app up to say why.
   let checking: Policy
   do {
-    checking = try policy(signer: try ownSigner(), environment: ProcessInfo.processInfo.environment)
+    let signedBy = try ownSigner()
+    checking = try policy(signer: signedBy, environment: ProcessInfo.processInfo.environment)
   } catch {
     fail("\(error), so nothing was installed", ApplyEnd.notThisApps.rawValue)
   }

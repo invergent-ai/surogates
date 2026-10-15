@@ -142,9 +142,11 @@ final class VerifyTests: FolderTestCase {
     XCTAssertEqual(requirement(team: "ABCDE12345"), "identifier \"ai.invergent.surogate\" and \(developerIDForm)")
     for team in ["", "ABCDE1234", "abcde12345", "ABCDE12345\"", "ABCDE 2345", "ABCDE123456"] { XCTAssertNil(requirement(team: team), team) }
     // Each is a requirement the Security framework reads.
-    for text in [developerIDForm, try XCTUnwrap(requirement(team: "ABCDE12345"))] {
+    let full = try XCTUnwrap(requirement(team: "ABCDE12345"))
+    for text in [developerIDForm, full] {
       var read: SecRequirement?
-      XCTAssertEqual(SecRequirementCreateWithString(text as CFString, [], &read), errSecSuccess, text)
+      let status = SecRequirementCreateWithString(text as CFString, [], &read)
+      XCTAssertEqual(status, errSecSuccess, text)
     }
     let given = [testRequirement: "identifier \"x\""]
     XCTAssertEqual(try policy(signer: .team("ABCDE12345"), environment: given), Policy(requirement: requirement(team: "ABCDE12345")!, assess: true))
@@ -230,6 +232,51 @@ final class ApplyTests: FolderTestCase {
       XCTAssertEqual(try inode(staged), coming, what)
       XCTAssertEqual(bundleVersion(app), "1.2.3", what)
     }
+  }
+
+  func testTakesNoLinkAtTheStagedNameThoughItLeadsToABundleThatWouldPass() throws {
+    let app = try bundle(folder + "/Surogate.app", version: "1.2.3")
+    let elsewhere = try bundle(folder + "/elsewhere/Surogate.app", version: "1.2.4")
+    let staged = folder + "/.Surogate-1.2.4.staging"
+    try FileManager.default.createSymbolicLink(atPath: staged, withDestinationPath: elsewhere)
+    XCTAssertEqual(stagedRefusal(staged, app: app), "\(staged) is not a folder")
+    let was = try inode(app)
+    let gone = try endedProcess()
+    let (end, why) = apply(Update(pid: gone, staged: staged, app: app, version: "1.2.4"), policy: test)
+    XCTAssertEqual(end, .notThisApps, why)
+    XCTAssertEqual(try inode(app), was)
+    XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: staged), elsewhere)
+    // Nor one that is another user's.
+    let real = try bundle(folder + "/other/.Surogate-1.2.4.staging", version: "1.2.4")
+    XCTAssertEqual(stagedRefusal(real, app: app, uid: getuid() + 1), "\(real) is not this user's")
+    XCTAssertNil(stagedRefusal(real, app: app))
+  }
+
+  func testSwapsNothingWhileAProcessOfThisUsersRunsFromTheApp() throws {
+    let app = try bundle(folder + "/Surogate.app", version: "1.2.3")
+    let staged = try bundle(folder + "/.Surogate-1.2.4.staging", version: "1.2.4")
+    // A start of the app's while the helper applies: a program of the bundle's own, still running.
+    let source = folder + "/sleeper.c"
+    try "#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n".write(toFile: source, atomically: true, encoding: .utf8)
+    try shell("/usr/bin/cc", ["-o", app + "/Contents/Resources/sleeper", source])
+    let started = Process()
+    started.executableURL = URL(fileURLWithPath: app + "/Contents/Resources/sleeper")
+    try started.run()
+    usleep(200_000)
+    XCTAssertEqual(runningFrom(app)?.pid, started.processIdentifier)
+    // The helper's own process is no other.
+    XCTAssertNil(runningFrom(app, among: [RunningProcess(pid: getpid(), path: app + "/Contents/MacOS/surogate-helper", args: [])]))
+    let was = try inode(app)
+    let coming = try inode(staged)
+    let gone = try endedProcess()
+    let (end, why) = apply(Update(pid: gone, staged: staged, app: app, version: "1.2.4"), policy: test)
+    XCTAssertEqual(end, .didNotQuit)
+    XCTAssertEqual(why, "Surogate still runs from \(app), as process \(started.processIdentifier), so nothing was installed")
+    XCTAssertEqual(try inode(app), was)
+    XCTAssertEqual(try inode(staged), coming)
+    started.terminate()
+    started.waitUntilExit()
+    XCTAssertNil(runningFrom(app))
   }
 
   func testChecksTheStagedBundleAgainAfterTheAppsCheck() throws {
