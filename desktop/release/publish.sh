@@ -11,8 +11,10 @@
 # with no install script, which installs linux-x64's alone (see target_files):
 #
 #   desktop/darwin-arm64/latest.json
+#   desktop/darwin-arm64/Surogate.dmg                     the newest release's disk image, under a name that stays, for the website
 #   desktop/releases/<version>/darwin-arm64/manifest.json, .sig
-#   desktop/releases/<version>/darwin-arm64/surogate-desktop-<version>-darwin-arm64.tar.gz
+#   desktop/releases/<version>/darwin-arm64/surogate-desktop-<version>-darwin-arm64.tar.gz   Surogate.app, which the app updates from
+#   desktop/releases/<version>/darwin-arm64/surogate-desktop-<version>-darwin-arm64.dmg      the disk image a person installs it from
 #
 #   desktop/win32-x64/latest.json
 #   desktop/win32-x64/Surogate.msi                        the newest release's MSI, under a name that stays, for the website
@@ -26,7 +28,9 @@
 #                                                 # install.sh beside this script; for win32-x64, of the
 #                                                 # MSI the release signed, by DESKTOP_TARBALL_SHA256 and
 #                                                 # DESKTOP_TARBALL_SIZE, and of the layout it is made of,
-#                                                 # <out>/Surogate (describe_layout). All that reads the
+#                                                 # <out>/Surogate (describe_layout); for darwin-arm64, of
+#                                                 # the tarball of Surogate.app the release signed, by the
+#                                                 # same two words (describe_bundle). All that reads the
 #                                                 # build's bytes is here, and here is no release key:
 #                                                 # with DESKTOP_RELEASE_KEY in its environment, set or
 #                                                 # empty, it refuses
@@ -43,7 +47,11 @@
 #                                                 # pair by install.sh's keys and its tarball the one
 #                                                 # the manifest names: each object sent and read back,
 #                                                 # in the order said at send; never a release again,
-#                                                 # and latest.json only for the newest version
+#                                                 # and latest.json only for the newest version. For
+#                                                 # darwin-arm64, its disk image too, <out>/surogate-
+#                                                 # desktop-<version>-darwin-arm64.dmg, only as the one
+#                                                 # whose sha256 is DESKTOP_DMG_SHA256, the signing job's
+#                                                 # own word for it
 # Environment for send: S3_ENDPOINT (R2's https://<account>.r2.cloudflarestorage.com), S3_BUCKET,
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
 set -euo pipefail
@@ -74,15 +82,16 @@ OUT="${3:-}"
 # tarball or Windows's MSI, and the payload's type; the folder under desktop/ that the release's own
 # three are sent to and kept in; the manifest of the newest release; and the object, if any, that
 # goes last, after latest.json, under a name that stays: linux-x64's install script, win32-x64's MSI
-# for the website. The app names them the same (TARGETS, in src/platform.ts).
+# and darwin-arm64's disk image for the website; and darwin-arm64's disk image under its version,
+# IMAGE, sent with the release's own. The app names them the same (TARGETS, in src/platform.ts).
 target_files() {
   case "$1" in
     linux-x64) PLATFORM=linux ARCH=x64 RELEASE="releases/$VERSION" LATEST=latest.json ARCHIVE="surogate-desktop-$VERSION-$1.tar.gz" ARCHIVE_TYPE=application/gzip
-      LAST=install.sh LAST_FROM="$HERE/install.sh" LAST_TYPE=text/x-shellscript ;;
+      LAST=install.sh LAST_FROM="$HERE/install.sh" LAST_TYPE=text/x-shellscript IMAGE= ;;
     darwin-arm64) PLATFORM=darwin ARCH=arm64 RELEASE="releases/$VERSION/darwin-arm64" LATEST=darwin-arm64/latest.json ARCHIVE="surogate-desktop-$VERSION-$1.tar.gz" ARCHIVE_TYPE=application/gzip
-      LAST= LAST_FROM= LAST_TYPE= ;;
+      IMAGE="surogate-desktop-$VERSION-$1.dmg" LAST=darwin-arm64/Surogate.dmg LAST_FROM="$OUT/surogate-desktop-$VERSION-$1.dmg" LAST_TYPE=application/x-apple-diskimage ;;
     win32-x64) PLATFORM=win32 ARCH=x64 RELEASE="releases/$VERSION/win32-x64" LATEST=win32-x64/latest.json ARCHIVE="surogate-desktop-$VERSION-$1.msi" ARCHIVE_TYPE=application/x-msi
-      LAST=win32-x64/Surogate.msi LAST_FROM="$OUT/$ARCHIVE" LAST_TYPE=application/x-msi ;;
+      LAST=win32-x64/Surogate.msi LAST_FROM="$OUT/$ARCHIVE" LAST_TYPE=application/x-msi IMAGE= ;;
     *) return 1 ;;
   esac
 }
@@ -168,14 +177,89 @@ describe_layout() {
   echo "wrote $OUT/manifest.json"
 }
 
+# macOS's describe: the update payload, the tarball of the signed and stapled Surogate.app that the signing job packed
+# (scripts/sign-mac.sh pack), by that job's two words for it, DESKTOP_TARBALL_SHA256 and DESKTOP_TARBALL_SIZE, unpacked
+# whole as linux-x64's is: one top folder, Surogate.app, of files of one name each, folders and links that each lead
+# inside it, which is all the app's updater takes. Its app's state schema and version by the install script's own reader, the version its
+# Info.plist says, and its release keys, which the app checks its updates by, install.sh's key for key. What it writes
+# is this job's own check of the release, as linux-x64's is.
+describe_bundle() {
+  : "${DESKTOP_TARBALL_SHA256:?}" "${DESKTOP_TARBALL_SIZE:?}"
+  [[ "$DESKTOP_TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_TARBALL_SHA256 is not a sha256, as the signing job gives its tarball's"
+  [[ "$DESKTOP_TARBALL_SIZE" =~ ^[1-9][0-9]{0,14}$ ]] || fail "DESKTOP_TARBALL_SIZE is not a size in bytes, as the signing job gives its tarball's"
+  [ -f "$OUT/$ARCHIVE" ] || fail "$OUT/$ARCHIVE is not there: the signing job packs it (scripts/sign-mac.sh pack)"
+  local sha256 size tree package keys schema reader link target shown
+  sha256="$(sha256sum <"$OUT/$ARCHIVE" | cut -d' ' -f1)"
+  [ "$sha256" = "$DESKTOP_TARBALL_SHA256" ] || fail "$OUT/$ARCHIVE is not the tarball the signing job made: its sha256 is $sha256, and the signing job's $DESKTOP_TARBALL_SHA256"
+  size="$(stat -c %s "$OUT/$ARCHIVE")"
+  [ "$size" = "$DESKTOP_TARBALL_SIZE" ] || fail "$OUT/$ARCHIVE is not the tarball the signing job made: its size is $size bytes, and the signing job's $DESKTOP_TARBALL_SIZE"
+  [ "$(tail -n 1 "$HERE/install.sh")" = 'main "$@"' ] || fail 'install.sh does not end with the line that runs it (main "$@"): no package is read with it'
+  keys_listed || fail "$NOT_LISTED"
+  # Unpacked, read and removed as linux-x64's tarball is, by the same rules of signals (see describe).
+  trap '' HUP INT PIPE TERM
+  unpacked="$(mktemp -d --tmpdir release-unpacked-XXXXXXXXXX)"
+  cleanup() {
+    trap '' HUP INT PIPE TERM
+    chmod -R u+rwX "$unpacked" 2>/dev/null || :
+    rm -rf "$unpacked"
+  }
+  trap 'cleanup || :' EXIT
+  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 141' PIPE; trap 'exit 143' TERM
+  tar -xzf "$OUT/$ARCHIVE" -C "$unpacked" --no-same-owner --no-same-permissions 2>/dev/null || fail "$OUT/$ARCHIVE could not be unpacked"
+  tree="$(realpath "$unpacked")"
+  # Surogate.app alone at its top, a folder and no link, of files, folders and links alone, and every link leading to
+  # something of the bundle's own.
+  shown="$(ls -A "$unpacked")"
+  [ "$shown" = Surogate.app ] && [ -d "$unpacked/Surogate.app" ] && [ ! -L "$unpacked/Surogate.app" ] || fail "$OUT/$ARCHIVE holds other than Surogate.app at its top"
+  shown="$(find "$unpacked/Surogate.app" ! -type f ! -type d ! -type l -print -quit)"
+  [ -z "$shown" ] || fail "$OUT/$ARCHIVE holds other than files, folders and links: ${shown#"$unpacked"/}"
+  while IFS= read -r -d '' link; do
+    target="$(realpath -e "$link" 2>/dev/null)" || target=
+    case "$target" in "$tree/Surogate.app"/*) ;; *) fail "$OUT/$ARCHIVE holds a link that leads out of Surogate.app, or to nothing: ${link#"$unpacked"/}" ;; esac
+  done < <(find "$unpacked/Surogate.app" -type l -print0)
+  # No AppleDouble file, which a tar of macOS's leaves for a file's extended attributes: its name would break the seal.
+  shown="$(find "$unpacked/Surogate.app" -name '._*' -print -quit)"
+  [ -z "$shown" ] || fail "$OUT/$ARCHIVE holds an AppleDouble file, which breaks the bundle's seal: ${shown#"$unpacked"/}"
+  # No file of two names, which a hard link of the archive's unpacks as: the updater takes a file of one name alone, and
+  # the app its release keys only so.
+  shown="$(find "$unpacked/Surogate.app" -type f -links +1 -print -quit)"
+  [ -z "$shown" ] || fail "$OUT/$ARCHIVE holds a file of more than one name, which the app's updater takes for none of its own: ${shown#"$unpacked"/}"
+  # Each a file of the bundle's own: no link, and under no folder that is one.
+  package=Surogate.app/Contents/Resources/app/package.json
+  [ -f "$unpacked/$package" ] && [ "$(realpath "$unpacked/$package")" = "$tree/$package" ] || fail "the tarball's $package names no stateSchema"
+  reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e ".stateSchema | select(type == \"number\" and . == floor and (floor | . >= 1 and . < 1e15)) | floor"'
+  schema="$(bash -c "$reader" _ "$HERE/install.sh" "$unpacked/$package" 2>/dev/null)" || fail "the tarball's $package names no stateSchema"
+  reader='. <(sed "\$d" "$1") && settings && one_object "$2" any 1048576 | jq -e --arg version "$3" ".version == \$version" >/dev/null'
+  bash -c "$reader" _ "$HERE/install.sh" "$unpacked/$package" "$VERSION" 2>/dev/null || fail "the tarball's app is not version $VERSION, by its $package"
+  # The version the bundle says of itself, in the XML that plutil keeps it in: its updater takes no other.
+  shown="$(sed -n '/^[[:space:]]*<key>CFBundleShortVersionString<\/key>$/{n;s/^[[:space:]]*<string>\(.*\)<\/string>$/\1/p;}' "$unpacked/Surogate.app/Contents/Info.plist" 2>/dev/null)" || shown=
+  [ "$shown" = "$VERSION" ] || fail "the tarball's Surogate.app is not version $VERSION, by its Info.plist's CFBundleShortVersionString"
+  # The release keys' member as the archive has it, whose mode the unpacking here did not keep: one regular file, of
+  # one name, that no group and no other may write, as the app takes its keys only so.
+  keys=Surogate.app/Contents/Resources/release-keys
+  shown="$(tar -tvzf "$OUT/$ARCHIVE" "$keys" 2>/dev/null)" || shown=
+  [[ "$shown" == -????[!w]??[!w]?\ * && "$shown" != *$'\n'* ]] || fail "the tarball's $keys is not one regular file that only its owner may write"
+  [ -f "$unpacked/$keys" ] && [ "$(realpath "$unpacked/$keys")" = "$tree/$keys" ] \
+    && bash -c '. <(sed "\$d" "$1") && settings && listed read "$2" && [ "${#read[@]}" -gt 0 ] && [ "${#read[@]}" -eq "${#RELEASE_KEYS[@]}" ] || exit 1
+      for at in "${!read[@]}"; do [ "${read[at]}" = "${RELEASE_KEYS[at]}" ] || exit 1; done' _ "$HERE/install.sh" "$unpacked/$keys" \
+    || fail "the tarball's $keys is not install.sh's list of release keys, key for key: its app would check its updates by others"
+  cleanup || fail "the unpacked tarball could not be removed from $unpacked: no manifest is written"
+  # A signature that is here is of another manifest than the one written now.
+  rm -f "$OUT/manifest.json.sig"
+  manifest "$VERSION" "$sha256" "$size" "$schema" >"$OUT/manifest.json"
+  echo "wrote $OUT/manifest.json"
+}
+
 case "$VERB" in
   describe)
     if [ "$DESKTOP_TARGET" = win32-x64 ]; then
       describe_layout
       exit 0
     fi
-    # What the tarball holds, and where in it the app's package is, is linux-x64's alone so far.
-    [ "$DESKTOP_TARGET" = linux-x64 ] || fail "describe reads a linux-x64 tarball or a win32-x64 layout, and not yet a release for $DESKTOP_TARGET"
+    if [ "$DESKTOP_TARGET" = darwin-arm64 ]; then
+      describe_bundle
+      exit 0
+    fi
     : "${DESKTOP_TARBALL_SHA256:?}"
     [ -f "$OUT/$ARCHIVE" ] || fail "$OUT/$ARCHIVE is not there: run scripts/package.sh first"
     # The tarball is the one the build made, by the hash the build's job gave for it: an artifact
@@ -315,6 +399,14 @@ case "$VERB" in
     named="$(jq -r '.sha256 | strings' "$OUT/manifest.json" 2>/dev/null)" || named=
     [ -n "$named" ] && [ -f "$OUT/$ARCHIVE" ] && [ "$(sha256sum <"$OUT/$ARCHIVE" | cut -d' ' -f1)" = "$named" ] \
       || fail "$OUT/$ARCHIVE is not the tarball that $OUT/manifest.json names, by its sha256: nothing is sent"
+    # macOS's disk image, which no manifest names, by the signing job's own word for it, DESKTOP_DMG_SHA256: the one here
+    # is this job's download of that job's artifact, under whose name any job of the run may put another file.
+    if [ -n "$IMAGE" ]; then
+      : "${DESKTOP_DMG_SHA256:?}"
+      [[ "$DESKTOP_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "DESKTOP_DMG_SHA256 is not a sha256, as the signing job gives its disk image's"
+      [ -f "$OUT/$IMAGE" ] && [ "$(sha256sum <"$OUT/$IMAGE" | cut -d' ' -f1)" = "$DESKTOP_DMG_SHA256" ] \
+        || fail "$OUT/$IMAGE is not the disk image the signing job made, by its sha256: nothing is sent"
+    fi
     # A request to the bucket, signed; its HTTP status on stdout. One that cannot connect in half a
     # minute, or that stalls for a minute, stops, and is said: the job's time limit would otherwise
     # be what ends it. The secret reaches curl through a pipe from printf, a builtin, never its
@@ -361,8 +453,9 @@ case "$VERB" in
     rm -f "$OUT/latest.json"
     # A release that is there, and older than the one latest.json names, is whole: no object of
     # a release is sent a second time. So is one that latest.json names, once the bucket's last
-    # object (its install script, or Windows's MSI that stays) is this one's, for a target that has
-    # one. Else a send was cut short after the release's own three were there, and this one ends it.
+    # object (its install script, or Windows's MSI or macOS's disk image that stays) is this one's, for
+    # a target that has one. Else a send was cut short after the release's own were there, and this
+    # one ends it.
     if [ -n "$there" ] && [ -n "$newest" ]; then
       if dpkg --compare-versions "$VERSION" lt "$newest"; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
       if [ "$VERSION" = "$newest" ] && [ -z "$LAST" ]; then fail "desktop/$RELEASE is published already, and is not sent again"; fi
@@ -382,9 +475,11 @@ case "$VERB" in
     #    the signature of its manifest, and last its manifest, the mark that the three are there.
     #    None is ever sent again once that mark is: an install and an app read the signature of
     #    the newest release from here, and --version reads all three. Cut before the mark, the
-    #    next send sends the three again.
+    #    next send sends the three again. macOS's disk image is its release's own too, sent after its
+    #    tarball, and before the mark.
     if [ -z "$there" ]; then
       put "$OUT/$ARCHIVE" "$RELEASE/$ARCHIVE" "$ARCHIVE_TYPE"
+      [ -z "$IMAGE" ] || put "$OUT/$IMAGE" "$RELEASE/$IMAGE" application/x-apple-diskimage
       put "$OUT/manifest.json.sig" "$RELEASE/manifest.json.sig" application/octet-stream
       put "$OUT/manifest.json" "$RELEASE/manifest.json" application/json
     fi
@@ -403,9 +498,9 @@ case "$VERB" in
       #    one: a key signs only once a release that lists it is out. Sent before latest.json,
       #    a script that has dropped the key before's would refuse the release before, and
       #    every first install would end there until the send was run again. The next send of
-      #    this release finds the script owed, and sends it. Windows's MSI goes in the script's
-      #    place, under the name the website links to, after latest.json names its release, and
-      #    is owed the same way. A target with neither ends at 2.
+      #    this release finds the script owed, and sends it. Windows's MSI and macOS's disk image
+      #    go in the script's place, under the name the website links to, after latest.json names
+      #    their release, and are owed the same way.
       [ "$VERSION" = "$newest" ] || put "$OUT/manifest.json" "$LATEST" application/json no-cache --retry 3
       [ -z "$LAST" ] || put "$LAST_FROM" "$LAST" "$LAST_TYPE" no-cache
       published="published desktop/$RELEASE as desktop/$LATEST"
