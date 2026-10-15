@@ -44,7 +44,6 @@ from surogates.db.models import (
     FollowupEnrollmentRow,
     FollowupSettingsRow,
     OutreachMessageRow,
-    SessionLease,
     User,
 )
 from surogates.followup import store as followup_store
@@ -54,6 +53,7 @@ from surogates.channels.identity import get_or_create_channel_session
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
 from surogates.session.events import OUTREACH_OPENER_MARKER, PLATFORM_NOTE, EventType
+from surogates.session.store import live_lease_token
 
 logger = logging.getLogger(__name__)
 
@@ -151,36 +151,31 @@ def window_open(last_inbound_at: datetime | None, now: datetime) -> bool:
 async def _busy(session_factory: Any, session_id: uuid.UUID, now: datetime) -> uuid.UUID | None:
     """The token of the turn holding this conversation right now, if any."""
     async with session_factory() as db:
-        lease = (
-            await db.execute(
-                sa.select(SessionLease.lease_token, SessionLease.expires_at)
-                .where(SessionLease.session_id == session_id)
-            )
-        ).one_or_none()
-    # ``session_leases.expires_at`` is naive UTC.
-    return lease.lease_token if lease is not None and as_utc(lease.expires_at) > as_utc(now) else None
+        return await live_lease_token(db, session_id, now)
 
 
-async def busy_safety_line(
-    session_factory: Any, redis: Any, *, org_id: uuid.UUID, agent_id: str,
-    session_id: uuid.UUID, user_id: uuid.UUID, now: datetime | None = None,
-) -> str | None:
-    """The business's ``busy_safety_line`` for *user_id* when a worker is
-    mid-turn in this conversation, once per turn; ``None`` when it is unset,
-    nobody is, or they are on the team (they talk to the agent, nobody is
-    waiting on it for them)."""
-    settings = await followup_store.get_settings(session_factory, org_id=org_id, agent_id=agent_id)
-    line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
-    if not line or followup_store.is_team_member(settings, user_id):
-        return None
-    token = await _busy(session_factory, session_id, now or datetime.now(timezone.utc))
-    if token is None:
-        return None
-    first = await redis.set(
+async def busy_line_for(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, session_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> tuple[str, uuid.UUID] | None:
+    """The business's ``busy_safety_line`` and the running turn's lease token,
+    when *user_id* writes mid-turn; ``None`` when it is unset, no turn runs,
+    or they are on the team (nobody waits on the agent for them)."""
+    async with session_factory() as db:
+        settings = await db.get(FollowupSettingsRow, (org_id, agent_id))
+        line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
+        if not line or followup_store.is_team_member(settings, user_id):
+            return None
+        token = await live_lease_token(db, session_id)
+    return (line, token) if token is not None else None
+
+
+async def first_busy_line(redis: Any, session_id: uuid.UUID, token: uuid.UUID) -> bool:
+    """Whether this is the running turn's first busy line: one per turn."""
+    return bool(await redis.set(
         f"surogates:followup:busy-line:{session_id}:{token}", "1",
         ex=int(timedelta(hours=6).total_seconds()), nx=True,
-    )
-    return line if first else None
+    ))
 
 
 async def _transition(

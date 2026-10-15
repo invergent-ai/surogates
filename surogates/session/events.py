@@ -31,6 +31,22 @@ SILENT_REPLY = "NO_MESSAGE"
 PLATFORM_NOTE = "platform_note"
 
 
+def disclosure_note(text: str) -> str:
+    """What the model reads of the AI disclosure the platform sent."""
+    return (
+        "[From the platform, not the person: it already sent them this AI "
+        f"disclosure, in this conversation: «{text}»]"
+    )
+
+
+def busy_line_note(line: str) -> str:
+    """What the model reads of the busy line the platform sent."""
+    return (
+        "[Sent by the platform to the person when this message came in, "
+        f"while you were still answering them: «{line}»]"
+    )
+
+
 @unique
 class EventType(str, Enum):
     """Every event in the system's append-only log has exactly one of these types.

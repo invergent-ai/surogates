@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import uuid
 
@@ -132,6 +133,10 @@ async def _busy_line_case(sf, *, line, busy, messages=2, keep_deps=False):
             routing=_whatsapp_routing(), config=_make_config(), deps=deps,
         )
         assert result == InboundOutcome.PROCESSED
+    # The line goes out beside the message, not ahead of it.
+    from surogates.channels import inbound as inbound_module
+
+    await asyncio.gather(*inbound_module._background)
     return [(e[1], e[2]) for e in deps.session_store.events] if keep_deps else nudges
 
 

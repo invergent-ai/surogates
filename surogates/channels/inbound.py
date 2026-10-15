@@ -26,6 +26,7 @@ the cache TTL).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -47,8 +48,8 @@ from surogates.channels.source import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
-from surogates.followup.outreach import busy_safety_line, deliver_pending
-from surogates.session.events import PLATFORM_NOTE, EventType
+from surogates.followup.outreach import busy_line_for, deliver_pending, first_busy_line
+from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,22 @@ def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     # never match after a space.  (?<!\w)/(?!\w) behaves like \b for plain
     # words and still works for punctuated patterns.
     return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE)
+
+
+_background: set[asyncio.Task] = set()
+
+
+def _in_background(send: Any) -> None:
+    """Run *send* without holding up the message it accompanies."""
+    async def run() -> None:
+        try:
+            await send
+        except Exception:  # noqa: BLE001
+            logger.warning("[channels] background notice failed", exc_info=True)
+
+    task = asyncio.create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 def is_stop_command(text: str | None) -> bool:
@@ -801,6 +818,7 @@ class ChannelInboundPipeline:
         # them (an alert, an operator's message) goes out now, ahead of the
         # agent's answer to what they wrote.
         # ------------------------------------------------------------------
+        _busy_line = None
         if deps.session_factory is not None and routing.identifier:
             try:
                 _org = UUID(str(routing.org_id))
@@ -832,6 +850,11 @@ class ChannelInboundPipeline:
                         user_id=identity.user_id, platform=routing.platform,
                         platform_user_id=msg.platform_user_id, text=msg.text,
                     )
+                    if deps.input_nudge is not None:
+                        _busy_line = await busy_line_for(
+                            deps.session_factory, org_id=_org, agent_id=routing.agent_id,
+                            session_id=session_id, user_id=identity.user_id,
+                        )
             except Exception:  # noqa: BLE001
                 # The person's own message must reach the agent whatever
                 # happens to the bookkeeping around it.
@@ -1038,22 +1061,14 @@ class ChannelInboundPipeline:
             "media_types": msg.media_types,
             "source": _source,
         }
-        # A message that lands mid-turn is read when the turn reaches its
-        # next step, which can be long: a business that set a line tells the
-        # person what to do meanwhile.  Not for one that ended a pending
-        # question, which the turn reads at once.
-        if msg.is_dm and not _unanswered and deps.session_factory is not None and deps.input_nudge is not None:
+        # Read only when the running turn reaches its next step; a message
+        # that ended a pending question is read at once and needs no line.
+        if _busy_line and not _unanswered:
             try:
-                _line = await busy_safety_line(
-                    deps.session_factory, deps.redis, org_id=UUID(str(routing.org_id)),
-                    agent_id=routing.agent_id, session_id=session_id, user_id=identity.user_id,
-                )
-                if _line:
-                    await deps.input_nudge(session_id, msg, _line)
-                    event_data[PLATFORM_NOTE] = (
-                        "[Sent by the platform to the person when this message came in, "
-                        f"while you were still answering them: «{_line}»]"
-                    )
+                line, token = _busy_line
+                if await first_busy_line(deps.redis, session_id, token):
+                    _in_background(deps.input_nudge(session_id, msg, line))
+                    event_data[PLATFORM_NOTE] = busy_line_note(line)
             except Exception:  # noqa: BLE001
                 logger.warning("[followup] busy line not sent for %s", session_id, exc_info=True)
 
