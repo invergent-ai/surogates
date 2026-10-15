@@ -1202,6 +1202,72 @@ async def resolve_escalation(
     return row
 
 
+ESCALATION_PREFIX = "escalation:"
+
+
+def escalation_key(escalation_id: uuid.UUID, invitation_id: uuid.UUID | None = None) -> str:
+    """``escalation:<step or ->:<id hex>``: what groups one escalation's
+    alerts, its Inbox item and its reminder."""
+    return f"{ESCALATION_PREFIX}{invitation_id or '-'}:{escalation_id.hex}"
+
+
+def escalation_of(key: str | None) -> str | None:
+    """The escalation key *key* starts with (an alert's dedupe key adds its
+    recipient), or ``None`` when it names no escalation."""
+    parts = (key or "").split(":")
+    if parts[0] + ":" != ESCALATION_PREFIX or len(parts) < 3:
+        return None
+    return ":".join(parts[:3])
+
+
+def escalation_hex(key: str) -> str:
+    """The id hex of the escalation an escalation key names."""
+    return key.split(":")[2]
+
+
+async def open_escalations(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID | None = None,
+) -> list[EscalationRow]:
+    """The agent's unresolved escalations about someone, latest first; about
+    *user_id* alone when given."""
+    query = (
+        sa.select(EscalationRow)
+        .where(EscalationRow.org_id == org_id)
+        .where(EscalationRow.agent_id == agent_id)
+        .where(EscalationRow.resolved_at.is_(None))
+        .where(EscalationRow.user_id.isnot(None))
+        .order_by(EscalationRow.created_at.desc())
+    )
+    if user_id is not None:
+        query = query.where(EscalationRow.user_id == user_id)
+    async with session_factory() as db:
+        return list((await db.execute(query)).scalars().all())
+
+
+async def handle_escalations(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str,
+    take: list[uuid.UUID], resolve: list[uuid.UUID], owner: str,
+) -> None:
+    """*owner* takes the escalations *take* names and resolves those
+    *resolve* names, which then leave the Inbox: one write each."""
+    owner = (owner or "").strip()
+    if not owner:
+        raise ValueError("an escalation needs an owner")
+    async with session_factory() as db:
+        for ids, values in ((take, {"owner": owner}), (resolve, {"resolved_at": _utcnow()})):
+            if ids:
+                await db.execute(
+                    sa.update(EscalationRow)
+                    .where(EscalationRow.org_id == org_id)
+                    .where(EscalationRow.agent_id == agent_id)
+                    .where(EscalationRow.id.in_(ids))
+                    .values(**values)
+                )
+        await db.commit()
+    for escalation_id in resolve:
+        await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+
+
 async def close_escalation_inbox_items(
     session_factory: Any, *, org_id: uuid.UUID, escalation_id: uuid.UUID,
 ) -> int:

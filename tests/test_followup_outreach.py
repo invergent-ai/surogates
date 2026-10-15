@@ -561,7 +561,7 @@ async def test_an_unopened_red_alert_is_sent_once_more_to_the_whole_team(sf, doc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("handled", [{"owner": "Ana"}, {"resolved_at": NOW}])
-async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session, handled):
+async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session, handled, monkeypatch):
     taken, open_ = uuid.uuid4(), uuid.uuid4()
     async with sf() as db:
         for escalation_id, extra in ((taken, handled), (open_, {})):
@@ -574,11 +574,18 @@ async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session
     await _red_alert(sf, [uuid.uuid4()], escalation_id=open_)
     await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=40))
     await _at(sf, 40)
+    # A batch of one: the handled, older alert must not take the newer's place.
+    async with sf() as db:
+        await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.dedupe_key.like(f"%{taken.hex}%"))
+            .values(created_at=NOW - timedelta(minutes=41))
+        )
+        await db.commit()
+    monkeypatch.setattr(outreach, "BATCH", 1)
     await _send(sf, _Store(), _Delivery())
     [reminder] = await _alerts(sf, "reminder")
     assert open_.hex in reminder.dedupe_key
-    # Out of the reminder's batch for good.
-    assert all(r.reminded_at is not None for r in await _alerts(sf, "agent"))
 
 
 @pytest.mark.asyncio

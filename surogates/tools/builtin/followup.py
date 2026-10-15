@@ -879,7 +879,9 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     # red one is reminded once and read as one, and names the check-in
     # whose history records it.
     escalation_id = uuid.uuid4()
-    escalation = f"escalation:{invitation.id if invitation is not None else '-'}:{escalation_id.hex}"
+    escalation = followup_store.escalation_key(
+        escalation_id, invitation.id if invitation is not None else None,
+    )
     inboxed = target_id is not None and await _inbox(
         sf, ctx, settings, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",

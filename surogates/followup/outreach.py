@@ -237,7 +237,7 @@ async def _write_text(
     # Without these the model, seeing only the masked log, told a team
     # member it could not give them the number and never closed the case.
     notes = [MASKED_NOTE] if logged != text else []
-    if row.kind == "alert" and (row.dedupe_key or "").startswith("escalation:"):
+    if row.kind == "alert" and followup_store.escalation_of(row.dedupe_key):
         notes.append(ESCALATION_NOTE)
     data = {
         "message": {"role": "assistant", "content": logged},
@@ -742,7 +742,18 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
                 .where(OutreachMessageRow.kind == "alert")
                 .where(OutreachMessageRow.severity == "red")
                 .where(OutreachMessageRow.reminded_at.is_(None))
-                .where(OutreachMessageRow.dedupe_key.like("escalation:%"))
+                .where(OutreachMessageRow.dedupe_key.like(followup_store.ESCALATION_PREFIX + "%"))
+                # A case a team member took or resolved needs no reminder.
+                .where(~sa.exists().where(
+                    EscalationRow.org_id == OutreachMessageRow.org_id,
+                    EscalationRow.agent_id == OutreachMessageRow.agent_id,
+                    sa.or_(EscalationRow.owner.isnot(None), EscalationRow.resolved_at.isnot(None)),
+                    OutreachMessageRow.dedupe_key.like(
+                        sa.literal(followup_store.ESCALATION_PREFIX + "%:")
+                        + sa.func.replace(sa.cast(EscalationRow.id, sa.String), "-", "")
+                        + sa.literal(":%")
+                    ),
+                ))
                 .where(OutreachMessageRow.created_at <= now - BATCH_WINDOW)
                 .where(OutreachMessageRow.created_at >= now - REMINDER_LOOKBACK)
                 .order_by(OutreachMessageRow.created_at)
@@ -751,24 +762,10 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
         ).all()
     groups: dict[str, list[tuple[Any, Any]]] = {}
     for row, settings in rows:
-        groups.setdefault(row.dedupe_key.rsplit(":", 1)[0], []).append((row, settings))
-    handled = await _handled_escalations(session_factory, groups)
+        groups.setdefault(followup_store.escalation_of(row.dedupe_key), []).append((row, settings))
 
     reminded = 0
-    # Marked, not just passed over: left unmarked they would keep filling the
-    # batch, and a newer unread alert behind them would never be reached.
-    taken = [r.id for key, members in groups.items() if key.rsplit(":", 1)[1] in handled for r, _ in members]
-    if taken:
-        async with session_factory() as db:
-            await db.execute(
-                sa.update(OutreachMessageRow)
-                .where(OutreachMessageRow.id.in_(taken))
-                .values(reminded_at=now)
-            )
-            await db.commit()
     for escalation, members in groups.items():
-        if escalation.rsplit(":", 1)[1] in handled:
-            continue
         row, settings = members[0]
         wait = timedelta(minutes=red_alert_reminder_minutes(settings))
         if as_utc(row.created_at) > as_utc(now) - wait:
@@ -780,27 +777,6 @@ async def _remind_unseen_red_alerts(session_factory: Any, *, now: datetime) -> i
         except Exception:  # noqa: BLE001 — one escalation, not the pass
             logger.exception("[outreach] could not remind the team of %s", escalation)
     return reminded
-
-
-async def _handled_escalations(session_factory: Any, groups: dict[str, Any]) -> set[str]:
-    """The id hexes, among *groups*' escalations, a team member took or resolved."""
-    ids = set()
-    for key in groups:
-        try:
-            ids.add(uuid.UUID(key.rsplit(":", 1)[1]))
-        except ValueError:
-            continue
-    if not ids:
-        return set()
-    async with session_factory() as db:
-        found = (
-            await db.execute(
-                sa.select(EscalationRow.id)
-                .where(EscalationRow.id.in_(ids))
-                .where(sa.or_(EscalationRow.owner.isnot(None), EscalationRow.resolved_at.isnot(None)))
-            )
-        ).scalars().all()
-    return {escalation_id.hex for escalation_id in found}
 
 
 async def _remind(
@@ -818,7 +794,7 @@ async def _remind(
         kind="alert", severity="red", created_by="reminder", topic="urgent",
         text=wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
-        dedupe_prefix="reminder:" + escalation.removeprefix("escalation:"),
+        dedupe_prefix="reminder:" + escalation.removeprefix(followup_store.ESCALATION_PREFIX),
         fallback_senders={row.platform: row.channel_identifier},
     )
     async with session_factory() as db:
