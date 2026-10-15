@@ -231,6 +231,17 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     expect(table.rows[0].cells[0].paras[0].runs[0]).toMatchObject({ text: "Region", b: true, color: { hex: "#ffffff", alpha: 1 } });
   });
 
+  it("refuses a table row or cell background that is not solid", async () => {
+    for (const [row, cell, said] of [
+      ["background:rgba(255,255,255,0.08)", "", 'tr:nth-of-type(2)> ("North120"): a table row\'s background must be a solid colour (the editor draws it opaque).'],
+      ["", "background:rgba(20,40,90,0.5)", 'td:nth-of-type(1)> ("North"): a table cell\'s background must be a solid colour (the editor draws it opaque).'],
+    ]) {
+      const html = `<section style="background:#14213D;color:#ffffff;padding:128px"><table style="width:1200px;font-size:32px">
+        <tr style="background:#14213D"><th>Region</th><th>Q1</th></tr><tr style="${row}"><td style="${cell}">North</td><td>120</td></tr></table></section>`;
+      await expect(measure(html), html).rejects.toThrow(said!);
+    }
+  });
+
   it("fits a picture by object-fit: contain as a smaller box, cover as a crop", async () => {
     const wide = "data:image/svg+xml;base64," + Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"/>').toString("base64");
     const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;display:flex;flex-direction:row;gap:40px">

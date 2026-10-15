@@ -66,7 +66,8 @@ SVG, from a file or inline, is plain shapes: no script, foreignObject or `on…`
 declaration, and no link but to `#…` or to a PNG or JPEG as data. matplotlib's SVGs go in as they are.
 
 **Tables:** `<table>` of `<tr>` with `<th>` (the first row) and `<td>`, plain text, no colspan or rowspan. Column widths:
-`width:N%` on every cell of the first row. A `<tr>` may carry `background`. A row is about 2.1 × the font size per line.
+`width:N%` on every cell of the first row. A `<tr>` or a cell may carry a solid `background`, never a translucent
+one: the editor draws it opaque. A row is about 2.1 × the font size per line.
 
 **Shapes:** a painted `<div>` is a rectangle; `<hr>` is a line; `<x-shape kind="rect|ellipse|diamond|arrow-right|
 arrow-left|arrow-up|arrow-down|line">` fills its box. `<x-connector x1 y1 x2 y2 route="straight|hv|vh|elbow"
