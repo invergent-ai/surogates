@@ -29,7 +29,8 @@
 #                                              the disk image: <app> and a link to /Applications, signed as sign signs
 #   sign-mac.sh dmg-check <dmg> <app> adhoc | trial <name> | developer-id <team>
 #                                              the image signed by that signer, holding <app> by its own signature and the
-#                                              link to /Applications, and nothing else
+#                                              link to /Applications, and nothing else, hidden or not, but what macOS keeps
+#                                              on any volume
 #   sign-mac.sh notarize <app or dmg>          notarized by Apple's notary service and stapled, with the App Store Connect
 #                                              API key in APPLE_NOTARY_KEY_P8 (base64), APPLE_NOTARY_KEY_ID and
 #                                              APPLE_NOTARY_ISSUER_ID
@@ -330,15 +331,28 @@ case "$VERB" in
     mounted="$(mktemp -d)"
     trap 'hdiutil detach -quiet "$mounted" 2>/dev/null || hdiutil detach -quiet -force "$mounted" 2>/dev/null || :; rmdir "$mounted" 2>/dev/null || :' EXIT
     hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mounted" "$dmg" || fail "$dmg could not be attached"
-    [ "$(ls -1 "$mounted")" = "Applications
-Surogate.app" ] || fail "$dmg holds other than Surogate.app and the link to /Applications: $(ls -1 "$mounted" | tr '\n' ' ')"
+    # Every entry at the volume's top, hidden ones too: the app and the link, and else only what macOS itself keeps on a
+    # volume (an HFS+ volume's journal and its folder of hard links' data, the file system's event log, Spotlight's
+    # index, the trash and the folder of temporary items), each said as it is found.
+    found=
+    own=
+    while IFS= read -r -d '' entry; do
+      name="${entry#"$mounted"/}"
+      case "$name" in
+        Applications | Surogate.app) found="$found+$name" ;;
+        .fseventsd | .Trashes | .Spotlight-V100 | .TemporaryItems | .journal | .journal_info_block | ".HFS+ Private Directory Data"$'\r')
+          own="$own $(printf '%q' "$name")" ;;
+        *) fail "$dmg holds other than Surogate.app and the link to /Applications: $(printf '%q' "$name")" ;;
+      esac
+    done < <(find "$mounted" -mindepth 1 -maxdepth 1 -print0)
+    case "$found" in +Applications+Surogate.app | +Surogate.app+Applications) ;; *) fail "$dmg holds other than Surogate.app and the link to /Applications" ;; esac
     [ -L "$mounted/Applications" ] && [ "$(readlink "$mounted/Applications")" = /Applications ] || fail "$dmg's Applications is not a link to /Applications"
     [ -d "$mounted/Surogate.app" ] && [ ! -L "$mounted/Surogate.app" ] || fail "$dmg's Surogate.app is no folder"
     # The app it holds is the one signed and checked, by its code directory's hashes.
     hashes() { codesign -dvvv "$1" 2>&1 | grep '^CDHash=' || :; }
     [ -n "$(hashes "$app")" ] && [ "$(hashes "$mounted/Surogate.app")" = "$(hashes "$app")" ] || fail "$dmg holds another Surogate.app than $app"
     said="$(codesign --verify --strict --deep --verbose=2 "$mounted/Surogate.app" 2>&1)" || fail "$dmg's Surogate.app's signature does not check out: $said"
-    echo "checked $dmg: Surogate.app and the link to /Applications"
+    echo "checked $dmg: Surogate.app and the link to /Applications, beside the volume's own:${own:- none}"
     ;;
   notarize)
     file="$1"

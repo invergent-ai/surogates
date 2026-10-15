@@ -190,6 +190,16 @@ ditto "$signed" "$work/bare/Surogate.app"
 hdiutil create -quiet -volname Surogate -srcfolder "$work/bare" -fs HFS+ -format UDZO "$work/bare.dmg"
 codesign --force --sign "$identity" --keychain "$work/test.keychain-db" --timestamp "$work/bare.dmg"
 refuses "refuses a disk image with no link to /Applications" "holds other than Surogate.app and the link to /Applications" "$SIGN" dmg-check "$work/bare.dmg" "$signed" trial "$SIGNER"
+mkdir -p "$work/dotted"
+ditto "$signed" "$work/dotted/Surogate.app"
+ln -s /Applications "$work/dotted/Applications"
+printf 'hidden\n' >"$work/dotted/.hidden"
+hdiutil create -quiet -volname Surogate -srcfolder "$work/dotted" -fs HFS+ -format UDZO "$work/dotted.dmg"
+codesign --force --sign "$identity" --keychain "$work/test.keychain-db" --timestamp "$work/dotted.dmg"
+refuses "refuses a disk image that holds a hidden file beside the app and the link" "holds other than Surogate.app and the link to /Applications: .hidden" \
+  "$SIGN" dmg-check "$work/dotted.dmg" "$signed" trial "$SIGNER"
+said="$("$SIGN" dmg-check "$work/Surogate.dmg" "$signed" trial "$SIGNER" 2>&1)" || :
+grep -q "beside the volume's own: " <<<"$said" && ok "says what of the volume's own the disk image holds ($said)" || not_ok "says nothing of the volume's own entries: $said"
 
 refuses "notarizes nothing without the notary service's key" "APPLE_NOTARY_KEY_P8" env -u APPLE_NOTARY_KEY_P8 "$SIGN" notarize "$signed"
 refuses "takes no bundle but a notarized one for Gatekeeper's" "Gatekeeper" "$SIGN" assess "$signed" "$work/Surogate.dmg"
