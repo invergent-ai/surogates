@@ -251,39 +251,47 @@ describe("IterationGroup", () => {
     expect(trigger).not.toBeNull();
   });
 
-  it("collapses multiple same-tool runs into a counted label", () => {
+  it("lists each call of a same-tool run as a command of its own", () => {
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        { id: "c1", toolName: "patch", args: "{}", status: "complete" },
-        { id: "c2", toolName: "patch", args: "{}", status: "complete" },
-        { id: "c3", toolName: "patch", args: "{}", status: "complete" },
+        { id: "c1", toolName: "patch", args: "{\"path\":\"a.html\"}", status: "complete" },
+        { id: "c2", toolName: "patch", args: "{\"path\":\"b.html\"}", status: "complete" },
+        { id: "c3", toolName: "patch", args: "{\"path\":\"c.html\"}", status: "complete" },
       ],
     });
-    const dom = mount(
-      <IterationGroup
-        message={message}
-      />,
-    );
-    expect(dom.textContent).toContain("Edited 3 files");
+    const dom = mount(<IterationGroup message={message} />);
+    expect(dom.textContent).toContain("Ran 3 commands");
+    expect(dom.textContent).not.toContain("Edited 3 files");
+    act(() => {
+      [...dom.querySelectorAll("button")]
+        .find((b) => b.textContent?.includes("Ran "))!
+        .click();
+    });
+    expect(dom.textContent).toContain("Patch · a.html");
+    expect(dom.textContent).toContain("Patch · c.html");
   });
 
-  it("falls back to 'Used N tools' for mixed tool batches without a summary", () => {
+  it("lists a mixed batch's calls one by one, never 'Used N tools'", () => {
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        { id: "c1", toolName: "patch", args: "{}", status: "complete" },
-        { id: "c2", toolName: "read_file", args: "{}", status: "complete" },
+        { id: "c1", toolName: "patch", args: "{\"path\":\"x.html\"}", status: "complete" },
+        { id: "c2", toolName: "read_file", args: "{\"path\":\"y.md\"}", status: "complete" },
       ],
     });
-    const dom = mount(
-      <IterationGroup
-        message={message}
-      />,
-    );
-    expect(dom.textContent).toContain("Used 2 tools");
+    const dom = mount(<IterationGroup message={message} />);
+    expect(dom.textContent).toContain("Ran 2 commands");
+    expect(dom.textContent).not.toContain("Used 2 tools");
+    act(() => {
+      [...dom.querySelectorAll("button")]
+        .find((b) => b.textContent?.includes("Ran "))!
+        .click();
+    });
+    expect(dom.textContent).toContain("Patch · x.html");
+    expect(dom.textContent).toContain("Read · y.md");
   });
 
   it("keeps reasoning out of a row, which has nothing to open without tool output", () => {
@@ -356,16 +364,14 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("Process");
     expect(dom.textContent).not.toContain("Memory");
 
-    // Expand — every call that returned something shows its output,
-    // hidden ones included: what the agent listed is a detail worth
-    // checking. Calls that returned nothing leave no trace.
+    // Expand — the row is the patch alone, so it opens onto the patch's
+    // output; the hidden calls are no row of their own, and with no summary
+    // speaking for the whole step, their output stays out too.
     const trigger = dom.querySelector("button[aria-expanded='false']");
     act(() => { (trigger as HTMLButtonElement).click(); });
-    expect(dom.textContent).toContain("Listed .");
-    expect(dom.textContent).toContain("a.txt");
-    expect(dom.textContent).toContain("Edited x.html");
     expect(dom.textContent).toContain("Applied");
-    expect(dom.textContent).not.toContain("Searched files");
+    expect(dom.textContent).not.toContain("a.txt");
+    expect(dom.textContent).not.toContain("Listed");
     expect(dom.textContent).not.toContain("Done");
   });
 
@@ -552,26 +558,19 @@ describe("IterationGroup", () => {
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        {
-          id: "c1",
-          toolName: "skill_view",
-          args: '{"name":"copywriting"}',
-          status: "complete",
-        },
-        {
-          id: "c2",
-          toolName: "skill_view",
-          args: '{"name":"social"}',
-          status: "complete",
-        },
+        { id: "c1", toolName: "skill_view", args: '{"name":"copywriting"}', status: "complete" },
+        { id: "c2", toolName: "skill_view", args: '{"name":"social"}', status: "complete" },
       ],
     });
-    const dom = mount(
-      <IterationGroup
-        message={message}
-      />,
-    );
-    expect(dom.textContent).toContain("Reading skills copywriting, social");
+    const dom = mount(<IterationGroup message={message} />);
+    expect(dom.textContent).toContain("Ran 2 commands");
+    act(() => {
+      [...dom.querySelectorAll("button")]
+        .find((b) => b.textContent?.includes("Ran "))!
+        .click();
+    });
+    expect(dom.textContent).toContain("Reading skill copywriting");
+    expect(dom.textContent).toContain("Reading skill social");
   });
 
   it("falls back to a countable label when the skill name is unparseable", () => {
@@ -617,32 +616,24 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("Running Skill");
   });
 
-  it("keeps skill_view out of a mixed batch's generic label", () => {
-    // skill_view is visible now, so a mixed batch counts it.
+  it("names a skill load beside the other calls of its batch", () => {
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
       toolCalls: [
-        {
-          id: "c1",
-          toolName: "skill_view",
-          args: '{"name":"copywriting"}',
-          status: "complete",
-        },
-        {
-          id: "c2",
-          toolName: "web_search",
-          args: '{"query":"dashboards"}',
-          status: "complete",
-        },
+        { id: "c1", toolName: "skill_view", args: '{"name":"copywriting"}', status: "complete" },
+        { id: "c2", toolName: "web_search", args: '{"query":"dashboards"}', status: "complete" },
       ],
     });
-    const dom = mount(
-      <IterationGroup
-        message={message}
-      />,
-    );
-    expect(dom.textContent).toContain("Used 2 tools");
+    const dom = mount(<IterationGroup message={message} />);
+    expect(dom.textContent).toContain("Ran 2 commands");
+    act(() => {
+      [...dom.querySelectorAll("button")]
+        .find((b) => b.textContent?.includes("Ran "))!
+        .click();
+    });
+    expect(dom.textContent).toContain("Reading skill copywriting");
+    expect(dom.textContent).toContain("Web search · dashboards");
   });
 
   it("renders nothing when complete, no summary, no tools, no reasoning", () => {

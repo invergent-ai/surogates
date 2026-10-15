@@ -13,7 +13,6 @@ import { describe, expect, it } from "vitest";
 import {
   deriveSingleToolLabel,
   extractToolDetail,
-  sameToolGroupLabel,
   skillViewLabel,
   toolRowLabel,
 } from "../src/components/chat/simple-labels";
@@ -127,11 +126,6 @@ describe("knowledge base tools", () => {
     );
   });
 
-  it("counts a run of the same tool in words", () => {
-    expect(sameToolGroupLabel("kb_read_page", 2)).toBe("Read 2 knowledge base pages");
-    expect(sameToolGroupLabel("kb_search_pages", 3)).toBe("Ran 3 knowledge base searches");
-    expect(sameToolGroupLabel("merge_experiment", 2)).toBe("Merge experiment × 2");
-  });
 });
 
 describe("other one-liner tools", () => {

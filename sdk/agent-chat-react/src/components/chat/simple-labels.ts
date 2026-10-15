@@ -71,6 +71,8 @@ export function cancelledToolLabel(toolName: string): string {
     kb_read_page: "Knowledge base page",
     vision_analyze: "Image analysis",
     skill_step: "Procedure step",
+    office_read: "Read document",
+    office_edit: "Edit document",
   };
   if (map[toolName]) return map[toolName];
   // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
@@ -119,6 +121,8 @@ export function skillViewLabel(calls: ToolCallInfo[]): string {
  * still appears in the expanded body via toolRowLabel.
  */
 export function deriveSingleToolLabel(tc: ToolCallInfo): string {
+  // A skill load names the skill, as its live shimmer does.
+  if (tc.toolName === "skill_view") return skillViewLabel([tc]);
   const name = cancelledToolLabel(tc.toolName);
   if (_HEADER_HIDES_DETAIL.has(tc.toolName)) {
     return _HEADER_GENERIC_VERB[tc.toolName] ?? name;
@@ -153,7 +157,9 @@ export function extractToolDetail(tc: ToolCallInfo): string | null {
     case "read_file":
     case "write_file":
     case "patch":
-    case "list_files": {
+    case "list_files":
+    case "office_read":
+    case "office_edit": {
       const path = stringArg("path") ?? stringArg("file_path");
       return path ? lastPathSegment(path) : null;
     }
@@ -297,28 +303,6 @@ function kbPageName(path: string): string {
   return lastPathSegment(path).replace(/\.(md|json)$/, "");
 }
 
-const _PLURAL_LABEL: Record<string, (n: number) => string> = {
-  read_file: (n) => `Read ${n} files`,
-  write_file: (n) => `Wrote ${n} files`,
-  patch: (n) => `Edited ${n} files`,
-  search_files: (n) => `Ran ${n} file searches`,
-  terminal: (n) => `Ran ${n} commands`,
-  web_search: (n) => `Ran ${n} web searches`,
-  web_extract: (n) => `Fetched ${n} pages`,
-  session_search: (n) => `Ran ${n} session searches`,
-  kb_search_pages: (n) => `Ran ${n} knowledge base searches`,
-  kb_read_page: (n) => `Read ${n} knowledge base pages`,
-  vision_analyze: (n) => `Looked at ${n} images`,
-  consult_expert: (n) => `Consulted ${n} experts`,
-  delegate_task: (n) => `Delegated ${n} tasks`,
-};
-
-/** Header for an iteration whose calls all use one tool. */
-export function sameToolGroupLabel(toolName: string, count: number): string {
-  return _PLURAL_LABEL[toolName]?.(count)
-    ?? `${cancelledToolLabel(toolName)} × ${count}`;
-}
-
 /**
  * Verb-first prose line for a tool call ("Edited landing.html",
  * "Read the frontend-design skill"). Falls back to the human tool
@@ -335,6 +319,10 @@ export function toolRowLabel(tc: ToolCallInfo): string {
       return detail ? `Edited ${detail}` : "Edited a file";
     case "list_files":
       return detail ? `Listed ${detail}` : "Listed files";
+    case "office_read":
+      return detail ? `Read ${detail}` : "Read a document";
+    case "office_edit":
+      return detail ? `Edited ${detail}` : "Edited a document";
     case "search_files": {
       if (!detail) return "Searched files";
       // ``target`` picks the axis: file *contents* (the default) or
