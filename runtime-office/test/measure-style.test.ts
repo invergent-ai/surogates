@@ -146,6 +146,7 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
       [`<p data-build-in="fade" style="font-size:32px">Flow</p>`, "builds go on pinned elements"],
       [`<p style="font-size:32px">x</p>`, "data-transition is one of", `data-transition="zoom" style="background:#fff"`],
       [`<div id="card" data-transition="magic" style="${box};background:#000"></div>`, '<section > div>: data-transition belongs on the <section> of the slide it leads into.'],
+      [`<section data-transition="fade"><p style="font-size:32px">Inner</p></section>`, '<section > section> ("Inner"): data-transition belongs on the <section> of the slide it leads into.'],
       [`<x-connector x1="0" y1="0" x2="100" y2="100" route="curvy"></x-connector>`, "route is one of"],
       [`<x-connector x1="0" y1="0" x2="100"></x-connector>`, "gives x1, y1, x2 and y2"],
     ]) {
