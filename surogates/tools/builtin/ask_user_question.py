@@ -98,6 +98,12 @@ STEP_CAME_DUE_DETAIL = (
     "is still missing."
 )
 
+_DETAILS = {
+    DISMISSED: DISMISSED_BY_A_COMMAND,
+    WROTE_SOMETHING_ELSE: WROTE_SOMETHING_ELSE_DETAIL,
+    STEP_CAME_DUE: STEP_CAME_DUE_DETAIL,
+}
+
 #: Set on a channel ``user.message`` to the ``tool_call_id`` of the question it
 #: did not answer.
 DISMISSES_QUESTION = "dismisses_question"
@@ -562,9 +568,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
             {
                 "cancelled": True,
                 "reason": reason,
-                **({"detail": DISMISSED_BY_A_COMMAND} if reason == DISMISSED else {}),
-                **({"detail": WROTE_SOMETHING_ELSE_DETAIL} if reason == WROTE_SOMETHING_ELSE else {}),
-                **({"detail": STEP_CAME_DUE_DETAIL} if reason == STEP_CAME_DUE else {}),
+                **({"detail": _DETAILS[reason]} if reason in _DETAILS else {}),
                 "questions_asked": questions,
             },
             ensure_ascii=False,
