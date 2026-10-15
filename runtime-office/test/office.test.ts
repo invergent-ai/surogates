@@ -175,6 +175,19 @@ describe("Office edits without a group", () => {
     expect(method).not.toHaveBeenCalled();
   });
 
+  it("sends no Undo for a command the editor did not run", async () => {
+    const { office, method } = officeAnswering([null], { kind: "loose", formats: { loose } });
+    await expect(office.edit("p", ops)).rejects.toThrow(/^the editor could not run the edit; nothing of it applied$/);
+    expect(method).not.toHaveBeenCalled();
+  });
+
+  it("closes a page whose Undo went unanswered, and says the edit may have applied", async () => {
+    const { office, method, pool } = officeAnswering([{ __error: "the stamp failed" }], { kind: "loose", formats: { loose } });
+    method.mockResolvedValueOnce({ sentAt: 0, value: { __timeout: true } });
+    await expect(office.edit("p", ops)).rejects.toThrow(/^the editor stopped answering; the edit may have applied: read the document again before editing$/);
+    expect(pool.close).toHaveBeenCalledWith("p");
+  });
+
   it("closes a page that stopped answering, sending nothing more", async () => {
     const { office, method, pool } = officeAnswering([{ __timeout: true }], { kind: "loose", formats: { loose } });
     await expect(office.edit("p", ops)).rejects.toBeInstanceOf(EditorError);

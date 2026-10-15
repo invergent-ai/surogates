@@ -18,6 +18,9 @@ const STALLED_EDIT = "the editor stopped answering; the edit may have applied: r
 /** The editor could not do what was asked (not the agent's input, not a dead page). */
 export class EditorError extends Error {}
 
+/** The editor skipped the command, answering nothing: the document is unchanged. */
+class NotRun extends EditorError {}
+
 type Reply = { sentAt: number; value: unknown };
 
 const stalled = (reply: Reply): boolean => (reply.value as { __timeout?: true } | undefined)?.__timeout === true;
@@ -36,14 +39,14 @@ export class Office {
   async read(id: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const page = await this.pool.get(id);
     const scope = this.formatOf(page).readScope(body);
-    return (await this.readOnly(id, () => this.context(page).run(scope))) as Record<string, unknown>;
+    return (await this.readOnly(id, () => this.context(page, "the editor could not run the request").run(scope))) as Record<string, unknown>;
   }
 
   /** Applies the batch, all of it or none; then waits until the editor has sent it to the document server. */
   async edit(id: string, raw: unknown): Promise<Record<string, unknown>> {
     const page = await this.pool.get(id);
     const format = this.formatOf(page);
-    const context = this.context(page);
+    const context = this.context(page, "the editor could not run the edit; nothing of it applied");
     const ops = await this.readOnly(id, () => format.compile(raw, context));
     const work = () => format.edit(context, ops);
     const { outcome, sentAt } = format.grouped ? await this.inGroup(id, page, work) : await this.undoing(id, page, work);
@@ -81,8 +84,8 @@ export class Office {
     return format;
   }
 
-  private context(page: EditorPage): EditContext {
-    return { page, run: async (scope) => unwrap((await this.run(page, scope)).value) };
+  private context(page: EditorPage, notRun: string): EditContext {
+    return { page, run: async (scope) => unwrap((await this.run(page, scope)).value, notRun) };
   }
 
   // A read changes nothing: a page that stopped answering is closed, and a fresh one may answer.
@@ -141,8 +144,12 @@ export class Office {
         await this.pool.close(id);
         throw new EditorError(STALLED_EDIT);
       }
-      if (!(error instanceof EditorError)) throw error;
-      await page.method("Undo", []);
+      if (error instanceof NotRun || !(error instanceof EditorError)) throw error;
+      if (stalled(await page.method("Undo", []))) {
+        // The change already reached co-editors and may still stand.
+        await this.pool.close(id);
+        throw new EditorError(STALLED_EDIT);
+      }
       await this.recycleIfPoisoned(id, page);
       throw new EditorError(`${error.message}; what it changed was undone`);
     }
@@ -166,8 +173,8 @@ export class Office {
 }
 
 // A script's answer: an error or a stall said as one, an answer too deep for a command sent as JSON.
-function unwrap(value: unknown): unknown {
-  if (value === undefined || value === null) throw new EditorError("the editor could not run the request");
+function unwrap(value: unknown, notRun: string): unknown {
+  if (value === undefined || value === null) throw new NotRun(notRun);
   const answer = value as { __timeout?: true; __error?: unknown; __json?: unknown };
   if (answer.__timeout) throw new Stalled("the editor stopped answering");
   if (typeof answer.__error === "string") throw new EditorError(answer.__error);
