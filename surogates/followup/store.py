@@ -724,6 +724,9 @@ def is_team_member(settings: Any, user_id: uuid.UUID | None) -> bool:
     return str(user_id) in {str(r) for r in (settings.alert_recipient_user_ids or [])}
 
 
+NOBODY_RECEIVES = "no team member receives this kind of message"
+
+
 async def notify_team(
     session_factory: Any,
     settings: Any,
@@ -780,7 +783,7 @@ async def notify_team(
         ]
     if not recipients and not destinations:
         return 0, (
-            "no team member receives this kind of message" if topic and settings
+            NOBODY_RECEIVES if topic and settings
             and settings.alert_recipient_user_ids else "no team members are configured"
         )
     senders = {

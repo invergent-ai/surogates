@@ -125,8 +125,8 @@ async def test_enrol_refuses_a_protocol_no_program_offers(sf, patient):
         {"protocol": "made-up", "consent": True, "summary": "x"},
         **_kw(sf, session_id),
     )
-    assert "not offered" in result
-    assert "post-op" in result
+    assert "is not active for this business (active: post-op)" in result
+    assert "call escalate" in result and "do not explain" in result
 
 
 async def _deactivate_programs(sf):
@@ -145,11 +145,8 @@ async def test_no_active_program_is_named_a_practice_configuration_problem(sf, p
         {"protocol": "post-op", "consent": True, "summary": "x"},
         **_kw(sf, session_id),
     )
-    assert result.startswith("Not enrolled")
-    assert "no active Program" in result
-    assert "configuration problem at the business" in result
-    assert "escalate" in result
-    assert "post-op" in result
+    assert result.startswith("Not enrolled: 'post-op' is not active for this business.")
+    assert "call escalate" in result and "do not explain" in result
 
     status = await followup.handle_followup_status({}, **_kw(sf, session_id))
     assert status.startswith("Protocols offered: none.")

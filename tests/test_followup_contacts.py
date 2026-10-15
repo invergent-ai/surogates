@@ -797,3 +797,21 @@ async def test_a_team_members_stop_is_said_to_the_agent_not_an_opt_out(sf, clini
     )
     [identity] = [i for i in await _all(sf, ChannelIdentity) if i.user_id == ion]
     assert store.permission_status(identity) == "withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_nobody_receives_still_reaches_the_team(sf, clinic):
+    doctor, _, nurse = clinic
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT,
+        team_permissions={str(m): {"receives": ["new_enrolments"]} for m in (doctor, nurse)},
+    )
+    stranger, stranger_session = await _user(sf, "Ana Pop", "40711111111")
+    result = await followup.handle_escalate(
+        {"reason": "Asked to join a follow-up that is not active"}, **_kw(sf, stranger_session),
+    )
+    assert "2 team member(s)" in result
+    alerts = [r for r in await _all(sf, OutreachMessageRow) if r.kind == "alert"]
+    assert {r.user_id for r in alerts} == {doctor, nurse}
+    [escalation] = await _all(sf, EscalationRow)
+    assert escalation.user_id == stranger and escalation.state == "raised"

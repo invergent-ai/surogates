@@ -26,6 +26,7 @@ from surogates.db.models import (
 from surogates.channels.identity import mask_readable_phones, normalize_wa_id
 from surogates.followup import people
 from surogates.followup import store as followup_store
+from surogates.followup.store import NOBODY_RECEIVES
 from surogates.followup.context import (
     Context,
     channel_names,
@@ -430,21 +431,15 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
     offered = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
-    if not offered:
+    if not offered or protocol not in offered:
         return (
-            f"Not enrolled: the business has no active Program, so nobody can "
-            f"be enrolled in '{protocol}' or any other protocol. This is a "
-            f"configuration problem at the business, not something the person "
-            f"did: tell them follow-up is not set up yet and the team will "
-            f"be told, then call escalate with the reason \"No active follow-up "
-            f"Program for protocol '{protocol}'\"."
-        )
-    if protocol not in offered:
-        return (
-            f"Not enrolled: '{protocol}' is not offered here. Offered: "
-            f"{', '.join(sorted(offered))}. If the business told you to use "
-            f"'{protocol}', it has no active Program for it: that is a "
-            f"configuration problem at the business, so escalate saying so."
+            f"Not enrolled: '{protocol}' is not active for this business"
+            + (f" (active: {', '.join(sorted(offered))})" if offered else "")
+            + ". The person is waiting on the team now: call escalate with what "
+            f"they asked for and the reason \"No active follow-up for '{protocol}'\". "
+            "This note is for you: do not explain programs, protocols or "
+            "configuration to the person; tell them only that the team will get "
+            "back to them."
         )
     summary = str(arguments.get("summary") or "").strip()
     if not summary:
@@ -882,12 +877,16 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     )
     team = [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])]
     to = _chosen(settings, await followup_store.display_names(sf, team), arguments.get("to"))
+    alert = {
+        "kind": "alert", "text": f"🔴 {reason}" if severity == "red" else reason,
+        "reason": reason, "severity": severity, "dedupe_prefix": escalation, "to": to or None,
+    }
     queued, why_not = await _tell_team(
-        sf, ctx, settings, kind="alert",
-        text=f"🔴 {reason}" if severity == "red" else reason, reason=reason,
-        severity=severity, dedupe_prefix=escalation,
-        topic="urgent" if severity == "red" else "attention", to=to or None,
+        sf, ctx, settings, topic="urgent" if severity == "red" else "attention", **alert,
     )
+    if not queued and why_not == NOBODY_RECEIVES:
+        # Someone is waiting on a human: an inbox nobody watches is not one.
+        queued, why_not = await _tell_team(sf, ctx, settings, **alert)
 
     if invitation is not None:
         # One write records what happened, on the check-in's own history.
