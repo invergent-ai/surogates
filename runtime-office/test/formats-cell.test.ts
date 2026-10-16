@@ -112,7 +112,7 @@ describe("a spreadsheet's comment threads", () => {
     });
 
     it("passes on a refusal the editor gives before changing anything", async () => {
-      const refused = { refused: { op: 1, reason: `Comment thread ${thread} is gone: read the outline again.` } };
+      const refused = { refused: { op: 1, reason: `Comment thread ${thread} is gone: its comment was deleted, or the cell it was on was removed. Read the outline again.` } };
       const run = vi.fn(async (_scope: Record<string, unknown>) => refused);
       expect(await cell.edit({ page, run }, ops())).toEqual(refused);
       expect(run.mock.calls.map(([scope]) => scope.action)).toEqual(["comment"]);

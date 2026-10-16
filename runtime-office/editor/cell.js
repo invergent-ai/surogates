@@ -177,7 +177,7 @@
     var found = Object.create(null);
     ops.forEach(function (op, index) {
       if (!found[op.thread]) found[op.thread] = threadById(op.thread);
-      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: read the outline again.");
+      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: its comment was deleted, or the cell it was on was removed. Read the outline again.");
     });
     var expect = [];
     Object.keys(found).forEach(function (id) {

@@ -118,7 +118,7 @@
     var found = Object.create(null);
     ops.forEach(function (op, index) {
       if (!found[op.thread]) found[op.thread] = annotById(op.thread);
-      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: read the outline again.");
+      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: its comment was deleted, or the page it was on was removed. Read the outline again.");
     });
     // Every reply before any resolve, whatever the ops' order: a resolve sets the comment's data with the history off,
     // so nothing that can fail and be undone may come after it.

@@ -63,7 +63,8 @@ A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "w
 {"op": "move", "target": {"block": "880", "hash": "33cc44dd"}, "to": {"block": "853", "hash": "a1b2c3d4"}, "side": "before"}
 ```
 
-A list you insert starts its own numbering. A moved block loses the comments anchored in it.
+A list you insert starts its own numbering. A block you replace or move keeps the comment threads anchored in it: over
+the same words when they are still in it, otherwise over the whole new block.
 
 ## Comments
 

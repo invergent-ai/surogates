@@ -170,6 +170,7 @@ describe("a reply in a slide's comment thread", () => {
   it("is refused when someone holds the comment, and when the thread is gone", () => {
     expect(commented(true).run({ action: "edit", ops: [{ op: "reply", thread: "{G}", body: "March." }], agent }).refused)
       .toMatchObject({ op: 0, reason: expect.stringMatching(/Someone is changing comment thread \{G\}/) });
-    expect(commented(false).run({ action: "edit", ops: [{ op: "resolve", thread: "{H}" }], agent }).refused.reason).toMatch(/is gone/);
+    expect(commented(false).run({ action: "edit", ops: [{ op: "resolve", thread: "{H}" }], agent }).refused.reason)
+      .toBe("Comment thread {H} is gone: its comment was deleted, or the slide it was on was removed. Read the outline again.");
   });
 });
