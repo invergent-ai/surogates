@@ -13,6 +13,11 @@ sees the question it is being answered to.
   back.  Skipping that call would put the opener and the reply in two
   different sessions.
 * Telegram keys a DM on the private chat id, which is the user's own id.
+* Teams keys a DM on the personal conversation id, which only the
+  conversation reference the bot recorded when the person wrote (or installed
+  it) knows, along with the serviceUrl to write to.
+* Discord, like Slack, keys a DM on its DM channel id, which
+  ``POST /users/@me/channels`` returns for the user.
 
 :func:`resolve_dm` is that knowledge in one place, shared with outreach.
 
@@ -35,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+import httpx
 import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
@@ -75,12 +81,14 @@ async def dm_session(
     session_key: str,
     channel_id: str,
     sender: str,
+    session_config: dict | None = None,
 ) -> UUID:
     """The one-to-one conversation a person's reply will land in.
 
     Shared by check-in openers and outreach: both must write into the session
     the inbound pipeline resolves for that person's next message, or the
     reply arrives in a conversation that never asked anything.
+    *session_config* is the target's :attr:`DmTarget.session_config`.
     """
     return await get_or_create_channel_session(
         session_store, redis,
@@ -101,6 +109,7 @@ async def dm_session(
                 source={"chat_type": "private"}, fallback_id=session_key,
             ),
             "multi_party": False,
+            **(session_config or {}),
         },
         session_factory=session_factory, storage=storage, settings=settings,
         # Writing first is no work for the agent: the reply resumes it.
@@ -116,12 +125,15 @@ async def resolve_dm(
     credentials_for: Any = None,
     slack_client_factory: Any = None,
     org_id: Any = None,
+    redis: Any = None,
 ) -> DmTarget:
     """The DM a first message to *identity* goes into, on *platform*.
 
     *identity* is the person's channel identity or its ``platform_user_id``.
     *credentials_for* (``async (kind, identifier, org_id) -> dict``) and
-    *org_id* are needed only on Slack, where the DM must be opened first.
+    *org_id* are needed only on Slack and Discord, where the DM must be
+    opened first; *redis* only on Teams, where the conversation reference
+    lives.
     Raises :class:`OpenerUndeliverable` with an operator-readable reason.
     """
     user = str(getattr(identity, "platform_user_id", identity) or "")
@@ -146,6 +158,45 @@ async def resolve_dm(
         return DmTarget(
             dm_key("slack", dm_id, user), dm_id,
             {"channel_id": dm_id, "thread_ts": None, "channel_identifier": sender},
+        )
+    if platform == "teams":
+        from surogates.channels.platforms.teams import conversation_ref
+
+        ref = await conversation_ref(redis, sender, user=user) if redis is not None else None
+        if not ref:
+            raise OpenerUndeliverable(
+                "This person has no Teams chat with the agent yet: they must "
+                "install it or write to it first",
+            )
+        conversation = str(ref.get("conversation_id") or "")
+        return DmTarget(
+            dm_key("teams", conversation, user), conversation,
+            {
+                "conversation_id": conversation, "service_url": ref.get("service_url", ""),
+                "reply_to_id": None, "channel_identifier": sender,
+            },
+            {
+                "teams_conversation_id": conversation,
+                "teams_service_url": ref.get("service_url", ""),
+                "teams_tenant_id": ref.get("tenant_id", ""),
+            },
+        )
+    if platform == "discord":
+        if credentials_for is None:
+            raise OpenerUndeliverable("No credential vault in this process")
+        creds = await credentials_for("discord", sender, str(org_id)) or {}
+        bot_token = str(creds.get("bot_token") or "")
+        if not bot_token:
+            raise OpenerUndeliverable("Discord bot token is missing for this sender")
+        from surogates.channels.platforms.discord import open_dm
+
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            dm_id, error = await open_dm(http, bot_token, user)
+        if not dm_id:
+            raise OpenerUndeliverable(f"Discord: {error or 'no direct message opened'}")
+        return DmTarget(
+            dm_key("discord", dm_id, user), dm_id,
+            {"channel_id": dm_id, "channel_identifier": sender},
         )
     if (target := dm_target(platform, user, sender)) is not None:
         return target
@@ -209,6 +260,7 @@ def make_step_waker(
                 platform, invitation.platform_user_id, sender,
                 credentials_for=credentials_for,
                 slack_client_factory=slack_client_factory, org_id=invitation.org_id,
+                redis=redis,
             )
             session_id = await dm_session(
                 session_store, redis,
@@ -216,6 +268,7 @@ def make_step_waker(
                 org_id=invitation.org_id, agent_id=invitation.agent_id,
                 user_id=invitation.user_id, platform=platform,
                 session_key=target.session_key, channel_id=target.channel_id, sender=sender,
+                session_config=target.session_config,
             )
             status = await _status(session_id)
         # An idle conversation must be revived like an inbound message
@@ -299,13 +352,15 @@ def make_opener_enqueue(
     Returns ``async (invitation) -> int | Woken`` — the outbox row id — or
     raises :class:`OpenerUndeliverable`.
     """
-    async def _session(invitation, platform, session_key, *, channel_id, sender) -> UUID:
+    async def _session(invitation, platform, session_key, *, channel_id, sender,
+                       session_config=None) -> UUID:
         return await dm_session(
             session_store, redis,
             session_factory=session_factory, storage=storage, settings=settings,
             org_id=invitation.org_id, agent_id=invitation.agent_id,
             user_id=invitation.user_id, platform=platform,
             session_key=session_key, channel_id=channel_id, sender=sender,
+            session_config=session_config,
         )
 
     def _metadata(invitation, *, template_name):
@@ -332,10 +387,12 @@ def make_opener_enqueue(
             platform, invitation.platform_user_id, sender,
             credentials_for=credentials_for,
             slack_client_factory=slack_client_factory, org_id=invitation.org_id,
+            redis=redis,
         )
         session_id = await _session(
             invitation, platform, target.session_key,
             channel_id=target.channel_id, sender=sender,
+            session_config=target.session_config,
         )
         # The transcript event is a user-role message; the marker keeps the
         # model from reading its own invitation as something the person said.
@@ -395,6 +452,7 @@ def make_opener_enqueue(
         session_id = await _session(
             invitation, platform, target.session_key,
             channel_id=target.channel_id, sender=sender,
+            session_config=target.session_config,
         )
         template = {"name": template_name, "language": template_language}
         metadata = _metadata(invitation, template_name=template_name)

@@ -31,6 +31,8 @@ dependencies = [
     "redis[hiredis]>=5.0,<6.0",
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
+    # The Discord Gateway client (surogates.channels.gateway).
+    "websockets>=13",
     "sse-starlette>=1.6,<3.0",
     "python-jose[cryptography]>=3.3,<4.0",
     "passlib[bcrypt]>=1.7,<2.0",

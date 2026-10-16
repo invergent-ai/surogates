@@ -353,6 +353,10 @@ _THREAD_DEST_FIELDS = {
     "telegram": ("message_thread_id", "telegram_thread_key"),
     # WhatsApp is DM-only and has no threads at all.
     "whatsapp": (None, None),
+    # A Teams channel thread is addressed by its root message id.
+    "teams": ("reply_to_id", "teams_thread_key"),
+    # A Discord thread is a channel of its own: its id is the channel id.
+    "discord": (None, None),
 }
 
 
@@ -1679,6 +1683,12 @@ class SessionStore:
                     "reply_to_message_id": config.get("telegram_reply_to_message_id"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
+            elif channel == "discord":
+                destination = {
+                    "channel_id": config.get("discord_channel_id", ""),
+                    "reply_to_message_id": config.get("discord_reply_to_message_id"),
+                    "channel_identifier": config.get("channel_identifier", ""),
+                }
             elif channel == "whatsapp":
                 # No thread fields: WhatsApp is DM-only.  No api_version
                 # either — session config is a creation-time snapshot and
@@ -1687,6 +1697,16 @@ class SessionStore:
                 destination = {
                     "wa_id": config.get("whatsapp_channel_id", ""),
                     "phone_number_id": config.get("channel_identifier", ""),
+                    "channel_identifier": config.get("channel_identifier", ""),
+                }
+            elif channel == "teams":
+                # Teams writes need the regional serviceUrl the conversation
+                # came from as well as its id; inbound keeps both current.
+                destination = {
+                    "conversation_id": config.get("teams_conversation_id")
+                    or config.get("teams_channel_id", ""),
+                    "service_url": config.get("teams_service_url", ""),
+                    thread_dest: config.get(thread_key),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
 
@@ -1704,19 +1724,22 @@ class SessionStore:
                 # session config (written by the channels process) and must be
                 # read fresh — the per-session config cache above is primed
                 # once and would pin every reply to the first message:
-                # ``telegram_reply_to_message_id`` (reply threading) and, for
+                # ``<channel>_reply_to_message_id`` (reply threading) and, for
                 # collapsed single-session conversations that span every
                 # thread of a chat, the ``*_thread_key`` reply destination.
-                # Gated on the cached config carrying the marker/key at all,
-                # so ordinary sessions pay no extra query.  Best-effort: a
-                # read failure falls back to the cached values rather than
-                # dropping the delivery.
+                # Teams' conversation id and serviceUrl move too (inbound
+                # refreshes them when Microsoft does), so they are always read
+                # fresh.  Gated on the cached config carrying the marker/key
+                # at all, so ordinary sessions pay no extra query.
+                # Best-effort: a read failure falls back to the cached values
+                # rather than dropping the delivery.
+                reply_key = f"{channel}_reply_to_message_id"
                 needs_fresh_reply = (
-                    channel == "telegram"
-                    and "telegram_reply_to_message_id" in config
+                    channel in ("telegram", "discord") and reply_key in config
                 )
                 needs_fresh_thread = bool(config.get("single_session"))
-                if needs_fresh_reply or needs_fresh_thread:
+                needs_fresh_teams = channel == "teams"
+                if needs_fresh_reply or needs_fresh_thread or needs_fresh_teams:
                     try:
                         fresh = await db.get(SessionRow, session_id)
                         fresh_config = (
@@ -1724,10 +1747,20 @@ class SessionStore:
                         )
                         if needs_fresh_reply:
                             destination["reply_to_message_id"] = (
-                                fresh_config.get("telegram_reply_to_message_id")
+                                fresh_config.get(reply_key)
                             )
                         if needs_fresh_thread and thread_dest is not None:
                             destination[thread_dest] = fresh_config.get(thread_key)
+                        if needs_fresh_teams:
+                            destination["conversation_id"] = (
+                                fresh_config.get("teams_conversation_id")
+                                or fresh_config.get("teams_channel_id")
+                                or destination["conversation_id"]
+                            )
+                            destination["service_url"] = (
+                                fresh_config.get("teams_service_url")
+                                or destination["service_url"]
+                            )
                     except Exception:
                         pass
                 outbox = DeliveryOutbox(

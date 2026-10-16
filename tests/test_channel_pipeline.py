@@ -718,6 +718,35 @@ async def test_channel_identifier_in_session_config_uses_routing_identifier_not_
     )
 
 
+@pytest.mark.asyncio
+async def test_platform_prefixed_source_keys_reach_session_config():
+    """An adapter's ``<platform>_*`` source keys (Teams' serviceUrl and tenant)
+    are kept in session config for delivery, and never override the
+    pipeline's own keys."""
+    from dataclasses import replace
+
+    msg = replace(_make_msg(is_dm=True, ts="16.0", identifier="a:conv"), source={
+        "teams_service_url": "https://smba.example.test/emea/",
+        "teams_tenant_id": "tenant-1",
+        "teams_channel_id": "spoofed",
+        "activity_id": "1",
+    })
+    routing = _make_routing()
+    routing.platform = "teams"
+    deps = _make_deps()
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=routing, config=_make_config(), deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    session_config = deps._sessions_created[0]["config"]
+    assert session_config["teams_service_url"] == "https://smba.example.test/emea/"
+    assert session_config["teams_tenant_id"] == "tenant-1"
+    assert session_config["teams_channel_id"] == "a:conv"
+    assert "activity_id" not in session_config
+
+
 def _make_group_msg(*, platform_user_id: str, ts: str = "50.0") -> InboundMessage:
     return InboundMessage(
         kind="text",

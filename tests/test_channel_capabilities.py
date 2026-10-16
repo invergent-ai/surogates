@@ -19,8 +19,15 @@ def test_slack_and_telegram_open_with_text_and_telegram_needs_prior_contact():
     assert telegram.needs_prior_contact and not slack.needs_prior_contact
 
 
+def test_teams_writes_text_into_a_conversation_someone_opened():
+    teams = capabilities_for("teams")
+    assert teams.can_initiate and teams.needs_prior_contact and teams.opener == "text"
+    assert teams.identity == "member" and teams.window_hours is None and not teams.forms
+    assert teams.label == "Microsoft Teams"
+
+
 def test_anonymous_website_visitors_cannot_be_written_to_first():
-    for kind in ("website", "teams", None, ""):
+    for kind in ("website", None, ""):
         assert not capabilities_for(kind).can_initiate
 
 
@@ -33,4 +40,12 @@ def test_voice_web_and_api_write_first_into_the_persons_own_conversation():
     assert voice.identity == "phone" and voice.receipts == {"read"}
     assert web.identity == "user" and web.receipts == frozenset()
     assert api.identity == "external" and api.receipts == {"delivered", "read"}
-    assert set(initiating_platforms()) == {"whatsapp", "slack", "telegram", "voice", "web", "api"}
+    assert set(initiating_platforms()) == {
+        "whatsapp", "slack", "teams", "telegram", "discord", "voice", "web", "api",
+    }
+
+
+def test_discord_writes_first_only_to_people_who_wrote_to_the_bot():
+    caps = capabilities_for("discord")
+    assert caps.can_initiate and caps.needs_prior_contact and caps.opener == "text"
+    assert caps.identity == "user" and caps.label == "Discord" and not caps.buttons

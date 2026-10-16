@@ -897,3 +897,12 @@ def test_a_masked_number_matches_its_leading_and_trailing_digits():
     # Masked as it was written, in its national form.
     assert team._masked_match("+07…842", ["40700000842"])
     assert not team._masked_match("+08…842", ["40700000842"])
+
+
+def test_every_preferred_channel_enum_names_each_text_channel_that_writes_first():
+    from surogates.channels.capabilities import initiating_platforms
+    from surogates.tools.builtin import followup as followup_tools, team as team_tools
+
+    text_channels = set(initiating_platforms()) - {"voice", "web", "api"}
+    for schema in (followup_tools.FOLLOWUP_UPDATE_SCHEMA, team_tools.TEAM_UPDATE_PERSON_SCHEMA):
+        assert set(schema.parameters["properties"]["preferred_channel"]["enum"]) == text_channels

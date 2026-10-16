@@ -41,12 +41,102 @@ async def test_no_number_no_call_and_no_webhook_no_api_delivery():
         await resolve_dm("website", "x", "y")
 
 
+async def _recorded_teams_chat():
+    from surogates.channels.platforms.teams import _remember_conversation
+
+    class _Redis(dict):
+        async def set(self, key, value, ex=None):
+            self[key] = value
+
+        async def get(self, key):
+            return dict.get(self, key)
+
+    redis = _Redis()
+    with pytest.raises(OpenerUndeliverable, match="Teams chat"):
+        await resolve_dm("teams", "aad-1", "app-1", redis=redis)
+    await _remember_conversation(redis, "app-1", {
+        "type": "conversationUpdate", "serviceUrl": "https://smba.example.test/emea/",
+        "from": {"id": "29:x", "aadObjectId": "aad-1"},
+        "conversation": {"id": "a:conv-1", "conversationType": "personal", "tenantId": "t"},
+    })
+    return redis, await resolve_dm("teams", "aad-1", "app-1", redis=redis)
+
+
+async def test_teams_writes_into_the_personal_chat_its_bot_recorded():
+    _redis, target = await _recorded_teams_chat()
+    # Keyed on the conversation id, as inbound keys the personal chat.
+    assert target.session_key == "agent:teams:dm:a:conv-1"
+    assert target.destination == {
+        "conversation_id": "a:conv-1", "service_url": "https://smba.example.test/emea/",
+        "reply_to_id": None, "channel_identifier": "app-1",
+    }
+
+
+async def test_a_teams_dm_session_keeps_what_delivery_needs_to_reach_it(monkeypatch):
+    """An agent-written step is delivered from session config, so the session
+    an opener creates must carry the serviceUrl and tenant inbound would."""
+    from surogates.programs import opener as opener_mod
+
+    redis, target = await _recorded_teams_chat()
+    seen = {}
+
+    async def get_or_create(store, redis, *, config, **kw):
+        seen.update(config)
+        return uuid4()
+
+    async def no_boundary(*a, **kw):
+        return None
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", get_or_create)
+    monkeypatch.setattr(opener_mod, "shared_memory_boundary", no_boundary)
+    await opener_mod.dm_session(
+        None, redis, session_factory=None, storage=None, settings=None, org_id=uuid4(),
+        agent_id="agent-1", user_id=uuid4(), platform="teams", session_key=target.session_key,
+        channel_id=target.channel_id, sender="app-1", session_config=target.session_config,
+    )
+    assert seen["teams_conversation_id"] == "a:conv-1"
+    assert seen["teams_service_url"] == "https://smba.example.test/emea/"
+    assert seen["teams_tenant_id"] == "t"
+
+
 def test_only_the_persons_own_conversation_gets_outbox_rows():
     assert outbound_dm("voice", {"channel_session_key": "agent:voice:dm:40712"})
     assert outbound_dm("web", {"channel_session_key": "agent:web:dm:u-1"})
     assert not outbound_dm("voice", {"channel_session_key": "agent:voice:call:SCL_1"})  # a live inbound call
     assert not outbound_dm("web", {})  # an ordinary web chat
     assert not outbound_dm("api", None)  # an integrator's own API session
+
+
+async def test_a_teams_reply_goes_to_the_service_url_inbound_last_recorded(sf):
+    """The destination cache is primed once per process; Teams' serviceUrl and
+    conversation id move, and inbound refreshes them in the row, so delivery
+    must read them from the row rather than the cache."""
+    from surogates.db.models import DeliveryOutbox, Session as SessionRow
+    from surogates.session.store import SessionStore
+
+    sid = uuid4()
+    async with sf() as db:
+        db.add(SessionRow(id=sid, org_id=uuid4(), agent_id="agent-1", channel="teams", config={
+            "teams_conversation_id": "a:conv-1", "teams_service_url": "https://smba.example.test/emea/",
+            "channel_identifier": "app-1",
+        }))
+        await db.commit()
+    store = SessionStore(sf)
+    reply = {"message": {"role": "assistant", "content": "Bună!"}}
+    await store._enqueue_channel_delivery(sid, 1, EventType.LLM_RESPONSE, reply)
+    async with sf() as db:
+        row = await db.get(SessionRow, sid)
+        row.config = {**row.config, "teams_conversation_id": "a:conv-2",
+                      "teams_service_url": "https://smba.example.test/amer/"}
+        await db.commit()
+    await store._enqueue_channel_delivery(sid, 2, EventType.LLM_RESPONSE, reply)
+
+    async with sf() as db:
+        rows = (await db.execute(sa.select(DeliveryOutbox).order_by(DeliveryOutbox.event_id))).scalars().all()
+    assert [(r.destination["conversation_id"], r.destination["service_url"]) for r in rows] == [
+        ("a:conv-1", "https://smba.example.test/emea/"),
+        ("a:conv-2", "https://smba.example.test/amer/"),
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -69,7 +69,7 @@ def queue_priority(channel: str | None) -> float:
 #: that claims their outbox rows).  Must match the platforms registered in
 #: :mod:`surogates.channels.platforms` — an outbox row for any other
 #: channel value would never be claimed and sit "pending" forever.
-ADAPTER_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
+ADAPTER_CHANNELS = frozenset({"slack", "teams", "telegram", "whatsapp", "discord"})
 
 #: Channels the platform writes first on without an inbound webhook adapter
 #: (:mod:`surogates.channels.outbound`, the voice worker).  Only the person's
@@ -100,10 +100,9 @@ INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 #: Everything else (api, studio, task, delegation, worker, scheduled,
 #: ambient, browser_setup) must never mint a binding or count as
 #: end-user activity — ``studio`` in particular is the operator talking
-#: to their own agent, not a customer of it. ``teams`` remains reserved
-#: for a future adapter so its roster and activity stats stay aligned.
+#: to their own agent, not a customer of it.
 END_USER_CHANNELS = frozenset(
-    {"web", "website", "slack", "telegram", "teams", "whatsapp", "voice"}
+    {"web", "website", "slack", "telegram", "teams", "whatsapp", "voice", "discord"}
 )
 
 #: Channels created by a service-account token rather than a logged-in

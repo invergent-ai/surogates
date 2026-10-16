@@ -21,7 +21,7 @@ __all__ = [
 # Channel platforms whose sessions are memory-partitioned by conversation.
 # ``voice`` always persists its boundary at session creation: one call, or one
 # caller's number when the agent remembers callers.
-MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp", "voice"})
+MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "teams", "telegram", "whatsapp", "voice", "discord"})
 
 # Memory-boundary namespace for evaluation sessions, which need a scratch
 # partition. Outside the managed channels only this and
@@ -74,6 +74,14 @@ def boundary_token(
         if chat_type in ("group", "supergroup"):
             return f"tg:g:{cid}"
         return f"telegram:iso:{fallback_id}"  # unknown telegram surface → isolated
+
+    if platform == "discord":
+        # Server channels never collapse to ``public``: the bot may read a
+        # channel that is open to the whole server or to one role only, and
+        # nothing in the message says which.
+        if not cid:
+            return f"discord:iso:{fallback_id}"
+        return f"discord:d:{cid}" if visibility == "dm" else f"discord:c:{cid}"
 
     # Unknown platform → fail closed, isolated.
     return f"{platform}:iso:{fallback_id}"

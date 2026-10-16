@@ -6,7 +6,7 @@ session, so every channel's DM key is computed here and nowhere else.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from surogates.channels.source import SessionSource, build_session_key
 
@@ -33,6 +33,9 @@ class DmTarget:
     session_key: str
     channel_id: str
     destination: dict
+    # Session-config keys delivery needs beyond ``<platform>_channel_id``
+    # (Teams' serviceUrl and tenant), as the inbound pipeline writes them.
+    session_config: dict = field(default_factory=dict)
 
 
 def dm_key(platform: str, chat_id: str, user_id: str) -> str:
@@ -43,9 +46,11 @@ def dm_key(platform: str, chat_id: str, user_id: str) -> str:
 
 
 def dm_target(platform: str, user: str, sender: str) -> DmTarget | None:
-    """The DM a first message to *user* goes into; ``None`` on Slack, whose
-    DM id only Slack knows (see :func:`surogates.programs.opener.resolve_dm`),
-    and on a channel the platform cannot write first on.
+    """The DM a first message to *user* goes into; ``None`` on Slack and
+    Discord, whose DM channel id only the platform knows, on Teams, whose
+    personal chat only its recorded conversation reference knows (all in
+    :func:`surogates.programs.opener.resolve_dm`), and on a channel the
+    platform cannot write first on.
 
     *user* is the identity's ``platform_user_id``: the ``wa_id`` on WhatsApp,
     the chat id on Telegram, digits for voice, the person's user id for web,

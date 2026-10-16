@@ -110,6 +110,20 @@ The sandbox runs the full `surogates` Python package. A persistent `tool-executo
 5. Adapter formats payload -> sends via platform API -> marks row delivered
 ```
 
+### Messaging Channel over a socket (Discord)
+
+```
+1. Gateway supervisor (channels pod): list active discord routings, take the
+   Redis lock discord-gateway:<app id> per bot, hold one websocket per bot
+2. MESSAGE_CREATE -> dispatcher.ingest_from_socket -> the same ingest() a
+   verified webhook body runs (resolve -> creds -> parse -> pipeline)
+3. Same flow as web (steps 2-7 above); delivery as for Slack (REST)
+```
+
+Webhook platforms (Slack, Telegram, WhatsApp) are mounted as routes;
+`topology = "socket"` platforms get no route, and their connection is the
+authentication, so their events enter after verify.
+
 ### API Channel (Programmatic)
 
 ```

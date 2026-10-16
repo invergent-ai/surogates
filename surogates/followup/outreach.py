@@ -1113,6 +1113,7 @@ async def _send_one(
             row.platform, user, row.channel_identifier,
             credentials_for=credentials_for,
             slack_client_factory=slack_client_factory, org_id=row.org_id,
+            redis=redis,
         )
     except OpenerUndeliverable as exc:
         return await _fail(session_factory, row.id, exc.reason) if queued else 0
@@ -1122,6 +1123,7 @@ async def _send_one(
         org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
         platform=row.platform, session_key=target.session_key,
         channel_id=target.channel_id, sender=row.channel_identifier,
+        session_config=target.session_config,
     )
     # Only a channel with a service window needs a template to reopen it;
     # anywhere else the text is written straight into the conversation.
@@ -1148,11 +1150,27 @@ async def _send_to_destination(
     session_factory: Any, row: Any, *, session_store: Any, redis: Any, now: datetime,
     storage: Any, settings: Any,
 ) -> int:
-    """Post into the team's shared place (a Slack channel, a Telegram group):
-    the team configured it, so no person's permission or window applies."""
+    """Post into the team's shared place (a Slack, Teams or Discord channel, a
+    Telegram group): the team configured it, so no person's permission or window applies."""
     channel = row.destination
-    if row.platform not in ("slack", "telegram"):
+    if row.platform not in ("slack", "teams", "telegram", "discord"):
         return await _fail(session_factory, row.id, f"No shared destination on {row.platform}")
+    # Teams writes need the serviceUrl the bot last heard the channel on.
+    reference: dict = {}
+    if row.platform == "teams":
+        from surogates.channels.platforms.teams import conversation_ref
+
+        ref = await conversation_ref(redis, row.channel_identifier, conversation_id=channel)
+        if not ref:
+            return await _fail(
+                session_factory, row.id,
+                "The agent has not been added to that Teams conversation",
+            )
+        reference = {
+            "teams_conversation_id": channel,
+            "teams_service_url": ref.get("service_url", ""),
+            "teams_tenant_id": ref.get("tenant_id", ""),
+        }
     key = build_session_key(SessionSource(
         platform=row.platform, chat_id=channel, chat_type="channel", user_id=channel,
         user_name="", thread_id=None, chat_name=channel,
@@ -1164,6 +1182,7 @@ async def _send_to_destination(
             f"{row.platform}_channel_id": channel, f"{row.platform}_thread_key": None,
             "channel_identifier": row.channel_identifier, "multi_party": True,
             "memory_boundary": f"{row.platform}:team:{channel}",
+            **reference,
         },
         session_factory=session_factory, storage=storage, settings=settings, resume=False,
     )

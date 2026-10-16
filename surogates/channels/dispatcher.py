@@ -21,6 +21,13 @@ Security-critical ordering for every request:
   7. handle_non_message_update (if the platform declares it) → if True, return 200.
   8. parse(body) → 400 on exception, 200 if None; otherwise:
   9. build routing object + deps; await pipeline.handle.
+
+Steps 7–9 are :meth:`ChannelWebhookDispatcher.ingest`, which a socket
+platform (Discord's Gateway) also calls, through
+:meth:`~ChannelWebhookDispatcher.ingest_from_socket`: its events arrive on a
+connection opened with the tenant's own bot token, so they are authenticated
+by origin and skip steps 1–6, but resolve, parse, enrich and the pipeline are
+the same code.
 """
 
 from __future__ import annotations
@@ -77,6 +84,18 @@ class _RoutingObject:
     # from the Host subdomain, so only the agent's own host can sign the
     # user in.  Empty when the routing record carries none.
     api_web_url: str = ""
+
+
+def _routing_for(platform: Any, identifier: str, resolved: dict) -> _RoutingObject:
+    """The routing carrier for a resolved tenant (``resolve_tenant``'s dict)."""
+    return _RoutingObject(
+        org_id=resolved["org_id"],
+        agent_id=resolved["agent_id"],
+        platform=platform.kind,
+        identifier=identifier,
+        config=resolved.get("config") or {},
+        api_web_url=resolved.get("api_web_url") or "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +258,6 @@ class ChannelWebhookDispatcher:
             return identifier, None, {}, {}, None, Response(status_code=200)
 
         org_id: str = resolved["org_id"]
-        agent_id: str = resolved["agent_id"]
         config: dict = resolved.get("config") or {}
 
         # Step 3: Resolve credentials.
@@ -290,14 +308,7 @@ class ChannelWebhookDispatcher:
             )
             return identifier, org_id, config, creds, None, Response(status_code=401)
 
-        routing = _RoutingObject(
-            org_id=org_id,
-            agent_id=agent_id,
-            platform=platform.kind,
-            identifier=identifier,
-            config=config,
-            api_web_url=resolved.get("api_web_url") or "",
-        )
+        routing = _routing_for(platform, identifier, resolved)
         return identifier, org_id, config, creds, routing, None
 
     # ------------------------------------------------------------------
@@ -340,8 +351,6 @@ class ChannelWebhookDispatcher:
         module.  The secure front-half (steps 1–5) is shared with the
         interactive handler via :meth:`_resolve_and_verify`.
         """
-        pipeline = self._pipeline
-        deps_factory = self._deps_factory
         self_ = self
 
         async def _handler(request: Request) -> Response:
@@ -352,7 +361,7 @@ class ChannelWebhookDispatcher:
             # See module docstring for the full ordering contract.
             # ----------------------------------------------------------------
             raw_bytes = await request.body()
-            _id, org_id, config, creds, routing, err = await self_._resolve_and_verify(
+            _id, _org, _config, creds, routing, err = await self_._resolve_and_verify(
                 platform, request, raw_bytes
             )
             if err is not None:
@@ -374,103 +383,149 @@ class ChannelWebhookDispatcher:
                 return Response(status_code=400)
 
             # ----------------------------------------------------------------
-            # Step 7: Optional non-message update hook.
+            # Steps 7–9: shared with the socket platforms (see ingest).
             # ----------------------------------------------------------------
-            handle_nmu = getattr(platform, "handle_non_message_update", None)
-            if handle_nmu is not None:
-                deps = deps_factory(platform.kind, routing, creds, platform)
-                try:
-                    handled = await handle_nmu(body, routing=routing, creds=creds, deps=deps)
-                except Exception:
-                    logger.warning(
-                        "[dispatcher] handle_non_message_update raised on %s:%s",
-                        platform.kind, _id, exc_info=True,
-                    )
-                    return Response(status_code=200)
-                if handled:
-                    return Response(status_code=200)
-                # Fall through — still need deps for pipeline below.
-            else:
-                deps = deps_factory(platform.kind, routing, creds, platform)
-
-            # ----------------------------------------------------------------
-            # Step 8: Parse into a normalised message.
-            #
-            # creds are forwarded as an optional keyword argument so platforms
-            # that need async credential-dependent initialisation (e.g. Slack
-            # auth.test for bot_user_id) can receive them without requiring a
-            # separate pre-flight call.  identifier is forwarded so platforms
-            # whose path identifier IS the bot identity (e.g. Telegram username)
-            # can skip a network round-trip.  Platforms that do not accept these
-            # kwargs silently ignore them via their own signature.
-            #
-            # parse may return a coroutine (async platforms).  We await
-            # defensively — same pattern used for verify above.
-            # ----------------------------------------------------------------
-            try:
-                msg_or_coro = platform.parse(body, creds=creds, identifier=_id)
-                if inspect.isawaitable(msg_or_coro):
-                    msg = await msg_or_coro
-                else:
-                    msg = msg_or_coro
-            except Exception:
-                logger.warning(
-                    "[dispatcher] parse raised on %s:%s", platform.kind, _id,
-                    exc_info=True,
-                )
-                return Response(status_code=400)
-
-            if msg is None:
-                # Non-message event (reaction, edit, etc.) — ack and move on.
-                return Response(status_code=200)
-
-            # ----------------------------------------------------------------
-            # Step 8b: Optional enrich hook (e.g. async user name resolution).
-            #
-            # If the platform declares an ``enrich`` method, call it with the
-            # parsed message and the resolved creds.  The enriched message
-            # replaces the original before it reaches the pipeline.
-            # ----------------------------------------------------------------
-            enrich = getattr(platform, "enrich", None)
-            if enrich is not None:
-                try:
-                    msg = await enrich(msg, creds=creds)
-                except Exception:
-                    logger.warning(
-                        "[dispatcher] enrich raised on %s:%s — using unenriched message",
-                        platform.kind, _id,
-                        exc_info=True,
-                    )
-
-            # ----------------------------------------------------------------
-            # Step 9: Run inbound pipeline.
-            # ----------------------------------------------------------------
-            outcome = await pipeline.handle(
-                msg, routing=routing, config=config, deps=deps
-            )
-            # Platform-native received-ack (e.g. Telegram emoji reaction)
-            # for messages that were accepted for processing. Fired without
-            # awaiting: it is best-effort decoration, and a slow platform
-            # API call here would delay the webhook 200 (which platforms
-            # treat as a redelivery signal).
-            ack = getattr(platform, "ack_received", None)
-            if ack is not None and outcome is InboundOutcome.PROCESSED:
-                async def _ack_task(ack=ack, msg=msg, creds=creds, config=config):
-                    try:
-                        await ack(msg, creds=creds, config=config)
-                    except Exception:
-                        logger.warning(
-                            "[dispatcher] ack_received failed on %s",
-                            platform.kind, exc_info=True,
-                        )
-                task = asyncio.get_running_loop().create_task(_ack_task())
-                self._ack_tasks.add(task)
-                task.add_done_callback(self._ack_tasks.discard)
-            return Response(status_code=200)
+            status = await self_.ingest(platform, body, routing=routing, creds=creds)
+            return Response(status_code=status)
 
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.
         _handler.__name__ = f"_dispatch_{platform.kind}"
         return _handler
+
+    # ------------------------------------------------------------------
+    # Shared post-verify half (webhook handler and socket platforms)
+    # ------------------------------------------------------------------
+
+    async def ingest(
+        self, platform: ChannelPlatform, body: Any, *, routing: _RoutingObject, creds: dict,
+    ) -> int:
+        """Steps 7–9 for an authenticated event; returns the HTTP status to ack with.
+
+        Entered only once the event's origin is proven: by ``verify`` for a
+        webhook, by the bot token's own connection for a socket platform
+        (:meth:`ingest_from_socket`).  Both paths run exactly this code, so a
+        gate added here protects both.
+        """
+        identifier = routing.identifier
+        config = routing.config
+        deps = self._deps_factory(platform.kind, routing, creds, platform)
+
+        # ----------------------------------------------------------------
+        # Step 7: Optional non-message update hook.
+        # ----------------------------------------------------------------
+        handle_nmu = getattr(platform, "handle_non_message_update", None)
+        if handle_nmu is not None:
+            try:
+                handled = await handle_nmu(body, routing=routing, creds=creds, deps=deps)
+            except Exception:
+                logger.warning(
+                    "[dispatcher] handle_non_message_update raised on %s:%s",
+                    platform.kind, identifier, exc_info=True,
+                )
+                return 200
+            if handled:
+                return 200
+
+        # ----------------------------------------------------------------
+        # Step 8: Parse into a normalised message.
+        #
+        # creds are forwarded as an optional keyword argument so platforms
+        # that need async credential-dependent initialisation (e.g. Slack
+        # auth.test for bot_user_id) can receive them without requiring a
+        # separate pre-flight call.  identifier is forwarded so platforms
+        # whose path identifier IS the bot identity (e.g. Telegram username)
+        # can skip a network round-trip.  Platforms that do not accept these
+        # kwargs silently ignore them via their own signature.
+        #
+        # parse may return a coroutine (async platforms).  We await
+        # defensively — same pattern used for verify above.
+        # ----------------------------------------------------------------
+        try:
+            msg = platform.parse(body, creds=creds, identifier=identifier)
+            if inspect.isawaitable(msg):
+                msg = await msg
+        except Exception:
+            logger.warning(
+                "[dispatcher] parse raised on %s:%s", platform.kind, identifier,
+                exc_info=True,
+            )
+            return 400
+
+        if msg is None:
+            # Non-message event (reaction, edit, etc.) — ack and move on.
+            return 200
+
+        # ----------------------------------------------------------------
+        # Step 8b: Optional enrich hook (e.g. async user name resolution).
+        #
+        # If the platform declares an ``enrich`` method, call it with the
+        # parsed message and the resolved creds.  The enriched message
+        # replaces the original before it reaches the pipeline.
+        # ----------------------------------------------------------------
+        enrich = getattr(platform, "enrich", None)
+        if enrich is not None:
+            try:
+                msg = await enrich(msg, creds=creds)
+            except Exception:
+                logger.warning(
+                    "[dispatcher] enrich raised on %s:%s — using unenriched message",
+                    platform.kind, identifier,
+                    exc_info=True,
+                )
+
+        # ----------------------------------------------------------------
+        # Step 9: Run inbound pipeline.
+        # ----------------------------------------------------------------
+        outcome = await self._pipeline.handle(
+            msg, routing=routing, config=config, deps=deps
+        )
+        # Platform-native received-ack (e.g. Telegram emoji reaction)
+        # for messages that were accepted for processing. Fired without
+        # awaiting: it is best-effort decoration, and a slow platform
+        # API call here would delay the webhook 200 (which platforms
+        # treat as a redelivery signal).
+        ack = getattr(platform, "ack_received", None)
+        if ack is not None and outcome is InboundOutcome.PROCESSED:
+            async def _ack_task(ack=ack, msg=msg, creds=creds, config=config):
+                try:
+                    await ack(msg, creds=creds, config=config)
+                except Exception:
+                    logger.warning(
+                        "[dispatcher] ack_received failed on %s",
+                        platform.kind, exc_info=True,
+                    )
+            task = asyncio.get_running_loop().create_task(_ack_task())
+            self._ack_tasks.add(task)
+            task.add_done_callback(self._ack_tasks.discard)
+        return 200
+
+    async def ingest_from_socket(
+        self, platform: ChannelPlatform, identifier: str, body: Any,
+    ) -> int:
+        """Feed one event a socket platform's own connection received.
+
+        The connection was opened with this identifier's bot token, so the
+        event is authenticated by where it came from and enters after verify.
+        The tenant is still resolved per event, through the same cache the
+        webhooks use, so a routing paused in ops stops answering within the
+        cache TTL even before the supervisor drops the connection.
+        """
+        resolved = await resolve_tenant(self._cache, platform.kind, identifier)
+        if resolved is None:
+            logger.debug(
+                "[dispatcher] %s:%s — no routing for a socket event, dropped",
+                platform.kind, identifier,
+            )
+            return 200
+        creds = await resolve_channel_credentials(
+            vault=self._vault,
+            kind=platform.kind,
+            identifier=identifier,
+            org_id=resolved["org_id"],
+            refs=platform.descriptor.vault_refs(identifier),
+        )
+        routing = _routing_for(platform, identifier, resolved)
+        return await self.ingest(platform, body, routing=routing, creds=creds)
 
     def _make_interactive_handler(self, platform: ChannelPlatform):
         """Return an async FastAPI route handler for form-encoded interactive requests.

@@ -258,7 +258,7 @@ FOLLOWUP_UPDATE_SCHEMA = ToolSchema(
             },
             "preferred_channel": {
                 "type": "string",
-                "enum": ["whatsapp", "telegram", "slack"],
+                "enum": ["whatsapp", "telegram", "slack", "teams", "discord"],
                 "description": "The channel the person asked to be written to on.",
             },
             "status": {
