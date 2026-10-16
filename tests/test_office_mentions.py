@@ -162,6 +162,28 @@ async def test_nothing_is_acknowledged_where_the_agent_does_not_edit_live(monkey
 
 
 @pytest.mark.asyncio
+async def test_a_wake_that_ends_before_any_model_call_posts_no_acknowledgement(monkeypatch):
+    # A thread bound to its folder ends its turn saying why: an acknowledgement would promise an answer nobody gives.
+    calls = _acknowledging(monkeypatch)
+    session = _session()
+    store = AsyncMock()
+    store.get_session.return_value = session
+    store.get_harness_cursor = AsyncMock(return_value=0)
+    store.get_events = AsyncMock(return_value=[_mention(1)])
+    store.try_acquire_lease = AsyncMock(return_value=SimpleNamespace(lease_token=uuid4()))
+    harness = _harness(store)
+    harness._name_the_turn = AsyncMock()
+    harness._fail_session = AsyncMock()
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    monkeypatch.setattr(loop_module, "bound_to_its_folder", lambda _session: True)
+    monkeypatch.setattr(loop_module, "DeviceOperations", lambda *_args: SimpleNamespace(cancel=AsyncMock()))
+    await harness.wake(session.id)
+    harness._fail_session.assert_awaited_once()
+    assert calls == []
+    harness._llm.chat.completions.create.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_a_mention_that_arrives_mid_turn_is_acknowledged_before_the_model_reads_it(monkeypatch):
     calls = _acknowledging(monkeypatch)
     store = AsyncMock()

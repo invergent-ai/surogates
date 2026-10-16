@@ -2058,9 +2058,6 @@ class AgentHarness(
             # a client that reads the thread's row then sees it.
             await self._answer_file_waits(session, all_events)
 
-            # 4'''. A comment that mentioned the agent is acknowledged in its thread before the model reads it.
-            await self._acknowledge_mentions(session, all_events)
-
             # 5. Emit HARNESS_WAKE event.
             await self._store.emit_event(
                 session_id,
@@ -2089,6 +2086,11 @@ class AgentHarness(
                     error_category="storage_error", retryable=False,
                 )
                 return
+
+            # A comment that mentioned the agent is acknowledged in its thread before the model reads it: here, past
+            # the checks that can end the turn with no model call, so a turn that ends there promises nothing. The
+            # events the wake loaded say which mentions are new.
+            await self._acknowledge_mentions(session, all_events)
 
             # 5'. Another worker woke a local-folder session since this one
             # did: it may have compacted or cleared the history, and reset
