@@ -21,6 +21,7 @@ from PIL import Image
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
+from surogates.office.mentions import ACKNOWLEDGEMENT
 from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOffice, RuntimeOfficeError
 from surogates.session.files import ComputerAway, session_files
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -42,9 +43,9 @@ READ_DESCRIPTION = (
     "file pane, with everyone's latest edits. Word documents (.docx), spreadsheets (.xlsx), slide decks (.pptx) and "
     "PDFs (.pdf). Read before every office_edit: what it shows is what office_edit targets.\n"
     'view "outline" (default): a Word document\'s blocks (id, hash, kind, first words; comment threads, tracked '
-    "changes; a long one in pages: start=<next>); a spreadsheet's sheets (used range, top rows, merged cells, charts); "
-    "a deck's slides (id, number, title, hash); a PDF's pages (first line, form fields, a checkbox as true/false, "
-    "annotations; start=<next>).\n"
+    "changes; a long one in pages: start=<next>); a spreadsheet's sheets (used range, top rows, merged cells, charts) "
+    "and comment threads; a deck's slides (id, number, title, hash) and comment threads; a PDF's pages (first line, "
+    "form fields, a checkbox as true/false, annotations, each a comment thread with its replies; start=<next>).\n"
     'One in full: view "block" (Word; target = a block id), "range" (spreadsheet; target = "Sheet!A1:D20": the cells '
     'as shown, their formulas and number formats), "slide" (deck; target = a slide id; every shape in canvas px), '
     '"page" (PDF; target = a page number; its text).\n'
@@ -61,10 +62,10 @@ EDIT_DESCRIPTION = (
     "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
     "result shows it as it is now: the user's edit wins; read again and work from it.\n"
     "Word: insert {target, side: before|after, content}, replace {target, content} (on quoted words, "
-    '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side} (loses the '
-    'comments anchored in it), comment {anchor: {find}, body}, reply {thread, body}, resolve {thread}. Targets: '
-    '{"block": "<id>", '
-    '"hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, {"end": true}. Content: {"markdown": '
+    '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side}, comment '
+    '{anchor: {find}, body}, reply {thread, body}, resolve {thread}; a replaced or moved block keeps its comment '
+    'threads. Targets: {"block": "<id>", "hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, '
+    '{"end": true}. Content: {"markdown": '
     '"…", "blocks": {…}}; a line <?block k?> places blocks[k]: {"type": "pending", "intent": "…"}, {"type": "chart", '
     '"chart": "bar|column|line|pie|…", "title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG '
     'or JPEG>", "width": <px>}.\n'
@@ -72,16 +73,23 @@ EDIT_DESCRIPTION = (
     'in as into a cell: "=…" is a live formula, a leading \' keeps text); format {range, number_format, bold, italic, '
     "fill, color, align, valign, wrap, width}; chart {range, type: column|bar|line|pie|area|doughnut|scatter, title, "
     'anchor: "F2"}; sheet {action: add|rename|delete, name, to, after}.\n'
-    "Deck: slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]}, each slide one <section> "
-    "in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the office skill's slide "
-    "reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the first deck edit of a "
+    "Deck: text {slide, hash, shape, text} changes one shape's text and keeps everything else (its place, style and "
+    "placeholder; the slide's notes): use it for a small change, a title, a word, a number (shape ids from view "
+    '"slide"). slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole '
+    "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the "
+    "office skill's slide reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the "
+    "first deck edit of a "
     "session, read that reference (skill_view name office, file_path references/slide.md): the format is strict, and a "
     "refused slide costs a round trip.\n"
     "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "
     "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
     "text|checkbox, page, rect: [x1, y1, x2, y2] in points from the page's top-left, name}; redact {text}, alone in "
     "its call (gone for good once saved); annotate {kind: free_text|stamp, page, rect, text | stamp}. A PDF's "
-    "existing text cannot be changed."
+    "existing text cannot be changed.\n"
+    "Comment threads, in every type: reply {thread, body} and resolve {thread}, where thread is a thread's id as "
+    "office_read's outline shows it. In a spreadsheet, deck or PDF they go in a call of their own. A reply in a thread "
+    "states only the result, in one or two sentences (at most 400 characters): your reasoning, the steps and the "
+    "conversation stay in the chat. Resolve last."
 )
 
 READ_PARAMETERS = {
@@ -156,6 +164,23 @@ async def _office_edit(arguments: dict[str, Any], **kwargs: Any) -> str:
         return await runtime.edit(document.page_id, await _with_pictures(ops, session, kwargs))
 
     return await _run(arguments, kwargs, create=True, call=call)
+
+
+async def acknowledge_mention(mention: dict[str, str], **kwargs: Any) -> str:
+    """Post ACKNOWLEDGEMENT in the thread a mention came from, through the agent's editor session as office_edit edits;
+    the answer as office_edit gives it. A PDF's mention carries no lasting thread id: its thread is found by the
+    comment's words and its author."""
+
+    async def call(runtime: RuntimeOffice, document: AgentDocument, session: Any) -> dict[str, Any]:
+        thread: str | None = mention["thread"]
+        if mention["kind"] == "pdf":
+            found = await runtime.read(document.page_id, {"view": "thread", "query": mention["comment"], "author": mention["author_id"]})
+            thread = (found.get("thread") or {}).get("id")
+            if not thread:
+                raise AgentDocumentError(f"The comment that mentioned you is not in {document.path} any more.")
+        return await runtime.edit(document.page_id, [{"op": "reply", "thread": thread, "body": ACKNOWLEDGEMENT}])
+
+    return await _run({"path": mention["path"]}, kwargs, create=False, call=call)
 
 
 async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: bool, call: Call) -> str:

@@ -85,13 +85,42 @@
     return null;
   }
 
+  // A thread is named as the editor's mentions name it: the comment's durable id in hex, at least eight digits. The
+  // builder's GetId gives the durable id in decimal.
+  function threadId(c) {
+    var h = Number(c.GetId()).toString(16);
+    return h.length < 8 ? ("0000000" + h).slice(-8) : h;
+  }
+
+  var MAX_REPLIES = 10;
+
+  // A thread's latest replies. A reply's IsSolved can throw, so it is not asked. A thread's words are cut by count and
+  // by characters: text without spaces is one word.
+  function repliesOf(c) {
+    var out = [];
+    for (var i = Math.max(0, c.GetRepliesCount() - MAX_REPLIES); i < c.GetRepliesCount(); i++) {
+      var r = c.GetReply(i);
+      out.push({ author: r.GetAuthorName(), text: clip(words(r.GetText() || "", 30), 300) });
+    }
+    return out;
+  }
+
+  // Open threads first (a mention's thread is open), until the budget: with the blocks, the outline's first page stays
+  // under the 50,000 characters a tool result may hold.
+  var COMMENTS_BUDGET = 15000;
+
   function comments() {
-    return doc.GetAllComments().slice(0, 30).map(function (c) {
-      return {
-        id: String(c.GetId()), author: c.GetAuthorName(), quote: words(c.GetQuoteText() || "", 8),
-        text: words(c.GetText() || "", 30), replies: c.GetRepliesCount(), resolved: !!c.IsSolved(),
+    var all = doc.GetAllComments(), out = [], size = 0;
+    var ordered = all.filter(function (c) { return !c.IsSolved(); }).concat(all.filter(function (c) { return !!c.IsSolved(); }));
+    for (var i = 0; i < ordered.length && size < COMMENTS_BUDGET; i++) {
+      var c = ordered[i], thread = {
+        id: threadId(c), author: c.GetAuthorName(), quote: words(c.GetQuoteText() || "", 8),
+        text: clip(words(c.GetText() || "", 30), 300), replies: repliesOf(c), resolved: !!c.IsSolved(),
       };
-    });
+      size += JSON.stringify(thread).length;
+      out.push(thread);
+    }
+    return out;
   }
 
   function trackedChanges() {
@@ -352,6 +381,90 @@
     else where.el.Delete();
   }
 
+  // A block rewritten as new ones keeps the comment threads anchored in it: the same comment, its data, durable id and
+  // replies untouched, over the same words when the new blocks still have them, otherwise over the new blocks. No
+  // builder call tells where a comment is or adds marks for one that exists: these are the editor's internals (the
+  // element by its id, its comment marks, the flag that keeps a deleted block's comments, its own adding and removing
+  // of a comment's marks).
+  function internalOf(el) {
+    return AscCommon.g_oTableId.Get_ById(String(el.GetInternalId()));
+  }
+
+  function threadsIn(el) {
+    var manager = doc.Document.GetCommentsManager(), seen = Object.create(null), out = [];
+    internalOf(el).GetAllComments([]).forEach(function (at) {
+      var comment = manager.GetById(at.Comment.GetCommentId());
+      if (comment && !seen[comment.GetId()]) {
+        seen[comment.GetId()] = true;
+        out.push(comment);
+      }
+    });
+    return out;
+  }
+
+  function removeKeepingThreads(where) {
+    var logic = doc.Document, before = logic.RemoveCommentsOnPreDelete;
+    logic.RemoveCommentsOnPreDelete = false;
+    try {
+      remove(where);
+    } finally {
+      logic.RemoveCommentsOnPreDelete = before;
+    }
+  }
+
+  function inDocument(markId) {
+    var mark = AscCommon.g_oTableId.Get_ById(markId);
+    return !!mark && mark.IsUseInDocument();
+  }
+
+  // A range's positions count run boundaries as well as characters, so the words are searched for, not counted to.
+  function sameWords(elements, quote) {
+    for (var i = 0; quote && i < elements.length; i++) {
+      var words = elements[i].Search(quote, true)[0];
+      if (words && words.GetText() === quote) return words;
+    }
+    return null;
+  }
+
+  function wrap(el, comment, start, end) {
+    var internal = internalOf(el);
+    internal.SetApplyToAll(true);
+    try {
+      internal.AddComment(comment, start, end);
+    } finally {
+      internal.SetApplyToAll(false);
+    }
+  }
+
+  function keepThreads(threads, elements) {
+    var logic = doc.Document, manager = logic.GetCommentsManager();
+    // A copied table keeps its comment marks: they become the comment's own.
+    elements.forEach(function (el) {
+      internalOf(el).GetAllComments([]).forEach(function (at) {
+        var comment = manager.GetById(at.Comment.GetCommentId());
+        if (comment) comment.SetRangeMark(at.Comment);
+      });
+    });
+    var holders = elements.filter(function (el) { return kindOf(el) !== "pending"; });
+    threads.forEach(function (comment) {
+      var start = !inDocument(comment.GetRangeStart()), end = !inDocument(comment.GetRangeEnd());
+      if (!start && !end) return;
+      // Nothing but pending blocks to stand on: the thread goes with its text, as a deleted block's does.
+      if (!holders.length) return logic.RemoveComment(comment.GetId(), true, false);
+      var words = start && end ? sameWords(holders, String(comment.GetData().GetQuoteText() || "").trim()) : null;
+      if (words) {
+        words.Select(false);
+        logic.Controller.AddComment(comment);
+        logic.RemoveSelection();
+        return;
+      }
+      var first = holders[0], last = holders[holders.length - 1];
+      if (first === last) return wrap(first, comment, start, end);
+      if (start) wrap(first, comment, true, false);
+      if (end) wrap(last, comment, false, true);
+    });
+  }
+
   var EDITS = {
     insert: function (op) {
       var where = resolveTarget(op.target), blank = where.end ? onlyBlankLine() : null;
@@ -362,8 +475,9 @@
     replace: function (op) {
       var where = resolveTarget(op.target), elements = build(op.blocks);
       if (where.pending) return { ids: fill(where.el, elements) };
-      var ids = insertAt(where.el.GetPosInParent(), elements);
-      remove(where);
+      var threads = threadsIn(where.el), ids = insertAt(where.el.GetPosInParent(), elements);
+      removeKeepingThreads(where);
+      keepThreads(threads, elements);
       return { ids: ids };
     },
     reword: function (op) {
@@ -382,16 +496,17 @@
     move: function (op) {
       var what = resolveTarget(op.target), to = resolveTarget(op.to);
       if (to.el && String(to.el.GetInternalId()) === String(what.el.GetInternalId())) throw new Refusal("A block cannot move next to itself.");
-      var copy = what.el.Copy();
+      var threads = threadsIn(what.el), copy = what.el.Copy();
       insertAt(position(to, op.side), [copy]);
-      remove(what);
+      removeKeepingThreads(what);
+      keepThreads(threads, [copy]);
       return { ids: [String(copy.GetInternalId())] };
     },
     comment: function (op, agent) {
       var where = resolveTarget(op.anchor);
       var comment = where.range.AddComment(op.body, agent.name, agent.id);
       if (!comment) throw new Refusal("The quoted words are inside a locked part of the document; anchor the comment elsewhere.");
-      return { thread: String(comment.GetId()) };
+      return { thread: threadId(comment) };
     },
     reply: function (op, agent) {
       changeThread(op.thread, function (data) { data.Add_Reply(replyOf(op.body, agent)); });
@@ -404,10 +519,11 @@
   };
 
   // The Builder's AddReply and SetSolved change a comment's data in place, so cancelling the edit cannot take them
-  // back: a copy is changed and set instead, and the history keeps the old data. (Internal, unversioned names.)
+  // back: a copy is changed and set instead, and the history keeps the old data. (Internal, unversioned names.) The
+  // builder finds a comment by its durable id in decimal; a thread id is that id in hex.
   function changeThread(thread, change) {
-    var found = doc.GetCommentById(String(thread));
-    if (!found) throw new Refusal("Comment thread " + thread + " is gone.");
+    var found = /^[0-9a-f]{1,16}$/i.test(thread) ? doc.GetCommentById(String(parseInt(thread, 16))) : null;
+    if (!found) throw new Refusal("Comment thread " + thread + " is gone: its comment was deleted, or the text it was on was removed. Read the outline again.");
     var data = found.Comment.GetData().Copy();
     change(data);
     doc.Document.EditComment(found.Comment.GetId(), data);

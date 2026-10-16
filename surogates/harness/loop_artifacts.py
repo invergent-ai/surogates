@@ -170,6 +170,26 @@ def _coerce_tool_args(raw: Any) -> dict[str, Any]:
         except (json.JSONDecodeError, TypeError):
             return {}
     return {}
+
+
+def _write_refused(content: Any) -> bool:
+    """Whether a write_file or patch result says the call wrote nothing.
+
+    Both tools refuse with a JSON object whose ``error`` is set, which
+    patch may follow with a hint; a V4A patch none of whose files was
+    changed answers ``status: "error"`` instead.
+    """
+    if not isinstance(content, str):
+        return False
+    try:
+        result, _ = json.JSONDecoder().raw_decode(content.lstrip())
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(result, dict) and (
+        bool(result.get("error")) or result.get("status") == "error"
+    )
+
+
 _PROMOTABLE_FENCES: dict[str, tuple[str, str]] = {
     "svg": ("svg", "svg"),
     "html": ("html", "html"),

@@ -1,18 +1,21 @@
 import { readFileSync } from "node:fs";
 import { ContentError } from "../markdown.js";
 import type { Canvas, Measurer } from "../slides/measure.js";
-import { checkBatch, EditorError, textArg, type EditContext, type Format, type Outcome, type Scope } from "./format.js";
+import { checkBatch, commentOp, commentsAlone, EditorError, textArg, type CommentOp, type EditContext, type Format, type Outcome, type Scope } from "./format.js";
 
 const MAX_OPS = 20;
 const MAX_SLIDES = 10;
 const CANVAS_WIDTH = 1920;
+const MAX_SHAPE_TEXT = 2000;
 
 type Raw = Record<string, unknown>;
 export type SlideEntry = { html: string; after: string | null } | { id: string; hash: string; html: string };
 export type SlideOp =
   | { op: "slides"; slides: SlideEntry[] }
   | { op: "order"; ids: string[] }
-  | { op: "remove"; slides: { id: string; hash: string }[] };
+  | { op: "remove"; slides: { id: string; hash: string }[] }
+  | { op: "text"; slide: string; hash: string; shape: string; text: string }
+  | CommentOp;
 
 function guarded(raw: unknown, what: string): { id: string; hash: string } {
   const entry = (raw ?? {}) as Raw;
@@ -44,14 +47,24 @@ function checkOp(raw: Raw): SlideOp {
       if (!Array.isArray(raw.slides) || !raw.slides.length) throw new ContentError('"slides" lists the slides to remove: {"id", "hash"} each.');
       return { op: "remove", slides: raw.slides.map((entry) => guarded(entry, "a slide to remove")) };
     }
-    default:
-      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use slides, order or remove.`);
+    case "text": {
+      const slide = textArg(raw.slide, "slide"), shape = textArg(raw.shape, "shape");
+      if (typeof raw.hash !== "string" || !raw.hash) throw new ContentError("a shape's text change carries the hash its slide had when you read it.");
+      if (typeof raw.text !== "string") throw new ContentError('"text" is the shape\'s new text, a line per paragraph.');
+      if (raw.text.length > MAX_SHAPE_TEXT) throw new ContentError(`"text" is at most ${MAX_SHAPE_TEXT} characters: a longer text is a slide of its own.`);
+      return { op: "text", slide, hash: raw.hash, shape, text: raw.text.replace(/\r\n?/g, "\n") };
+    }
+    default: {
+      const comment = commentOp(raw);
+      if (comment) return comment;
+      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use slides, text, order, remove, reply or resolve.`);
+    }
   }
 }
 
 /** The agent's batch, checked as far as it can be without measuring. */
 export function checkSlideOps(input: unknown): SlideOp[] {
-  const ops = checkBatch(input, MAX_OPS, checkOp);
+  const ops = commentsAlone(checkBatch(input, MAX_OPS, checkOp));
   const slides = ops.reduce((sum, op) => sum + (op.op === "slides" ? op.slides.length : 0), 0);
   if (slides > MAX_SLIDES) throw new ContentError(`One call builds at most ${MAX_SLIDES} slides; split the deck over several calls.`);
   // New slides have no ids yet: an order in the same call could not place them.
@@ -102,6 +115,6 @@ export function slideFormat(measurer: Measurer): Format {
     grouped: true,
     readScope,
     compile: (raw, context) => compile(raw, context, measurer),
-    edit: async (context, ops) => (await context.run({ action: "edit", ops })) as Outcome,
+    edit: async (context, ops) => (await context.run({ action: "edit", ops, agent: context.page.user })) as Outcome,
   };
 }

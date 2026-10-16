@@ -155,6 +155,7 @@ export type {
   AgentChatExpertFeedbackRating,
   AgentChatHtmlArtifactSpec,
   AgentChatMarkdownArtifactSpec,
+  AgentChatMentionableUser,
   AgentChatMessage,
   AgentChatMessageStatus,
   AgentChatRuntimeApi,

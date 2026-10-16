@@ -43,6 +43,11 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
 <aside>Say hi.</aside>
 </section>`;
 
+  it("tells a slide without notes from one whose empty aside clears them", async () => {
+    expect((await measure(`<section style="background:#ffffff"><p style="font-size:32px">Hi</p></section>`)).notes).toBeNull();
+    expect((await measure(`<section style="background:#ffffff"><p style="font-size:32px">Hi</p><aside></aside></section>`)).notes).toBe("");
+  });
+
   it("measures the format's example slide into native shapes", async () => {
     const spec: Any = await measure(PLAN);
     expect(spec.background).toEqual({ type: "solid", color: { hex: "#fbfbf8", alpha: 1 } });

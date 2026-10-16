@@ -849,7 +849,7 @@ describe("AgentChat", () => {
     // element so responsive classes can reference it via var().
     expect(
       (layout as HTMLElement | null)?.style.getPropertyValue("--right-stack-w"),
-    ).toBe("50%");
+    ).toBe("75%");
     // Desktop two-pane layout is `md:`-prefixed (mobile-first single column).
     expect(layout?.className).toContain("md:relative");
     expect(chatPanel?.className).toContain("md:absolute");

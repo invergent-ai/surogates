@@ -21,6 +21,7 @@ from surogates.harness.loop_artifacts import (
     _coerce_tool_args,
     _derive_artifact_name,
     _terminal_executes_file,
+    _write_refused,
 )
 from surogates.harness.delivery_manifest import (
     check_terminal_claim,
@@ -248,6 +249,13 @@ _TURN_MARK = f"{WORKSPACE_STORAGE_DIR}/.turn"
 # a turn did nothing, and its end asks that computer for no keep.
 _NEVER_RAN = frozenset({"usage_limit", "nowhere_to_work"})
 
+# The tools whose call names a file the turn wrote.
+_WRITING_TOOLS = frozenset({"write_file", "patch"})
+
+
+def _event_type(evt: Any) -> str:
+    return evt.type.value if hasattr(evt.type, "value") else evt.type
+
 
 class ArtifactCompletionMixin:
     #: The turn's tool sagas, set when its loop starts; its end completes them.
@@ -260,6 +268,9 @@ class ArtifactCompletionMixin:
     _turn_marked: bool = False
     #: The last event before the turn's loop started: the turn's own come after it.
     _turn_after_event_id: int = 0
+    #: The documents whose comment thread the worker acknowledged a mention in, since the last turn-end save: saved with
+    #: those the turn edited, though no office_edit call named them.
+    _mention_paths: tuple[str, ...] = ()
     #: The last turn-ending event before a routine run's turn: its calls come after it.
     _routine_turn: int | None = None
 
@@ -612,16 +623,42 @@ class ArtifactCompletionMixin:
             )
             return out
 
-        in_turn = False
-        terminal_commands: list[str] = []
-        for evt in events:
-            data = evt.data or {}
-            if data.get("turn_id") == turn_id:
-                in_turn = True
-            if not in_turn:
-                continue
+        start = next(
+            (i for i, evt in enumerate(events)
+             if (evt.data or {}).get("turn_id") == turn_id),
+            len(events),
+        )
+        turn_events = events[start:]
+        # A refused write delivers nothing, so its call is no candidate. The
+        # results are read only for a turn that wrote, and only from its
+        # first event: a result always follows its call.
+        if any(
+            _event_type(evt) == EventType.TOOL_CALL.value
+            and (evt.data or {}).get("name") in _WRITING_TOOLS
+            and (evt.data or {}).get("tool_call_id")
+            for evt in turn_events
+        ):
+            try:
+                results = await self._store.get_events(
+                    session_id, after=turn_events[0].id,
+                    types=[EventType.TOOL_RESULT],
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to read tool results for candidate artifacts on %s",
+                    session_id, exc_info=True,
+                )
+                results = []
+            turn_events = sorted([*turn_events, *results], key=lambda evt: evt.id)
 
-            etype_str = evt.type.value if hasattr(evt.type, "value") else evt.type
+        terminal_commands: list[str] = []
+        # The file candidate each write call awaiting its result made, by
+        # call id, and the candidates whose call was refused.
+        awaiting: dict[str, int] = {}
+        refused: set[int] = set()
+        for evt in turn_events:
+            data = evt.data or {}
+            etype_str = _event_type(evt)
 
             if etype_str == EventType.TOOL_CALL.value:
                 # Tool-call payloads carry ``name`` and ``arguments`` per
@@ -631,7 +668,7 @@ class ArtifactCompletionMixin:
                 raw_args = data.get("arguments")
                 args = _coerce_tool_args(raw_args)
 
-                if name in {"write_file", "patch"}:
+                if name in _WRITING_TOOLS:
                     path = (
                         args.get("path")
                         or args.get("file_path")
@@ -643,6 +680,9 @@ class ArtifactCompletionMixin:
                         and path
                         and not _is_internal_workspace_path(path)
                     ):
+                        call_id = str(data.get("tool_call_id") or "")
+                        if call_id:
+                            awaiting[call_id] = len(out)
                         out.append(
                             TurnArtifact(kind="file", label=path, ref=path),
                         )
@@ -662,6 +702,13 @@ class ArtifactCompletionMixin:
                     cmd = args.get("command") or ""
                     if isinstance(cmd, str) and cmd:
                         terminal_commands.append(cmd)
+            elif etype_str == EventType.TOOL_RESULT.value:
+                # A call's first result is its own: a second one is only the
+                # row a cancellation adds after it.
+                if data.get("name") in _WRITING_TOOLS:
+                    index = awaiting.pop(str(data.get("tool_call_id") or ""), None)
+                    if index is not None and _write_refused(data.get("content")):
+                        refused.add(index)
             elif etype_str in (
                 EventType.ARTIFACT_CREATED.value,
                 EventType.ARTIFACT_UPDATED.value,
@@ -676,6 +723,7 @@ class ArtifactCompletionMixin:
                             kind="artifact", label=name, ref=artifact_id,
                         ),
                     )
+        out = [art for i, art in enumerate(out) if i not in refused]
 
         # The tool-call branch keys an artifact candidate by name, because
         # the id only exists once the API has answered. When the event did
@@ -1471,7 +1519,7 @@ class ArtifactCompletionMixin:
             await self._sandbox_pool.ensure(owner, spec)
 
     async def _save_office_documents(self, session: Session) -> None:
-        """Save the documents this turn edited through the editor; nothing for a turn that edited none."""
+        """Save the documents this turn edited through the editor, or acknowledged a mention in; nothing for a turn that did neither."""
         try:
             office = load_settings().office
             if not office.agent_editing:
@@ -1480,9 +1528,11 @@ class ArtifactCompletionMixin:
             from surogates.office.turn_end import save_turn
 
             await save_turn(store=self._store, session=session, after=self._turn_after_event_id, office=office,
-                            session_factory=self._session_factory)
+                            session_factory=self._session_factory, also=self._mention_paths)
         except Exception:
             logger.exception("Could not save the documents %s edited this turn", session.id)
+        finally:
+            self._mention_paths = ()
 
     async def _pick_up_routine(self, session: Session, *, yours: bool = False) -> None:
         """A master's routine run records its changes to the real files as its own, at its turn's end.

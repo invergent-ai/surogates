@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { ContentError } from "../markdown.js";
-import { checkBatch, textArg, type EditContext, type Format, type Outcome, type Scope } from "./format.js";
+import { checkBatch, commentOp, commentsAlone, isCommentOp, textArg, type CommentOp, type EditContext, type Format, type Outcome, type Scope } from "./format.js";
 
 export const MAX_OPS = 50;
 const MAX_CELLS = 10_000;
@@ -27,7 +27,8 @@ export type CellOp =
   | { op: "chart"; sheet: string; range: string; type: string; title: string; on: string; anchor: { row: number; col: number }; name: string | null; width: number; height: number }
   | { op: "sheet"; action: "add"; name: string; after: string | null }
   | { op: "sheet"; action: "rename"; name: string; to: string }
-  | { op: "sheet"; action: "delete"; name: string };
+  | { op: "sheet"; action: "delete"; name: string }
+  | CommentOp;
 
 type Raw = Record<string, unknown>;
 type Phase = { refused: unknown } | { results: Record<string, unknown>; pending?: unknown[] };
@@ -164,8 +165,11 @@ function compileOp(raw: Raw): CellOp {
       if (raw.action === "delete") return { op: "sheet", action: "delete", name };
       throw new ContentError('"action" is "add", "rename" or "delete".');
     }
-    default:
-      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use set, format, chart or sheet.`);
+    default: {
+      const comment = commentOp(raw);
+      if (comment) return comment;
+      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use set, format, chart, sheet, reply or resolve.`);
+    }
   }
 }
 
@@ -197,7 +201,7 @@ function checkSheets(ops: CellOp[]): void {
 }
 
 export function compileCellOps(input: unknown): CellOp[] {
-  const ops = checkBatch(input, MAX_OPS, compileOp);
+  const ops = commentsAlone(checkBatch(input, MAX_OPS, compileOp));
   const cells = ops.reduce((sum, op) => sum + (op.op === "set" ? op.values.length * op.values[0]!.length : 0), 0);
   if (cells > MAX_CELLS_PER_CALL) throw new ContentError(`One call writes at most ${MAX_CELLS_PER_CALL} cells; split it.`);
   checkSheets(ops);
@@ -229,7 +233,19 @@ async function settle(check: () => Promise<unknown>): Promise<boolean> {
   }
 }
 
+// A thread's reply or resolve lands when the server grants the comment's lock, after the command: the group stays open
+// until a fresh read shows it, as for a sheet add, so a cancel still takes it back.
+async function threadEdit(context: EditContext, ops: CommentOp[]): Promise<Outcome> {
+  const asked = (await context.run({ action: "comment", ops, agent: context.page.user })) as { refused: unknown } | { expect: unknown[] };
+  if ("refused" in asked) return asked;
+  if (!(await settle(() => context.run({ action: "threads_landed", expect: asked.expect })))) {
+    return { refused: { op: 0, reason: "Someone else is changing this comment right now: nothing applied. Try again in a moment." } };
+  }
+  return { results: ops.map((_, op) => ({ op })) };
+}
+
 async function edit(context: EditContext, list: unknown[]): Promise<Outcome> {
+  if ((list as CellOp[]).every(isCommentOp)) return threadEdit(context, list as CommentOp[]);
   const ops = (list as CellOp[]).map((op, index) => ({ index, op }));
   const results: Record<string, unknown> = {};
   const sheets = ops.filter((entry) => entry.op.op === "sheet");

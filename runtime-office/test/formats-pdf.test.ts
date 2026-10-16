@@ -53,3 +53,21 @@ describe("PDF ops", () => {
     expect(() => compilePdfOps([{ op: "replace", find: "a", text: "b" }])).toThrow("existing text cannot be changed");
   });
 });
+
+describe("a PDF's comment threads", () => {
+  it("finds a mention's thread by its words and its author", () => {
+    expect(pdf.readScope({ view: "thread", query: "@Agent is March right?", author: "user:1" })).toEqual({
+      action: "thread", query: "@Agent is March right?", author: "user:1",
+    });
+    expect(() => pdf.readScope({ view: "thread", query: "x" })).toThrow('"author" is required');
+  });
+
+  it("takes a reply and a resolve, in a call of their own", () => {
+    expect(compilePdfOps([{ op: "reply", thread: "1_1", body: "March." }, { op: "resolve", thread: "1_1" }])).toEqual([
+      { op: "reply", thread: "1_1", body: "March." },
+      { op: "resolve", thread: "1_1" },
+    ]);
+    expect(() => compilePdfOps([{ op: "resolve", thread: "1_1" }, { op: "pages", action: "add", page: 1 }])).toThrow("reply and resolve go in a call of their own");
+    expect(() => compilePdfOps([{ op: "reply", thread: "1_1", body: "x".repeat(401) }])).toThrow("a thread reply states just the result");
+  });
+});

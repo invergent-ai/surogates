@@ -1,4 +1,4 @@
-import type { AgentChatOfficeEvent } from "../types";
+import type { AgentChatMentionableUser, AgentChatOfficeEvent } from "../types";
 
 const OFFICE_EXTENSIONS = new Set(["docx", "xlsx", "pptx", "pdf", "doc", "odt", "rtf", "xls", "ods", "ppt", "odp"]);
 
@@ -15,8 +15,29 @@ const fold = (path: string) => path.normalize("NFC").toLowerCase();
 export const officeEventFor = (events: Record<string, AgentChatOfficeEvent>, path: string) =>
   events[path] ?? Object.entries(events).find(([key]) => fold(key) === fold(path))?.[1];
 
+/** What the editor hands an event handler. */
+export interface DocEditorEvent {
+  data?: unknown;
+}
+
+/** The editor's events the pane handles: who a comment can mention, and a comment that mentioned someone. */
+export interface DocEditorEvents {
+  onRequestUsers(event: DocEditorEvent): void;
+  onRequestSendNotify(event: DocEditorEvent): void;
+}
+
+/** What `onRequestSendNotify` carries: the comment's id (a reply's is its thread's), its words, and who it mentions. */
+export interface MentionNotice {
+  emails?: string[];
+  actionId?: string;
+  actionLink?: { action?: { type?: string; data?: string } };
+  message?: string;
+}
+
 export interface DocEditorInstance {
   destroyEditor(): void;
+  /** Answers `onRequestUsers`: the people the editor offers to mention. */
+  setUsers(answer: { c?: unknown; users: AgentChatMentionableUser[] }): void;
 }
 
 declare global {

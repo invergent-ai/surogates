@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EditorPage } from "../src/connector.js";
 import { cell, compileCellOps } from "../src/formats/cell.js";
 import { ContentError } from "../src/markdown.js";
@@ -85,5 +85,56 @@ describe("a spreadsheet batch", () => {
     const ops = compileCellOps([{ op: "set", range: "Gone!A1", values: [["x"]] }]);
     expect(await cell.edit({ page: {} as EditorPage, run }, ops)).toEqual(refused);
     expect(run.mock.calls.map(([scope]) => scope.action)).toEqual(["lock"]);
+  });
+});
+
+describe("a spreadsheet's comment threads", () => {
+  const thread = "{F80AA885-C2F8-8A96-7622-6B76D3A85AB7}";
+
+  it("takes a reply and a resolve, in a call of their own", () => {
+    expect(compileCellOps([{ op: "reply", thread, body: "Yes: 120." }, { op: "resolve", thread }])).toEqual([
+      { op: "reply", thread, body: "Yes: 120." },
+      { op: "resolve", thread },
+    ]);
+    expect(() => compileCellOps([{ op: "reply", thread, body: "x" }, { op: "set", range: "Sales!A1", values: [[1]] }])).toThrow(
+      "reply and resolve go in a call of their own",
+    );
+    expect(() => compileCellOps([{ op: "reply", thread, body: "x".repeat(401) }])).toThrow("a thread reply states just the result");
+  });
+
+  describe("in the editor", () => {
+    const page = { user: { id: "agent:it", name: "Agent" } } as EditorPage;
+    const ops = () => compileCellOps([{ op: "reply", thread, body: "Yes: 120." }, { op: "resolve", thread }]);
+    const expected = { expect: [{ thread, replies: 1, resolved: true }] };
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("passes on a refusal the editor gives before changing anything", async () => {
+      const refused = { refused: { op: 1, reason: `Comment thread ${thread} is gone: its comment was deleted, or the cell it was on was removed. Read the outline again.` } };
+      const run = vi.fn(async (_scope: Record<string, unknown>) => refused);
+      expect(await cell.edit({ page, run }, ops())).toEqual(refused);
+      expect(run.mock.calls.map(([scope]) => scope.action)).toEqual(["comment"]);
+    });
+
+    it("answers each op once a fresh read shows the changes, under the agent's name", async () => {
+      let polls = 0;
+      const run = vi.fn(async (scope: Record<string, unknown>) => (scope.action === "comment" ? expected : ++polls >= 3));
+      expect(await cell.edit({ page, run }, ops())).toEqual({ results: [{ op: 0 }, { op: 1 }] });
+      expect(run.mock.calls[0]![0]).toEqual({ action: "comment", ops: ops(), agent: { id: "agent:it", name: "Agent" } });
+      expect(run.mock.calls.slice(1).map(([scope]) => scope)).toEqual(Array(3).fill({ action: "threads_landed", expect: expected.expect }));
+    });
+
+    it("refuses a change that has not landed when the wait ends", async () => {
+      vi.useFakeTimers();
+      const run = vi.fn(async (scope: Record<string, unknown>) => (scope.action === "comment" ? expected : false));
+      const outcome = cell.edit({ page, run }, ops());
+      await vi.runAllTimersAsync();
+      expect(await outcome).toEqual({
+        refused: { op: 0, reason: "Someone else is changing this comment right now: nothing applied. Try again in a moment." },
+      });
+      expect(run.mock.calls.length).toBeGreaterThan(2);
+    });
   });
 });

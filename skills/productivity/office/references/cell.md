@@ -61,3 +61,14 @@ call.
 
 - **Someone is editing a cell you write:** the call names them and the cell. Try again in a moment, or ask them.
 - **A protected sheet or workbook:** only the user can lift the protection.
+
+## Comments
+
+The outline lists the comment threads, open ones first: each one's `id`, its `cell`, the author, the text, the latest
+replies and whether it is resolved. Reply and resolve in a call of their own:
+
+```json
+{"ops": [{"op": "reply", "thread": "{F80AA885-C2F8-8A96-7622-6B76D3A85AB7}", "body": "Fixed: Q1 North is 120, from the March export."}, {"op": "resolve", "thread": "{F80AA885-C2F8-8A96-7622-6B76D3A85AB7}"}]}
+```
+
+A reply states only the result, in one or two sentences (at most 400 characters). Resolve last.

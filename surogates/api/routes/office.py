@@ -12,9 +12,10 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from surogates.api.routes.sessions import SendMessageRequest, SendMessageResponse, deliver_message
 from surogates.api.routes.workspace import (
     _get_session_store,
     _get_workspace_session_bucket_and_root,
@@ -23,15 +24,19 @@ from surogates.api.routes.workspace import (
     workspace_files,
 )
 from surogates.api.session_guards import is_scheduled_run_session, require_device_access
+from surogates.channels.inbound import build_principal_stamp
 from surogates.db.models import User
 from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
 from surogates.office import sessions as office_sessions
-from surogates.office.agent import location_of
+from surogates.office.agent import AGENT_KINDS, location_of
 from surogates.office.chats import live_session
 from surogates.office.editor_config import build_editor_config
 from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, on_disk_spelling
+from surogates.office.guard import office_tools_offered
 from surogates.office.kinds import office_kind
+from surogates.office.mentions import MENTION_SOURCE, agent_address, mention_message, mentionable_agent
 from surogates.office.tokens import InvalidOfficeToken, read_document_server_body, read_url_token
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -46,6 +51,8 @@ PENDING_PREFIX = "_office/pending/"
 class EditorConfigResponse(BaseModel):
     document_server_url: str
     config: dict[str, Any]
+    #: Who a comment can mention: the chat's agent where it answers in the thread, nobody elsewhere.
+    mentionable_users: list[dict[str, str]] = []
 
 
 @router.get("/api/sessions/{session_id}/workspace/editor", response_model=EditorConfigResponse)
@@ -88,12 +95,18 @@ async def get_workspace_editor(
             )
     location = location_of(target, path)
     document = await _open_document(request, location=location, path=path, session_id=session.id, user=(user_id, user_name))
+    edit = kind.editable and not view and not is_scheduled_run_session(session)
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
-        user_id=user_id, user_name=user_name, theme=theme,
-        edit=kind.editable and not view and not is_scheduled_run_session(session),
+        user_id=user_id, user_name=user_name, theme=theme, edit=edit,
     )
-    return EditorConfigResponse(document_server_url=office.public_url.rstrip("/"), config=config)
+    # The agent answers a comment only where it edits live, in a document it edits, from an editor that edits, in a
+    # chat it is sent the office tools in.
+    mentionable = (
+        [mentionable_agent(session.agent_id, await _agent_name(request, session.agent_id))]
+        if office.agent_editing and edit and kind.file_type in AGENT_KINDS and office_tools_offered(session) else []
+    )
+    return EditorConfigResponse(document_server_url=office.public_url.rstrip("/"), config=config, mentionable_users=mentionable)
 
 
 async def _open_document(
@@ -130,6 +143,82 @@ async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, st
             user = await db.scalar(select(User).where(User.id == tenant.user_id, User.org_id == tenant.org_id))
         return f"user:{tenant.user_id}", user.display_name if user is not None else "You"
     raise HTTPException(status_code=403, detail="Only a person can open the editor.")
+
+
+async def _agent_name(request: Request, agent_id: str) -> str:
+    """The agent's display name, as its editor session shows it; "Agent" where the runtime config does not say."""
+    cache = getattr(request.app.state, "runtime_config_cache", None)
+    if cache is None:
+        return "Agent"
+    try:
+        payload = await cache.get(agent_id)
+    except Exception:  # an unknown agent or a cache blip: the name is only shown
+        logger.warning("Could not read agent %s's name for the editor", agent_id, exc_info=True)
+        return "Agent"
+    return str((payload or {}).get("display_name") or "Agent")
+
+
+class EditorMentionRequest(BaseModel):
+    path: str = Field(max_length=4096)
+    #: The comment's id from the editor's notice (``actionLink.action.data``): a reply's is its thread's. Word's is hex,
+    #: a spreadsheet's and a deck's a {GUID}, a PDF's hex: nothing else reaches the note the model reads.
+    comment_id: str = Field(pattern=r"^[A-Za-z0-9{}_-]{1,64}$")
+    #: The comment or reply that mentioned the agent, as written.
+    message: str = Field(min_length=1, max_length=10_000)
+    emails: list[str] = Field(max_length=50)
+
+
+@router.post(
+    "/api/sessions/{session_id}/workspace/editor/mention", response_model=SendMessageResponse, status_code=202,
+)
+@router.post("/sessions/{session_id}/workspace/editor/mention", response_model=SendMessageResponse, status_code=202)
+async def mention_agent(
+    session_id: UUID,
+    body: EditorMentionRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    _rate: None = Depends(rate_limit_dep),
+) -> SendMessageResponse:
+    """A comment in the chat's file pane mentioned the agent: the chat gets it as the person's message, and the agent
+    answers in the comment's thread."""
+    _require_service_account_api_route(request, tenant)
+    office = request.app.state.settings.office
+    if not office.agent_editing:
+        raise HTTPException(status_code=503, detail="The agent cannot answer comments here.")
+    _validate_path(body.path)
+    kind = office_kind(body.path)
+    if kind is None or kind.file_type not in AGENT_KINDS:
+        raise HTTPException(status_code=415, detail="The agent answers comments in Word documents, spreadsheets, slide decks and PDFs.")
+    store = _get_session_store(request)
+    session, _bucket, _root = await _get_workspace_session_bucket_and_root(request, store, session_id, tenant, path=body.path)
+    await require_device_access(request, session, tenant)
+    # Without office_read and office_edit the agent could not answer in the thread.
+    if not office_tools_offered(session):
+        raise HTTPException(status_code=409, detail="The agent in this chat cannot answer in comments.")
+    # The address the editor offered: made of the agent's name as it is now.
+    agent_name = await _agent_name(request, session.agent_id)
+    if agent_address(agent_name).lower() not in {email.lower() for email in body.emails}:
+        raise HTTPException(status_code=400, detail="The comment does not mention the agent.")
+    author_id, author = await _acting_user(request, tenant)
+    # A mention's message needs a name, and a person's display name may be empty.
+    author = author or "Someone"
+    target = await _document_session(request, session)
+    # On a computer the pane may name the file in another spelling than its open row: compared without case there.
+    documents = await office_sessions.open_like(request.app.state.session_factory, [location_of(target, body.path)])
+    if not any(session.id in document.session_ids for document in documents):
+        raise HTTPException(
+            status_code=409, detail=f"{body.path} is not open in this chat any more: open it here again to mention the agent.",
+        )
+    content, metadata = mention_message(
+        path=body.path, thread=body.comment_id, kind=kind.file_type, author=author, author_id=author_id,
+        comment=body.message, agent_name=agent_name,
+    )
+    return await deliver_message(
+        request, session_id, SendMessageRequest(content=content, metadata=metadata), tenant, agent_runtime,
+        extra={"source": MENTION_SOURCE,
+               **build_principal_stamp(user_id=tenant.user_id, service_account_id=tenant.service_account_id)},
+    )
 
 
 @router.get("/office/files/{token}")

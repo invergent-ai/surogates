@@ -224,6 +224,7 @@ export async function getWorkspaceFile(
 export interface WorkspaceEditorResponse {
   document_server_url: string;
   config: Record<string, unknown>;
+  mentionable_users?: { id: string; name: string; email: string }[];
 }
 
 export async function getWorkspaceEditor(
@@ -239,4 +240,18 @@ export async function getWorkspaceEditor(
     throw new Error(await refusal(sessionId, response, "Failed to open the document"));
   }
   return (await response.json()) as WorkspaceEditorResponse;
+}
+
+export async function notifyEditorMention(
+  sessionId: string,
+  mention: { path: string; comment_id: string; message: string; emails: string[] },
+): Promise<void> {
+  const response = await authFetch(`/api/v1/sessions/${sessionId}/workspace/editor/mention`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mention),
+  });
+  if (!response.ok) {
+    throw new Error(await refusal(sessionId, response, "Could not tell the agent about the comment"));
+  }
 }

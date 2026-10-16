@@ -58,3 +58,34 @@ export function checkBatch<T>(input: unknown, max: number, one: (raw: Record<str
     }
   });
 }
+
+/** The most characters a reply in a comment thread has: it states the result, and the conversation stays in the chat. */
+export const MAX_THREAD_REPLY = 400;
+
+/** A reply to a comment thread, or its resolve. The thread is named as the outline names it. */
+export type CommentOp = { op: "reply"; thread: string; body: string } | { op: "resolve"; thread: string };
+
+export const isCommentOp = (op: { op: unknown }): boolean => op.op === "reply" || op.op === "resolve";
+
+/** *raw* checked as a reply or a resolve; null when it is another op. */
+export function commentOp(raw: Record<string, unknown>): CommentOp | null {
+  if (raw.op === "resolve") return { op: "resolve", thread: threadArg(raw.thread) };
+  if (raw.op !== "reply") return null;
+  const thread = threadArg(raw.thread);
+  const body = textArg(raw.body, "body");
+  if (body.length > MAX_THREAD_REPLY) throw new ContentError("a thread reply states just the result, in one or two sentences: keep the rest for the chat");
+  return { op: "reply", thread, body };
+}
+
+/** *ops*, its replies and resolves alone in it or absent: a spreadsheet, deck or PDF changes a thread in a call of its own. */
+export function commentsAlone<T extends { op: unknown }>(ops: T[]): T[] {
+  if (ops.some(isCommentOp) && !ops.every(isCommentOp)) throw new ContentError("reply and resolve go in a call of their own, with no other op beside them.");
+  return ops;
+}
+
+// A thread's id as the outline shows it: a number is taken as its string.
+function threadArg(value: unknown): string {
+  const thread = textArg(value, "thread");
+  if (thread.length > 64) throw new ContentError('"thread" is a comment thread\'s id, as the outline shows it.');
+  return thread;
+}

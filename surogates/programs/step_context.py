@@ -171,7 +171,9 @@ async def _last_form_answers(session_factory: Any, session_id: Any) -> str | Non
             )
         ).scalars().all()
     for data in rows:
-        if ((data or {}).get("source") or {}).get("flow_reply"):
+        source = (data or {}).get("source")
+        # A message's source is a dict for a form's answer, a string for others (a mention, an inbox decision).
+        if isinstance(source, dict) and source.get("flow_reply"):
             return " ".join(str(data.get("content") or "").split())[:600] or None
     return None
 

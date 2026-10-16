@@ -1026,7 +1026,7 @@ export function inspect(args: InspectArgs): Inspected {
     const spec: SlideSpec = {
       background: background === "picture" ? null : background,
       shapes: [...(background === "picture" ? [shot(section, "box", sectionBox)] : []), ...layer(section)],
-      notes: (section.querySelector(":scope > aside")?.textContent ?? "").trim(), hidden: section.hasAttribute("hidden"),
+      notes: section.querySelector(":scope > aside")?.textContent?.trim() ?? null, hidden: section.hasAttribute("hidden"),
       transition: transition ? { effect: transition, ms: transition === "magic" ? 1000 : 700 } : null,
     };
     return { spec, icons, embeds: embedded, shots };

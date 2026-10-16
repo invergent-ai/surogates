@@ -44,10 +44,27 @@ watches and may edit the same document. Work like a colleague in a shared docume
   `references/word.md`.
 - **Spreadsheets:** read the range before writing it, and pass what it showed as `expect`. Values go in as typed into
   a cell: a formula starts with `=` and stays live. See `references/cell.md`.
-- **Slide decks:** each slide is one `<section>` in the Claude Slides format, built as native shapes the user can edit.
-  A slide too full for its boxes is refused: split it; nothing shrinks. See `references/slide.md`.
+- **Slide decks:** a small change (a title, a word, a number) is `text` on that one shape, which keeps its place and
+  style. A new or redesigned slide is one `<section>` in the Claude Slides format, built as native shapes the user can
+  edit. A slide too full for its boxes is refused: split it; nothing shrinks. See `references/slide.md`.
 - **PDFs:** fill fields, add, remove or rotate pages, redact, annotate. Existing text cannot be changed. See
   `references/pdf.md`.
+
+## When a comment calls you
+
+A message that starts `[Comment on <file>]` is a person who mentioned you in a comment in that document: the words in
+« » are theirs, quoted from it. "On it, I'll reply here when done." is already posted in the thread, and the note with
+the message says which thread it is, or, in a PDF, how to find it.
+
+1. Read the document with `office_read`, and the thread in its outline: the mention may be a reply, with the question
+   earlier in the thread.
+2. Do what it asks with `office_edit`, as for any request.
+3. Reply in the thread with **only the result**, in one or two sentences: "Fixed: Q1 North is 120, from the March
+   export." Never your reasoning, the steps or the conversation: those go in the chat. A reply over 400 characters is
+   refused. If you cannot do it, say why in one sentence, and leave the thread open.
+4. Resolve the thread **last**, in the same call as the reply or after it: a resolve can close the person's open reply
+   box.
+5. Finish with one line in the chat, as after any request.
 
 ## Writing rules
 

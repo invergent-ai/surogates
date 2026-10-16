@@ -19,11 +19,13 @@ const { loadDocsApi: realLoadDocsApi } = await vi.importActual<typeof import("..
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 const destroyEditor = vi.fn();
-const DocEditor = vi.fn(() => ({ destroyEditor }));
+const setUsers = vi.fn();
+const DocEditor = vi.fn(() => ({ destroyEditor, setUsers }));
 
 beforeEach(() => {
   DocEditor.mockClear();
   destroyEditor.mockClear();
+  setUsers.mockClear();
   (window as unknown as { DocsAPI: unknown }).DocsAPI = { DocEditor };
 });
 
@@ -251,5 +253,79 @@ describe("loadDocsApi", () => {
     await rejected;
     realLoadDocsApi("https://slow.example");
     expect(scripts).toHaveLength(2);
+  });
+});
+
+describe("comments that mention the agent", () => {
+  const AGENT = { id: "agent:writer", name: "Writer", email: "writer@agent.invalid" };
+  const notice = (emails: string[]) => ({
+    data: { emails, actionId: "15689582", actionLink: { action: { type: "comment", data: "15689582" } }, message: "@writer@agent.invalid is Q1 right?" },
+  });
+
+  async function opened(over: Partial<AgentChatAdapter> = {}) {
+    const config = { document: { key: "k" }, token: "t" };
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config, mentionable_users: [AGENT] });
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceEditorConfig, ...over })} sessionId="s-1" path="docs/Plan.docx" onClose={() => {}} />,
+    );
+    const passed = (DocEditor.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
+    return { view, config, passed, events: passed.events as Record<string, (event: { data?: unknown }) => void> };
+  }
+
+  it("offers the agent to mention, and sends a comment that mentions it to the chat", async () => {
+    const notifyWorkspaceEditorMention = vi.fn().mockResolvedValue(undefined);
+    const { config, passed, events } = await opened({ notifyWorkspaceEditorMention });
+    expect(passed).toMatchObject(config);
+    events.onRequestUsers({ data: { c: "info" } });
+    expect(setUsers).toHaveBeenCalledWith({ c: "info", users: [AGENT] });
+    act(() => events.onRequestSendNotify(notice(["Writer@Agent.invalid"])));
+    expect(notifyWorkspaceEditorMention).toHaveBeenCalledWith({
+      sessionId: "s-1", path: "docs/Plan.docx", commentId: "15689582", message: "@writer@agent.invalid is Q1 right?", emails: ["Writer@Agent.invalid"],
+    });
+  });
+
+  it("offers the agent to a comment's mention, and nobody to any other list the editor asks for", async () => {
+    const { events } = await opened({ notifyWorkspaceEditorMention: vi.fn().mockResolvedValue(undefined) });
+    events.onRequestUsers({ data: { c: "mention" } });
+    expect(setUsers).toHaveBeenLastCalledWith({ c: "mention", users: [AGENT] });
+    // A sheet's protected range would give its rights to the agent's mention id, which no editor of it has.
+    events.onRequestUsers({ data: { c: "protect" } });
+    expect(setUsers).toHaveBeenLastCalledWith({ c: "protect", users: [] });
+    events.onRequestUsers({});
+    expect(setUsers).toHaveBeenLastCalledWith({ c: undefined, users: [] });
+  });
+
+  it("sends nothing for a comment that mentions someone else", async () => {
+    const notifyWorkspaceEditorMention = vi.fn().mockResolvedValue(undefined);
+    const { events } = await opened({ notifyWorkspaceEditorMention });
+    events.onRequestSendNotify(notice(["ana@example.com"]));
+    expect(notifyWorkspaceEditorMention).not.toHaveBeenCalled();
+  });
+
+  it("says when the chat could not be told", async () => {
+    const said = "docs/Plan.docx is not open in this chat any more: open it here again to mention the agent.";
+    const notifyWorkspaceEditorMention = vi.fn().mockRejectedValue(new Error(said));
+    const { view, events } = await opened({ notifyWorkspaceEditorMention });
+    await act(async () => {
+      events.onRequestSendNotify(notice(["writer@agent.invalid"]));
+    });
+    await act(async () => {});
+    expect([...view.querySelectorAll('[role="status"]')].map((node) => node.textContent)).toContain(`The agent was not told about your comment: ${said}`);
+  });
+
+  it("without the adapter method, passes the config as signed", async () => {
+    const { config, passed } = await opened();
+    expect(passed).toBe(config);
+  });
+
+  it("where the chat offers nobody to mention, passes the config as signed", async () => {
+    const config = { document: { key: "k" }, token: "t" };
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config, mentionable_users: [] });
+    const notifyWorkspaceEditorMention = vi.fn().mockResolvedValue(undefined);
+    await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceEditorConfig, notifyWorkspaceEditorMention })} sessionId="s-1"
+        path="docs/Plan.docx" onClose={() => {}} />,
+    );
+    expect((DocEditor.mock.calls[0] as unknown as [string, unknown])[1]).toBe(config);
   });
 });

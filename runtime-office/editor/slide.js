@@ -7,7 +7,7 @@
 // only where the builder has no call; each says so.
 (function () {
   "use strict";
-  var pres = Api.GetPresentation(), VIEW_BUDGET = 30000, MAX_MATCHES = 50, EMU_PER_PT = 12700;
+  var pres = Api.GetPresentation(), VIEW_BUDGET = 30000, MAX_MATCHES = 50, EMU_PER_PT = 12700, THREAD_BUDGET = 15000, MAX_REPLIES = 10;
 
   function hash(text) {
     var h = 0x811c9dc5;
@@ -78,8 +78,83 @@
   // --- reading
 
   function outline() {
-    return { canvas: [1920, Math.round(1920 * pres.GetHeight() / pres.GetWidth())], slides: pres.GetAllSlides().map(entry) };
+    return { canvas: [1920, Math.round(1920 * pres.GetHeight() / pres.GetWidth())], slides: pres.GetAllSlides().map(entry), comments: threads() };
   }
+
+  // --- comment threads. A thread is named by its comment's GUID, the id the editor's mentions carry. Internal: the GUID
+  // is only in the comment's data (`GetData().m_sGuid`), the builder's GetId throws in a presentation, and the slide is
+  // the comment's holder's (`Comment.Parent.slide`, numbered from 0).
+
+  function guidOf(c) { return c.Comment.GetData().m_sGuid; }
+  function slideOf(c) { var holder = c.Comment.Parent; return holder && holder.slide ? holder.slide.num + 1 : null; }
+
+  function repliesOf(c) {
+    var out = [];
+    for (var i = Math.max(0, c.GetRepliesCount() - MAX_REPLIES); i < c.GetRepliesCount(); i++) {
+      var r = c.GetReply(i);
+      out.push({ author: r.GetAuthorName(), text: clip(String(r.GetText() || ""), 300) });
+    }
+    return out;
+  }
+
+  // Open threads first (a mention's thread is open), until the budget: the outline stays under what a tool result holds.
+  function threads() {
+    var all = pres.GetAllComments(), out = [], size = 0;
+    var ordered = all.filter(function (c) { return !c.IsSolved(); }).concat(all.filter(function (c) { return !!c.IsSolved(); }));
+    for (var i = 0; i < ordered.length && size < THREAD_BUDGET; i++) {
+      var c = ordered[i], thread = { id: guidOf(c), slide: slideOf(c), author: c.GetAuthorName(),
+        text: clip(String(c.GetText() || ""), 300), replies: repliesOf(c), resolved: !!c.IsSolved() };
+      size += JSON.stringify(thread).length;
+      out.push(thread);
+    }
+    return out;
+  }
+
+  function threadById(id) { return pres.GetAllComments().filter(function (c) { return guidOf(c) === id; })[0] || null; }
+
+  // The builder's AddReply and SetSolved change a comment's data in place, so cancelling the group could not take them
+  // back: a copy is changed and set instead, and the history keeps the old data. A slide comment's data has no Copy, and
+  // its class is out of reach here (the connector's `Asc` shadows it): its fields are copied one by one. (internal)
+  function copyOf(d) {
+    var out = new AscCommon.CCommentData();
+    for (var k in d) if (Object.prototype.hasOwnProperty.call(d, k) && typeof d[k] !== "function") out[k] = d[k];
+    out.m_aReplies = (d.m_aReplies || []).map(copyOf);
+    return out;
+  }
+
+  // As the builder's AddReply makes it (internal).
+  function replyOf(text, agent) {
+    var reply = new AscCommon.CCommentData(), now = new Date();
+    reply.SetText(text);
+    reply.SetUserName(agent.name);
+    reply.m_sUserId = agent.id;
+    reply.m_sTime = String(now.getTime() - now.getTimezoneOffset() * 60000);
+    reply.m_sOOTime = String(now.getTime());
+    return reply;
+  }
+
+  function comment(ops, agent) {
+    var found = Object.create(null);
+    ops.forEach(function (op, index) {
+      if (!found[op.thread]) found[op.thread] = threadById(op.thread);
+      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: its comment was deleted, or the slide it was on was removed. Read the outline again.");
+    });
+    Object.keys(found).forEach(function (id) {
+      var c = found[id], before = c.Comment.GetData(), data = copyOf(before), first = -1;
+      ops.forEach(function (op, index) {
+        if (op.thread !== id) return;
+        if (first < 0) first = index;
+        if (op.op === "reply") data.Add_Reply(replyOf(op.body, agent));
+        else data.SetSolved(true);
+      });
+      pres.Presentation.EditComment(c.Comment.Get_Id(), data);   // internal: no builder call sets a comment's data
+      // The editor leaves a comment someone holds as it was, and says nothing.
+      if (c.Comment.GetData() === before) throw new Refusal(first, "Someone is changing comment thread " + id + " right now: nothing applied. Try again in a moment.");
+    });
+    return { results: ops.map(function (op, index) { return { op: index }; }) };
+  }
+
+  function onlyComments(ops) { return ops.every(function (op) { return op.op === "reply" || op.op === "resolve"; }); }
 
   function fillText(uni) {   // a compiled fill (internal: the builder reads only direct formatting)
     var f = uni && uni.fill;
@@ -532,10 +607,57 @@
     var none = Api.CreateSlideShowTransition();
     none.SetEntryEffect("effectNone");
     slide.SetSlideShowTransition(none);
+    // Its notes stay unless its HTML has an <aside>, whose words replace them: an empty one clears them.
     var notes = slide.GetNotesPage();
-    if (notes && notes.GetBodyShape()) notes.GetBodyShape().GetDocContent().RemoveAllElements();
+    if (spec.notes !== null && notes && notes.GetBodyShape()) notes.GetBodyShape().GetDocContent().RemoveAllElements();
     build(slide, spec);
     return slide;
+  }
+
+  // --- one shape's text, the rest of the slide as it is
+
+  function shapeOf(slide, id) {
+    var drawings = slide.GetAllDrawings();
+    for (var i = 0; i < drawings.length; i++) if (String(drawings[i].GetInternalId()) === String(id)) return drawings[i];
+    return null;
+  }
+  function textShape(op, index) {
+    var slide = slideById(op.slide), shape = slide ? shapeOf(slide, op.shape) : null;
+    if (!shape) throw new Refusal(index, "Slide " + op.slide + " has no shape " + op.shape + " now: an earlier op of this call rebuilt or removed it, or the id is not one the slide view gave. Read the slide again.");
+    // internal: the builder cannot tell whether a shape has a text body
+    if (shape.GetClassType() !== "shape" || !(shape.Shape && shape.Shape.txBody)) {
+      throw new Refusal(index, "Shape " + op.shape + " has no text to change: it is a picture, a table, a group or a shape without a text box. Rebuild the slide with slides for that.");
+    }
+    return shape;
+  }
+  // The run a paragraph's new text is set in: its first with text, else its first.
+  function styleRunOf(p) {
+    var first = -1;
+    for (var j = 0; j < p.GetElementsCount(); j++) {
+      var el = p.GetElement(j);
+      if (!el || el.GetClassType() !== "run") continue;
+      if (first < 0) first = j;
+      if (String(el.GetText() || "")) return j;
+    }
+    return first;
+  }
+  function setLine(p, line) {
+    var keep = styleRunOf(p), run = keep >= 0 ? p.GetElement(keep) : Api.CreateRun();
+    for (var j = p.GetElementsCount() - 1; j >= 0; j--) if (j !== keep) p.RemoveElement(j);
+    run.ClearContent();
+    if (line) run.AddText(line);
+    if (keep < 0) p.AddElement(run);
+  }
+  // Each line is a paragraph, kept with its alignment, bullet and spacing and set in its first run's style; a line past
+  // the shape's paragraphs is set as its last one. The shape's place, size and placeholder are not touched.
+  function setText(shape, text) {
+    var content = shape.GetDocContent(), lines = text.split("\n"), count = content.GetElementsCount();
+    for (var i = 0; i < lines.length; i++) {
+      var p = i < count ? content.GetElement(i) : content.GetElement(count - 1).Copy();
+      if (i >= count) content.Push(p);
+      setLine(p, lines[i]);
+    }
+    for (var k = content.GetElementsCount() - 1; k >= lines.length; k--) content.RemoveElement(k);
   }
 
   // --- the batch: every check first, then the changes in order
@@ -562,6 +684,10 @@
       } else if (op.op === "remove") {
         op.slides.forEach(function (s) { guarded(s, index); removed[s.id] = true; });
         if (ids.filter(function (id) { return !removed[id]; }).length === 0) throw new Refusal(index, "A deck keeps at least one slide.");
+      } else if (op.op === "text") {
+        if (removed[op.slide]) throw new Refusal(index, "Slide " + op.slide + " is removed by this call.");
+        guarded({ id: op.slide, hash: op.hash }, index);
+        textShape(op, index);
       } else if (op.op === "order") {
         if (op.ids.slice().sort().join(",") !== ids.slice().sort().join(",")) {
           throw new Refusal(index, "\"order\" lists every slide of the deck once, by id. Its slides are now: " + ids.join(", ") + ".");
@@ -575,7 +701,7 @@
   function emptyTemplate(ops) {
     var all = pres.GetAllSlides(), slide = all[0];
     if (all.length !== 1 || !ops.some(function (op) { return op.op === "slides" && op.slides.some(function (s) { return s.id === undefined; }); })) return null;
-    if (ops.some(function (op) { return op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
+    if (ops.some(function (op) { return op.op === "text" ? op.slide === idOf(slide) : op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
     var layout = slide.GetLayout(), transition = slide.GetSlideShowTransition();
     if (!layout || layout.GetName() !== "Title Slide" || !slide.GetVisible() || notesOf(slide) || connectorsOf(slide).length) return null;
     // internal: the builder reads no background; a slide that follows its layout has none of its own
@@ -598,6 +724,10 @@
       }
       if (op.op === "remove") {
         op.slides.forEach(function (s) { slideById(s.id).Delete(); });
+        return { op: index };
+      }
+      if (op.op === "text") {
+        setText(textShape(op, index), op.text);
         return { op: index };
       }
       op.ids.forEach(function (id, at) { var slide = slideById(id); if (slide.GetSlideIndex() !== at) slide.MoveTo(at); });
@@ -630,7 +760,7 @@
     if (scope.action === "outline") return outline();
     if (scope.action === "slide") return view(scope.target);
     if (scope.action === "search") return search(scope.query);
-    if (scope.action === "edit") return edit(scope.ops);
+    if (scope.action === "edit") return onlyComments(scope.ops) ? comment(scope.ops, scope.agent) : edit(scope.ops);
     return { __error: "unknown action " + scope.action };
   } catch (e) {
     // A builder call that throws inside the editor's no-history section leaves its object registry off: everything

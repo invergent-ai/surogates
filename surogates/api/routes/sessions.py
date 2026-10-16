@@ -1049,6 +1049,23 @@ async def send_message(
     _rate: None = Depends(rate_limit_dep),
 ) -> SendMessageResponse:
     """Send a user message to a session, triggering agent processing."""
+    return await deliver_message(request, session_id, body, tenant, agent_runtime)
+
+
+async def deliver_message(
+    request: Request,
+    session_id: UUID,
+    body: SendMessageRequest,
+    tenant: TenantContext,
+    agent_runtime: AgentRuntimeContext,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> SendMessageResponse:
+    """A person's message to a session, past every gate a typed one passes, then the session woken.
+
+    *extra* is merged into the event by a route that writes the message itself (its ``source``, its principal). Such a
+    message is never taken as the answer to a question the agent waits on, nor to a program step: it is no reply typed
+    under either."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
@@ -1143,18 +1160,21 @@ async def send_message(
     # pipeline makes for plain replies (Slack instead nudges toward its
     # modal; the web composer stays enabled under the question widget,
     # so typing must work here or the wake stays parked on the tool
-    # until its timeout).  Guards, in order: only genuinely-active
-    # sessions (a terminal session's tool already cancelled itself);
-    # only real web users (an API service-account client cannot detect
-    # the reinterpretation); only pure text (images/attachments are new
-    # material for the next turn).  The claim is atomic among
-    # claim-first callers; the form's respond route emits first and
-    # claims best-effort, so the helper also refuses when a response
-    # event already exists for the tool call.  Commerce/allowance gates
-    # are deliberately not re-run: the resumed turn spends the
-    # reservation its original message already authorized.
+    # until its timeout).  Guards, in order: only a message its person
+    # typed (a route's own message, a mention's, is no reply); only
+    # genuinely-active sessions (a terminal session's tool already
+    # cancelled itself); only real web users (an API service-account
+    # client cannot detect the reinterpretation); only pure text
+    # (images/attachments are new material for the next turn).  The
+    # claim is atomic among claim-first callers; the form's respond
+    # route emits first and claims best-effort, so the helper also
+    # refuses when a response event already exists for the tool call.
+    # Commerce/allowance gates are deliberately not re-run: the resumed
+    # turn spends the reservation its original message already
+    # authorized.
     if (
-        was_active
+        extra is None
+        and was_active
         and not request.url.path.startswith("/v1/api/")
         and body.content.strip()
         and not body.images
@@ -1417,7 +1437,7 @@ async def send_message(
         event_data["metadata"] = body.metadata
     if attachments_payload:
         event_data["attachments"] = attachments_payload
-    if tenant.user_id is not None and outbound_dm(session.channel, session.config):
+    if extra is None and tenant.user_id is not None and outbound_dm(session.channel, session.config):
         # The web chat a step waited in: the person's message may be its answer.
         from surogates.channels.outbound import begin_step_reply
         await begin_step_reply(
@@ -1425,6 +1445,8 @@ async def send_message(
             agent_id=session.agent_id, platform="web",
             platform_user_id=str(tenant.user_id), session_id=session_id,
         )
+    if extra:
+        event_data.update(extra)
     event_id = await store.emit_event(
         session_id,
         EventType.USER_MESSAGE,
