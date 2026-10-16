@@ -19,7 +19,7 @@ It speaks the real wire format and signs like the real thing — there is no
 "auth off" switch.  It serves OpenID metadata and a JWKS for an RSA key made
 at first start (kept in ``--state`` so a restart does not invalidate the
 runtime's cached key), mints RS256 tokens (``iss`` api.botframework.com,
-``aud`` the App ID, a ``serviceUrl`` claim naming this server) for every
+``aud`` the App ID, a ``serviceurl`` claim naming this server) for every
 activity it posts to ``--messaging-endpoint``, checks client credentials on
 ``/{tenant}/oauth2/v2.0/token``, and accepts only the tokens it issued on the
 connector API (``/v3/conversations/{id}/activities``: POST, PUT, typing).
@@ -101,7 +101,7 @@ def mint_token(service: str, *, app_id: str = APP_ID, ttl: int = 3600) -> str:
     now = int(time.time())
     claims = {
         "iss": ISSUER, "aud": app_id, "nbf": now - 5, "exp": now + ttl,
-        "serviceUrl": service,
+        "serviceurl": service,
     }
     return jwt.encode(claims, _pem(), algorithm="RS256", headers={"kid": KID})
 

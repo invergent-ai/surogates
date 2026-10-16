@@ -387,8 +387,11 @@ class TeamsPlatform:
         if not isinstance(activity, dict):
             return False
         # Replies are POSTed (with our token) to the activity's serviceUrl, so
-        # it must be the one Microsoft signed.
-        if claims.get("serviceUrl") != activity.get("serviceUrl"):
+        # it must be the one Microsoft signed.  The connector spells the claim
+        # ``serviceurl`` (botbuilder's SERVICE_URL_CLAIM); accept the camel-case
+        # form too.
+        claimed = claims.get("serviceurl", claims.get("serviceUrl"))
+        if claimed != activity.get("serviceUrl"):
             logger.warning("[teams] serviceUrl claim does not match the activity for %s", app_id)
             return False
         endorsements = key.get("endorsements")

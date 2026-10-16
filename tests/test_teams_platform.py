@@ -56,7 +56,7 @@ def _token(*, pem: bytes = KEY_A, kid: str = "A", **claims) -> str:
     now = int(time.time())
     body = {
         "iss": BOT_FRAMEWORK_ISSUER, "aud": APP_ID, "nbf": now - 10,
-        "exp": now + 3600, "serviceUrl": SERVICE_URL,
+        "exp": now + 3600, "serviceurl": SERVICE_URL,
     }
     body.update(claims)
     return jwt.encode(body, pem.decode(), algorithm="RS256", headers={"kid": kid})
@@ -116,11 +116,23 @@ async def test_verify_accepts_a_bot_framework_token_for_this_app(platform):
     {"aud": "11111111-0000-4000-8000-000000000000"},
     {"iss": "https://sts.windows.net/evil/"},
     {"exp": int(time.time()) - 600, "nbf": int(time.time()) - 4000},
-    {"serviceUrl": "https://attacker.example.test/"},
+    {"serviceurl": "https://attacker.example.test/"},
 ])
 async def test_verify_rejects_a_bad_claim(platform, claims):
     _mock_keys(respx, _jwk(KEY_A, "A"))
     assert await _verify(platform, _token(**claims)) is False
+
+
+@respx.mock
+async def test_verify_accepts_the_camel_case_service_url_claim(platform):
+    _mock_keys(respx, _jwk(KEY_A, "A"))
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": BOT_FRAMEWORK_ISSUER, "aud": APP_ID, "nbf": now - 10,
+         "exp": now + 3600, "serviceUrl": SERVICE_URL},
+        KEY_A.decode(), algorithm="RS256", headers={"kid": "A"},
+    )
+    assert await _verify(platform, token) is True
 
 
 @respx.mock
