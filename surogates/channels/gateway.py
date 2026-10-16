@@ -20,8 +20,9 @@ connection itself, one per customer bot:
   ``channel_routing_changed:discord:<app id>`` it lists the active routings
   (ops ``GET /api/channels/by-kind/discord``) and, per bot, takes the Redis
   leader lock ``discord-gateway:<app id>``: two replicas holding one bot's
-  Gateway would answer every message twice.  The lock is renewed each pass;
-  a replica that dies lets it expire and another takes the bot over.
+  Gateway would answer every message twice.  Held locks are renewed on their
+  own timer, so a slow ops cannot let one lapse; a replica that dies lets it
+  expire and another takes the bot over.
 
 No discord.py: a thin client over ``websockets`` is all the runtime needs,
 since everything outbound is plain REST (:mod:`.platforms.discord`).
@@ -337,9 +338,9 @@ class DiscordGatewaySupervisor:
                 routings = await self._platform_client.list_channel_routings("discord")
             except Exception:
                 # Ops unreachable says nothing about the bots: keep what we
-                # hold (and its locks) rather than dropping every connection.
+                # hold (the renewal timer keeps its locks) rather than
+                # dropping every connection.
                 logger.warning("[discord] listing routings failed; keeping connections", exc_info=True)
-                await self._renew_all()
                 return
             wanted = {r["channel_identifier"]: r for r in routings if r.get("channel_identifier")}
             if changed is not None:
@@ -357,9 +358,6 @@ class DiscordGatewaySupervisor:
                             ident, held.client.fatal_code,
                         )
                     await self._stop(ident)
-                elif not await self._renew(held):
-                    logger.warning("[discord] lost the Gateway lock for %s; stopping", ident)
-                    await self._stop(ident, release=False)
 
             for ident, routing in wanted.items():
                 if ident not in self._held and ident not in self._halted:
@@ -369,12 +367,19 @@ class DiscordGatewaySupervisor:
                         logger.exception("[discord] starting the Gateway for %s failed", ident)
 
     async def run(self) -> None:
-        """Reconcile now, every ``LOCK_TTL_S / 3`` and on every routing change."""
+        """Reconcile now, every ``LOCK_TTL_S / 3`` and on every routing change;
+        renew the held locks every ``LOCK_TTL_S / 3`` on a timer of their own,
+        outside the reconcile mutex, so a slow ops call never lets one lapse."""
 
         async def _tick() -> None:
             while True:
                 await self.reconcile()
                 await asyncio.sleep(self.LOCK_TTL_S / 3)
+
+        async def _keep_locks() -> None:
+            while True:
+                await asyncio.sleep(self.LOCK_TTL_S / 3)
+                await self.renew_locks()
 
         async def _on_message(msg: dict) -> None:
             channel = msg.get("channel") or ""
@@ -386,6 +391,7 @@ class DiscordGatewaySupervisor:
         try:
             await asyncio.gather(
                 _tick(),
+                _keep_locks(),
                 listen_forever(
                     self._redis, ["channel_routing_changed:discord:*"], _on_message,
                     name="[discord] Gateway supervisor",
@@ -454,7 +460,10 @@ class DiscordGatewaySupervisor:
             logger.warning("[discord] renewing a Gateway lock failed", exc_info=True)
             return True
 
-    async def _renew_all(self) -> None:
+    async def renew_locks(self) -> None:
+        """Renew every held lock; stop the connection whose lock was lost."""
         for ident, held in list(self._held.items()):
-            if not await self._renew(held):
+            # Checked again after the await: reconcile may have replaced it.
+            if not await self._renew(held) and self._held.get(ident) is held:
+                logger.warning("[discord] lost the Gateway lock for %s; stopping", ident)
                 await self._stop(ident, release=False)

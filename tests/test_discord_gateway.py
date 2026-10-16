@@ -318,3 +318,53 @@ async def test_a_fatal_bot_is_left_alone_until_its_routing_changes():
     await sup.reconcile(changed="app1")
     assert len(_FakeClient.instances) == 2
     await sup.shutdown()
+
+
+class _SlowOps(_Ops):
+    """Answers the first listing, then hangs as an overloaded ops would."""
+
+    def __init__(self, routings):
+        super().__init__(routings)
+        self.calls = 0
+
+    async def list_channel_routings(self, kind):
+        self.calls += 1
+        if self.calls > 1:
+            await asyncio.Event().wait()
+        return self.routings
+
+
+async def test_held_locks_are_renewed_while_ops_hangs(monkeypatch):
+    async def _no_pubsub(*a, **kw):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(gw, "listen_forever", _no_pubsub)
+    redis = _Redis()
+    renewals = []
+    original_set = redis.set
+
+    async def _set(key, value, **kw):
+        if kw.get("xx"):
+            renewals.append(key)
+        return await original_set(key, value, **kw)
+
+    redis.set = _set
+    sup = _supervisor([ROUTING], redis=redis)
+    sup._platform_client = _SlowOps([ROUTING])
+    sup.LOCK_TTL_S = 0.15
+    task = asyncio.create_task(sup.run())
+    await _wait(lambda: sup._platform_client.calls >= 2 and len(renewals) >= 2)
+    assert sup.held == {"app1"}
+    await _stop(task)
+
+
+async def test_a_lost_lock_stops_the_bot_without_freeing_it():
+    redis = _Redis()
+    sup = _supervisor([ROUTING], redis=redis)
+    await sup.reconcile()
+    await asyncio.sleep(0)
+    (client,) = _FakeClient.instances
+    redis.data["discord-gateway:app1"] = b"other-replica"
+    await sup.renew_locks()
+    assert client.cancelled and sup.held == set()
+    assert redis.data == {"discord-gateway:app1": b"other-replica"}
