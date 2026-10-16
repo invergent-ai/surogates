@@ -290,6 +290,24 @@ def _extract_files(attachments: list) -> list[InboundFileRef]:
 # ---------------------------------------------------------------------------
 
 
+def _split_utf8(text: str, budget: int) -> list[str]:
+    """:func:`split_text` with every chunk at most *budget* UTF-8 bytes.
+
+    A chunk over the budget is split again at a character limit scaled down
+    by how far over it is, until every piece fits.
+    """
+    out: list[str] = []
+    pending = split_text(text, budget)
+    while pending:
+        chunk = pending.pop(0)
+        size = len(chunk.encode("utf-8"))
+        if size <= budget:
+            out.append(chunk)
+        else:
+            pending[:0] = split_text(chunk, max(1, len(chunk) * budget // size))
+    return out
+
+
 @dataclass
 class _Typing:
     task: asyncio.Task | None = None
@@ -308,8 +326,10 @@ class TeamsPlatform:
         identity="member", label="Microsoft Teams",
     )
 
-    #: Teams rejects activities over ~28 KB (MessageSizeTooBig); split under it.
-    _MAX_MESSAGE_CHARS = 24000
+    #: Teams rejects activities over ~28 KB (MessageSizeTooBig, a permanent
+    #: failure); split under it.  Bytes, not characters: a Romanian or CJK
+    #: reply takes two or three bytes a character.
+    _MAX_MESSAGE_BYTES = 24000
 
     descriptor = ChannelDescriptor(
         vault_refs=lambda identifier: {
@@ -517,7 +537,7 @@ class TeamsPlatform:
             return SendResult(success=False, error=error)
 
         text: str = item.payload.get("content", "")
-        chunks = split_text(text, self._MAX_MESSAGE_CHARS) or [text]
+        chunks = _split_utf8(text, self._MAX_MESSAGE_BYTES) or [text]
         root = destination.get("reply_to_id")
 
         last_id: str | None = None

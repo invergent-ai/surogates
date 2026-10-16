@@ -387,6 +387,20 @@ async def test_send_splits_long_replies(platform):
 
 
 @respx.mock
+async def test_send_splits_a_long_non_ascii_reply_by_bytes(platform):
+    """Teams' cap is bytes: 20 000 characters of Romanian is ~40 KB and would
+    be refused for good as MessageSizeTooBig if sent as one message."""
+    _mock_token(respx)
+    post = respx.post(ACTIVITIES).mock(return_value=httpx.Response(201, json={"id": "c"}))
+    text = ("țară " * 4000).strip()  # 19 999 characters, 31 999 bytes
+    result = await platform.send(_item(text), creds=_creds())
+    assert result.success and post.call_count == 2
+    sent = [json.loads(c.request.content)["text"] for c in post.calls]
+    assert all(len(t.encode("utf-8")) <= 24000 for t in sent)
+    assert " ".join(sent) == text
+
+
+@respx.mock
 async def test_send_edits_the_progress_message_in_place(platform):
     _mock_token(respx)
     put = respx.put(f"{ACTIVITIES}/act-9").mock(return_value=httpx.Response(200, json={"id": "act-9"}))
