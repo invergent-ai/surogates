@@ -72,9 +72,13 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 				const users = opened.mentionable_users ?? [];
 				const notify = adapter.notifyWorkspaceEditorMention?.bind(adapter);
 				// The chat's agent is the one person a comment can mention. A comment that mentions it is sent to this
-				// chat, whose agent answers in the comment's thread.
+				// chat, whose agent answers in the comment's thread. Any other list the editor asks for (a sheet's
+				// protected range) gets nobody: the agent's mention id is no editor's, and a right given to it grants none.
 				const events: DocEditorEvents | null = users.length && notify ? {
-					onRequestUsers: (event) => editor?.setUsers({ c: (event.data as { c?: unknown } | undefined)?.c, users }),
+					onRequestUsers: (event) => {
+						const c = (event.data as { c?: unknown } | undefined)?.c;
+						editor?.setUsers({ c, users: c === "mention" || c === "info" ? users : [] });
+					},
 					onRequestSendNotify: (event) => {
 						const mention = (event.data ?? {}) as MentionNotice;
 						const emails = mention.emails ?? [];

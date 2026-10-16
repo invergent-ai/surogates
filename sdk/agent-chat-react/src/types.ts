@@ -922,7 +922,7 @@ export interface AgentChatMentionableUser {
 export interface AgentChatWorkspaceEditor {
   /** Where the browser loads the editor (`<url>/web-apps/apps/api/documents/api.js`). */
   document_server_url: string;
-  /** The signed editor config, passed to `DocsAPI.DocEditor` unchanged. */
+  /** The signed editor config, passed to `DocsAPI.DocEditor` as signed; the pane adds only its own `events` beside it. */
   config: Record<string, unknown>;
   /** Who a comment can mention: the chat's agent where it answers in the thread; none elsewhere. */
   mentionable_users?: AgentChatMentionableUser[];

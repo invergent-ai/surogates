@@ -284,6 +284,17 @@ describe("comments that mention the agent", () => {
     });
   });
 
+  it("offers the agent to a comment's mention, and nobody to any other list the editor asks for", async () => {
+    const { events } = await opened({ notifyWorkspaceEditorMention: vi.fn().mockResolvedValue(undefined) });
+    events.onRequestUsers({ data: { c: "mention" } });
+    expect(setUsers).toHaveBeenLastCalledWith({ c: "mention", users: [AGENT] });
+    // A sheet's protected range would give its rights to the agent's mention id, which no editor of it has.
+    events.onRequestUsers({ data: { c: "protect" } });
+    expect(setUsers).toHaveBeenLastCalledWith({ c: "protect", users: [] });
+    events.onRequestUsers({});
+    expect(setUsers).toHaveBeenLastCalledWith({ c: undefined, users: [] });
+  });
+
   it("sends nothing for a comment that mentions someone else", async () => {
     const notifyWorkspaceEditorMention = vi.fn().mockResolvedValue(undefined);
     const { events } = await opened({ notifyWorkspaceEditorMention });
@@ -305,5 +316,16 @@ describe("comments that mention the agent", () => {
   it("without the adapter method, passes the config as signed", async () => {
     const { config, passed } = await opened();
     expect(passed).toBe(config);
+  });
+
+  it("where the chat offers nobody to mention, passes the config as signed", async () => {
+    const config = { document: { key: "k" }, token: "t" };
+    const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config, mentionable_users: [] });
+    const notifyWorkspaceEditorMention = vi.fn().mockResolvedValue(undefined);
+    await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceEditorConfig, notifyWorkspaceEditorMention })} sessionId="s-1"
+        path="docs/Plan.docx" onClose={() => {}} />,
+    );
+    expect((DocEditor.mock.calls[0] as unknown as [string, unknown])[1]).toBe(config);
   });
 });
