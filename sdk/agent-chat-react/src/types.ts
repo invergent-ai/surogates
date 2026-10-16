@@ -910,12 +910,22 @@ export interface AgentChatWorkspaceFile {
   truncated: boolean;
 }
 
+/** Someone a comment in the editor can mention: the chat's agent. */
+export interface AgentChatMentionableUser {
+  id: string;
+  name: string;
+  /** The address the editor offers and matches the mention by. */
+  email: string;
+}
+
 /** A document opened in the document server's editor. */
 export interface AgentChatWorkspaceEditor {
   /** Where the browser loads the editor (`<url>/web-apps/apps/api/documents/api.js`). */
   document_server_url: string;
   /** The signed editor config, passed to `DocsAPI.DocEditor` unchanged. */
   config: Record<string, unknown>;
+  /** Who a comment can mention: the chat's agent where it answers in the thread; none elsewhere. */
+  mentionable_users?: AgentChatMentionableUser[];
 }
 
 export interface AgentChatWorkspaceUpload {
@@ -1200,6 +1210,18 @@ export interface AgentChatAdapter {
     theme: "light" | "dark";
     view?: boolean;
   }): Promise<AgentChatWorkspaceEditor>;
+  /**
+   * Tells the chat that a comment in its file pane mentioned the agent: the agent answers in the comment's thread.
+   * *commentId* is the editor's id for the comment (a reply's is its thread's), *message* the comment's words.
+   * Optional, like `getWorkspaceEditorConfig`.
+   */
+  notifyWorkspaceEditorMention?(input: {
+    sessionId: string;
+    path: string;
+    commentId: string;
+    message: string;
+    emails: string[];
+  }): Promise<void>;
   openEventStream(input: {
     sessionId: string;
     after: number;

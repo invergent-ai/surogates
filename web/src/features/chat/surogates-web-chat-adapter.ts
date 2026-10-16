@@ -316,6 +316,12 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return await workspaceApi.getWorkspaceEditor(input.sessionId, input.path, input.theme, input.view ?? false);
   },
 
+  async notifyWorkspaceEditorMention(input) {
+    await workspaceApi.notifyEditorMention(input.sessionId, {
+      path: input.path, comment_id: input.commentId, message: input.message, emails: input.emails,
+    });
+  },
+
   async uploadWorkspaceFile(input) {
     return await workspaceApi.uploadFile(
       input.sessionId,

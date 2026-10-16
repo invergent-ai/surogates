@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@invergent/ui-sdk/button";
 import { AlertCircleIcon, DownloadIcon, FileTextIcon, Maximize2Icon, Minimize2Icon, XIcon } from "lucide-react";
-import { type DocEditorInstance, loadDocsApi } from "../../lib/office";
+import { type DocEditorEvents, type DocEditorInstance, loadDocsApi, type MentionNotice } from "../../lib/office";
 import type { AgentChatAdapter, AgentChatOfficeEvent } from "../../types";
 
 interface OfficeEditorPaneProps {
@@ -40,6 +40,7 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 	const placeholderId = `office-editor-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
+	const [mentionTrouble, setMentionTrouble] = useState<string | null>(null);
 	// Trouble reported before the pane opened is old news: the editor opens the file as it stands.
 	const [openedAfter] = useState(() => officeEvent?.eventId ?? 0);
 	const notice = officeEvent && officeEvent.eventId > openedAfter ? officeEvent : null;
@@ -60,6 +61,7 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 		let editor: DocEditorInstance | null = null;
 		setError(null);
 		setLoading(true);
+		setMentionTrouble(null);
 		void (async () => {
 			try {
 				if (!adapter.getWorkspaceEditorConfig) throw new Error("Preview not available. Download the file to open it.");
@@ -67,7 +69,27 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 				await loadDocsApi(opened.document_server_url);
 				if (cancelled) return;
 				if (!window.DocsAPI) throw new Error("The document editor could not be loaded.");
-				editor = new window.DocsAPI.DocEditor(placeholderId, opened.config);
+				const users = opened.mentionable_users ?? [];
+				const notify = adapter.notifyWorkspaceEditorMention?.bind(adapter);
+				// The chat's agent is the one person a comment can mention. A comment that mentions it is sent to this
+				// chat, whose agent answers in the comment's thread.
+				const events: DocEditorEvents | null = users.length && notify ? {
+					onRequestUsers: (event) => editor?.setUsers({ c: (event.data as { c?: unknown } | undefined)?.c, users }),
+					onRequestSendNotify: (event) => {
+						const mention = (event.data ?? {}) as MentionNotice;
+						const emails = mention.emails ?? [];
+						const named = new Set(emails.map((email) => email.toLowerCase()));
+						if (!users.some((user) => named.has(user.email.toLowerCase()))) return;
+						setMentionTrouble(null);
+						void notify({
+							sessionId, path, emails, message: mention.message ?? "",
+							commentId: String(mention.actionLink?.action?.data ?? mention.actionId ?? ""),
+						}).catch((sendError: unknown) => {
+							if (!cancelled) setMentionTrouble(`The agent was not told about your comment: ${(sendError as Error).message}`);
+						});
+					},
+				} : null;
+				editor = new window.DocsAPI.DocEditor(placeholderId, events ? { ...opened.config, events } : opened.config);
 			} catch (openError) {
 				if (!cancelled) setError((openError as Error).message);
 			} finally {
@@ -123,6 +145,11 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 			{notice && saveNotice(notice) && (
 				<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
 					{saveNotice(notice)}
+				</div>
+			)}
+			{mentionTrouble && (
+				<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+					{mentionTrouble}
 				</div>
 			)}
 			{loading && !error && <div className="p-3 text-sm text-muted-foreground">Opening {fileName}…</div>}
