@@ -50,3 +50,15 @@ an earlier op counts).
   information_only, completed, void, sign_here.
 
 **Existing text cannot be changed.** To correct a PDF's words, tell the user; offer a note, a redaction or a new page.
+
+## Comments
+
+A comment in a PDF is an annotation, usually a sticky note (`text`), and its replies. The outline lists each page's
+annotations with their `id`, author, text, latest replies and whether they are resolved. Reply and resolve in a call of
+their own:
+
+```json
+{"ops": [{"op": "reply", "thread": "1_1", "body": "March: the contract says 1 March 2026."}, {"op": "resolve", "thread": "1_1"}]}
+```
+
+A reply states only the result, in one or two sentences (at most 400 characters). Resolve last.

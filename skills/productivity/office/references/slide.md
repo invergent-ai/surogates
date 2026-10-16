@@ -124,3 +124,14 @@ elements per slide.
 - **Too much? Split the slide.** Nothing shrinks.
 - **Square corners.** Never round a card, label, frame or picture: no `border-radius`, no `kind="rounded"`.
 - Keep repeated elements in the same place on every slide of a kind, the heading at the top margin.
+
+## Comments
+
+The outline lists every comment thread: its `id`, its `slide` number, the author, the text, the latest replies and
+whether it is resolved. Reply and resolve in a call of their own:
+
+```json
+{"ops": [{"op": "reply", "thread": "{9D24FA3F-798C-22EB-4B89-84EF55C02C52}", "body": "Moved the start to March, as the lease says."}, {"op": "resolve", "thread": "{9D24FA3F-798C-22EB-4B89-84EF55C02C52}"}]}
+```
+
+A reply states only the result, in one or two sentences (at most 400 characters). Resolve last.

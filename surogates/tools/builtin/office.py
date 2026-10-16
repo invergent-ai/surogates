@@ -43,9 +43,9 @@ READ_DESCRIPTION = (
     "file pane, with everyone's latest edits. Word documents (.docx), spreadsheets (.xlsx), slide decks (.pptx) and "
     "PDFs (.pdf). Read before every office_edit: what it shows is what office_edit targets.\n"
     'view "outline" (default): a Word document\'s blocks (id, hash, kind, first words; comment threads, tracked '
-    "changes; a long one in pages: start=<next>); a spreadsheet's sheets (used range, top rows, merged cells, charts); "
-    "a deck's slides (id, number, title, hash); a PDF's pages (first line, form fields, a checkbox as true/false, "
-    "annotations; start=<next>).\n"
+    "changes; a long one in pages: start=<next>); a spreadsheet's sheets (used range, top rows, merged cells, charts) "
+    "and comment threads; a deck's slides (id, number, title, hash) and comment threads; a PDF's pages (first line, "
+    "form fields, a checkbox as true/false, annotations, each a comment thread with its replies; start=<next>).\n"
     'One in full: view "block" (Word; target = a block id), "range" (spreadsheet; target = "Sheet!A1:D20": the cells '
     'as shown, their formulas and number formats), "slide" (deck; target = a slide id; every shape in canvas px), '
     '"page" (PDF; target = a page number; its text).\n'
@@ -82,7 +82,11 @@ EDIT_DESCRIPTION = (
     "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
     "text|checkbox, page, rect: [x1, y1, x2, y2] in points from the page's top-left, name}; redact {text}, alone in "
     "its call (gone for good once saved); annotate {kind: free_text|stamp, page, rect, text | stamp}. A PDF's "
-    "existing text cannot be changed."
+    "existing text cannot be changed.\n"
+    "Comment threads, in every type: reply {thread, body} and resolve {thread}, where thread is a thread's id as "
+    "office_read's outline shows it. In a spreadsheet, deck or PDF they go in a call of their own. A reply in a thread "
+    "states only the result, in one or two sentences (at most 400 characters): your reasoning, the steps and the "
+    "conversation stay in the chat. Resolve last."
 )
 
 READ_PARAMETERS = {
