@@ -1160,16 +1160,18 @@ async def deliver_message(
     # pipeline makes for plain replies (Slack instead nudges toward its
     # modal; the web composer stays enabled under the question widget,
     # so typing must work here or the wake stays parked on the tool
-    # until its timeout).  Guards, in order: only genuinely-active
-    # sessions (a terminal session's tool already cancelled itself);
-    # only real web users (an API service-account client cannot detect
-    # the reinterpretation); only pure text (images/attachments are new
-    # material for the next turn).  The claim is atomic among
-    # claim-first callers; the form's respond route emits first and
-    # claims best-effort, so the helper also refuses when a response
-    # event already exists for the tool call.  Commerce/allowance gates
-    # are deliberately not re-run: the resumed turn spends the
-    # reservation its original message already authorized.
+    # until its timeout).  Guards, in order: only a message its person
+    # typed (a route's own message, a mention's, is no reply); only
+    # genuinely-active sessions (a terminal session's tool already
+    # cancelled itself); only real web users (an API service-account
+    # client cannot detect the reinterpretation); only pure text
+    # (images/attachments are new material for the next turn).  The
+    # claim is atomic among claim-first callers; the form's respond
+    # route emits first and claims best-effort, so the helper also
+    # refuses when a response event already exists for the tool call.
+    # Commerce/allowance gates are deliberately not re-run: the resumed
+    # turn spends the reservation its original message already
+    # authorized.
     if (
         extra is None
         and was_active

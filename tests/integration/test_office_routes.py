@@ -669,3 +669,70 @@ async def test_a_chat_whose_agent_has_no_office_tools_offers_it_to_nobody_and_re
     assert refused.json()["detail"] == "The agent in this chat cannot answer in comments."
     assert await SessionStore(session_factory).get_events(master.id) == []
     assert woken == []
+
+
+async def test_a_mention_never_answers_the_question_the_agent_waits_on(client, app, session_factory, monkeypatch):
+    from surogates.session.interactive_input import pending_input_for_session
+
+    session_id, headers, _, body, woken = await _mentioning(client, app, session_factory, monkeypatch)
+    store = SessionStore(session_factory)
+    await store.update_session_status(UUID(session_id), "active")
+    await store.emit_event(UUID(session_id), EventType.INBOX_INPUT_REQUIRED, {
+        "tool_call_id": "call_1", "questions": [{"prompt": "Which quarter?", "choices": [{"label": "Q1"}, {"label": "Q2"}]}],
+        "context": "",
+    })
+    response = await client.post(f"/v1/sessions/{session_id}/workspace/editor/mention", json=body, headers=headers)
+    assert response.status_code == 202, response.text
+    [event] = await store.get_events(UUID(session_id), types=[EventType.USER_MESSAGE])
+    assert event.id == response.json()["event_id"] and event.data["source"] == "office_mention"
+    # The question still waits for the person's own answer.
+    assert await store.get_events(UUID(session_id), types=[EventType.ASK_USER_QUESTION_RESPONSE]) == []
+    assert (await pending_input_for_session(store, session_id=UUID(session_id)))["tool_call_id"] == "call_1"
+    assert woken == [UUID(session_id)]
+
+
+async def test_a_mention_is_no_reply_to_the_program_step_the_chat_waits_on(client, app, session_factory, monkeypatch):
+    from datetime import datetime, timezone
+
+    from surogates.db.models import ProgramInvitationRow, ProgramOccurrenceRow
+
+    app.state.settings.office = AGENT_EDITING
+    app.state.runtime_config_cache = _AgentNames()
+
+    async def enqueue(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
+    _, headers, user_id, chat = await _user_chat(client, app, session_factory)
+    # A program reached the person in their web chat, and its step waits for their reply there.
+    store = SessionStore(session_factory)
+    reached = await store.create_session(
+        user_id=user_id, org_id=chat.org_id, agent_id=chat.agent_id,
+        config={"storage_bucket": chat.config["storage_bucket"], "channel_session_key": f"agent:web:dm:{user_id}"},
+    )
+    async with session_factory() as db:
+        occurrence = ProgramOccurrenceRow(org_id=chat.org_id, program_id=uuid.uuid4(), agent_id=chat.agent_id,
+                                          scheduled_for=datetime.now(timezone.utc), skill_ref="post-op",
+                                          template_name="daily", template_language="en_US", status="fired")
+        db.add(occurrence)
+        await db.flush()
+        invitation = ProgramInvitationRow(occurrence_id=occurrence.id, program_id=occurrence.program_id, org_id=chat.org_id,
+                                          agent_id=chat.agent_id, user_id=user_id, platform="web",
+                                          platform_user_id=str(user_id), delivery_state="delivered",
+                                          response_state="awaiting_reply", escalation_state="none")
+        db.add(invitation)
+        await db.commit()
+    await app.state.storage.write(reached.config["storage_bucket"], session_workspace_key(str(reached.id), "docs/Plan.docx"), b"PK")
+    opened = await client.get(f"/v1/sessions/{reached.id}/workspace/editor", params={"path": "docs/Plan.docx"}, headers=headers)
+    assert opened.status_code == 200, opened.text
+    address = f"{reached.agent_id}@agent.invalid"
+    response = await client.post(f"/v1/sessions/{reached.id}/workspace/editor/mention", headers=headers, json={
+        "path": "docs/Plan.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address],
+    })
+    assert response.status_code == 202, response.text
+    # Only the mention reached the chat: no step reply was recorded, nor told to the agent.
+    [event] = await store.get_events(reached.id, types=[EventType.USER_MESSAGE])
+    assert event.data["source"] == "office_mention"
+    async with session_factory() as db:
+        step = await db.get(ProgramInvitationRow, invitation.id)
+    assert (step.response_state, step.session_id) == ("awaiting_reply", None)
