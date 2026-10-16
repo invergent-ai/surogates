@@ -93,7 +93,7 @@ Discord Gateway (wss) ──► DiscordGatewayClient (one per bot, one replica p
 | `free_response_channels` | `[]` | channel ids answered without a mention |
 | `allow_bots` | `none` | `none`, `mentions` or `all` other bots |
 | `message_content` | off | identify with the privileged Message Content intent |
-| `multi_session` | on | off folds every thread of a channel into one conversation |
+| `multi_session` | on | the agent's capability, projected by ops; a Discord thread is its own channel, so it never merges threads |
 | `identity_policy` | `shadow` | `linked` asks unknown people to link their account, in a DM |
 
 ## Ops notes
