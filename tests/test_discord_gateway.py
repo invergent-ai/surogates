@@ -189,6 +189,50 @@ async def test_an_unauthorized_token_is_fatal_before_connecting():
     assert client.fatal_code == 4004
 
 
+async def test_a_channels_messages_are_ingested_in_order_and_others_run_beside():
+    started: list[str] = []
+    release = {"1": asyncio.Event(), "2": asyncio.Event(), "3": asyncio.Event()}
+
+    async def _on(event, data, client):
+        started.append(data["id"])
+        await release[data["id"]].wait()
+
+    client = DiscordGatewayClient(token=TOKEN, intents=0, on_dispatch=_on)
+    for s, (mid, channel) in enumerate((("1", "c1"), ("2", "c1"), ("3", "c2")), 1):
+        await client._handle(None, {"op": 0, "t": "MESSAGE_CREATE", "s": s,
+                                    "d": {"id": mid, "channel_id": channel}})
+    await _wait(lambda: sorted(started) == ["1", "3"])
+    await asyncio.sleep(0.02)
+    assert "2" not in started  # waits for the first message of its channel
+    release["1"].set()
+    await _wait(lambda: started[-1] == "2")
+    release["2"].set()
+    release["3"].set()
+    await _wait(lambda: not client._tasks)
+    assert client._tails == {}
+
+
+async def test_a_stopped_client_cancels_what_it_had_queued(fake):
+    cancelled = asyncio.Event()
+
+    async def _on(event, data, client):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def _message(g, ws):
+        await g.send_dispatch(ws, "MESSAGE_CREATE", {"id": "1", "channel_id": "c1"})
+
+    fake.script[1] = _message
+    client = DiscordGatewayClient(token=TOKEN, intents=0, on_dispatch=_on)
+    task = await _running(client)
+    await _wait(lambda: client._tasks)
+    await _stop(task)
+    await asyncio.wait_for(cancelled.wait(), 1)
+
+
 # ---------------------------------------------------------------------------
 # Supervisor
 # ---------------------------------------------------------------------------

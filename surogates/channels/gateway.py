@@ -103,7 +103,9 @@ class DiscordGatewayClient:
 
     *on_dispatch* receives ``(event_name, data, client)`` for every dispatch
     but READY and RESUMED; it runs as its own task so a slow pipeline never
-    holds up heartbeats or the next event.
+    holds up heartbeats, but after the previous event of the same Discord
+    channel, so a conversation's messages are ingested in order and the first
+    creates its session before the second looks it up.
     """
 
     def __init__(
@@ -127,6 +129,8 @@ class DiscordGatewayClient:
         self._acked = True
         self._healthy = False
         self._tasks: set[asyncio.Task] = set()
+        #: The last dispatch task queued per channel id; the next one waits on it.
+        self._tails: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -135,30 +139,36 @@ class DiscordGatewayClient:
     async def run(self) -> None:
         """Connect, and reconnect, until cancelled or a fatal close code."""
         delay = _BACKOFF_INITIAL_S
-        while True:
-            self._healthy = False
-            try:
-                await self._session()
-            except _Fatal as exc:
-                self.fatal_code = exc.code
-                logger.error(
-                    "[discord] Gateway refused this bot for good (close code %s); "
-                    "fix the token or intents in the Developer Portal and reconnect the channel",
-                    exc.code,
-                )
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — any failure is a reconnect
-                logger.warning("[discord] Gateway connection failed: %r", exc)
-            if self._healthy:
-                # The link worked and dropped (or Discord asked us to move):
-                # come straight back, with a little jitter.
-                delay = _BACKOFF_INITIAL_S
-                await asyncio.sleep(random.random() * _BACKOFF_INITIAL_S)
-            else:
-                await asyncio.sleep(delay * (0.5 + random.random() / 2))
-                delay = min(delay * 2, _BACKOFF_MAX_S)
+        try:
+            while True:
+                self._healthy = False
+                try:
+                    await self._session()
+                except _Fatal as exc:
+                    self.fatal_code = exc.code
+                    logger.error(
+                        "[discord] Gateway refused this bot for good (close code %s); "
+                        "fix the token or intents in the Developer Portal and reconnect the channel",
+                        exc.code,
+                    )
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — any failure is a reconnect
+                    logger.warning("[discord] Gateway connection failed: %r", exc)
+                if self._healthy:
+                    # The link worked and dropped (or Discord asked us to move):
+                    # come straight back, with a little jitter.
+                    delay = _BACKOFF_INITIAL_S
+                    await asyncio.sleep(random.random() * _BACKOFF_INITIAL_S)
+                else:
+                    await asyncio.sleep(delay * (0.5 + random.random() / 2))
+                    delay = min(delay * 2, _BACKOFF_MAX_S)
+        finally:
+            # A stopped client (another replica holds the bot now) must not
+            # go on ingesting what it had queued.
+            for task in list(self._tasks):
+                task.cancel()
 
     async def _gateway_url(self) -> str:
         http = self._http or httpx.AsyncClient(timeout=15.0)
@@ -255,9 +265,14 @@ class DiscordGatewayClient:
             elif event == "RESUMED":
                 self._healthy = True
             else:
-                task = asyncio.create_task(self._dispatch(event, data))
+                channel = str(data.get("channel_id") or "")
+                task = asyncio.create_task(
+                    self._dispatch(event, data, after=self._tails.get(channel)),
+                )
+                self._tails[channel] = task
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
+                task.add_done_callback(lambda t, c=channel: self._forget_tail(c, t))
         elif op == 1:
             await self._send(ws, 1, self.seq)
         elif op == 11:
@@ -270,7 +285,13 @@ class DiscordGatewayClient:
             await asyncio.sleep(random.uniform(*_INVALID_SESSION_WAIT_S))
             await ws.close(_RECONNECT_CLOSE, "invalid session")
 
-    async def _dispatch(self, event: str, data: dict) -> None:
+    def _forget_tail(self, channel: str, task: asyncio.Task) -> None:
+        if self._tails.get(channel) is task:
+            del self._tails[channel]
+
+    async def _dispatch(self, event: str, data: dict, *, after: asyncio.Task | None = None) -> None:
+        if after is not None:
+            await asyncio.wait([after])
         try:
             await self._on_dispatch(event, data, self)
         except Exception:
