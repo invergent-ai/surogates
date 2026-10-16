@@ -7,9 +7,39 @@ type Any = any;
 
 // editor/slide.js run against a stand-in for the builder: a deck of slides that hold text boxes.
 const SCRIPT = readFileSync(new URL("../editor/slide.js", import.meta.url), "utf8");
-const EMPTY_SPEC = { background: null, shapes: [], notes: "", hidden: false, transition: null };
+const EMPTY_SPEC = { background: null, shapes: [], notes: null, hidden: false, transition: null };
 
-interface Box { placeholder?: string; text?: string; name?: string }
+// A text body's paragraphs, each with its alignment and its runs, each run with its text and a style name.
+interface ParaStub { jc?: string; runs: { text: string; style?: string }[] }
+function runOf(r: { text: string; style?: string }): Any {
+  const run: Any = { text: r.text, style: r.style ?? "plain", GetClassType: () => "run", GetText: () => run.text };
+  run.ClearContent = () => { run.text = ""; return true; };
+  run.AddText = (text: string) => { run.text += text; return true; };
+  return run;
+}
+function paraOf(p: ParaStub): Any {
+  const para: Any = { jc: p.jc ?? "left", items: p.runs.map(runOf) };
+  para.GetElementsCount = () => para.items.length;
+  para.GetElement = (j: number) => para.items[j] ?? null;
+  para.RemoveElement = (j: number) => { para.items.splice(j, 1); return true; };
+  para.AddElement = (el: Any) => { para.items.push(el); return true; };
+  para.Copy = () => paraOf({ jc: para.jc, runs: para.items.map((r: Any) => ({ text: r.text, style: r.style })) });
+  return para;
+}
+function contentOf(paras: ParaStub[]): Any {
+  const content: Any = { paras: paras.map(paraOf) };
+  content.GetElementsCount = () => content.paras.length;
+  content.GetElement = (i: number) => content.paras[i] ?? null;
+  content.Push = (p: Any) => { content.paras.push(p); return true; };
+  content.RemoveElement = (i: number) => { content.paras.splice(i, 1); return true; };
+  content.GetText = () => content.paras.map((p: Any) => p.items.map((r: Any) => r.text).join("")).join("\r\n");
+  return content;
+}
+// A shape's text: its paragraphs, alignment and run styles.
+const paragraphs = (shape: Any) => shape.GetDocContent().paras.map((p: Any) => [p.jc, p.items.map((r: Any) => `${r.style}:${r.text}`)]);
+
+// A text box; or, with kind, a drawing of that kind; body false: a shape without a text box.
+interface Box { placeholder?: string; text?: string; name?: string; paras?: ParaStub[]; kind?: string; body?: false }
 // A slide's own background, transition and comments are what a person can give it without typing.
 interface SlideStub { layout?: string; boxes?: Box[]; notes?: string; background?: true; transition?: string; comments?: number }
 function deck(slides: SlideStub[]) {
@@ -17,16 +47,24 @@ function deck(slides: SlideStub[]) {
   const all: Any[] = [];
   const makeSlide = ({ layout = "Blank", boxes = [], notes = "", background, transition = "effectNone", comments = 0 }: SlideStub) => {
     const id = String(next++);
-    const slide: Any = {
-      Slide: { Get_Id: () => id, cSld: { spTree: [], Bg: background ? {} : null } }, comments,
-      GetSlideShowTransition: () => ({ GetEntryEffect: () => transition }),
-      GetAllDrawings: () => boxes.map((b) => ({
-        GetClassType: () => "shape", Shape: { txBody: {} }, GetDocContent: () => ({ GetText: () => b.text ?? "" }),
+    let notesText = notes;
+    const drawings = boxes.map((b, i) => {
+      const content = contentOf(b.paras ?? [{ runs: [{ text: b.text ?? "" }] }]);
+      return {
+        box: b, GetInternalId: () => `${id}-${i}`, GetClassType: () => b.kind ?? "shape", Shape: b.body === false ? {} : { txBody: {} },
+        GetDocContent: () => content,
         GetPlaceholder: () => (b.placeholder ? { GetType: () => b.placeholder } : null), GetName: () => b.name ?? "",
         GetPosX: () => 0, GetPosY: () => 0, GetWidth: () => 0, GetHeight: () => 0,
-      })),
+      };
+    });
+    const body = { GetDocContent: () => ({ RemoveAllElements: () => { notesText = ""; } }) };
+    const slide: Any = {
+      Slide: { Get_Id: () => id, cSld: { spTree: [], Bg: background ? {} : null } }, comments, drawings,
+      GetSlideShowTransition: () => ({ GetEntryEffect: () => transition }),
+      GetAllDrawings: () => drawings.slice(),
       GetLayout: () => ({ GetName: () => layout }),
-      GetNotesPage: () => ({ GetBodyShapeText: () => notes, GetBodyShape: () => null }),
+      GetNotesPage: () => ({ GetBodyShapeText: () => notesText, GetBodyShape: () => body }),
+      AddNotesText: (text: string) => { notesText += text; },
       GetVisible: () => true, SetVisible: () => undefined,
       GetSlideIndex: () => all.indexOf(slide),
       Delete: () => all.splice(all.indexOf(slide), 1),
@@ -42,7 +80,7 @@ function deck(slides: SlideStub[]) {
     GetAllComments: () => all.flatMap((slide) => Array.from({ length: slide.comments }, () => ({}))),
   };
   const Api = {
-    GetPresentation: () => pres, CreateSlide: () => makeSlide({}),
+    GetPresentation: () => pres, CreateSlide: () => makeSlide({}), CreateRun: () => runOf({ text: "", style: "new" }),
     CreateSlideShowTransition: () => ({ SetEntryEffect: () => undefined, SetDuration: () => undefined }),
     CreateImage: () => ({ SetPosition: () => undefined, Drawing: { setName: () => undefined } }),
   };
@@ -172,5 +210,79 @@ describe("a reply in a slide's comment thread", () => {
       .toMatchObject({ op: 0, reason: expect.stringMatching(/Someone is changing comment thread \{G\}/) });
     expect(commented(false).run({ action: "edit", ops: [{ op: "resolve", thread: "{H}" }], agent }).refused.reason)
       .toBe("Comment thread {H} is gone: its comment was deleted, or the slide it was on was removed. Read the outline again.");
+  });
+});
+
+describe("a slide rewritten from HTML", () => {
+  const notes = (run: (scope: Any) => Any) => JSON.parse(run({ action: "slide", target: "100" }).__json).notes;
+  const rewrite = (run: (scope: Any) => Any, spec: Any) =>
+    run({ action: "edit", ops: [{ op: "slides", slides: [{ id: "100", hash: run({ action: "outline" }).slides[0].hash, spec }] }] });
+
+  it("keeps its speaker notes when its HTML has none", () => {
+    const { run } = deck([{ notes: "Mention the lease." }]);
+    expect(rewrite(run, EMPTY_SPEC).results).toEqual([{ op: 0, slides: [{ id: "100", number: 1 }] }]);
+    expect(notes(run)).toBe("Mention the lease.");
+  });
+
+  it("takes its HTML's notes in their place, and an empty aside clears them", () => {
+    const { run } = deck([{ notes: "Mention the lease." }]);
+    rewrite(run, { ...EMPTY_SPEC, notes: "Open with the budget." });
+    expect(notes(run)).toBe("Open with the budget.");
+    rewrite(run, { ...EMPTY_SPEC, notes: "" });
+    expect(notes(run)).toBe("");
+  });
+});
+
+describe("one shape's text", () => {
+  const TITLE: Box = { placeholder: "title", paras: [{ jc: "center", runs: [{ text: "", style: "empty" }, { text: "Next ", style: "title" }, { text: "quarter", style: "bold" }] }] };
+  const BODY: Box = { paras: [{ runs: [{ text: "Open the Lisbon office", style: "body" }] }, { jc: "right", runs: [{ text: "In March", style: "small" }] }] };
+  const setting = (run: (scope: Any) => Any, shape: string, text: string) =>
+    run({ action: "edit", ops: [{ op: "text", slide: "100", hash: run({ action: "outline" }).slides[0].hash, shape, text }] });
+
+  it("sets the text in the first run's style, keeping the paragraph and the shape", () => {
+    const { run, all } = deck([{ layout: "Title Only", boxes: [TITLE, BODY], notes: "Mention the lease." }]);
+    expect(setting(run, "100-0", "Q3 plan")).toEqual({ results: [{ op: 0 }] });
+    expect(paragraphs(all[0].drawings[0])).toEqual([["center", ["title:Q3 plan"]]]);
+    expect(all[0].drawings[0].GetPlaceholder().GetType()).toBe("title");
+    expect(paragraphs(all[0].drawings[1])).toEqual([["left", ["body:Open the Lisbon office"]], ["right", ["small:In March"]]]);
+    expect(all[0].GetNotesPage().GetBodyShapeText()).toBe("Mention the lease.");
+  });
+
+  it("sets each line in its own paragraph: a line past the shape's paragraphs as its last one, and a paragraph past the lines goes", () => {
+    const { run, all } = deck([{ boxes: [BODY] }]);
+    setting(run, "100-0", "One\nTwo\nThree");
+    expect(paragraphs(all[0].drawings[0])).toEqual([["left", ["body:One"]], ["right", ["small:Two"]], ["right", ["small:Three"]]]);
+    setting(run, "100-0", "Only");
+    expect(paragraphs(all[0].drawings[0])).toEqual([["left", ["body:Only"]]]);
+  });
+
+  it("fills an empty text box, and a paragraph without runs gets one", () => {
+    const { run, all } = deck([{ boxes: [{ paras: [{ jc: "center", runs: [] }] }] }]);
+    setting(run, "100-0", "Lisbon");
+    expect(paragraphs(all[0].drawings[0])).toEqual([["center", ["new:Lisbon"]]]);
+  });
+
+  it("is refused on a slide changed since it was read, a shape the slide does not have, and a shape with no text", () => {
+    const { run, all } = deck([{ boxes: [BODY, { kind: "image" }, { body: false }] }]);
+    const refused = (op: Any) => run({ action: "edit", ops: [{ op: "text", slide: "100", hash: run({ action: "outline" }).slides[0].hash, text: "x", ...op }] }).refused;
+    expect(refused({ shape: "100-0", hash: "00000000" })).toMatchObject({ op: 0, reason: "Slide 100 changed since you read it. This is it now; work from it." });
+    expect(refused({ shape: "100-9" }).reason).toMatch(/^Slide 100 has no shape 100-9 now/);
+    for (const shape of ["100-1", "100-2"]) expect(refused({ shape }).reason).toMatch(new RegExp(`^Shape ${shape} has no text to change`));
+    expect(paragraphs(all[0].drawings[0])).toEqual([["left", ["body:Open the Lisbon office"]], ["right", ["small:In March"]]]);
+  });
+
+  it("is refused, before anything changes, on a slide an earlier op of the call removes", () => {
+    const { run, all } = deck([{ boxes: [BODY] }, {}]);
+    const hash = run({ action: "outline" }).slides[0].hash;
+    const out = run({ action: "edit", ops: [{ op: "remove", slides: [{ id: "100", hash }] }, { op: "text", slide: "100", hash, shape: "100-0", text: "x" }] });
+    expect(out.refused).toMatchObject({ op: 1, reason: "Slide 100 is removed by this call." });
+    expect(all).toHaveLength(2);
+  });
+
+  it("keeps a new deck's empty slide when the call sets its text", () => {
+    const { run, ids } = deck([TEMPLATE]);
+    const hash = run({ action: "outline" }).slides[0].hash;
+    run({ action: "edit", ops: [{ op: "text", slide: "100", hash, shape: "100-0", text: "Lisbon" }, add(1)] });
+    expect(ids()).toEqual(["100", "101"]);
   });
 });

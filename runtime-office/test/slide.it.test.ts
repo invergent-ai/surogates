@@ -103,6 +103,57 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
     expect((await outline(agent)).slides[1]).toMatchObject({ id: second.id, title: "Hiring plan" });
   });
 
+  it("changes one shape's text, and keeps the shape and the slide as they were", async () => {
+    const { agent, user } = await deck();
+    const second = (await outline(agent)).slides[1];
+    const before: Any = await office.read(agent, { view: "slide", target: second.id });
+    const title = before.shapes.find((s: Any) => s.placeholder === "title");
+    expect(title).toMatchObject({ x: 72, y: 43, w: 1296, h: 180, paras: [{ align: "center", runs: [{ text: "Next quarter", size: 88, font: "Calibri" }] }] });
+    const result: Any = await office.edit(agent, [{ op: "text", slide: second.id, hash: second.hash, shape: title.id, text: "Q3 plan" }]);
+    expect(result).toMatchObject({ applied: true, results: [{ op: 0 }] });
+    const renamed = { ...title, paras: [{ ...title.paras[0], runs: [{ ...title.paras[0].runs[0], text: "Q3 plan" }] }] };
+    for (const id of [agent, user]) {
+      await eventually(async () => {
+        const view: Any = await office.read(id, { view: "slide", target: second.id });
+        expect(view.shapes).toEqual(before.shapes.map((s: Any) => (s.id === title.id ? renamed : s)));
+        expect(view.notes).toBe("Mention the lease.");
+      });
+    }
+    expect((await outline(user)).slides[1]).toMatchObject({ id: second.id, title: "Q3 plan", layout: "Title Only", notes: true });
+  });
+
+  it("takes a shape's text change back with the rest of a refused batch", async () => {
+    const { agent, user } = await deck();
+    const second = (await outline(agent)).slides[1];
+    const before: Any = await office.read(agent, { view: "slide", target: second.id });
+    const title = before.shapes.find((s: Any) => s.placeholder === "title");
+    // The text change comes after the slide is rebuilt, when its shape is gone: refused once the rebuild has applied.
+    const result: Any = await office.edit(agent, [
+      { op: "slides", slides: [{ id: second.id, hash: second.hash, html: SLIDE }] },
+      { op: "text", slide: second.id, hash: second.hash, shape: title.id, text: "Q3 plan" },
+    ]);
+    expect(result).toMatchObject({ applied: false, refused: { op: 1 } });
+    expect(result.refused.reason).toMatch(new RegExp(`^Slide ${second.id} has no shape ${title.id} now`));
+    await sleep(2_000);
+    for (const id of [agent, user]) {
+      const view: Any = await office.read(id, { view: "slide", target: second.id });
+      expect(view.shapes).toEqual(before.shapes);
+      expect(view.notes).toBe("Mention the lease.");
+    }
+  });
+
+  it("keeps a rewritten slide's notes unless its HTML gives notes of its own", async () => {
+    const { agent, user } = await deck();
+    const notes = async (id: string, slide: string): Promise<unknown> => ((await office.read(id, { view: "slide", target: slide })) as Any).notes;
+    let second = (await outline(agent)).slides[1];
+    const plain = `<section style="background:#ffffff"><h2 style="font-size:72px">Lisbon</h2></section>`;
+    expect(((await office.edit(agent, [{ op: "slides", slides: [{ id: second.id, hash: second.hash, html: plain }] }])) as Any).applied).toBe(true);
+    for (const id of [agent, user]) await eventually(async () => expect(await notes(id, second.id)).toBe("Mention the lease."));
+    second = (await outline(agent)).slides[1];
+    expect(((await office.edit(agent, [{ op: "slides", slides: [{ id: second.id, hash: second.hash, html: SLIDE }] }])) as Any).applied).toBe(true);
+    for (const id of [agent, user]) await eventually(async () => expect(await notes(id, second.id)).toBe("Start with the budget."));
+  });
+
   it("a replaced slide whose HTML sets no background shows the deck's again", async () => {
     const { agent, user } = await deck();
     // The second slide's own background beside its layout's and master's, and the fill the page draws for it and for

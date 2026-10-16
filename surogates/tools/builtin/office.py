@@ -73,9 +73,12 @@ EDIT_DESCRIPTION = (
     'in as into a cell: "=…" is a live formula, a leading \' keeps text); format {range, number_format, bold, italic, '
     "fill, color, align, valign, wrap, width}; chart {range, type: column|bar|line|pie|area|doughnut|scatter, title, "
     'anchor: "F2"}; sheet {action: add|rename|delete, name, to, after}.\n'
-    "Deck: slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]}, each slide one <section> "
-    "in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the office skill's slide "
-    "reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the first deck edit of a "
+    "Deck: text {slide, hash, shape, text} changes one shape's text and keeps everything else (its place, style and "
+    "placeholder; the slide's notes): use it for a small change, a title, a word, a number (shape ids from view "
+    '"slide"). slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole '
+    "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the "
+    "office skill's slide reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the "
+    "first deck edit of a "
     "session, read that reference (skill_view name office, file_path references/slide.md): the format is strict, and a "
     "refused slide costs a round trip.\n"
     "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "

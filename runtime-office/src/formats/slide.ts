@@ -6,6 +6,7 @@ import { checkBatch, commentOp, commentsAlone, EditorError, textArg, type Commen
 const MAX_OPS = 20;
 const MAX_SLIDES = 10;
 const CANVAS_WIDTH = 1920;
+const MAX_SHAPE_TEXT = 2000;
 
 type Raw = Record<string, unknown>;
 export type SlideEntry = { html: string; after: string | null } | { id: string; hash: string; html: string };
@@ -13,6 +14,7 @@ export type SlideOp =
   | { op: "slides"; slides: SlideEntry[] }
   | { op: "order"; ids: string[] }
   | { op: "remove"; slides: { id: string; hash: string }[] }
+  | { op: "text"; slide: string; hash: string; shape: string; text: string }
   | CommentOp;
 
 function guarded(raw: unknown, what: string): { id: string; hash: string } {
@@ -45,10 +47,17 @@ function checkOp(raw: Raw): SlideOp {
       if (!Array.isArray(raw.slides) || !raw.slides.length) throw new ContentError('"slides" lists the slides to remove: {"id", "hash"} each.');
       return { op: "remove", slides: raw.slides.map((entry) => guarded(entry, "a slide to remove")) };
     }
+    case "text": {
+      const slide = textArg(raw.slide, "slide"), shape = textArg(raw.shape, "shape");
+      if (typeof raw.hash !== "string" || !raw.hash) throw new ContentError("a shape's text change carries the hash its slide had when you read it.");
+      if (typeof raw.text !== "string") throw new ContentError('"text" is the shape\'s new text, a line per paragraph.');
+      if (raw.text.length > MAX_SHAPE_TEXT) throw new ContentError(`"text" is at most ${MAX_SHAPE_TEXT} characters: a longer text is a slide of its own.`);
+      return { op: "text", slide, hash: raw.hash, shape, text: raw.text.replace(/\r\n?/g, "\n") };
+    }
     default: {
       const comment = commentOp(raw);
       if (comment) return comment;
-      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use slides, order, remove, reply or resolve.`);
+      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use slides, text, order, remove, reply or resolve.`);
     }
   }
 }

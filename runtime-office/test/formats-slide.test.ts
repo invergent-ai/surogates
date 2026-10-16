@@ -5,7 +5,7 @@ import { checkSlideOps, slideFormat } from "../src/formats/slide.js";
 import { ContentError } from "../src/markdown.js";
 import type { Canvas, Measurer } from "../src/slides/measure.js";
 
-const spec = { background: null, shapes: [], notes: "", hidden: false, transition: null };
+const spec = { background: null, shapes: [], notes: null, hidden: false, transition: null };
 
 describe("a deck's reads", () => {
   const format = slideFormat({} as Measurer);
@@ -30,6 +30,28 @@ describe("slide ops", () => {
     expect(() => checkSlideOps([{ op: "order", ids: ["1", "1"] }])).toThrow("each slide once");
     expect(() => checkSlideOps([{ op: "slides", slides: [{ html: "<section></section>" }] }, { op: "order", ids: ["1"] }])).toThrow("order slides in a call of its own");
     expect(() => checkSlideOps([{ op: "remove", slides: [{ id: "1" }] }])).toThrow("carries the hash");
+  });
+
+  it("changes one shape's text by its slide's id and hash and its own id, a line per paragraph", () => {
+    expect(checkSlideOps([{ op: "text", slide: "1473", hash: "dc3285c8", shape: "1482", text: "Q3 plan\r\nfor Lisbon" }]))
+      .toEqual([{ op: "text", slide: "1473", hash: "dc3285c8", shape: "1482", text: "Q3 plan\nfor Lisbon" }]);
+    expect(checkSlideOps([{ op: "text", slide: 1473, hash: "h", shape: 1482, text: "" }])).toEqual([{ op: "text", slide: "1473", hash: "h", shape: "1482", text: "" }]);
+    expect(() => checkSlideOps([{ op: "text", slide: "1473", shape: "1482", text: "x" }])).toThrow("op 0: a shape's text change carries the hash its slide had when you read it.");
+    expect(() => checkSlideOps([{ op: "text", hash: "h", shape: "1482", text: "x" }])).toThrow('"slide" is required');
+    expect(() => checkSlideOps([{ op: "text", slide: "1473", hash: "h", text: "x" }])).toThrow('"shape" is required');
+    expect(() => checkSlideOps([{ op: "text", slide: "1473", hash: "h", shape: "1482" }])).toThrow('"text" is the shape\'s new text, a line per paragraph.');
+    expect(() => checkSlideOps([{ op: "text", slide: "1473", hash: "h", shape: "1482", text: "x".repeat(2001) }])).toThrow('"text" is at most 2000 characters');
+    expect(() => checkSlideOps([{ op: "rename" }])).toThrow('unknown op "rename"; use slides, text, order, remove, reply or resolve.');
+  });
+
+  it("sends a text change to the editor as it is: there is nothing to measure", async () => {
+    const measure = vi.fn();
+    const format = slideFormat({ measure } as unknown as Measurer);
+    const context = { page: {} as EditorPage, run: vi.fn() };
+    const op = { op: "text", slide: "1473", hash: "dc3285c8", shape: "1482", text: "Q3 plan" };
+    expect(await format.compile([op], context)).toEqual([op]);
+    expect(context.run).not.toHaveBeenCalled();
+    expect(measure).not.toHaveBeenCalled();
   });
 
   it("measures at most ten slides a call", () => {

@@ -34,7 +34,8 @@ export type ShapeSpec =
   | (Placed & { kind: "path"; points: number[][]; stroke: Stroke; head: "none" | "open" | "filled"; tail: "none" | "open" | "filled" })
   | (Placed & { kind: "group"; children: ShapeSpec[] });
 export interface Transition { effect: string; ms: number }
-export interface SlideSpec { background: Fill | null; shapes: ShapeSpec[]; notes: string; hidden: boolean; transition: Transition | null }
+// notes: the <aside>'s words, or null when the slide has none (a replaced slide then keeps the notes it had).
+export interface SlideSpec { background: Fill | null; shapes: ShapeSpec[]; notes: string | null; hidden: boolean; transition: Transition | null }
 
 /** Where a slide's fonts come from: the document server's, in runtime-office. */
 export interface FontSource {

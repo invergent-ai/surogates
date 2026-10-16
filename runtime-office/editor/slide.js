@@ -607,10 +607,57 @@
     var none = Api.CreateSlideShowTransition();
     none.SetEntryEffect("effectNone");
     slide.SetSlideShowTransition(none);
+    // Its notes stay unless its HTML has an <aside>, whose words replace them: an empty one clears them.
     var notes = slide.GetNotesPage();
-    if (notes && notes.GetBodyShape()) notes.GetBodyShape().GetDocContent().RemoveAllElements();
+    if (spec.notes !== null && notes && notes.GetBodyShape()) notes.GetBodyShape().GetDocContent().RemoveAllElements();
     build(slide, spec);
     return slide;
+  }
+
+  // --- one shape's text, the rest of the slide as it is
+
+  function shapeOf(slide, id) {
+    var drawings = slide.GetAllDrawings();
+    for (var i = 0; i < drawings.length; i++) if (String(drawings[i].GetInternalId()) === String(id)) return drawings[i];
+    return null;
+  }
+  function textShape(op, index) {
+    var slide = slideById(op.slide), shape = slide ? shapeOf(slide, op.shape) : null;
+    if (!shape) throw new Refusal(index, "Slide " + op.slide + " has no shape " + op.shape + " now: an earlier op of this call rebuilt or removed it, or the id is not one the slide view gave. Read the slide again.");
+    // internal: the builder cannot tell whether a shape has a text body
+    if (shape.GetClassType() !== "shape" || !(shape.Shape && shape.Shape.txBody)) {
+      throw new Refusal(index, "Shape " + op.shape + " has no text to change: it is a picture, a table, a group or a shape without a text box. Rebuild the slide with slides for that.");
+    }
+    return shape;
+  }
+  // The run a paragraph's new text is set in: its first with text, else its first.
+  function styleRunOf(p) {
+    var first = -1;
+    for (var j = 0; j < p.GetElementsCount(); j++) {
+      var el = p.GetElement(j);
+      if (!el || el.GetClassType() !== "run") continue;
+      if (first < 0) first = j;
+      if (String(el.GetText() || "")) return j;
+    }
+    return first;
+  }
+  function setLine(p, line) {
+    var keep = styleRunOf(p), run = keep >= 0 ? p.GetElement(keep) : Api.CreateRun();
+    for (var j = p.GetElementsCount() - 1; j >= 0; j--) if (j !== keep) p.RemoveElement(j);
+    run.ClearContent();
+    if (line) run.AddText(line);
+    if (keep < 0) p.AddElement(run);
+  }
+  // Each line is a paragraph, kept with its alignment, bullet and spacing and set in its first run's style; a line past
+  // the shape's paragraphs is set as its last one. The shape's place, size and placeholder are not touched.
+  function setText(shape, text) {
+    var content = shape.GetDocContent(), lines = text.split("\n"), count = content.GetElementsCount();
+    for (var i = 0; i < lines.length; i++) {
+      var p = i < count ? content.GetElement(i) : content.GetElement(count - 1).Copy();
+      if (i >= count) content.Push(p);
+      setLine(p, lines[i]);
+    }
+    for (var k = content.GetElementsCount() - 1; k >= lines.length; k--) content.RemoveElement(k);
   }
 
   // --- the batch: every check first, then the changes in order
@@ -637,6 +684,10 @@
       } else if (op.op === "remove") {
         op.slides.forEach(function (s) { guarded(s, index); removed[s.id] = true; });
         if (ids.filter(function (id) { return !removed[id]; }).length === 0) throw new Refusal(index, "A deck keeps at least one slide.");
+      } else if (op.op === "text") {
+        if (removed[op.slide]) throw new Refusal(index, "Slide " + op.slide + " is removed by this call.");
+        guarded({ id: op.slide, hash: op.hash }, index);
+        textShape(op, index);
       } else if (op.op === "order") {
         if (op.ids.slice().sort().join(",") !== ids.slice().sort().join(",")) {
           throw new Refusal(index, "\"order\" lists every slide of the deck once, by id. Its slides are now: " + ids.join(", ") + ".");
@@ -650,7 +701,7 @@
   function emptyTemplate(ops) {
     var all = pres.GetAllSlides(), slide = all[0];
     if (all.length !== 1 || !ops.some(function (op) { return op.op === "slides" && op.slides.some(function (s) { return s.id === undefined; }); })) return null;
-    if (ops.some(function (op) { return op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
+    if (ops.some(function (op) { return op.op === "text" ? op.slide === idOf(slide) : op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
     var layout = slide.GetLayout(), transition = slide.GetSlideShowTransition();
     if (!layout || layout.GetName() !== "Title Slide" || !slide.GetVisible() || notesOf(slide) || connectorsOf(slide).length) return null;
     // internal: the builder reads no background; a slide that follows its layout has none of its own
@@ -673,6 +724,10 @@
       }
       if (op.op === "remove") {
         op.slides.forEach(function (s) { slideById(s.id).Delete(); });
+        return { op: index };
+      }
+      if (op.op === "text") {
+        setText(textShape(op, index), op.text);
         return { op: index };
       }
       op.ids.forEach(function (id, at) { var slide = slideById(id); if (slide.GetSlideIndex() !== at) slide.MoveTo(at); });

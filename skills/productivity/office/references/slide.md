@@ -13,8 +13,11 @@ pictures and tables at the measured places: the user gets a slide they can click
 
 ## Editing
 
+- `text`: the text of one shape, by its slide's `id` and `hash` and the shape's `id` from view `slide`; everything
+  else of the slide stays as it is. Use it for a small change: a title, a word, a number.
 - `slides`: add slides from HTML (`after` a slide id, `"start"`, or last), or replace one in place with its `id` and
-  the `hash` the outline gave. A slide the user changed since you read it refuses the call: read it again.
+  the `hash` the outline gave: that rebuilds the whole slide from your HTML, so use it to redesign a slide, not to
+  change its words. A slide the user changed since you read it refuses the call: read it again.
   A new deck's one empty title slide gives way to the first slides you add.
 - `order`: every slide's id, in the order wanted (a call of its own).
 - `remove`: slides by `id` and `hash`.
@@ -36,6 +39,17 @@ At most ten slides per call; one or two per call lets the user watch the deck gr
 ```json
 {"op": "order", "ids": ["1428", "1_630", "1473"]}
 ```
+
+### Changing text
+
+```json
+{"op": "text", "slide": "1473", "hash": "dc3285c8", "shape": "1482", "text": "Q3 plan"}
+```
+
+The shape keeps its place, size, placeholder, alignment and font: the new text takes the style of its first run. Each
+line of `text` is a paragraph, set in the style of the shape's paragraph in that place (a line past them, as its last
+one). Several shapes of one slide change in one call, each its own op with the hash you read. A picture, a table or a
+shape without a text box has no text to change: rebuild its slide with `slides`.
 
 ## The format
 
@@ -105,7 +119,8 @@ element then moves from its place on the first slide to its place on the second:
 A build or a magic-move `id` inside another moving element is refused, and so is a table inside a moving box: give the
 table its own motion. A connector or a build inside a box that goes in as one picture (see Styles) is refused too.
 
-**Notes:** one `<aside>` of plain text, the section's last child.
+**Notes:** one `<aside>` of plain text, the section's last child. A slide you replace keeps its notes when its HTML has
+no `<aside>`; an `<aside>` replaces them, and an empty `<aside></aside>` clears them.
 
 **Fonts:** the document server's own, so the text sets exactly as measured. A `font-family` list resolves to its first
 font the server has, then the generic: Arial, Calibri, Cambria, Georgia, Montserrat, Noto Sans, Open Sans, Times New
