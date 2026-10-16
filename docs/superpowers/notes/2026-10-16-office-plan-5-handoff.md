@@ -57,7 +57,30 @@ The plan's "Decided while planning" section lists the writer's own choices for F
   - Run integration files one at a time, since they share port 8791. Don't export the integration env for `npm test` unless you mean to run every integration file at once.
 - **Don't close an editor page while its pictures are still loading.** Euro-Office 9.3.5's docservice crashes on an aborted cache download. The fix is in our `office-server` fork, but DEV still runs the upstream image.
 
-## The other machine needs
+## On node1 (the machine taking over)
+
+`ssh -i ~/digitalocean administrator@node1` (checked 2026-10-16):
+
+- **Hardware:** 56 cores, 499 GB RAM, 192 GB free disk. The suites can run at full parallelism here (`-n 16` or more), and with git 2.53 the `test_local_history` failures should not appear.
+- **Repositories:** in `/home/administrator/work/flavius/`, namely `surogates` (on `master` 9cba2c1b, behind origin), `surogate-ops` and `surogate-router`.
+  - Fetch and make the worktree there: `git -C ~/work/flavius/surogates fetch origin && git -C ~/work/flavius/surogates worktree add ~/work/flavius/surogates/.worktrees/office-plan-5 docs/office-editors-plan-5`.
+  - Work only in worktrees; leave the main checkout alone.
+- **Tools:**
+  - `surogates/.venv` is Python 3.12.15; use it for tests, not the system Python 3.14.
+  - `uv` is in `~/.local/bin`.
+  - Node v26.11.1 and npm come from nvm and are on the `PATH` only in a login shell: run Node commands through `bash -lc '…'`.
+  - Playwright's Chromium is not installed yet; run `npx playwright install chromium` in runtime-office, which may need system libraries from root.
+  - Claude Code is installed.
+- **DEV document server:** node1 is the DEV host (`br0` 172.17.31.241, where DEV Postgres is too).
+  - `office.densemax.local` does not resolve on node1 yet; `curl --resolve office.densemax.local:443:172.17.31.241` gets 200.
+  - Needs, as root: an `/etc/hosts` line `172.17.31.241 office.densemax.local`.
+  - Then `OFFICE_IT_DS_URL=https://office.densemax.local` and `OFFICE_IT_HOST=http://172.17.31.241:8791`. That address doesn't change, unlike the laptop's VPN address.
+- **Still missing on node1:**
+  - `config.dev.yaml` (secrets; the laptop has it at `/work/surogates/config.dev.yaml`), so put it at `~/work/flavius/surogates/config.dev.yaml` and point `SUROGATES_CONFIG` there;
+  - the DEV kubeconfig, which wasn't in the home folder: `/etc/rancher/k3s/k3s.yaml` is root-only, and `~/work/flavius/prod-k3s.yml` is the **PROD** cluster's, never to be used for DEV work;
+  - `.vscode/launch.json` (or just `SUROGATES_PLATFORM_API_TOKEN`), for the DEV processes.
+
+## The other machine needs (general)
 
 - **Network:** the VPN to DEV, so the DEV document server can reach this machine's `vpn0` address on port 8791, and the editor fixture server is reachable.
   - `vpn0`'s address changes when the VPN reconnects. Update `OFFICE_IT_HOST`, and `office.callback_base_url` in `config.dev.yaml` when running DEV processes.
