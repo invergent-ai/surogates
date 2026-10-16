@@ -398,15 +398,24 @@ class DiscordPlatform:
         return msg_id is not None
 
     async def download_file(self, *, creds: dict, url: str, max_bytes: int) -> bytes | None:
-        """Fetch an attachment from Discord's CDN (signed URL, no auth header)."""
+        """Fetch an attachment from Discord's CDN (signed URL, no auth header).
+
+        Streamed, so a file over *max_bytes* is dropped without being read
+        whole.  Never raises.
+        """
         try:
-            resp = await self._http.get(url)
-        except httpx.HTTPError as exc:
+            async with self._http.stream("GET", url) as resp:
+                if resp.status_code >= 300:
+                    return None
+                body = bytearray()
+                async for part in resp.aiter_bytes():
+                    body.extend(part)
+                    if len(body) > max_bytes:
+                        return None
+                return bytes(body)
+        except Exception as exc:  # noqa: BLE001 — a bad URL is no file, not a crash
             logger.warning("[discord] attachment download failed: %s", exc)
             return None
-        if resp.status_code >= 300 or len(resp.content) > max_bytes:
-            return None
-        return resp.content
 
     # ------------------------------------------------------------------
     # keep_typing — "Surogate is typing…" held for the turn

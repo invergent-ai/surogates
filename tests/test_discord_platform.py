@@ -233,3 +233,20 @@ async def test_typing_repeats_until_the_answer_goes_out(monkeypatch):
     await asyncio.sleep(0.05)
     assert typing.call_count == seen and not platform._typing
 
+
+@respx.mock
+async def test_an_oversized_attachment_stops_downloading_at_the_cap():
+    url = "https://cdn.discordapp.com/attachments/1/2/big.bin"
+    served: list[int] = []
+
+    async def _body():
+        for n in range(100):
+            served.append(n)
+            yield b"x" * 10
+
+    respx.get(url).mock(return_value=httpx.Response(200, content=_body()))
+    assert await DiscordPlatform().download_file(creds=CREDS, url=url, max_bytes=25) is None
+    assert len(served) < 100
+
+    respx.get(url).mock(return_value=httpx.Response(200, content=b"%PDF"))
+    assert await DiscordPlatform().download_file(creds=CREDS, url=url, max_bytes=25) == b"%PDF"
