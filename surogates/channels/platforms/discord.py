@@ -252,8 +252,9 @@ class DiscordPlatform:
 
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(timeout=30.0)
-        # channel id -> (task, bot token, turn_active)
-        self._typing: dict[str, tuple[asyncio.Task, str, Callable[[], Awaitable[bool]]]] = {}
+        # (bot token, channel id) -> (task, turn_active).  Keyed on the bot as
+        # well: two bots in one channel each hold their own indicator.
+        self._typing: dict[tuple[str, str], tuple[asyncio.Task, Callable[[], Awaitable[bool]]]] = {}
 
     # Socket platform: these exist for the protocol; nothing routes to them.
     def route_path(self, identifier: str | None = None) -> str:
@@ -328,9 +329,9 @@ class DiscordPlatform:
         # A message clears Discord's typing indicator: text beside a tool call
         # means the turn goes on, so put it back; an answer ends it.
         if item.payload.get("intermediate") or item.payload.get("code_run"):
-            self._rearm_typing(channel_id)
+            self._rearm_typing(token, channel_id)
         else:
-            self._stop_typing(channel_id)
+            self._stop_typing(token, channel_id)
         return SendResult(success=True, message_id=last_id)
 
     async def delete_message(self, *, creds: dict, channel: str, ts: str) -> None:
@@ -432,29 +433,29 @@ class DiscordPlatform:
         token = (creds or {}).get("bot_token") or ""
         channel_id = getattr(msg, "identifier", "") or ""
         if token and channel_id:
-            self._start_typing(channel_id, token, turn_active)
+            self._start_typing(token, channel_id, turn_active)
 
     def _start_typing(
-        self, channel_id: str, token: str, turn_active: Callable[[], Awaitable[bool]],
+        self, token: str, channel_id: str, turn_active: Callable[[], Awaitable[bool]],
     ) -> None:
-        self._stop_typing(channel_id)
+        self._stop_typing(token, channel_id)
         task = asyncio.get_running_loop().create_task(
-            self._typing_loop(channel_id, token, turn_active),
+            self._typing_loop(token, channel_id, turn_active),
         )
-        self._typing[channel_id] = (task, token, turn_active)
+        self._typing[(token, channel_id)] = (task, turn_active)
 
-    def _rearm_typing(self, channel_id: str) -> None:
-        held = self._typing.get(channel_id)
+    def _rearm_typing(self, token: str, channel_id: str) -> None:
+        held = self._typing.get((token, channel_id))
         if held is not None:
-            self._start_typing(channel_id, held[1], held[2])
+            self._start_typing(token, channel_id, held[1])
 
-    def _stop_typing(self, channel_id: str) -> None:
-        held = self._typing.pop(channel_id, None)
+    def _stop_typing(self, token: str, channel_id: str) -> None:
+        held = self._typing.pop((token, channel_id), None)
         if held is not None:
             held[0].cancel()
 
     async def _typing_loop(
-        self, channel_id: str, token: str, turn_active: Callable[[], Awaitable[bool]],
+        self, token: str, channel_id: str, turn_active: Callable[[], Awaitable[bool]],
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _TYPING_CAP_S
@@ -468,9 +469,9 @@ class DiscordPlatform:
             return
         except Exception:
             logger.warning("[discord] typing keep-alive failed", exc_info=True)
-        held = self._typing.get(channel_id)
+        held = self._typing.get((token, channel_id))
         if held is not None and held[0] is asyncio.current_task():
-            del self._typing[channel_id]
+            del self._typing[(token, channel_id)]
 
 
 def _register() -> None:

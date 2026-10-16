@@ -349,8 +349,10 @@ class TeamsPlatform:
         self._jwks_lock = asyncio.Lock()
         # (app_id, tenant) -> (access token, monotonic expiry)
         self._tokens: dict[tuple[str, str], tuple[str, float]] = {}
-        # conversation id -> the typing keep-alive of the turn under way.
-        self._typing: dict[str, _Typing] = {}
+        # (app id, conversation id) -> the typing keep-alive of the turn under
+        # way.  Keyed on the bot as well: two bots in one conversation each
+        # hold their own.
+        self._typing: dict[tuple[str, str], _Typing] = {}
 
     # ------------------------------------------------------------------
     # Routing
@@ -635,9 +637,10 @@ class TeamsPlatform:
             "reply_to_id": getattr(msg, "thread_key", None),
             "channel_identifier": source.get("app_id"),
         }
-        key = str(destination["conversation_id"] or "")
-        if not key or not destination["service_url"]:
+        conversation = str(destination["conversation_id"] or "")
+        if not conversation or not destination["service_url"]:
             return
+        key = (str(destination["channel_identifier"] or ""), conversation)
         previous = self._typing.pop(key, None)
         if previous is not None and previous.task is not None:
             previous.task.cancel()
@@ -648,7 +651,7 @@ class TeamsPlatform:
         )
 
     async def _typing_loop(
-        self, key: str, state: _Typing, destination: dict, creds: dict,
+        self, key: tuple[str, str], state: _Typing, destination: dict, creds: dict,
         turn_active: Callable[[], Awaitable[bool]],
     ) -> None:
         loop = asyncio.get_running_loop()

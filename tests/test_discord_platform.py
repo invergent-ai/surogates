@@ -235,6 +235,26 @@ async def test_typing_repeats_until_the_answer_goes_out(monkeypatch):
 
 
 @respx.mock
+async def test_one_bots_answer_leaves_another_bots_typing_in_the_channel(monkeypatch):
+    monkeypatch.setattr(discord_mod, "_TYPING_EVERY_S", 0.01)
+    respx.post(f"{DISCORD_API_BASE}/channels/{CHANNEL}/typing").mock(return_value=httpx.Response(204))
+    respx.post(f"{DISCORD_API_BASE}/channels/{CHANNEL}/messages").mock(
+        return_value=httpx.Response(200, json={"id": "m"}),
+    )
+    platform = DiscordPlatform()
+
+    async def _active():
+        return True
+
+    other = {"bot_token": "other-bot-token"}
+    platform.keep_typing(SimpleNamespace(identifier=CHANNEL), creds=CREDS, turn_active=_active)
+    platform.keep_typing(SimpleNamespace(identifier=CHANNEL), creds=other, turn_active=_active)
+    await platform.send(_item("answer"), creds=CREDS)
+    assert list(platform._typing) == [("other-bot-token", CHANNEL)]
+    platform._stop_typing("other-bot-token", CHANNEL)
+
+
+@respx.mock
 async def test_an_oversized_attachment_stops_downloading_at_the_cap():
     url = "https://cdn.discordapp.com/attachments/1/2/big.bin"
     served: list[int] = []

@@ -508,6 +508,22 @@ async def test_keep_typing_posts_typing_until_the_turn_ends(platform, monkeypatc
     assert not platform._typing
 
 
+async def test_two_bots_in_one_conversation_each_keep_their_own_typing(platform):
+    async def active() -> bool:
+        return True
+
+    first = parse(_activity(), app_id=APP_ID)
+    other_app = "22222222-0000-4000-8000-000000000000"
+    second = parse(_activity(), app_id=other_app)
+    platform.keep_typing(first, creds=_creds(), turn_active=active)
+    held = platform._typing[(APP_ID, "a:personal-1")]
+    platform.keep_typing(second, creds=_creds(), turn_active=active)
+    await asyncio.sleep(0)
+    assert not held.task.cancelled() and len(platform._typing) == 2
+    for state in list(platform._typing.values()):
+        state.task.cancel()
+
+
 def test_capabilities_and_descriptor():
     p = TeamsPlatform()
     assert p.kind == "teams" and p.topology == "webhook" and p.supports_edit
