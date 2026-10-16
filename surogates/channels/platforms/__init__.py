@@ -9,6 +9,7 @@ platforms.  Add a new built-in by importing its module here.
 
 from __future__ import annotations
 
+from surogates.channels.platforms import discord as discord  # noqa: F401
 from surogates.channels.platforms import slack as slack  # noqa: F401
 from surogates.channels.platforms import teams as teams  # noqa: F401
 from surogates.channels.platforms import telegram as telegram  # noqa: F401

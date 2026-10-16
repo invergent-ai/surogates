@@ -1502,7 +1502,7 @@ def writer_line(speaker: Speaker | None) -> str:
 
 
 #: Channels whose one-to-one conversations keep a memory partition of their own.
-_PARTITIONED = ("whatsapp", "telegram", "slack", "teams", "voice")
+_PARTITIONED = ("whatsapp", "telegram", "slack", "teams", "voice", "discord")
 
 
 async def shared_memory_boundary(

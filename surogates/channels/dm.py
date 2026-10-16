@@ -43,9 +43,9 @@ def dm_key(platform: str, chat_id: str, user_id: str) -> str:
 
 
 def dm_target(platform: str, user: str, sender: str) -> DmTarget | None:
-    """The DM a first message to *user* goes into; ``None`` on Slack, whose
-    DM id only Slack knows, on Teams, whose personal chat only its recorded
-    conversation reference knows (both in
+    """The DM a first message to *user* goes into; ``None`` on Slack and
+    Discord, whose DM channel id only the platform knows, on Teams, whose
+    personal chat only its recorded conversation reference knows (all in
     :func:`surogates.programs.opener.resolve_dm`), and on a channel the
     platform cannot write first on.
 

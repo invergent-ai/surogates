@@ -252,7 +252,7 @@ TEAM_UPDATE_PERSON_SCHEMA = ToolSchema(
             },
             "preferred_channel": {
                 "type": "string",
-                "enum": ["whatsapp", "telegram", "slack"],
+                "enum": ["whatsapp", "telegram", "slack", "discord"],
                 "description": "The channel the person wants to be written to on.",
             },
             "confirmation": {

@@ -985,7 +985,7 @@ class ChannelInboundPipeline:
         # While a question is pending, a message is its answer or dismisses it
         # — see _intercept_pending_input.
         if deps.pending_input is not None and routing.platform in (
-            "slack", "teams", "telegram", "whatsapp",
+            "slack", "teams", "telegram", "whatsapp", "discord",
         ):
             intercepted, _unanswered = await self._intercept_pending_input(
                 msg, routing=routing, deps=deps, session_id=session_id,
@@ -1372,13 +1372,17 @@ class ChannelInboundPipeline:
     ) -> None:
         """Remember which inbound message the outbound reply should attach to.
 
-        Driven by the routing config's ``reply_to_mode`` (today only
-        Telegram routings carry it): ``all`` tracks the latest message,
-        ``first`` pins the session's opening message, anything else leaves
-        replies unthreaded.  Groups only — replying to the only other party
-        in a DM is noise.  Best-effort; never raises.
+        Driven by the routing config's ``reply_to_mode`` (Telegram routings
+        carry it): ``all`` tracks the latest message, ``first`` pins the
+        session's opening message, anything else leaves replies unthreaded.
+        Discord defaults to ``all``: a server channel is one shared
+        conversation, so an answer quotes the message it answers.  Groups
+        only — replying to the only other party in a DM is noise.
+        Best-effort; never raises.
         """
-        reply_to_mode = str(config.get("reply_to_mode") or "").lower()
+        reply_to_mode = str(
+            config.get("reply_to_mode") or ("all" if routing.platform == "discord" else "")
+        ).lower()
         message_id = (msg.source or {}).get("message_id")
         if msg.is_dm or message_id is None or reply_to_mode not in ("all", "first"):
             return

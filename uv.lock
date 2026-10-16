@@ -3374,6 +3374,7 @@ dependencies = [
     { name = "sse-starlette" },
     { name = "surogate-hub-sdk" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -3437,6 +3438,7 @@ requires-dist = [
     { name = "sse-starlette", specifier = ">=1.6,<3.0" },
     { name = "surogate-hub-sdk", url = "https://github.com/invergent-ai/surogate-hub/releases/download/v2.1.5/surogate_hub_sdk-2.1.5-py3-none-any.whl" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1.0" },
+    { name = "websockets", specifier = ">=13" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=13" },
 ]
 provides-extras = ["voice"]

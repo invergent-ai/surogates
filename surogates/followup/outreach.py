@@ -1149,10 +1149,10 @@ async def _send_to_destination(
     session_factory: Any, row: Any, *, session_store: Any, redis: Any, now: datetime,
     storage: Any, settings: Any,
 ) -> int:
-    """Post into the team's shared place (a Slack or Teams channel, a Telegram
-    group): the team configured it, so no person's permission or window applies."""
+    """Post into the team's shared place (a Slack, Teams or Discord channel, a
+    Telegram group): the team configured it, so no person's permission or window applies."""
     channel = row.destination
-    if row.platform not in ("slack", "teams", "telegram"):
+    if row.platform not in ("slack", "teams", "telegram", "discord"):
         return await _fail(session_factory, row.id, f"No shared destination on {row.platform}")
     # Teams writes need the serviceUrl the bot last heard the channel on.
     reference: dict = {}

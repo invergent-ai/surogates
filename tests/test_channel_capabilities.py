@@ -41,5 +41,11 @@ def test_voice_web_and_api_write_first_into_the_persons_own_conversation():
     assert web.identity == "user" and web.receipts == frozenset()
     assert api.identity == "external" and api.receipts == {"delivered", "read"}
     assert set(initiating_platforms()) == {
-        "whatsapp", "slack", "teams", "telegram", "voice", "web", "api",
+        "whatsapp", "slack", "teams", "telegram", "discord", "voice", "web", "api",
     }
+
+
+def test_discord_writes_first_only_to_people_who_wrote_to_the_bot():
+    caps = capabilities_for("discord")
+    assert caps.can_initiate and caps.needs_prior_contact and caps.opener == "text"
+    assert caps.identity == "user" and caps.label == "Discord" and not caps.buttons

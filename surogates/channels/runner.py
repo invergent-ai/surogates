@@ -502,6 +502,9 @@ def build_channels_app(
     )
 
     app = dispatcher.build_app()
+    # The socket platforms (Discord's Gateway) feed events through the same
+    # dispatcher's ingest(); run_channels hands it to their supervisor.
+    app.state.channel_dispatcher = dispatcher
     # Hand the per-message identity caches to the caller so it can wire the
     # cross-process invalidator (link_channel publishes channel_identity_changed
     # on bind; the channels pod evicts the just-linked sender's stale entry).
@@ -519,7 +522,8 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
 
     Serves the FastAPI app on ``settings.channels.port``, starts one
     delivery loop per enabled platform, starts the reconciler pub/sub
-    loop, and shuts down cleanly on SIGINT/SIGTERM.
+    loop and, when Discord is enabled, its Gateway supervisor, and shuts
+    down cleanly on SIGINT/SIGTERM.
 
     Parameters
     ----------
@@ -644,6 +648,21 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         name="channel-catchup",
     )
     tasks.append(catchup_task)
+
+    # Discord has no webhook: its messages arrive on a Gateway connection
+    # per bot, which the supervisor holds (one replica per bot, by lock).
+    discord = next((p for p in enabled if p.kind == "discord"), None)
+    if discord is not None:
+        from surogates.channels.gateway import DiscordGatewaySupervisor
+
+        supervisor = DiscordGatewaySupervisor(
+            platform=discord,
+            platform_client=client,
+            vault=vault,
+            redis=redis,
+            ingest=app.state.channel_dispatcher.ingest_from_socket,
+        )
+        tasks.append(asyncio.create_task(supervisor.run(), name="discord-gateway"))
 
     # Serve via uvicorn.
     channels_settings = getattr(settings, "channels", None)
