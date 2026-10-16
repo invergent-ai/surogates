@@ -76,6 +76,38 @@ def test_only_the_persons_own_conversation_gets_outbox_rows():
     assert not outbound_dm("api", None)  # an integrator's own API session
 
 
+async def test_a_teams_reply_goes_to_the_service_url_inbound_last_recorded(sf):
+    """The destination cache is primed once per process; Teams' serviceUrl and
+    conversation id move, and inbound refreshes them in the row, so delivery
+    must read them from the row rather than the cache."""
+    from surogates.db.models import DeliveryOutbox, Session as SessionRow
+    from surogates.session.store import SessionStore
+
+    sid = uuid4()
+    async with sf() as db:
+        db.add(SessionRow(id=sid, org_id=uuid4(), agent_id="agent-1", channel="teams", config={
+            "teams_conversation_id": "a:conv-1", "teams_service_url": "https://smba.example.test/emea/",
+            "channel_identifier": "app-1",
+        }))
+        await db.commit()
+    store = SessionStore(sf)
+    reply = {"message": {"role": "assistant", "content": "Bună!"}}
+    await store._enqueue_channel_delivery(sid, 1, EventType.LLM_RESPONSE, reply)
+    async with sf() as db:
+        row = await db.get(SessionRow, sid)
+        row.config = {**row.config, "teams_conversation_id": "a:conv-2",
+                      "teams_service_url": "https://smba.example.test/amer/"}
+        await db.commit()
+    await store._enqueue_channel_delivery(sid, 2, EventType.LLM_RESPONSE, reply)
+
+    async with sf() as db:
+        rows = (await db.execute(sa.select(DeliveryOutbox).order_by(DeliveryOutbox.event_id))).scalars().all()
+    assert [(r.destination["conversation_id"], r.destination["service_url"]) for r in rows] == [
+        ("a:conv-1", "https://smba.example.test/emea/"),
+        ("a:conv-2", "https://smba.example.test/amer/"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------

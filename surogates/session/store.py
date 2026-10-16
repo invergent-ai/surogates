@@ -1727,16 +1727,19 @@ class SessionStore:
                 # ``<channel>_reply_to_message_id`` (reply threading) and, for
                 # collapsed single-session conversations that span every
                 # thread of a chat, the ``*_thread_key`` reply destination.
-                # Gated on the cached config carrying the marker/key at all,
-                # so ordinary sessions pay no extra query.  Best-effort: a
-                # read failure falls back to the cached values rather than
-                # dropping the delivery.
+                # Teams' conversation id and serviceUrl move too (inbound
+                # refreshes them when Microsoft does), so they are always read
+                # fresh.  Gated on the cached config carrying the marker/key
+                # at all, so ordinary sessions pay no extra query.
+                # Best-effort: a read failure falls back to the cached values
+                # rather than dropping the delivery.
                 reply_key = f"{channel}_reply_to_message_id"
                 needs_fresh_reply = (
                     channel in ("telegram", "discord") and reply_key in config
                 )
                 needs_fresh_thread = bool(config.get("single_session"))
-                if needs_fresh_reply or needs_fresh_thread:
+                needs_fresh_teams = channel == "teams"
+                if needs_fresh_reply or needs_fresh_thread or needs_fresh_teams:
                     try:
                         fresh = await db.get(SessionRow, session_id)
                         fresh_config = (
@@ -1748,6 +1751,16 @@ class SessionStore:
                             )
                         if needs_fresh_thread and thread_dest is not None:
                             destination[thread_dest] = fresh_config.get(thread_key)
+                        if needs_fresh_teams:
+                            destination["conversation_id"] = (
+                                fresh_config.get("teams_conversation_id")
+                                or fresh_config.get("teams_channel_id")
+                                or destination["conversation_id"]
+                            )
+                            destination["service_url"] = (
+                                fresh_config.get("teams_service_url")
+                                or destination["service_url"]
+                            )
                     except Exception:
                         pass
                 outbox = DeliveryOutbox(
