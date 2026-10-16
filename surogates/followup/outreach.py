@@ -1148,10 +1148,10 @@ async def _send_to_destination(
     session_factory: Any, row: Any, *, session_store: Any, redis: Any, now: datetime,
     storage: Any, settings: Any,
 ) -> int:
-    """Post into the team's shared place (a Slack channel, a Telegram group):
+    """Post into the team's shared place (a Slack or Discord channel, a Telegram group):
     the team configured it, so no person's permission or window applies."""
     channel = row.destination
-    if row.platform not in ("slack", "telegram"):
+    if row.platform not in ("slack", "telegram", "discord"):
         return await _fail(session_factory, row.id, f"No shared destination on {row.platform}")
     key = build_session_key(SessionSource(
         platform=row.platform, chat_id=channel, chat_type="channel", user_id=channel,

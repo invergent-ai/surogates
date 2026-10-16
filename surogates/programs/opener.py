@@ -13,6 +13,8 @@ sees the question it is being answered to.
   back.  Skipping that call would put the opener and the reply in two
   different sessions.
 * Telegram keys a DM on the private chat id, which is the user's own id.
+* Discord, like Slack, keys a DM on its DM channel id, which
+  ``POST /users/@me/channels`` returns for the user.
 
 :func:`resolve_dm` is that knowledge in one place, shared with outreach.
 
@@ -35,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+import httpx
 import sqlalchemy as sa
 
 from surogates.channels.capabilities import capabilities_for
@@ -121,7 +124,8 @@ async def resolve_dm(
 
     *identity* is the person's channel identity or its ``platform_user_id``.
     *credentials_for* (``async (kind, identifier, org_id) -> dict``) and
-    *org_id* are needed only on Slack, where the DM must be opened first.
+    *org_id* are needed only on Slack and Discord, where the DM must be
+    opened first.
     Raises :class:`OpenerUndeliverable` with an operator-readable reason.
     """
     user = str(getattr(identity, "platform_user_id", identity) or "")
@@ -146,6 +150,23 @@ async def resolve_dm(
         return DmTarget(
             dm_key("slack", dm_id, user), dm_id,
             {"channel_id": dm_id, "thread_ts": None, "channel_identifier": sender},
+        )
+    if platform == "discord":
+        if credentials_for is None:
+            raise OpenerUndeliverable("No credential vault in this process")
+        creds = await credentials_for("discord", sender, str(org_id)) or {}
+        bot_token = str(creds.get("bot_token") or "")
+        if not bot_token:
+            raise OpenerUndeliverable("Discord bot token is missing for this sender")
+        from surogates.channels.platforms.discord import open_dm
+
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            dm_id, error = await open_dm(http, bot_token, user)
+        if not dm_id:
+            raise OpenerUndeliverable(f"Discord: {error or 'no direct message opened'}")
+        return DmTarget(
+            dm_key("discord", dm_id, user), dm_id,
+            {"channel_id": dm_id, "channel_identifier": sender},
         )
     if (target := dm_target(platform, user, sender)) is not None:
         return target

@@ -353,6 +353,8 @@ _THREAD_DEST_FIELDS = {
     "telegram": ("message_thread_id", "telegram_thread_key"),
     # WhatsApp is DM-only and has no threads at all.
     "whatsapp": (None, None),
+    # A Discord thread is a channel of its own: its id is the channel id.
+    "discord": (None, None),
 }
 
 
@@ -1679,6 +1681,12 @@ class SessionStore:
                     "reply_to_message_id": config.get("telegram_reply_to_message_id"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
+            elif channel == "discord":
+                destination = {
+                    "channel_id": config.get("discord_channel_id", ""),
+                    "reply_to_message_id": config.get("discord_reply_to_message_id"),
+                    "channel_identifier": config.get("channel_identifier", ""),
+                }
             elif channel == "whatsapp":
                 # No thread fields: WhatsApp is DM-only.  No api_version
                 # either — session config is a creation-time snapshot and
@@ -1704,16 +1712,16 @@ class SessionStore:
                 # session config (written by the channels process) and must be
                 # read fresh — the per-session config cache above is primed
                 # once and would pin every reply to the first message:
-                # ``telegram_reply_to_message_id`` (reply threading) and, for
+                # ``<channel>_reply_to_message_id`` (reply threading) and, for
                 # collapsed single-session conversations that span every
                 # thread of a chat, the ``*_thread_key`` reply destination.
                 # Gated on the cached config carrying the marker/key at all,
                 # so ordinary sessions pay no extra query.  Best-effort: a
                 # read failure falls back to the cached values rather than
                 # dropping the delivery.
+                reply_key = f"{channel}_reply_to_message_id"
                 needs_fresh_reply = (
-                    channel == "telegram"
-                    and "telegram_reply_to_message_id" in config
+                    channel in ("telegram", "discord") and reply_key in config
                 )
                 needs_fresh_thread = bool(config.get("single_session"))
                 if needs_fresh_reply or needs_fresh_thread:
@@ -1724,7 +1732,7 @@ class SessionStore:
                         )
                         if needs_fresh_reply:
                             destination["reply_to_message_id"] = (
-                                fresh_config.get("telegram_reply_to_message_id")
+                                fresh_config.get(reply_key)
                             )
                         if needs_fresh_thread and thread_dest is not None:
                             destination[thread_dest] = fresh_config.get(thread_key)

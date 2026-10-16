@@ -68,6 +68,12 @@ _PERMANENT_DELIVERY_ERRORS: frozenset[str] = frozenset({
     "account_inactive",
     "token_revoked",
     "invalid_auth",
+    # Discord — JSON error codes, delimited like Graph's below: unknown
+    # channel, missing access, cannot DM this user, missing permissions.
+    "discord error 10003 (",
+    "discord error 50001 (",
+    "discord error 50007 (",
+    "discord error 50013 (",
     # Telegram
     "bot was blocked by the user",
     "user is deactivated",
