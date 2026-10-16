@@ -249,6 +249,13 @@ _TURN_MARK = f"{WORKSPACE_STORAGE_DIR}/.turn"
 # a turn did nothing, and its end asks that computer for no keep.
 _NEVER_RAN = frozenset({"usage_limit", "nowhere_to_work"})
 
+# The tools whose call names a file the turn wrote.
+_WRITING_TOOLS = frozenset({"write_file", "patch"})
+
+
+def _event_type(evt: Any) -> str:
+    return evt.type.value if hasattr(evt.type, "value") else evt.type
+
 
 class ArtifactCompletionMixin:
     #: The turn's tool sagas, set when its loop starts; its end completes them.
@@ -605,8 +612,8 @@ class ArtifactCompletionMixin:
                 # turn that revises an artifact emits only the former, and
                 # without it that turn's card falls back to the name-keyed
                 # candidate below, whose ref never resolves to a panel.
-                types=[EventType.TOOL_CALL, EventType.TOOL_RESULT,
-                       EventType.ARTIFACT_CREATED, EventType.ARTIFACT_UPDATED,
+                types=[EventType.TOOL_CALL, EventType.ARTIFACT_CREATED,
+                       EventType.ARTIFACT_UPDATED,
                        EventType.LLM_REQUEST, EventType.LLM_RESPONSE],
             )
         except Exception:
@@ -616,32 +623,42 @@ class ArtifactCompletionMixin:
             )
             return out
 
-        # A refused write delivers nothing, so its call is no candidate. A
-        # call can have two results (one written as it was cancelled): any
-        # one that is not a refusal means the write may have landed.
-        landed: dict[str, bool] = {}
-        for evt in events:
-            etype_str = evt.type.value if hasattr(evt.type, "value") else evt.type
-            if etype_str != EventType.TOOL_RESULT.value:
-                continue
-            data = evt.data or {}
-            call_id = str(data.get("tool_call_id") or "")
-            if call_id:
-                landed[call_id] = (
-                    landed.get(call_id, False)
-                    or not _write_refused(data.get("content"))
+        start = next(
+            (i for i, evt in enumerate(events)
+             if (evt.data or {}).get("turn_id") == turn_id),
+            len(events),
+        )
+        turn_events = events[start:]
+        # A refused write delivers nothing, so its call is no candidate. The
+        # results are read only for a turn that wrote, and only from its
+        # first event: a result always follows its call.
+        if any(
+            _event_type(evt) == EventType.TOOL_CALL.value
+            and (evt.data or {}).get("name") in _WRITING_TOOLS
+            and (evt.data or {}).get("tool_call_id")
+            for evt in turn_events
+        ):
+            try:
+                results = await self._store.get_events(
+                    session_id, after=turn_events[0].id,
+                    types=[EventType.TOOL_RESULT],
                 )
+            except Exception:
+                logger.debug(
+                    "Failed to read tool results for candidate artifacts on %s",
+                    session_id, exc_info=True,
+                )
+                results = []
+            turn_events = sorted([*turn_events, *results], key=lambda evt: evt.id)
 
-        in_turn = False
         terminal_commands: list[str] = []
-        for evt in events:
+        # The file candidate each write call awaiting its result made, by
+        # call id, and the candidates whose call was refused.
+        awaiting: dict[str, int] = {}
+        refused: set[int] = set()
+        for evt in turn_events:
             data = evt.data or {}
-            if data.get("turn_id") == turn_id:
-                in_turn = True
-            if not in_turn:
-                continue
-
-            etype_str = evt.type.value if hasattr(evt.type, "value") else evt.type
+            etype_str = _event_type(evt)
 
             if etype_str == EventType.TOOL_CALL.value:
                 # Tool-call payloads carry ``name`` and ``arguments`` per
@@ -651,9 +668,7 @@ class ArtifactCompletionMixin:
                 raw_args = data.get("arguments")
                 args = _coerce_tool_args(raw_args)
 
-                if name in {"write_file", "patch"}:
-                    if landed.get(str(data.get("tool_call_id") or "")) is False:
-                        continue
+                if name in _WRITING_TOOLS:
                     path = (
                         args.get("path")
                         or args.get("file_path")
@@ -665,6 +680,9 @@ class ArtifactCompletionMixin:
                         and path
                         and not _is_internal_workspace_path(path)
                     ):
+                        call_id = str(data.get("tool_call_id") or "")
+                        if call_id:
+                            awaiting[call_id] = len(out)
                         out.append(
                             TurnArtifact(kind="file", label=path, ref=path),
                         )
@@ -684,6 +702,13 @@ class ArtifactCompletionMixin:
                     cmd = args.get("command") or ""
                     if isinstance(cmd, str) and cmd:
                         terminal_commands.append(cmd)
+            elif etype_str == EventType.TOOL_RESULT.value:
+                # A call's first result is its own: a second one is only the
+                # row a cancellation adds after it.
+                if data.get("name") in _WRITING_TOOLS:
+                    index = awaiting.pop(str(data.get("tool_call_id") or ""), None)
+                    if index is not None and _write_refused(data.get("content")):
+                        refused.add(index)
             elif etype_str in (
                 EventType.ARTIFACT_CREATED.value,
                 EventType.ARTIFACT_UPDATED.value,
@@ -698,6 +723,7 @@ class ArtifactCompletionMixin:
                             kind="artifact", label=name, ref=artifact_id,
                         ),
                     )
+        out = [art for i, art in enumerate(out) if i not in refused]
 
         # The tool-call branch keys an artifact candidate by name, because
         # the id only exists once the API has answered. When the event did

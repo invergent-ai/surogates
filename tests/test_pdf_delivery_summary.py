@@ -108,6 +108,67 @@ async def test_a_turn_whose_folder_could_not_be_listed_flags_no_file_its_reply_n
         harness._store.emit_event.assert_not_awaited()
 
 
+STARTED = datetime(2026, 10, 16, 9, 0, 0, tzinfo=timezone.utc)
+REPORT = {"kind": "file", "label": "report.md", "ref": "report.md"}
+
+
+def call(call_id, tool, args):
+    return SimpleNamespace(type=EventType.TOOL_CALL, data={"name": tool, "arguments": args, "tool_call_id": call_id})
+
+
+def result(call_id, tool, content):
+    return SimpleNamespace(type=EventType.TOOL_RESULT, data={
+        "name": tool, "content": content, "elapsed_ms": 1, "tool_call_id": call_id,
+    })
+
+
+async def card(events, listed=()):
+    """The files the turn's summary names, after an earlier turn's *events* and this one's, ending with report.md written.
+
+    *events* is a list of an earlier turn's events and a list of this turn's; *listed* is the workspace's other files,
+    each a (path, size, written in this turn).
+    """
+    session_id, turn_id = uuid4(), str(uuid4())
+    earlier, this_turn = events
+    log = [
+        *([SimpleNamespace(type=EventType.LLM_REQUEST, data={"turn_id": "earlier"}), *earlier] if earlier else []),
+        SimpleNamespace(type=EventType.LLM_REQUEST, data={"turn_id": turn_id}),
+        *this_turn,
+        call("c9", "write_file", {"path": "report.md", "content": "# Report\n"}),
+        result("c9", "write_file", json.dumps({"status": "ok", "path": "report.md", "bytes_written": 9, "lines_written": 1})),
+    ]
+    for event_id, event in enumerate(log, 1):
+        event.id = event_id
+
+    async def get_events(session_id, *, types=None, after=None, **_):
+        return [e for e in log if (types is None or e.type in types) and (after is None or e.id > after)]
+
+    harness = ArtifactCompletionMixin()
+    harness._turn_started_at = STARTED
+    harness._pending_iteration_summary_tasks = {}
+    harness._turn_summarizer = None
+    harness._store = AsyncMock()
+    harness._store.get_session.return_value = SimpleNamespace(
+        id=session_id, channel="web", config={"storage_bucket": "workspace"},
+    )
+    harness._store.get_events.side_effect = get_events
+    harness._storage = AsyncMock()
+    harness._storage.list_entries.return_value = [
+        {"key": f"{session_id}/{path}", "size": size, "modified": STARTED + timedelta(minutes=1 if new else -60)}
+        for path, size, new in [*listed, ("report.md", 9, True)]
+    ]
+
+    await harness._drain_and_emit_turn_summary(
+        session_id=session_id, turn_id=turn_id, user_message="write the report", final_message="Done.",
+    )
+
+    harness._store.emit_event.assert_awaited_once()
+    (_, kind, summary), _ = harness._store.emit_event.await_args
+    assert kind == EventType.TURN_SUMMARY
+    assert summary["turn_id"] == turn_id and "rejected" not in summary
+    return summary["artifacts"]
+
+
 @pytest.mark.parametrize("tool, args, content, listed", [
     # The editor's guard refuses a text write to a document; nothing was there to list.
     ("write_file", {"path": "sample.docx", "content": "hello"}, json.dumps({"error": (
@@ -117,51 +178,42 @@ async def test_a_turn_whose_folder_could_not_be_listed_flags_no_file_its_reply_n
     ("patch", {"path": "notes.md", "old_string": "a", "new_string": "b"}, json.dumps({
         "error": "Could not find the specified text in notes.md",
     }) + "\n\n[Hint: old_string not found. Use read_file to verify the current content.]", [("notes.md", 12, False)]),
+    # A V4A patch whose validation failed changed none of its files.
+    ("patch", {"mode": "patch", "path": "notes.md", "patch": "*** Begin Patch\n*** Update File: notes.md\n-a\n+b\n*** End Patch"},
+     json.dumps({"status": "error", "files": [], "errors": [
+         "Patch validation failed (no files were modified):", "notes.md: context not found",
+     ]}), [("notes.md", 12, False)]),
 ])
 async def test_a_refused_write_is_no_delivered_file(tool, args, content, listed):
-    session_id, turn_id = uuid4(), str(uuid4())
-    started = datetime(2026, 10, 16, 9, 0, 0, tzinfo=timezone.utc)
-    events = [
-        SimpleNamespace(type=EventType.LLM_REQUEST, data={"turn_id": turn_id}),
-        SimpleNamespace(type=EventType.TOOL_CALL, data={"name": tool, "arguments": args, "tool_call_id": "c1"}),
-        SimpleNamespace(type=EventType.TOOL_RESULT, data={
-            "name": tool, "content": content, "elapsed_ms": 1, "tool_call_id": "c1",
-        }),
-        SimpleNamespace(type=EventType.TOOL_CALL, data={
-            "name": "write_file", "arguments": {"path": "report.md", "content": "# Report\n"}, "tool_call_id": "c2",
-        }),
-        SimpleNamespace(type=EventType.TOOL_RESULT, data={
-            "name": "write_file", "elapsed_ms": 4, "tool_call_id": "c2",
-            "content": json.dumps({"status": "ok", "path": "report.md", "bytes_written": 9, "lines_written": 1}),
-        }),
+    assert await card(([], [call("c1", tool, args), result("c1", tool, content)]), listed) == [REPORT]
+
+
+@pytest.mark.parametrize("results", [
+    [],  # its result is not written yet
+    [result("c1", "write_file", json.dumps({"status": "ok", "path": "draft.md", "error": None}))],
+    [result("c1", "write_file", json.dumps({"status": "ok", "path": "draft.md", "error": False}))],
+])
+async def test_a_write_not_refused_is_delivered(results):
+    this_turn = [call("c1", "write_file", {"path": "draft.md", "content": "draft"}), *results]
+    draft = {"kind": "file", "label": "draft.md", "ref": "draft.md"}
+    # Unlisted, as a just-written file can be: only its call names it.
+    assert await card(([], this_turn)) == [draft, REPORT]
+
+
+async def test_an_earlier_turns_refusal_drops_no_call_of_this_turn():
+    # Some providers number their calls from call_0 in every response.
+    refused = result("call_0", "write_file", json.dumps({"error": "Refusing to overwrite 'draft.md'"}))
+    earlier = [call("call_0", "write_file", {"path": "draft.md", "content": "a"}), refused]
+    this_turn = [call("call_0", "write_file", {"path": "draft.md", "content": "b"})]
+    draft = {"kind": "file", "label": "draft.md", "ref": "draft.md"}
+    assert await card((earlier, this_turn)) == [draft, REPORT]
+
+
+async def test_an_earlier_turns_write_keeps_no_refused_call_of_this_turn():
+    landed = result("call_0", "write_file", json.dumps({"status": "ok", "path": "draft.md"}))
+    earlier = [call("call_0", "write_file", {"path": "draft.md", "content": "a"}), landed]
+    this_turn = [
+        call("call_0", "write_file", {"path": "draft.md", "content": "b"}),
+        result("call_0", "write_file", json.dumps({"error": "Refusing to overwrite 'draft.md'"})),
     ]
-    harness = ArtifactCompletionMixin()
-    harness._turn_started_at = started
-    harness._pending_iteration_summary_tasks = {}
-    harness._turn_summarizer = None
-    harness._store = AsyncMock()
-    harness._store.get_session.return_value = SimpleNamespace(
-        id=session_id, channel="web", config={"storage_bucket": "workspace"},
-    )
-
-    async def get_events(session_id, *, types=None, **_):
-        return [e for e in events if types is None or e.type in types]
-
-    harness._store.get_events.side_effect = get_events
-    harness._storage = AsyncMock()
-    harness._storage.list_entries.return_value = [
-        {"key": f"{session_id}/{path}", "size": size, "modified": started + timedelta(minutes=1 if new else -60)}
-        for path, size, new in [*listed, ("report.md", 9, True)]
-    ]
-
-    await harness._drain_and_emit_turn_summary(
-        session_id=session_id, turn_id=turn_id, user_message="write the report", final_message="Done.",
-    )
-
-    harness._store.emit_event.assert_awaited_once_with(
-        session_id, EventType.TURN_SUMMARY, {
-            "turn_id": turn_id,
-            "recap": "",
-            "artifacts": [{"kind": "file", "label": "report.md", "ref": "report.md"}],
-        },
-    )
+    assert await card((earlier, this_turn)) == [REPORT]

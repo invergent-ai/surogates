@@ -183,7 +183,7 @@ def _write_refused(content: Any) -> bool:
         return False
     try:
         result, _ = json.JSONDecoder().raw_decode(content.lstrip())
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     return isinstance(result, dict) and (
         bool(result.get("error")) or result.get("status") == "error"
