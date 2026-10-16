@@ -351,6 +351,28 @@ async def test_the_step_context_names_the_day_before_the_start_and_why(sf):
 
 
 @pytest.mark.asyncio
+async def test_the_step_context_finds_the_form_answers_past_messages_with_another_source(sf):
+    program = await _program(sf)
+    inv = await _invitation(sf, program, await _person(sf), session_id=SESSION)
+    async with sf() as db:
+        db.add(SessionRow(id=SESSION, org_id=ORG, agent_id=AGENT, channel="web", config={}))
+        db.add(Event(session_id=SESSION, type="user.message", data={
+            "content": "Pain: 2\nSlept: well", "source": {"flow_reply": True},
+        }))
+        db.add(Event(session_id=SESSION, type="user.message", data={
+            "content": "[Comment on Plan.docx] Ion: «@Writer is Q1 right?»", "source": "office_mention",
+        }))
+        db.add(Event(session_id=SESSION, type="user.message", data={
+            "content": "Approved", "source": "inbox_governance_decision",
+        }))
+        await db.commit()
+
+    text = await step_context(sf, inv, event="reply", now=NOW, config=program.config)
+
+    assert "Last form answers: Pain: 2 Slept: well" in text
+
+
+@pytest.mark.asyncio
 async def test_the_step_context_says_which_contact_is_writing(sf):
     program = await _program(sf)
     person = await _person(sf)

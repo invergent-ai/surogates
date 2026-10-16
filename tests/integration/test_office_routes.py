@@ -15,10 +15,13 @@ from httpx import ASGITransport, AsyncClient
 from jose import jwt
 from sqlalchemy import delete
 
+from surogates.api.routes import sessions as session_routes
+from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
 from surogates.devices.binding import Binding
 from surogates.office import sessions as office_sessions
 from surogates.office.tokens import read_url_token, sign
+from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import session_workspace_key
 from surogates.tenant.auth.jwt import create_access_token
@@ -516,3 +519,112 @@ async def test_a_save_keeps_its_mark_and_who_edited_since_the_last_landed_save(c
     # Landed: the next save's authors start at the last change already landed.
     third = await save('{"turn": "m3"}', [user, agent, agent], "2026-10-13T10:02:00Z")
     assert third["authors"] == ["agent:w:s"]
+
+
+AGENT_EDITING = OfficeSettings(
+    public_url="https://office.example", internal_url="http://docs.internal", callback_base_url="https://api.example",
+    jwt_secret=JWT_SECRET, token_secret=TOKEN_SECRET,
+    runtime_office_url="http://runtime-office.test", runtime_office_token="r" * 32,
+)
+
+
+class _AgentNames:
+    """The runtime config cache, as far as the editor reads it: the agent's display name."""
+
+    async def get(self, agent_id):
+        return {"display_name": "Writer"}
+
+
+async def _mentioning(client, app, session_factory, monkeypatch):
+    """A person's chat with docs/Plan.docx open in its pane, where the agent edits live; a mention's body; the wakes."""
+    app.state.settings.office = AGENT_EDITING
+    app.state.runtime_config_cache = _AgentNames()
+    woken: list = []
+
+    async def enqueue(redis, *, org_id, agent_id, session_id):
+        woken.append(session_id)
+
+    monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
+    session_id, headers, user_id, session = await _user_chat(client, app, session_factory)
+    opened = await client.get(f"/v1/sessions/{session_id}/workspace/editor", params={"path": "docs/Plan.docx"}, headers=headers)
+    assert opened.status_code == 200, opened.text
+    address = f"{session.agent_id}@agent.invalid"
+    body = {"path": "docs/Plan.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address]}
+    return session_id, headers, user_id, body, woken
+
+
+async def test_the_editor_offers_the_agent_to_mention_only_where_it_answers(client, app, session_factory):
+    session_id, headers, _, session = await _user_chat(client, app, session_factory)
+    url = f"/v1/sessions/{session_id}/workspace/editor"
+    assert (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()["mentionable_users"] == []
+    app.state.settings.office = AGENT_EDITING
+    app.state.runtime_config_cache = _AgentNames()
+    offered = (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()["mentionable_users"]
+    assert offered == [{"id": f"agent:{session.agent_id}", "name": "Writer", "email": f"{session.agent_id}@agent.invalid"}]
+    viewing = await client.get(url, params={"path": "docs/Plan.docx", "view": "true"}, headers=headers)
+    assert viewing.json()["mentionable_users"] == []
+
+
+async def test_a_mention_reaches_the_chat_as_the_persons_message_and_wakes_it(client, app, session_factory, monkeypatch):
+    session_id, headers, user_id, body, woken = await _mentioning(client, app, session_factory, monkeypatch)
+    response = await client.post(f"/v1/sessions/{session_id}/workspace/editor/mention", json=body, headers=headers)
+    assert response.status_code == 202, response.text
+    [event] = await SessionStore(session_factory).get_events(UUID(session_id), types=[EventType.USER_MESSAGE])
+    assert event.id == response.json()["event_id"]
+    assert event.data == {
+        "content": f"[Comment on Plan.docx] Test User {user_id}: «@Writer is Q1 right?»",
+        "metadata": {"path": "docs/Plan.docx", "thread": "15689582", "kind": "docx", "author": f"Test User {user_id}",
+                     "author_id": f"user:{user_id}", "comment": body["message"]},
+        "source": "office_mention",
+        "principal_user_id": str(user_id),
+    }
+    assert woken == [UUID(session_id)]
+
+
+async def test_a_mention_from_a_document_this_chat_does_not_have_open_is_refused(client, app, session_factory, monkeypatch):
+    session_id, headers, _, body, woken = await _mentioning(client, app, session_factory, monkeypatch)
+    [document] = await office_sessions.open_documents(session_factory)
+    await office_sessions.close(session_factory, document.id)
+    refused = await client.post(f"/v1/sessions/{session_id}/workspace/editor/mention", json=body, headers=headers)
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "docs/Plan.docx is not open in this chat any more: open it here again to mention the agent."
+    assert await SessionStore(session_factory).get_events(UUID(session_id), types=[EventType.USER_MESSAGE]) == []
+    assert woken == []
+
+
+async def test_a_mention_names_the_agent_in_a_document_it_answers_in(client, app, session_factory, monkeypatch):
+    session_id, headers, _, body, _ = await _mentioning(client, app, session_factory, monkeypatch)
+    url = f"/v1/sessions/{session_id}/workspace/editor/mention"
+    assert (await client.post(url, json={**body, "emails": ["ana@example.com"]}, headers=headers)).status_code == 400
+    assert (await client.post(url, json={**body, "path": "notes.odt"}, headers=headers)).status_code == 415
+    app.state.settings.office = OfficeSettings(public_url="https://office.example", internal_url="http://docs.internal",
+                                               callback_base_url="https://api.example", jwt_secret=JWT_SECRET,
+                                               token_secret=TOKEN_SECRET)
+    assert (await client.post(url, json=body, headers=headers)).status_code == 503
+
+
+async def test_a_service_accounts_mention_is_the_person_it_names(client, app, session_factory, monkeypatch):
+    app.state.settings.office = AGENT_EDITING
+
+    async def enqueue(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id, name="ops")
+    created = await client.post("/v1/api/sessions", json={"config": {"source": "ops"}}, headers={"Authorization": f"Bearer {issued.token}"})
+    session_id = created.json()["id"]
+    session = await SessionStore(session_factory).get_session(UUID(session_id))
+    await app.state.storage.write(session.config["storage_bucket"], session_workspace_key(session_id, "a.xlsx"), b"PK")
+    acting = {"Authorization": f"Bearer {issued.token}", "X-Surogate-Acting-User-Id": "42", "X-Surogate-Acting-User-Name": quote("Ana Popescu")}
+    opened = await client.get(f"/v1/api/sessions/{session_id}/workspace/editor", params={"path": "a.xlsx"}, headers=acting)
+    assert opened.status_code == 200, opened.text
+    address = f"{session.agent_id}@agent.invalid"
+    response = await client.post(f"/v1/api/sessions/{session_id}/workspace/editor/mention", headers=acting, json={
+        "path": "a.xlsx", "comment_id": "{F80AA885-C2F8-8A96-7622-6B76D3A85AB7}", "message": f"@{address} total?", "emails": [address],
+    })
+    assert response.status_code == 202, response.text
+    [event] = await SessionStore(session_factory).get_events(UUID(session_id), types=[EventType.USER_MESSAGE])
+    assert event.data["content"] == "[Comment on a.xlsx] Ana Popescu: «@Agent total?»"
+    assert event.data["metadata"]["author_id"] == f"sa:{issued.id}:42"
+    assert event.data["principal_service_account_id"] == str(issued.id)
