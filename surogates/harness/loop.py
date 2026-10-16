@@ -143,6 +143,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How long the acknowledgement of one mention may take: a slow runtime-office must not hold the turn. One that lands
+#: after the wait is given up is harmless, the thread only gets it late.
+ACK_TIMEOUT_SECONDS = 25
+
 # Some names below are not used by this module but are re-exported here as a
 # stable import surface for the test suite (`from surogates.harness.loop import ...`);
 # those lines are marked with `# noqa: F401`.
@@ -1151,21 +1155,33 @@ class AgentHarness(
 
     async def _acknowledge_mentions(self, session: Session, events: list) -> None:
         """Post the acknowledgement in the thread of each mention in *events* that no wake or request has followed:
-        the person sees the agent took their comment before the model answers it.  A failure is logged, and the turn
-        goes on.  Each document acknowledged in is saved at the turn's end with those the turn edited."""
+        the person sees the agent took their comment before the model answers it.  A failure, or an acknowledgement
+        that takes longer than ACK_TIMEOUT_SECONDS, is logged, and the turn goes on.  Each document acknowledged in is
+        saved at the turn's end with those the turn edited."""
         mentions = unacknowledged(events)
-        if not mentions or not load_settings().office.agent_editing:
+        if not mentions:
+            return
+        try:
+            editing = load_settings().office.agent_editing
+        except Exception:
+            logger.exception("Could not read the office settings to acknowledge mentions (session %s)", session.id)
+            return
+        if not editing:
             return
         # Local: the office tools import surogates.session, whose store imports this package.
         from surogates.tools.builtin.office import acknowledge_mention
 
         for mention in mentions:
             try:
-                answer = json.loads(await acknowledge_mention(
+                answer = json.loads(await asyncio.wait_for(acknowledge_mention(
                     mention, session_id=str(session.id), agent_id=session.agent_id, session_store=self._store,
                     storage=self._storage, session_factory=self._session_factory, redis=self._redis,
                     platform_client=self._platform_client,
-                ))
+                ), timeout=ACK_TIMEOUT_SECONDS))
+            except TimeoutError:
+                logger.warning("Could not acknowledge a mention in %s (session %s): no answer in %s seconds",
+                               mention["path"], session.id, ACK_TIMEOUT_SECONDS)
+                continue
             except Exception:
                 logger.exception("Could not acknowledge a mention in %s (session %s)", mention["path"], session.id)
                 continue

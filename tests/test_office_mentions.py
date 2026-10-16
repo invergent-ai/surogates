@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -118,6 +119,39 @@ async def test_each_new_mention_is_acknowledged_and_a_failure_never_stops_the_tu
     await harness._acknowledge_mentions(session, [_mention(1, thread="boom"), _mention(2, thread="gone"), _mention(3)])
     assert calls == [("boom", str(session.id)), ("gone", str(session.id)), ("15689582", str(session.id))]
     assert harness._mention_paths == ("docs/Plan.docx",)
+
+
+@pytest.mark.asyncio
+async def test_an_acknowledgement_that_never_answers_holds_the_turn_no_longer_than_its_bound(monkeypatch, caplog):
+    calls = _acknowledging(monkeypatch)
+
+    async def stuck(mention, **kwargs):
+        calls.append((mention["thread"], kwargs["session_id"]))
+        if mention["thread"] == "stuck":
+            await asyncio.Event().wait()
+        return json.dumps({"applied": True})
+
+    monkeypatch.setattr(office_tools, "acknowledge_mention", stuck)
+    monkeypatch.setattr(loop_module, "ACK_TIMEOUT_SECONDS", 0.05)
+    harness, session = _harness(AsyncMock()), _session()
+    await asyncio.wait_for(harness._acknowledge_mentions(session, [_mention(1, thread="stuck"), _mention(2)]), timeout=5)
+    assert calls == [("stuck", str(session.id)), ("15689582", str(session.id))]
+    assert harness._mention_paths == ("docs/Plan.docx",)
+    assert "Could not acknowledge a mention in docs/Plan.docx" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_settings_that_cannot_be_read_are_logged_and_the_turn_goes_on(monkeypatch, caplog):
+    calls = _acknowledging(monkeypatch)
+
+    def unreadable():
+        raise RuntimeError("the config file is gone")
+
+    monkeypatch.setattr(loop_module, "load_settings", unreadable)
+    harness = _harness(AsyncMock())
+    await harness._acknowledge_mentions(_session(), [_mention(1)])
+    assert calls == [] and harness._mention_paths == ()
+    assert "Could not read the office settings" in caplog.text
 
 
 @pytest.mark.asyncio
