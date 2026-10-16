@@ -127,8 +127,8 @@ elements per slide.
 
 ## Comments
 
-The outline lists every comment thread: its `id`, its `slide` number, the author, the text, the latest replies and
-whether it is resolved. Reply and resolve in a call of their own:
+The outline lists the comment threads, open ones first: each one's `id`, its `slide` number, the author, the text, the
+latest replies and whether it is resolved. Reply and resolve in a call of their own:
 
 ```json
 {"ops": [{"op": "reply", "thread": "{9D24FA3F-798C-22EB-4B89-84EF55C02C52}", "body": "Moved the start to March, as the lease says."}, {"op": "resolve", "thread": "{9D24FA3F-798C-22EB-4B89-84EF55C02C52}"}]}

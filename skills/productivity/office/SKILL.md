@@ -53,7 +53,7 @@ watches and may edit the same document. Work like a colleague in a shared docume
 
 A message that starts `[Comment on <file>]` is a person who mentioned you in a comment in that document: the words in
 « » are theirs, quoted from it. "On it, I'll reply here when done." is already posted in the thread, and the note with
-the message says which thread it is.
+the message says which thread it is, or, in a PDF, how to find it.
 
 1. Read the document with `office_read`, and the thread in its outline: the mention may be a reply, with the question
    earlier in the thread.
