@@ -61,3 +61,16 @@ describe("slide ops", () => {
     await expect(compiled).rejects.toThrow(/^op 0, slide 0 could not be measured: page\.screenshot: Timeout 30000ms exceeded\.$/);
   });
 });
+
+describe("a deck's comment threads", () => {
+  const thread = "{9D24FA3F-798C-22EB-4B89-84EF55C02C52}";
+
+  it("takes a reply and a resolve, in a call of their own", () => {
+    expect(checkSlideOps([{ op: "reply", thread, body: "March." }, { op: "resolve", thread }])).toEqual([
+      { op: "reply", thread, body: "March." },
+      { op: "resolve", thread },
+    ]);
+    expect(() => checkSlideOps([{ op: "resolve", thread }, { op: "order", ids: ["1_402"] }])).toThrow("reply and resolve go in a call of their own");
+    expect(() => checkSlideOps([{ op: "reply", thread, body: "x".repeat(401) }])).toThrow("a thread reply states just the result");
+  });
+});

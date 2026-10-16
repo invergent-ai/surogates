@@ -123,3 +123,53 @@ describe("a slide's title in the outline", () => {
     expect(run({ action: "outline" }).slides.map((s: Any) => s.title)).toEqual(["Lisbon: team and setup", "Quarterly review", "Just words"]);
   });
 });
+
+describe("a reply in a slide's comment thread", () => {
+  // A deck with one comment, whose data the editor replaces on EditComment unless someone holds the comment.
+  function commented(held: boolean) {
+    class CommentData {
+      m_sGuid = "{G}";
+      m_aReplies: Any[] = [];
+      m_bSolved = false;
+      Add_Reply(reply: Any) { this.m_aReplies.push(reply); }
+      SetSolved(solved: boolean) { this.m_bSolved = solved; }
+      SetText(text: string) { (this as Any).m_sText = text; }
+      SetUserName(name: string) { (this as Any).m_sUserName = name; }
+    }
+    let data = new CommentData();
+    const comment = {
+      Comment: { GetData: () => data, Get_Id: () => "1_1", Parent: { slide: { num: 0 } } },
+      GetAuthorName: () => "Flavius", GetText: () => "@Agent which month?", IsSolved: () => data.m_bSolved,
+      GetRepliesCount: () => data.m_aReplies.length,
+      GetReply: (i: number) => ({ GetAuthorName: () => data.m_aReplies[i].m_sUserName, GetText: () => data.m_aReplies[i].m_sText }),
+    };
+    const pres = {
+      GetWidth: () => 12192000, GetHeight: () => 6858000, GetAllComments: () => [comment], GetAllSlides: () => [],
+      Presentation: { EditComment: (_id: string, next: Any) => { if (!held) data = next; } },
+    };
+    const run = (scope: Any): Any =>
+      runInNewContext(`(${SCRIPT})()`, { Api: { GetPresentation: () => pres }, scope, AscFormat: {}, AscCommon: { CCommentData: CommentData } });
+    return { run, data: () => data };
+  }
+  const agent = { id: "agent:a:s", name: "Agent" };
+
+  it("replies and resolves on a copy of the comment's data", () => {
+    const deck = commented(false);
+    const before = deck.data();
+    expect(deck.run({ action: "edit", ops: [{ op: "reply", thread: "{G}", body: "March." }, { op: "resolve", thread: "{G}" }], agent }))
+      .toEqual({ results: [{ op: 0 }, { op: 1 }] });
+    expect(deck.data()).not.toBe(before);
+    expect(before.m_aReplies).toEqual([]);
+    expect(deck.data().m_aReplies.map((r: Any) => [r.m_sUserName, r.m_sText, r.m_sUserId])).toEqual([["Agent", "March.", "agent:a:s"]]);
+    expect(deck.data().m_bSolved).toBe(true);
+    expect(deck.run({ action: "outline" }).comments).toEqual([
+      { id: "{G}", slide: 1, author: "Flavius", text: "@Agent which month?", replies: [{ author: "Agent", text: "March." }], resolved: true },
+    ]);
+  });
+
+  it("is refused when someone holds the comment, and when the thread is gone", () => {
+    expect(commented(true).run({ action: "edit", ops: [{ op: "reply", thread: "{G}", body: "March." }], agent }).refused)
+      .toMatchObject({ op: 0, reason: expect.stringMatching(/Someone is changing comment thread \{G\}/) });
+    expect(commented(false).run({ action: "edit", ops: [{ op: "resolve", thread: "{H}" }], agent }).refused.reason).toMatch(/is gone/);
+  });
+});

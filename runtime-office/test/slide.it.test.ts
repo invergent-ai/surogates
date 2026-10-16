@@ -196,4 +196,29 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
       expect((await outline(user)).slides).toHaveLength(3);
     });
   });
+
+  it("lists a person's comment with its slide, and answers it there", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pptx");
+    const page = await pool.get(user);
+    // The builder's AddComment comments the editor's current slide, whichever slide it is called on, and ApiSlide.Select
+    // does not move it on this page: the person goes to the second slide first (internal).
+    await page.command("function () { var p = Api.GetPresentation(); p.Presentation.Set_CurPage(1); p.GetSlideByIndex(1).AddComment(914400, 914400, scope.text, scope.name, scope.id); return true; }",
+      { text: "@Agent which month for Lisbon?", name: "Flavius", id: "user:it" });
+    let thread = "";
+    await eventually(async () => {
+      thread = (await page.command("function () { var c = Api.GetPresentation().GetAllComments()[0]; return c ? c.Comment.GetData().m_sGuid : ''; }", {}))
+        .value as string;
+      expect(thread).toMatch(/^\{[0-9A-F-]+\}$/i);
+    });
+    const comments = async (id: string): Promise<Any[]> => ((await office.read(id, { view: "outline" })) as Any).comments;
+    await eventually(async () => {
+      expect(await comments(agent)).toEqual([{ id: thread, slide: 2, author: "Flavius", text: "@Agent which month for Lisbon?", replies: [], resolved: false }]);
+    });
+    const refused = (await office.edit(agent, [{ op: "reply", thread, body: "x" }, { op: "resolve", thread: "{00000000-0000-0000-0000-000000000000}" }])) as Any;
+    expect(refused).toMatchObject({ applied: false, refused: { op: 1 } });
+    expect(await office.edit(agent, [{ op: "reply", thread, body: "March: the lease starts then." }, { op: "resolve", thread }])).toMatchObject({ applied: true });
+    await eventually(async () => {
+      expect((await comments(user))[0]).toMatchObject({ resolved: true, replies: [{ author: "Agent", text: "March: the lease starts then." }] });
+    });
+  });
 });

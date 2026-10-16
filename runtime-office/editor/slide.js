@@ -7,7 +7,7 @@
 // only where the builder has no call; each says so.
 (function () {
   "use strict";
-  var pres = Api.GetPresentation(), VIEW_BUDGET = 30000, MAX_MATCHES = 50, EMU_PER_PT = 12700;
+  var pres = Api.GetPresentation(), VIEW_BUDGET = 30000, MAX_MATCHES = 50, EMU_PER_PT = 12700, THREAD_BUDGET = 15000, MAX_REPLIES = 10;
 
   function hash(text) {
     var h = 0x811c9dc5;
@@ -78,8 +78,83 @@
   // --- reading
 
   function outline() {
-    return { canvas: [1920, Math.round(1920 * pres.GetHeight() / pres.GetWidth())], slides: pres.GetAllSlides().map(entry) };
+    return { canvas: [1920, Math.round(1920 * pres.GetHeight() / pres.GetWidth())], slides: pres.GetAllSlides().map(entry), comments: threads() };
   }
+
+  // --- comment threads. A thread is named by its comment's GUID, the id the editor's mentions carry. Internal: the GUID
+  // is only in the comment's data (`GetData().m_sGuid`), the builder's GetId throws in a presentation, and the slide is
+  // the comment's holder's (`Comment.Parent.slide`, numbered from 0).
+
+  function guidOf(c) { return c.Comment.GetData().m_sGuid; }
+  function slideOf(c) { var holder = c.Comment.Parent; return holder && holder.slide ? holder.slide.num + 1 : null; }
+
+  function repliesOf(c) {
+    var out = [];
+    for (var i = Math.max(0, c.GetRepliesCount() - MAX_REPLIES); i < c.GetRepliesCount(); i++) {
+      var r = c.GetReply(i);
+      out.push({ author: r.GetAuthorName(), text: clip(String(r.GetText() || ""), 300) });
+    }
+    return out;
+  }
+
+  // Open threads first (a mention's thread is open), until the budget: the outline stays under what a tool result holds.
+  function threads() {
+    var all = pres.GetAllComments(), out = [], size = 0;
+    var ordered = all.filter(function (c) { return !c.IsSolved(); }).concat(all.filter(function (c) { return !!c.IsSolved(); }));
+    for (var i = 0; i < ordered.length && size < THREAD_BUDGET; i++) {
+      var c = ordered[i], thread = { id: guidOf(c), slide: slideOf(c), author: c.GetAuthorName(),
+        text: clip(String(c.GetText() || ""), 300), replies: repliesOf(c), resolved: !!c.IsSolved() };
+      size += JSON.stringify(thread).length;
+      out.push(thread);
+    }
+    return out;
+  }
+
+  function threadById(id) { return pres.GetAllComments().filter(function (c) { return guidOf(c) === id; })[0] || null; }
+
+  // The builder's AddReply and SetSolved change a comment's data in place, so cancelling the group could not take them
+  // back: a copy is changed and set instead, and the history keeps the old data. A slide comment's data has no Copy, and
+  // its class is out of reach here (the connector's `Asc` shadows it): its fields are copied one by one. (internal)
+  function copyOf(d) {
+    var out = new AscCommon.CCommentData();
+    for (var k in d) if (Object.prototype.hasOwnProperty.call(d, k) && typeof d[k] !== "function") out[k] = d[k];
+    out.m_aReplies = (d.m_aReplies || []).map(copyOf);
+    return out;
+  }
+
+  // As the builder's AddReply makes it (internal).
+  function replyOf(text, agent) {
+    var reply = new AscCommon.CCommentData(), now = new Date();
+    reply.SetText(text);
+    reply.SetUserName(agent.name);
+    reply.m_sUserId = agent.id;
+    reply.m_sTime = String(now.getTime() - now.getTimezoneOffset() * 60000);
+    reply.m_sOOTime = String(now.getTime());
+    return reply;
+  }
+
+  function comment(ops, agent) {
+    var found = Object.create(null);
+    ops.forEach(function (op, index) {
+      if (!found[op.thread]) found[op.thread] = threadById(op.thread);
+      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: read the outline again.");
+    });
+    Object.keys(found).forEach(function (id) {
+      var c = found[id], before = c.Comment.GetData(), data = copyOf(before), first = -1;
+      ops.forEach(function (op, index) {
+        if (op.thread !== id) return;
+        if (first < 0) first = index;
+        if (op.op === "reply") data.Add_Reply(replyOf(op.body, agent));
+        else data.SetSolved(true);
+      });
+      pres.Presentation.EditComment(c.Comment.Get_Id(), data);   // internal: no builder call sets a comment's data
+      // The editor leaves a comment someone holds as it was, and says nothing.
+      if (c.Comment.GetData() === before) throw new Refusal(first, "Someone is changing comment thread " + id + " right now: nothing applied. Try again in a moment.");
+    });
+    return { results: ops.map(function (op, index) { return { op: index }; }) };
+  }
+
+  function onlyComments(ops) { return ops.every(function (op) { return op.op === "reply" || op.op === "resolve"; }); }
 
   function fillText(uni) {   // a compiled fill (internal: the builder reads only direct formatting)
     var f = uni && uni.fill;
@@ -630,7 +705,7 @@
     if (scope.action === "outline") return outline();
     if (scope.action === "slide") return view(scope.target);
     if (scope.action === "search") return search(scope.query);
-    if (scope.action === "edit") return edit(scope.ops);
+    if (scope.action === "edit") return onlyComments(scope.ops) ? comment(scope.ops, scope.agent) : edit(scope.ops);
     return { __error: "unknown action " + scope.action };
   } catch (e) {
     // A builder call that throws inside the editor's no-history section leaves its object registry off: everything
