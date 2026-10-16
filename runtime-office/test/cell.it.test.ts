@@ -88,6 +88,15 @@ describe.skipIf(!itEnabled)("a spreadsheet", () => {
     expect((await threads(user))[0].replies).toEqual([]);
   });
 
+  it("refuses a thread named like an object's built-in name as gone", async () => {
+    const { agent } = await pair(office, opened, "sample.xlsx");
+    for (const thread of ["constructor", "__proto__"]) {
+      const refused = (await office.edit(agent, [{ op: "resolve", thread }])) as Any;
+      expect(refused, thread).toMatchObject({ applied: false, refused: { op: 0 } });
+      expect(refused.refused.reason).toMatch(/is gone/);
+    }
+  });
+
   it("outlines its sheets", async () => {
     const { agent } = await pair(office, opened, "sample.xlsx");
     const read: Any = await office.read(agent, { view: "outline" });

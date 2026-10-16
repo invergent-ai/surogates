@@ -174,7 +174,7 @@
   // first one's change. The comment's sheet is made active first, because a change goes to the active sheet's comments
   // and on another sheet does nothing. runtime-office then waits until a fresh read shows the changes.
   function comment(ops, agent) {
-    var found = {};
+    var found = Object.create(null);
     ops.forEach(function (op, index) {
       if (!found[op.thread]) found[op.thread] = threadById(op.thread);
       if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: read the outline again.");
