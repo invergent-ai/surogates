@@ -139,12 +139,10 @@ export interface AgentChatProps {
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
 // so it stays component-local; arbitrary-value Tailwind classes read it.
-const RIGHT_STACK_STYLE = {
-  // Both the column's width and the chat panel's right offset read this, so
-  // one value keeps them complementary. 50%: the browser shell renders a real
-  // page, and page layouts are unusable in a 440px strip.
-  ["--right-stack-w" as string]: "50%",
-} as React.CSSProperties;
+// Both the column's width and the chat panel's right offset read it, so one
+// value keeps them complementary. 75%: an open document or browser page is
+// the work, and the chat beside it a quarter.
+const RIGHT_STACK_STYLE = { ["--right-stack-w" as string]: "75%" } as React.CSSProperties;
 
 /** The panes the phone layout shows one at a time. The files *tree* is not
  *  one — it expands as an accordion inside the chat column at every width —
