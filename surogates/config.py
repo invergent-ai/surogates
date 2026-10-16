@@ -632,6 +632,10 @@ class TelegramChannelSettings(ChannelKindSettings):
     model_config = {"env_prefix": "SUROGATES_CHANNELS_TELEGRAM_"}
 
 
+class TeamsChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_TEAMS_"}
+
+
 class WebsiteChannelSettings(ChannelKindSettings):
     model_config = {"env_prefix": "SUROGATES_CHANNELS_WEBSITE_"}
 
@@ -691,6 +695,7 @@ class ChannelsSettings(BaseSettings):
     # Per-kind enablement.  Keys are platform kind slugs; presence +
     # ``enabled=True`` activates the platform.  Absent key → disabled.
     slack: SlackChannelSettings = Field(default_factory=SlackChannelSettings)
+    teams: TeamsChannelSettings = Field(default_factory=TeamsChannelSettings)
     telegram: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
     website: WebsiteChannelSettings = Field(default_factory=WebsiteChannelSettings)
     whatsapp: WhatsAppChannelSettings = Field(default_factory=WhatsAppChannelSettings)

@@ -95,6 +95,16 @@ _PERMANENT_DELIVERY_ERRORS: frozenset[str] = frozenset({
     "graph error 132015 (",  # template paused
     "graph error 132016 (",  # template disabled
     "template payload incomplete",  # ours: name or language missing
+    # Microsoft Teams (Bot Framework connector).  Codes are matched
+    # lowercased; the 404 is a delimited prefix (see TeamsPlatform._call)
+    # because a bare "404" would match any platform's text.
+    "messagewritesblocked",          # the bot was blocked from this chat
+    "conversationblockedbyuser",     # the person blocked the bot
+    "botnotinconversationroster",    # the bot was removed / uninstalled
+    "messagesizetoobig",
+    "teams error 404 ",              # conversation not found
+    "no teams conversation reference",  # ours: nowhere to write to
+    "invalid_client",                # Entra refused the client secret
 })
 
 # Give up on an undelivered item once it is older than this, whatever the
