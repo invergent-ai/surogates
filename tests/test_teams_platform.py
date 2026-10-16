@@ -489,3 +489,12 @@ def test_capabilities_and_descriptor():
     assert p.descriptor.vault_refs(APP_ID) == {"app_password": "app_password", "tenant_id": "tenant_id"}
     assert p.descriptor.webhook_registration == "manual"
     assert p.identifier_of(_request(None), None) == APP_ID
+
+
+def test_the_teams_prompt_hint_loads_and_teams_has_no_artifact_panel():
+    from surogates.harness.prompt import CHANNELS_WITHOUT_ARTIFACT_PANEL
+    from surogates.harness.prompt_library import PromptLibrary
+
+    hint = PromptLibrary().platform_hint("teams")
+    assert hint and "Microsoft Teams" in hint and "MEDIA:" in hint
+    assert "teams" in CHANNELS_WITHOUT_ARTIFACT_PANEL
