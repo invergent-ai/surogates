@@ -140,33 +140,29 @@ async def test_send_with_update_ts_edits_in_place():
 
 
 @respx.mock
-async def test_a_429_waits_retry_after_once(monkeypatch):
+async def test_a_429_is_a_retryable_failure_without_waiting(monkeypatch):
     slept: list[float] = []
 
     async def _sleep(s):
         slept.append(s)
 
     monkeypatch.setattr(discord_mod.asyncio, "sleep", _sleep)
-    respx.post(f"{DISCORD_API_BASE}/channels/{CHANNEL}/messages").mock(side_effect=[
-        httpx.Response(429, json={"retry_after": 0.25, "global": False}),
-        httpx.Response(200, json={"id": "m1"}),
-    ])
-    assert (await DiscordPlatform().send(_item(), creds=CREDS)).success
-    assert slept == [0.25]
-
-
-@respx.mock
-async def test_a_second_429_is_a_retryable_failure(monkeypatch):
-    async def _sleep(_s):
-        return None
-
-    monkeypatch.setattr(discord_mod.asyncio, "sleep", _sleep)
-    respx.post(f"{DISCORD_API_BASE}/channels/{CHANNEL}/messages").mock(
-        return_value=httpx.Response(429, json={"retry_after": 1}),
+    route = respx.post(f"{DISCORD_API_BASE}/channels/{CHANNEL}/messages").mock(
+        return_value=httpx.Response(429, json={"retry_after": 30}),
     )
     result = await DiscordPlatform().send(_item(), creds=CREDS)
     assert not result.success and result.retryable
     assert not is_permanent_delivery_error(result.error)
+    assert slept == [] and route.call_count == 1
+
+
+@respx.mock
+async def test_a_2xx_body_that_is_not_json_does_not_raise():
+    respx.post(f"{DISCORD_API_BASE}/users/@me/channels").mock(
+        return_value=httpx.Response(200, text="<html>proxy</html>"),
+    )
+    async with httpx.AsyncClient() as http:
+        assert await discord_mod._request(http, "POST", "/users/@me/channels", token=TOKEN) == ({}, "", False)
 
 
 @pytest.mark.parametrize("code", [10003, 50001, 50007, 50013])
@@ -236,3 +232,4 @@ async def test_typing_repeats_until_the_answer_goes_out(monkeypatch):
     seen = typing.call_count
     await asyncio.sleep(0.05)
     assert typing.call_count == seen and not platform._typing
+

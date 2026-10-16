@@ -186,28 +186,24 @@ async def _request(
 ) -> tuple[dict | None, str, bool]:
     """One REST call.  Never raises.
 
-    Returns ``(body, "", False)`` on success (``{}`` for a 204),
-    ``(None, error, retryable)`` otherwise.  A 429 is waited out once for its
-    ``retry_after``; a second 429 is handed back as retryable, so the outbox
-    retries it later instead of this call sleeping on.
+    Returns ``(body, "", False)`` on success (``{}`` for a 204 or a body
+    that is not a JSON object), ``(None, error, retryable)`` otherwise.  A 429
+    is handed back as retryable at once: this runs inside the shared delivery
+    loop, so waiting out ``retry_after`` here would hold up every other
+    channel's rows; the outbox retries it later.
     """
     url = f"{DISCORD_API_BASE}{path}"
     try:
         resp = await http.request(method, url, headers=_headers(token), **kwargs)
-        if resp.status_code == 429:
-            try:
-                wait = float(resp.json().get("retry_after") or 1.0)
-            except Exception:
-                wait = 1.0
-            await asyncio.sleep(min(wait, 30.0))
-            resp = await http.request(method, url, headers=_headers(token), **kwargs)
     except httpx.HTTPError as exc:
         logger.warning("[discord] %s %s failed: %s", method, path, exc)
         return None, f"discord transport error: {exc}", True
     if resp.status_code < 300:
-        if resp.status_code == 204 or not resp.content:
-            return {}, "", False
-        return resp.json(), "", False
+        try:
+            body = resp.json() if resp.status_code != 204 and resp.content else {}
+        except ValueError:
+            body = {}
+        return body if isinstance(body, dict) else {}, "", False
     return None, _error(resp), resp.status_code == 429 or resp.status_code >= 500
 
 
