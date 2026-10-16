@@ -6,7 +6,7 @@ session, so every channel's DM key is computed here and nowhere else.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from surogates.channels.source import SessionSource, build_session_key
 
@@ -33,6 +33,9 @@ class DmTarget:
     session_key: str
     channel_id: str
     destination: dict
+    # Session-config keys delivery needs beyond ``<platform>_channel_id``
+    # (Teams' serviceUrl and tenant), as the inbound pipeline writes them.
+    session_config: dict = field(default_factory=dict)
 
 
 def dm_key(platform: str, chat_id: str, user_id: str) -> str:

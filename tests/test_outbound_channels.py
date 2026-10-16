@@ -41,7 +41,7 @@ async def test_no_number_no_call_and_no_webhook_no_api_delivery():
         await resolve_dm("website", "x", "y")
 
 
-async def test_teams_writes_into_the_personal_chat_its_bot_recorded():
+async def _recorded_teams_chat():
     from surogates.channels.platforms.teams import _remember_conversation
 
     class _Redis(dict):
@@ -59,13 +59,44 @@ async def test_teams_writes_into_the_personal_chat_its_bot_recorded():
         "from": {"id": "29:x", "aadObjectId": "aad-1"},
         "conversation": {"id": "a:conv-1", "conversationType": "personal", "tenantId": "t"},
     })
-    target = await resolve_dm("teams", "aad-1", "app-1", redis=redis)
+    return redis, await resolve_dm("teams", "aad-1", "app-1", redis=redis)
+
+
+async def test_teams_writes_into_the_personal_chat_its_bot_recorded():
+    _redis, target = await _recorded_teams_chat()
     # Keyed on the conversation id, as inbound keys the personal chat.
     assert target.session_key == "agent:teams:dm:a:conv-1"
     assert target.destination == {
         "conversation_id": "a:conv-1", "service_url": "https://smba.example.test/emea/",
         "reply_to_id": None, "channel_identifier": "app-1",
     }
+
+
+async def test_a_teams_dm_session_keeps_what_delivery_needs_to_reach_it(monkeypatch):
+    """An agent-written step is delivered from session config, so the session
+    an opener creates must carry the serviceUrl and tenant inbound would."""
+    from surogates.programs import opener as opener_mod
+
+    redis, target = await _recorded_teams_chat()
+    seen = {}
+
+    async def get_or_create(store, redis, *, config, **kw):
+        seen.update(config)
+        return uuid4()
+
+    async def no_boundary(*a, **kw):
+        return None
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", get_or_create)
+    monkeypatch.setattr(opener_mod, "shared_memory_boundary", no_boundary)
+    await opener_mod.dm_session(
+        None, redis, session_factory=None, storage=None, settings=None, org_id=uuid4(),
+        agent_id="agent-1", user_id=uuid4(), platform="teams", session_key=target.session_key,
+        channel_id=target.channel_id, sender="app-1", session_config=target.session_config,
+    )
+    assert seen["teams_conversation_id"] == "a:conv-1"
+    assert seen["teams_service_url"] == "https://smba.example.test/emea/"
+    assert seen["teams_tenant_id"] == "t"
 
 
 def test_only_the_persons_own_conversation_gets_outbox_rows():

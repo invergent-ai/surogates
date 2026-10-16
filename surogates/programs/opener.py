@@ -81,12 +81,14 @@ async def dm_session(
     session_key: str,
     channel_id: str,
     sender: str,
+    session_config: dict | None = None,
 ) -> UUID:
     """The one-to-one conversation a person's reply will land in.
 
     Shared by check-in openers and outreach: both must write into the session
     the inbound pipeline resolves for that person's next message, or the
     reply arrives in a conversation that never asked anything.
+    *session_config* is the target's :attr:`DmTarget.session_config`.
     """
     return await get_or_create_channel_session(
         session_store, redis,
@@ -107,6 +109,7 @@ async def dm_session(
                 source={"chat_type": "private"}, fallback_id=session_key,
             ),
             "multi_party": False,
+            **(session_config or {}),
         },
         session_factory=session_factory, storage=storage, settings=settings,
         # Writing first is no work for the agent: the reply resumes it.
@@ -171,6 +174,11 @@ async def resolve_dm(
             {
                 "conversation_id": conversation, "service_url": ref.get("service_url", ""),
                 "reply_to_id": None, "channel_identifier": sender,
+            },
+            {
+                "teams_conversation_id": conversation,
+                "teams_service_url": ref.get("service_url", ""),
+                "teams_tenant_id": ref.get("tenant_id", ""),
             },
         )
     if platform == "discord":
@@ -260,6 +268,7 @@ def make_step_waker(
                 org_id=invitation.org_id, agent_id=invitation.agent_id,
                 user_id=invitation.user_id, platform=platform,
                 session_key=target.session_key, channel_id=target.channel_id, sender=sender,
+                session_config=target.session_config,
             )
             status = await _status(session_id)
         # An idle conversation must be revived like an inbound message
@@ -343,13 +352,15 @@ def make_opener_enqueue(
     Returns ``async (invitation) -> int | Woken`` — the outbox row id — or
     raises :class:`OpenerUndeliverable`.
     """
-    async def _session(invitation, platform, session_key, *, channel_id, sender) -> UUID:
+    async def _session(invitation, platform, session_key, *, channel_id, sender,
+                       session_config=None) -> UUID:
         return await dm_session(
             session_store, redis,
             session_factory=session_factory, storage=storage, settings=settings,
             org_id=invitation.org_id, agent_id=invitation.agent_id,
             user_id=invitation.user_id, platform=platform,
             session_key=session_key, channel_id=channel_id, sender=sender,
+            session_config=session_config,
         )
 
     def _metadata(invitation, *, template_name):
@@ -381,6 +392,7 @@ def make_opener_enqueue(
         session_id = await _session(
             invitation, platform, target.session_key,
             channel_id=target.channel_id, sender=sender,
+            session_config=target.session_config,
         )
         # The transcript event is a user-role message; the marker keeps the
         # model from reading its own invitation as something the person said.
@@ -440,6 +452,7 @@ def make_opener_enqueue(
         session_id = await _session(
             invitation, platform, target.session_key,
             channel_id=target.channel_id, sender=sender,
+            session_config=target.session_config,
         )
         template = {"name": template_name, "language": template_language}
         metadata = _metadata(invitation, template_name=template_name)

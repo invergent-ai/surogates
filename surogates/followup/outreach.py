@@ -1123,6 +1123,7 @@ async def _send_one(
         org_id=row.org_id, agent_id=row.agent_id, user_id=row.user_id,
         platform=row.platform, session_key=target.session_key,
         channel_id=target.channel_id, sender=row.channel_identifier,
+        session_config=target.session_config,
     )
     # Only a channel with a service window needs a template to reopen it;
     # anywhere else the text is written straight into the conversation.
