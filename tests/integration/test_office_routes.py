@@ -23,8 +23,9 @@ from surogates.office import sessions as office_sessions
 from surogates.office.tokens import read_url_token, sign
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
-from surogates.storage.tenant import session_workspace_key
+from surogates.storage.tenant import boundary_workspace_key, session_workspace_key
 from surogates.tenant.auth.jwt import create_access_token
+from surogates.workstreams import master_config
 from tests.device_computer import computer_io
 
 from .conftest import create_org, create_user, issue_service_account_token
@@ -611,8 +612,11 @@ async def test_a_service_accounts_mention_is_the_person_it_names(client, app, se
 
     monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
     org_id = await create_org(session_factory)
-    issued = await issue_service_account_token(session_factory, org_id, name="ops")
-    created = await client.post("/v1/api/sessions", json={"config": {"source": "ops"}}, headers={"Authorization": f"Bearer {issued.token}"})
+    # The control plane's Work chat, which shows the file pane: an integrator's api chat has none, nor the office tools.
+    issued = await issue_service_account_token(session_factory, org_id, name=f"ops-chat-{org_id}-42")
+    created = await client.post("/v1/api/sessions", json={"channel": "studio", "config": {"source": "ops"}},
+                                headers={"Authorization": f"Bearer {issued.token}"})
+    assert created.status_code == 201, created.text
     session_id = created.json()["id"]
     session = await SessionStore(session_factory).get_session(UUID(session_id))
     await app.state.storage.write(session.config["storage_bucket"], session_workspace_key(session_id, "a.xlsx"), b"PK")
@@ -628,3 +632,37 @@ async def test_a_service_accounts_mention_is_the_person_it_names(client, app, se
     assert event.data["content"] == "[Comment on a.xlsx] Ana Popescu: «@Agent total?»"
     assert event.data["metadata"]["author_id"] == f"sa:{issued.id}:42"
     assert event.data["principal_service_account_id"] == str(issued.id)
+
+
+async def test_a_chat_whose_agent_has_no_office_tools_offers_it_to_nobody_and_refuses_its_mention(
+    client, app, session_factory, monkeypatch,
+):
+    # A project's master gives the work out and is never sent office_read or office_edit: it cannot answer in a thread.
+    app.state.settings.office = AGENT_EDITING
+    app.state.runtime_config_cache = _AgentNames()
+    woken: list = []
+
+    async def enqueue(redis, *, org_id, agent_id, session_id):
+        woken.append(session_id)
+
+    monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
+    _, headers, user_id, chat = await _user_chat(client, app, session_factory)
+    master = await SessionStore(session_factory).create_session(
+        user_id=user_id, org_id=chat.org_id, agent_id=chat.agent_id,
+        config={"storage_bucket": chat.config["storage_bucket"],
+                **master_config(uuid.uuid4(), name="Quarterly report", goal=None, instructions="")},
+    )
+    key = boundary_workspace_key(master.config, master, master.id, "docs/Plan.docx")
+    await app.state.storage.write(master.config["storage_bucket"], key, b"PK")
+    opened = await client.get(f"/v1/sessions/{master.id}/workspace/editor", params={"path": "docs/Plan.docx"}, headers=headers)
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["config"]["editorConfig"]["mode"] == "edit"
+    assert opened.json()["mentionable_users"] == []
+    address = f"{master.agent_id}@agent.invalid"
+    refused = await client.post(f"/v1/sessions/{master.id}/workspace/editor/mention", headers=headers, json={
+        "path": "docs/Plan.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address],
+    })
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "The agent in this chat cannot answer in comments."
+    assert await SessionStore(session_factory).get_events(master.id) == []
+    assert woken == []

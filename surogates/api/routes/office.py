@@ -32,6 +32,7 @@ from surogates.office.agent import AGENT_KINDS, location_of
 from surogates.office.chats import live_session
 from surogates.office.editor_config import build_editor_config
 from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, on_disk_spelling
+from surogates.office.guard import office_tools_offered
 from surogates.office.kinds import office_kind
 from surogates.office.mentions import MENTION_SOURCE, agent_address, mention_message, mentionable_agent
 from surogates.office.tokens import InvalidOfficeToken, read_document_server_body, read_url_token
@@ -99,10 +100,11 @@ async def get_workspace_editor(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
         user_id=user_id, user_name=user_name, theme=theme, edit=edit,
     )
-    # The agent answers a comment only where it edits live, in a document it edits, from an editor that edits.
+    # The agent answers a comment only where it edits live, in a document it edits, from an editor that edits, in a
+    # chat it is sent the office tools in.
     mentionable = (
         [mentionable_agent(session.agent_id, await _agent_name(request, session.agent_id))]
-        if office.agent_editing and edit and kind.file_type in AGENT_KINDS else []
+        if office.agent_editing and edit and kind.file_type in AGENT_KINDS and office_tools_offered(session) else []
     )
     return EditorConfigResponse(document_server_url=office.public_url.rstrip("/"), config=config, mentionable_users=mentionable)
 
@@ -190,6 +192,9 @@ async def mention_agent(
     store = _get_session_store(request)
     session, _bucket, _root = await _get_workspace_session_bucket_and_root(request, store, session_id, tenant, path=body.path)
     await require_device_access(request, session, tenant)
+    # Without office_read and office_edit the agent could not answer in the thread.
+    if not office_tools_offered(session):
+        raise HTTPException(status_code=409, detail="The agent in this chat cannot answer in comments.")
     if agent_address(session.agent_id).lower() not in {email.lower() for email in body.emails}:
         raise HTTPException(status_code=400, detail="The comment does not mention the agent.")
     author_id, author = await _acting_user(request, tenant)

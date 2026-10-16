@@ -19,6 +19,7 @@ from surogates.tools.builtin.coordinator import strict_coordinator_excluded
 from surogates.tools.builtin.file_ops import patch_targets
 
 WRITING_TOOLS = frozenset({"write_file", "patch"})
+OFFICE_TOOLS = frozenset({"office_read", "office_edit"})
 #: How a sentence names each document office_edit changes.
 NOUNS = dict(zip(AGENT_KINDS, ("a Word document", "a spreadsheet", "a slide deck", "a PDF"), strict=True))
 
@@ -28,10 +29,21 @@ def _applies(session: Any, session_factory: Any) -> bool:
     return session_factory is not None and load_settings().office.agent_editing
 
 
-def _offered(session: Any) -> bool:
-    """Whether this session is sent office_read and office_edit: by the rules that take them away from it."""
-    strict = strict_coordinator_excluded(session.config or {})
-    return has_file_pane(session) and (strict is None or "office_edit" not in strict)
+def office_tools_offered(session: Any) -> bool:
+    """Whether this session is sent office_read and office_edit, by the rules the worker takes them away by: a chat with
+    no file pane, a strict coordinator (a project's master, a /mission chat), and the session's own allowed_tools and
+    excluded_tools. An agent definition's tools and a package's paywalled ones, which the worker learns at the wake, are
+    not in the session's row."""
+    if not has_file_pane(session):
+        return False
+    config = session.config or {}
+    if config.get("coordinator"):
+        # A coordinator that is not strict keeps every tool.
+        strict = strict_coordinator_excluded(config)
+        return strict is None or not OFFICE_TOOLS & strict
+    if config.get("allowed_tools"):
+        return OFFICE_TOOLS <= set(config["allowed_tools"])
+    return not OFFICE_TOOLS & set(config.get("excluded_tools") or [])
 
 
 async def _open_locations(session_factory: Any, session: Any, locations: list[str]) -> set[str]:
@@ -67,7 +79,7 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
             f"office_edit (read it with office_read), not with {tool_name}."
         )
     # Closed, a document office_edit changes is its too: a text write breaks it. A session without it writes as it may.
-    if not _offered(session):
+    if not office_tools_offered(session):
         return None
     for path in sorted(paths.values()):
         noun = NOUNS.get(office_kind(path).file_type)
@@ -86,7 +98,7 @@ async def open_document_note(tool_args: Any, session: Any, *, session_factory: A
     if device_of(session.config) is not None and not within_folder(path):
         return None  # it cannot be matched to an open document
     if not await _open_locations(session_factory, session, [location_of(session, path)]):
-        noun = NOUNS.get(office_kind(path).file_type) if _offered(session) else None
+        noun = NOUNS.get(office_kind(path).file_type) if office_tools_offered(session) else None
         return f"{path} is {noun}: to change it, read it with office_read and edit it with office_edit." if noun else None
     return (
         f"{path} is open in the document editor, which holds it now: read it with office_read and change it with "
