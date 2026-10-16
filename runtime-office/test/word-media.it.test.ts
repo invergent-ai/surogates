@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { compileOps } from "../src/ops.js";
 import { Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
 import { AGENT, editorConfig, IT, itEnabled, newKey, startFixture, type Fixture } from "./support/office.js";
@@ -26,7 +25,7 @@ describe.skipIf(!itEnabled)("pictures and charts", () => {
   it("adds a picture and a chart at the end", async () => {
     const key = newKey();
     const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT), documentServerUrl: IT.dsUrl });
-    const result: Any = await office.edit(agent, compileOps([{
+    const result: Any = await office.edit(agent, [{
       op: "insert",
       target: { end: true },
       content: {
@@ -36,7 +35,7 @@ describe.skipIf(!itEnabled)("pictures and charts", () => {
           growth: { type: "chart", chart: "bar", title: "Growth", rows: [["", "2025", "2026"], ["North", 10, 12], ["East", 8, 9]] },
         },
       },
-    }]));
+    }]);
     expect(result.applied).toBe(true);
     const blocks: Any[] = ((await office.read(agent, { view: "outline" })) as Any).blocks;
     expect(blocks.slice(-2).map((b) => b.kind)).toEqual(["image", "image"]);
@@ -45,11 +44,11 @@ describe.skipIf(!itEnabled)("pictures and charts", () => {
   it("fits a tall picture within a page's height, keeping its shape", async () => {
     const key = newKey();
     const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT), documentServerUrl: IT.dsUrl });
-    const result: Any = await office.edit(agent, compileOps([{
+    const result: Any = await office.edit(agent, [{
       op: "insert",
       target: { end: true },
       content: { markdown: "<?block tall?>", blocks: { tall: { type: "image", data: DOT, mime: "image/png", width: 300, height: 1800 } } },
-    }]));
+    }]);
     const size = await (await pool.get(agent)).command(
       "function () { var d = Api.GetByInternalId(scope.id).GetAllDrawingObjects()[0]; return [Math.round(d.GetWidth()), Math.round(d.GetHeight())]; }",
       { id: result.results[0].ids[0] },

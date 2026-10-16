@@ -112,5 +112,5 @@ async def test_an_edit_waits_longer_and_its_timeout_says_it_may_have_applied(mon
     assert raised.value.status == 0 and not isinstance(raised.value, PageGone)
     with pytest.raises(RuntimeOfficeError, match="could not be reached"):
         await RuntimeOffice(OFFICE).read("abc.s-1", {"view": "outline"})
-    # runtime-office's slowest edit (the group's start and end, the command, the check, the flush) is past 60 s.
-    assert timeouts == [120.0, 60.0]
+    # runtime-office's slowest edit (a deck's ten slides measured, then its commands and the flush) is past 60 s.
+    assert timeouts == [300.0, 60.0]

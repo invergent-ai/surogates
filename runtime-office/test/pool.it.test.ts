@@ -37,6 +37,20 @@ describe.skipIf(!itEnabled)("PagePool against the document server", () => {
     expect(pool.size()).toBe(0);
   });
 
+  it("reads the editor's modified flag from its frame", async () => {
+    const key = newKey();
+    const id = await pool.open(request(key));
+    const page = await pool.get(id);
+    expect(page.kind).toBe("word");
+    expect(await page.modified()).toBe(false);
+    const sent = Date.now();
+    await page.command("function () { var p = Api.CreateParagraph(); p.AddText('x'); Api.GetDocument().Push(p); return 1; }", {});
+    expect(await page.waitFlushed(sent, 10_000)).toBe(true);
+    expect(await page.modified()).toBe(false);
+    expect(page.editorUrl()).toMatch(/\/web-apps\//);
+    await pool.close(id);
+  });
+
   it("refuses a document past its limit", async () => {
     await pool.open(request(newKey()));
     await pool.open(request(newKey()));

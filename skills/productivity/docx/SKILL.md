@@ -1,6 +1,7 @@
 ---
 name: docx
 description: "When the office_edit tool is available and the document is in the workspace, use the office skill instead: the user watches the edit live. Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx) or Word templates (.dotx). Triggers include: any mention of Microsoft Word Documents, such as 'Word doc', 'word document', '.docx', '.dotx', 'microsoft doc'. Also use when extracting or reorganizing content from .docx or .dotx files, inserting or replacing images in documents, find-and-replace in Word files, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a deliverable as a Word or .docx file (to download, email or print), use this skill. Do NOT use for PDFs, spreadsheets, Google Docs, or coding unrelated to document generation."
+fallback_for_tools: [office_edit]
 license: Proprietary. LICENSE.txt has complete terms
 ---
 

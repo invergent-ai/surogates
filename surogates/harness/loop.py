@@ -5376,46 +5376,10 @@ class AgentHarness(
         explicit_allowed = bool(config.get("allowed_tools"))
 
         if config.get("coordinator"):
-            tool_filter: set[str] | None = None
-            # ``strict_coordinator`` is the structural-enforcement flag the
-            # ``subagent-task-orchestrator`` skill assumes: implementation
-            # tools (terminal, file I/O, web, browser, vision, KB) are
-            # stripped so the LLM can only delegate, not "fix it quickly"
-            # in-band.  ``/mission`` sets it; AgentDef-driven coordinators
-            # leave it off and keep the legacy full-tool behaviour.
-            if config.get("strict_coordinator"):
-                from surogates.tools.builtin.coordinator import (
-                    COORDINATOR_IMPLEMENTATION_TOOLS,
-                )
+            from surogates.tools.builtin.coordinator import strict_coordinator_excluded
 
-                excluded = set(config.get("excluded_tools") or [])
-                excluded.update(COORDINATOR_IMPLEMENTATION_TOOLS)
-                # Research coordinators get READ access back for OBSERVE
-                # forensics (failure logs, eval output). Writes, terminal,
-                # web, and browser stay stripped — the strict-mode incident
-                # class was the model DOING the work, which still needs tools
-                # it does not have. Reads the user explicitly excluded stay
-                # excluded.
-                if config.get("active_research_run_id"):
-                    user_excluded = set(config.get("excluded_tools") or [])
-                    excluded -= (
-                        {"read_file", "search_files", "list_files"}
-                        - user_excluded
-                    )
-                if is_project_master(config):
-                    from surogates.tools.builtin.coordinator import (
-                        PROJECT_MASTER_EXCLUDED_TOOLS,
-                        PROJECT_MASTER_OWN_TOOLS,
-                        PROJECT_ON_COMPUTER_EXCLUDED_TOOLS,
-                    )
-
-                    user_excluded = set(config.get("excluded_tools") or [])
-                    excluded -= PROJECT_MASTER_OWN_TOOLS - user_excluded
-                    excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
-                    # Where the project works is the server's stamp, never the caller's.
-                    if device_of(config) is not None:
-                        excluded |= PROJECT_ON_COMPUTER_EXCLUDED_TOOLS
-                tool_filter = set(self._tools.tool_names) - excluded
+            strict = strict_coordinator_excluded(config)
+            tool_filter: set[str] | None = None if strict is None else set(self._tools.tool_names) - strict
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
         else:

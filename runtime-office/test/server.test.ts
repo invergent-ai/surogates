@@ -1,5 +1,6 @@
 import { connect, type AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ContentError } from "../src/markdown.js";
 import { Busy, PageGone } from "../src/pages.js";
 import { createServer, type OfficeApi } from "../src/server.js";
 
@@ -66,18 +67,19 @@ describe("the HTTP API", () => {
     expect((await call(`${base}/pages/k.s/read`, { method: "POST", body: JSON.stringify({ view: "outline" }) })).status).toBe(410);
   });
 
-  it("checks reads and ops before the editor sees them", async () => {
-    const office = fakeOffice();
-    const base = await serve(office);
-    expect((await call(`${base}/pages/k.s/read`, { method: "POST", body: JSON.stringify({ view: "everything" }) })).status).toBe(400);
-    const bad = await call(`${base}/pages/k.s/edit`, { method: "POST", body: JSON.stringify({ ops: [{ op: "paint" }] }) });
-    expect(bad.status).toBe(400);
-    expect(((await bad.json()) as { error: string }).error).toMatch(/^op 0: unknown op/);
-    const good = await call(`${base}/pages/k.s/edit`, {
-      method: "POST", body: JSON.stringify({ ops: [{ op: "insert", target: { end: true }, content: { markdown: "Hi." } }] }),
+  it("hands reads and ops to the office, and answers 400 to what it refuses", async () => {
+    const office = fakeOffice({
+      read: vi.fn(async () => { throw new ContentError('In a Word document "view" is "outline", "block" or "search".'); }),
     });
+    const base = await serve(office);
+    const refused = await call(`${base}/pages/k.s/read`, { method: "POST", body: JSON.stringify({ view: "everything" }) });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: 'In a Word document "view" is "outline", "block" or "search".' });
+    expect(office.read).toHaveBeenCalledWith("k.s", { view: "everything" });
+    const ops = [{ op: "insert", target: { end: true }, content: { markdown: "Hi." } }];
+    const good = await call(`${base}/pages/k.s/edit`, { method: "POST", body: JSON.stringify({ ops }) });
     expect(await good.json()).toEqual({ applied: true, results: [], flushed: true });
-    expect(office.edit).toHaveBeenCalledWith("k.s", [{ op: "insert", target: { end: true }, side: "after", blocks: [{ t: "p", runs: [{ text: "Hi." }] }] }]);
+    expect(office.edit).toHaveBeenCalledWith("k.s", ops);
   });
 
   it("flushes, closes, and refuses an oversized body", async () => {

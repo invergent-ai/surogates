@@ -16,9 +16,13 @@ logger = logging.getLogger(__name__)
 # Opening loads the whole editor in a browser.
 OPEN_TIMEOUT_S = 90.0
 CALL_TIMEOUT_S = 60.0
-# runtime-office's slowest edit: the group's start, the command, the group's end and the check, 20 s each, then the
-# flush wait of 10 s.
-EDIT_TIMEOUT_S = 120.0
+# runtime-office's slowest edit is a deck's: its size read (a command: 20 s at most), up to 10 slides measured at 20 s
+# each at most, the group's start, the edit and the group's end (20 s each), then the flush wait (11.5 s): about 292 s.
+# A spreadsheet's adds its settle waits for sheets and cell locks (3 s each, then a command) to its commands, about
+# 160 s; a PDF's its Undo waits (5 s each), about 42 s. Time queued behind the page's other calls, or behind other
+# documents' slides on runtime-office's one measuring page, is not counted: an edit may still apply after this, and
+# the error says so.
+EDIT_TIMEOUT_S = 300.0
 
 
 class RuntimeOfficeError(Exception):

@@ -26,8 +26,10 @@ from typing import Any
 from uuid import UUID
 
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.devices.binding import device_of
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.workstreams import is_project_master
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,36 @@ PROJECT_MASTER_EXCLUDED_TOOLS: frozenset[str] = WORKER_EXCLUDED_TOOLS | {
 # thread of such a project works in a copy of the project's folder there, and
 # only its user starts one, from its card.
 PROJECT_ON_COMPUTER_EXCLUDED_TOOLS: frozenset[str] = frozenset({"start_thread"})
+
+
+def strict_coordinator_excluded(config: dict[str, Any]) -> set[str] | None:
+    """The tools a strict coordinator is not given, its own ``excluded_tools`` among them; None for any other session.
+
+    ``strict_coordinator`` is the structural-enforcement flag the
+    ``subagent-task-orchestrator`` skill assumes: implementation tools
+    (terminal, file I/O, web, browser, vision, KB) are stripped so the LLM
+    can only delegate, not "fix it quickly" in-band.  ``/mission`` sets it;
+    AgentDef-driven coordinators leave it off and keep the legacy full-tool
+    behaviour.
+    """
+    if not (config.get("coordinator") and config.get("strict_coordinator")):
+        return None
+    user_excluded = set(config.get("excluded_tools") or [])
+    excluded = user_excluded | COORDINATOR_IMPLEMENTATION_TOOLS
+    # Research coordinators get READ access back for OBSERVE forensics
+    # (failure logs, eval output). Writes, terminal, web, and browser stay
+    # stripped — the strict-mode incident class was the model DOING the work,
+    # which still needs tools it does not have. Reads the user explicitly
+    # excluded stay excluded.
+    if config.get("active_research_run_id"):
+        excluded -= {"read_file", "search_files", "list_files"} - user_excluded
+    if is_project_master(config):
+        excluded -= PROJECT_MASTER_OWN_TOOLS - user_excluded
+        excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
+        # Where the project works is the server's stamp, never the caller's.
+        if device_of(config) is not None:
+            excluded |= PROJECT_ON_COMPUTER_EXCLUDED_TOOLS
+    return excluded
 
 # ---------------------------------------------------------------------------
 # Schemas

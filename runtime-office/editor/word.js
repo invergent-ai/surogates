@@ -459,7 +459,6 @@
     if (scope.action === "outline") return outline(scope.start || 0, scope.limit || 200);
     if (scope.action === "view") return view(scope.target);
     if (scope.action === "search") return search(scope.query);
-    if (scope.action === "modified") return doc.Document.Api.isDocumentModified();
     return { __error: "unknown action " + scope.action };
   } catch (e) {
     return { __error: String((e && e.message) || e) };

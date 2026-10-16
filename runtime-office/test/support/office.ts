@@ -1,7 +1,10 @@
 import { createHmac, randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { networkInterfaces } from "node:os";
 import { HOST_HTML } from "../../src/host.js";
+import type { Office } from "../../src/office.js";
 
 export const IT = {
   dsUrl: process.env.OFFICE_IT_DS_URL ?? "",
@@ -23,12 +26,15 @@ export function sign(payload: object): string {
   return `${unsigned}.${createHmac("sha256", IT.secret).update(unsigned).digest("base64url")}`;
 }
 
+const TYPES: Record<string, string> = { docx: "word", xlsx: "cell", pptx: "slide", pdf: "pdf" };
+
 export function editorConfig(key: string, user: { id: string; name: string }, file = "sample.docx"): Record<string, unknown> {
+  const fileType = file.split(".").pop()!;
   const config = {
     width: "100%",
     height: "100%",
-    document: { fileType: "docx", key, title: file, url: `${IT.host}/files/${file}`, permissions: { edit: true, review: true, comment: true } },
-    documentType: "word",
+    document: { fileType, key, title: file, url: `${IT.host}/files/${file}`, permissions: { edit: true, review: true, comment: true } },
+    documentType: TYPES[fileType],
     editorConfig: {
       callbackUrl: `${IT.host}/callback`,
       mode: "edit",
@@ -49,6 +55,13 @@ export interface Fixture {
 
 /** Serves the fixture documents and the host page, and records the document server's callbacks. */
 export async function startFixture(): Promise<Fixture> {
+  // An address this machine no longer has (a VPN that reconnected with another) leaves every editor waiting on a file
+  // the document server cannot fetch, until the test times out saying nothing.
+  const { address } = await lookup(new URL(IT.host).hostname);
+  const own = Object.values(networkInterfaces()).flat().map((each) => each?.address);
+  if (!own.includes(address)) {
+    throw new Error(`OFFICE_IT_HOST ${IT.host} is not an address of this machine (it has ${own.filter((a) => a && !a.includes(":")).join(", ")}): the document server could not fetch the test documents`);
+  }
   const callbacks: Record<string, unknown>[] = [];
   const server = createServer((req, res) => {
     if (req.method === "POST" && req.url === "/callback") {
@@ -68,8 +81,8 @@ export async function startFixture(): Promise<Fixture> {
     const file = /^\/files\/([\w.-]+)$/.exec(req.url ?? "");
     try {
       if (!file) throw new Error("not found");
-      // blank.docx is the document office_edit creates a new one from.
-      const path = file[1] === "blank.docx" ? "../../../surogates/office/templates/blank.docx" : `../fixtures/${file[1]}`;
+      // blank.<type> is the document office_edit creates a new one from.
+      const path = /^blank\.\w+$/.test(file[1]!) ? `../../../surogates/office/templates/${file[1]}` : `../fixtures/${file[1]}`;
       res.end(readFileSync(new URL(path, import.meta.url)));
     } catch {
       res.statusCode = 404;
@@ -82,4 +95,26 @@ export async function startFixture(): Promise<Fixture> {
     callbacks,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
+}
+
+/** An agent page and a person page on one fresh key, their ids added to *opened* for the test to close. */
+export async function pair(office: Office, opened: string[], file = "sample.docx"): Promise<{ agent: string; user: string }> {
+  const key = newKey();
+  const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT, file), documentServerUrl: IT.dsUrl });
+  const user = await office.open({ docKey: key, sessionId: "user", config: editorConfig(key, USER, file), documentServerUrl: IT.dsUrl });
+  opened.push(agent, user);
+  return { agent, user };
+}
+
+/** Runs *check* until it passes or *ms* run out: the other editor can still be taking in a change. */
+export async function eventually(check: () => Promise<void>, ms = 10_000): Promise<void> {
+  const until = Date.now() + ms;
+  for (;;) {
+    try {
+      return await check();
+    } catch (error) {
+      if (Date.now() > until) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
 }

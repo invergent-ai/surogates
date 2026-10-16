@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 from contextlib import asynccontextmanager
@@ -120,9 +121,53 @@ async def test_busy_and_bad_requests_are_said(session_factory, storage, redis_cl
     _, kwargs = await _kwargs(session_factory, storage, redis_client)
     assert "view" in json.loads(await office_tools._office_read({"path": "a.docx", "view": "all"}, **kwargs))["error"]
     assert "ops" in json.loads(await office_tools._office_edit({"path": "a.docx", "ops": []}, **kwargs))["error"]
-    assert ".docx" in json.loads(await office_tools._office_edit({"path": "a.xlsx", "ops": [{"op": "delete"}]}, **kwargs))["error"]
+    assert "slide decks" in json.loads(await office_tools._office_edit({"path": "a.odt", "ops": [{"op": "delete"}]}, **kwargs))["error"]
     FakeRuntime.busy = True
     assert "try again" in json.loads(await office_tools._office_read({"path": "a.docx"}, **kwargs))["error"]
+
+
+async def test_each_view_and_its_target_reach_runtime_office(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    await storage.write("b", session_workspace_key(session.id, "a.xlsx"), b"PK-xlsx")
+    await office_tools._office_read({"path": "a.xlsx", "view": "range", "target": "Sales!A1:B2"}, **kwargs)
+    assert FakeRuntime.calls[-1] == ("read", {"view": "range", "target": "Sales!A1:B2"})
+    await office_tools._office_read({"path": "a.xlsx", "view": "search", "query": "North"}, **kwargs)
+    assert FakeRuntime.calls[-1] == ("read", {"view": "search", "query": "North"})
+    assert "target" in json.loads(await office_tools._office_read({"path": "a.xlsx", "view": "slide"}, **kwargs))["error"]
+
+
+async def test_a_slides_pictures_are_read_from_the_workspace(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    picture = io.BytesIO()
+    Image.new("RGB", (40, 20)).save(picture, format="PNG")
+    await storage.write("b", session_workspace_key(session.id, "img/chart.png"), picture.getvalue())
+    await storage.write("b", session_workspace_key(session.id, "logo.svg"), b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>')
+    html = '<section><img src="img/chart.png" alt="a"><img src=\'/workspace/logo.svg\' alt="b"><img src="data:image/png;base64,AA==" alt="c"></section>'
+    answer = json.loads(await office_tools._office_edit({"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": html}]}]}, **kwargs))
+    assert answer["applied"] is True
+    sent = FakeRuntime.calls[-1][1][0]["slides"][0]["html"]
+    assert 'src="data:image/png;base64,' in sent and "src='data:image/svg+xml;base64," in sent and 'src="data:image/png;base64,AA=="' in sent
+    await storage.write("b", session_workspace_key(session.id, "notes.txt"), b"hello")
+    bad = '<section><img src="notes.txt" alt="x"></section>'
+    assert "not a PNG, JPEG or SVG" in json.loads(await office_tools._office_edit({"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": bad}]}]}, **kwargs))["error"]
+
+
+async def test_a_slide_svg_from_the_workspace_goes_on_as_it_is_and_a_file_that_is_no_svg_is_refused(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    # matplotlib's own: runtime-office checks what an SVG holds, and drops the DOCTYPE.
+    svg = (b'<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'
+           b'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n'
+           b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><text>online = 34%</text></svg>')
+    await storage.write("b", session_workspace_key(session.id, "chart.svg"), svg)
+    answer = json.loads(await office_tools._office_edit(
+        {"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": '<section><img src="chart.svg" alt="x"></section>'}]}]}, **kwargs))
+    assert answer["applied"] is True
+    sent = FakeRuntime.calls[-1][1][0]["slides"][0]["html"]
+    assert sent == f'<section><img src="data:image/svg+xml;base64,{base64.b64encode(svg).decode()}" alt="x"></section>'
+    await storage.write("b", session_workspace_key(session.id, "fake.svg"), b"\x89PNG\r\n\x1a\n not an svg")
+    answer = json.loads(await office_tools._office_edit(
+        {"path": "deck.pptx", "ops": [{"op": "slides", "slides": [{"html": '<section><img src="fake.svg" alt="x"></section>'}]}]}, **kwargs))
+    assert "fake.svg is not a PNG, JPEG or SVG" in answer["error"]
 
 
 async def test_edit_creates_a_missing_document_and_reads_pictures_for_the_editor(session_factory, storage, redis_client):

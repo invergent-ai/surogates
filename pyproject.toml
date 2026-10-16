@@ -92,6 +92,9 @@ surogates = [
     # server installs this package as a wheel and runs those migrations.
     "db/*.sql",
     "office/templates/*.docx",
+    "office/templates/*.xlsx",
+    "office/templates/*.pptx",
+    "office/templates/*.pdf",
 ]
 
 [tool.setuptools_scm]
