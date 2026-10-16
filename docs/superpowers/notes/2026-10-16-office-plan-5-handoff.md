@@ -75,10 +75,16 @@ The plan's "Decided while planning" section lists the writer's own choices for F
   - `office.densemax.local` does not resolve on node1 yet; `curl --resolve office.densemax.local:443:172.17.31.241` gets 200.
   - Needs, as root: an `/etc/hosts` line `172.17.31.241 office.densemax.local`.
   - Then `OFFICE_IT_DS_URL=https://office.densemax.local` and `OFFICE_IT_HOST=http://172.17.31.241:8791`. That address doesn't change, unlike the laptop's VPN address.
-- **Still missing on node1:**
-  - `config.dev.yaml` (secrets; the laptop has it at `/work/surogates/config.dev.yaml`), so put it at `~/work/flavius/surogates/config.dev.yaml` and point `SUROGATES_CONFIG` there;
-  - the DEV kubeconfig, which wasn't in the home folder: `/etc/rancher/k3s/k3s.yaml` is root-only, and `~/work/flavius/prod-k3s.yml` is the **PROD** cluster's, never to be used for DEV work;
-  - `.vscode/launch.json` (or just `SUROGATES_PLATFORM_API_TOKEN`), for the DEV processes.
+- **Set up 2026-10-16:**
+  - The worktree `~/work/flavius/surogates/.worktrees/office-plan-5` is on `docs/office-editors-plan-5`.
+  - runtime-office's `node_modules` are installed.
+  - `config.dev.yaml` and `.vscode/launch.json` were copied into `~/work/flavius/surogates/`. Both are mode 600 and git-ignored, and `office.callback_base_url` is rewritten to `http://172.17.31.241:8000`. Set `SUROGATES_CONFIG=/home/administrator/work/flavius/surogates/config.dev.yaml`.
+  - `/etc/hosts` has `172.17.31.241 office.densemax.local`.
+  - Verified: runtime-office `npm test` gives 220 passed / 62 skipped, typecheck is clean, and `word-read.it.test.ts` passes 7/7 against DEV.
+- **Node on the PATH:** prefix commands with `export PATH=$HOME/.config/nvm/versions/node/v26.11.1/bin:$PATH`. nvm only loads in an interactive shell, so `bash -lc` doesn't find Node.
+- **Playwright's Chromium:** `playwright-core` 1.60.0 doesn't support Ubuntu 26.04, so install its browser with `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 ./node_modules/.bin/playwright-core install chromium`. That gives build 1223. `npx playwright install` fetches a newer build that our version doesn't use.
+- **DEV kubeconfig:** `KUBECONFIG=~/k3s.yaml`; node1's `kubectl` is k3s's wrapper and ignores `--kubeconfig`. `~/work/flavius/prod-k3s.yml` is the **PROD** cluster's and must never be used for DEV work.
+- **Still missing:** an `/etc/hosts` line `172.17.31.241 sghub.densemax.local` for the DEV Hub, which is needed by the DEV processes and the skills publish. It answers on that address.
 
 ## The other machine needs (general)
 
