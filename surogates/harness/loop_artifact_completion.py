@@ -21,6 +21,7 @@ from surogates.harness.loop_artifacts import (
     _coerce_tool_args,
     _derive_artifact_name,
     _terminal_executes_file,
+    _write_refused,
 )
 from surogates.harness.delivery_manifest import (
     check_terminal_claim,
@@ -604,8 +605,8 @@ class ArtifactCompletionMixin:
                 # turn that revises an artifact emits only the former, and
                 # without it that turn's card falls back to the name-keyed
                 # candidate below, whose ref never resolves to a panel.
-                types=[EventType.TOOL_CALL, EventType.ARTIFACT_CREATED,
-                       EventType.ARTIFACT_UPDATED,
+                types=[EventType.TOOL_CALL, EventType.TOOL_RESULT,
+                       EventType.ARTIFACT_CREATED, EventType.ARTIFACT_UPDATED,
                        EventType.LLM_REQUEST, EventType.LLM_RESPONSE],
             )
         except Exception:
@@ -614,6 +615,22 @@ class ArtifactCompletionMixin:
                 session_id, exc_info=True,
             )
             return out
+
+        # A refused write delivers nothing, so its call is no candidate. A
+        # call can have two results (one written as it was cancelled): any
+        # one that is not a refusal means the write may have landed.
+        landed: dict[str, bool] = {}
+        for evt in events:
+            etype_str = evt.type.value if hasattr(evt.type, "value") else evt.type
+            if etype_str != EventType.TOOL_RESULT.value:
+                continue
+            data = evt.data or {}
+            call_id = str(data.get("tool_call_id") or "")
+            if call_id:
+                landed[call_id] = (
+                    landed.get(call_id, False)
+                    or not _write_refused(data.get("content"))
+                )
 
         in_turn = False
         terminal_commands: list[str] = []
@@ -635,6 +652,8 @@ class ArtifactCompletionMixin:
                 args = _coerce_tool_args(raw_args)
 
                 if name in {"write_file", "patch"}:
+                    if landed.get(str(data.get("tool_call_id") or "")) is False:
+                        continue
                     path = (
                         args.get("path")
                         or args.get("file_path")

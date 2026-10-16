@@ -1,9 +1,12 @@
 """A generated PDF survives inspection and Python's incidental cache files."""
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
+
+import pytest
 
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.session.events import EventType
@@ -103,3 +106,62 @@ async def test_a_turn_whose_folder_could_not_be_listed_flags_no_file_its_reply_n
 
         # Unseen is not unsupported: a wrong warning is worse than none.
         harness._store.emit_event.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tool, args, content, listed", [
+    # The editor's guard refuses a text write to a document; nothing was there to list.
+    ("write_file", {"path": "sample.docx", "content": "hello"}, json.dumps({"error": (
+        "sample.docx is a Word document: change it with office_edit (read it with office_read), not with write_file."
+    )}), []),
+    # patch follows a text it could not find with a hint, after the JSON: the file is there, unchanged.
+    ("patch", {"path": "notes.md", "old_string": "a", "new_string": "b"}, json.dumps({
+        "error": "Could not find the specified text in notes.md",
+    }) + "\n\n[Hint: old_string not found. Use read_file to verify the current content.]", [("notes.md", 12, False)]),
+])
+async def test_a_refused_write_is_no_delivered_file(tool, args, content, listed):
+    session_id, turn_id = uuid4(), str(uuid4())
+    started = datetime(2026, 10, 16, 9, 0, 0, tzinfo=timezone.utc)
+    events = [
+        SimpleNamespace(type=EventType.LLM_REQUEST, data={"turn_id": turn_id}),
+        SimpleNamespace(type=EventType.TOOL_CALL, data={"name": tool, "arguments": args, "tool_call_id": "c1"}),
+        SimpleNamespace(type=EventType.TOOL_RESULT, data={
+            "name": tool, "content": content, "elapsed_ms": 1, "tool_call_id": "c1",
+        }),
+        SimpleNamespace(type=EventType.TOOL_CALL, data={
+            "name": "write_file", "arguments": {"path": "report.md", "content": "# Report\n"}, "tool_call_id": "c2",
+        }),
+        SimpleNamespace(type=EventType.TOOL_RESULT, data={
+            "name": "write_file", "elapsed_ms": 4, "tool_call_id": "c2",
+            "content": json.dumps({"status": "ok", "path": "report.md", "bytes_written": 9, "lines_written": 1}),
+        }),
+    ]
+    harness = ArtifactCompletionMixin()
+    harness._turn_started_at = started
+    harness._pending_iteration_summary_tasks = {}
+    harness._turn_summarizer = None
+    harness._store = AsyncMock()
+    harness._store.get_session.return_value = SimpleNamespace(
+        id=session_id, channel="web", config={"storage_bucket": "workspace"},
+    )
+
+    async def get_events(session_id, *, types=None, **_):
+        return [e for e in events if types is None or e.type in types]
+
+    harness._store.get_events.side_effect = get_events
+    harness._storage = AsyncMock()
+    harness._storage.list_entries.return_value = [
+        {"key": f"{session_id}/{path}", "size": size, "modified": started + timedelta(minutes=1 if new else -60)}
+        for path, size, new in [*listed, ("report.md", 9, True)]
+    ]
+
+    await harness._drain_and_emit_turn_summary(
+        session_id=session_id, turn_id=turn_id, user_message="write the report", final_message="Done.",
+    )
+
+    harness._store.emit_event.assert_awaited_once_with(
+        session_id, EventType.TURN_SUMMARY, {
+            "turn_id": turn_id,
+            "recap": "",
+            "artifacts": [{"kind": "file", "label": "report.md", "ref": "report.md"}],
+        },
+    )
