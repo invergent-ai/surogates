@@ -160,8 +160,9 @@ async def _agent_name(request: Request, agent_id: str) -> str:
 
 class EditorMentionRequest(BaseModel):
     path: str = Field(max_length=4096)
-    #: The comment's id from the editor's notice (``actionLink.action.data``): a reply's is its thread's.
-    comment_id: str = Field(min_length=1, max_length=64)
+    #: The comment's id from the editor's notice (``actionLink.action.data``): a reply's is its thread's. Word's is hex,
+    #: a spreadsheet's and a deck's a {GUID}, a PDF's hex: nothing else reaches the note the model reads.
+    comment_id: str = Field(pattern=r"^[A-Za-z0-9{}_-]{1,64}$")
     #: The comment or reply that mentioned the agent, as written.
     message: str = Field(min_length=1, max_length=10_000)
     emails: list[str] = Field(max_length=50)

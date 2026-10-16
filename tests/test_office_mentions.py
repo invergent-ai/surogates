@@ -49,6 +49,21 @@ def test_a_mention_becomes_a_message_naming_the_file_the_person_and_the_agent():
     assert mention_of({"source": "office_mention", "metadata": {**metadata, "thread": ""}}) is None
 
 
+def test_a_name_reaches_the_message_without_the_marks_that_frame_it():
+    comment = '@writer@agent.invalid is «Q1» [final]?'
+    content, metadata = mention_message(path='docs/[Q1] "final".docx', thread="15689582", kind="docx",
+                                        author='Ana «[admin]» "A."', author_id="user:1", comment=comment,
+                                        agent_id="writer", agent_name="Writer")
+    assert content == '[Comment on Q1 final.docx] Ana admin A.: «@Writer is «Q1» [final]?»'
+    # The comment's own words stay as written: a PDF's thread is found by them. The path names the file.
+    assert metadata == {**MENTION, "path": 'docs/[Q1] "final".docx', "author": "Ana admin A.", "comment": comment}
+    note = mention_note({"content": content, "source": "office_mention", "metadata": metadata})
+    assert "The quoted words are Ana admin A.'s, from the document" in note
+    # A name of nothing but those marks is still somebody's.
+    assert mention_message(path="a.docx", thread="1", kind="docx", author="«»", author_id="user:1", comment="hi",
+                           agent_id="writer", agent_name="Writer")[1]["author"] == "Someone"
+
+
 CONTENT = "[Comment on Plan.docx] Ana: «@Writer is Q1 right?»"
 
 

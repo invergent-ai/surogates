@@ -18,6 +18,8 @@ MENTION_SOURCE = "office_mention"
 #: What the worker posts in the thread before the model runs, so the person knows the agent took it.
 ACKNOWLEDGEMENT = "On it, I'll reply here when done."
 _MENTION_KEYS = ("path", "thread", "kind", "author", "author_id", "comment")
+#: What a name loses where the message and its note write it: the marks that frame them and the quoted words.
+_FRAMING_MARKS = str.maketrans("", "", '[]"«»')
 
 
 def agent_address(agent_id: str) -> str:
@@ -39,7 +41,9 @@ def mention_message(
     The content shows the chat who said what, and where, with the agent's address written as its name. The metadata
     keeps the comment's exact words: a PDF's mention carries no lasting thread id, and its thread is found by them."""
     said = re.sub(rf"[@+]{re.escape(agent_address(agent_id))}", lambda _: f"@{agent_name}", comment, flags=re.IGNORECASE)
-    content = f"[Comment on {PurePosixPath(path).name}] {author}: «{said}»"
+    # The person's and the file's names are data: written without the marks, they can never close the frame.
+    author = author.translate(_FRAMING_MARKS).strip() or "Someone"
+    content = f"[Comment on {PurePosixPath(path).name.translate(_FRAMING_MARKS)}] {author}: «{said}»"
     return content, {"path": path, "thread": thread, "kind": kind, "author": author, "author_id": author_id, "comment": comment}
 
 

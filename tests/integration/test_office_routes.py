@@ -598,6 +598,9 @@ async def test_a_mention_names_the_agent_in_a_document_it_answers_in(client, app
     url = f"/v1/sessions/{session_id}/workspace/editor/mention"
     assert (await client.post(url, json={**body, "emails": ["ana@example.com"]}, headers=headers)).status_code == 400
     assert (await client.post(url, json={**body, "path": "notes.odt"}, headers=headers)).status_code == 415
+    # A thread id is the editor's: Word's hex, a {GUID}, a PDF's hex. Nothing else reaches the note.
+    for comment_id in ('15689582" or another', "1]", "a b", "x" * 65):
+        assert (await client.post(url, json={**body, "comment_id": comment_id}, headers=headers)).status_code == 422, comment_id
     app.state.settings.office = OfficeSettings(public_url="https://office.example", internal_url="http://docs.internal",
                                                callback_base_url="https://api.example", jwt_secret=JWT_SECRET,
                                                token_secret=TOKEN_SECRET)
