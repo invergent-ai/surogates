@@ -549,7 +549,7 @@ async def _mentioning(client, app, session_factory, monkeypatch):
     session_id, headers, user_id, session = await _user_chat(client, app, session_factory)
     opened = await client.get(f"/v1/sessions/{session_id}/workspace/editor", params={"path": "docs/Plan.docx"}, headers=headers)
     assert opened.status_code == 200, opened.text
-    address = f"{session.agent_id}@agent.invalid"
+    address = "writer@agent.invalid"
     body = {"path": "docs/Plan.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address]}
     return session_id, headers, user_id, body, woken
 
@@ -561,14 +561,16 @@ async def test_the_editor_offers_the_agent_to_mention_only_where_it_answers(clie
     app.state.settings.office = AGENT_EDITING
     app.state.runtime_config_cache = _AgentNames()
     offered = (await client.get(url, params={"path": "docs/Plan.docx"}, headers=headers)).json()["mentionable_users"]
-    assert offered == [{"id": f"agent:{session.agent_id}", "name": "Writer", "email": f"{session.agent_id}@agent.invalid"}]
+    assert offered == [{"id": f"agent:{session.agent_id}", "name": "Writer", "email": "writer@agent.invalid"}]
     viewing = await client.get(url, params={"path": "docs/Plan.docx", "view": "true"}, headers=headers)
     assert viewing.json()["mentionable_users"] == []
 
 
 async def test_a_mention_reaches_the_chat_as_the_persons_message_and_wakes_it(client, app, session_factory, monkeypatch):
     session_id, headers, user_id, body, woken = await _mentioning(client, app, session_factory, monkeypatch)
-    response = await client.post(f"/v1/sessions/{session_id}/workspace/editor/mention", json=body, headers=headers)
+    # The address is matched without case, as the editor may spell it.
+    response = await client.post(f"/v1/sessions/{session_id}/workspace/editor/mention",
+                                 json={**body, "emails": ["WRITER@Agent.Invalid"]}, headers=headers)
     assert response.status_code == 202, response.text
     [event] = await SessionStore(session_factory).get_events(UUID(session_id), types=[EventType.USER_MESSAGE])
     assert event.id == response.json()["event_id"]
@@ -597,6 +599,9 @@ async def test_a_mention_names_the_agent_in_a_document_it_answers_in(client, app
     session_id, headers, _, body, _ = await _mentioning(client, app, session_factory, monkeypatch)
     url = f"/v1/sessions/{session_id}/workspace/editor/mention"
     assert (await client.post(url, json={**body, "emails": ["ana@example.com"]}, headers=headers)).status_code == 400
+    # The agent is mentioned by the address its name makes, as the editor offered it; its id makes none.
+    agent_id = (await SessionStore(session_factory).get_session(UUID(session_id))).agent_id
+    assert (await client.post(url, json={**body, "emails": [f"{agent_id}@agent.invalid"]}, headers=headers)).status_code == 400
     assert (await client.post(url, json={**body, "path": "notes.odt"}, headers=headers)).status_code == 415
     # A thread id is the editor's: Word's hex, a {GUID}, a PDF's hex. Nothing else reaches the note.
     for comment_id in ('15689582" or another', "1]", "a b", "x" * 65):
@@ -626,7 +631,8 @@ async def test_a_service_accounts_mention_is_the_person_it_names(client, app, se
     acting = {"Authorization": f"Bearer {issued.token}", "X-Surogate-Acting-User-Id": "42", "X-Surogate-Acting-User-Name": quote("Ana Popescu")}
     opened = await client.get(f"/v1/api/sessions/{session_id}/workspace/editor", params={"path": "a.xlsx"}, headers=acting)
     assert opened.status_code == 200, opened.text
-    address = f"{session.agent_id}@agent.invalid"
+    # No runtime config names the agent here: it is "Agent".
+    address = "agent@agent.invalid"
     response = await client.post(f"/v1/api/sessions/{session_id}/workspace/editor/mention", headers=acting, json={
         "path": "a.xlsx", "comment_id": "{F80AA885-C2F8-8A96-7622-6B76D3A85AB7}", "message": f"@{address} total?", "emails": [address],
     })
@@ -661,7 +667,7 @@ async def test_a_chat_whose_agent_has_no_office_tools_offers_it_to_nobody_and_re
     assert opened.status_code == 200, opened.text
     assert opened.json()["config"]["editorConfig"]["mode"] == "edit"
     assert opened.json()["mentionable_users"] == []
-    address = f"{master.agent_id}@agent.invalid"
+    address = "writer@agent.invalid"
     refused = await client.post(f"/v1/sessions/{master.id}/workspace/editor/mention", headers=headers, json={
         "path": "docs/Plan.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address],
     })
@@ -725,7 +731,7 @@ async def test_a_mention_is_no_reply_to_the_program_step_the_chat_waits_on(clien
     await app.state.storage.write(reached.config["storage_bucket"], session_workspace_key(str(reached.id), "docs/Plan.docx"), b"PK")
     opened = await client.get(f"/v1/sessions/{reached.id}/workspace/editor", params={"path": "docs/Plan.docx"}, headers=headers)
     assert opened.status_code == 200, opened.text
-    address = f"{reached.agent_id}@agent.invalid"
+    address = "writer@agent.invalid"
     response = await client.post(f"/v1/sessions/{reached.id}/workspace/editor/mention", headers=headers, json={
         "path": "docs/Plan.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address],
     })

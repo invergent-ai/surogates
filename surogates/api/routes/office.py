@@ -196,7 +196,9 @@ async def mention_agent(
     # Without office_read and office_edit the agent could not answer in the thread.
     if not office_tools_offered(session):
         raise HTTPException(status_code=409, detail="The agent in this chat cannot answer in comments.")
-    if agent_address(session.agent_id).lower() not in {email.lower() for email in body.emails}:
+    # The address the editor offered: made of the agent's name as it is now.
+    agent_name = await _agent_name(request, session.agent_id)
+    if agent_address(agent_name).lower() not in {email.lower() for email in body.emails}:
         raise HTTPException(status_code=400, detail="The comment does not mention the agent.")
     author_id, author = await _acting_user(request, tenant)
     # A mention's message needs a name, and a person's display name may be empty.
@@ -210,7 +212,7 @@ async def mention_agent(
         )
     content, metadata = mention_message(
         path=body.path, thread=body.comment_id, kind=kind.file_type, author=author, author_id=author_id,
-        comment=body.message, agent_id=session.agent_id, agent_name=await _agent_name(request, session.agent_id),
+        comment=body.message, agent_name=agent_name,
     )
     return await deliver_message(
         request, session_id, SendMessageRequest(content=content, metadata=metadata), tenant, agent_runtime,

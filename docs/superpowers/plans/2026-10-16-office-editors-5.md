@@ -7,7 +7,7 @@
 **Architecture:**
 - **runtime-office learns comment threads in all four editors.** Each outline lists the threads with their replies, and `reply {thread, body}` / `resolve {thread}` work in every type. A thread is named by the id the editor's own mention carries: Word's durable id in hex, the spreadsheet's and deck's comment GUID. A PDF's mention carries no lasting id, so a PDF thread is its annotation's id, and a PDF read view finds a mention's thread by the comment's exact words and its author. A thread reply over 400 characters is refused before anything applies.
 - **The runtime API offers the agent and takes the mention.**
-  - The editor config response lists the agent as the only mentionable user: `agent:<agent_id>`, its display name and `<agent_id>@agent.invalid`.
+  - The editor config response lists the agent as the only mentionable user: `agent:<agent_id>`, its display name and an address made of that name (`ey@agent.invalid` for "EY").
   - `POST /sessions/{id}/workspace/editor/mention` checks the document is open in that chat, then builds a `user.message` (`source: "office_mention"`, the thread in its metadata, the comment framed as quoted words). It sends the message through the same gates and wake as a typed message, by way of a `deliver_message` split out of `send_message`.
 - **The worker acknowledges, the model reads, the turn saves.**
   - Before a wake's model call, and before a turn under way reads a mention that arrived mid-turn, the harness posts the acknowledgement in the thread through runtime-office, as `office_edit` does. A failure is logged and never blocks the turn.
@@ -42,7 +42,7 @@
    Every internal (unversioned) editor name carries a comment saying no builder call does it.
 2. **The agent's reply in the thread states only the result**, in one or two sentences: never the conversation, reasoning or steps. The full exchange stays in the chat (Flavius). runtime-office refuses a thread reply longer than 400 characters with "a thread reply states just the result, in one or two sentences: keep the rest for the chat". The skill and the mention message say so too.
 3. **Order in the thread:** the worker posts the fixed acknowledgement "On it, I'll reply here when done." before the model runs. The agent then replies with the result and resolves **last**: a resolve can close a person's open reply box, and in Word an incoming reply wipes their half-typed reply.
-4. **The agent is the only mentionable user**, offered as id `agent:<agent_id>`, its display name, and `<agent_id>@agent.invalid`: an address the editor's mention pattern accepts that can never be a real mailbox (RFC 2606 reserves `.invalid`). The editor config response carries it. The SDK answers `onRequestUsers` with it, and forwards `onRequestSendNotify` only when the agent's address is among the emails.
+4. **The agent is the only mentionable user**, offered as id `agent:<agent_id>`, its display name, and an address made of that name, `<slug>@agent.invalid` (`ey@agent.invalid` for "EY"; Flavius, 2026-10-16: the comment reads well): an address the editor's mention pattern accepts that can never be a real mailbox (RFC 2606 reserves `.invalid`). The editor config response carries it, and the mention route accepts the address the chat's agent's current name makes, compared without case: only this chat's agent is ever offered, so a name another agent shares routes nowhere else. The SDK answers `onRequestUsers` with it, and forwards `onRequestSendNotify` only when the agent's address is among the emails.
 5. **The mention goes to the chat whose file pane fired it:** `POST /sessions/{id}/workspace/editor/mention` with `{path, comment_id (actionLink.action.data), message, emails}`.
    - The runtime checks the document is open in that session's office row.
    - It builds a `user.message` with `"source": "office_mention"`, metadata `{path, thread: comment_id, kind, author}` and the acting person as principal. The content frames the comment text as quoted data: `[Comment on <file>] <person>: «…»`.
@@ -93,7 +93,7 @@
 - **Thread ids:** what the outline shows. Word: the durable id in hex, at least eight digits. Spreadsheet and deck: the comment's `{…}` GUID. PDF: the annotation's id (`Annot.GetId()`).
 - **A thread reply** is at most 400 characters; past that it is refused with exactly `a thread reply states just the result, in one or two sentences: keep the rest for the chat`.
 - **The acknowledgement** is exactly `On it, I'll reply here when done.`. Order in a thread: acknowledgement, reply, resolve last.
-- **The agent's mention address** is `<agent_id>@agent.invalid`, with any character outside `[A-Za-z0-9._-]` made `-`. Its mentionable id is `agent:<agent_id>`.
+- **The agent's mention address** is `<slug>@agent.invalid`, the slug made of its display name: lower case, every run of characters outside `[a-z0-9._]` made one `-`, leading and trailing `-` and `.` removed; an empty slug is `agent`. Its mentionable id is `agent:<agent_id>`.
 - **A mention's message** has `"source": "office_mention"` at the top of its event data. Only the mention route sets it, so a typed message's metadata can never pass for a mention.
 - **Commits:**
   - Conventional Commits.

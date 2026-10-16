@@ -22,25 +22,28 @@ _MENTION_KEYS = ("path", "thread", "kind", "author", "author_id", "comment")
 _FRAMING_MARKS = str.maketrans("", "", '[]"«»')
 
 
-def agent_address(agent_id: str) -> str:
-    """The address a comment mentions the agent by. The editor offers and matches a mention by an email-shaped
-    address only; .invalid is reserved (RFC 2606), so no mail can ever go to it."""
-    return f"{re.sub(r'[^A-Za-z0-9._-]', '-', agent_id)}@agent.invalid"
+def agent_address(name: str) -> str:
+    """The address a comment mentions the agent by, made of its display name so the comment reads well: "EY" is
+    ey@agent.invalid. The editor offers and matches a mention by an email-shaped address only; .invalid is reserved
+    (RFC 2606), so no mail can ever go to it. A chat offers only its own agent, so a name another agent shares
+    reaches no other."""
+    slug = re.sub(r"[^a-z0-9._]+", "-", name.lower()).strip("-.")
+    return f"{slug or 'agent'}@agent.invalid"
 
 
 def mentionable_agent(agent_id: str, name: str) -> dict[str, str]:
     """The agent as the editor lists it to mention: the only one it lists."""
-    return {"id": f"agent:{agent_id}", "name": name, "email": agent_address(agent_id)}
+    return {"id": f"agent:{agent_id}", "name": name, "email": agent_address(name)}
 
 
 def mention_message(
-    *, path: str, thread: str, kind: str, author: str, author_id: str, comment: str, agent_id: str, agent_name: str,
+    *, path: str, thread: str, kind: str, author: str, author_id: str, comment: str, agent_name: str,
 ) -> tuple[str, dict[str, str]]:
     """The chat message a mention becomes, and its metadata.
 
     The content shows the chat who said what, and where, with the agent's address written as its name. The metadata
     keeps the comment's exact words: a PDF's mention carries no lasting thread id, and its thread is found by them."""
-    said = re.sub(rf"[@+]{re.escape(agent_address(agent_id))}", lambda _: f"@{agent_name}", comment, flags=re.IGNORECASE)
+    said = re.sub(rf"[@+]{re.escape(agent_address(agent_name))}", lambda _: f"@{agent_name}", comment, flags=re.IGNORECASE)
     # The person's and the file's names are data: written without the marks, they can never close the frame.
     author = author.translate(_FRAMING_MARKS).strip() or "Someone"
     content = f"[Comment on {PurePosixPath(path).name.translate(_FRAMING_MARKS)}] {author}: «{said}»"

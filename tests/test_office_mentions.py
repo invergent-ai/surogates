@@ -30,17 +30,23 @@ MENTION = {"path": "docs/Plan.docx", "thread": "15689582", "kind": "docx", "auth
            "comment": "@WRITER@agent.invalid is Q1 right?"}
 
 
-def test_the_agent_is_offered_by_an_address_no_mail_can_reach():
-    assert agent_address("writer") == "writer@agent.invalid"
-    assert agent_address("org/writer 2") == "org-writer-2@agent.invalid"
+def test_the_agent_is_offered_by_an_address_made_of_its_name_that_no_mail_can_reach():
+    assert agent_address("EY") == "ey@agent.invalid"
+    assert agent_address("Sales Bot / EU 2") == "sales-bot-eu-2@agent.invalid"
+    assert agent_address("-.Writer v1.2_beta.-") == "writer-v1.2_beta@agent.invalid"
+    assert agent_address("Zoë") == "zo@agent.invalid"
+    assert agent_address("") == agent_address("«»") == "agent@agent.invalid"
     # The editor matches a mention by /\B[@+][A-Z0-9._%+-]+@[A-Z0-9._-]+\.[A-Z]+\b/i alone.
-    assert re.fullmatch(r"[A-Z0-9._%+-]+@[A-Z0-9._-]+\.[A-Z]+", agent_address("3f2a_9b-c.d"), re.IGNORECASE)
-    assert mentionable_agent("writer", "Writer") == {"id": "agent:writer", "name": "Writer", "email": "writer@agent.invalid"}
+    for name in ("EY", "Sales Bot / EU 2", "-.Writer v1.2_beta.-", "Zoë", "«»"):
+        address = agent_address(name)
+        assert re.search(r"\B[@+][A-Z0-9._%+-]+@[A-Z0-9._-]+\.[A-Z]+\b", f"see @{address} please", re.IGNORECASE)[0] == f"@{address}"
+    agent_id = "f4d5772e-c75e-4bd6-99a0-7e14947dfd6b"
+    assert mentionable_agent(agent_id, "EY") == {"id": f"agent:{agent_id}", "name": "EY", "email": "ey@agent.invalid"}
 
 
 def test_a_mention_becomes_a_message_naming_the_file_the_person_and_the_agent():
     content, metadata = mention_message(path="docs/Plan.docx", thread="15689582", kind="docx", author="Ana", author_id="user:1",
-                                        comment="@WRITER@agent.invalid is Q1 right?", agent_id="writer", agent_name="Writer")
+                                        comment="@WRITER@agent.invalid is Q1 right?", agent_name="Writer")
     assert content == "[Comment on Plan.docx] Ana: «@Writer is Q1 right?»"
     assert metadata == MENTION
     assert mention_of({"content": content, "source": "office_mention", "metadata": metadata}) == MENTION
@@ -53,7 +59,7 @@ def test_a_name_reaches_the_message_without_the_marks_that_frame_it():
     comment = '@writer@agent.invalid is «Q1» [final]?'
     content, metadata = mention_message(path='docs/[Q1] "final".docx', thread="15689582", kind="docx",
                                         author='Ana «[admin]» "A."', author_id="user:1", comment=comment,
-                                        agent_id="writer", agent_name="Writer")
+                                        agent_name="Writer")
     assert content == '[Comment on Q1 final.docx] Ana admin A.: «@Writer is «Q1» [final]?»'
     # The comment's own words stay as written: a PDF's thread is found by them. The path names the file.
     assert metadata == {**MENTION, "path": 'docs/[Q1] "final".docx', "author": "Ana admin A.", "comment": comment}
@@ -61,7 +67,7 @@ def test_a_name_reaches_the_message_without_the_marks_that_frame_it():
     assert "The quoted words are Ana admin A.'s, from the document" in note
     # A name of nothing but those marks is still somebody's.
     assert mention_message(path="a.docx", thread="1", kind="docx", author="«»", author_id="user:1", comment="hi",
-                           agent_id="writer", agent_name="Writer")[1]["author"] == "Someone"
+                           agent_name="Writer")[1]["author"] == "Someone"
 
 
 CONTENT = "[Comment on Plan.docx] Ana: «@Writer is Q1 right?»"
