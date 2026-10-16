@@ -44,6 +44,7 @@ class FakeRuntime:
 
     gone_once = False
     busy = False
+    thread: dict | None = {"id": "1_1", "page": 1}
     calls: list[tuple[str, object]] = []
 
     def __init__(self, office) -> None:
@@ -56,6 +57,9 @@ class FakeRuntime:
         return f"{doc_key}.{session_id}"
 
     async def read(self, page, request):
+        if request.get("view") == "thread":
+            FakeRuntime.calls.append(("read", request))
+            return {"thread": FakeRuntime.thread}
         FakeRuntime.calls.append(("read", request))
         if FakeRuntime.gone_once:
             FakeRuntime.gone_once = False
@@ -76,6 +80,7 @@ async def _no_rows(session_factory):
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch):
     FakeRuntime.gone_once, FakeRuntime.busy, FakeRuntime.calls = False, False, []
+    FakeRuntime.thread = {"id": "1_1", "page": 1}
     monkeypatch.setattr(office_tools, "RuntimeOffice", FakeRuntime)
     monkeypatch.setattr(office_tools, "load_settings", lambda: SimpleNamespace(office=OFFICE))
     office_tools._names.clear()
@@ -253,3 +258,26 @@ async def test_on_a_computer_the_answer_names_the_document_as_the_computer_spell
     _, kwargs = await _on_a_computer(session_factory, storage, redis_client, monkeypatch, {"Plan.docx": b"PK"}, ignores_case=True)
     answer = json.loads(await office_tools._office_edit({"path": "plan.docx", "ops": [{"op": "delete"}]}, **kwargs))
     assert answer["document"] == "Plan.docx"
+
+
+MENTION = {"path": "a.docx", "thread": "15689582", "kind": "docx", "author": "Ana", "author_id": "user:1", "comment": "@Writer check"}
+
+
+async def test_a_mention_is_acknowledged_in_its_thread(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    answer = json.loads(await office_tools.acknowledge_mention(MENTION, **kwargs))
+    assert answer["applied"] is True
+    assert FakeRuntime.calls[-1] == ("edit", [{"op": "reply", "thread": "15689582", "body": "On it, I'll reply here when done."}])
+
+
+async def test_a_pdfs_mention_finds_its_thread_by_the_comments_words(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    await storage.write("b", session_workspace_key(session.id, "c.pdf"), b"%PDF")
+    mention = {**MENTION, "path": "c.pdf", "thread": "5885824a", "kind": "pdf", "comment": "@Writer is March right?"}
+    await office_tools.acknowledge_mention(mention, **kwargs)
+    assert FakeRuntime.calls[-2:] == [
+        ("read", {"view": "thread", "query": "@Writer is March right?", "author": "user:1"}),
+        ("edit", [{"op": "reply", "thread": "1_1", "body": "On it, I'll reply here when done."}]),
+    ]
+    FakeRuntime.thread = None
+    assert "not in c.pdf any more" in json.loads(await office_tools.acknowledge_mention(mention, **kwargs))["error"]

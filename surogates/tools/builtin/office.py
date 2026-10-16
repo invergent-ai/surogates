@@ -21,6 +21,7 @@ from PIL import Image
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
+from surogates.office.mentions import ACKNOWLEDGEMENT
 from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOffice, RuntimeOfficeError
 from surogates.session.files import ComputerAway, session_files
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -156,6 +157,23 @@ async def _office_edit(arguments: dict[str, Any], **kwargs: Any) -> str:
         return await runtime.edit(document.page_id, await _with_pictures(ops, session, kwargs))
 
     return await _run(arguments, kwargs, create=True, call=call)
+
+
+async def acknowledge_mention(mention: dict[str, str], **kwargs: Any) -> str:
+    """Post ACKNOWLEDGEMENT in the thread a mention came from, through the agent's editor session as office_edit edits;
+    the answer as office_edit gives it. A PDF's mention carries no lasting thread id: its thread is found by the
+    comment's words and its author."""
+
+    async def call(runtime: RuntimeOffice, document: AgentDocument, session: Any) -> dict[str, Any]:
+        thread: str | None = mention["thread"]
+        if mention["kind"] == "pdf":
+            found = await runtime.read(document.page_id, {"view": "thread", "query": mention["comment"], "author": mention["author_id"]})
+            thread = (found.get("thread") or {}).get("id")
+            if not thread:
+                raise AgentDocumentError(f"The comment that mentioned you is not in {document.path} any more.")
+        return await runtime.edit(document.page_id, [{"op": "reply", "thread": thread, "body": ACKNOWLEDGEMENT}])
+
+    return await _run({"path": mention["path"]}, kwargs, create=False, call=call)
 
 
 async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: bool, call: Call) -> str:

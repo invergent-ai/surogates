@@ -21,6 +21,7 @@ from surogates.harness.loop_messages import (
     _view_context_note_from_metadata,
     _whiteboard_note_from_metadata,
 )
+from surogates.office.mentions import mention_note
 from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
@@ -89,6 +90,9 @@ def build_user_message_dict(
     whiteboard_note = _whiteboard_note_from_metadata(event_data.get("metadata"))
     if whiteboard_note:
         note_parts.append(whiteboard_note)
+    office_note = mention_note(event_data)
+    if office_note:
+        note_parts.append(office_note)
     attachments_note = _attachments_note_from_data(event_data)
     if attachments_note:
         note_parts.append(attachments_note)

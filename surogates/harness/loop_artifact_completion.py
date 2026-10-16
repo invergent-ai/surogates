@@ -260,6 +260,9 @@ class ArtifactCompletionMixin:
     _turn_marked: bool = False
     #: The last event before the turn's loop started: the turn's own come after it.
     _turn_after_event_id: int = 0
+    #: The documents whose comment thread the worker acknowledged a mention in, since the last turn-end save: saved with
+    #: those the turn edited, though no office_edit call named them.
+    _mention_paths: tuple[str, ...] = ()
     #: The last turn-ending event before a routine run's turn: its calls come after it.
     _routine_turn: int | None = None
 
@@ -1471,7 +1474,7 @@ class ArtifactCompletionMixin:
             await self._sandbox_pool.ensure(owner, spec)
 
     async def _save_office_documents(self, session: Session) -> None:
-        """Save the documents this turn edited through the editor; nothing for a turn that edited none."""
+        """Save the documents this turn edited through the editor, or acknowledged a mention in; nothing for a turn that did neither."""
         try:
             office = load_settings().office
             if not office.agent_editing:
@@ -1480,9 +1483,11 @@ class ArtifactCompletionMixin:
             from surogates.office.turn_end import save_turn
 
             await save_turn(store=self._store, session=session, after=self._turn_after_event_id, office=office,
-                            session_factory=self._session_factory)
+                            session_factory=self._session_factory, also=self._mention_paths)
         except Exception:
             logger.exception("Could not save the documents %s edited this turn", session.id)
+        finally:
+            self._mention_paths = ()
 
     async def _pick_up_routine(self, session: Session, *, yours: bool = False) -> None:
         """A master's routine run records its changes to the real files as its own, at its turn's end.

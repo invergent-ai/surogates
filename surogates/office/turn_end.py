@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -40,9 +41,11 @@ async def edited_paths(store: Any, session_id: Any, after: int) -> list[str]:
     return paths
 
 
-async def save_turn(*, store: Any, session: Any, after: int, office: OfficeSettings, session_factory: Any) -> None:
-    """Save every document this turn edited: flush the agent's editor, force a save, wait for it to come."""
-    paths = await edited_paths(store, session.id, after)
+async def save_turn(*, store: Any, session: Any, after: int, office: OfficeSettings, session_factory: Any,
+                    also: Sequence[str] = ()) -> None:
+    """Save every document this turn edited, and those in *also* (where the worker acknowledged a mention): flush the
+    agent's editor, force a save, wait for it to come."""
+    paths = list(dict.fromkeys([*await edited_paths(store, session.id, after), *also]))
     if not paths:
         return
     # Waiting on the document server holds none of the worker's turn slots; a turn that edited nothing gives none back.

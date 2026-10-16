@@ -298,3 +298,29 @@ async def test_a_path_outside_the_folder_on_the_computer_saves_nothing(session_f
     monkeypatch.setattr(turn_end, "_save", recording_save)
     await turn_end.save_turn(store=store, session=session, after=after, office=OFFICE, session_factory=session_factory)
     assert saved == []
+
+
+async def test_a_turn_whose_only_change_was_an_acknowledgement_still_saves_that_document(session_factory, storage, monkeypatch):
+    store, session, document, _ = await _turn(session_factory, storage)
+    flushed: list[str] = []
+    sent: list[str] = []
+
+    class Runtime:
+        def __init__(self, office):
+            pass
+
+        async def flush(self, page):
+            flushed.append(page)
+            return True
+
+    async def nothing_unsaved(office, doc_key, userdata):
+        sent.append(userdata)
+        return 4
+
+    monkeypatch.setattr(turn_end, "RuntimeOffice", Runtime)
+    monkeypatch.setattr(turn_end, "force_save", nothing_unsaved)
+    edited_none = await store.last_event_id(session.id)
+    await turn_end.save_turn(store=store, session=session, after=edited_none, office=OFFICE,
+                             session_factory=session_factory, also=("a.docx",))
+    assert flushed == [f"{document.doc_key}.{session.id}"]
+    assert len(sent) == 1

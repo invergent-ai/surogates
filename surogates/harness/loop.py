@@ -117,6 +117,8 @@ from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.config import load_settings
+from surogates.office.mentions import unacknowledged
 from surogates.session.inbox_payload import ASK_USER_QUESTION_RESCUE_PREFIX
 from surogates.session.store import RERUN_WINDOW
 from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
@@ -1147,6 +1149,32 @@ class AgentHarness(
         if said:
             await self._store.answer_file_waits(session.id, before=said)
 
+    async def _acknowledge_mentions(self, session: Session, events: list) -> None:
+        """Post the acknowledgement in the thread of each mention in *events* that no wake or request has followed:
+        the person sees the agent took their comment before the model answers it.  A failure is logged, and the turn
+        goes on.  Each document acknowledged in is saved at the turn's end with those the turn edited."""
+        mentions = unacknowledged(events)
+        if not mentions or not load_settings().office.agent_editing:
+            return
+        # Local: the office tools import surogates.session, whose store imports this package.
+        from surogates.tools.builtin.office import acknowledge_mention
+
+        for mention in mentions:
+            try:
+                answer = json.loads(await acknowledge_mention(
+                    mention, session_id=str(session.id), agent_id=session.agent_id, session_store=self._store,
+                    storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+                    platform_client=self._platform_client,
+                ))
+            except Exception:
+                logger.exception("Could not acknowledge a mention in %s (session %s)", mention["path"], session.id)
+                continue
+            if answer.get("error") or not answer.get("applied"):
+                logger.warning("Could not acknowledge a mention in %s (session %s): %s", mention["path"], session.id,
+                               answer.get("error") or answer.get("refused"))
+                continue
+            self._mention_paths = (*self._mention_paths, mention["path"])
+
     async def _collect_steer_messages(
         self,
         session: Session,
@@ -1176,6 +1204,8 @@ class AgentHarness(
         # A message of yours that joins a turn under way gets no wake of its
         # own: it answers the thread's waits over its files here.
         await self._answer_file_waits(session, events)
+        # A mention that joins a turn under way is acknowledged in its thread before the model reads it.
+        await self._acknowledge_mentions(session, events)
         # A command of the harness's is never the model's to read: the turn
         # leaves it, and its own wake answers it once the turn has ended.
         rendered = [
@@ -2011,6 +2041,9 @@ class AgentHarness(
             # a message of yours reaches it.  Before the wake is streamed, so
             # a client that reads the thread's row then sees it.
             await self._answer_file_waits(session, all_events)
+
+            # 4'''. A comment that mentioned the agent is acknowledged in its thread before the model reads it.
+            await self._acknowledge_mentions(session, all_events)
 
             # 5. Emit HARNESS_WAKE event.
             await self._store.emit_event(
