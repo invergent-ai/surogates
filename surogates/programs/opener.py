@@ -13,6 +13,9 @@ sees the question it is being answered to.
   back.  Skipping that call would put the opener and the reply in two
   different sessions.
 * Telegram keys a DM on the private chat id, which is the user's own id.
+* Teams keys a DM on the personal conversation id, which only the
+  conversation reference the bot recorded when the person wrote (or installed
+  it) knows, along with the serviceUrl to write to.
 
 :func:`resolve_dm` is that knowledge in one place, shared with outreach.
 
@@ -116,12 +119,14 @@ async def resolve_dm(
     credentials_for: Any = None,
     slack_client_factory: Any = None,
     org_id: Any = None,
+    redis: Any = None,
 ) -> DmTarget:
     """The DM a first message to *identity* goes into, on *platform*.
 
     *identity* is the person's channel identity or its ``platform_user_id``.
     *credentials_for* (``async (kind, identifier, org_id) -> dict``) and
-    *org_id* are needed only on Slack, where the DM must be opened first.
+    *org_id* are needed only on Slack, where the DM must be opened first;
+    *redis* only on Teams, where the conversation reference lives.
     Raises :class:`OpenerUndeliverable` with an operator-readable reason.
     """
     user = str(getattr(identity, "platform_user_id", identity) or "")
@@ -146,6 +151,23 @@ async def resolve_dm(
         return DmTarget(
             dm_key("slack", dm_id, user), dm_id,
             {"channel_id": dm_id, "thread_ts": None, "channel_identifier": sender},
+        )
+    if platform == "teams":
+        from surogates.channels.platforms.teams import conversation_ref
+
+        ref = await conversation_ref(redis, sender, user=user) if redis is not None else None
+        if not ref:
+            raise OpenerUndeliverable(
+                "This person has no Teams chat with the agent yet: they must "
+                "install it or write to it first",
+            )
+        conversation = str(ref.get("conversation_id") or "")
+        return DmTarget(
+            dm_key("teams", conversation, user), conversation,
+            {
+                "conversation_id": conversation, "service_url": ref.get("service_url", ""),
+                "reply_to_id": None, "channel_identifier": sender,
+            },
         )
     if (target := dm_target(platform, user, sender)) is not None:
         return target
@@ -209,6 +231,7 @@ def make_step_waker(
                 platform, invitation.platform_user_id, sender,
                 credentials_for=credentials_for,
                 slack_client_factory=slack_client_factory, org_id=invitation.org_id,
+                redis=redis,
             )
             session_id = await dm_session(
                 session_store, redis,
@@ -332,6 +355,7 @@ def make_opener_enqueue(
             platform, invitation.platform_user_id, sender,
             credentials_for=credentials_for,
             slack_client_factory=slack_client_factory, org_id=invitation.org_id,
+            redis=redis,
         )
         session_id = await _session(
             invitation, platform, target.session_key,

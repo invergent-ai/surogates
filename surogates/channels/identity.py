@@ -461,6 +461,11 @@ async def revive_channel_session(session_store: SessionStore, session_id: UUID) 
         logger.info("Resuming %s session %s (status=%s)", session.channel, session_id, session.status)
 
 
+#: Session-config keys that inbound refreshes on a reused session, because
+#: delivery reads them and they may change under a live conversation.
+_LIVE_DESTINATION_KEYS = ("teams_conversation_id", "teams_service_url", "teams_tenant_id")
+
+
 async def get_or_create_channel_session(
     session_store: SessionStore,
     redis: object,
@@ -604,6 +609,12 @@ async def get_or_create_channel_session(
             await session_store.update_session_config_key(
                 existing_id, "channel_identifier", incoming_identifier,
             )
+        # Teams addresses a conversation by its id *and* the regional
+        # serviceUrl it was last seen on, which Microsoft may move; a session
+        # first written by an opener carries neither.  Keep the latest.
+        for key in _LIVE_DESTINATION_KEYS:
+            if config.get(key) and _existing_config.get(key) != config.get(key):
+                await session_store.update_session_config_key(existing_id, key, config[key])
         if resume and existing_status in ("completed", "paused"):
             await session_store.resume_session(existing_id, source="channel_message")
             logger.info(

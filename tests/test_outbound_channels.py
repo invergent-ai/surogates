@@ -41,6 +41,33 @@ async def test_no_number_no_call_and_no_webhook_no_api_delivery():
         await resolve_dm("website", "x", "y")
 
 
+async def test_teams_writes_into_the_personal_chat_its_bot_recorded():
+    from surogates.channels.platforms.teams import _remember_conversation
+
+    class _Redis(dict):
+        async def set(self, key, value, ex=None):
+            self[key] = value
+
+        async def get(self, key):
+            return dict.get(self, key)
+
+    redis = _Redis()
+    with pytest.raises(OpenerUndeliverable, match="Teams chat"):
+        await resolve_dm("teams", "aad-1", "app-1", redis=redis)
+    await _remember_conversation(redis, "app-1", {
+        "type": "conversationUpdate", "serviceUrl": "https://smba.example.test/emea/",
+        "from": {"id": "29:x", "aadObjectId": "aad-1"},
+        "conversation": {"id": "a:conv-1", "conversationType": "personal", "tenantId": "t"},
+    })
+    target = await resolve_dm("teams", "aad-1", "app-1", redis=redis)
+    # Keyed on the conversation id, as inbound keys the personal chat.
+    assert target.session_key == "agent:teams:dm:a:conv-1"
+    assert target.destination == {
+        "conversation_id": "a:conv-1", "service_url": "https://smba.example.test/emea/",
+        "reply_to_id": None, "channel_identifier": "app-1",
+    }
+
+
 def test_only_the_persons_own_conversation_gets_outbox_rows():
     assert outbound_dm("voice", {"channel_session_key": "agent:voice:dm:40712"})
     assert outbound_dm("web", {"channel_session_key": "agent:web:dm:u-1"})

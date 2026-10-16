@@ -64,7 +64,7 @@ MODELS_REQUIRING_DISCIPLINE: tuple[str, ...] = (
 # SMS and CLI are excluded because they can't carry image attachments;
 # cron is excluded because its delivery destination varies.
 CHANNELS_WITHOUT_ARTIFACT_PANEL: frozenset[str] = frozenset({
-    "slack", "discord", "telegram", "whatsapp", "signal", "email",
+    "slack", "discord", "teams", "telegram", "whatsapp", "signal", "email",
 })
 
 # Maximum bytes to read from any single memory/skill file.

@@ -21,7 +21,7 @@ __all__ = [
 # Channel platforms whose sessions are memory-partitioned by conversation.
 # ``voice`` always persists its boundary at session creation: one call, or one
 # caller's number when the agent remembers callers.
-MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp", "voice"})
+MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "teams", "telegram", "whatsapp", "voice"})
 
 # Memory-boundary namespace for evaluation sessions, which need a scratch
 # partition. Outside the managed channels only this and

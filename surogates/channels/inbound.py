@@ -795,6 +795,13 @@ class ChannelInboundPipeline:
             agent_id=routing.agent_id,
             channel=routing.platform,
             config={
+                # Platform keys the adapter needs to write back (Teams: its
+                # serviceUrl, tenant and conversation id).  First, so the
+                # pipeline's own keys below always win.
+                **{
+                    k: v for k, v in (msg.source or {}).items()
+                    if k.startswith(f"{routing.platform}_")
+                },
                 f"{routing.platform}_channel_id": msg.identifier,
                 f"{routing.platform}_thread_key": msg.thread_key,
                 "channel_identifier": routing.identifier,
@@ -978,7 +985,7 @@ class ChannelInboundPipeline:
         # While a question is pending, a message is its answer or dismisses it
         # — see _intercept_pending_input.
         if deps.pending_input is not None and routing.platform in (
-            "slack", "telegram", "whatsapp",
+            "slack", "teams", "telegram", "whatsapp",
         ):
             intercepted, _unanswered = await self._intercept_pending_input(
                 msg, routing=routing, deps=deps, session_id=session_id,

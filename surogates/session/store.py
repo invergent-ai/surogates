@@ -353,6 +353,8 @@ _THREAD_DEST_FIELDS = {
     "telegram": ("message_thread_id", "telegram_thread_key"),
     # WhatsApp is DM-only and has no threads at all.
     "whatsapp": (None, None),
+    # A Teams channel thread is addressed by its root message id.
+    "teams": ("reply_to_id", "teams_thread_key"),
 }
 
 
@@ -1687,6 +1689,16 @@ class SessionStore:
                 destination = {
                     "wa_id": config.get("whatsapp_channel_id", ""),
                     "phone_number_id": config.get("channel_identifier", ""),
+                    "channel_identifier": config.get("channel_identifier", ""),
+                }
+            elif channel == "teams":
+                # Teams writes need the regional serviceUrl the conversation
+                # came from as well as its id; inbound keeps both current.
+                destination = {
+                    "conversation_id": config.get("teams_conversation_id")
+                    or config.get("teams_channel_id", ""),
+                    "service_url": config.get("teams_service_url", ""),
+                    thread_dest: config.get(thread_key),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
 

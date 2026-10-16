@@ -44,8 +44,10 @@ def dm_key(platform: str, chat_id: str, user_id: str) -> str:
 
 def dm_target(platform: str, user: str, sender: str) -> DmTarget | None:
     """The DM a first message to *user* goes into; ``None`` on Slack, whose
-    DM id only Slack knows (see :func:`surogates.programs.opener.resolve_dm`),
-    and on a channel the platform cannot write first on.
+    DM id only Slack knows, on Teams, whose personal chat only its recorded
+    conversation reference knows (both in
+    :func:`surogates.programs.opener.resolve_dm`), and on a channel the
+    platform cannot write first on.
 
     *user* is the identity's ``platform_user_id``: the ``wa_id`` on WhatsApp,
     the chat id on Telegram, digits for voice, the person's user id for web,
