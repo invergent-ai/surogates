@@ -29,3 +29,12 @@ def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():
     skills = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}
     for name, sentence in OFFICE_FIRST.items():
         assert skills[name].description.startswith(sentence), name
+
+
+def test_the_docx_xlsx_and_pptx_skills_hide_where_the_office_tools_are_offered():
+    # The model picks a file skill over the office skill despite the description; hiding it is what holds.
+    # The pdf skill stays: it extracts, merges and splits, which the office tools do not.
+    skills = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}
+    for name in ("docx", "xlsx", "pptx"):
+        assert skills[name].fallback_for_tools == ["office_edit"], name
+    assert not skills["pdf"].fallback_for_tools

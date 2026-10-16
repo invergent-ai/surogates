@@ -1,6 +1,7 @@
 ---
 name: pptx
 description: "When the office_edit tool is available and the deck is a .pptx in the workspace, use the office skill instead: the user watches the slides arrive live. Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations as PowerPoint (.pptx) files; reading, parsing, or extracting text from any .pptx or .potx file (even if the extracted content will be used elsewhere, like in an email, summary, or creating a different type of slide deck); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates (.potx), layouts, speaker notes, or comments. Trigger whenever the user asks for a PowerPoint, a deck, slides or a presentation, or references a .pptx or .potx filename, regardless of what they plan to do with the content afterward."
+fallback_for_tools: [office_edit]
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
