@@ -44,6 +44,50 @@ describe.skipIf(!itEnabled)("a spreadsheet", () => {
     }, { sheet, row, col, text });
   }
 
+  // A person's comment on a cell, made in their editor; its GUID is what the editor's mention of it carries. The comment
+  // lands after the command, as the agent's do.
+  async function personComments(user: string, sheet: string, cell: string, text: string): Promise<string> {
+    const page = await pool.get(user);
+    await page.command("function () { var s = Api.GetSheet(scope.sheet); s.SetActive(); s.GetRange(scope.cell).AddComment(scope.text, scope.name); return true; }",
+      { sheet, cell, text, name: "Flavius" });
+    let guid = "";
+    await eventually(async () => {
+      guid = (await page.command("function () { var c = Api.GetSheet(scope.sheet).GetComments()[0]; return c ? c.Comment.asc_getGuid() : ''; }",
+        { sheet })).value as string;
+      expect(guid).toMatch(/^\{[0-9A-F-]+\}$/i);
+    });
+    return guid;
+  }
+  const threads = async (id: string): Promise<Any[]> => ((await office.read(id, { view: "outline" })) as Any).comments;
+
+  it("lists a person's comment with its cell, and answers it on another sheet than the agent's", async () => {
+    const { agent, user } = await pair(office, opened, "sample.xlsx");
+    const thread = await personComments(user, "Notes", "A1", "@Agent are these thousands?");
+    await eventually(async () => {
+      expect(await threads(agent)).toEqual([{ id: thread, cell: "Notes!A1", author: "Flavius", text: "@Agent are these thousands?",
+        replies: [], resolved: false }]);
+    });
+    expect(await office.edit(agent, [{ op: "reply", thread, body: "Yes: thousands of euros." }, { op: "resolve", thread }]))
+      .toMatchObject({ applied: true });
+    await eventually(async () => {
+      expect((await threads(user))[0]).toMatchObject({ id: thread, resolved: true, replies: [{ author: "Agent", text: "Yes: thousands of euros." }] });
+    });
+  });
+
+  it("applies nothing when one thread of the call is gone", async () => {
+    const { agent, user } = await pair(office, opened, "sample.xlsx");
+    const thread = await personComments(user, "Sales", "B2", "@Agent source?");
+    await eventually(async () => expect((await threads(agent)).map((t: Any) => t.id)).toEqual([thread]));
+    const refused = (await office.edit(agent, [
+      { op: "reply", thread, body: "x" },
+      { op: "reply", thread: "{00000000-0000-0000-0000-000000000000}", body: "y" },
+    ])) as Any;
+    expect(refused).toMatchObject({ applied: false, refused: { op: 1 } });
+    expect(refused.refused.reason).toMatch(/is gone/);
+    await sleep(500);
+    expect((await threads(user))[0].replies).toEqual([]);
+  });
+
   it("outlines its sheets", async () => {
     const { agent } = await pair(office, opened, "sample.xlsx");
     const read: Any = await office.read(agent, { view: "outline" });

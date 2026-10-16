@@ -3,11 +3,12 @@
 // variable, so constants come from AscCommon and AscCommonExcel). Every exception is caught here, because the editor
 // swallows them. runtime-office runs an edit inside a group of actions, which it cancels when the edit is refused or
 // fails: nothing of a batch is kept unless all of it applied. Internal names are used only where the builder has no
-// call, each marked where it is used: the used range's bounds, merged areas, protection, locks, chart ranges.
+// call, each marked where it is used: the used range's bounds, merged areas, protection, locks, chart ranges, a
+// comment's GUID and cell.
 (function () {
   "use strict";
 
-  var VIEW_BUDGET = 30000, TOP_COLUMNS = 30, MAX_MATCHES = 50, EMU_PER_PX = 9525;
+  var VIEW_BUDGET = 30000, TOP_COLUMNS = 30, MAX_MATCHES = 50, EMU_PER_PX = 9525, THREAD_BUDGET = 15000, MAX_REPLIES = 10;
   // The builder's chart types: "bar" draws columns, and "column" and "line" throw.
   var CHARTS = { column: "bar", bar: "horizontalBar", line: "lineNormal", pie: "pie", area: "area", doughnut: "doughnut", scatter: "scatter" };
   var CHART_NAMES = { bar: "column", horizontalBar: "bar", lineNormal: "line" };
@@ -81,6 +82,7 @@
         }),
       });
     }
+    out.comments = threads();
     return out;
   }
 
@@ -124,6 +126,83 @@
       }
     }
     return { matches: matches, total: total };
+  }
+
+  // --- comment threads. A thread is named by its comment's GUID, the id the editor's mentions carry; the builder's
+  // GetId is another id, made per sheet. Internal: the GUID (`Comment.asc_getGuid()`) and the cell (`Comment.nRow`,
+  // `Comment.nCol`), which no builder call gives.
+
+  function guidOf(c) { return c.Comment.asc_getGuid(); }
+
+  function repliesOf(c) {
+    var out = [];
+    for (var i = Math.max(0, c.GetRepliesCount() - MAX_REPLIES); i < c.GetRepliesCount(); i++) {
+      var r = c.GetReply(i);
+      out.push({ author: r.GetAuthorName(), text: clip(String(r.GetText() || ""), 300) });
+    }
+    return out;
+  }
+
+  // Open threads first (a mention's thread is open), until the budget: the outline stays under what a tool result holds.
+  function threads() {
+    var open = [], solved = [], out = [], size = 0;
+    Api.GetSheets().forEach(function (s) {
+      s.GetComments().forEach(function (c) {
+        (c.IsSolved() ? solved : open).push({ id: guidOf(c), cell: at(s.GetName(), a1(c.Comment.nRow, c.Comment.nCol)),
+          author: c.GetAuthorName(), text: clip(String(c.GetText() || ""), 300), replies: repliesOf(c), resolved: !!c.IsSolved() });
+      });
+    });
+    open.concat(solved).forEach(function (t) {
+      if (size >= THREAD_BUDGET) return;
+      size += JSON.stringify(t).length;
+      out.push(t);
+    });
+    return out;
+  }
+
+  function threadById(id) {
+    var sheets = Api.GetSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      var c = sheets[i].GetComments().filter(function (x) { return guidOf(x) === id; })[0];
+      if (c) return { sheet: sheets[i], comment: c };
+    }
+    return null;
+  }
+
+  // Each thread's changes go on one ApiComment. Every change sends the comment's whole data, which the editor applies
+  // when the server grants the comment's lock, after the command: a second copy of the comment would overwrite the
+  // first one's change. The comment's sheet is made active first, because a change goes to the active sheet's comments
+  // and on another sheet does nothing. runtime-office then waits until a fresh read shows the changes.
+  function comment(ops, agent) {
+    var found = {};
+    ops.forEach(function (op, index) {
+      if (!found[op.thread]) found[op.thread] = threadById(op.thread);
+      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: read the outline again.");
+    });
+    var expect = [];
+    Object.keys(found).forEach(function (id) {
+      var c = found[id].comment, resolved = false;
+      found[id].sheet.SetActive();
+      ops.forEach(function (op) {
+        if (op.thread !== id) return;
+        if (op.op === "resolve") {
+          c.SetSolved(true);
+          resolved = true;
+          return;
+        }
+        c.AddReply(op.body, agent.name, agent.id);
+        c.GetReply(c.GetRepliesCount() - 1).SetTimeUTC(Date.now());   // AddReply dates none
+      });
+      expect.push({ thread: id, replies: c.GetRepliesCount(), resolved: resolved });
+    });
+    return { expect: expect };
+  }
+
+  function threadsLanded(expect) {
+    return expect.every(function (e) {
+      var t = threadById(e.thread);
+      return !!t && t.comment.GetRepliesCount() >= e.replies && (!e.resolved || !!t.comment.IsSolved());
+    });
   }
 
   // --- sheets: checked whole, then changed; adds and deletes land after the command when a co-editor is connected
@@ -307,6 +386,8 @@
     if (scope.action === "landed") return landed(scope.pending);
     if (scope.action === "lock") return lock(scope.ranges, scope.ticket);
     if (scope.action === "locks") return locks(scope.ticket);
+    if (scope.action === "comment") return comment(scope.ops, scope.agent);
+    if (scope.action === "threads_landed") return threadsLanded(scope.expect);
     if (scope.action === "edit") return edit(scope.ops);
     return { __error: "unknown action " + scope.action };
   } catch (e) {
