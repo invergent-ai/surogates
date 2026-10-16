@@ -40,6 +40,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - [Web](channels/web.md) -- browser chat UI with real-time streaming, session management, workspace browsing
 - [Slack](channels/slack.md) -- setup guide, Socket Mode, DMs, @mentions, threading, file attachments, multi-workspace
 - [Telegram](channels/telegram.md) -- Bot API, DMs, groups, forum topics, media handling
+- [Discord](channels/discord.md) -- the customer's own bot over the Gateway (socket), DMs, server channels, files
 - [API](channels/api.md) -- fire-and-forget programmatic channel for synthetic-data pipelines and batch jobs
 - Session routing and response delivery (durable outbox, Redis nudges)
 
