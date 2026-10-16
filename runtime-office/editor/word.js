@@ -94,12 +94,13 @@
 
   var MAX_REPLIES = 10;
 
-  // A thread's latest replies. A reply's IsSolved can throw, so it is not asked.
+  // A thread's latest replies. A reply's IsSolved can throw, so it is not asked. A thread's words are cut by count and
+  // by characters: text without spaces is one word.
   function repliesOf(c) {
     var out = [];
     for (var i = Math.max(0, c.GetRepliesCount() - MAX_REPLIES); i < c.GetRepliesCount(); i++) {
       var r = c.GetReply(i);
-      out.push({ author: r.GetAuthorName(), text: words(r.GetText() || "", 30) });
+      out.push({ author: r.GetAuthorName(), text: clip(words(r.GetText() || "", 30), 300) });
     }
     return out;
   }
@@ -114,7 +115,7 @@
     for (var i = 0; i < ordered.length && size < COMMENTS_BUDGET; i++) {
       var c = ordered[i], thread = {
         id: threadId(c), author: c.GetAuthorName(), quote: words(c.GetQuoteText() || "", 8),
-        text: words(c.GetText() || "", 30), replies: repliesOf(c), resolved: !!c.IsSolved(),
+        text: clip(words(c.GetText() || "", 30), 300), replies: repliesOf(c), resolved: !!c.IsSolved(),
       };
       size += JSON.stringify(thread).length;
       out.push(thread);

@@ -58,6 +58,19 @@ describe.skipIf(!itEnabled)("comments", () => {
     });
   });
 
+  it("bounds a thread's words by characters too, when they have no spaces", async () => {
+    const { agent, user } = await pair(office, opened);
+    const thread = await personComments(user, "x".repeat(400));
+    await (await pool.get(user)).command(
+      "function () { Api.GetDocument().GetAllComments()[0].AddReply(scope.text, scope.name, scope.id); return true; }",
+      { text: "y".repeat(400), name: USER.name, id: USER.id },
+    );
+    await eventually(async () => {
+      expect(await comments(agent)).toEqual([{ id: thread, author: "Flavius", quote: "North grew", text: `${"x".repeat(300)} …`,
+        replies: [{ author: "Flavius", text: `${"y".repeat(300)} …` }], resolved: false }]);
+    });
+  });
+
   it("refuses a long thread reply before anything applies, and the shorter retry lands once", async () => {
     const { agent, user } = await pair(office, opened);
     const thread = await personComments(user, "@Agent check this");
