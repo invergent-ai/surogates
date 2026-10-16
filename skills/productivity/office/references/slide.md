@@ -73,7 +73,10 @@ per line.
 
 **Shapes:** a painted `<div>` is a rectangle; `<hr>` is a line; `<x-shape kind="rect|ellipse|diamond|arrow-right|
 arrow-left|arrow-up|arrow-down|line">` fills its box. `<x-connector x1 y1 x2 y2 route="straight|hv|vh|elbow"
-head-end="open|filled">` draws a line between points. `<x-icon name="…" style="color; width; height">`, name one of
+head-end="open|filled">` draws a line between points measured from the slide (or a `position:relative` box), so it is a
+direct child of that box. Between two boxes in a row, leave the points out and give it a width:
+`<x-connector head-end="filled" style="width:48px;height:0;color:#FBFBF8;border-width:3px">` runs across the gap it
+takes up (a height, in a column). `<x-icon name="…" style="color; width; height">`, name one of
 Activity Book Chart Chat Check CheckCircle Clock Cloud Code Database Globe GraduationCap Home Key Lightbulb Lightning
 Link Lock PaperPlane Play Search Settings Star ThumbsUp Tool Trust Users Verified Warning Wrench. Nothing goes inside an
 `<x-shape>`, `<x-icon>`, `<x-connector>` or `<hr>`: a label goes in a text element beside it. `<x-embed>` (a static HTML

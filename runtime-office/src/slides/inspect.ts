@@ -229,6 +229,9 @@ export function inspect(args: InspectArgs): Inspected {
         if (tag === "X-CONNECTOR") {
           const given = ["x1", "y1", "x2", "y2"].filter((name) => el.hasAttribute(name));
           if (given.length % 4 || given.some((name) => !/^-?\d+(\.\d+)?(px|%)?$/.test(el.getAttribute(name)!.trim()))) fail(`${describe(el)}: an x-connector gives x1, y1, x2 and y2 (px, or % of its host's box), or none of them.`);
+          // Points are measured from the host, so among boxes laid out in a row or column they are a guess at where
+          // the neighbours land; without points the connector runs across the very gap it takes up.
+          if (given.length && !isHost(el.parentElement!)) fail(`${describe(el)}: an x-connector's x1, y1, x2 and y2 are measured from the slide or a position:relative box, not from its place among the boxes around it: put it directly in that box, or leave out the coordinates and give it a width (or height) so it runs across the gap it fills.`);
         }
         if (tag === "X-ICON" && !args.icons.includes(el.getAttribute("name") ?? "")) fail(`${describe(el)}: name is one of ${args.icons.join(", ")}.`);
         if (tag === "X-EMBED") {

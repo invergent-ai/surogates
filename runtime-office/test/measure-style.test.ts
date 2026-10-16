@@ -69,6 +69,14 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
     expect(shapes[1]).toMatchObject({ y: 0, text: { paras: [{ runs: [{ text: "After" }] }] } });
   });
 
+  it("runs a connector without points across the gap it fills in a row, and refuses points on one there", async () => {
+    const row = (connector: string) => `<div style="display:flex;flex-direction:row;align-items:center"><div style="width:300px;height:120px;background:#eeeeee"></div>${connector}<div style="width:300px;height:120px;background:#fbbf24"></div></div>`;
+    const shapes = await one(row(`<x-connector head-end="filled" style="width:48px;height:0;color:#14285A;border-width:3px"></x-connector>`));
+    expect(shapes.find((s: Any) => s.kind === "path").points).toEqual([[300 * E, 60 * E], [348 * E, 60 * E]]);
+    // Points are measured from the host, not from the connector's place in the row, so guessed ones miss the gap.
+    await expect(one(row(`<x-connector x1="464" y1="752" x2="608" y2="752" style="color:#14285A"></x-connector>`))).rejects.toThrow("leave out the coordinates");
+  });
+
   it("draws a double border and borders on some sides as shapes after the box, grouped with it", async () => {
     const [doubled] = await one(`<div style="${box};background:#eeeeee;border:12px double #c81e1e"></div>`);
     const [plain, double] = doubled.children;
