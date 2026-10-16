@@ -85,13 +85,41 @@
     return null;
   }
 
+  // A thread is named as the editor's mentions name it: the comment's durable id in hex, at least eight digits. The
+  // builder's GetId gives the durable id in decimal.
+  function threadId(c) {
+    var h = Number(c.GetId()).toString(16);
+    return h.length < 8 ? ("0000000" + h).slice(-8) : h;
+  }
+
+  var MAX_REPLIES = 10;
+
+  // A thread's latest replies. A reply's IsSolved can throw, so it is not asked.
+  function repliesOf(c) {
+    var out = [];
+    for (var i = Math.max(0, c.GetRepliesCount() - MAX_REPLIES); i < c.GetRepliesCount(); i++) {
+      var r = c.GetReply(i);
+      out.push({ author: r.GetAuthorName(), text: words(r.GetText() || "", 30) });
+    }
+    return out;
+  }
+
+  // Open threads first (a mention's thread is open), until the budget: with the blocks, the outline's first page stays
+  // under the 50,000 characters a tool result may hold.
+  var COMMENTS_BUDGET = 15000;
+
   function comments() {
-    return doc.GetAllComments().slice(0, 30).map(function (c) {
-      return {
-        id: String(c.GetId()), author: c.GetAuthorName(), quote: words(c.GetQuoteText() || "", 8),
-        text: words(c.GetText() || "", 30), replies: c.GetRepliesCount(), resolved: !!c.IsSolved(),
+    var all = doc.GetAllComments(), out = [], size = 0;
+    var ordered = all.filter(function (c) { return !c.IsSolved(); }).concat(all.filter(function (c) { return !!c.IsSolved(); }));
+    for (var i = 0; i < ordered.length && size < COMMENTS_BUDGET; i++) {
+      var c = ordered[i], thread = {
+        id: threadId(c), author: c.GetAuthorName(), quote: words(c.GetQuoteText() || "", 8),
+        text: words(c.GetText() || "", 30), replies: repliesOf(c), resolved: !!c.IsSolved(),
       };
-    });
+      size += JSON.stringify(thread).length;
+      out.push(thread);
+    }
+    return out;
   }
 
   function trackedChanges() {
@@ -391,7 +419,7 @@
       var where = resolveTarget(op.anchor);
       var comment = where.range.AddComment(op.body, agent.name, agent.id);
       if (!comment) throw new Refusal("The quoted words are inside a locked part of the document; anchor the comment elsewhere.");
-      return { thread: String(comment.GetId()) };
+      return { thread: threadId(comment) };
     },
     reply: function (op, agent) {
       changeThread(op.thread, function (data) { data.Add_Reply(replyOf(op.body, agent)); });
@@ -404,9 +432,10 @@
   };
 
   // The Builder's AddReply and SetSolved change a comment's data in place, so cancelling the edit cannot take them
-  // back: a copy is changed and set instead, and the history keeps the old data. (Internal, unversioned names.)
+  // back: a copy is changed and set instead, and the history keeps the old data. (Internal, unversioned names.) The
+  // builder finds a comment by its durable id in decimal; a thread id is that id in hex.
   function changeThread(thread, change) {
-    var found = doc.GetCommentById(String(thread));
+    var found = /^[0-9a-f]{1,16}$/i.test(thread) ? doc.GetCommentById(String(parseInt(thread, 16))) : null;
     if (!found) throw new Refusal("Comment thread " + thread + " is gone.");
     var data = found.Comment.GetData().Copy();
     change(data);

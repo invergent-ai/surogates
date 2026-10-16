@@ -69,11 +69,13 @@ A list you insert starts its own numbering. A moved block loses the comments anc
 
 ```json
 {"op": "comment", "anchor": {"find": "grew 12%"}, "body": "Source: the regional sales export, 3 Oct."}
-{"op": "reply", "thread": "1184659669", "body": "Updated the figure."}
-{"op": "resolve", "thread": "1184659669"}
+{"op": "reply", "thread": "4697b1d5", "body": "Updated the figure to 12.4%, from the October export."}
+{"op": "resolve", "thread": "4697b1d5"}
 ```
 
-`thread` is a comment's `id` from the outline, or the `thread` a `comment` op returned.
+`thread` is a comment's `id` from the outline, or the `thread` a `comment` op returned. The outline lists each thread's
+latest replies. A reply in a thread states only the result, in one or two sentences (at most 400 characters): the
+reasoning and the conversation stay in the chat.
 
 ## Refusals
 

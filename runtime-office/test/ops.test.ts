@@ -39,6 +39,14 @@ describe("compileOps", () => {
     expect(() => compileOps([{ op: "resolve" }])).toThrow(/"thread" is required/);
   });
 
+  it("keeps a thread reply to the result", () => {
+    const said = "x".repeat(400);
+    expect(compileOps([{ op: "reply", thread: "4697b1d5", body: said }])).toEqual([{ op: "reply", thread: "4697b1d5", body: said }]);
+    expect(() => compileOps([{ op: "reply", thread: "4697b1d5", body: `${said}y` }])).toThrow(
+      "op 0: a thread reply states just the result, in one or two sentences: keep the rest for the chat",
+    );
+  });
+
   it("refuses an empty or oversized batch", () => {
     expect(() => compileOps([])).toThrow(ContentError);
     expect(() => compileOps("insert")).toThrow(ContentError);
