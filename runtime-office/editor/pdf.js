@@ -6,7 +6,7 @@
 // call; each says so.
 (function () {
   "use strict";
-  var doc = Api.GetDocument(), TEXT_BUDGET = 30000, MAX_MATCHES = 50, MAX_SEARCH_PAGES = 200;
+  var doc = Api.GetDocument(), TEXT_BUDGET = 30000, MAX_MATCHES = 50, MAX_SEARCH_PAGES = 200, MAX_REPLIES = 10;
 
   function clip(text, max) { return text.length > max ? text.slice(0, max) + " …" : text; }
   // A page's text: the builder has no call for it, so the whole page is selected and the selection read; the
@@ -25,21 +25,35 @@
         value: checkbox ? w.IsChecked() : f.GetParentValue ? (f.GetParentValue() === undefined ? null : f.GetParentValue()) : null, rect: w.GetRect() };
     });
   }
-  function annotationsOf(page) {
-    return page.GetAllAnnots().map(function (a) {
-      return { type: a.GetClassType().replace(/Annot$/, ""), rect: a.GetRect(), author: a.GetAuthorName(), text: a.GetContents() || "" };
-    });
+  // An annotation and its replies make a comment thread. A thread is named by the annotation's id, the same in every
+  // co-editor's editor; the id the editor's mentions carry is made anew each time. Internal: the id (`Annot.GetId()`),
+  // the user id (`Annot.GetUserId()`) and the state (`Annot.GetState()`), which no builder call reads.
+  function solved(a) {
+    if (typeof a.Annot.GetState !== "function") return false;   // a stamp or a free text has no state
+    var state = a.Annot.GetState();
+    return state === 2 || state === 5;   // Accepted, or Completed
   }
+  function annotationOf(a) {
+    return { id: a.Annot.GetId(), type: a.GetClassType().replace(/Annot$/, ""), rect: a.GetRect(), author: a.GetAuthorName(),
+      text: a.GetContents() || "", resolved: solved(a),
+      replies: a.GetReplies().slice(-MAX_REPLIES).map(function (r) { return { author: r.GetAuthorName(), text: clip(r.GetContents() || "", 300) }; }) };
+  }
+  function annotationsOf(page) { return page.GetAllAnnots().map(annotationOf); }
 
   // --- reading
 
+  // Pages up to the limit and the budget: with its comment threads the outline stays under what a tool result holds. A
+  // call lists at least its first page, so the next call starts further on.
   function outline(start, limit) {
-    var count = doc.GetPagesCount(), pages = [];
+    var count = doc.GetPagesCount(), pages = [], size = 0;
     for (var i = start; i < count && pages.length < limit; i++) {
       var page = doc.GetPage(i), text = pageText(page);
-      pages.push({ page: i + 1, size: sizeOf(i), rotation: page.GetRotation(),
+      var entry = { page: i + 1, size: sizeOf(i), rotation: page.GetRotation(),
         first_line: clip(text.split("\n").filter(function (l) { return l.trim(); })[0] || "", 120), chars: text.length,
-        fields: fieldsOf(page), annotations: annotationsOf(page) });
+        fields: fieldsOf(page), annotations: annotationsOf(page) };
+      size += JSON.stringify(entry).length;
+      if (pages.length && size > TEXT_BUDGET) break;
+      pages.push(entry);
     }
     var out = { pages: pages, total: count };
     if (start + pages.length < count) out.next = start + pages.length;
@@ -59,6 +73,73 @@
       }
     }
     return { matches: matches, total: total };
+  }
+
+  // --- comment threads
+
+  // When an annotation or reply was made, comparable: the editor keeps it as milliseconds in text ("1792141582257"),
+  // turning a file's PDF dates so as it reads them. One with no date counts as the oldest.
+  function madeAt(x) {
+    var made = Number(x.GetCreationDate());
+    return made > 0 ? made : -1;
+  }
+
+  // The thread a mention came from. Its id is no use, being made anew each time, so the thread is found by its words:
+  // the newest annotation or reply by that person reading exactly so. A reply's words give its annotation. Editing a
+  // comment sends no mention, so the words cannot have changed since.
+  function threadOf(query, author) {
+    var best = null;
+    for (var p = 0; p < doc.GetPagesCount(); p++) {
+      doc.GetPage(p).GetAllAnnots().forEach(function (a) {
+        [a].concat(a.GetReplies()).forEach(function (x) {
+          if (x.GetContents() !== query || x.Annot.GetUserId() !== author) return;
+          var made = madeAt(x);
+          if (!best || made >= best.made) best = { made: made, annot: a, page: p + 1 };
+        });
+      });
+    }
+    if (!best) return { thread: null };
+    var thread = annotationOf(best.annot);
+    thread.page = best.page;
+    return { thread: thread };
+  }
+
+  function annotById(id) {
+    for (var p = 0; p < doc.GetPagesCount(); p++) {
+      var found = doc.GetPage(p).GetAllAnnots().filter(function (a) { return a.Annot.GetId() === id; })[0];
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function onlyComments(ops) { return ops.every(function (op) { return op.op === "reply" || op.op === "resolve"; }); }
+
+  function comment(ops, agent) {
+    var found = Object.create(null);
+    ops.forEach(function (op, index) {
+      if (!found[op.thread]) found[op.thread] = annotById(op.thread);
+      if (!found[op.thread]) throw new Refusal(index, "Comment thread " + op.thread + " is gone: read the outline again.");
+    });
+    // Every reply before any resolve, whatever the ops' order: a resolve sets the comment's data with the history off,
+    // so nothing that can fail and be undone may come after it.
+    ops.forEach(function (op) {
+      if (op.op !== "reply") return;
+      var target = found[op.thread], reply = Api.CreateTextAnnot(target.GetRect());
+      reply.SetContents(op.body);
+      reply.SetAuthorName(agent.name);
+      reply.Annot.SetUserId(agent.id);   // internal: the builder sets no user id
+      if (!target.AddReply(reply)) throw new Error("the editor took no reply");
+    });
+    ops.forEach(function (op) {
+      if (op.op !== "resolve") return;
+      // Internal, the editor's own resolve. It sets the comment's whole data and deletes every reply missing from it,
+      // so the data is read from the annotation as it is now, this call's replies included.
+      var target = found[op.thread], data = new AscCommon.CCommentData();
+      data.Read_FromAscCommentData(target.Annot.GetAscCommentData());
+      data.SetSolved(true);
+      doc.Document.EditComment(target.Annot.GetId(), data);
+    });
+    return { results: ops.map(function (op, index) { return { op: index }; }) };
   }
 
   // --- the batch
@@ -203,7 +284,8 @@
     if (scope.action === "outline") return outline(scope.start || 0, scope.limit || 100);
     if (scope.action === "page") return view(scope.page);
     if (scope.action === "search") return search(scope.query);
-    if (scope.action === "edit") return edit(scope.ops, scope.agent);
+    if (scope.action === "thread") return threadOf(scope.query, scope.author);
+    if (scope.action === "edit") return onlyComments(scope.ops) ? comment(scope.ops, scope.agent) : edit(scope.ops, scope.agent);
     return { __error: "unknown action " + scope.action };
   } catch (e) {
     if (e instanceof Refusal) return { refused: { op: e.op, reason: e.reason } };

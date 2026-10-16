@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { ContentError } from "../markdown.js";
-import { checkBatch, textArg, wholeNumber, type Format, type Outcome, type Scope } from "./format.js";
+import { checkBatch, commentOp, commentsAlone, textArg, wholeNumber, type CommentOp, type Format, type Outcome, type Scope } from "./format.js";
 
 const MAX_OPS = 50;
 const MAX_OUTLINE = 100;
@@ -19,7 +19,8 @@ export type PdfOp =
   | { op: "add_field"; type: "text" | "checkbox"; page: number; rect: number[]; name: string; value?: string | boolean }
   | { op: "redact"; text: string; match_case: boolean; whole_words: boolean }
   | { op: "annotate"; kind: "free_text"; page: number; rect: number[]; text: string }
-  | { op: "annotate"; kind: "stamp"; page: number; rect: number[]; stamp: string };
+  | { op: "annotate"; kind: "stamp"; page: number; rect: number[]; stamp: string }
+  | CommentOp;
 
 function rect(value: unknown): number[] {
   const ok = Array.isArray(value) && value.length === 4 && value.every((n) => typeof n === "number" && n >= 0 && n <= MAX_POINTS)
@@ -106,13 +107,16 @@ function compileOp(raw: Raw): PdfOp {
     }
     case "replace":
       throw new ContentError("a PDF's existing text cannot be changed: tell the user, and offer what you can do (a note, a redaction, a new page).");
-    default:
-      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use pages, fill, add_field, redact or annotate.`);
+    default: {
+      const comment = commentOp(raw);
+      if (comment) return comment;
+      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use pages, fill, add_field, redact, annotate, reply or resolve.`);
+    }
   }
 }
 
 export function compilePdfOps(input: unknown): PdfOp[] {
-  const ops = checkBatch(input, MAX_OPS, compileOp);
+  const ops = commentsAlone(checkBatch(input, MAX_OPS, compileOp));
   // Marking a redaction runs an editor action of its own. With a co-editor connected it refuses a second one in the
   // command, and beside other changes it makes a second undo point, which the one Undo after a failure leaves standing.
   if (ops.some((op) => op.op === "redact") && ops.length > 1) throw new ContentError("send each redaction as a call of its own, with no other op beside it.");
@@ -124,6 +128,8 @@ function readScope(body: Raw): Scope {
   if (view === "outline") return { action: "outline", start: wholeNumber(body.start ?? 0, "start", 0), limit: MAX_OUTLINE };
   if (view === "page") return { action: "page", page: wholeNumber(body.target, "target", 1) };
   if (view === "search") return { action: "search", query: textArg(body.query, "query") };
+  // The worker's own read, which the tool does not offer: the thread a mention came from.
+  if (view === "thread") return { action: "thread", query: textArg(body.query, "query"), author: textArg(body.author, "author") };
   throw new ContentError('In a PDF "view" is "outline", "page" (target: a page number) or "search".');
 }
 
