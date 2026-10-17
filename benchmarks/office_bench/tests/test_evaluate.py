@@ -26,7 +26,7 @@ def _events():
         Event(1, "user.message", {"content": "make a deck"}),
         Event(2, "harness.wake", {}),
         Event(3, "llm.request", {"model": "surogate"}),
-        Event(4, "tool.call", {"name": "skill_view", "arguments": {"name": "office", "file_path": "references/slide.md"}}),
+        Event(4, "tool.call", {"name": "skill_view", "arguments": {"name": "office", "file_path": "references/pptx.md"}}),
         Event(5, "llm.response", {"model": "surogate3.7-flash", "message": {"tool_calls": []}}),
         Event(6, "tool.call", {"name": "office_edit", "arguments": json.dumps({"path": "d.pptx", "ops": []})}),
         Event(7, "tool.result", {"name": "office_edit", "content": json.dumps(
@@ -49,7 +49,7 @@ def test_metrics_from_a_trace():
     assert m["refusals"] == ["op 0: The slide is too full: split it."]
     assert m["office_errors"] == ['office_edit: "ops" is a non-empty list of ops.']
     assert m["other_tool_errors"] == ["write_file: d.pptx is a slide deck: use office_edit"]
-    assert m["skill_views"] == ["office/references/slide.md"] and m["read_office_skill"]
+    assert m["skill_views"] == ["office/references/pptx.md"] and m["read_office_skill"]
     assert m["file_tools_on_documents"] and m["file_tools_on_documents"][0].startswith("write_file")
     assert m["turns"] == 1
     assert m["office_events"][0].startswith("office.save_failed")

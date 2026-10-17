@@ -21,6 +21,7 @@ from PIL import Image
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.office.agent import AGENT_KINDS, AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
+from surogates.office.guide import GUIDES_KEY, guide_for
 from surogates.office.kinds import office_kind
 from surogates.office.mentions import ACKNOWLEDGEMENT
 from surogates.office.ops_input import OpsInputError, read_ops
@@ -81,7 +82,7 @@ EDIT_DESCRIPTION = (
     "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the "
     "office skill's slide reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the "
     "first deck edit of a "
-    "session, read that reference (skill_view name office, file_path references/slide.md): the format is strict, and a "
+    "session, read that reference (skill_view name office, file_path references/pptx.md): the format is strict, and a "
     "refused slide costs a round trip.\n"
     "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "
     "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
@@ -240,7 +241,28 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         answer["created"] = True
     if result.get("flushed") is False:
         answer["note"] = "The edit applied in your editor but had not reached the others' editors after 10 seconds."
-    return json.dumps({**answer, **result}, ensure_ascii=False)
+    answer = {**answer, **result}
+    if kind is not None and "error" not in answer:
+        guide = await _guide(kind.file_type, session, kwargs)
+        if guide is not None:
+            answer["guide"] = guide
+    return json.dumps(answer, ensure_ascii=False)
+
+
+async def _guide(kind: str, session: Any, kwargs: dict[str, Any]) -> dict[str, str] | None:
+    """The office skill's rules and *kind*'s reference, with the model's first call on that type in the session, which
+    then records it as given. Only a model's call takes it: the worker's own (a mention's acknowledgement) never does."""
+    if not kwargs.get("tool_call_id") or kind in ((session.config or {}).get(GUIDES_KEY) or []):
+        return None
+    guide = await guide_for(kind, kwargs.get("api_client"))
+    if guide is None:
+        return None
+    try:
+        await kwargs["session_store"].append_session_config_list(session.id, GUIDES_KEY, kind)
+    except Exception:
+        # The call has done its work: its answer stands, and the next call on this type carries the guide again.
+        logger.warning("could not record the %s guide as given in session %s", kind, session.id, exc_info=True)
+    return guide
 
 
 def _open_by(document: AgentDocument) -> list[str]:

@@ -6,9 +6,11 @@ import base64
 import io
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import pytest_asyncio
 from PIL import Image
@@ -21,6 +23,7 @@ from surogates.office import agent as office_agent
 from surogates.office import files as office_files
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
+from surogates.office.guide import GUIDES_KEY
 from surogates.office.runtime_office import OfficeBusy, PageGone
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
@@ -314,3 +317,92 @@ async def test_a_pdfs_mention_finds_its_thread_by_the_comments_words(session_fac
     ]
     FakeRuntime.thread = None
     assert "not in c.pdf any more" in json.loads(await office_tools.acknowledge_mention(mention, **kwargs))["error"]
+
+
+OFFICE_SKILL = Path(__file__).parents[2] / "skills/productivity/office"
+
+
+class SkillsAPI:
+    """The API as the worker's client reaches it: the office skill's files, one at a time; *failing*, a 404."""
+
+    def __init__(self, *, failing: bool = False) -> None:
+        self.failing = failing
+        self.asked: list[tuple[str, str | None]] = []
+
+    async def view_skill(self, name, file_path=None):
+        self.asked.append((name, file_path))
+        if self.failing or not file_path:
+            request = httpx.Request("GET", f"http://api.test/v1/skills/{name}/file")
+            raise httpx.HTTPStatusError("not found", request=request, response=httpx.Response(404, request=request))
+        content = (OFFICE_SKILL / file_path).read_text()
+        return json.dumps({"success": True, "file_path": file_path, "content": content, "binary": False})
+
+
+def _by_the_model(kwargs, api):
+    """*kwargs* as the worker passes them for a model's tool call."""
+    return {**kwargs, "tool_call_id": "call_1", "api_client": api}
+
+
+async def _guides(kwargs):
+    session = await kwargs["session_store"].get_session(UUID(kwargs["session_id"]))
+    return session.config.get(GUIDES_KEY)
+
+
+async def test_first_call_of_a_type_carries_its_guide(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    api = SkillsAPI()
+    answer = json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api)))
+    assert "error" not in answer and answer["blocks"] == []
+    assert answer["guide"]["reference"].startswith("# office_edit for Word documents")
+    assert answer["guide"]["rules"].startswith("# Working on documents live with the user")
+    assert "---" not in answer["guide"]["rules"]
+    # Through the skill's file route: the whole skill's view stages its files into the workspace.
+    assert sorted(api.asked) == [("office", "SKILL.md"), ("office", "references/docx.md")]
+    assert await _guides(kwargs) == ["docx"]
+
+
+async def test_second_call_does_not(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    api = SkillsAPI()
+    await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api))
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": [{"op": "delete"}]}, **_by_the_model(kwargs, api)))
+    assert answer["applied"] is True and "guide" not in answer
+    assert len(api.asked) == 2
+    assert await _guides(kwargs) == ["docx"]
+
+
+async def test_each_type_once(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    await storage.write("b", session_workspace_key(session.id, "b.xlsx"), b"PK-xlsx")
+    api = SkillsAPI()
+    await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api))
+    answer = json.loads(await office_tools._office_read({"path": "b.xlsx"}, **_by_the_model(kwargs, api)))
+    assert answer["guide"]["reference"].startswith("# Spreadsheets (.xlsx)")
+    assert await _guides(kwargs) == ["docx", "xlsx"]
+
+
+async def test_unfetchable_guide_is_left_out(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    answer = json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI(failing=True))))
+    assert answer == {"document": "a.docx", "open_by": [], "blocks": []}
+    assert await _guides(kwargs) is None
+    # The next call that can fetch it carries it.
+    assert "guide" in json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI())))
+
+
+async def test_a_failed_call_leaves_the_guide_for_the_next(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    api = SkillsAPI()
+    FakeRuntime.busy = True
+    answer = json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api)))
+    assert "error" in answer and "guide" not in answer
+    assert api.asked == [] and await _guides(kwargs) is None
+
+
+async def test_acknowledgement_never_takes_the_guide(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    api = SkillsAPI()
+    # As the loop acknowledges a mention: no tool call of the model's.
+    answer = json.loads(await office_tools.acknowledge_mention(MENTION, **{**kwargs, "api_client": api}))
+    assert answer["applied"] is True and "guide" not in answer
+    assert api.asked == [] and await _guides(kwargs) is None

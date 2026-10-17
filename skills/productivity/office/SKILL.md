@@ -41,12 +41,12 @@ watches and may edit the same document. Work like a colleague in a shared docume
 
 - **Word documents:** plant a new document's outline first, every section a pending block saying what it will hold,
   then fill one section per call; re-word with `replace` on quoted words, which keeps their formatting. See
-  `references/word.md`.
+  `references/docx.md`.
 - **Spreadsheets:** read the range before writing it, and pass what it showed as `expect`. Values go in as typed into
-  a cell: a formula starts with `=` and stays live. See `references/cell.md`.
+  a cell: a formula starts with `=` and stays live. See `references/xlsx.md`.
 - **Slide decks:** a small change (a title, a word, a number) is `text` on that one shape, which keeps its place and
   style. A new or redesigned slide is one `<section>` in the Claude Slides format, built as native shapes the user can
-  edit. A slide too full for its boxes is refused: split it; nothing shrinks. See `references/slide.md`.
+  edit. A slide too full for its boxes is refused: split it; nothing shrinks. See `references/pptx.md`.
 - **PDFs:** fill fields, add, remove or rotate pages, redact, annotate. Existing text cannot be changed. See
   `references/pdf.md`.
 

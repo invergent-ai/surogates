@@ -20,8 +20,16 @@ def test_the_office_skill_is_a_built_in_gated_on_office_edit():
     skills = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}
     office = skills["office"]
     assert "office_edit" in office.requires_tools
-    for reference in ("word.md", "cell.md", "slide.md", "pdf.md"):
+    for reference in ("docx.md", "xlsx.md", "pptx.md", "pdf.md"):
         assert (SKILLS / "productivity/office/references" / reference).exists()
+
+
+def test_guides_stay_small():
+    # The first office call on each type carries the skill's rules and that type's reference, whole.
+    rules = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}["office"].content
+    for kind in ("docx", "xlsx", "pptx", "pdf"):
+        reference = (SKILLS / "productivity/office/references" / f"{kind}.md").read_text()
+        assert len(rules) + len(reference) < 40_000, kind
 
 
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():
