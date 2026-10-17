@@ -22,27 +22,36 @@ describe("compileContent", () => {
 
   it("gives each list its own numbering and nests levels", () => {
     expect(compileContent("- a\n- b\n  - c\n\n1. one\n2. two")).toEqual([
-      { t: "li", list: 0, ordered: false, level: 0, runs: [{ text: "a" }] },
-      { t: "li", list: 0, ordered: false, level: 0, runs: [{ text: "b" }] },
-      { t: "li", list: 0, ordered: false, level: 1, runs: [{ text: "c" }] },
-      { t: "li", list: 1, ordered: true, level: 0, runs: [{ text: "one" }] },
-      { t: "li", list: 1, ordered: true, level: 0, runs: [{ text: "two" }] },
+      { t: "li", list: 0, root: 0, ordered: false, level: 0, runs: [{ text: "a" }] },
+      { t: "li", list: 0, root: 0, ordered: false, level: 0, runs: [{ text: "b" }] },
+      { t: "li", list: 0, root: 0, ordered: false, level: 1, runs: [{ text: "c" }] },
+      { t: "li", list: 1, root: 1, ordered: true, level: 0, runs: [{ text: "one" }] },
+      { t: "li", list: 1, root: 1, ordered: true, level: 0, runs: [{ text: "two" }] },
     ]);
   });
 
-  // The editor counts these levels below the list item an insert lands next to; a list that joins none starts at its
-  // shallowest level.
+  it("names the top-level list a nested list of the other kind is written under", () => {
+    expect(compileContent("1. a\n   - b\n2. c\n\n- d")).toEqual([
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "a" }] },
+      { t: "li", list: 1, root: 0, ordered: false, level: 1, runs: [{ text: "b" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "c" }] },
+      { t: "li", list: 2, root: 2, ordered: false, level: 0, runs: [{ text: "d" }] },
+    ]);
+  });
+
+  // The editor counts these levels below the list item an insert lands next to; a top-level list that joins none starts
+  // at its shallowest level, its nested lists with it.
   it("reads a list item indented two or three spaces as one level down", () => {
     expect(compileContent("  1. sub\n1. main\n   1. nested")).toEqual([
-      { t: "li", list: 0, ordered: true, level: 1, runs: [{ text: "sub" }] },
-      { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "main" }] },
-      { t: "li", list: 0, ordered: true, level: 1, runs: [{ text: "nested" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 1, runs: [{ text: "sub" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "main" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 1, runs: [{ text: "nested" }] },
     ]);
     expect(compileContent("   - x\n     - y")).toEqual([
-      { t: "li", list: 0, ordered: false, level: 1, runs: [{ text: "x" }] },
-      { t: "li", list: 0, ordered: false, level: 2, runs: [{ text: "y" }] },
+      { t: "li", list: 0, root: 0, ordered: false, level: 1, runs: [{ text: "x" }] },
+      { t: "li", list: 0, root: 0, ordered: false, level: 2, runs: [{ text: "y" }] },
     ]);
-    expect(compileContent(" - z")).toEqual([{ t: "li", list: 0, ordered: false, level: 0, runs: [{ text: "z" }] }]);
+    expect(compileContent(" - z")).toEqual([{ t: "li", list: 0, root: 0, ordered: false, level: 0, runs: [{ text: "z" }] }]);
   });
 
   it("keeps a table's header as its first row", () => {
@@ -78,10 +87,10 @@ describe("compileContent", () => {
 
   it("keeps the code blocks and tables inside a list item, after its line", () => {
     expect(compileContent("1. step\n\n   ```\n   cmd\n   ```\n\n   | A |\n   |---|\n   | 1 |\n2. next")).toEqual([
-      { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "step" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "step" }] },
       { t: "code", lines: ["cmd"] },
       { t: "table", rows: [[[{ text: "A" }]], [[{ text: "1" }]]] },
-      { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "next" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "next" }] },
     ]);
   });
 

@@ -359,20 +359,22 @@
   }
 
   // An inserted list item that lands right next to an item of a list of its kind (numbered or bulleted) continues that
-  // list: the items of its list take that list's numbering, their levels counted from the item's.
+  // list: the items of its list take that list's numbering, and the levels of everything written under the same
+  // top-level list count from the item's.
   function joining(where, side, blocks) {
     var next = blocks[side === "before" ? blocks.length - 1 : 0];
     if (!where.el || next.t !== "li" || kindOf(where.el) !== (next.ordered ? "numbered" : "bullet")) return null;
     var level = where.el.GetNumbering();
-    return { list: next.list, numbering: level.GetNumbering(), level: level.GetLevelIndex() };
+    return { list: next.list, root: next.root, numbering: level.GetNumbering(), level: level.GetLevelIndex() };
   }
 
-  // Each list's shallowest level in the markdown. A list of its own starts there at its first level, however far the
-  // markdown indented it; only a list that continues one counts its indentation, from the item it lands next to.
+  // Each top-level list's shallowest level in the markdown, its nested lists included. A list of its own starts there at
+  // its first level, however far the markdown indented it; only a list that continues one counts its indentation, from
+  // the item it lands next to.
   function shallowest(blocks) {
     var top = {};
     blocks.forEach(function (b) {
-      if (b.t === "li" && (top[b.list] === undefined || b.level < top[b.list])) top[b.list] = b.level;
+      if (b.t === "li" && (top[b.root] === undefined || b.level < top[b.root])) top[b.root] = b.level;
     });
     return top;
   }
@@ -386,7 +388,7 @@
       else if (b.t === "p") out.push(paragraphOf(b.runs));
       else if (b.t === "li") {
         var numbering = lists[b.list] || (lists[b.list] = doc.CreateNumbering(b.ordered ? "numbered" : "bullet"));
-        var item = paragraphOf(b.runs), base = join && b.list === join.list ? join.level : -top[b.list];
+        var item = paragraphOf(b.runs), base = join && b.root === join.root ? join.level : -top[b.root];
         item.SetNumbering(numbering.GetLevel(Math.min(base + b.level, 8)));
         out.push(item);
       } else if (b.t === "code") {
