@@ -40,14 +40,25 @@ const paragraphs = (shape: Any) => shape.GetDocContent().paras.map((p: Any) => [
 
 // A text box; or, with kind, a drawing of that kind; body false: a shape without a text box.
 interface Box { placeholder?: string; text?: string; name?: string; paras?: ParaStub[]; kind?: string; body?: false }
-// A slide's own background, transition and comments are what a person can give it without typing.
-interface SlideStub { layout?: string; boxes?: Box[]; notes?: string; background?: true; transition?: string; comments?: number }
+// A slide's notes page: its body's paragraphs, a line of the notes each. Emptied, the body keeps one empty paragraph.
+function notesPageOf(text: string): Any {
+  const content = contentOf(text ? text.split("\n").map((line) => ({ runs: [{ text: line, style: "notes" }] })) : [{ runs: [] }]);
+  content.RemoveAllElements = () => { content.paras = [paraOf({ runs: [] })]; return true; };
+  const body = { GetDocContent: () => content };
+  return { content, GetBodyShapeText: () => content.GetText(), GetBodyShape: () => body };
+}
+// The lines of a slide's notes, as its notes page holds them: a paragraph each.
+const noteLines = (slide: Any) => slide.GetNotesPage()?.content.paras.map((p: Any) => p.items.map((r: Any) => r.text).join(""));
+
+// A slide's own background, transition and comments are what a person can give it without typing. Notes null: the
+// slide has no notes page.
+interface SlideStub { layout?: string; boxes?: Box[]; notes?: string | null; background?: true; transition?: string; comments?: number }
 function deck(slides: SlideStub[]) {
   let next = 100;
   const all: Any[] = [];
   const makeSlide = ({ layout = "Blank", boxes = [], notes = "", background, transition = "effectNone", comments = 0 }: SlideStub) => {
     const id = String(next++);
-    let notesText = notes;
+    let notesPage: Any = notes === null ? null : notesPageOf(notes);
     const drawings = boxes.map((b, i) => {
       const content = contentOf(b.paras ?? [{ runs: [{ text: b.text ?? "" }] }]);
       return {
@@ -57,14 +68,18 @@ function deck(slides: SlideStub[]) {
         GetPosX: () => 0, GetPosY: () => 0, GetWidth: () => 0, GetHeight: () => 0,
       };
     });
-    const body = { GetDocContent: () => ({ RemoveAllElements: () => { notesText = ""; } }) };
     const slide: Any = {
       Slide: { Get_Id: () => id, cSld: { spTree: [], Bg: background ? {} : null } }, comments, drawings,
       GetSlideShowTransition: () => ({ GetEntryEffect: () => transition }),
       GetAllDrawings: () => drawings.slice(),
       GetLayout: () => ({ GetName: () => layout }),
-      GetNotesPage: () => ({ GetBodyShapeText: () => notesText, GetBodyShape: () => body }),
-      AddNotesText: (text: string) => { notesText += text; },
+      GetNotesPage: () => notesPage,
+      // As the builder's: the notes page made when the slide has none, the text added to the body's first paragraph.
+      AddNotesText: (text: string) => {
+        notesPage ??= notesPageOf("");
+        notesPage.content.paras[0].items.push(runOf({ text, style: "added" }));
+        return true;
+      },
       GetVisible: () => true, SetVisible: () => undefined,
       GetSlideIndex: () => all.indexOf(slide),
       Delete: () => all.splice(all.indexOf(slide), 1),
@@ -308,5 +323,71 @@ describe("one shape's text", () => {
     const hash = run({ action: "outline" }).slides[0].hash;
     run({ action: "edit", ops: [{ op: "text", slide: "100", hash, shape: "100-0", text: "Lisbon" }, add(1)] });
     expect(ids()).toEqual(["100", "101"]);
+  });
+});
+
+describe("a slide's speaker notes", () => {
+  const TITLE: Box = { placeholder: "title", paras: [{ jc: "center", runs: [{ text: "Next quarter", style: "title" }] }] };
+  const BODY: Box = { paras: [{ runs: [{ text: "Open the Lisbon office", style: "body" }] }, { jc: "right", runs: [{ text: "In March", style: "small" }] }] };
+  const hashOf = (run: (scope: Any) => Any, at = 0) => run({ action: "outline" }).slides[at].hash;
+  const notes = (run: (scope: Any) => Any, text: string, slide = "100") => ({ op: "notes", slide, hash: hashOf(run), text });
+
+  it("take the new text in place of the old, a line per paragraph, and nothing else of the slide changes", () => {
+    const { run, all } = deck([{ layout: "Title Only", boxes: [TITLE, BODY], notes: "Mention the lease.\nAnd the date." }]);
+    const drawings = all[0].GetAllDrawings(), shapes = drawings.map(paragraphs), hash = hashOf(run);
+    expect(run({ action: "edit", ops: [notes(run, "Open with the budget.\nThen the lease.\nEnd on March.")] }))
+      .toEqual({ results: [{ op: 0, notes: "Open with the budget.\nThen the lease.\nEnd on March." }] });
+    expect(noteLines(all[0])).toEqual(["Open with the budget.", "Then the lease.", "End on March."]);
+    expect(all[0].GetAllDrawings()).toEqual(drawings);
+    expect(all[0].GetAllDrawings().map(paragraphs)).toEqual(shapes);
+    expect(all[0].drawings[0].GetPlaceholder().GetType()).toBe("title");
+    expect(hashOf(run)).not.toBe(hash);
+    expect(run({ action: "outline" }).slides[0]).toMatchObject({ title: "Next quarter", shapes: 2, notes: true });
+  });
+
+  it("are cleared by an empty text, and made on a slide that has no notes page", () => {
+    const { run, all } = deck([{ notes: "Mention the lease." }, { notes: null }]);
+    run({ action: "edit", ops: [notes(run, "")] });
+    expect(noteLines(all[0])).toEqual([""]);
+    expect(run({ action: "outline" }).slides[0].notes).toBe(false);
+    run({ action: "edit", ops: [{ op: "notes", slide: "101", hash: hashOf(run, 1), text: "" }] });
+    expect(all[1].GetNotesPage()).toBeNull();
+    run({ action: "edit", ops: [{ op: "notes", slide: "101", hash: hashOf(run, 1), text: "Say hi." }] });
+    expect(noteLines(all[1])).toEqual(["Say hi."]);
+  });
+
+  it("go with a shape's text change on the same slide, each op with the hash you read", () => {
+    const { run, all } = deck([{ boxes: [TITLE], notes: "Mention the lease." }]);
+    const hash = hashOf(run);
+    expect(run({ action: "edit", ops: [
+      { op: "text", slide: "100", hash, shape: "100-0", text: "Q3 plan" }, { op: "notes", slide: "100", hash, text: "Start with Q3." },
+    ] }).results).toEqual([{ op: 0 }, { op: 1, notes: "Start with Q3." }]);
+    expect(paragraphs(all[0].drawings[0])).toEqual([["center", ["title:Q3 plan"]]]);
+    expect(noteLines(all[0])).toEqual(["Start with Q3."]);
+  });
+
+  it("are refused on a slide changed since it was read, and on one the call rebuilds or removes, before anything changes", () => {
+    const { run, all } = deck([{ notes: "Mention the lease." }, {}]);
+    const hash = hashOf(run);
+    expect(run({ action: "edit", ops: [{ op: "notes", slide: "100", hash: "00000000", text: "x" }] }).refused)
+      .toMatchObject({ op: 0, reason: "Slide 100 changed since you read it. This is it now; work from it." });
+    const rebuild = { op: "slides", slides: [{ id: "100", hash, spec: EMPTY_SPEC }] }, note = { op: "notes", slide: "100", hash, text: "x" };
+    const REBUILT = "Slide 100 is rebuilt by this call: give its notes in the rebuild's <aside>.";
+    expect(run({ action: "edit", ops: [rebuild, note] }).refused).toMatchObject({ op: 1, reason: REBUILT });
+    expect(run({ action: "edit", ops: [note, rebuild] }).refused).toMatchObject({ op: 0, reason: REBUILT });
+    const remove = { op: "remove", slides: [{ id: "100", hash }] };
+    expect(run({ action: "edit", ops: [remove, note] }).refused).toMatchObject({ op: 1, reason: "Slide 100 is removed by this call." });
+    expect(run({ action: "edit", ops: [note, remove] }).refused).toMatchObject({ op: 0, reason: "Slide 100 is removed by this call." });
+    expect(all).toHaveLength(2);
+    expect(noteLines(all[0])).toEqual(["Mention the lease."]);
+  });
+
+  it("set on a deck's one slide beside slides added in the same call keep that slide", () => {
+    for (const only of [TEMPLATE, { boxes: [TITLE] }]) {
+      const { run, ids, all } = deck([only]);
+      expect(run({ action: "edit", ops: [notes(run, "Open with the decision."), add(1)] }).results[0]).toEqual({ op: 0, notes: "Open with the decision." });
+      expect(ids()).toEqual(["100", "101"]);
+      expect(noteLines(all[0])).toEqual(["Open with the decision."]);
+    }
   });
 });

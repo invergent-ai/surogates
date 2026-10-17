@@ -7,6 +7,7 @@ const MAX_OPS = 20;
 const MAX_SLIDES = 10;
 const CANVAS_WIDTH = 1920;
 const MAX_SHAPE_TEXT = 2000;
+const MAX_NOTES = 5000;
 
 type Raw = Record<string, unknown>;
 export type SlideEntry = { html: string; after: string | null } | { id: string; hash: string; html: string };
@@ -15,6 +16,7 @@ export type SlideOp =
   | { op: "order"; ids: string[] }
   | { op: "remove"; slides: { id: string; hash: string }[] }
   | { op: "text"; slide: string; hash: string; shape: string; text: string }
+  | { op: "notes"; slide: string; hash: string; text: string }
   | CommentOp;
 
 function guarded(raw: unknown, what: string): { id: string; hash: string } {
@@ -54,10 +56,17 @@ function checkOp(raw: Raw): SlideOp {
       if (raw.text.length > MAX_SHAPE_TEXT) throw new ContentError(`"text" is at most ${MAX_SHAPE_TEXT} characters: a longer text is a slide of its own.`);
       return { op: "text", slide, hash: raw.hash, shape, text: raw.text.replace(/\r\n?/g, "\n") };
     }
+    case "notes": {
+      const slide = textArg(raw.slide, "slide");
+      if (typeof raw.hash !== "string" || !raw.hash) throw new ContentError("a notes change carries the hash its slide had when you read it.");
+      if (typeof raw.text !== "string") throw new ContentError('"text" is the slide\'s speaker notes, a line per paragraph.');
+      if (raw.text.length > MAX_NOTES) throw new ContentError(`"text" is at most ${MAX_NOTES} characters.`);
+      return { op: "notes", slide, hash: raw.hash, text: raw.text.replace(/\r\n?/g, "\n") };
+    }
     default: {
       const comment = commentOp(raw);
       if (comment) return comment;
-      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use slides, text, order, remove, reply or resolve.`);
+      throw new ContentError(`unknown op ${JSON.stringify(raw.op)}; use slides, text, notes, order, remove, reply or resolve.`);
     }
   }
 }

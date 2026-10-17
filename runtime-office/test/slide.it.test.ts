@@ -122,6 +122,30 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
     expect((await outline(user)).slides[1]).toMatchObject({ id: second.id, title: "Q3 plan", layout: "Title Only", notes: true });
   });
 
+  it("sets a slide's speaker notes, a line per paragraph, and keeps its shapes as they were", async () => {
+    const { agent, user } = await deck();
+    let second = (await outline(agent)).slides[1];
+    const before: Any = await office.read(agent, { view: "slide", target: second.id });
+    expect(before.notes).toBe("Mention the lease.");
+    const text = "Open with the budget.\nThen the lease.";
+    const result: Any = await office.edit(agent, [{ op: "notes", slide: second.id, hash: second.hash, text }]);
+    expect(result).toMatchObject({ applied: true, results: [{ op: 0, notes: text }] });
+    for (const id of [agent, user]) {
+      await eventually(async () => {
+        const view: Any = await office.read(id, { view: "slide", target: second.id });
+        // Two paragraphs: a line break inside one would read "\r".
+        expect(view.notes).toBe("Open with the budget.\r\nThen the lease.");
+        expect(view.shapes).toEqual(before.shapes);
+      });
+    }
+    expect((await outline(user)).slides[1]).toMatchObject({ id: second.id, title: "Next quarter", layout: "Title Only", notes: true });
+    second = (await outline(agent)).slides[1];
+    expect(((await office.edit(agent, [{ op: "notes", slide: second.id, hash: second.hash, text: "" }])) as Any).applied).toBe(true);
+    await eventually(async () => {
+      expect((await outline(user)).slides[1]).toMatchObject({ id: second.id, notes: false });
+    });
+  });
+
   it("takes a shape's text change back with the rest of a refused batch", async () => {
     const { agent, user } = await deck();
     const second = (await outline(agent)).slides[1];

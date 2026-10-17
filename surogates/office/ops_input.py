@@ -44,6 +44,7 @@ OP_SHAPES: dict[str, dict[str, str]] = {
     "pptx": {
         "slides": '{"op": "slides", "slides": [{"html": "<section>…</section>", "after": "<slide id>"}]}',
         "text": '{"op": "text", "slide": "<id>", "hash": "<hash>", "shape": "<id>", "text": "…"}',
+        "notes": '{"op": "notes", "slide": "<id>", "hash": "<hash>", "text": "…"}',
         "order": '{"op": "order", "ids": ["<slide id>", "…"]}',
         "remove": '{"op": "remove", "slides": [{"id": "<slide id>", "hash": "<hash>"}]}',
         "reply": _REPLY,

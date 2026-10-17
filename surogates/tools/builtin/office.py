@@ -109,7 +109,8 @@ EDIT_DESCRIPTION = (
     'anchor: "F2"}; sheet {action: add|rename|delete, name, to, after}.\n'
     "Deck: text {slide, hash, shape, text} changes one shape's text and keeps everything else (its place, style and "
     "placeholder; the slide's notes): use it for a small change, a title, a word, a number (shape ids from view "
-    '"slide"). slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole '
+    '"slide"). notes {slide, hash, text} sets a slide\'s speaker notes and changes nothing else. slides {slides: '
+    "[{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole "
     "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes; order "
     "{ids: every slide, in order}; remove {slides: [{id, hash}]}. The slide format is strict: your first office call on "
     "a deck brings its reference.\n"
