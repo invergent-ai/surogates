@@ -6,7 +6,8 @@ pod> --``). Unset, or when the converter fails, there is no PDF and the reason s
 never estimated.
 
 ``measure_overflow`` reads the PDF's text, one page per slide, and gives each rendered line to the top-level text box
-it belongs to. A box overflows when one of its lines ends more than ``TOLERANCE_PT`` below the box or right of it.
+it belongs to. A box overflows when one of its lines has its baseline more than ``TOLERANCE_PT`` below the box, or
+ends more than that right of it. Descenders below the box are not an overflow a reader sees.
 """
 from __future__ import annotations
 
@@ -85,7 +86,7 @@ def render_pdf(document: bytes, file_type: str, timeout: float = TIMEOUT_S) -> R
 class Line:
     """Text one show operation put on a slide, in points from the slide's top-left corner.
 
-    A line is ``1.2`` times its font size tall, its baseline one font size below its top.
+    A line is ``1.2`` times its font size tall and its bottom is its baseline: descenders are not counted.
     """
 
     text: str
@@ -270,8 +271,8 @@ def _page_lines(page: Any, width: float, height: float) -> list[Line]:
                 return  # nothing visible, or rotated or mirrored text: no box edge to compare it with
             size = state.size * d * sy
             baseline = (top - f) * sy
-            lines.append(Line(text, (e + start * a - left) * sx, baseline - size,
-                              (e + (start + ink) * a - left) * sx, baseline + 0.2 * size))
+            lines.append(Line(text, (e + start * a - left) * sx, baseline - 1.2 * size,
+                              (e + (start + ink) * a - left) * sx, baseline))
 
     page.extract_text(visitor_operand_before=visit)
     return lines

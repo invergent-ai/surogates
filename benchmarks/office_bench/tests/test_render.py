@@ -10,6 +10,8 @@ import re
 import shlex
 import sys
 
+import pytest
+
 from obench.checks import Ctx, p_no_overflow
 from obench.docs import Deck, Shape, Slide, read_pptx
 from obench.render import (
@@ -106,8 +108,17 @@ def test_text_that_overflows():
     crowded = next(s for s in deck.slides[0].shapes if s.name == "Crowded")
     match = re.fullmatch(r"text ends (\d+) pt past the box's bottom", crowded.overflow or "")
     assert match, crowded.overflow
-    # Four lines at 28 pt take about 134 pt; the box is 40 pt tall.
-    assert 80 <= int(match[1]) <= 110
+    # The fourth 28 pt line's baseline sits about 91 pt below the 40 pt box.
+    assert int(match[1]) == 91
+
+
+def test_a_line_ends_at_its_baseline():
+    """Descenders below a box are not an overflow a reader sees: a line's bottom is its baseline."""
+    deck = read_pptx(str(FIXTURES / "fits.pptx"))
+    [[line]] = rendered_lines((FIXTURES / "fits.pdf").read_bytes(), deck.width, deck.height)
+    # The PDF puts the 24 pt line's baseline at y = 453.936 on a 540 pt page.
+    assert line.bottom == pytest.approx(540 - 453.936, abs=0.01)
+    assert line.top == pytest.approx(line.bottom - 1.2 * 24, abs=0.01)
 
 
 def test_text_of_no_shape_is_ignored():

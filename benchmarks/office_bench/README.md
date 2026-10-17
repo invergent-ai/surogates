@@ -56,8 +56,9 @@ made it wrong.
 8. **Check** (also offline, `obench check <run_id>`): the task's checks on its document, the trace metrics, the claim
    analysis. Writes `checks.json` and `trajectory.md`. A deck whose task checks overflow is first rendered to PDF by
    the document server's own converter, x2t (`OFFICEBENCH_RENDER_SHELL`); each rendered line of text is matched to
-   the text box whose text it is, and a box overflows when one of its lines ends more than 2 pt below the box or
-   right of it. The render is kept in `render/`, so a re-check measures the same PDF without the converter.
+   the text box whose text it is, and a box overflows when a line's baseline sits more than 2 pt below the box, or a
+   line ends more than 2 pt right of it (descenders below the box do not count). The render is kept in `render/`, so a
+   re-check measures the same PDF without the converter.
 
 ### Layout
 
