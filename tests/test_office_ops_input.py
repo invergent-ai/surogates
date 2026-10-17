@@ -54,6 +54,18 @@ def test_other_breakage_is_refused():
         assert "not valid JSON" in str(refused.value) and "character" in str(refused.value)
 
 
+def test_where_the_json_breaks_is_said_in_plain_words():
+    # json's own message for these ends in "at": the place is said once.
+    with pytest.raises(OpsInputError) as refused:
+        read_ops('[{"op": "delete", "target": "unterminated', "docx")
+    assert str(refused.value) == (
+        "ops is not valid JSON: Unterminated string starting at character 28, just after '[{\"op\": \"delete\", \"target\": '."
+    )
+    with pytest.raises(OpsInputError) as refused:
+        read_ops('[{"op": "delete", "x": "a\nb"}]', "docx")
+    assert str(refused.value).startswith("ops is not valid JSON: Invalid control character at character 25, ")
+
+
 def test_single_op_object():
     ops, read_as = read_ops(DELETE, "docx")
     assert ops == [DELETE] and any("one op" in note for note in read_as)

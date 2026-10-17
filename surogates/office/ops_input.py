@@ -175,7 +175,9 @@ def _parsed(text: str, read_as: list[str]) -> object:
         if closed is None:
             before = text[max(0, exc.pos - 40):exc.pos]
             where = f", just after {before!r}" if before else ""
-            raise OpsInputError(f"ops is not valid JSON: {exc.msg} at character {exc.pos}{where}.") from None
+            # Some of json's messages end in "at" ("Unterminated string starting at"): the place is said once.
+            what = exc.msg.removesuffix(" at")
+            raise OpsInputError(f"ops is not valid JSON: {what} at character {exc.pos}{where}.") from None
         fixed, added = closed
         read_as.append(f"{_AS_TEXT}, adding the {', the '.join(added)}.")
         return json.loads(fixed)
