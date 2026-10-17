@@ -65,8 +65,8 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     const result = await edit(agent, [
       { op: "insert", target: { block: second.id, hash: second.hash }, side: "after", content: { markdown: "3. Renew the support contract" } },
     ]);
-    // A list of its own: the reader sees the number the editor gives it, not the one written.
-    expect(result.results[0].reads).toEqual([{ id: result.results[0].ids[0], kind: "numbered", label: "1.", text: "Renew the support contract" }]);
+    // The reader sees the number the item got: the list's next.
+    expect(result.results[0].reads).toEqual([{ id: result.results[0].ids[0], kind: "numbered", label: "3.", text: "Renew the support contract" }]);
     expect(result.length.words).toBeGreaterThan(0);
     expect(result.length.pages).toBeGreaterThanOrEqual(1);
     // The length is the document's after the edit, its pages too.
@@ -77,6 +77,68 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     // A refusal shows the list item as the outline does.
     const refused = await edit(agent, [{ op: "delete", target: { block: second.id, hash: "00000000" } }]);
     expect(refused.refused.block).toMatchObject({ kind: "numbered", label: "2.", text: "Open the Lisbon office" });
+  });
+
+  const alone = async (): Promise<string> => {
+    const key = newKey();
+    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT), documentServerUrl: IT.dsUrl });
+    opened.push(agent);
+    return agent;
+  };
+  const numbered = async (id: string): Promise<Any[]> => (await blocks(id)).filter((b) => b.kind === "numbered");
+  const insertBeside = (id: string, item: Any, side: string, markdown: string, more: object = {}): Promise<Any> =>
+    edit(id, [{ op: "insert", target: { block: item.id, hash: item.hash }, side, content: { markdown }, ...more }]);
+  const labelled = async (id: string): Promise<string[][]> => (await numbered(id)).map((b) => [b.label, b.text]);
+
+  it("continues a numbered list", async () => {
+    const agent = await alone();
+    const [first, second] = await numbered(agent);
+    const result = await insertBeside(agent, second, "after", "3. Renew the support contract");
+    expect(result.results[0].reads[0]).toMatchObject({ kind: "numbered", label: "3.", text: "Renew the support contract" });
+    expect(await labelled(agent)).toEqual([["1.", "Hire two engineers"], ["2.", "Open the Lisbon office"], ["3.", "Renew the support contract"]]);
+    expect((await numbered(agent)).slice(0, 2).map((b) => b.hash)).toEqual([first.hash, second.hash]);
+  });
+
+  it("starts a list on request", async () => {
+    const agent = await alone();
+    const second = (await numbered(agent))[1];
+    const result = await insertBeside(agent, second, "after", "3. Renew the support contract", { list: "new" });
+    expect(result.results[0].reads[0]).toMatchObject({ kind: "numbered", label: "1.", text: "Renew the support contract" });
+  });
+
+  it("keeps bullets apart from numbers", async () => {
+    const agent = await alone();
+    const second = (await numbered(agent))[1];
+    const result = await insertBeside(agent, second, "after", "- An extra point");
+    expect(result.results[0].reads[0]).toMatchObject({ kind: "bullet", label: "•", text: "An extra point" });
+    expect((await numbered(agent)).map((b) => b.label)).toEqual(["1.", "2."]);
+  });
+
+  it("joins only the list item it lands next to", async () => {
+    const agent = await alone();
+    const [first, second] = await numbered(agent);
+    const before = await insertBeside(agent, first, "before", "1. Agree the budget");
+    expect(before.results[0].reads[0]).toMatchObject({ kind: "numbered", label: "1.", text: "Agree the budget" });
+    expect(await labelled(agent)).toEqual([["1.", "Agree the budget"], ["2.", "Hire two engineers"], ["3.", "Open the Lisbon office"]]);
+    // A heading between them: a list of its own.
+    const apart = await insertBeside(agent, second, "after", "## Next\n\n1. Book the venue");
+    expect(apart.results[0].reads.map((b: Any) => [b.kind, b.label])).toEqual([["heading2", undefined], ["numbered", "1."]]);
+  });
+
+  it("joins one level down", async () => {
+    const agent = await alone();
+    const first = (await numbered(agent))[0];
+    const result = await insertBeside(agent, first, "after", "  1. A sub-step");
+    // The sample's lists define their first level only, so a sub-step shows no number there: its numbering tells.
+    const levels = await (await pool.get(agent)).command(
+      "function () { return scope.ids.map(function (id) { var level = Api.GetByInternalId(id).GetNumbering(); " +
+        "return [level.GetLevelIndex(), level.GetNumbering().Num.GetId()]; }); }",
+      { ids: [first.id, result.results[0].ids[0]] },
+    );
+    const [[firstLevel, firstList], [level, list]] = levels.value as [[number, string], [number, string]];
+    expect([firstLevel, level]).toEqual([0, 1]);
+    expect(list).toBe(firstList);
+    expect(await labelled(agent)).toEqual(expect.arrayContaining([["1.", "Hire two engineers"], ["2.", "Open the Lisbon office"]]));
   });
 
   it("re-words quoted words in place", async () => {

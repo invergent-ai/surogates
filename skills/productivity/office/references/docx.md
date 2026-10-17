@@ -68,8 +68,18 @@ A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "w
 {"op": "move", "target": {"block": "880", "hash": "33cc44dd"}, "to": {"block": "853", "hash": "a1b2c3d4"}, "side": "before"}
 ```
 
-A list you insert starts its own numbering. A block you replace or move keeps the comment threads anchored in it: over
-the same words when they are still in it, otherwise over the whole new block.
+A block you replace or move keeps the comment threads anchored in it: over the same words when they are still in it,
+otherwise over the whole new block.
+
+List items you insert right before or after a list item of their kind (numbered or bulleted) continue its list and take
+its numbering, whatever number the markdown writes. An item indented two spaces goes one level below the one it is
+next to. `"list": "new"` starts a list of their own instead:
+
+```json
+{"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "3. Renew the support contract"}}
+{"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "  1. Ask for three quotes"}}
+{"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "1. Book the venue\n2. Send the invitations"}, "list": "new"}
+```
 
 ## Comments
 

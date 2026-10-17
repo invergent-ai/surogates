@@ -29,6 +29,9 @@ const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
 const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
+// An item of a top-level list indented two or three spaces goes one level down, as a nested one would: a sub-item
+// written on its own.
+const INDENTED = /^ {2,3}\S/;
 
 type Style = Omit<Run, "text">;
 type Lists = { next: number };
@@ -108,6 +111,7 @@ function blocksOf(tokens: Token[], lists: Lists): Block[] {
 function listOf(list: Tokens.List, id: number, level: number, lists: Lists): Block[] {
   const out: Block[] = [];
   for (const item of list.items) {
+    const own = level === 0 && INDENTED.test(item.raw) ? 1 : level;
     const runs: Run[] = [];
     const after: Token[] = [];
     for (const part of item.tokens) {
@@ -116,12 +120,12 @@ function listOf(list: Tokens.List, id: number, level: number, lists: Lists): Blo
         runs.push(...runsOf((part as Tokens.Text).tokens ?? [part]));
       } else after.push(part);
     }
-    out.push({ t: "li", list: id, ordered: list.ordered, level, runs: merge(runs) });
+    out.push({ t: "li", list: id, ordered: list.ordered, level: own, runs: merge(runs) });
     // The item's code, tables, quotes and nested lists follow its line in order.
     for (const part of after) {
       if (part.type !== "list") out.push(...blocksOf([part], lists));
       // A nested list of the same kind continues its parent's numbering one level down.
-      else out.push(...listOf(part as Tokens.List, (part as Tokens.List).ordered === list.ordered ? id : lists.next++, level + 1, lists));
+      else out.push(...listOf(part as Tokens.List, (part as Tokens.List).ordered === list.ordered ? id : lists.next++, own + 1, lists));
     }
   }
   return out;

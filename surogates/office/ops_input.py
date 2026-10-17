@@ -22,7 +22,7 @@ _BLOCK = '{"block": "<id>", "hash": "<hash>"}'
 #: Each document type's ops, in the order the tool's description gives them, each as one complete op in JSON.
 OP_SHAPES: dict[str, dict[str, str]] = {
     "docx": {
-        "insert": f'{{"op": "insert", "target": {_BLOCK}, "side": "before|after", "content": {{"markdown": "…"}}}}',
+        "insert": f'{{"op": "insert", "target": {_BLOCK}, "side": "before|after", "content": {{"markdown": "…"}}, "list": "new"}}',
         "replace": f'{{"op": "replace", "target": {_BLOCK}, "content": {{"markdown": "…"}}}}',
         "delete": f'{{"op": "delete", "target": {_BLOCK}}}',
         "move": f'{{"op": "move", "target": {_BLOCK}, "to": {_BLOCK}, "side": "before|after"}}',

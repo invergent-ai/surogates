@@ -47,6 +47,15 @@ describe("compileOps", () => {
     );
   });
 
+  it("takes a list of its own on request", () => {
+    expect(compileOps([{ op: "insert", target: { end: true }, content: { markdown: "- a" }, list: "new" }])).toEqual([
+      { op: "insert", target: { end: true }, side: "after", blocks: [{ t: "li", list: 0, ordered: false, level: 0, runs: [{ text: "a" }] }], list: "new" },
+    ]);
+    expect(() => compileOps([{ op: "insert", target: { end: true }, content: { markdown: "- a" }, list: "old" }])).toThrow(
+      'op 0: "list" is "new" (a list of its own) or left out.',
+    );
+  });
+
   it("refuses an empty or oversized batch", () => {
     expect(() => compileOps([])).toThrow(ContentError);
     expect(() => compileOps("insert")).toThrow(ContentError);

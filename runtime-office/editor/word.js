@@ -358,16 +358,26 @@
     return paragraph;
   }
 
-  function build(blocks) {
+  // An inserted list item that lands right next to an item of a list of its kind (numbered or bulleted) continues that
+  // list: the items of its list take that list's numbering, their levels counted from the item's.
+  function joining(where, side, blocks) {
+    var next = blocks[side === "before" ? blocks.length - 1 : 0];
+    if (!where.el || next.t !== "li" || kindOf(where.el) !== (next.ordered ? "numbered" : "bullet")) return null;
+    var level = where.el.GetNumbering();
+    return { list: next.list, numbering: level.GetNumbering(), level: level.GetLevelIndex() };
+  }
+
+  function build(blocks, join) {
     var out = [], lists = {};
+    if (join) lists[join.list] = join.numbering;
     for (var i = 0; i < blocks.length; i++) {
       var b = blocks[i];
       if (b.t === "h") out.push(paragraphOf(b.runs, "Heading " + b.level, b.level));
       else if (b.t === "p") out.push(paragraphOf(b.runs));
       else if (b.t === "li") {
         var numbering = lists[b.list] || (lists[b.list] = doc.CreateNumbering(b.ordered ? "numbered" : "bullet"));
-        var item = paragraphOf(b.runs);
-        item.SetNumbering(numbering.GetLevel(Math.min(b.level, 8)));
+        var item = paragraphOf(b.runs), base = join && b.list === join.list ? join.level : 0;
+        item.SetNumbering(numbering.GetLevel(Math.min(base + b.level, 8)));
         out.push(item);
       } else if (b.t === "code") {
         for (var l = 0; l < b.lines.length; l++) out.push(paragraphOf([{ text: b.lines[l], code: true }]));
@@ -491,7 +501,8 @@
   var EDITS = {
     insert: function (op) {
       var where = resolveTarget(op.target), blank = where.end ? onlyBlankLine() : null;
-      var at = position(where, op.side), elements = build(op.blocks), ids = insertAt(at, elements);
+      var join = op.list === "new" ? null : joining(where, op.side, op.blocks);
+      var at = position(where, op.side), elements = build(op.blocks, join), ids = insertAt(at, elements);
       if (blank) blank.Delete();
       return made(ids, elements);
     },

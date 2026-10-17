@@ -30,6 +30,19 @@ describe("compileContent", () => {
     ]);
   });
 
+  it("puts a list item indented two or three spaces one level down", () => {
+    expect(compileContent("  1. sub\n1. main\n   1. nested")).toEqual([
+      { t: "li", list: 0, ordered: true, level: 1, runs: [{ text: "sub" }] },
+      { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "main" }] },
+      { t: "li", list: 0, ordered: true, level: 1, runs: [{ text: "nested" }] },
+    ]);
+    expect(compileContent("   - x\n     - y")).toEqual([
+      { t: "li", list: 0, ordered: false, level: 1, runs: [{ text: "x" }] },
+      { t: "li", list: 0, ordered: false, level: 2, runs: [{ text: "y" }] },
+    ]);
+    expect(compileContent(" - z")).toEqual([{ t: "li", list: 0, ordered: false, level: 0, runs: [{ text: "z" }] }]);
+  });
+
   it("keeps a table's header as its first row", () => {
     expect(compileContent("| A | B |\n|---|---|\n| 1 | **2** |")).toEqual([
       { t: "table", rows: [[[{ text: "A" }], [{ text: "B" }]], [[{ text: "1" }], [{ text: "2", b: true }]]] },

@@ -96,7 +96,8 @@ EDIT_DESCRIPTION = (
     "One piece of work per call (a section, a block of cells, a slide), with a short line in the chat between calls. "
     "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
     "result shows it as it is now: the user's edit wins; read again and work from it.\n"
-    "Word: insert {target, side: before|after, content}, replace {target, content} (on quoted words, "
+    'Word: insert {target, side: before|after, content} (list items next to a list item continue its list; "list": '
+    '"new" starts a new one), replace {target, content} (on quoted words, '
     '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side}, comment '
     '{anchor: {find}, body}, reply {thread, body}, resolve {thread}; a replaced or moved block keeps its comment '
     'threads. Targets: {"block": "<id>", "hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, '
