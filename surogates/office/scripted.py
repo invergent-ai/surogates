@@ -34,6 +34,9 @@ MOUNT_SLACK_S = 2
 LOOK_TIMEOUT_S = 5
 #: The documents one note names; the rest are counted.
 NAMED_AT_MOST = 10
+#: Folders not looked in: the skills staged for the chat, and the trees a clone or an install brings, whose sample
+#: documents are not a script's and whose walk could take the whole look.
+NOT_LOOKED_IN = ("node_modules", ".git", ".skills", ".venv", "site-packages", "__pycache__")
 #: What ends a name in a command: the shell's spaces, quotes and operators, and an option's ``=``.
 _SEPARATORS = re.compile(r"[\s'\"`<>|;&(){}\[\]=]+")
 
@@ -53,14 +56,15 @@ async def scripted_documents(session: Any, since: float, *, sandbox_pool: Any) -
     if sandbox_pool is None or device_of(session.config) is not None:
         return []
     owner = sandbox_session_key(session)
+    skipped = " -o ".join(f"-name {folder}" for folder in NOT_LOOKED_IN)
     kinds = " -o ".join(f"-iname '*.{kind}'" for kind in AGENT_KINDS)
     try:
         # A thread's copy is on its pod's own disk, its times exact, and is made when the pod starts, just before the
         # call: a slack would count its making as the script's.
         after = since if sandbox_pool.holds_copy(owner) else since - MOUNT_SLACK_S
         command = (
-            f"find {WORKSPACE} -maxdepth 6 -type f \\( {kinds} \\) -newermt @{after:.3f} -not -path '*/.skills/*' "
-            "2>/dev/null"
+            f"find {WORKSPACE} -maxdepth 6 \\( {skipped} \\) -prune -o -type f \\( {kinds} \\) -newermt @{after:.3f} "
+            "-print 2>/dev/null"
         )
         answer = json.loads(await sandbox_pool.execute(
             owner, "terminal", json.dumps({"command": command, "timeout": LOOK_TIMEOUT_S}), timeout=LOOK_TIMEOUT_S,

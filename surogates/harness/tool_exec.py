@@ -2137,9 +2137,17 @@ async def _run_single_tool(
     if tool_name == "terminal" and not tool_failed:
         from surogates.office.scripted import terminal_notes
 
-        for note in await terminal_notes(
-            tool_args, session, began_in_sandbox, sandbox_pool=sandbox_pool, session_factory=session_factory,
-        ):
+        try:
+            notes = await terminal_notes(
+                tool_args, session, began_in_sandbox, sandbox_pool=sandbox_pool, session_factory=session_factory,
+            )
+        except Exception:
+            # The command ran: its result goes back as it is.
+            logger.warning(
+                "Could not make the office notes of a terminal call in session %s", session.id, exc_info=True,
+            )
+            notes = []
+        for note in notes:
             result_content = _noted(result_content, note)
 
     # A thread on a copy just made is told, by that step's result whatever the

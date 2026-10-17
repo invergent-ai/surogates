@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -31,12 +34,44 @@ async def test_the_documents_a_script_left_are_named_from_the_workspace():
     owner, name, arguments = pool.execute.call_args.args
     assert (owner, name) == (str(session.id), "terminal")
     command = json.loads(arguments)["command"]
-    assert command.startswith("find /workspace -maxdepth 6 -type f \\( -iname '*.docx' -o -iname '*.xlsx' -o ")
+    assert command.startswith(
+        "find /workspace -maxdepth 6 \\( -name node_modules -o -name .git -o -name .skills -o -name .venv "
+        "-o -name site-packages -o -name __pycache__ \\) -prune -o -type f \\( -iname '*.docx' -o -iname '*.xlsx' -o "
+    )
     assert "-iname '*.pptx' -o -iname '*.pdf' \\)" in command
     # A mounted workspace keeps whole seconds, on another machine's clock: two seconds before the call count.
-    assert "-newermt @998.000 " in command
-    assert "-not -path '*/.skills/*'" in command
+    assert "-newermt @998.000 -print " in command
     assert pool.execute.call_args.kwargs["timeout"] == 5
+
+
+def gnu_find() -> bool:
+    try:
+        return "GNU findutils" in subprocess.run(["find", "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not gnu_find(), reason="the sandbox's find is GNU findutils")
+@pytest.mark.asyncio
+async def test_dependency_and_version_control_folders_are_not_looked_in(tmp_path):
+    # A clone or an install that brings sample documents with it is not a script's document, and its tree is not walked.
+    since = time.time()
+    for path in (
+        "deck.pptx", "sub/B.XLSX", "node_modules/pdf-parse/test/data/s.pdf", ".git/x/y.pdf", ".skills/office/t.docx",
+        ".venv/lib/a.pdf", "lib/site-packages/pkg/b.pdf", "src/__pycache__/c.pdf", "notes.txt", "a/b/c/d/e/f/deep.pdf",
+        "old.docx",
+    ):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).touch()
+    os.utime(tmp_path / "old.docx", (since - 60, since - 60))
+
+    async def execute(owner, name, arguments, *, timeout=None):
+        command = json.loads(arguments)["command"].replace("find /workspace", f"find {tmp_path}", 1)
+        ran = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+        return json.dumps({"output": ran.stdout.replace(str(tmp_path), "/workspace"), "exit_code": ran.returncode})
+
+    pool = SimpleNamespace(execute=execute, holds_copy=lambda owner: False)
+    assert await scripted_documents(cloud_session(), since, sandbox_pool=pool) == ["deck.pptx", "sub/B.XLSX"]
 
 
 @pytest.mark.asyncio

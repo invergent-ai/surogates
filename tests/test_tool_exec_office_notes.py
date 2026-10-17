@@ -151,6 +151,14 @@ async def test_a_command_whose_open_documents_cannot_be_told_is_answered_as_it_r
     assert await run(chat(), "pandoc docs/a.docx -t plain", pod=Pod(""), session_factory=MagicMock()) == RAN
 
 
+async def test_a_note_that_cannot_be_made_leaves_the_result_as_it_ran(monkeypatch):
+    def unreadable():
+        raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr(skill_visibility, "load_settings", unreadable)
+    assert await run(chat(), "python make_deck.py", pod=Pod("/workspace/deck.pptx\n")) == RAN
+
+
 async def test_a_script_that_changed_a_document_open_in_the_editor_is_told_the_editor_holds_it(monkeypatch):
     # The editor is its only writer: what the script did there is not the document.
     monkeypatch.setattr(office_sessions, "open_locations", holding("docs/a.docx"))
