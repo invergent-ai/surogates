@@ -5,6 +5,7 @@ refused, and reads of one are told where to change it."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from surogates.config import load_settings
@@ -88,23 +89,46 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
     return None
 
 
-async def open_document_note(tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
-    """The note read_file adds when the document it read is open in the editor or is a document office_edit changes,
-    or None."""
-    raw = str(tool_args.get("path") or "") if isinstance(tool_args, dict) else ""
-    if not raw or not office_kind(raw) or "\0" in raw or not _applies(session, session_factory):
+#: What a step that reads, or names, a document open in the editor is told.
+OPEN_NOTE = (
+    "{path} is open in the document editor, which holds it now: read it with office_read and change it with "
+    "office_edit. Your own files can lag the editor or not have the document yet (a project thread's copy gets it "
+    "at its next turn): do not look for it there."
+)
+
+
+def _matchable(raw: str, session: Any) -> str | None:
+    """*raw*, a path as the model wrote it, relative to the workspace, when it may name a document open in the editor;
+    else None."""
+    if not raw or not office_kind(raw) or "\0" in raw:
         return None
     path = relative_path(raw, session)
     if device_of(session.config) is not None and not within_folder(path):
         return None  # it cannot be matched to an open document
+    return path
+
+
+async def open_documents(paths: Iterable[str], session: Any, *, session_factory: Any) -> list[str]:
+    """Those of *paths*, as the model wrote them, that name a document open in the editor: relative to the workspace,
+    each once, sorted."""
+    matchable = [path for path in (_matchable(raw, session) for raw in paths) if path]
+    if not matchable or not _applies(session, session_factory):
+        return []
+    named = {location_of(session, path): path for path in matchable}
+    return sorted({named[location] for location in await _open_locations(session_factory, session, list(named))})
+
+
+async def open_document_note(tool_args: Any, session: Any, *, session_factory: Any) -> str | None:
+    """The note read_file adds when the document it read is open in the editor or is a document office_edit changes,
+    or None."""
+    raw = str(tool_args.get("path") or "") if isinstance(tool_args, dict) else ""
+    path = _matchable(raw, session)
+    if path is None or not _applies(session, session_factory):
+        return None
     if not await _open_locations(session_factory, session, [location_of(session, path)]):
         noun = NOUNS.get(office_kind(path).file_type) if office_tools_offered(session) else None
         return f"{path} is {noun}: to change it, read it with office_read and edit it with office_edit." if noun else None
-    return (
-        f"{path} is open in the document editor, which holds it now: read it with office_read and change it with "
-        "office_edit. Your own files can lag the editor or not have the document yet (a project thread's copy gets it "
-        "at its next turn): do not look for it there."
-    )
+    return OPEN_NOTE.format(path=path)
 
 
 async def hold_open_documents(session_factory: Any, session: Any, turn: dict[str, Any]) -> None:

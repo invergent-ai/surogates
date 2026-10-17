@@ -437,6 +437,10 @@ async def test_a_steps_note_is_a_key_of_its_own_in_a_json_result_and_a_line_afte
     assert json.loads(tool_exec._noted('{"status": "started"}', "kept: a.md")) == {"status": "started", "note": "kept: a.md"}
     assert tool_exec._noted("Done.", "kept: a.md") == "Done.\n\n[kept: a.md]"
     assert tool_exec._noted("[1, 2]", "kept: a.md") == "[1, 2]\n\n[kept: a.md]"
+    # A second note joins the first, and the result's own text stays as it was written.
+    assert tool_exec._noted('{"output": "café", "note": "kept: a.md"}', "deck.pptx changed") == (
+        '{"output": "café", "note": "kept: a.md deck.pptx changed"}'
+    )
 
 
 #: A model's reply the provider failed: with no retry left, the turn fails.
