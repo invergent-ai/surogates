@@ -75,6 +75,7 @@ def test_doc_path_normalizes_what_office_edit_was_given():
     assert doc_path("/workspace/a/b.docx") == "a/b.docx"
     assert doc_path("./b.docx") == "b.docx"
     assert doc_path(" b.docx ") == "b.docx"
+    assert doc_path("__WORKSPACE__/a/b.docx") == "a/b.docx"
 
 
 def test_edited_paths_reads_string_and_dict_arguments():

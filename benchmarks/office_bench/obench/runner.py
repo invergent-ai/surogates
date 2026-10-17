@@ -63,7 +63,7 @@ def sha(data: bytes) -> str:
 def doc_path(raw: str) -> str:
     """A path as office_edit was given it, as the workspace names it."""
     p = (raw or "").strip().replace("\\", "/")
-    for prefix in ("/workspace/", "workspace/"):
+    for prefix in ("/workspace/", "workspace/", "__WORKSPACE__/"):
         if p.startswith(prefix):
             p = p[len(prefix):]
     while p.startswith("./"):

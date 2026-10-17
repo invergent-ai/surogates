@@ -49,6 +49,12 @@ def test_suite_shape():
     assert sum(t.mode == "create" for t in pilot) >= 3
 
 
+def test_every_deck_task_keeps_its_shapes_on_the_slide():
+    decks = [t for t in TASKS if t.kind == "pptx"]
+    assert decks
+    assert [t.id for t in decks if "every shape inside the slide" not in [c.name for c in t.checks]] == []
+
+
 @pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
 def test_task_is_well_formed(task):
     assert docs.kind_of(task.target) == task.kind

@@ -12,6 +12,7 @@ import posixpath
 import re
 import zipfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -731,3 +732,30 @@ def read_pdf(path: str) -> PdfDoc:
 def read(path: str):
     kind = kind_of(path)
     return {"docx": read_docx, "xlsx": read_xlsx, "pptx": read_pptx, "pdf": read_pdf}[kind](path)
+
+
+# --------------------------------------------------------------------------- Producer
+
+# How the document editor names itself in what it saves, before a slash and its version.
+EDITOR_PRODUCER = "euro-office"
+_APPLICATION = "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}Application"
+
+
+def producer(path: Path) -> str | None:
+    """The program that saved the document, as it names itself: a package's ``docProps/app.xml`` ``<Application>``, a
+    PDF's ``/Producer``. None when the document does not say, or that part cannot be read."""
+    if kind_of(str(path)) == "pdf":
+        from pypdf import PdfReader
+
+        try:
+            name = (PdfReader(path).metadata or {}).get("/Producer")
+        except Exception:  # noqa: BLE001 - a PDF whose metadata pypdf cannot read names no producer
+            return None
+    else:
+        try:
+            with zipfile.ZipFile(path) as z:
+                app = ET.fromstring(z.read("docProps/app.xml")).find(_APPLICATION)
+        except (KeyError, zipfile.BadZipFile, ET.ParseError):
+            return None
+        name = app.text if app is not None else None
+    return str(name or "").strip() or None

@@ -9,6 +9,7 @@ import json
 import os
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from obench import docs, render
@@ -135,6 +136,32 @@ def find_document(task: Task, meta: dict[str, Any]) -> tuple[dict[str, Any] | No
     return None, f"no {task.target} in the workspace"
 
 
+def made_in_editor(events: list[Event], path: str, saved: str) -> CheckResult:
+    """Whether the editor made the document at workspace *path*, stored at *saved*: an applied office_edit call named
+    it, and the editor saved it. A script that writes the file leaves its library's name as the producer instead."""
+    want = doc_path(path)
+    named: set[str] = set()
+    applied = 0
+    for ev in events:
+        d = ev.data or {}
+        if d.get("name") != "office_edit" or not d.get("tool_call_id"):
+            continue
+        if ev.type == "tool.call" and doc_path(str(_args(d).get("path") or "")) == want:
+            named.add(d["tool_call_id"])
+        elif ev.type == "tool.result" and d["tool_call_id"] in named:
+            content = _parse(d.get("content"))
+            applied += int(isinstance(content, dict) and content.get("applied") is True)
+    made_by = docs.producer(Path(saved))
+    problems = []
+    if not applied:
+        problems.append(f"no applied office_edit call names {path}")
+    if not (made_by or "").lower().startswith(docs.EDITOR_PRODUCER.lower()):
+        problems.append(f"saved by {made_by!r}, not the editor" if made_by else "the file names no producer")
+    if problems:
+        return CheckResult("made in the editor", False, "; ".join(problems))
+    return CheckResult("made in the editor", True, f"{applied} applied office_edit call(s); saved by {made_by}")
+
+
 def original_model(task: Task, rollout_dir: str) -> Any:
     inp = task.original_input
     if inp is None:
@@ -206,6 +233,8 @@ def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
             results.append(CheckResult("document saved and opens", True, note or f"{found['size']} bytes"))
         except Exception as exc:  # noqa: BLE001
             results.append(CheckResult("document saved and opens", False, f"cannot open: {type(exc).__name__}: {exc}"))
+    results.append(made_in_editor(events, found["path"], os.path.join(rollout_dir, found["local"])) if found
+                   else CheckResult("made in the editor", False, "no document"))
     if task.mode == "edit" and found is not None and not found.get("changed", True):
         results.append(CheckResult("the document changed", False, "byte-identical to the upload: no edit was saved"))
     if isinstance(doc, docs.Deck) and any(chk.reads_render for chk in task.checks):

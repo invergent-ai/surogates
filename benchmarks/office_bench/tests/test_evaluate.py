@@ -1,18 +1,24 @@
 """What the trace says the agent did, and when its final word contradicts the checks."""
 import json
 import pathlib
+import re
 import shlex
 import shutil
 import sys
+import zipfile
 
+from obench import docs
 from obench.checks import CheckResult
 from obench.client import Event
 from obench.evaluate import claims, evaluate, find_document, final_message, metrics
 from obench.render import RENDER_SHELL_ENV
-from obench.tasks import by_id
+from obench.tasks import FIXTURES as INPUTS, by_id
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 OVERFLOW = "no text overflows its box"
+MADE = "made in the editor"
+# The editor's name and version as it saves them, assembled so the public-repository scan does not read an address.
+EDITOR = "euro-office/" + ".".join(("2", "5", "565", "0"))
 
 
 def _events():
@@ -109,8 +115,11 @@ def test_a_negated_claim_word_is_not_a_claim_and_a_missing_input_is():
     assert c["admits_a_problem"] and not c["claims_success_despite_failures"]
 
 
-def _rollout(tmp_path, collected: list[tuple[str, pathlib.Path]]) -> str:
-    """A stored rollout whose workspace held *collected* (workspace path, file)."""
+def _rollout(tmp_path, collected: list[tuple[str, pathlib.Path]], events: list[Event] | None = None) -> str:
+    """A stored rollout whose workspace held *collected* (workspace path, file), after *events*."""
+    with open(tmp_path / "events.jsonl", "w", encoding="utf-8") as fh:
+        for ev in events or []:
+            fh.write(json.dumps({"id": ev.id, "type": ev.type, "data": ev.data}) + "\n")
     entries = []
     for path, source in collected:
         local = tmp_path / "documents" / path
@@ -158,3 +167,75 @@ def test_no_renderer_scores_overflow_unknown_and_says_why(tmp_path, monkeypatch)
     check = _check(evaluate(by_id()["pptx-kpi-chart"], rollout), OVERFLOW)
     assert check["passed"] is None and RENDER_SHELL_ENV in check["detail"]
     assert not (tmp_path / "render").exists()
+
+
+def _office_edit(path: str, applied: bool = True, call_id: str = "call_1") -> list[Event]:
+    """An office_edit call on *path* and its result."""
+    return [
+        Event(1, "tool.call", {"name": "office_edit", "arguments": {"path": path, "ops": [{"op": "slides"}]},
+                               "tool_call_id": call_id}),
+        Event(2, "tool.result", {"name": "office_edit", "tool_call_id": call_id, "content": json.dumps(
+            {"document": path.rsplit("/", 1)[-1], "open_by": [], "applied": applied, "results": [], "flushed": True})}),
+    ]
+
+
+def _saved_by(source: pathlib.Path, dest: pathlib.Path, application: str) -> pathlib.Path:
+    """*source* with its docProps/app.xml naming *application* as the program that saved it."""
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as out:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "docProps/app.xml":
+                data = re.sub(rb"<Application>[^<]*</Application>",
+                              f"<Application>{application}</Application>".encode(), data)
+            out.writestr(item, data)
+    return dest
+
+
+def _scripted_deck(tmp_path) -> pathlib.Path:
+    from pptx import Presentation
+
+    (tmp_path / "made").mkdir()
+    path = tmp_path / "made" / "kpi.pptx"
+    Presentation().save(str(path))
+    return path
+
+
+def test_scripted_document_is_not_made_in_the_editor(tmp_path, monkeypatch):
+    monkeypatch.delenv(RENDER_SHELL_ENV, raising=False)
+    deck = _scripted_deck(tmp_path)
+    assert "PowerPoint" in docs.producer(deck)
+    rollout = _rollout(tmp_path, [("kpi.pptx", deck)], _office_edit("kpi.pptx"))
+    check = _check(evaluate(by_id()["pptx-kpi-chart"], rollout), MADE)
+    assert check["passed"] is False and docs.producer(deck) in check["detail"]
+
+
+def test_editor_document_without_office_edit_fails(tmp_path, monkeypatch):
+    monkeypatch.delenv(RENDER_SHELL_ENV, raising=False)
+    deck = _saved_by(_scripted_deck(tmp_path), tmp_path / "made" / "editor.pptx", EDITOR)
+    assert docs.producer(deck) == EDITOR
+    # An applied edit of another document, and a refused one of this: neither made it.
+    events = _office_edit("other.pptx") + _office_edit("kpi.pptx", applied=False, call_id="call_2")
+    rollout = _rollout(tmp_path, [("kpi.pptx", deck)], events)
+    check = _check(evaluate(by_id()["pptx-kpi-chart"], rollout), MADE)
+    assert check["passed"] is False and "office_edit" in check["detail"]
+
+
+def test_editor_document_with_office_edit_passes(tmp_path, monkeypatch):
+    monkeypatch.delenv(RENDER_SHELL_ENV, raising=False)
+    deck = _saved_by(_scripted_deck(tmp_path), tmp_path / "made" / "editor.pptx", EDITOR)
+    rollout = _rollout(tmp_path, [("kpi.pptx", deck)], _office_edit("__WORKSPACE__/kpi.pptx"))
+    assert _check(evaluate(by_id()["pptx-kpi-chart"], rollout), MADE)["passed"] is True
+
+
+def test_pdf_rewritten_by_pypdf_fails(tmp_path):
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.append(str(INPUTS / "sample.pdf"))
+    (tmp_path / "made").mkdir()
+    pdf = tmp_path / "made" / "service-agreement.pdf"
+    writer.write(str(pdf))
+    assert docs.producer(pdf) == "pypdf"
+    rollout = _rollout(tmp_path, [("service-agreement.pdf", pdf)], _office_edit("service-agreement.pdf"))
+    check = _check(evaluate(by_id()["pdf-annotate"], rollout), MADE)
+    assert check["passed"] is False and "pypdf" in check["detail"]

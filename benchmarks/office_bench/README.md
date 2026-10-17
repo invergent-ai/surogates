@@ -96,8 +96,8 @@ whose final message admits no problem is flagged **claims success despite failed
 the report quotes the words and the check.
 
 `tests/` (offline, no network) pins the fixture contents the edit checks rely on, builds the
-correct document with python-docx/openpyxl/python-pptx/pypdf (21 of the 33 tasks) and asserts **every check passes it**, while the
-untouched input **fails** every edit task. That is what makes a check trustworthy.
+correct document with python-docx/openpyxl/python-pptx/pypdf (21 of the 33 tasks) and asserts **every task check passes it**
+(not "made in the editor", which a scripted file fails by design), while the untouched input **fails** every edit task. That is what makes a check trustworthy.
 
 ## How to run
 
@@ -161,8 +161,10 @@ the office tools do not need the sandbox, and the report counts these results.
 33 tasks: 17 create, 16 edit; Word 11, spreadsheet 9, deck 10, PDF 3. Edit inputs are
 `runtime-office/test/fixtures/sample.{docx,xlsx,pptx,pdf}`; `xlsx-fix-formula` derives its input from `sample.xlsx`
 at staging (East's total made `=B3+B2`). Every task also has the implicit first check **document saved and opens**,
-and every edit task **the document changed** (fails when the download is byte-identical to the upload). Comment
-tasks are left for later.
+then **made in the editor** (an applied `office_edit` call named the document, and the saved file names the editor as
+its producer: `docProps/app.xml`'s `<Application>`, or a PDF's `/Producer`; a file a script wrote names its library,
+such as python-pptx's PowerPoint, openpyxl or pypdf), and every edit task **the document changed** (fails when the
+download is byte-identical to the upload). Comment tasks are left for later.
 
 ### Word
 
@@ -238,7 +240,7 @@ tasks are left for later.
   - Checks: 5-7 slides; mentions 8 key facts; no empty slide; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-add-bullet`** (edit, pilot) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add 'Costs came in 4% under budget' as another bullet on the first slide of quarterly-review.pptx."*
-  - Checks: the bullet joins the slide's bullet list; slide 1 title kept; slide 2 unchanged; 2 slides; no text overflows its box; text readable against what is under it.
+  - Checks: the bullet joins the slide's bullet list; slide 1 title kept; slide 2 unchanged; 2 slides; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-report-summary`** (create) -> `report-summary.pptx`; input `quarterly-report.docx` (from sample.docx)
   - *"Turn quarterly-report.docx into a 3-slide summary deck, report-summary.pptx."*
   - Checks: 3 slides; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide; quarterly-report.docx left as it was; text readable against what is under it.
@@ -253,16 +255,16 @@ tasks are left for later.
   - Checks: 2 slides; title slide; agenda slide has every item and time; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-change-title`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Change the title of the second slide in quarterly-review.pptx to 'Q3 plan'."*
-  - Checks: slide 2 title is 'Q3 plan'; the rest of slide 2 is kept; slide 1 unchanged; 2 slides; text readable against what is under it.
+  - Checks: slide 2 title is 'Q3 plan'; the rest of slide 2 is kept; slide 1 unchanged; 2 slides; every shape inside the slide; text readable against what is under it.
 - **`pptx-reorder`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"In quarterly-review.pptx, move the 'Next quarter' slide to the front."*
-  - Checks: slides in the order ['Next quarter', 'Quarterly review']; the moved slide is intact (notes too); the other slide is intact; 2 slides; text readable against what is under it.
+  - Checks: slides in the order ['Next quarter', 'Quarterly review']; the moved slide is intact (notes too); the other slide is intact; 2 slides; every shape inside the slide; text readable against what is under it.
 - **`pptx-table-slide`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add a slide at the end of quarterly-review.pptx with a table of Q1 and Q2 revenue by region: North 120 and 140, East 90 and 110, South 70 and 65."*
   - Checks: 3 slides; a native table on slide 3 holding ['North', 'East', 'South', 120, 140, 90, 110, 70, 65]; slide 1 unchanged; slide 2 unchanged; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-notes`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add speaker notes to the first slide of quarterly-review.pptx: 'Thank the regional leads. Hiring slipped because two offers were declined.'"*
-  - Checks: slide 1 speaker notes say it; slide 1's visible content is kept; slide 2 unchanged; 2 slides; text readable against what is under it.
+  - Checks: slide 1 speaker notes say it; slide 1's visible content is kept; slide 2 unchanged; 2 slides; every shape inside the slide; text readable against what is under it.
 
 ### PDF
 
