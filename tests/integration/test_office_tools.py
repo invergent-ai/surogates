@@ -25,7 +25,7 @@ from surogates.office import guide as office_guide
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.guide import GUIDES_KEY, RETRY_AFTER_S
-from surogates.office.runtime_office import OfficeBusy, PageGone
+from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOfficeError
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import session_workspace_key
@@ -48,6 +48,8 @@ class FakeRuntime:
 
     gone_once = False
     busy = False
+    # An edit runtime-office refuses: (its words, its status).
+    refuses: tuple[str, int] | None = None
     thread: dict | None = {"id": "1_1", "page": 1}
     outline: dict = {"blocks": []}
     calls: list[tuple[str, object]] = []
@@ -73,6 +75,8 @@ class FakeRuntime:
 
     async def edit(self, page, ops):
         FakeRuntime.calls.append(("edit", ops))
+        if FakeRuntime.refuses:
+            raise RuntimeOfficeError(*FakeRuntime.refuses)
         return {"applied": True, "results": [{"op": 0}], "flushed": True}
 
 
@@ -84,7 +88,7 @@ async def _no_rows(session_factory):
 
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch):
-    FakeRuntime.gone_once, FakeRuntime.busy, FakeRuntime.calls = False, False, []
+    FakeRuntime.gone_once, FakeRuntime.busy, FakeRuntime.refuses, FakeRuntime.calls = False, False, None, []
     FakeRuntime.thread, FakeRuntime.outline = {"id": "1_1", "page": 1}, {"blocks": []}
     monkeypatch.setattr(office_tools, "RuntimeOffice", FakeRuntime)
     monkeypatch.setattr(office_tools, "load_settings", lambda: SimpleNamespace(office=OFFICE))
@@ -431,7 +435,39 @@ async def test_a_failed_call_leaves_the_guide_for_the_next(session_factory, stor
     FakeRuntime.busy = True
     answer = json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api)))
     assert "error" in answer and "guide" not in answer
+    FakeRuntime.busy, FakeRuntime.refuses = False, ("the editor did not answer", 502)
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": [{"op": "delete"}]}, **_by_the_model(kwargs, api)))
+    assert "error" in answer and "guide" not in answer
+    answer = json.loads(await office_tools._office_read({"path": "gone.docx"}, **_by_the_model(kwargs, api)))
+    assert "error" in answer and "guide" not in answer
     assert api.asked == [] and await _guides(kwargs) is None
+
+
+async def test_a_call_refused_for_what_it_says_carries_the_guide(session_factory, storage, redis_client):
+    # A small model's first deck edit is most often refused for its slide: the moment it needs the reference most.
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    api = SkillsAPI()
+    FakeRuntime.refuses = ("op 0: slide 1: the title overflows its box by 120 px: split the slide.", 400)
+    ops = [{"op": "slides", "slides": [{"html": "<section><h1>Q3</h1></section>"}]}]
+    answer = json.loads(await office_tools._office_edit({"path": "d.pptx", "ops": ops}, **_by_the_model(kwargs, api)))
+    assert answer["error"] == FakeRuntime.refuses[0]
+    assert answer["guide"]["reference"].startswith("# Slide decks (.pptx)")
+    assert answer["guide"]["rules"].startswith("# Working on documents live with the user")
+    assert await _guides(kwargs) == ["pptx"]
+    # Given once: the next refusal on the type goes without it.
+    answer = json.loads(await office_tools._office_edit({"path": "d.pptx", "ops": ops}, **_by_the_model(kwargs, api)))
+    assert "error" in answer and "guide" not in answer
+    assert len(api.asked) == 2
+
+
+async def test_ops_that_cannot_be_read_carry_the_guide_beside_what_was_read(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    answer = json.loads(await office_tools._office_edit(
+        {"path": "a.docx", "ops": '[{"op": "rewrite", "target": {"end": true}'}, **_by_the_model(kwargs, SkillsAPI())))
+    assert "insert, replace, delete, move, comment, reply or resolve" in answer["error"]
+    assert answer["read_as"] and answer["guide"]["reference"].startswith("# office_edit for Word documents")
+    assert await _guides(kwargs) == ["docx"]
+    assert FakeRuntime.calls == []
 
 
 async def test_acknowledgement_never_takes_the_guide(session_factory, storage, redis_client):

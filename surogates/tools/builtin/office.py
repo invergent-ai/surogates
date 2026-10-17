@@ -232,13 +232,16 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
     if not within_folder(path):
         return _error("Name the document by its path in the chat's folder, like docs/report.docx.")
     kind = office_kind(path)
+    # The document types the agent works on; any other kind is refused by opening.
+    file_type = kind.file_type if kind is not None and kind.file_type in AGENT_KINDS else None
     reading: dict[str, Any] = {}
-    # A call that cannot be read opens nothing and makes nothing; a kind the agent cannot edit is refused by opening.
-    if before_open is not None and kind is not None and kind.file_type in AGENT_KINDS:
+    # A call that cannot be read opens nothing and makes nothing.
+    if before_open is not None and file_type is not None:
         try:
-            reading = before_open(kind.file_type)
+            reading = before_open(file_type)
         except OpsInputError as exc:
-            return _error(str(exc), **_read_as(exc.read_as))
+            # Refused for what it says: the type's rules and reference are what the model needs now.
+            return await _with_guide({"error": str(exc), **_read_as(exc.read_as)}, file_type, session, kwargs)
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
     try:
@@ -262,7 +265,8 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         return _error("The office service has as many documents open as it can hold; try again in a minute.", **reading)
     except RuntimeOfficeError as exc:
         if exc.status == 400:
-            return _error(str(exc), **reading)
+            # Refused for what it says (a slide's format or fit, a Word block's content, an op): as above.
+            return await _with_guide({"error": str(exc), **reading}, file_type, session, kwargs)
         logger.warning("runtime-office failed on %s", path, exc_info=True)
         return _error(f"The editor could not do that: {exc}", **reading)
     # Named as its saves and notices name it, the computer's spelling of it: the next call finds it at once.
@@ -272,19 +276,19 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
     if result.get("flushed") is False:
         answer["note"] = "The edit applied in your editor but had not reached the others' editors after 10 seconds."
     answer = {**answer, **result}
+    if "error" in answer:
+        return json.dumps(answer, ensure_ascii=False)
+    return await _with_guide(answer, file_type, session, kwargs)
+
+
+async def _with_guide(answer: dict[str, Any], kind: str | None, session: Any, kwargs: dict[str, Any]) -> str:
+    """*answer* as JSON, carrying the office skill's rules and *kind*'s reference on the model's first call on that
+    type in the session, done or refused for what it said, which then records the type as given. A guide that would
+    make the result MAX_GUIDED_RESULT long or more is left for the next call. Only a model's call takes it: the
+    worker's own (a mention's acknowledgement) never does."""
     text = json.dumps(answer, ensure_ascii=False)
-    if kind is None or "error" in answer:
-        return text
-    return await _with_guide(answer, text, kind.file_type, session, kwargs)
-
-
-async def _with_guide(answer: dict[str, Any], text: str, kind: str, session: Any, kwargs: dict[str, Any]) -> str:
-    """*text* (the answer as JSON), carrying the office skill's rules and *kind*'s reference on the model's first call on
-    that type in the session, which then records the type as given. A guide that would make the result MAX_GUIDED_RESULT
-    long or more is left for the next call. Only a model's call takes it: the worker's own (a mention's acknowledgement)
-    never does."""
     given = (session.config or {}).get(GUIDES_KEY) or []
-    if not kwargs.get("tool_call_id") or kind in given or len(text) >= MAX_GUIDED_RESULT:
+    if kind is None or not kwargs.get("tool_call_id") or kind in given or len(text) >= MAX_GUIDED_RESULT:
         return text
     guide = await guide_for(kind, kwargs.get("api_client"))
     if guide is None:
@@ -295,7 +299,7 @@ async def _with_guide(answer: dict[str, Any], text: str, kind: str, session: Any
     try:
         await kwargs["session_store"].append_session_config_list(session.id, GUIDES_KEY, kind)
     except Exception:
-        # The call has done its work: its answer stands, and the next call on this type carries the guide again.
+        # The answer stands, guide and all: the next call on this type carries the guide again.
         logger.warning("could not record the %s guide as given in session %s", kind, session.id, exc_info=True)
     return guided
 
