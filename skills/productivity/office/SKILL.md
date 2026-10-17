@@ -1,6 +1,6 @@
 ---
 name: office
-description: "Use whenever a Word document (.docx), spreadsheet (.xlsx), slide deck (.pptx) or PDF in the workspace is to be written, filled in, edited or commented on and the office_edit tool is available: the user watches your edits appear live in the file pane, under your name, and may edit beside you. Covers drafting a document section by section, filling and formatting sheets, building slides in the Claude Slides format, and filling, redacting or annotating a PDF. Use the docx, xlsx and pptx skills only when the office tools are not available."
+description: "Use whenever a Word document (.docx), spreadsheet (.xlsx), slide deck (.pptx) or PDF in the workspace is to be written, filled in, edited or commented on and the office_edit tool is available: the user watches your edits appear live in the file pane, under your name, and may edit beside you. Covers drafting a document section by section, filling and formatting sheets, building slides in the Claude Slides format, and filling, redacting or annotating a PDF."
 requires_tools: [office_edit]
 ---
 
@@ -38,8 +38,9 @@ watches and may edit the same document. Work like a colleague in a shared docume
 4. **When an edit is refused,** nothing of the call applied. The result says why, and shows what you targeted as it
    is now: someone edited it, and their edit wins. Read again and work from what is there; never put your old version
    back over theirs. A user editing the very cells or slide you want: wait, or ask them.
-5. **Never touch an open document any other way.** No `write_file`, `patch`, terminal, script, python library or
-   sandbox skill on it: the editor is its only writer.
+5. **Never touch an open document any other way.** No `write_file`, `patch`, terminal, script or python library on
+   it: the editor is its only writer. The pdf skill's work (merging, splitting, encrypting) writes a new file, never
+   over an open one.
 6. **Check before you answer** (below), then finish with one line in the chat saying what you did and what the user
    can do next. The work belongs in the document, not in the chat.
 

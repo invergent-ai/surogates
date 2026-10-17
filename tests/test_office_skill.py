@@ -37,6 +37,18 @@ def test_the_office_skill_is_a_built_in_gated_on_office_edit():
         assert (SKILLS / "productivity/office/references" / reference).exists()
 
 
+def test_the_office_skill_names_no_skill_its_chats_cannot_open():
+    # Offered only where office_edit is, where the docx, xlsx and pptx skills are hidden: its index line and its rules
+    # send the agent to none of them, and leave the pdf skill its work on a new file.
+    office = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}["office"]
+    for text in (office.description, office.content):
+        assert not re.search(r"\b(docx|xlsx|pptx)(,? (docx|xlsx|pptx|and|or))* skills?\b", text, re.IGNORECASE), text
+    assert "sandbox skill" not in office.content
+    assert "The pdf skill's work (merging, splitting, encrypting) writes a new file, never over an open one." in " ".join(
+        office.content.split()
+    )
+
+
 def test_guides_stay_small():
     # The first office call on each type carries the skill's rules and that type's reference, whole.
     rules = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}["office"].content
