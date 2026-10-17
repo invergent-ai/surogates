@@ -185,6 +185,29 @@ def test_a_list_marker_the_text_does_not_hold_is_still_its_line():
     assert body.overflow == "text ends 38 pt past the box's bottom"
 
 
+def test_text_running_into_the_box_below_overflows():
+    title = _text("Title", 60, 40, 600, 70, "A long title that wraps onto a second line")
+    subtitle = _text("Subtitle", 60, 115, 600, 40, "The subtitle")
+    deck = _slide(title, subtitle)
+    lines = [Line("A long title that wraps onto", 67, 64, 560, 100), Line("a second line", 67, 114, 300, 150),
+             Line("The subtitle", 67, 125, 200, 150)]
+    measure_lines([lines], deck)
+    assert title.overflow == "text ends 40 pt past the box's bottom"
+    assert subtitle.overflow == ""
+
+
+def test_a_list_number_or_a_slide_number_is_not_a_distant_box_running_over():
+    # The render draws a list's "1." and a slide's number "3"; neither box stores that text, but the title holds both.
+    title = _text("Title", 60, 40, 600, 50, "Q1. Results and the Q3 plan")
+    body = _text("Body", 60, 120, 600, 200, "Hire two engineers")
+    number = _text("Slide Number", 600, 500, 60, 24, "‹#›")
+    deck = _slide(title, body, number)
+    lines = [Line("Q1. Results and the Q3 plan", 67, 44, 500, 80), Line("1.", 70, 124, 84, 148),
+             Line("Hire two engineers", 90, 124, 300, 148), Line("3", 640, 502, 646, 520)]
+    measure_lines([lines], deck)
+    assert [title.overflow, body.overflow, number.overflow] == ["", "", None]
+
+
 def test_a_render_with_other_pages_than_slides_is_not_measured():
     deck = read_pptx(str(FIXTURES / "fits.pptx"))
     pages = rendered_lines((FIXTURES / "fits.pdf").read_bytes(), deck.width, deck.height)

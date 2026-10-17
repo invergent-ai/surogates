@@ -307,12 +307,14 @@ def _owner(line: Line, shapes: list[tuple[Shape, str]], others: list[Shape]) -> 
     """The shape of *shapes* (with the text each holds) whose text *line* is.
 
     A shape holds the line when its text contains the line's (with or without a leading list marker) and its box spans
-    the line's start or middle. The holder whose box the line is in wins. A line out of every holder's box but in the
-    box of one of *others* is that shape's own text (a chart's labels, a list number, a field), so nobody's here.
-    Else the nearest holder: its text ran out of its box.
+    the line's start or middle. The holder whose box the line is in wins. Out of every holder's box, a line is its
+    text running out of the box, given to the nearest holder, unless the line is in the box of one of *others* (a
+    chart's labels) or is too short to say whose it is: a list's number or a field such as a slide number, drawn by
+    a box that does not store it, would otherwise read as a distant holder running over.
     """
     text = _squash(line.text)
-    texts = {t for t in (text, _LIST_MARKER.sub("", text)) if t}
+    unmarked = _LIST_MARKER.sub("", text)
+    texts = {t for t in (text, unmarked) if t}
     if not texts:
         return None
     middle = (line.top + line.bottom) / 2
@@ -329,7 +331,7 @@ def _owner(line: Line, shapes: list[tuple[Shape, str]], others: list[Shape]) -> 
     within = [s for s in holders if inside(s)]
     if within:
         return within[-1]  # drawn last, so on top
-    if any(inside(s) for s in others if all(s is not h for h in holders)):
+    if len(text) < 3 or not unmarked or any(inside(s) for s in others):
         return None
     return min(holders, key=lambda s: max(0.0, s.y - line.bottom, line.top - (s.y + s.h)))
 
@@ -355,8 +357,8 @@ def measure_lines(pages: list[list[Line]], deck: Deck) -> None:
         # Group children are not measured: their offsets are in the group's own space, not the slide's.
         top_level = [s for s in slide.shapes if not s.in_group]
         shapes = [(s, held) for s in top_level if s.kind in ("text", "table") and (held := _holds(s))]
-        # What draws text of its own; a picture or an empty box (a card under a text box) does not.
-        others = [s for s in top_level if s.kind in ("chart", "other")] + [s for s, _ in shapes]
+        # What draws text the model does not know: a chart's labels, a diagram's words.
+        others = [s for s in top_level if s.kind in ("chart", "other")]
         found: dict[int, list[Line]] = {}
         for line in lines:
             owner = _owner(line, shapes, others)
