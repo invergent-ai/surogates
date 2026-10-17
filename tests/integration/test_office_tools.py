@@ -21,9 +21,10 @@ from surogates.db.models import OfficeSession
 from surogates.devices.binding import Binding
 from surogates.office import agent as office_agent
 from surogates.office import files as office_files
+from surogates.office import guide as office_guide
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
-from surogates.office.guide import GUIDES_KEY
+from surogates.office.guide import GUIDES_KEY, RETRY_AFTER_S
 from surogates.office.runtime_office import OfficeBusy, PageGone
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
@@ -88,6 +89,7 @@ def fakes(monkeypatch):
     monkeypatch.setattr(office_tools, "RuntimeOffice", FakeRuntime)
     monkeypatch.setattr(office_tools, "load_settings", lambda: SimpleNamespace(office=OFFICE))
     office_tools._names.clear()
+    office_guide._unfetchable.clear()
 
 
 @pytest.fixture
@@ -334,19 +336,20 @@ OFFICE_SKILL = Path(__file__).parents[2] / "skills/productivity/office"
 
 
 class SkillsAPI:
-    """The API as the worker's client reaches it: the office skill's files, one at a time; *failing*, a 404."""
+    """The API as the worker's client reaches it: the office skill's files as it stores them, one at a time; *failing*,
+    a 404, as the client raises it."""
 
     def __init__(self, *, failing: bool = False) -> None:
         self.failing = failing
-        self.asked: list[tuple[str, str | None]] = []
+        self.asked: list[tuple[str, str]] = []
 
-    async def view_skill(self, name, file_path=None):
-        self.asked.append((name, file_path))
-        if self.failing or not file_path:
+    async def skill_file_bytes(self, name, path):
+        self.asked.append((name, path))
+        if self.failing:
             request = httpx.Request("GET", f"http://api.test/v1/skills/{name}/file")
-            raise httpx.HTTPStatusError("not found", request=request, response=httpx.Response(404, request=request))
-        content = (OFFICE_SKILL / file_path).read_text()
-        return json.dumps({"success": True, "file_path": file_path, "content": content, "binary": False})
+            raise httpx.HTTPStatusError(f"the skill's file {path} could not be fetched (HTTP 404)", request=request,
+                                        response=httpx.Response(404, request=request))
+        return (OFFICE_SKILL / path).read_bytes()
 
 
 def _by_the_model(kwargs, api):
@@ -392,13 +395,21 @@ async def test_each_type_once(session_factory, storage, redis_client):
     assert await _guides(kwargs) == ["docx", "xlsx"]
 
 
-async def test_unfetchable_guide_is_left_out(session_factory, storage, redis_client):
+async def test_unfetchable_guide_is_left_out(session_factory, storage, redis_client, monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(office_guide, "monotonic", lambda: now[0])
     _, kwargs = await _kwargs(session_factory, storage, redis_client)
     answer = json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI(failing=True))))
     assert answer == {"document": "a.docx", "open_by": [], "blocks": []}
     assert await _guides(kwargs) is None
-    # The next call that can fetch it carries it.
-    assert "guide" in json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI())))
+    # Not asked for again for a while: the calls in between go without it.
+    api = SkillsAPI()
+    assert "guide" not in json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api)))
+    assert api.asked == [] and await _guides(kwargs) is None
+    # The next call after that carries it.
+    now[0] += RETRY_AFTER_S
+    assert "guide" in json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api)))
+    assert await _guides(kwargs) == ["docx"]
 
 
 async def test_a_result_too_long_for_the_guide_leaves_it_for_the_next(session_factory, storage, redis_client):
