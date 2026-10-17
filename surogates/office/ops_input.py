@@ -3,8 +3,10 @@
 A small model's call often says clearly what it means in a form the tool does not take: the ops as JSON text (the
 model server's tool parser passes on a list it cannot parse as a string), that text with its last closers missing,
 one op without the list, the op's name as a key, or "type" where "op" belongs. Each is read as meant and said in the
-result (``read_as``); anything else is refused with what is wrong and where. Nothing else is guessed: not quotes,
-commas or keys, and not a closer missing anywhere but right before another closer or at the end.
+result (``read_as``), but one: a list sent as valid JSON text is parsed before the tool runs, by the harness's
+argument coercion (``surogates.tools.coerce``), and arrives as a list with nothing said. Anything else is refused with
+what is wrong and where. Nothing else is guessed: not quotes, commas or keys, and not a closer missing anywhere but
+right before another closer or at the end.
 """
 
 from __future__ import annotations
