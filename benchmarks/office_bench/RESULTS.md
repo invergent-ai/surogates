@@ -36,7 +36,7 @@ skill. 99 sessions, every one completed on the `studio` channel; no harness or r
 | Adding a third item to a numbered list gives "1. 2. 1." | docx-continue-list 3/3 | An inserted list starts its own numbering, and neither the edit result nor the outline shows list numbers, so the model reports "3." |
 | Adding speaker notes moves, resizes or adds to slide 1's shapes | pptx-notes 3/3 | Notes can only be set by rebuilding the whole slide (`slides` with an `<aside>`) |
 | Something asked for left out | docx-proposal r2 (the total cost), docx-report r2 (the chart) | No check against the request before answering |
-| Text running out of its box | pptx-pitch r2: the bullet lists on slide 1 and slide 6 end 17 and 18 pt below their boxes in the document server's render | A python-pptx deck whose boxes the script sized; the model last looked at it in a LibreOffice render made before its final edits |
+| Text running out of its box | pptx-pitch r2: the bullet lists on slide 1 and slide 6 end 17 and 18 pt below their boxes in the document server's render | A python-pptx deck whose boxes the script sized. Its only render could not be read (its image tool returned 401 on every slide), so it checked geometry with a script and then changed the layout without re-rendering |
 | A shape off the slide | pptx-kpi-chart r2: the title and the chart run off the slide | A python-pptx deck on the library's default 4:3 slide (10 in wide) with boxes 12.8 in wide |
 | Values typed where formulas were asked | xlsx-dates r3 | Written with openpyxl: no formula at all |
 | A PDF's form fields destroyed | pdf-annotate r3 | The model read the sandbox `pdf` skill, not the office one, and rewrote the PDF with pypdf from the terminal when the editor's note did not show in the file mid-turn (the editor saves as the turn ends) |
@@ -59,5 +59,8 @@ How to read the run:
 - **Waste is in the trace, not the score.** 309 `office_edit` calls: 7 refused and 89 errors, 31 of the errors
   `"ops" is a non-empty list of ops.` in 9 sessions (mostly a JSON brace missing four or five levels deep, which the
   model server passes on as a string).
+- **The image tool failed once.** `vision_analyze` answered 401 on all 6 calls of pptx-pitch r2, the only session
+  in which it failed (it has since been fixed); the 5 calls of pptx-kpi-chart r3 and pdf-annotate r3, later in the
+  run, worked. pitch r2's model never saw its slides.
 - **One run is three samples.** A class at 3/3 (the numbered list, the speaker notes) is systematic; a class at 1/3
   needs another run before a fix is believed.
