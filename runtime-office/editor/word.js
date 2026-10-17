@@ -42,6 +42,17 @@
     return doc.Search(String(text), matchCase).sort(function (a, b) { return a.GetStartPos() - b.GetStartPos(); });
   }
 
+  // What a reader sees before a list item's text: its number ("3.", "a)", "iv."), or "•" for a bullet; "" for anything
+  // else. It is what the text with numbering has before the item's own text, whatever follows the number (a tab, a
+  // space or nothing). The editor gives a bullet's symbol as "·", as the one character its font draws ("o" in Courier
+  // New) or not at all: a label without a digit is a number only when it has a letter and more than one character.
+  function labelOf(el) {
+    if (el.GetClassType() !== "paragraph" || !el.GetNumbering()) return "";
+    var full = String(el.GetText({ Numbering: true }) || ""), own = String(el.GetText({ Numbering: false }) || "");
+    var label = full.slice(0, full.length - own.length).trim();
+    return /\d/.test(label) || (label.length > 1 && /\p{L}/u.test(label)) ? label : "•";
+  }
+
   function kindOf(el) {
     var type = el.GetClassType();
     if (type === "table") return "table";
@@ -50,23 +61,34 @@
     var style = el.GetStyle(), name = style ? style.GetName() : "";
     var heading = /^heading (\d)$/i.exec(name);
     if (heading) return "heading" + heading[1];
-    // A numbered item's text starts with its number; a bullet's symbol is not in the text.
-    if (el.GetNumbering()) return /^\s*\d/.test(el.GetText({ Numbering: true })) ? "numbered" : "bullet";
+    if (el.GetNumbering()) return labelOf(el) === "•" ? "bullet" : "numbered";
     if (el.GetAllDrawingObjects().length && !textOf(el)) return "image";
     return "paragraph";
   }
 
+  // A block as the outline lists it: a list item's text begins with its label, and its hash is on the text without
+  // it, so a list renumbered around a block leaves its hash as it was.
   function describe(el, wordCount) {
-    var text = textOf(el), kind = kindOf(el);
+    var text = textOf(el), kind = kindOf(el), label = kind === "bullet" || kind === "numbered" ? labelOf(el) : "";
     var block = { id: String(el.GetInternalId()), hash: hash(text), kind: kind };
     if (kind === "pending") {
       block.key = el.GetTag().slice("pending:".length);
       block.intent = el.GetPlaceholderText();
     } else {
-      block.text = words(text, wordCount);
+      block.text = words(label ? label + " " + text : text, wordCount);
     }
     if (kind === "table") block.rows = el.GetRowsCount();
     return block;
+  }
+
+  // The blocks an op made: their ids, and each as a reader sees it now.
+  function made(ids, elements) {
+    var reads = elements.map(function (el) {
+      var block = describe(el, 24);
+      delete block.hash;
+      return block;
+    });
+    return { ids: ids, reads: reads };
   }
 
   // Each top-level block with its span, to find the block a match is in.
@@ -468,17 +490,17 @@
   var EDITS = {
     insert: function (op) {
       var where = resolveTarget(op.target), blank = where.end ? onlyBlankLine() : null;
-      var ids = insertAt(position(where, op.side), build(op.blocks));
+      var at = position(where, op.side), elements = build(op.blocks), ids = insertAt(at, elements);
       if (blank) blank.Delete();
-      return { ids: ids };
+      return made(ids, elements);
     },
     replace: function (op) {
       var where = resolveTarget(op.target), elements = build(op.blocks);
-      if (where.pending) return { ids: fill(where.el, elements) };
+      if (where.pending) return made(fill(where.el, elements), elements);
       var threads = threadsIn(where.el), ids = insertAt(where.el.GetPosInParent(), elements);
       removeKeepingThreads(where);
       keepThreads(threads, elements);
-      return { ids: ids };
+      return made(ids, elements);
     },
     reword: function (op) {
       var where = resolveTarget(op.target), start = where.range.GetStartPos(), length = where.range.GetText().length;
@@ -500,7 +522,7 @@
       insertAt(position(to, op.side), [copy]);
       removeKeepingThreads(what);
       keepThreads(threads, [copy]);
-      return { ids: [String(copy.GetInternalId())] };
+      return made([String(copy.GetInternalId())], [copy]);
     },
     comment: function (op, agent) {
       var where = resolveTarget(op.anchor);
@@ -567,7 +589,9 @@
         throw e;
       }
     }
-    return { results: results };
+    // The document's length once the batch applied: its words, and its pages as the editor lays them out. The
+    // statistics' page count is the layout's from before the batch; GetPageCount lays the document out again first.
+    return { results: results, length: { words: doc.GetStatistics().WordsCount, pages: doc.GetPageCount() } };
   }
 
   try {

@@ -57,6 +57,25 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     });
   });
 
+  it("shows what an insert made and how long the document is", async () => {
+    const key = newKey();
+    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT), documentServerUrl: IT.dsUrl });
+    opened.push(agent);
+    const second = (await blocks(agent)).filter((b) => b.kind === "numbered")[1];
+    const result = await edit(agent, [
+      { op: "insert", target: { block: second.id, hash: second.hash }, side: "after", content: { markdown: "3. Renew the support contract" } },
+    ]);
+    // A list of its own: the reader sees the number the editor gives it, not the one written.
+    expect(result.results[0].reads).toEqual([{ id: result.results[0].ids[0], kind: "numbered", text: "1. Renew the support contract" }]);
+    expect(result.length.words).toBeGreaterThan(0);
+    expect(result.length.pages).toBeGreaterThanOrEqual(1);
+    // The length is the document's after the edit, its pages too.
+    const long = Array.from({ length: 40 }, (_, i) => `Paragraph ${i + 1}: ${"words of body text ".repeat(20)}`).join("\n\n");
+    const longer = await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: long } }]);
+    expect(longer.length.words).toBeGreaterThan(result.length.words + 3_000);
+    expect(longer.length.pages).toBeGreaterThan(1);
+  });
+
   it("re-words quoted words in place", async () => {
     const { agent, user } = await pair(office, opened);
     expect(await edit(agent, [{ op: "replace", target: { find: "revenue target" }, content: { text: "sales goal" } }])).toMatchObject({ applied: true });
@@ -79,12 +98,14 @@ describe.skipIf(!itEnabled)("editing a document", () => {
       { op: "move", target: { block: risks.id, hash: risks.hash }, to: { block: regions.id, hash: regions.hash }, side: "before" },
     ]);
     expect(result).toMatchObject({ applied: true });
+    expect(result.results[0].reads.map((b: Any) => [b.kind, b.text])).toEqual([["bullet", "• Hiring"], ["bullet", "• Supply"]]);
+    expect(result.results[2].reads).toEqual([{ id: result.results[2].ids[0], kind: "heading2", text: "Risks" }]);
     const after = await blocks(agent);
     const texts = after.map((b) => b.text);
     expect(texts).not.toContain("Hiring could slip a quarter.");
     expect(texts).not.toContain("North grew fastest, then the east.");
     expect(texts.indexOf("Risks")).toBeLessThan(texts.indexOf("Regions"));
-    expect(after.filter((b) => b.kind === "bullet").map((b) => b.text)).toEqual(expect.arrayContaining(["Hiring", "Supply"]));
+    expect(after.filter((b) => b.kind === "bullet").map((b) => b.text)).toEqual(expect.arrayContaining(["• Hiring", "• Supply"]));
   });
 
   it("refuses a block the user changed, keeps nothing of the batch, and shows the block as it is now", async () => {
@@ -148,9 +169,12 @@ describe.skipIf(!itEnabled)("editing a document", () => {
 
   it("fills a pending block, then says it is gone", async () => {
     const { agent } = await pair(office, opened);
-    await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "<?block s?>", blocks: { s: { type: "pending", intent: "Summary goes here" } } } }]);
+    const planted = await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "<?block s?>", blocks: { s: { type: "pending", intent: "Summary goes here" } } } }]);
+    expect(planted.results[0].reads).toEqual([{ id: planted.results[0].ids[0], kind: "pending", key: "s", intent: "Summary goes here" }]);
     expect((await blocks(agent)).find((b) => b.kind === "pending")).toMatchObject({ key: "s", intent: "Summary goes here" });
-    expect(await edit(agent, [{ op: "replace", target: { pending: "s" }, content: { markdown: "## Summary\n\nDone." } }])).toMatchObject({ applied: true });
+    const filled = await edit(agent, [{ op: "replace", target: { pending: "s" }, content: { markdown: "## Summary\n\nDone." } }]);
+    expect(filled).toMatchObject({ applied: true });
+    expect(filled.results[0].reads.map((b: Any) => [b.kind, b.text])).toEqual([["heading2", "Summary"], ["paragraph", "Done."]]);
     const after = await blocks(agent);
     expect(after.find((b) => b.kind === "pending")).toBeUndefined();
     expect(after.slice(-2).map((b) => [b.kind, b.text])).toEqual([["heading2", "Summary"], ["paragraph", "Done."]]);

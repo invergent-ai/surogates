@@ -43,6 +43,16 @@ describe.skipIf(!itEnabled)("reading a document", () => {
     expect(read.tracked_changes).toEqual({});
   });
 
+  it("shows list labels, the hashes on the text without them", async () => {
+    const items = (await outline(agent)).blocks.filter((b: Any) => b.kind === "bullet" || b.kind === "numbered");
+    expect(items.map((b: Any) => [b.kind, b.text, b.hash])).toEqual([
+      ["bullet", "• North", "675e4fa4"],
+      ["bullet", "• East", "6733095c"],
+      ["numbered", "1. Hire two engineers", "50a0b3ef"],
+      ["numbered", "2. Open the Lisbon office", "94de4ba3"],
+    ]);
+  });
+
   it("gives every co-editor the same ids and hashes", async () => {
     expect((await outline(user)).blocks).toEqual((await outline(agent)).blocks);
   });
