@@ -397,6 +397,61 @@ def p_in_bounds(tol: float = 2.0) -> Check:
     return Check("every shape inside the slide", fn)
 
 
+def contrast_ratio(a: str, b: str) -> float:
+    """WCAG contrast ratio of two ``"RRGGBB"`` colours: 1 (the same) to 21 (black on white)."""
+    def luminance(hex_: str) -> float:
+        def channel(c: float) -> float:
+            return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+        r, g, b_ = (channel(int(hex_[i:i + 2], 16) / 255) for i in (0, 2, 4))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b_
+
+    light, dark = sorted((luminance(a), luminance(b)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _under(slide, index: int) -> str | None:
+    """The colour under text shape *index*: its own fill, else the fill of the nearest shape drawn before it (z-order
+    is document order) whose box holds its centre, else the slide's background. None when that is not read: a theme
+    fill, a picture, a table or a chart. Group children are skipped: their boxes are in the group's own space."""
+    shape = slide.shapes[index]
+    if shape.fill or shape.opaque:
+        return shape.fill
+    cx, cy = shape.x + shape.w / 2, shape.y + shape.h / 2
+    for below in reversed(slide.shapes[:index]):
+        if below.in_group or not (below.x <= cx <= below.x + below.w and below.y <= cy <= below.y + below.h):
+            continue
+        if below.fill or below.opaque:
+            return below.fill
+    return slide.background
+
+
+def p_contrast(min_ratio: float = 3.0) -> Check:
+    """Each text box's first run, by its explicit colour, against what is under it (``_under``). A box whose colour or
+    background is not read (theme colours) is not judged; a deck where none is judged is unknown."""
+    def fn(deck: Deck, ctx):
+        judged, skipped, bad = [], 0, []
+        for i, sl in enumerate(deck.slides, 1):
+            for j, s in enumerate(sl.shapes):
+                if s.kind != "text" or not s.text.strip():
+                    continue
+                below = None if s.in_group or s.color is None else _under(sl, j)
+                if below is None:
+                    skipped += 1
+                    continue
+                ratio = contrast_ratio(s.color, below)
+                judged.append(ratio)
+                if ratio < min_ratio:
+                    bad.append(f"slide {i}: {s.text[:40]!r} {s.color} on {below} ({ratio:.1f}:1)")
+        if not judged:
+            return None, (f"none of {skipped} text box{'es' * (skipped != 1)} judged: theme colours, a group, or text "
+                          "on a picture, table, chart or theme fill") if skipped else "no text"
+        rest = f"; {skipped} not judged (theme colours, a group, or a fill not read)" if skipped else ""
+        if bad:
+            return False, f"{len(bad)} of {len(judged)} below {min_ratio:g}:1: {bad[:4]}{rest}"
+        return True, f"{len(judged)} text box{'es' * (len(judged) != 1)} judged, the lowest {min(judged):.1f}:1{rest}"
+    return Check("text readable against what is under it", fn)
+
+
 def p_every_slide_has_text() -> Check:
     def fn(deck: Deck, ctx):
         empty = [i for i, s in enumerate(deck.slides, 1) if not s.text().strip()]

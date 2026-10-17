@@ -58,7 +58,10 @@ made it wrong.
    the document server's own converter, x2t (`OFFICEBENCH_RENDER_SHELL`); each rendered line of text is matched to
    the text box whose text it is, and a box overflows when a line's baseline sits more than 2 pt below the box, or a
    line ends more than 2 pt right of it (descenders below the box do not count). The render is kept in `render/`, so a
-   re-check measures the same PDF without the converter.
+   re-check measures the same PDF without the converter. A deck's contrast is read from the colours it stores: a text
+   box's first run's explicit sRGB colour against the box's own solid fill, else the fill of the nearest shape drawn
+   before it whose box holds its centre, else the slide's solid background, at least 3:1 (WCAG). Theme colours are not
+   resolved: text using them, or sitting on a picture, table, chart or theme fill, is not judged.
 
 ### Layout
 
@@ -84,7 +87,8 @@ A check returns **pass**, **fail** or **unknown** (`None`): unknown is reported,
 benchmark cannot tell — a formula using a function `formula.py` does not implement, a file that stores no computed
 values, a chart that is a picture so its values are unreadable, a number-format code the editor stored that Excel may
 not read the same way (`[Euro]#,##0.00`), a deck nothing rendered (no `OFFICEBENCH_RENDER_SHELL`, the converter
-failed, or no document was saved), so its overflow was not measured.
+failed, or no document was saved), so its overflow was not measured, a deck where no text box's contrast could be
+judged (theme colours, or text on a picture or a theme fill).
 
 "Claim vs checks": each check names the words that would claim what it verifies (`chart`, `bold`, `table`, `page`…).
 A failed check whose words appear in the agent's final message is a **contradicted claim**; a run with failed checks
@@ -231,34 +235,34 @@ tasks are left for later.
 
 - **`pptx-pitch`** (create, pilot) -> `shelfie-pitch.pptx`
   - *"I need a 6-slide pitch deck, shelfie-pitch.pptx, for Shelfie - an app that gets a small bookshop selling its stock online in 10 minutes. Problem: there are 2,300 independent bookshops in Portugal and Spain and 70% of them don't sell online. Then the solution, how it works, the business model (€29 a month plus 2% per sale), traction (85 shops in the beta, €41k of sales in 3 months), and the ask: we're raising €600k for 18 months."*
-  - Checks: 5-7 slides; mentions 8 key facts; no empty slide; no text overflows its box; every shape inside the slide.
+  - Checks: 5-7 slides; mentions 8 key facts; no empty slide; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-add-bullet`** (edit, pilot) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add 'Costs came in 4% under budget' as another bullet on the first slide of quarterly-review.pptx."*
-  - Checks: the bullet joins the slide's bullet list; slide 1 title kept; slide 2 unchanged; 2 slides; no text overflows its box.
+  - Checks: the bullet joins the slide's bullet list; slide 1 title kept; slide 2 unchanged; 2 slides; no text overflows its box; text readable against what is under it.
 - **`pptx-report-summary`** (create) -> `report-summary.pptx`; input `quarterly-report.docx` (from sample.docx)
   - *"Turn quarterly-report.docx into a 3-slide summary deck, report-summary.pptx."*
-  - Checks: 3 slides; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide; quarterly-report.docx left as it was.
+  - Checks: 3 slides; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide; quarterly-report.docx left as it was; text readable against what is under it.
 - **`pptx-onboarding`** (create) -> `support-onboarding.pptx`
   - *"Make a 5-slide onboarding deck for new support staff, support-onboarding.pptx: a welcome slide; our three support tiers with their response targets (Tier 1: 1 hour, Tier 2: 4 hours, Tier 3: 24 hours) as a table; the tools we use (Zendesk, Slack, Notion); what the first week looks like; and who to ask (Marta, team lead; Rui, tooling)."*
-  - Checks: 5 slides; a native table holding ['tier', 1, 4, 24]; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide.
+  - Checks: 5 slides; a native table holding ['tier', 1, 4, 24]; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-kpi-chart`** (create) -> `kpi.pptx`
   - *"Create kpi.pptx: one slide titled 'Revenue is up 50% since January' with a chart of monthly revenue from Jan to Jun: 42, 45, 51, 49, 58, 63 (thousand euros)."*
-  - Checks: 1 slides; the title says it; a chart on slide 1; the chart carries the six monthly values; no text overflows its box; every shape inside the slide.
+  - Checks: 1 slides; the title says it; a chart on slide 1; the chart carries the six monthly values; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-workshop`** (create) -> `workshop.pptx`
   - *"Make workshop.pptx with a title slide, 'Pricing workshop - 12 November', and an agenda slide: 09:00 Welcome; 09:15 Where our prices are today; 10:00 Competitor review; 10:45 Break; 11:00 Three pricing options; 12:00 Vote and next steps; 12:30 Close."*
-  - Checks: 2 slides; title slide; agenda slide has every item and time; no text overflows its box; every shape inside the slide.
+  - Checks: 2 slides; title slide; agenda slide has every item and time; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-change-title`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Change the title of the second slide in quarterly-review.pptx to 'Q3 plan'."*
-  - Checks: slide 2 title is 'Q3 plan'; the rest of slide 2 is kept; slide 1 unchanged; 2 slides.
+  - Checks: slide 2 title is 'Q3 plan'; the rest of slide 2 is kept; slide 1 unchanged; 2 slides; text readable against what is under it.
 - **`pptx-reorder`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"In quarterly-review.pptx, move the 'Next quarter' slide to the front."*
-  - Checks: slides in the order ['Next quarter', 'Quarterly review']; the moved slide is intact (notes too); the other slide is intact; 2 slides.
+  - Checks: slides in the order ['Next quarter', 'Quarterly review']; the moved slide is intact (notes too); the other slide is intact; 2 slides; text readable against what is under it.
 - **`pptx-table-slide`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add a slide at the end of quarterly-review.pptx with a table of Q1 and Q2 revenue by region: North 120 and 140, East 90 and 110, South 70 and 65."*
-  - Checks: 3 slides; a native table on slide 3 holding ['North', 'East', 'South', 120, 140, 90, 110, 70, 65]; slide 1 unchanged; slide 2 unchanged; no text overflows its box; every shape inside the slide.
+  - Checks: 3 slides; a native table on slide 3 holding ['North', 'East', 'South', 120, 140, 90, 110, 70, 65]; slide 1 unchanged; slide 2 unchanged; no text overflows its box; every shape inside the slide; text readable against what is under it.
 - **`pptx-notes`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add speaker notes to the first slide of quarterly-review.pptx: 'Thank the regional leads. Hiring slipped because two offers were declined.'"*
-  - Checks: slide 1 speaker notes say it; slide 1's visible content is kept; slide 2 unchanged; 2 slides.
+  - Checks: slide 1 speaker notes say it; slide 1's visible content is kept; slide 2 unchanged; 2 slides; text readable against what is under it.
 
 ### PDF
 

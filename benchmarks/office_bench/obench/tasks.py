@@ -967,6 +967,7 @@ DECK_TASKS = [
             C.p_every_slide_has_text(),
             C.p_no_overflow(),
             C.p_in_bounds(),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -983,6 +984,7 @@ DECK_TASKS = [
             C.p_slide_kept(2),
             C.p_slides(2, 2),
             C.p_no_overflow(),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -999,6 +1001,7 @@ DECK_TASKS = [
             C.p_no_overflow(),
             C.p_in_bounds(),
             _input_unchanged("quarterly-report.docx"),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1019,6 +1022,7 @@ DECK_TASKS = [
             C.p_every_slide_has_text(),
             C.p_no_overflow(),
             C.p_in_bounds(),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1037,6 +1041,7 @@ DECK_TASKS = [
             _chart_values(1, [42, 45, 51, 49, 58, 63]),
             C.p_no_overflow(),
             C.p_in_bounds(),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1057,6 +1062,7 @@ DECK_TASKS = [
                            "vote and next steps", "close"], "agenda slide has every item and time"),
             C.p_no_overflow(),
             C.p_in_bounds(),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1071,6 +1077,7 @@ DECK_TASKS = [
             _slide_kept_but(2, skip_title=True),
             C.p_slide_kept(1),
             C.p_slides(2, 2),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1085,6 +1092,7 @@ DECK_TASKS = [
             C.p_slide_kept(2, new_index=1, name="the moved slide is intact (notes too)"),
             C.p_slide_kept(1, new_index=2, name="the other slide is intact"),
             C.p_slides(2, 2),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1104,6 +1112,7 @@ DECK_TASKS = [
             C.p_slide_kept(2),
             C.p_no_overflow(),
             C.p_in_bounds(),
+            C.p_contrast(),
         ),
     ),
     Task(
@@ -1121,6 +1130,7 @@ DECK_TASKS = [
             _slide_kept_but(1, skip_notes=True, name="slide 1's visible content is kept"),
             C.p_slide_kept(2),
             C.p_slides(2, 2),
+            C.p_contrast(),
         ),
     ),
 ]

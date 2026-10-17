@@ -23,8 +23,11 @@ NS = {
     "xdr": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
     "s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
 }
 W = "{%s}" % NS["w"]
+A = "{%s}" % NS["a"]
+P = "{%s}" % NS["p"]
 
 KINDS = {".docx": "docx", ".xlsx": "xlsx", ".pptx": "pptx", ".pdf": "pdf"}
 
@@ -486,6 +489,9 @@ class Shape:
     table: list[list[str]] | None = None
     in_group: bool = False  # a group's child: its offsets are in the group's own space, not the slide's
     overflow: str | None = None  # measured on the render: "" fits, else how far the text runs; None: not measured
+    color: str | None = None  # the first run's explicit sRGB colour ("RRGGBB"); None for a theme colour or none set
+    fill: str | None = None  # a solid sRGB fill; None for no fill or one whose colour is not read here
+    opaque: bool = False  # paints over its box: any fill, a picture, a table or a chart
 
 
 @dataclass
@@ -493,6 +499,7 @@ class Slide:
     shapes: list[Shape]
     notes: str
     title: str
+    background: str | None = None  # the solid sRGB background the slide shows; None for a theme or picture one
 
     def text(self) -> str:
         parts = []
@@ -541,15 +548,17 @@ def read_pptx(path: str) -> Deck:
                 for child in shape.shapes:
                     add(child, 0.0, 0.0, True)
                 return
+            fill, opaque = _paint(shape._element)
+            paint = {"in_group": in_group, "fill": fill, "opaque": opaque}
             if getattr(shape, "has_table", False) and shape.has_table:
                 rows = [[c.text.strip() for c in r.cells] for r in shape.table.rows]
-                shapes.append(Shape("table", shape.name, x, y, w, h, "", [], ph, table=rows, in_group=in_group))
+                shapes.append(Shape("table", shape.name, x, y, w, h, "", [], ph, table=rows, **paint))
                 return
             if getattr(shape, "has_chart", False) and shape.has_chart:
-                shapes.append(Shape("chart", shape.name, x, y, w, h, "", [], ph, in_group=in_group))
+                shapes.append(Shape("chart", shape.name, x, y, w, h, "", [], ph, **paint))
                 return
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE or shape.__class__.__name__ == "Picture":
-                shapes.append(Shape("picture", shape.name, x, y, w, h, "", [], ph, in_group=in_group))
+                shapes.append(Shape("picture", shape.name, x, y, w, h, "", [], ph, **paint))
                 return
             if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
                 paras = []
@@ -558,17 +567,71 @@ def read_pptx(path: str) -> Deck:
                     size = max(sizes) if sizes else (p.font.size.pt if p.font.size is not None else None)
                     paras.append((p.text if hasattr(p, "text") else "".join(r.text for r in p.runs), size))
                 text = "\n".join(t for t, _ in paras).strip()
-                shapes.append(Shape("text", shape.name, x, y, w, h, text, paras, ph, in_group=in_group))
+                shapes.append(Shape("text", shape.name, x, y, w, h, text, paras, ph,
+                                    color=_text_color(shape.text_frame), **paint))
                 return
-            shapes.append(Shape("other", shape.name, x, y, w, h, "", [], ph, in_group=in_group))
+            shapes.append(Shape("other", shape.name, x, y, w, h, "", [], ph, **paint))
 
         for shape in slide.shapes:
             add(shape)
         notes = ""
         if slide.has_notes_slide:
             notes = slide.notes_slide.notes_text_frame.text if slide.notes_slide.notes_text_frame else ""
-        slides.append(Slide(shapes=shapes, notes=notes or "", title=_slide_title(shapes)))
+        slides.append(Slide(shapes=shapes, notes=notes or "", title=_slide_title(shapes),
+                            background=_background(slide)))
     return Deck(width=width, height=height, slides=slides)
+
+
+def _srgb(solid_fill) -> str | None:
+    """The colour of an ``<a:solidFill>`` holding a plain sRGB value. A theme, scheme, preset or system colour, or an
+    sRGB value with a transform (alpha, lumMod, ...), is not read: None."""
+    clr = solid_fill.find(A + "srgbClr") if solid_fill is not None else None
+    if clr is None or len(clr):
+        return None
+    val = (clr.get("val") or "").upper()
+    return val if re.fullmatch(r"[0-9A-F]{6}", val) else None
+
+
+def _paint(el) -> tuple[str | None, bool]:
+    """(solid sRGB fill, whether it paints over its box) of a shape element. A picture, table or chart paints a box
+    whose colour is not read; a shape with no fill of its own takes its style's fill, a theme one."""
+    if el.tag in (P + "pic", P + "graphicFrame"):
+        return None, True
+    sppr = el.find(P + "spPr")
+    for child in sppr if sppr is not None else ():
+        name = child.tag.removeprefix(A) if isinstance(child.tag, str) else ""
+        if name == "noFill":
+            return None, False
+        if name == "solidFill":
+            return _srgb(child), True
+        if name in ("gradFill", "blipFill", "pattFill", "grpFill"):
+            return None, True
+    ref = el.find(f"{P}style/{A}fillRef")
+    return None, ref is not None and ref.get("idx", "0") != "0"
+
+
+def _text_color(frame) -> str | None:
+    """The explicit sRGB colour of the first run holding text; None when it inherits one (theme or placeholder)."""
+    for p in frame.paragraphs:
+        for r in p.runs:
+            if r.text.strip():
+                rpr = r._r.find(A + "rPr")
+                return _srgb(rpr.find(A + "solidFill")) if rpr is not None else None
+    return None
+
+
+def _background(slide) -> str | None:
+    """The solid sRGB background the slide shows: the first ``<p:bg>`` of the slide, its layout, its master."""
+    parts = [slide]
+    try:
+        parts += [slide.slide_layout, slide.slide_layout.slide_master]
+    except Exception:  # noqa: BLE001 - a slide with no layout shows only its own background
+        pass
+    for part in parts:
+        bg = part._element.find(f"{P}cSld/{P}bg")
+        if bg is not None:
+            return _srgb(bg.find(f"{P}bgPr/{A}solidFill"))
+    return None
 
 
 def _slide_title(shapes: list[Shape]) -> str:
