@@ -303,7 +303,7 @@ WORD_TASKS = [
             C.contains_all(["Maria", "Jon", "Priya", "Tom", "2.3", ("28 Oct", "28 October", "28/10"), "38%",
                             ("dark-mode", "dark mode"), "export"]),
             _owner_dates([("Jon", "21"), ("Priya", "18"), ("Tom", "16")]),
-            C.w_words(100, 600),
+            C.w_words(80, 600),
             C.w_no_pending(),
         ),
     ),

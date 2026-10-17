@@ -55,6 +55,12 @@ def test_every_deck_task_keeps_its_shapes_on_the_slide():
     assert [t.id for t in decks if "every shape inside the slide" not in [c.name for c in t.checks]] == []
 
 
+def test_minutes_floor():
+    """The notes the minutes are written from hold about 70 words; minutes that cover them run from about 80."""
+    lengths = [c.name for c in T["docx-minutes"].checks if c.name.startswith("length ")]
+    assert lengths == ["length 80-600 words"]
+
+
 @pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
 def test_task_is_well_formed(task):
     assert docs.kind_of(task.target) == task.kind
