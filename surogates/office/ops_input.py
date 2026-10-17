@@ -59,6 +59,15 @@ OP_SHAPES: dict[str, dict[str, str]] = {
 }
 #: Each document type's op names.
 OP_NAMES: dict[str, tuple[str, ...]] = {kind: tuple(shapes) for kind, shapes in OP_SHAPES.items()}
+#: Op names a document type refuses with a reason of its own, as runtime-office refuses them: what to do instead.
+REFUSED_OPS: dict[str, dict[str, str]] = {
+    "pdf": {
+        "replace": "a PDF's existing text cannot be changed: tell the user, and offer what you can do (a note, a "
+                   "redaction, a new page).",
+    },
+}
+#: Ops never offered as the nearest to one not known: gone for good once saved, the model names them itself.
+_NEVER_GUESSED = frozenset({"redact"})
 # The keys each op takes besides "op": an op whose name is missing or unknown is matched to those it shares most of.
 _KEYS = {kind: {name: set(json.loads(shape)) - {"op"} for name, shape in shapes.items()} for kind, shapes in OP_SHAPES.items()}
 _CLOSERS = {"{": "}", "[": "]"}
@@ -94,6 +103,9 @@ def read_ops(raw: object, kind: str) -> tuple[list[dict[str, Any]], list[str]]:
         if note:
             read_as.append(note)
         if op.get("op") not in OP_NAMES[kind]:
+            refused = REFUSED_OPS.get(kind, {}).get(_name_of(op))
+            if refused:
+                raise OpsInputError(f"op {index}: {refused}")
             if "op" in op:
                 raise OpsInputError(_unknown(f'op {index}: {_shown(op["op"])} is not a .{kind} op', op, op["op"], kind))
             said = f' ("type" {_shown(op["type"])} is not a .{kind} op)' if "type" in op else ""
@@ -186,6 +198,17 @@ def _named(op: dict[str, Any], index: int, kind: str) -> tuple[dict[str, Any], s
     return op, None
 
 
+def _name_of(op: dict[str, Any]) -> str | None:
+    """The op name *op* gives in any form it is read in: under "op", as its only key holding an object, or as "type"."""
+    if "op" in op:
+        name = op["op"]
+    elif len(op) == 1 and isinstance(next(iter(op.values())), dict):
+        name = next(iter(op))
+    else:
+        name = op.get("type")
+    return name if isinstance(name, str) else None
+
+
 def _unknown(what: str, op: dict[str, Any], name: object, kind: str) -> str:
     names = OP_NAMES[kind]
     message = f"{what}; the .{kind} ops are {', '.join(names[:-1])} or {names[-1]}."
@@ -197,8 +220,8 @@ def _unknown(what: str, op: dict[str, Any], name: object, kind: str) -> str:
 
 def _nearest(op: dict[str, Any], name: str | None, kind: str) -> list[str]:
     """The ops of *kind* nearest *op*, at most three: those sharing the most keys with it, closest by *name* first;
-    with no key in common, those whose names are about as close to *name* as the closest."""
-    names = OP_NAMES[kind]
+    with no key in common, those whose names are about as close to *name* as the closest. None in _NEVER_GUESSED."""
+    names = [each for each in OP_NAMES[kind] if each not in _NEVER_GUESSED]
     keys = set(op) - {"op"}
     shared = {each: len(keys & _KEYS[kind][each]) for each in names}
     alike = {each: difflib.SequenceMatcher(None, name, each).ratio() if name else 0.0 for each in names}

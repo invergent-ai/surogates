@@ -1,6 +1,7 @@
 """office_edit's ops, read as the model meant them: what was read differently is said, anything else is refused."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,11 @@ from surogates.office.agent import AGENT_KINDS
 from surogates.office.ops_input import OP_NAMES, OP_SHAPES, OpsInputError, close_missing, read_ops
 
 DELETE = {"op": "delete", "target": {"block": "1", "hash": "h"}}
+# runtime-office's own refusal of a PDF's "replace", word for word.
+PDF_TEXT_STAYS = (
+    "a PDF's existing text cannot be changed: tell the user, and offer what you can do (a note, a redaction, a new page)."
+)
+PDF_FORMAT = Path(__file__).parents[1] / "runtime-office/src/formats/pdf.ts"
 # As the benchmark saw it: the op's own '}' missing right before the list's ']', five levels deep.
 ONE_BRACE_SHORT = (
     '[{"op": "insert", "target": {"end": true}, "content": {"markdown": "# A\\n<?block why?>", '
@@ -78,6 +84,37 @@ def test_unknown_op_lists_the_ops_and_the_nearest():
         read_ops([{"op": "rewrite"}], "docx")
     assert "insert, replace, delete, move, comment, reply or resolve" in str(refused.value)
     assert OP_SHAPES["docx"]["replace"] in str(refused.value)
+
+
+def test_a_pdfs_text_is_never_replaced():
+    # The op the model reaches for first on a PDF: refused with what it can do instead, as runtime-office refuses it.
+    assert PDF_TEXT_STAYS in PDF_FORMAT.read_text()
+    for op in (
+        {"op": "replace", "find": "2025", "text": "2026"},
+        {"type": "replace", "find": "2025", "text": "2026"},
+        {"replace": {"find": "2025", "text": "2026"}},
+    ):
+        with pytest.raises(OpsInputError) as refused:
+            read_ops([{"op": "fill", "fields": {"a": "b"}}, op], "pdf")
+        assert str(refused.value) == f"op 1: {PDF_TEXT_STAYS}", op
+    # Only on a PDF: a Word document's text is re-worded with it.
+    assert read_ops([{"op": "replace", "target": {"find": "a"}, "content": {"text": "b"}}], "docx")[1] == []
+
+
+def test_a_redaction_is_never_offered_as_the_nearest():
+    # Gone for good once saved: the model names it itself, never takes it from a guess.
+    for op in (
+        {"op": "redaction", "text": "Ana Silva"},
+        {"op": "redacted"},
+        {"op": "erase", "text": "x"},
+        {"op": "remove_text", "text": "x"},
+        {"text": "x"},
+        {"op": "black_out", "find": "x"},
+    ):
+        with pytest.raises(OpsInputError) as refused:
+            read_ops([op], "pdf")
+        assert OP_SHAPES["pdf"]["redact"] not in str(refused.value), op
+        assert "redact" in str(refused.value)  # still among the ops it lists
 
 
 def test_empty_is_refused():
