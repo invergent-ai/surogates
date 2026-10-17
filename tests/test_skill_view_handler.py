@@ -311,3 +311,73 @@ class TestUnknownSkill:
         assert payload["success"] is False
         assert "'unknown' not found" in payload["error"]
         assert payload["available_skills"] == []
+
+
+# ---------------------------------------------------------------------------
+# What the api refuses
+# ---------------------------------------------------------------------------
+
+
+def _api_client(answer: Any) -> Any:
+    """The harness's api client, answered by *answer* instead of the api."""
+    import httpx
+
+    from surogates.harness.api_client import HarnessAPIClient
+
+    client = HarnessAPIClient("http://api.internal:8000", "token", session_id="00000000-0000-0000-0000-000000000003")
+    client._client = httpx.AsyncClient(
+        base_url="http://api.internal:8000", transport=httpx.MockTransport(answer),
+    )
+    return client
+
+
+@pytest.mark.asyncio
+class TestWhatTheApiRefuses:
+    async def test_missing_file_lists_what_exists(self) -> None:
+        import httpx
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v1/skills/office/file":
+                return httpx.Response(
+                    404, json={"detail": f"File '{request.url.params['path']}' not found in skill 'office'."},
+                )
+            assert request.url.path == "/v1/skills/office"
+            return httpx.Response(200, json={
+                "name": "office", "description": "Edit documents live", "content": "# Office", "source": "platform",
+                "linked_files": ["references/docx.md", "references/pdf.md"],
+            })
+
+        payload = json.loads(await _skill_view_handler(
+            {"name": "office", "file_path": "references/word.md"}, api_client=_api_client(answer),
+        ))
+
+        assert payload == {
+            "success": False,
+            "error": "File 'references/word.md' not found in skill 'office'.",
+            "available_files": ["references/docx.md", "references/pdf.md"],
+        }
+
+    async def test_a_skill_this_chat_does_not_have_says_why(self) -> None:
+        import httpx
+
+        why = (
+            "docx is for chats without the office tools: this chat makes and edits documents live with office_edit "
+            "(the office skill)."
+        )
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"detail": why})
+
+        for arguments in ({"name": "docx"}, {"name": "docx", "file_path": "references/x.md"}):
+            payload = json.loads(await _skill_view_handler(arguments, api_client=_api_client(answer)))
+            assert payload == {"success": False, "error": why}, arguments
+
+    async def test_an_unknown_skill_says_so(self) -> None:
+        import httpx
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Skill 'wordx' not found."})
+
+        for arguments in ({"name": "wordx"}, {"name": "wordx", "file_path": "references/x.md"}):
+            payload = json.loads(await _skill_view_handler(arguments, api_client=_api_client(answer)))
+            assert payload == {"success": False, "error": "Skill 'wordx' not found."}, arguments

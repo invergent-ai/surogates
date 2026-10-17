@@ -42,7 +42,7 @@ You are a code reviewer. When asked to review code:
 | `tags` | list | no | Metadata tags for categorisation and discovery |
 | `requires_tools` | list | no | Only activate when **all** listed tools are available |
 | `requires_agents` | list | no | Only activate when **all** listed sub-agents are available |
-| `fallback_for_tools` | list | no | Only activate when **any** listed tool is unavailable |
+| `fallback_for_tools` | list | no | Hidden while **all** listed tools are available: from the prompt's skill index, `skills_list` and `skill_view` |
 
 The body text after the frontmatter is the skill's prompt content. It is injected into the system prompt or provided as context when the skill is activated.
 
@@ -56,7 +56,7 @@ Skills can declare conditions that control whether they appear in a session. The
 |---|---|
 | `requires_tools` | Skill is **included** only when **all** listed tools are available. |
 | `requires_agents` | Skill is **included** only when **all** listed sub-agents are in the session's sub-agent catalog. A feature pack whose sub-agent ships in the agent's bundle only while the feature is on uses this to gate the skills that drive it — the research-mission (Arbor) skills require `arbor-executor`, which the bundle carries only when research missions are enabled. |
-| `fallback_for_tools` | Skill is **excluded** when **all** listed tools are available. It only appears as a fallback when at least one is missing. |
+| `fallback_for_tools` | Skill is **hidden** when **all** listed tools are available: the prompt's skill index leaves it out, `skills_list` does not list it and `skill_view` refuses it, saying why. It only appears as a fallback when at least one is missing. The prompt hides by the session's toolset; `skills_list` and `skill_view` read skills through the API, which knows a session's tools only from its row, so they hide by the office tools (`office_read`, `office_edit`): a chat with them has no `docx`, `xlsx`, `pptx` or `pdf-forms` skill. The web UI's slash menu names no session and lists every skill. |
 
 Example -- a skill that provides manual web search instructions when the `web_search` tool is not connected:
 

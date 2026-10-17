@@ -52,6 +52,7 @@ from surogates.tools.builtin.skill_validation import (
     validate_frontmatter,
     validate_name,
 )
+from surogates.tools.skill_visibility import fallback_hidden, fallback_refusal, offered_fallback_tools
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +459,32 @@ def _skill_entitled(skill_def, entitled: frozenset[str] | None) -> bool:
     return skill_entitled(skill_def, entitled)
 
 
+async def _named_session(
+    request: Request, tenant: TenantContext, session_id: "UUID | None",
+) -> Any | None:
+    """The tenant's session that *session_id* names, or ``None``: none is named, or it is not the tenant's."""
+    if session_id is None:
+        return None
+    try:
+        return await _authorize_session_for_staging(request, tenant, session_id)
+    except HTTPException:
+        return None
+
+
+def _fallback_tools_offered(session: Any | None) -> frozenset[str]:
+    """The tools a fallback skill stands in for that *session* is sent.  None without a session: the web UI's slash
+    menu names none, and lists every skill."""
+    if session is None:
+        return frozenset()
+    return offered_fallback_tools(getattr(session, "channel", None), session.config)
+
+
+def _refuse_hidden_fallback(skill_def: Any, session: Any | None) -> None:
+    """Refuse a skill that stands in for tools *session* is sent: that chat does the work with them, live."""
+    if fallback_hidden(skill_def.fallback_for_tools or (), _fallback_tools_offered(session)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=fallback_refusal(skill_def.name))
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -486,7 +513,11 @@ async def list_skills(
     bundle = await _resolve_agent_bundle(request)
     system_bundle = await _resolve_system_bundle(request)
     overrides = await _load_session_skill_overrides(request, tenant, session_id)
-    entitled = await _session_entitled_skills(request, tenant, session_id)
+    session = await _named_session(request, tenant, session_id)
+    entitled = await _session_entitled_skills(
+        request, tenant, session_id, resolved_session=session,
+    )
+    offered = _fallback_tools_offered(session)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant,
@@ -506,10 +537,13 @@ async def list_skills(
                 )
                 if a.enabled
             }
+    # And the index's other gate: a fallback skill is left out of a chat
+    # sent the tools it stands in for.
     all_skills = [
         s for s in all_skills
         if _skill_entitled(s, entitled)
         and set(s.requires_agents or ()) <= agent_names
+        and not fallback_hidden(s.fallback_for_tools or (), offered)
     ]
 
     summaries: list[SkillSummary] = []
@@ -567,11 +601,17 @@ async def view_skill(
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
-    entitled = await _session_entitled_skills(request, tenant, session_id)
+    # Authorize the session before staging writes into its bucket: it
+    # must belong to this tenant.
+    session = None if session_id is None else await _authorize_session_for_staging(request, tenant, session_id)
+    entitled = await _session_entitled_skills(
+        request, tenant, session_id, resolved_session=session,
+    )
     if not _skill_entitled(skill_def, entitled):
         # Same shape as unknown so a probing client learns nothing
         # beyond "not available to you".
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    _refuse_hidden_fallback(skill_def, session)
 
     detail = SkillDetail(
         name=skill_def.name,
@@ -622,11 +662,9 @@ async def view_skill(
         )
 
     # Auto-stage the skill tree when a session is specified and there are
-    # files beyond SKILL.md itself.  Authorize first: the session must
-    # belong to this tenant before we write into its bucket.  A chat on a
-    # local folder has them put in its folder by the tool call that views
-    # the skill (``surogates.tools.builtin.skills``), never in the cloud.
-    session = None if session_id is None else await _authorize_session_for_staging(request, tenant, session_id)
+    # files beyond SKILL.md itself.  A chat on a local folder has them put
+    # in its folder by the tool call that views the skill
+    # (``surogates.tools.builtin.skills``), never in the cloud.
     if session is not None and device_of(session.config) is None:
         staged_at = await _stage_skill_for_session(
             request=request,
@@ -718,6 +756,7 @@ async def read_skill_file(
     )
     if not _skill_entitled(skill_def, entitled):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    _refuse_hidden_fallback(skill_def, session_for_staging)
 
     def _placeholder() -> dict[str, Any]:
         """A binary file's answer when it is not staged; a local folder's says how to have it there."""

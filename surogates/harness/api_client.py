@@ -155,7 +155,9 @@ class HarnessAPIClient:
         """View a skill's content or a linked file.  Returns JSON string.
 
         Forwards the client's ``session_id`` (if set) to the API so that
-        supporting files get auto-staged into the session workspace.
+        supporting files get auto-staged into the session workspace.  A
+        skill the api refuses or does not know answers why, in its words;
+        a file the skill does not have answers with the files it does.
         """
         if not name or not name.strip():
             # An empty name would build "/v1/skills/" and 307-redirect into an
@@ -164,15 +166,34 @@ class HarnessAPIClient:
                 {"success": False, "error": "Skill name is required."},
                 ensure_ascii=False,
             )
-        params: dict[str, Any] = {}
-        if self._session_id is not None:
-            params["session_id"] = self._session_id
-        if file_path:
-            params["path"] = file_path
-            data = await self._get(f"/v1/skills/{name}/file", params=params)
-        else:
-            data = await self._get(f"/v1/skills/{name}", params=params or None)
+        session = {} if self._session_id is None else {"session_id": self._session_id}
+        try:
+            if file_path:
+                data = await self._get(f"/v1/skills/{name}/file", params={**session, "path": file_path})
+            else:
+                data = await self._get(f"/v1/skills/{name}", params=session or None)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in (403, 404):
+                raise
+            if not file_path or exc.response.status_code == 403:
+                return _error_response(exc)
+            return await self._missing_skill_file(name, file_path, session)
         return json.dumps({"success": True, **data}, ensure_ascii=False)
+
+    async def _missing_skill_file(self, name: str, file_path: str, session: dict[str, Any]) -> str:
+        """Why *file_path* could not be read from skill *name*: the files the skill has, or, for a skill the file
+        route did not know either, why not, from the skill's own view under the same session."""
+        try:
+            skill = await self._get(f"/v1/skills/{name}", params=session or None)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in (403, 404):
+                raise
+            return _error_response(exc)
+        return json.dumps({
+            "success": False,
+            "error": f"File '{file_path}' not found in skill '{name}'.",
+            "available_files": skill.get("linked_files") or [],
+        }, ensure_ascii=False)
 
     async def skill_file_bytes(self, name: str, path: str) -> bytes:
         """A skill's linked file as the skill stores it: what a local folder's ``skill_view`` puts in the folder.
