@@ -7,6 +7,9 @@
 (function () {
   "use strict";
   var doc = Api.GetDocument(), TEXT_BUDGET = 30000, MAX_MATCHES = 50, MAX_SEARCH_PAGES = 200, MAX_REPLIES = 10;
+  // The editor rounds a new stamp's rect to whole millimetres and, when it next draws it, scales the stamp to that
+  // rect: measured, up to about 6 points a side beyond the size it was made at.
+  var STAMP_GROWTH = 6;
 
   function clip(text, max) { return text.length > max ? text.slice(0, max) + " …" : text; }
   // A page's text: the builder has no call for it, so the whole page is selected and the selection read; the
@@ -204,8 +207,8 @@
     throw new Refusal(index, "\"" + anchor.find + "\" is in the document " + seen + " times: nth counts from 1 up to " + seen + ".");
   }
 
-  // An annotate placed by its words gets its page and its rect here, beside them, clear of what the page holds and of
-  // what the batch's earlier ops put there (`added`, by page index before the batch).
+  // An annotate placed by its words gets its page here, and the place of `size` beside them, clear of what the page
+  // holds and of what the batch's earlier ops put there (`added`, by page index before the batch).
   function placeByWords(op, index, order, added, size) {
     var found = findWords(op.anchor, index, order), page = doc.GetPage(found.source), pageSize = sizeOf(found.source);
     var taken = page.GetAllAnnots().map(function (a) { return a.GetRect(); })
@@ -213,7 +216,7 @@
     var rect = placeBeside(pageSize[0], pageSize[1], found.match, lineBoxes(page), taken, size[0], size[1]);
     if (!rect) throw new Refusal(index, "There is no free place beside \"" + op.anchor.find + "\" on page " + found.page + ": give \"page\" and \"rect\".");
     op.page = found.page;
-    op.rect = rect;
+    return rect;
   }
 
   // --- the batch
@@ -284,13 +287,16 @@
         fields[op.name] = op.type === "checkbox" ? "checkboxField" : "textField";
         take(op.page, op.rect);
       } else if (op.op === "annotate") {
-        var stamp = op.kind === "stamp" ? stampSize(op.stamp, agent.name) : null;
-        if (op.anchor) placeByWords(op, index, order, added, stamp || noteSize(op.text));
-        else {
+        // A stamp takes the room it can grow into: STAMP_GROWTH a side beyond its size, its corner that far in.
+        var stamp = op.kind === "stamp" ? stampSize(op.stamp, agent.name) : null, grow = STAMP_GROWTH;
+        if (op.anchor) {
+          var at = placeByWords(op, index, order, added, stamp ? [stamp[0] + 2 * grow, stamp[1] + 2 * grow] : noteSize(op.text));
+          op.rect = stamp ? [at[0] + grow, at[1] + grow, at[0] + grow + stamp[0], at[1] + grow + stamp[1]].map(tenth) : at;
+        } else {
           page(op.page);
           inside(op.page, op.rect);
         }
-        take(op.page, stamp ? [op.rect[0], op.rect[1], op.rect[0] + stamp[0], op.rect[1] + stamp[1]] : op.rect);
+        take(op.page, stamp ? [op.rect[0] - grow, op.rect[1] - grow, op.rect[0] + stamp[0] + grow, op.rect[1] + stamp[1] + grow] : op.rect);
       } else if (op.op === "redact") {
         // Applying a redaction applies every unapplied mark in the document, the person's too.
         if (pendingMarks()) throw new Refusal(index, "The document has redaction marks someone made and has not applied: applying this redaction would apply theirs too. Ask the user to apply or remove them first.");
