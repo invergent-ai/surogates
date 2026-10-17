@@ -66,16 +66,17 @@
     return "paragraph";
   }
 
-  // A block as the outline lists it: a list item's text begins with its label, and its hash is on the text without
-  // it, so a list renumbered around a block leaves its hash as it was.
+  // A block as the outline lists it. A list item's label comes apart from its text: the text is what a quote can
+  // find, and the hash is on it, so a list renumbered around a block leaves its hash as it was.
   function describe(el, wordCount) {
-    var text = textOf(el), kind = kindOf(el), label = kind === "bullet" || kind === "numbered" ? labelOf(el) : "";
+    var text = textOf(el), kind = kindOf(el);
     var block = { id: String(el.GetInternalId()), hash: hash(text), kind: kind };
+    if (kind === "bullet" || kind === "numbered") block.label = labelOf(el);
     if (kind === "pending") {
       block.key = el.GetTag().slice("pending:".length);
       block.intent = el.GetPlaceholderText();
     } else {
-      block.text = words(label ? label + " " + text : text, wordCount);
+      block.text = words(text, wordCount);
     }
     if (kind === "table") block.rows = el.GetRowsCount();
     return block;

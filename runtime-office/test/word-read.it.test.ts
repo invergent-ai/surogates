@@ -43,14 +43,20 @@ describe.skipIf(!itEnabled)("reading a document", () => {
     expect(read.tracked_changes).toEqual({});
   });
 
-  it("shows list labels, the hashes on the text without them", async () => {
-    const items = (await outline(agent)).blocks.filter((b: Any) => b.kind === "bullet" || b.kind === "numbered");
-    expect(items.map((b: Any) => [b.kind, b.text, b.hash])).toEqual([
-      ["bullet", "• North", "675e4fa4"],
-      ["bullet", "• East", "6733095c"],
-      ["numbered", "1. Hire two engineers", "50a0b3ef"],
-      ["numbered", "2. Open the Lisbon office", "94de4ba3"],
+  it("shows list labels apart from the text, the hashes as they were", async () => {
+    const read = await outline(agent);
+    const items = read.blocks.filter((b: Any) => b.kind === "bullet" || b.kind === "numbered");
+    expect(items.map((b: Any) => [b.kind, b.label, b.text, b.hash])).toEqual([
+      ["bullet", "•", "North", "675e4fa4"],
+      ["bullet", "•", "East", "6733095c"],
+      ["numbered", "1.", "Hire two engineers", "50a0b3ef"],
+      ["numbered", "2.", "Open the Lisbon office", "94de4ba3"],
     ]);
+    expect(read.blocks.filter((b: Any) => "label" in b)).toHaveLength(4);
+    const viewed: Any = await office.read(agent, { view: "block", target: items[2].id });
+    expect([viewed.label, viewed.text]).toEqual(["1.", "Hire two engineers"]);
+    const found: Any = await office.read(agent, { view: "search", query: "Lisbon" });
+    expect([found.matches[0].label, found.matches[0].text]).toEqual(["2.", "Open the Lisbon office"]);
   });
 
   it("gives every co-editor the same ids and hashes", async () => {

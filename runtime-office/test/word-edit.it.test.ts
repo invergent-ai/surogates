@@ -66,7 +66,7 @@ describe.skipIf(!itEnabled)("editing a document", () => {
       { op: "insert", target: { block: second.id, hash: second.hash }, side: "after", content: { markdown: "3. Renew the support contract" } },
     ]);
     // A list of its own: the reader sees the number the editor gives it, not the one written.
-    expect(result.results[0].reads).toEqual([{ id: result.results[0].ids[0], kind: "numbered", text: "1. Renew the support contract" }]);
+    expect(result.results[0].reads).toEqual([{ id: result.results[0].ids[0], kind: "numbered", label: "1.", text: "Renew the support contract" }]);
     expect(result.length.words).toBeGreaterThan(0);
     expect(result.length.pages).toBeGreaterThanOrEqual(1);
     // The length is the document's after the edit, its pages too.
@@ -74,6 +74,9 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     const longer = await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: long } }]);
     expect(longer.length.words).toBeGreaterThan(result.length.words + 3_000);
     expect(longer.length.pages).toBeGreaterThan(1);
+    // A refusal shows the list item as the outline does.
+    const refused = await edit(agent, [{ op: "delete", target: { block: second.id, hash: "00000000" } }]);
+    expect(refused.refused.block).toMatchObject({ kind: "numbered", label: "2.", text: "Open the Lisbon office" });
   });
 
   it("re-words quoted words in place", async () => {
@@ -98,14 +101,14 @@ describe.skipIf(!itEnabled)("editing a document", () => {
       { op: "move", target: { block: risks.id, hash: risks.hash }, to: { block: regions.id, hash: regions.hash }, side: "before" },
     ]);
     expect(result).toMatchObject({ applied: true });
-    expect(result.results[0].reads.map((b: Any) => [b.kind, b.text])).toEqual([["bullet", "• Hiring"], ["bullet", "• Supply"]]);
+    expect(result.results[0].reads.map((b: Any) => [b.kind, b.label, b.text])).toEqual([["bullet", "•", "Hiring"], ["bullet", "•", "Supply"]]);
     expect(result.results[2].reads).toEqual([{ id: result.results[2].ids[0], kind: "heading2", text: "Risks" }]);
     const after = await blocks(agent);
     const texts = after.map((b) => b.text);
     expect(texts).not.toContain("Hiring could slip a quarter.");
     expect(texts).not.toContain("North grew fastest, then the east.");
     expect(texts.indexOf("Risks")).toBeLessThan(texts.indexOf("Regions"));
-    expect(after.filter((b) => b.kind === "bullet").map((b) => b.text)).toEqual(expect.arrayContaining(["• Hiring", "• Supply"]));
+    expect(after.filter((b) => b.kind === "bullet").map((b) => b.text)).toEqual(expect.arrayContaining(["Hiring", "Supply"]));
   });
 
   it("refuses a block the user changed, keeps nothing of the batch, and shows the block as it is now", async () => {
