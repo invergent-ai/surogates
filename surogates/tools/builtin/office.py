@@ -38,6 +38,8 @@ MAX_PICTURES_BYTES = 12 * 1024 * 1024
 # A slide's <img src="…">: a workspace path the measuring page could not fetch (it fetches nothing), made a data URL.
 _IMG_SRC = re.compile(r"""(<img\b[^>]*?\bsrc\s*=\s*)(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
 _NAME_TTL_S = 300.0
+# A result with its guide stays this short: the tool registry cuts a result at 50 000 characters.
+MAX_GUIDED_RESULT = 45_000
 # The agent's display name by agent id, read from its runtime config at most every five minutes.
 _names: dict[str, tuple[float, str]] = {}
 
@@ -242,27 +244,32 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
     if result.get("flushed") is False:
         answer["note"] = "The edit applied in your editor but had not reached the others' editors after 10 seconds."
     answer = {**answer, **result}
-    if kind is not None and "error" not in answer:
-        guide = await _guide(kind.file_type, session, kwargs)
-        if guide is not None:
-            answer["guide"] = guide
-    return json.dumps(answer, ensure_ascii=False)
+    text = json.dumps(answer, ensure_ascii=False)
+    if kind is None or "error" in answer:
+        return text
+    return await _with_guide(answer, text, kind.file_type, session, kwargs)
 
 
-async def _guide(kind: str, session: Any, kwargs: dict[str, Any]) -> dict[str, str] | None:
-    """The office skill's rules and *kind*'s reference, with the model's first call on that type in the session, which
-    then records it as given. Only a model's call takes it: the worker's own (a mention's acknowledgement) never does."""
-    if not kwargs.get("tool_call_id") or kind in ((session.config or {}).get(GUIDES_KEY) or []):
-        return None
+async def _with_guide(answer: dict[str, Any], text: str, kind: str, session: Any, kwargs: dict[str, Any]) -> str:
+    """*text* (the answer as JSON), carrying the office skill's rules and *kind*'s reference on the model's first call on
+    that type in the session, which then records the type as given. A guide that would make the result MAX_GUIDED_RESULT
+    long or more is left for the next call. Only a model's call takes it: the worker's own (a mention's acknowledgement)
+    never does."""
+    given = (session.config or {}).get(GUIDES_KEY) or []
+    if not kwargs.get("tool_call_id") or kind in given or len(text) >= MAX_GUIDED_RESULT:
+        return text
     guide = await guide_for(kind, kwargs.get("api_client"))
     if guide is None:
-        return None
+        return text
+    guided = json.dumps({**answer, "guide": guide}, ensure_ascii=False)
+    if len(guided) >= MAX_GUIDED_RESULT:
+        return text
     try:
         await kwargs["session_store"].append_session_config_list(session.id, GUIDES_KEY, kind)
     except Exception:
         # The call has done its work: its answer stands, and the next call on this type carries the guide again.
         logger.warning("could not record the %s guide as given in session %s", kind, session.id, exc_info=True)
-    return guide
+    return guided
 
 
 def _open_by(document: AgentDocument) -> list[str]:

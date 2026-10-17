@@ -48,6 +48,7 @@ class FakeRuntime:
     gone_once = False
     busy = False
     thread: dict | None = {"id": "1_1", "page": 1}
+    outline: dict = {"blocks": []}
     calls: list[tuple[str, object]] = []
 
     def __init__(self, office) -> None:
@@ -67,7 +68,7 @@ class FakeRuntime:
         if FakeRuntime.gone_once:
             FakeRuntime.gone_once = False
             raise PageGone("closed", 410)
-        return {"blocks": []}
+        return FakeRuntime.outline
 
     async def edit(self, page, ops):
         FakeRuntime.calls.append(("edit", ops))
@@ -83,7 +84,7 @@ async def _no_rows(session_factory):
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch):
     FakeRuntime.gone_once, FakeRuntime.busy, FakeRuntime.calls = False, False, []
-    FakeRuntime.thread = {"id": "1_1", "page": 1}
+    FakeRuntime.thread, FakeRuntime.outline = {"id": "1_1", "page": 1}, {"blocks": []}
     monkeypatch.setattr(office_tools, "RuntimeOffice", FakeRuntime)
     monkeypatch.setattr(office_tools, "load_settings", lambda: SimpleNamespace(office=OFFICE))
     office_tools._names.clear()
@@ -388,6 +389,19 @@ async def test_unfetchable_guide_is_left_out(session_factory, storage, redis_cli
     assert await _guides(kwargs) is None
     # The next call that can fetch it carries it.
     assert "guide" in json.loads(await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI())))
+
+
+async def test_a_result_too_long_for_the_guide_leaves_it_for_the_next(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    FakeRuntime.outline = {"blocks": [{"id": "1", "text": "x" * 40_000}]}
+    text = await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI()))
+    answer = json.loads(text)
+    assert "guide" not in answer and answer["blocks"] == FakeRuntime.outline["blocks"]
+    assert await _guides(kwargs) is None
+    FakeRuntime.outline = {"blocks": []}
+    text = await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI()))
+    assert "guide" in json.loads(text) and len(text) < 45_000
+    assert await _guides(kwargs) == ["docx"]
 
 
 async def test_a_failed_call_leaves_the_guide_for_the_next(session_factory, storage, redis_client):
