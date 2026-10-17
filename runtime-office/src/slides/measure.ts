@@ -34,8 +34,12 @@ export type ShapeSpec =
   | (Placed & { kind: "path"; points: number[][]; stroke: Stroke; head: "none" | "open" | "filled"; tail: "none" | "open" | "filled" })
   | (Placed & { kind: "group"; children: ShapeSpec[] });
 export interface Transition { effect: string; ms: number }
-// notes: the <aside>'s words, or null when the slide has none (a replaced slide then keeps the notes it had).
-export interface SlideSpec { background: Fill | null; shapes: ShapeSpec[]; notes: string | null; hidden: boolean; transition: Transition | null }
+// notes: the <aside>'s words, or null when the slide has none (a replaced slide then keeps the notes it had). ignored:
+// one line for each piece of inline CSS outside the format that was taken as it is because it changes nothing in the
+// native shape ("border-collapse: collapse on a table: native tables already collapse"), for the edit's result.
+export interface SlideSpec {
+  background: Fill | null; shapes: ShapeSpec[]; notes: string | null; hidden: boolean; transition: Transition | null; ignored: string[];
+}
 
 /** Where a slide's fonts come from: the document server's, in runtime-office. */
 export interface FontSource {
@@ -87,14 +91,14 @@ export class Measurer {
     await page.setContent(documentOf(html, canvas));
     const args = (phase: InspectArgs["phase"]): InspectArgs => ({ phase, canvas, minPx: MIN_TEXT_PX, icons: ICON_NAMES });
     step.now = "checking the slide";
-    const checked = await this.inspect(page, args("check"));
+    const checked = (await this.inspect(page, args("check"))) as { stacks: string[]; ignored: string[] };
     // The check gives each SVG picture the data it checked: the pictures load again before anything is measured.
     await page.evaluate(() => Promise.all(Array.from(document.images, (img) => img.decode().catch(() => undefined))));
     // Each font stack lays text out in its first family the document server has: Chromium measures with that one.
     step.now = "reading the document server's font list";
     const list = await this.fonts.list(editor);
     const has = new Map([...list.faces.values()].map((faces) => [faces.name.toLowerCase(), faces.name]));
-    const resolved = Object.fromEntries((checked as { stacks: string[] }).stacks.map((stack) => [stack, resolveFamily(stack, has)]));
+    const resolved = Object.fromEntries(checked.stacks.map((stack) => [stack, resolveFamily(stack, has)]));
     await page.evaluate((families: Record<string, string>) => {
       for (const node of Array.from(document.querySelectorAll<HTMLElement>("section, section *"))) {
         if (node.closest("svg, x-embed")) continue;
@@ -115,11 +119,11 @@ export class Measurer {
       });
     }
     step.now = "measuring the shapes";
-    const { spec, icons, embeds, shots } = (await this.inspect(page, args("shapes"))) as Extract<Inspected, { spec: SlideSpec }>;
+    const { spec, icons, embeds, shots } = (await this.inspect(page, args("shapes"))) as Extract<Inspected, { spec: unknown }>;
     step.now = "painting the icons";
     if (shots.length) await paintIcons(page);
     await this.drawPictures(page, canvas, spec, { icons, embeds, shots }, step);
-    return spec;
+    return { ...spec, ignored: checked.ignored };
   }
 
   private async inspect(page: Page, args: InspectArgs): Promise<Inspected> {
@@ -130,7 +134,7 @@ export class Measurer {
 
   // Each placeholder picture made what it shows: an svg drawn by Chromium, an icon from the icon set, an embed drawn on
   // a page of its own, and a shot taken in turn.
-  private async drawPictures(page: Page, canvas: Canvas, spec: SlideSpec, drawn: Omit<Extract<Inspected, { spec: SlideSpec }>, "spec">, step: Step): Promise<void> {
+  private async drawPictures(page: Page, canvas: Canvas, spec: Pick<SlideSpec, "shapes">, drawn: Omit<Extract<Inspected, { spec: unknown }>, "spec">, step: Step): Promise<void> {
     const { icons, embeds, shots } = drawn;
     const visit = async (shapes: ShapeSpec[]): Promise<void> => {
       for (const shape of shapes) {

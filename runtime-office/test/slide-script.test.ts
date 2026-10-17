@@ -7,7 +7,7 @@ type Any = any;
 
 // editor/slide.js run against a stand-in for the builder: a deck of slides that hold text boxes.
 const SCRIPT = readFileSync(new URL("../editor/slide.js", import.meta.url), "utf8");
-const EMPTY_SPEC = { background: null, shapes: [], notes: null, hidden: false, transition: null };
+const EMPTY_SPEC = { background: null, shapes: [], notes: null, hidden: false, transition: null, ignored: [] };
 
 // A text body's paragraphs, each with its alignment and its runs, each run with its text and a style name.
 interface ParaStub { jc?: string; runs: { text: string; style?: string }[] }
@@ -148,6 +148,30 @@ describe("a magic move that cannot play", () => {
   it("says nothing when the second arrives by one", () => {
     const { run } = deck([typed]);
     expect(run({ action: "edit", ops: [{ op: "slides", slides: [pinning(false), pinning(true)] }] }).results[0].note).toBeUndefined();
+  });
+});
+
+describe("CSS a slide was built with though it changes nothing", () => {
+  const COLLAPSE = "border-collapse: collapse on a table: native tables already collapse";
+  const DISC = "list-style-type: disc on a ul: a native bulleted list already shows •";
+  const typed = { boxes: [{ text: "Agenda" }] };
+
+  it("is said in the op's note, slide by slide", () => {
+    const { run } = deck([typed]);
+    const out = run({ action: "edit", ops: [{ op: "slides", slides: [
+      { after: null, spec: { ...EMPTY_SPEC, ignored: [COLLAPSE, DISC] } }, { after: null, spec: EMPTY_SPEC },
+    ] }] });
+    expect(out.results[0].note).toBe(`Slide 2 is built, but this CSS changes nothing there and can be left out: ${COLLAPSE}; ${DISC}.`);
+  });
+
+  it("comes after a magic move's note, which it keeps", () => {
+    const { run } = deck([typed]);
+    const pinned = { kind: "picture", src: "icon:0", x: 0, y: 0, w: 100, h: 100, rot: 0, magic: "next-step" };
+    const out = run({ action: "edit", ops: [{ op: "slides", slides: [
+      { after: null, spec: { ...EMPTY_SPEC, shapes: [pinned] } }, { after: null, spec: { ...EMPTY_SPEC, shapes: [pinned], ignored: [COLLAPSE] } },
+    ] }] });
+    expect(out.results[0].note).toBe('ids match across slides but slide 3 has no data-transition="magic": nothing will move. '
+      + `Slide 3 is built, but this CSS changes nothing there and can be left out: ${COLLAPSE}.`);
   });
 });
 
