@@ -27,7 +27,10 @@ export class ContentError extends Error {}
 
 const MAX_BLOCKS = 400;
 const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
-const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:\s*(.+?)\s*\?>$/;
+// The intent is trimmed after the match: spaces matched on both sides of a lazy intent backtrack cubically on a run.
+const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:(.*)\?>$/;
+// Markdown reads any other <?pending …?>, in any letters, as a tag and writes nothing: the section would be lost unsaid.
+const PENDING_LIKE = /<\?pending/i;
 const MAX_INTENT = 300;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
@@ -68,8 +71,7 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
       out.push({ t: "pending", key, intent: intent.slice(0, MAX_INTENT) });
       continue;
     }
-    // Markdown reads any other <?pending …?> as a tag and writes nothing: the section would be lost unsaid.
-    if (trimmed.includes("<?pending")) throw new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>.");
+    if (PENDING_LIKE.test(trimmed)) throw new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>.");
     const placeholder = PLACEHOLDER.exec(trimmed);
     if (!placeholder) {
       segment.push(line);

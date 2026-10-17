@@ -163,6 +163,18 @@ describe("pending blocks, written in the markdown", () => {
       expect(() => compileContent(line), line).toThrow(/<\?pending name: what it will hold\?>/);
     }
   });
+
+  it("refuses a pending line in other letters, which markdown would drop unsaid", () => {
+    for (const line of ["<?PENDING summary: Three sentences?>", "<?Pending summary: Three sentences?>"]) {
+      expect(() => compileContent(line), line).toThrow(/<\?pending name: what it will hold\?>/);
+    }
+  });
+
+  it("refuses a long run of spaces promptly", () => {
+    const started = performance.now();
+    expect(() => compileContent(`<?pending k:${" ".repeat(5_000)}x`)).toThrow(/is a line of its own/);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
 });
 
 describe("typed pictures and charts", () => {
