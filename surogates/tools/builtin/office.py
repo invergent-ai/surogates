@@ -71,9 +71,8 @@ EDIT_DESCRIPTION = (
     'a later call fills (replace, target {"pending": "goals"}):\n'
     "```json\n"
     '{"path": "plans/launch.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown": '
-    '"# Launch plan\\n\\n## Goals\\n<?block goals?>\\n\\n## Budget\\n<?block budget?>", "blocks": {"goals": {"type": '
-    '"pending", "intent": "Three goals, each with a date"}, "budget": {"type": "pending", "intent": "Costs by quarter, '
-    'in a table"}}}}]}\n'
+    '"# Launch plan\\n\\n## Goals\\n<?pending goals: Three goals, each with a date?>\\n\\n## Budget\\n'
+    '<?pending budget: Costs by quarter, in a table?>"}}]}\n'
     "```\n"
     "A spreadsheet's cells and a bold header:\n"
     "```json\n"
@@ -101,10 +100,9 @@ EDIT_DESCRIPTION = (
     '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side}, comment '
     '{anchor: {find}, body}, reply {thread, body}, resolve {thread}; a replaced or moved block keeps its comment '
     'threads. Targets: {"block": "<id>", "hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, '
-    '{"end": true}. Content: {"markdown": '
-    '"…", "blocks": {…}}; a line <?block k?> places blocks[k]: {"type": "pending", "intent": "…"}, {"type": "chart", '
-    '"chart": "bar|column|line|pie|…", "title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG '
-    'or JPEG>", "width": <px>}.\n'
+    '{"end": true}. Content: {"markdown": "…", "blocks": {…}}; a line <?pending k: what it will hold?> is a pending '
+    'block; a line <?block k?> places blocks[k]: {"type": "chart", "chart": "bar|column|line|pie|…", "title": "…", '
+    '"rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG or JPEG>", "width": <px>}.\n'
     'Spreadsheet: set {range: "Sheet!A1", values: [[…]], expect?: [[the range as you read it]]} (each value is typed '
     'in as into a cell: "=…" is a live formula, a leading \' keeps text); format {range, number_format, bold, italic, '
     "fill, color, align, valign, wrap, width}; chart {range, type: column|bar|line|pie|area|doughnut|scatter, title, "

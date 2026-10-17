@@ -41,6 +41,14 @@ def test_office_edit_shows_one_complete_call_per_document_type():
             assert set(op) - {"op"} <= set(json.loads(OP_SHAPES[kind][op["op"]])), (kind, op)
 
 
+def test_office_edit_writes_a_word_outlines_pending_sections_in_the_markdown():
+    # A pending section is a line of the markdown: the outline needs no nested "blocks" map to close.
+    word = _examples()[0]["ops"][0]["content"]
+    assert word["markdown"].count("<?pending ") >= 2, word
+    assert "blocks" not in word, word
+    assert '"type": "pending"' not in EDIT_DESCRIPTION
+
+
 def test_office_edit_says_how_many_words_fill_a_page_and_to_check_before_answering():
     assert "450 words" in EDIT_DESCRIPTION
     assert "office_read before you answer" in EDIT_DESCRIPTION

@@ -27,6 +27,8 @@ export class ContentError extends Error {}
 
 const MAX_BLOCKS = 400;
 const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
+const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:\s*(.+?)\s*\?>$/;
+const MAX_INTENT = 300;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
 const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
@@ -38,17 +40,37 @@ const INDENTED = /^ {2,3}\S/;
 type Style = Omit<Run, "text">;
 type Lists = { next: number };
 
-/** The blocks of one op's content: markdown, where a line `<?block k?>` stands for the typed block `blocks[k]`. */
+/** The blocks of one op's content: markdown, where a line `<?pending k: intent?>` is a pending block saying what its
+ * section will hold, and a line `<?block k?>` stands for the typed block `blocks[k]`, a chart or a picture. */
 export function compileContent(markdown: string, blocks: Record<string, unknown> = {}): Block[] {
+  for (const [key, block] of Object.entries(blocks)) {
+    if ((block as Record<string, unknown> | null)?.type === "pending") {
+      throw new ContentError(`Pending blocks are written in the markdown now: <?pending ${key}: what it will hold?>.`);
+    }
+  }
   const out: Block[] = [];
   const lists: Lists = { next: 0 };
+  const keys = new Set<string>();
   let segment: string[] = [];
   const flush = () => {
     if (segment.length) out.push(...blocksOf(marked.lexer(segment.join("\n")), lists));
     segment = [];
   };
   for (const line of markdown.split("\n")) {
-    const placeholder = PLACEHOLDER.exec(line.trim());
+    const trimmed = line.trim();
+    const pending = PENDING.exec(trimmed);
+    const intent = pending?.[2]!.trim();
+    if (intent) {
+      flush();
+      const key = pending![1]!;
+      if (keys.has(key)) throw new ContentError(`<?pending ${key}: …?> is used twice in one op.`);
+      keys.add(key);
+      out.push({ t: "pending", key, intent: intent.slice(0, MAX_INTENT) });
+      continue;
+    }
+    // Markdown reads any other <?pending …?> as a tag and writes nothing: the section would be lost unsaid.
+    if (trimmed.includes("<?pending")) throw new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>.");
+    const placeholder = PLACEHOLDER.exec(trimmed);
     if (!placeholder) {
       segment.push(line);
       continue;
@@ -187,11 +209,6 @@ function runsOf(tokens: Token[] | undefined, style: Style = {}): Run[] {
 function typedBlock(key: string, value: unknown): Block {
   const block = (value ?? {}) as Record<string, unknown>;
   switch (block.type) {
-    case "pending": {
-      const intent = typeof block.intent === "string" ? block.intent.trim() : "";
-      if (!intent) throw new ContentError(`Pending block ${key} needs an "intent": the section it stands for.`);
-      return { t: "pending", key, intent: intent.slice(0, 300) };
-    }
     case "image": {
       if (typeof block.data !== "string" || typeof block.mime !== "string") {
         throw new ContentError(`Image block ${key} needs a "path" to a PNG or JPEG in the workspace.`);
@@ -204,7 +221,7 @@ function typedBlock(key: string, value: unknown): Block {
     case "chart":
       return chartOf(key, block);
     default:
-      throw new ContentError(`Block ${key} has type ${JSON.stringify(block.type)}; use "pending", "chart" or "image".`);
+      throw new ContentError(`Block ${key} has type ${JSON.stringify(block.type)}; use "chart" or "image".`);
   }
 }
 

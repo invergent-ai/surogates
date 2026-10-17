@@ -58,9 +58,10 @@ Your first office call on each type of document brings that type's reference wit
 `references/docx.md`, `references/xlsx.md`, `references/pptx.md` or `references/pdf.md`. They stay in this skill to read
 again.
 
-- **Word documents:** plant a new document's outline first, every section a pending block saying what it will hold,
-  then fill one section per call; re-word with `replace` on quoted words, which keeps their formatting. About 450
-  words of body text fill a page: count them for a length the user asks for.
+- **Word documents:** plant a new document's outline first, every section a pending block saying what it will hold
+  (a line `<?pending name: what it will hold?>`), then fill one section per call; re-word with `replace` on quoted
+  words, which keeps their formatting. About 450 words of body text fill a page: count them for a length the user asks
+  for.
 - **Spreadsheets:** read the range before writing it, and pass what it showed as `expect`. Values go in as typed into
   a cell: a formula starts with `=` and stays live.
 - **Slide decks:** a small change (a title, a word, a number) is `text` on that one shape, which keeps its place and

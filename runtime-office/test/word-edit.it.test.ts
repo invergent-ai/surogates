@@ -271,7 +271,7 @@ describe.skipIf(!itEnabled)("editing a document", () => {
 
   it("fills a pending block, then says it is gone", async () => {
     const { agent } = await pair(office, opened);
-    const planted = await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "<?block s?>", blocks: { s: { type: "pending", intent: "Summary goes here" } } } }]);
+    const planted = await edit(agent, [{ op: "insert", target: { end: true }, content: { markdown: "<?pending s: Summary goes here?>" } }]);
     expect(planted.results[0].reads).toEqual([{ id: planted.results[0].ids[0], kind: "pending", key: "s", intent: "Summary goes here" }]);
     expect((await blocks(agent)).find((b) => b.kind === "pending")).toMatchObject({ key: "s", intent: "Summary goes here" });
     const filled = await edit(agent, [{ op: "replace", target: { pending: "s" }, content: { markdown: "## Summary\n\nDone." } }]);
@@ -295,7 +295,7 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     opened.push(agent);
     const result = await edit(agent, [{
       op: "insert", target: { end: true },
-      content: { markdown: "# Plan\n\n## Risks\n\n<?block r?>", blocks: { r: { type: "pending", intent: "The risks" } } },
+      content: { markdown: "# Plan\n\n## Risks\n\n<?pending r: The risks?>" },
     }]);
     expect(result).toMatchObject({ applied: true });
     const outline: Any = await office.read(agent, { view: "outline" });

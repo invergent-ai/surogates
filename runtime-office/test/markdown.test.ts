@@ -65,9 +65,10 @@ describe("compileContent", () => {
   });
 
   it("places typed blocks between the markdown around them", () => {
-    expect(compileContent("## Risks\n<?block r?>\nAfter.", { r: { type: "pending", intent: "What could slip" } })).toEqual([
+    const picture = { type: "image", data: "AAAA", mime: "image/png", width: 10, height: 5 };
+    expect(compileContent("## Risks\n<?block r?>\nAfter.", { r: picture })).toEqual([
       { t: "h", level: 2, runs: [{ text: "Risks" }] },
-      { t: "pending", key: "r", intent: "What could slip" },
+      { t: "image", src: "data:image/png;base64,AAAA", width: 10, height: 5 },
       { t: "p", runs: [{ text: "After." }] },
     ]);
   });
@@ -75,7 +76,6 @@ describe("compileContent", () => {
   it("refuses a placeholder no block answers, and a block of an unknown type", () => {
     expect(() => compileContent("<?block x?>")).toThrow(ContentError);
     expect(() => compileContent("<?block x?>", { x: { type: "video" } })).toThrow(ContentError);
-    expect(() => compileContent("<?block x?>", { x: { type: "pending" } })).toThrow(/intent/);
   });
 
   it("turns what it does not map into plain text or nothing", () => {
@@ -115,13 +115,53 @@ describe("compileContent", () => {
     ]);
   });
 
-  it("refuses a placeholder that names an inherited property, and an intent that is not text", () => {
+  it("refuses a placeholder that names an inherited property", () => {
     expect(() => compileContent("<?block constructor?>", {})).toThrow(/names no entry/);
-    expect(() => compileContent("<?block x?>", { x: { type: "pending", intent: 5 } })).toThrow(/intent/);
   });
 
   it("refuses more than 400 blocks in one op", () => {
     expect(() => compileContent("p\n\n".repeat(401))).toThrow(ContentError);
+  });
+});
+
+describe("pending blocks, written in the markdown", () => {
+  it("writes a line <?pending key: intent?> as a pending block", () => {
+    expect(compileContent("# Q3\n\n## Summary\n<?pending summary: Three sentences on the quarter?>")).toEqual([
+      { t: "h", level: 1, runs: [{ text: "Q3" }] },
+      { t: "h", level: 2, runs: [{ text: "Summary" }] },
+      { t: "pending", key: "summary", intent: "Three sentences on the quarter" },
+    ]);
+  });
+
+  it("places it between the markdown around it, its intent trimmed", () => {
+    expect(compileContent("## Risks\n  <?pending risks:   What could slip  ?>\nAfter.")).toEqual([
+      { t: "h", level: 2, runs: [{ text: "Risks" }] },
+      { t: "pending", key: "risks", intent: "What could slip" },
+      { t: "p", runs: [{ text: "After." }] },
+    ]);
+  });
+
+  it("cuts an intent at 300 characters", () => {
+    const [block] = compileContent(`<?pending long: ${"x".repeat(400)}?>`);
+    expect(block).toEqual({ t: "pending", key: "long", intent: "x".repeat(300) });
+  });
+
+  it("refuses a key used twice in one op", () => {
+    expect(() => compileContent("<?pending summary: One?>\n\n<?pending summary: Two?>")).toThrow(
+      new ContentError("<?pending summary: …?> is used twice in one op."),
+    );
+  });
+
+  it("refuses a pending block in blocks, naming the inline form", () => {
+    expect(() => compileContent("## Risks\n<?block risks?>", { risks: { type: "pending", intent: "What could slip" } })).toThrow(
+      new ContentError("Pending blocks are written in the markdown now: <?pending risks: what it will hold?>."),
+    );
+  });
+
+  it("refuses a pending line without a key and an intent, or with text beside it", () => {
+    for (const line of ["<?pending summary?>", "<?pending summary: ?>", "<?pending: Three sentences?>", "## Summary <?pending summary: Three sentences?>"]) {
+      expect(() => compileContent(line), line).toThrow(/<\?pending name: what it will hold\?>/);
+    }
   });
 });
 

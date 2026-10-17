@@ -4,9 +4,9 @@
 
 - Target blocks by the `id` and `hash` the outline gives. Quote words with `find` only for a phrase inside a block.
 - A new document: one call inserts the title and every section's heading, each followed by a pending block saying what
-  it will hold. The user sees the whole shape at once and can delete a section before you write it. Then fill one
-  section per call, replacing its pending block. A pending block the user deleted is a section they do not want: leave
-  it out.
+  it will hold: a line of its own, `<?pending name: what it will hold?>`, each name once. The user sees the whole
+  shape at once and can delete a section before you write it. Then fill one section per call, replacing its pending
+  block (target `{"pending": "name"}`). A pending block the user deleted is a section they do not want: leave it out.
 - Re-word with `replace` on quoted words; replace a whole block only when it all changes.
 - Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced, moved or deleted is
   gone for the later ones (a moved block gets a new id, found in that op's result `ids`), and one it re-worded has a
@@ -38,13 +38,8 @@ kept) from the top, from 1: quote enough words to be unique (the `search` view i
 ## Plant a new document's outline
 
 ```json
-{"path": "reports/Q3.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {
-  "markdown": "# Q3 report\n\n## Summary\n<?block summary?>\n\n## Results\n<?block results?>\n\n## Risks\n<?block risks?>",
-  "blocks": {
-    "summary": {"type": "pending", "intent": "Three sentences: what happened this quarter and what it means"},
-    "results": {"type": "pending", "intent": "Revenue and costs by region, with a chart"},
-    "risks": {"type": "pending", "intent": "What could slip next quarter, and what we do about it"}
-  }}}]}
+{"path": "reports/Q3.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown":
+  "# Q3 report\n\n## Summary\n<?pending summary: Three sentences on what happened this quarter and what it means?>\n\n## Results\n<?pending results: Revenue and costs by region, with a chart?>\n\n## Risks\n<?pending risks: What could slip next quarter, and what we do about it?>"}}]}
 ```
 
 ## Fill one section
@@ -56,7 +51,8 @@ kept) from the top, from 1: quote enough words to be unique (the `search` view i
                         "rows": [["", "Q2", "Q3"], ["North", 3.75, 4.2], ["East", 2.87, 3.1]]}}}}]}
 ```
 
-A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "width": 480}` (PNG or JPEG, at most 5 MB).
+A line `<?block name?>` places `blocks[name]`: a chart, as above, or a picture from the workspace,
+`{"type": "image", "path": "charts/funnel.png", "width": 480}` (PNG or JPEG, at most 5 MB).
 
 ## Change what is there
 
