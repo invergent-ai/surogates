@@ -12,6 +12,7 @@ its row **and its failing classes**: the failing classes are the backlog, and a 
 | Date | Run | Where | Model served | Size | Checks | Clean rollouts |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-10-17 | full-001 | DEV | surogate3.7-flash | 33 × 3 | 692/724 (96%) | 76/99 |
+| 2026-10-17 | full-002 | DEV | surogate3.7-flash | 33 × 3 | 711/727 (98%) | 83/99 |
 
 **full-001** — the bar model's baseline, before any change to the protocol, the tool descriptions or the office
 skill. 99 sessions, every one completed on the `studio` channel; no harness or runner error, no rollout set aside, no
@@ -65,3 +66,91 @@ How to read the run:
   run, worked. pitch r2's model never saw its slides.
 - **One run is three samples.** A class at 3/3 (the numbered list, the speaker notes) is systematic; a class at 1/3
   needs another run before a fix is believed.
+
+**full-002** — the same 33 tasks × 3 on the read-as-meant build, scored by the same checks as full-001's row.
+`office_edit` reads what the model meant (an `ops` that is JSON text missing only its closers, a single op not in a
+list, an op name used as the key) and says so in `read_as`; Word results carry `reads` (each block as written, a list
+item with its `label`) and the document's `length`; the first office call on each document type carries the office
+skill's rules and that type's reference (`guide`); the docx, xlsx, pptx and pdf-forms skills are hidden where the office
+tools are; a terminal call that leaves office documents behind gets a note; the tool descriptions lead with making
+documents in the editor; slide CSS that changes nothing is taken with a note instead of refused. 99 scored sessions,
+every one completed on the `studio` channel; no harness or runner error, no `sandbox_unavailable` result. Four rollouts
+were set aside as infrastructure-invalid: the document server, loaded by other work's tests at the same time, did not
+save the editor's work. They were re-run on the same build, and the report lists them. 139 minutes of sessions, 724
+model calls, 714 tool calls.
+
+| Slice | Checks | Clean rollouts |
+| --- | --- | --- |
+| create | 398/411 (97%) | 38/51 |
+| edit | 313/316 (99%) | 45/48 |
+| Word | 232/240 (97%) | 25/33 |
+| spreadsheet | 185/186 (99%) | 26/27 |
+| deck | 237/244 (97%) | 23/30 |
+| PDF | 57/57 (100%) | 9/9 |
+
+16 rollouts failed at least one check, each for one cause:
+
+| What went wrong | Rollouts | Why |
+| --- | --- | --- |
+| A document under the check's word floor | 5: docx-report r1, r2 and r3 (431, 362 and 334 words for "two pages", 600 at least); docx-guide r1 and r3 (99 and 98 of 120 for "one page") | Each result now gives the document's length, and all five stop at or past the page count asked: the reports reach two pages (r1 three) at that length, the table and the chart taking the rest |
+| The yearly licence kept out of the total cost | docx-proposal 3/3: r1 and r2 give €55,000 one-off plus €4,800 a year (the check wants 59,800); r3 gives €59,800 for the first year but leaves the licence out of its cost table | As full-001's r2: the model keeps a recurring cost apart from the one-off ones on purpose. At 3/3 it is systematic, and the prompt allows the reading |
+| Text unreadable against what is under it (below 3:1) | pptx-onboarding r3, pptx-pitch r2 and r3, pptx-workshop r3 | The first three the same yellow accent (F2C14E) on white, 1.7:1; workshop r3 puts its agenda times in a sky-blue accent (0EA5E9) on off-white (FBFBF8), 2.7:1. Nothing checks contrast while editing |
+| Adding speaker notes moves, resizes or adds to slide 1's shapes | pptx-notes 3/3 | Unchanged: notes can only be set by rebuilding the whole slide |
+| A task's name cut short | xlsx-dates r2: "Copy final" written "Copy" | The durations are formulas and right |
+
+How to read the run:
+
+- **Still the model alone.** `surogate3.7-flash` served every model call, one session at a time. The runtime's advisor
+  expert was still offered to the model: it is switched apart from the agent's advisor, is on by default, and was
+  listed in full-001 too, where it was never called. Here the model called it once, to check its draft of docx-report
+  r3, and the call failed, so no advice reached the model and no stronger model corrected anything in this run.
+- **Like for like.** Both rows are scored by the same checks (full-001 re-scored), so the deltas below are not a
+  change of measure.
+- **Unknown is not counted.** 11 checks came back unknown: the contrast of 8 edits of the sample deck (theme colours)
+  and the values of the 3 kpi charts, each drawn as an SVG picture (inline, as the slide format has it, in r1 and r3;
+  from a file in r2).
+- **What the model said.** All 16 failing rollouts ended telling the user the work was done, 6 of them in the words of
+  a check that failed; none said it had worked around the editor.
+- **Four rollouts set aside and re-run.** docx-continue-list r3, xlsx-rename-sheet r3, pptx-kpi-chart r3 and
+  pptx-workshop r3 ran while other work's tests loaded the same document server, and it did not save the editor's
+  work: a save went unanswered, or did not come within 30 s of the turn's end. Such a rollout says nothing about the
+  model, so they were set aside as infrastructure-invalid (kept, not scored; the report lists them) and re-run on the
+  same build, one at a time, with nothing else on the document server. The re-runs pass every judged check but
+  workshop r3's contrast.
+
+What moved from full-001:
+
+| | full-001 | full-002 |
+| --- | --- | --- |
+| Checks | 692/724 | 711/727 |
+| Clean rollouts | 76/99 | 83/99 |
+| Clean Word / spreadsheet / deck / PDF | 25/33, 24/27, 19/30, 8/9 | 25/33, 26/27, 23/30, 9/9 |
+| `office_edit` calls | 309 | 266 |
+| `office_edit` errors | 85 | 37 |
+| of them `"ops" is a non-empty list of ops.` | 31 | 1 |
+| "Made in the editor" failures | 9, all scripts | 0 |
+| Terminal calls | 84 | 6 |
+| Sessions given a `guide` | 0 | 99 |
+| Sessions that opened an office reference with `skill_view` | 72 | 20 |
+| Model calls / tool calls / session minutes | 915 / 933 / 163 | 724 / 714 / 139 |
+
+- **No document made by a script.** The 6 terminal calls left only listed folders, 4 of them looking for the office
+  skill's reference files, and the docx, xlsx, pptx and pdf skills went unread (8 reads in full-001). With the scripts
+  went the classes only they produced: the shape off the slide, the text out of its box, values typed where formulas
+  were asked, and the PDF's destroyed form fields. The chart is in every docx-report (full-001's r2 left it out).
+- **Broken `ops` read as meant.** 6 calls in 5 sessions sent `ops` as JSON text short of a closing brace; the brace was
+  added at the end, with a `read_as` saying so, and 4 of the calls were applied. In the other 2 the brace missing was
+  the one closing the `content`, so the `"op"` after it was read inside the `content` and the call failed. Of the 37
+  errors left, the most are forms not read yet: an op whose `"op"` is missing or sits inside its `content` (6), a
+  spreadsheet range without its sheet (5), slide CSS the format does not take (5), JSON text broken elsewhere than its
+  closers (4), a chart block with no `"type"` (3), a `<?block?>` with no entry (3) and a block target with no hash (3).
+  The `border-collapse` that refused 8 slide calls in full-001 is taken with a note (7 calls in 7 sessions).
+- **The numbered list is seen.** Every docx-continue-list rollout saw an inserted item come back as "1." in `reads`
+  and rebuilt the list by replacing one of its items with all three, which numbers them 1. 2. 3.; all three pass. An
+  inserted item still starts its own numbering, so the task takes 5 to 8 `office_edit` calls where one should do.
+- **Contrast 5 → 4.** No near-white text on white this time; three of the four are one yellow accent, the fourth a
+  sky-blue one.
+- **Not moved, or worse.** Speaker notes stay 3/3. Short documents stay 5, though every Word result now gives the
+  length: the model writes to the page count, under the checks' word floors (docx-report 3/3, was 2/3). The licence
+  kept out of the total is 3/3 (was 1/3). 72 sessions still open the office skill themselves before their first office
+  call, so there the `guide` repeats rules the model already has.
