@@ -387,12 +387,21 @@ def p_no_overflow() -> Check:
 
 
 def p_in_bounds(tol: float = 2.0) -> Check:
+    """A group's child is placed in the group's own space, so it is judged by its outermost group's box on the slide."""
     def fn(deck: Deck, ctx):
         bad = []
         for i, sl in enumerate(deck.slides, 1):
+            groups = set()
             for s in sl.shapes:
-                if s.x < -tol or s.y < -tol or s.x + s.w > deck.width + tol or s.y + s.h > deck.height + tol:
-                    bad.append(f"slide {i}: {s.name} at ({s.x:.0f},{s.y:.0f}) {s.w:.0f}x{s.h:.0f}")
+                if s.in_group:
+                    if s.group_box is None or s.group_box in groups:
+                        continue
+                    groups.add(s.group_box)
+                    (x, y, w, h), what = s.group_box, f"the group holding {s.name}"
+                else:
+                    (x, y, w, h), what = (s.x, s.y, s.w, s.h), s.name
+                if x < -tol or y < -tol or x + w > deck.width + tol or y + h > deck.height + tol:
+                    bad.append(f"slide {i}: {what} at ({x:.0f},{y:.0f}) {w:.0f}x{h:.0f}")
         return not bad, "every shape on its slide" if not bad else f"{bad[:4]}"
     return Check("every shape inside the slide", fn)
 
