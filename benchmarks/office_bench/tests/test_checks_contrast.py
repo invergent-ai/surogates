@@ -139,5 +139,24 @@ def test_shapes_in_a_group_are_not_judged(tmp_path):
     assert _score(deck, tmp_path).passed is None
 
 
+def test_text_over_a_filled_shape_in_a_group_is_not_judged(tmp_path):
+    """Where a group's child lies on the slide is not read, so a painted child is taken to cover whatever lies inside
+    the group's box: unknown, not the slide's background."""
+    deck, slide = _blank()
+    _solid(slide.background.fill, WHITE)
+    _card(slide.shapes.add_group_shape().shapes, NAVY)
+    _text(slide.shapes, "Tools we use", WHITE)
+    assert _score(deck, tmp_path).passed is None
+
+
+def test_a_group_elsewhere_on_the_slide_does_not_hide_the_background(tmp_path):
+    deck, slide = _blank()
+    _solid(slide.background.fill, WHITE)
+    badge = slide.shapes.add_group_shape().shapes.add_shape(MSO_SHAPE.RECTANGLE, Pt(600), Pt(400), Pt(60), Pt(60))
+    _solid(badge.fill, WHITE)
+    _text(slide.shapes, "Ticketing and help centre", WHITE)
+    assert _score(deck, tmp_path).passed is False
+
+
 def test_every_deck_task_checks_contrast():
     assert all(CONTRAST in [c.name for c in t.checks] for t in DECK_TASKS)

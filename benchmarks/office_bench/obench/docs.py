@@ -488,6 +488,7 @@ class Shape:
     placeholder: str | None  # title, body, ... for placeholders
     table: list[list[str]] | None = None
     in_group: bool = False  # a group's child: its offsets are in the group's own space, not the slide's
+    group_box: tuple[float, float, float, float] | None = None  # a group child's outermost group's slide box
     overflow: str | None = None  # measured on the render: "" fits, else how far the text runs; None: not measured
     color: str | None = None  # the first run's explicit sRGB colour ("RRGGBB"); None for a theme colour or none set
     fill: str | None = None  # a solid sRGB fill; None for no fill or one whose colour is not read here
@@ -532,7 +533,8 @@ def read_pptx(path: str) -> Deck:
     for slide in deck.slides:
         shapes: list[Shape] = []
 
-        def add(shape, dx: float = 0.0, dy: float = 0.0, in_group: bool = False) -> None:
+        def add(shape, dx: float = 0.0, dy: float = 0.0, in_group: bool = False,
+                group_box: tuple[float, float, float, float] | None = None) -> None:
             x = ((shape.left or 0) / EMU_PER_PT) + dx
             y = ((shape.top or 0) / EMU_PER_PT) + dy
             w = (shape.width or 0) / EMU_PER_PT
@@ -546,10 +548,10 @@ def read_pptx(path: str) -> Deck:
                 ph = {"center_title": "ctrTitle", "subtitle": "subTitle"}.get(ph, ph)
             if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
                 for child in shape.shapes:
-                    add(child, 0.0, 0.0, True)
+                    add(child, 0.0, 0.0, True, group_box or (x, y, w, h))
                 return
             fill, opaque = _paint(shape._element)
-            paint = {"in_group": in_group, "fill": fill, "opaque": opaque}
+            paint = {"in_group": in_group, "group_box": group_box, "fill": fill, "opaque": opaque}
             if getattr(shape, "has_table", False) and shape.has_table:
                 rows = [[c.text.strip() for c in r.cells] for r in shape.table.rows]
                 shapes.append(Shape("table", shape.name, x, y, w, h, "", [], ph, table=rows, **paint))

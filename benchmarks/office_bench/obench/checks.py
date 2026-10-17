@@ -412,15 +412,23 @@ def contrast_ratio(a: str, b: str) -> float:
 def _under(slide, index: int) -> str | None:
     """The colour under text shape *index*: its own fill, else the fill of the nearest shape drawn before it (z-order
     is document order) whose box holds its centre, else the slide's background. None when that is not read: a theme
-    fill, a picture, a table or a chart. Group children are skipped: their boxes are in the group's own space."""
+    fill, a picture, a table or a chart, or a painted group child inside whose group's box the centre lies: a child's
+    own box is in the group's space, so whether it covers the centre is not known."""
     shape = slide.shapes[index]
     if shape.fill or shape.opaque:
         return shape.fill
     cx, cy = shape.x + shape.w / 2, shape.y + shape.h / 2
+
+    def holds(x: float, y: float, w: float, h: float) -> bool:
+        return x <= cx <= x + w and y <= cy <= y + h
+
     for below in reversed(slide.shapes[:index]):
-        if below.in_group or not (below.x <= cx <= below.x + below.w and below.y <= cy <= below.y + below.h):
+        if not (below.fill or below.opaque):
             continue
-        if below.fill or below.opaque:
+        if below.in_group:
+            if below.group_box is None or holds(*below.group_box):
+                return None
+        elif holds(below.x, below.y, below.w, below.h):
             return below.fill
     return slide.background
 
