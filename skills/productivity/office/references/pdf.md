@@ -34,6 +34,16 @@ an earlier op counts).
 {"ops": [{"op": "redact", "text": "account number 4471", "match_case": false}]}
 ```
 
+Place a note by the words it is about: `anchor` quotes them, and the note goes beside them, clear of the page's text,
+fields and notes. The result gives the `page` and `rect` it landed at.
+
+```json
+{"op": "annotate", "kind": "free_text", "anchor": {"find": "thirty days"}, "text": "Net 30 from the invoice date."}
+{"op": "annotate", "kind": "stamp", "anchor": {"find": "Signed:", "nth": 1}, "stamp": "approved"}
+```
+
+For a place no words mark, give `page` and `rect` instead:
+
 ```json
 {"op": "annotate", "kind": "free_text", "page": 1, "rect": [60, 560, 280, 600], "text": "Checked against the order."}
 {"op": "annotate", "kind": "stamp", "page": 1, "rect": [300, 360, 450, 410], "stamp": "approved"}
@@ -47,7 +57,9 @@ an earlier op counts).
   **Once the document saves, they are gone for good.** If someone has redaction marks of their own pending, the call is
   refused: ask the user to apply or remove them first.
 - `annotate`: a `free_text` note, or a `stamp`: approved, not_approved, draft, final, confidential, for_comment,
-  information_only, completed, void, sign_here.
+  information_only, completed, void, sign_here. It takes `anchor` or `page` and `rect`, not both. `anchor.nth` picks a
+  later match (from 1, through the pages in order); `match_case` is false unless you set it. With no free place beside
+  the words, the call is refused: give `page` and `rect`.
 
 **Existing text cannot be changed.** To correct a PDF's words, tell the user; offer a note, a redaction or a new page.
 

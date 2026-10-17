@@ -158,6 +158,84 @@ describe.skipIf(!itEnabled)("a PDF", () => {
     });
   });
 
+  // A page's text lines, each one box [x1, y1, x2, y2] in points from the top-left: the page selected whole, the last
+  // selection's boxes cleared first.
+  const textLines = async (id: string, page: number): Promise<number[][]> => (await (await pool.get(id)).command(
+    "function () { var doc = Api.GetDocument(), page = doc.GetPage(scope.page); doc.Document.GetFile().removeSelection();" +
+      " page.SetSelection({ x: 0.01, y: 0.01 }, { x: 100000, y: 100000 });" +
+      " return page.GetSelectionQuads().map(function (q) { var xs = [q[0], q[2], q[4], q[6]], ys = [q[1], q[3], q[5], q[7]];" +
+      " return [Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys)]; }); }",
+    { page: page - 1 },
+  )).value as number[][];
+  const overlaps = (a: number[], b: number[]): boolean => a[0]! < b[2]! && b[0]! < a[2]! && a[1]! < b[3]! && b[1]! < a[3]!;
+  const near = (a: number[], b: number[]): boolean => a.every((n, i) => Math.abs(n - b[i]!) < 1);
+
+  it("places a note beside its words", async () => {
+    const { agent, user } = await pair(office, opened, "sample.pdf");
+    const lines = await textLines(agent, 1);
+    // The fixture's line "Fees are due within thirty days of each invoice.", 12 pt, its baseline 130 pt from the top.
+    expect(lines.some((line) => line[1]! < 130 && line[3]! > 125)).toBe(true);
+    const result: Any = await office.edit(agent, [
+      { op: "annotate", kind: "free_text", anchor: { find: "thirty days" }, text: "Net 30 from the invoice date." },
+    ]);
+    expect(result).toMatchObject({ applied: true, results: [{ op: 0, page: 1, beside: "thirty days" }] });
+    const rect: number[] = result.results[0].rect;
+    expect(rect[1]! < 134 && rect[3]! > 118).toBe(true);
+    for (const line of lines) expect(overlaps(rect, line), JSON.stringify([rect, line])).toBe(false);
+    await eventually(async () => {
+      const notes = (await outline(user)).pages[0].annotations.filter((a: Any) => a.type === "freeText");
+      expect(notes).toHaveLength(1);
+      expect(near(notes[0].rect, rect), JSON.stringify([notes[0].rect, rect])).toBe(true);
+    });
+  });
+
+  it("places a stamp by its words", async () => {
+    const { agent } = await pair(office, opened, "sample.pdf");
+    const lines = await textLines(agent, 1);
+    const result: Any = await office.edit(agent, [
+      { op: "annotate", kind: "stamp", anchor: { find: "thirty days" }, stamp: "approved" },
+    ]);
+    expect(result).toMatchObject({ applied: true, results: [{ op: 0, page: 1, beside: "thirty days" }] });
+    const rect: number[] = result.results[0].rect;
+    for (const line of lines) expect(overlaps(rect, line), JSON.stringify([rect, line])).toBe(false);
+    const stamps = (await outline(agent)).pages[0].annotations.filter((a: Any) => a.type === "stamp");
+    expect(stamps).toHaveLength(1);
+    expect(near(stamps[0].rect, rect), JSON.stringify([stamps[0].rect, rect])).toBe(true);
+  });
+
+  it("places two notes on one line apart, on the page as the call's earlier ops leave it", async () => {
+    const { agent } = await pair(office, opened, "sample.pdf");
+    const result: Any = await office.edit(agent, [
+      { op: "pages", action: "add", page: 0 },
+      { op: "annotate", kind: "free_text", anchor: { find: "thirty days" }, text: "Net 30 from the invoice date." },
+      { op: "annotate", kind: "free_text", anchor: { find: "invoice" }, text: "Each invoice, not the month." },
+    ]);
+    expect(result).toMatchObject({ applied: true, results: [{ op: 0 }, { op: 1, page: 2 }, { op: 2, page: 2, beside: "invoice" }] });
+    const [first, second] = [result.results[1].rect, result.results[2].rect];
+    expect(overlaps(first, second), JSON.stringify([first, second])).toBe(false);
+    for (const line of await textLines(agent, 2)) {
+      for (const rect of [first, second]) expect(overlaps(rect, line), JSON.stringify([rect, line])).toBe(false);
+    }
+  });
+
+  it("refuses words that are not there", async () => {
+    const { agent } = await pair(office, opened, "sample.pdf");
+    const result: Any = await office.edit(agent, [
+      { op: "annotate", kind: "free_text", anchor: { find: "sixty days" }, text: "Net 60." },
+    ]);
+    expect(result).toMatchObject({ applied: false, refused: { op: 0, reason: '"sixty days" is not in the document.' } });
+    expect((await outline(agent)).pages[0].annotations).toEqual([]);
+  });
+
+  it("refuses an nth past the matches", async () => {
+    const { agent } = await pair(office, opened, "sample.pdf");
+    const result: Any = await office.edit(agent, [
+      { op: "annotate", kind: "free_text", anchor: { find: "thirty days", nth: 2 }, text: "Net 30." },
+    ]);
+    expect(result).toMatchObject({ applied: false, refused: { op: 0 } });
+    expect(result.refused.reason).toBe('"thirty days" is in the document 1 times: nth counts from 1 up to 1.');
+  });
+
   it("redacts words from the document", async () => {
     const { agent } = await pair(office, opened, "sample.pdf");
     const result: Any = await office.edit(agent, [{ op: "redact", text: "thirty" }]);
