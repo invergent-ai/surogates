@@ -145,7 +145,7 @@ elements per slide.
 - **A type scale of four or five sizes** (for example 120 / 72 / 44 / 32 / 24) and one or two fonts; emphasise with
   weight, italic or colour, not a new size.
 - **A hex palette, chosen once:** one dark, one light, one or two accents; toned whites and blacks (#FBFBF8, #14213D)
-  rather than pure. Text holds 4.5:1 contrast on its background (3:1 from 44 px).
+  rather than pure. Text holds 4.5:1 contrast on its background (3:1 from 44 px); below 3:1 the slide is refused.
 - **The vertical space adds up:** 824 px inside the margins on 16:9. A heading is about size × lines × 1.1; a card is
   lines × size × line height plus its padding. Leave a card's height out and let it fit its text.
 - **Too much? Split the slide.** Nothing shrinks.

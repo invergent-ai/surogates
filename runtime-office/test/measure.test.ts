@@ -107,15 +107,15 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
   // Models write a figure as a div of text in a card, and a step number as a box that flex centres it in.
   it("builds a div of text as one text box, styled by the div itself", async () => {
     for (const div of [
-      `<div style="font-size:48px;font-weight:700;color:#38BDF8;padding-bottom:12px">30%</div>`,
-      `<div data-text style="font-size:48px;font-weight:700;color:#38BDF8;padding-bottom:12px">30%</div>`,
+      `<div style="font-size:48px;font-weight:700;color:#0369A1;padding-bottom:12px">30%</div>`,
+      `<div data-text style="font-size:48px;font-weight:700;color:#0369A1;padding-bottom:12px">30%</div>`,
     ]) {
       const spec: Any = await measure(`<section style="background:#ffffff;padding:128px;font-family:Arial">
         <div style="background:#F8FAFC;border:2px solid #E2E8F0;padding:32px;width:600px">${div}<p style="font-size:32px">Lower costs</p></div></section>`);
       const text = spec.shapes[1];
       expect(text, div).toMatchObject({ kind: "shape", x: 162 * E, y: 162 * E, fill: null, text: { insets: [0, 0, 0, 12 * E] } });
       expect(text.text.paras, div).toHaveLength(1);
-      expect(text.text.paras[0].runs, div).toEqual([expect.objectContaining({ text: "30%", size: 24, b: true, color: { hex: "#38bdf8", alpha: 1 } })]);
+      expect(text.text.paras[0].runs, div).toEqual([expect.objectContaining({ text: "30%", size: 24, b: true, color: { hex: "#0369a1", alpha: 1 } })]);
     }
   });
 
@@ -202,16 +202,16 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
   it("refuses a painted span inside text, saying to draw it as a div beside the text, which then goes in", async () => {
     const DRAW = "a painted <span> inside text can't be drawn: draw it as a <div> beside the text.";
     for (const html of [
-      `<p style="font-size:32px">Status: <span style="background:#22c55e;color:#ffffff;padding:4px 12px">Live</span></p>`,
-      `<div style="font-size:32px">Status: <span style="background:#22c55e;color:#ffffff;padding:4px 12px">Live</span></div>`,
+      `<p style="font-size:32px">Status: <span style="background:#15803D;color:#ffffff;padding:4px 12px">Live</span></p>`,
+      `<div style="font-size:32px">Status: <span style="background:#15803D;color:#ffffff;padding:4px 12px">Live</span></div>`,
       `<div style="display:flex;gap:12px;align-items:center;font-size:32px"><span style="display:inline-block;width:16px;height:16px;background:#ff0000"></span>Revenue</div>`,
       `<p style="font-size:32px"><span style="border:2px solid #000000">Boxed</span></p>`,
     ]) {
       await expect(measure(`<section style="background:#fff;padding:128px">${html}</section>`), html).rejects.toThrow(DRAW);
     }
     const spec: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial">
-      <div style="display:flex;gap:12px;align-items:center"><p style="font-size:32px">Status:</p><div style="font-size:32px;background:#22c55e;color:#ffffff;padding:4px 12px">Live</div></div></section>`);
-    expect(spec.shapes.map((s: Any) => [s.fill?.color.hex ?? null, s.text.paras[0].runs[0].text])).toEqual([[null, "Status:"], ["#22c55e", "Live"]]);
+      <div style="display:flex;gap:12px;align-items:center"><p style="font-size:32px">Status:</p><div style="font-size:32px;background:#15803D;color:#ffffff;padding:4px 12px">Live</div></div></section>`);
+    expect(spec.shapes.map((s: Any) => [s.fill?.color.hex ?? null, s.text.paras[0].runs[0].text])).toEqual([[null, "Status:"], ["#15803d", "Live"]]);
   });
 
   it("leaves out a hidden list item, paragraph or span", async () => {
@@ -426,6 +426,44 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
 
   it("refuses text under 24 px", async () => {
     await expect(measure(`<section style="background:#fff"><p style="font-size:20px">Small print</p></section>`)).rejects.toThrow("the least on a slide is 24 px");
+  });
+
+  it("refuses white text on a white card", async () => {
+    await expect(measure(`<section style="background:#14213D;padding:128px">
+      <div style="background:#ffffff;padding:40px;width:900px"><h2 style="font-size:64px;color:#FBFBF8">Invisible heading</h2></div></section>`))
+      .rejects.toThrow('<section > div > h2> ("Invisible heading"): its text (#fbfbf8) on #ffffff reads at 1.0:1; text needs at least 3:1 here: try #14213D.');
+  });
+
+  it("refuses text under 3:1, counting a gradient by its worst stop and faded text by its opacity, naming the toned colour that reads better", async () => {
+    for (const [html, said] of [
+      [`<section style="background:#ffffff;padding:128px"><div style="background:#F8FAFC;padding:32px;width:600px"><p style="font-size:48px;color:#38BDF8">30%</p></div></section>`, "its text (#38bdf8) on #f8fafc reads at 2.0:1; text needs at least 3:1 here: try #14213D."],
+      [`<section style="background:#14213D;padding:128px"><p style="font-size:48px;color:#1A5C9A">Accent</p></section>`, "its text (#1a5c9a) on #14213d reads at 2.3:1; text needs at least 3:1 here: try #FBFBF8."],
+      [`<section style="background:linear-gradient(90deg, #14213D, #F8FAFC);padding:128px"><h2 style="font-size:64px;color:#FBFBF8">Fading out</h2></section>`, "its text (#fbfbf8) on #f8fafc reads at 1.0:1"],
+      [`<section style="background:#14213D;padding:128px"><p style="font-size:48px;color:#FBFBF8;opacity:0.3">Faint</p></section>`, "its text (#fbfbf8 at 30%) on #14213d reads at 2.6:1"],
+    ]) {
+      await expect(measure(html!), html).rejects.toThrow(said!);
+    }
+  });
+
+  // Claude Slides paints a pinned element listed before the flow under it, where Chromium paints it over.
+  it("takes white text on a pinned dark band", async () => {
+    const spec: Any = await measure(`<section style="background:#FBFBF8;padding:128px">
+      <div style="position:absolute;left:0;top:0;width:1920px;height:400px;background:#14285A"></div>
+      <h1 style="font-size:96px;color:#FBFBF8">Over the band</h1></section>`);
+    expect(spec.shapes.map((s: Any) => s.fill?.color.hex ?? s.text?.paras[0].runs[0].text)).toEqual(["#14285a", "Over the band"]);
+  });
+
+  it("composites a translucent card", async () => {
+    const spec: Any = await measure(`<section style="background:#14213D;padding:128px">
+      <div style="background:rgba(255,255,255,0.1);padding:40px;width:900px"><h2 style="font-size:64px;color:#FBFBF8">On glass</h2></div></section>`);
+    expect(spec.shapes.map((s: Any) => s.text?.paras[0].runs[0].text ?? null)).toEqual([null, "On glass"]);
+  });
+
+  it("skips text over a picture", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff">
+      <img src="${PNG}" alt="Lisbon" style="position:absolute;left:0;top:0;width:1920px;height:1080px">
+      <h1 style="position:absolute;left:128px;top:400px;font-size:96px;color:#FBFBF8">Over the photo</h1></section>`);
+    expect(spec.shapes.map((s: Any) => s.kind)).toEqual(["picture", "shape"]);
   });
 
   it("refuses text outside a text element, which nothing would draw", async () => {
