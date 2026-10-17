@@ -15,7 +15,7 @@ from surogates.devices.operations import DeviceOperations
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.office import guard
 from surogates.office import sessions as office_sessions
-from surogates.office.scripted import SCRIPTED_NOTE
+from surogates.office.scripted import SCRIPTED_NOTE, SCRIPTED_PDF_NOTE
 from surogates.tools import skill_visibility
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -109,7 +109,17 @@ async def test_a_script_that_leaves_many_documents_names_ten_and_counts_the_rest
     pod = Pod("".join(f"/workspace/out/{i:02}.pdf\n" for i in range(12)))
     said = json.loads(await run(chat(), "python split.py", pod=pod))
     named = ", ".join(f"out/{i:02}.pdf" for i in range(10))
-    assert said["note"] == SCRIPTED_NOTE.format(paths=f"{named} and 2 more")
+    # Splitting a PDF is the pdf skill's work: its note says which PDF work goes through office_edit and which not.
+    assert said["note"] == SCRIPTED_PDF_NOTE.format(paths=f"{named} and 2 more")
+
+
+async def test_a_script_that_leaves_pdfs_and_other_documents_is_told_of_each_apart():
+    pod = Pod("/workspace/deck.pptx\n/workspace/merged.pdf\n/workspace/notes.DOCX\n/workspace/scan.PDF\n")
+    said = json.loads(await run(chat(), "python build.py", pod=pod))
+    assert said["note"] == " ".join([
+        SCRIPTED_NOTE.format(paths="deck.pptx, notes.DOCX"),
+        SCRIPTED_PDF_NOTE.format(paths="merged.pdf, scan.PDF"),
+    ])
 
 
 async def test_a_command_that_only_reads_a_document_is_left_as_it_ran():

@@ -27,6 +27,12 @@ SCRIPTED_NOTE = (
     "{paths} changed by a script: the user can neither watch nor co-edit a document made that way. "
     "Make and change documents with office_edit (read them with office_read)."
 )
+#: A PDF's own: office_edit fills, notes, redacts and turns pages, and the rest of a PDF's work is the pdf skill's.
+SCRIPTED_PDF_NOTE = (
+    "{paths} changed by a script: the user can neither watch nor co-edit a document a script changed. "
+    "Filling, annotating and redacting a PDF, and adding, removing or rotating its pages, go through office_edit; "
+    "a new PDF with content, merging, splitting or encrypting PDFs are the pdf skill's work."
+)
 WORKSPACE = "/workspace"
 #: A mounted workspace keeps whole seconds, on its storage's clock: a change up to this long before the call is the
 #: call's.
@@ -85,7 +91,8 @@ async def terminal_notes(
     tool_args: Any, session: Any, started: float | None, *, sandbox_pool: Any, session_factory: Any,
 ) -> list[str]:
     """What a terminal call's result is told: of each document it named or changed that is open in the editor, that
-    the editor holds it; of the others it changed, in a chat with the office tools, that a script made them.
+    the editor holds it; of the others it changed, in a chat with the office tools, that a script made them, the PDFs
+    apart, with what of their work is office_edit's and what the pdf skill's.
 
     *started* is when the command began in the sandbox; None where it ran elsewhere, which is not looked at.
     """
@@ -101,6 +108,15 @@ async def terminal_notes(
         held = []
     notes = [OPEN_NOTE.format(path=path) for path in held]
     made = [path for path in changed if path not in held]
-    if made:
-        notes.append(SCRIPTED_NOTE.format(paths=_listed(made)))
+    documents = [path for path in made if not _is_pdf(path)]
+    pdfs = [path for path in made if _is_pdf(path)]
+    if documents:
+        notes.append(SCRIPTED_NOTE.format(paths=_listed(documents)))
+    if pdfs:
+        notes.append(SCRIPTED_PDF_NOTE.format(paths=_listed(pdfs)))
     return notes
+
+
+def _is_pdf(path: str) -> bool:
+    kind = office_kind(path)
+    return kind is not None and kind.file_type == "pdf"
