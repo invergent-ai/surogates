@@ -18,6 +18,11 @@ Environment:
     OFFICEBENCH_AGENT_ID       agent under test
     OFFICEBENCH_OPS_USER_ID    the operator's ops user id, stamped in config.ops as ops stamps a Work chat
     OFFICEBENCH_OPS_USERNAME   the operator's ops username, likewise
+    OFFICEBENCH_RENDER_SHELL   a command prefix opening a shell where the document server's converter, x2t, runs
+                               (e.g. "kubectl exec -i <converter pod> -c <container> --"): it renders a deck to PDF and
+                               text overflow is measured on that. Unset, overflow is unknown; a kept render/ is reused
+    OFFICEBENCH_X2T            x2t's path in that shell
+                               (default /var/www/euro-office/documentserver/server/FileConverter/bin/x2t)
 """
 from __future__ import annotations
 

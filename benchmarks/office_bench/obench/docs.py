@@ -484,7 +484,8 @@ class Shape:
     paragraphs: list[tuple[str, float | None]]  # (text, font size pt or None)
     placeholder: str | None  # title, body, ... for placeholders
     table: list[list[str]] | None = None
-    overflow: str | None = None  # why the text likely overflows its box, or None
+    in_group: bool = False  # a group's child: its offsets are in the group's own space, not the slide's
+    overflow: str | None = None  # measured on the render: "" fits, else how far the text runs; None: not measured
 
 
 @dataclass
@@ -507,12 +508,10 @@ class Deck:
     width: float  # points
     height: float
     slides: list[Slide]
+    render_note: str = "the deck was not rendered"  # why no text box's overflow was measured, when none was
 
     def text(self) -> str:
         return "\n\n".join(s.text() for s in self.slides)
-
-
-_DEFAULT_SIZE = {"title": 44.0, "ctrTitle": 44.0, "subTitle": 32.0, "body": 28.0}
 
 
 def read_pptx(path: str) -> Deck:
@@ -526,7 +525,7 @@ def read_pptx(path: str) -> Deck:
     for slide in deck.slides:
         shapes: list[Shape] = []
 
-        def add(shape, dx: float = 0.0, dy: float = 0.0) -> None:
+        def add(shape, dx: float = 0.0, dy: float = 0.0, in_group: bool = False) -> None:
             x = ((shape.left or 0) / EMU_PER_PT) + dx
             y = ((shape.top or 0) / EMU_PER_PT) + dy
             w = (shape.width or 0) / EMU_PER_PT
@@ -540,17 +539,17 @@ def read_pptx(path: str) -> Deck:
                 ph = {"center_title": "ctrTitle", "subtitle": "subTitle"}.get(ph, ph)
             if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
                 for child in shape.shapes:
-                    add(child, 0.0, 0.0)
+                    add(child, 0.0, 0.0, True)
                 return
             if getattr(shape, "has_table", False) and shape.has_table:
                 rows = [[c.text.strip() for c in r.cells] for r in shape.table.rows]
-                shapes.append(Shape("table", shape.name, x, y, w, h, "", [], ph, table=rows))
+                shapes.append(Shape("table", shape.name, x, y, w, h, "", [], ph, table=rows, in_group=in_group))
                 return
             if getattr(shape, "has_chart", False) and shape.has_chart:
-                shapes.append(Shape("chart", shape.name, x, y, w, h, "", [], ph))
+                shapes.append(Shape("chart", shape.name, x, y, w, h, "", [], ph, in_group=in_group))
                 return
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE or shape.__class__.__name__ == "Picture":
-                shapes.append(Shape("picture", shape.name, x, y, w, h, "", [], ph))
+                shapes.append(Shape("picture", shape.name, x, y, w, h, "", [], ph, in_group=in_group))
                 return
             if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
                 paras = []
@@ -559,11 +558,9 @@ def read_pptx(path: str) -> Deck:
                     size = max(sizes) if sizes else (p.font.size.pt if p.font.size is not None else None)
                     paras.append((p.text if hasattr(p, "text") else "".join(r.text for r in p.runs), size))
                 text = "\n".join(t for t, _ in paras).strip()
-                s = Shape("text", shape.name, x, y, w, h, text, paras, ph)
-                s.overflow = _overflow(shape, s)
-                shapes.append(s)
+                shapes.append(Shape("text", shape.name, x, y, w, h, text, paras, ph, in_group=in_group))
                 return
-            shapes.append(Shape("other", shape.name, x, y, w, h, "", [], ph))
+            shapes.append(Shape("other", shape.name, x, y, w, h, "", [], ph, in_group=in_group))
 
         for shape in slide.shapes:
             add(shape)
@@ -588,55 +585,6 @@ def _slide_title(shapes: list[Shape]) -> str:
     # The largest text, topmost first: a slide built from HTML has no title placeholder.
     best = max(texts, key=lambda s: (max((sz or 0) for _, sz in s.paragraphs) if s.paragraphs else 0, -s.y))
     return best.text
-
-
-def _overflow(shape, s: Shape) -> str | None:
-    """Whether the text likely runs past its box, estimated from the geometry.
-
-    Estimate, not measurement: average glyph width 0.55 em, line height 1.2
-    em; a size the shape does not state is taken from its placeholder kind
-    (or 18 pt). Flagged only past a 25 % margin, so it errs toward silence.
-    """
-    if not s.text or s.w <= 0 or s.h <= 0:
-        return None
-    try:
-        body = shape.text_frame._txBody.find("{%s}bodyPr" % NS["a"])
-    except Exception:  # noqa: BLE001
-        body = None
-
-    def inset(attr: str, default_pt: float) -> float:
-        if body is not None and body.get(attr) is not None:
-            return int(body.get(attr)) / EMU_PER_PT
-        return default_pt
-
-    inner_w = s.w - inset("lIns", 7.2) - inset("rIns", 7.2)
-    inner_h = s.h - inset("tIns", 3.6) - inset("bIns", 3.6)
-    if inner_w <= 0 or inner_h <= 0:
-        return None
-    wrap_none = body is not None and body.get("wrap") == "none"
-    default = _DEFAULT_SIZE.get(s.placeholder or "", 18.0)
-    total = 0.0
-    for text, size in s.paragraphs:
-        size = size or default
-        em = 0.55 * size
-        for line in (text or "").split("\x0b") or [""]:
-            # Text wraps only at spaces: fill lines greedily by words; a word never breaks.
-            lines, width = 1, 0.0
-            for word in line.split():
-                w = len(word) * em
-                if w > inner_w * 1.3:
-                    return f"the word {word[:20]!r} ~{w:.0f}pt wide in a {inner_w:.0f}pt box"
-                if wrap_none or width == 0.0 or width + em + w <= inner_w:
-                    width = w if width == 0.0 else width + em + w
-                else:
-                    lines += 1
-                    width = w
-            if wrap_none and width > inner_w * 1.25:
-                return f"one line ~{width:.0f}pt wide in a {inner_w:.0f}pt box"
-            total += lines * size * 1.2
-    if total > inner_h * 1.25:
-        return f"text ~{total:.0f}pt tall in a {inner_h:.0f}pt box"
-    return None
 
 
 # --------------------------------------------------------------------------- PDF

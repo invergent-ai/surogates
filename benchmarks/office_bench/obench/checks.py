@@ -43,6 +43,8 @@ class Check:
     name: str
     fn: Fn
     claim: tuple[str, ...] = ()
+    # Reads the document server's render of the document: with no document there is nothing to render, so unknown.
+    reads_render: bool = False
 
     def run(self, doc: Any, ctx: Ctx) -> CheckResult:
         try:
@@ -373,11 +375,15 @@ def p_slides(lo: int, hi: int) -> Check:
 
 
 def p_no_overflow() -> Check:
+    """Measured on the document server's render (``render.measure_overflow``); unknown when nothing was measured."""
     def fn(deck: Deck, ctx):
-        bad = [f"slide {i}: {s.name} ({s.overflow}) {s.text[:40]!r}" for i, sl in enumerate(deck.slides, 1)
-               for s in sl.shapes if s.overflow]
-        return not bad, "no text box looks overfull" if not bad else f"{bad[:4]}"
-    return Check("no text overflows its box (estimated from geometry)", fn)
+        measured = [(i, s) for i, sl in enumerate(deck.slides, 1) for s in sl.shapes if s.overflow is not None]
+        if not measured:
+            return None, f"not measured: {deck.render_note}"
+        bad = [f"slide {i}: {s.name} ({s.overflow}) {s.text[:40]!r}" for i, s in measured if s.overflow]
+        n = len(measured)
+        return not bad, f"{n} text box{'es' * (n != 1)} measured, none overflows" if not bad else f"{bad[:4]}"
+    return Check("no text overflows its box", fn, reads_render=True)
 
 
 def p_in_bounds(tol: float = 2.0) -> Check:

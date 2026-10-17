@@ -1,10 +1,18 @@
 """What the trace says the agent did, and when its final word contradicts the checks."""
 import json
+import pathlib
+import shlex
+import shutil
+import sys
 
 from obench.checks import CheckResult
 from obench.client import Event
-from obench.evaluate import claims, find_document, final_message, metrics
+from obench.evaluate import claims, evaluate, find_document, final_message, metrics
+from obench.render import RENDER_SHELL_ENV
 from obench.tasks import by_id
+
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+OVERFLOW = "no text overflows its box"
 
 
 def _events():
@@ -99,3 +107,54 @@ def test_a_negated_claim_word_is_not_a_claim_and_a_missing_input_is():
     c = claims(results, msg, doc_found=True, inputs=["sales.xlsx"])
     assert c["contradicted"] == ["says sales.xlsx is not there; it was uploaded before the message"]
     assert c["admits_a_problem"] and not c["claims_success_despite_failures"]
+
+
+def _rollout(tmp_path, collected: list[tuple[str, pathlib.Path]]) -> str:
+    """A stored rollout whose workspace held *collected* (workspace path, file)."""
+    entries = []
+    for path, source in collected:
+        local = tmp_path / "documents" / path
+        local.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, local)
+        entries.append({"path": path, "local": f"documents/{path}", "size": local.stat().st_size,
+                        "input": False, "changed": True})
+    (tmp_path / "meta.json").write_text(json.dumps({"index": 1, "collected": entries}), encoding="utf-8")
+    return str(tmp_path)
+
+
+def _check(result: dict, name: str) -> dict:
+    [found] = [c for c in result["checks"] if c["name"] == name]
+    return found
+
+
+def test_unsaved_document_scores_overflow_unknown(tmp_path, monkeypatch):
+    monkeypatch.delenv(RENDER_SHELL_ENV, raising=False)
+    result = evaluate(by_id()["pptx-pitch"], _rollout(tmp_path, []))
+    assert _check(result, OVERFLOW)["passed"] is None
+    assert _check(result, "5-7 slides")["passed"] is False
+
+
+def test_a_kept_render_is_measured_without_a_renderer(tmp_path, monkeypatch):
+    monkeypatch.delenv(RENDER_SHELL_ENV, raising=False)
+    rollout = _rollout(tmp_path, [("kpi.pptx", FIXTURES / "overflows.pptx")])
+    (tmp_path / "render").mkdir()
+    shutil.copyfile(FIXTURES / "overflows.pdf", tmp_path / "render" / "kpi.pdf")
+    check = _check(evaluate(by_id()["pptx-kpi-chart"], rollout), OVERFLOW)
+    assert check["passed"] is False and "Crowded" in check["detail"] and "pt past" in check["detail"]
+
+
+def test_a_render_is_kept_for_the_next_check(tmp_path, monkeypatch):
+    pdf = FIXTURES / "fits.pdf"
+    code = f"import shutil, sys; shutil.copyfileobj(open({str(pdf)!r}, 'rb'), sys.stdout.buffer)"
+    monkeypatch.setenv(RENDER_SHELL_ENV, f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}")
+    rollout = _rollout(tmp_path, [("kpi.pptx", FIXTURES / "fits.pptx")])
+    assert _check(evaluate(by_id()["pptx-kpi-chart"], rollout), OVERFLOW)["passed"] is True
+    assert (tmp_path / "render" / "kpi.pdf").read_bytes() == pdf.read_bytes()
+
+
+def test_no_renderer_scores_overflow_unknown_and_says_why(tmp_path, monkeypatch):
+    monkeypatch.delenv(RENDER_SHELL_ENV, raising=False)
+    rollout = _rollout(tmp_path, [("kpi.pptx", FIXTURES / "overflows.pptx")])
+    check = _check(evaluate(by_id()["pptx-kpi-chart"], rollout), OVERFLOW)
+    assert check["passed"] is None and RENDER_SHELL_ENV in check["detail"]
+    assert not (tmp_path / "render").exists()

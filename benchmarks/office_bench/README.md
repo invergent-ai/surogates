@@ -54,7 +54,10 @@ made it wrong.
    runner deletes each session after collecting it so pages are freed: the office reaper closes an archived chat's
    documents on its next pass. The events stay in the database; the documents are in `runs/`.
 8. **Check** (also offline, `obench check <run_id>`): the task's checks on its document, the trace metrics, the claim
-   analysis. Writes `checks.json` and `trajectory.md`.
+   analysis. Writes `checks.json` and `trajectory.md`. A deck whose task checks overflow is first rendered to PDF by
+   the document server's own converter, x2t (`OFFICEBENCH_RENDER_SHELL`); each rendered line of text is matched to
+   the text box whose text it is, and a box overflows when one of its lines ends more than 2 pt below the box or
+   right of it. The render is kept in `render/`, so a re-check measures the same PDF without the converter.
 
 ### Layout
 
@@ -64,6 +67,7 @@ made it wrong.
 | `obench/runner.py` | One task to one rollout: create, upload, send, stream, wait for the save, collect |
 | `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, shapes, fields) |
 | `obench/formula.py` | Small spreadsheet formula evaluator, so checks know what a formula computes |
+| `obench/render.py` | Render a deck with the document server's converter; measure text overflow on the PDF |
 | `obench/checks.py` | Check primitives (factories), each returning pass / fail / unknown with a detail |
 | `obench/tasks.py` | The 33 tasks: prompt, inputs, target document, checks |
 | `obench/evaluate.py` | Score a stored rollout: checks, trace metrics, claim vs checks, trajectory.md |
@@ -71,13 +75,15 @@ made it wrong.
 | `obench/cli.py` | `list` / `run` / `check` / `invalidate` / `report` |
 
 Each run writes `runs/<run_id>/<task_id>/r<k>/`: `events.jsonl` (every session event), `meta.json` (session,
-uploads, save wait, collected files), `documents/` (what was downloaded), `checks.json`, `trajectory.md`.
+uploads, save wait, collected files), `documents/` (what was downloaded), `render/` (a deck's PDF from the document
+server's converter), `checks.json`, `trajectory.md`.
 `runs/` and `.env` are git-ignored (`.gitignore`). Results worth keeping are recorded in [RESULTS.md](RESULTS.md).
 
 A check returns **pass**, **fail** or **unknown** (`None`): unknown is reported, never counted. It is used where the
 benchmark cannot tell — a formula using a function `formula.py` does not implement, a file that stores no computed
 values, a chart that is a picture so its values are unreadable, a number-format code the editor stored that Excel may
-not read the same way (`[Euro]#,##0.00`).
+not read the same way (`[Euro]#,##0.00`), a deck nothing rendered (no `OFFICEBENCH_RENDER_SHELL`, the converter
+failed, or no document was saved), so its overflow was not measured.
 
 "Claim vs checks": each check names the words that would claim what it verifies (`chart`, `bold`, `table`, `page`…).
 A failed check whose words appear in the agent's final message is a **contradicted claim**; a run with failed checks
@@ -100,7 +106,8 @@ In `benchmarks/office_bench/.env` (git-ignored, mode 600):
 | `OFFICEBENCH_BASE_URL` | harness API base (default `http://localhost:8000`) |
 | `OFFICEBENCH_AGENT_ID` | the agent under test |
 | `OFFICEBENCH_OPS_USER_ID` / `OFFICEBENCH_OPS_USERNAME` | that operator's ops user id and username, stamped in `config.ops` as ops stamps a Work chat (the user id is the last part of the account's name) |
-| `OFFICEBENCH_RENDER_SHELL` | a command prefix that runs a shell where the document server's converter, x2t, exists — e.g. `docker run -i --rm <document server image>` or `kubectl exec -i <converter pod> --`; unset, overflow is reported as unknown |
+| `OFFICEBENCH_RENDER_SHELL` | a command prefix that runs a shell where the document server's converter, x2t, exists — e.g. `docker run -i --rm <document server image>` or `kubectl exec -i <converter pod> -c <container> --`. The deck goes to the shell's stdin and its PDF comes back on stdout (120 s at most). Unset, or when the converter fails, "no text overflows its box" is unknown and says why. Not needed to re-check a rollout whose `render/` is there |
+| `OFFICEBENCH_X2T` | x2t's path in that shell (default `/var/www/euro-office/documentserver/server/FileConverter/bin/x2t`) |
 
 The agent's model, tools and prompts are whatever ops has configured for it. The prefix is `OFFICEBENCH_` on purpose:
 `SUROGATES_API_URL`/`SUROGATES_AGENT_ID` are real harness variables.
@@ -223,22 +230,22 @@ tasks are left for later.
 
 - **`pptx-pitch`** (create, pilot) -> `shelfie-pitch.pptx`
   - *"I need a 6-slide pitch deck, shelfie-pitch.pptx, for Shelfie - an app that gets a small bookshop selling its stock online in 10 minutes. Problem: there are 2,300 independent bookshops in Portugal and Spain and 70% of them don't sell online. Then the solution, how it works, the business model (€29 a month plus 2% per sale), traction (85 shops in the beta, €41k of sales in 3 months), and the ask: we're raising €600k for 18 months."*
-  - Checks: 5-7 slides; mentions 8 key facts; no empty slide; no text overflows its box (estimated from geometry); every shape inside the slide.
+  - Checks: 5-7 slides; mentions 8 key facts; no empty slide; no text overflows its box; every shape inside the slide.
 - **`pptx-add-bullet`** (edit, pilot) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add 'Costs came in 4% under budget' as another bullet on the first slide of quarterly-review.pptx."*
-  - Checks: the bullet joins the slide's bullet list; slide 1 title kept; slide 2 unchanged; 2 slides; no text overflows its box (estimated from geometry).
+  - Checks: the bullet joins the slide's bullet list; slide 1 title kept; slide 2 unchanged; 2 slides; no text overflows its box.
 - **`pptx-report-summary`** (create) -> `report-summary.pptx`; input `quarterly-report.docx` (from sample.docx)
   - *"Turn quarterly-report.docx into a 3-slide summary deck, report-summary.pptx."*
-  - Checks: 3 slides; mentions 5 key facts; no empty slide; no text overflows its box (estimated from geometry); every shape inside the slide; quarterly-report.docx left as it was.
+  - Checks: 3 slides; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide; quarterly-report.docx left as it was.
 - **`pptx-onboarding`** (create) -> `support-onboarding.pptx`
   - *"Make a 5-slide onboarding deck for new support staff, support-onboarding.pptx: a welcome slide; our three support tiers with their response targets (Tier 1: 1 hour, Tier 2: 4 hours, Tier 3: 24 hours) as a table; the tools we use (Zendesk, Slack, Notion); what the first week looks like; and who to ask (Marta, team lead; Rui, tooling)."*
-  - Checks: 5 slides; a native table holding ['tier', 1, 4, 24]; mentions 5 key facts; no empty slide; no text overflows its box (estimated from geometry); every shape inside the slide.
+  - Checks: 5 slides; a native table holding ['tier', 1, 4, 24]; mentions 5 key facts; no empty slide; no text overflows its box; every shape inside the slide.
 - **`pptx-kpi-chart`** (create) -> `kpi.pptx`
   - *"Create kpi.pptx: one slide titled 'Revenue is up 50% since January' with a chart of monthly revenue from Jan to Jun: 42, 45, 51, 49, 58, 63 (thousand euros)."*
-  - Checks: 1 slides; the title says it; a chart on slide 1; the chart carries the six monthly values; no text overflows its box (estimated from geometry); every shape inside the slide.
+  - Checks: 1 slides; the title says it; a chart on slide 1; the chart carries the six monthly values; no text overflows its box; every shape inside the slide.
 - **`pptx-workshop`** (create) -> `workshop.pptx`
   - *"Make workshop.pptx with a title slide, 'Pricing workshop - 12 November', and an agenda slide: 09:00 Welcome; 09:15 Where our prices are today; 10:00 Competitor review; 10:45 Break; 11:00 Three pricing options; 12:00 Vote and next steps; 12:30 Close."*
-  - Checks: 2 slides; title slide; agenda slide has every item and time; no text overflows its box (estimated from geometry); every shape inside the slide.
+  - Checks: 2 slides; title slide; agenda slide has every item and time; no text overflows its box; every shape inside the slide.
 - **`pptx-change-title`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Change the title of the second slide in quarterly-review.pptx to 'Q3 plan'."*
   - Checks: slide 2 title is 'Q3 plan'; the rest of slide 2 is kept; slide 1 unchanged; 2 slides.
@@ -247,7 +254,7 @@ tasks are left for later.
   - Checks: slides in the order ['Next quarter', 'Quarterly review']; the moved slide is intact (notes too); the other slide is intact; 2 slides.
 - **`pptx-table-slide`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add a slide at the end of quarterly-review.pptx with a table of Q1 and Q2 revenue by region: North 120 and 140, East 90 and 110, South 70 and 65."*
-  - Checks: 3 slides; a native table on slide 3 holding ['North', 'East', 'South', 120, 140, 90, 110, 70, 65]; slide 1 unchanged; slide 2 unchanged; no text overflows its box (estimated from geometry); every shape inside the slide.
+  - Checks: 3 slides; a native table on slide 3 holding ['North', 'East', 'South', 120, 140, 90, 110, 70, 65]; slide 1 unchanged; slide 2 unchanged; no text overflows its box; every shape inside the slide.
 - **`pptx-notes`** (edit) -> `quarterly-review.pptx`; input `quarterly-review.pptx` (from sample.pptx)
   - *"Add speaker notes to the first slide of quarterly-review.pptx: 'Thank the regional leads. Hiring slipped because two offers were declined.'"*
   - Checks: slide 1 speaker notes say it; slide 1's visible content is kept; slide 2 unchanged; 2 slides.

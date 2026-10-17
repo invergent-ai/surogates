@@ -419,25 +419,6 @@ def test_pptx_table_slide_done_right(tmp_path):
     assert failures(run_checks("pptx-table-slide", path)) == []
 
 
-def test_pptx_overflow_is_caught(tmp_path):
-    from pptx import Presentation
-    from pptx.util import Inches, Pt
-
-    deck = Presentation()
-    deck.slide_width, deck.slide_height = Inches(13.333), Inches(7.5)
-    slide = deck.slides.add_slide(deck.slide_layouts[6])
-    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(0.8))
-    box.text_frame.word_wrap = True
-    box.text_frame.text = "A sentence far too long for this small box, set large, so it runs over its bottom edge " * 2
-    box.text_frame.paragraphs[0].runs[0].font.size = Pt(32)
-    path = str(tmp_path / "x.pptx")
-    deck.save(path)
-    from obench.checks import p_no_overflow
-
-    passed, detail = p_no_overflow().fn(docs.read(path), Ctx())
-    assert passed is False and "tall" in detail
-
-
 # --------------------------------------------------------------------------- PDFs, done right
 
 

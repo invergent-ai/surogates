@@ -11,7 +11,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from obench import docs
+from obench import docs, render
 from obench.checks import CheckResult, Ctx
 from obench.client import Event
 from obench.runner import doc_path, load_events
@@ -174,6 +174,21 @@ def claims(results: list[CheckResult], message: str, doc_found: bool, inputs: li
     }
 
 
+def rendered(rollout_dir: str, found: dict[str, Any]) -> render.RenderResult:
+    """The document server's PDF of the found document: the one kept in ``render/``, else a new one, then kept."""
+    kept = os.path.join(rollout_dir, "render", os.path.splitext(os.path.basename(found["path"]))[0] + ".pdf")
+    if os.path.isfile(kept):
+        with open(kept, "rb") as fh:
+            return render.RenderResult(fh.read(), "")
+    with open(os.path.join(rollout_dir, found["local"]), "rb") as fh:
+        result = render.render_pdf(fh.read(), docs.kind_of(found["path"]))
+    if result.pdf is not None:
+        os.makedirs(os.path.dirname(kept), exist_ok=True)
+        with open(kept, "wb") as fh:
+            fh.write(result.pdf)
+    return result
+
+
 def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
     with open(os.path.join(rollout_dir, "meta.json"), encoding="utf-8") as fh:
         meta = json.load(fh)
@@ -193,6 +208,12 @@ def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
             results.append(CheckResult("document saved and opens", False, f"cannot open: {type(exc).__name__}: {exc}"))
     if task.mode == "edit" and found is not None and not found.get("changed", True):
         results.append(CheckResult("the document changed", False, "byte-identical to the upload: no edit was saved"))
+    if isinstance(doc, docs.Deck) and any(chk.reads_render for chk in task.checks):
+        rendering = rendered(rollout_dir, found)
+        if rendering.pdf is None:
+            doc.render_note = rendering.reason
+        else:
+            render.measure_overflow(rendering.pdf, doc)
     if doc is not None:
         ctx = Ctx(
             original=original_model(task, rollout_dir),
@@ -201,7 +222,8 @@ def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
         )
         results.extend(chk.run(doc, ctx) for chk in task.checks)
     else:
-        results.extend(CheckResult(chk.name, False, "no document", chk.claim) for chk in task.checks)
+        results.extend(CheckResult(chk.name, None if chk.reads_render else False, "no document", chk.claim)
+                       for chk in task.checks)
     session = meta.get("session") or {}
     out = {
         "task_id": task.id,
