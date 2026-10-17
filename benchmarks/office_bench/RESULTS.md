@@ -32,10 +32,11 @@ skill. 99 sessions, every one completed on the `studio` channel; no harness or r
 | --- | --- | --- |
 | The document built by a script, not in the editor | 9: six never called `office_read` or `office_edit` (pptx-kpi-chart r2 and r3, pptx-pitch r2, pptx-workshop r1, xlsx-sales-table r2, xlsx-dates r3); three mixed a script in (docx-report r2, xlsx-sales-table r3, pdf-annotate r3) | The model wrote python-pptx, openpyxl or pypdf scripts in the sandbox. Four of the nine fail only this check: they read right, but the user could not watch or co-edit them. docx-report r2 drew its chart with matplotlib and deleted the document from the terminal mid-edit, so the editor's save landed as a conflict copy |
 | A document far shorter than asked | docx-report r2 and r3 (332 and 505 words for "two pages", 600 at least); docx-faq r3 (138 of 150), docx-guide r1 (110 of 120), docx-proposal r2 (149 of 150) | The model does not count words, and no result tells it how long the document is |
-| Text unreadable against what is under it (below 3:1) | pptx-onboarding r1 and r2, pptx-pitch r1, r2 and r3 | onboarding r1 and pitch r3 have near-white text on white cards (1.0:1); all five put orange, yellow or teal accent text on white or cream (1.7 to 2.8:1). Contrast is a guideline in the slide reference that nothing checks while editing |
+| Text unreadable against what is under it (below 3:1) | pptx-onboarding r1 and r2, pptx-pitch r1, r2 and r3 | onboarding r1 and pitch r3 have near-white text on white cards (1.0:1); all five put orange, yellow or teal accent text on white or cream (1.6 to 2.8:1). Contrast is a guideline in the slide reference that nothing checks while editing |
 | Adding a third item to a numbered list gives "1. 2. 1." | docx-continue-list 3/3 | An inserted list starts its own numbering, and neither the edit result nor the outline shows list numbers, so the model reports "3." |
 | Adding speaker notes moves, resizes or adds to slide 1's shapes | pptx-notes 3/3 | Notes can only be set by rebuilding the whole slide (`slides` with an `<aside>`) |
-| Something asked for left out | docx-proposal r2 (the total cost), docx-report r2 (the chart) | No check against the request before answering |
+| The total cost not given as one sum | docx-proposal r2 (€55,000 one-off and €4,800 a year; the check wants 59,800) | It kept the yearly licence out of the total on purpose and told the user why |
+| A chart asked for left out | docx-report r2 | Its chart calls were refused for their form (a chart block with no markdown placing it, then `ops` sent as a string); it took that to mean the editor takes a chart only when the document is made, put the chart in the chat instead and said so |
 | Text running out of its box | pptx-pitch r2: the bullet lists on slide 1 and slide 6 end 17 and 18 pt below their boxes in the document server's render | A python-pptx deck whose boxes the script sized. Its only render could not be read (its image tool returned 401 on every slide), so it checked geometry with a script and then changed the layout without re-rendering |
 | A shape off the slide | pptx-kpi-chart r2: the title and the chart run off the slide | A python-pptx deck on the library's default 4:3 slide (10 in wide) with boxes 12.8 in wide |
 | Values typed where formulas were asked | xlsx-dates r3 | Written with openpyxl: no formula at all |
@@ -56,7 +57,7 @@ How to read the run:
 - **What the model said.** 21 of the 23 failing rollouts ended telling the user the work was done, 7 of them in the
   words of a check that failed. The other 2 said they had worked around the
   editor; pdf-annotate r3 still said its form fields were untouched.
-- **Waste is in the trace, not the score.** 309 `office_edit` calls: 7 refused and 89 errors, 31 of the errors
+- **Waste is in the trace, not the score.** 309 `office_edit` calls: 7 refused and 85 errors, 31 of the errors
   `"ops" is a non-empty list of ops.` in 9 sessions (mostly a JSON brace missing four or five levels deep, which the
   model server passes on as a string).
 - **The image tool failed once.** `vision_analyze` answered 401 on all 6 calls of pptx-pitch r2, the only session
