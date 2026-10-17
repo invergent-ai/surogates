@@ -29,8 +29,9 @@ const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
 const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
-// An item of a top-level list indented two or three spaces goes one level down, as a nested one would: a sub-item
-// written on its own.
+// An item of a top-level list indented two or three spaces is one level down, as a nested one would be: a sub-item
+// written on its own. The editor counts it below the list item it lands next to; a list that joins none starts at its
+// shallowest level.
 const INDENTED = /^ {2,3}\S/;
 
 type Style = Omit<Run, "text">;

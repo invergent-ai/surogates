@@ -367,8 +367,18 @@
     return { list: next.list, numbering: level.GetNumbering(), level: level.GetLevelIndex() };
   }
 
+  // Each list's shallowest level in the markdown. A list of its own starts there at its first level, however far the
+  // markdown indented it; only a list that continues one counts its indentation, from the item it lands next to.
+  function shallowest(blocks) {
+    var top = {};
+    blocks.forEach(function (b) {
+      if (b.t === "li" && (top[b.list] === undefined || b.level < top[b.list])) top[b.list] = b.level;
+    });
+    return top;
+  }
+
   function build(blocks, join) {
-    var out = [], lists = {};
+    var out = [], lists = {}, top = shallowest(blocks);
     if (join) lists[join.list] = join.numbering;
     for (var i = 0; i < blocks.length; i++) {
       var b = blocks[i];
@@ -376,7 +386,7 @@
       else if (b.t === "p") out.push(paragraphOf(b.runs));
       else if (b.t === "li") {
         var numbering = lists[b.list] || (lists[b.list] = doc.CreateNumbering(b.ordered ? "numbered" : "bullet"));
-        var item = paragraphOf(b.runs), base = join && b.list === join.list ? join.level : 0;
+        var item = paragraphOf(b.runs), base = join && b.list === join.list ? join.level : -top[b.list];
         item.SetNumbering(numbering.GetLevel(Math.min(base + b.level, 8)));
         out.push(item);
       } else if (b.t === "code") {

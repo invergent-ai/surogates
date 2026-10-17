@@ -72,8 +72,9 @@ A block you replace or move keeps the comment threads anchored in it: over the s
 otherwise over the whole new block.
 
 List items you insert right before or after a list item of their kind (numbered or bulleted) continue its list and take
-its numbering, whatever number the markdown writes. An item indented two spaces goes one level below the one it is
-next to. `"list": "new"` starts a list of their own instead:
+its numbering, whatever number the markdown writes; indented two spaces, they go one level below the item they are next
+to. `"list": "new"` starts a list of their own instead. A list of its own starts at its first level, however far you
+indent it:
 
 ```json
 {"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "3. Renew the support contract"}}

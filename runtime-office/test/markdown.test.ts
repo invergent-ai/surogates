@@ -30,7 +30,9 @@ describe("compileContent", () => {
     ]);
   });
 
-  it("puts a list item indented two or three spaces one level down", () => {
+  // The editor counts these levels below the list item an insert lands next to; a list that joins none starts at its
+  // shallowest level.
+  it("reads a list item indented two or three spaces as one level down", () => {
     expect(compileContent("  1. sub\n1. main\n   1. nested")).toEqual([
       { t: "li", list: 0, ordered: true, level: 1, runs: [{ text: "sub" }] },
       { t: "li", list: 0, ordered: true, level: 0, runs: [{ text: "main" }] },

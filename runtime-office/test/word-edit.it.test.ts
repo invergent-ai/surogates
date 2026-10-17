@@ -141,6 +141,24 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     expect(await labelled(agent)).toEqual(expect.arrayContaining([["1.", "Hire two engineers"], ["2.", "Open the Lisbon office"]]));
   });
 
+  it("starts an indented list that joins nothing at its first level", async () => {
+    const agent = await alone();
+    const before = await blocks(agent);
+    const north = byText(before, "North grew");
+    const risk = byText(before, "Hiring could slip");
+    const result = await edit(agent, [
+      { op: "insert", target: { block: north.id, hash: north.hash }, side: "after", content: { markdown: "  - a\n  - b" } },
+      { op: "replace", target: { block: risk.id, hash: risk.hash }, content: { markdown: "  1. Hiring\n  2. Supply" } },
+    ]);
+    expect(result.results[1].reads.map((b: Any) => [b.kind, b.label])).toEqual([["numbered", "1."], ["numbered", "2."]]);
+    const ids = [...result.results[0].ids, ...result.results[1].ids];
+    const levels = await (await pool.get(agent)).command(
+      "function () { return scope.ids.map(function (id) { return Api.GetByInternalId(id).GetNumbering().GetLevelIndex(); }); }",
+      { ids },
+    );
+    expect(levels.value).toEqual([0, 0, 0, 0]);
+  });
+
   it("re-words quoted words in place", async () => {
     const { agent, user } = await pair(office, opened);
     expect(await edit(agent, [{ op: "replace", target: { find: "revenue target" }, content: { text: "sales goal" } }])).toMatchObject({ applied: true });
