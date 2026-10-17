@@ -662,14 +662,19 @@
 
   // --- a slide's speaker notes, the rest of the slide as it is
 
-  // The notes body emptied, then each line a paragraph of it; an empty text leaves it empty. AddNotesText makes the
-  // notes page of a slide that has none.
+  // The notes body emptied, then each line a paragraph of it; an empty text leaves it empty.
   function setNotes(slide, text) {
     if (!slide.GetNotesPage()) {
       if (!text) return;
-      slide.AddNotesText("");
+      // The editor gives every slide it opens or makes a notes page; one without gets one as Api.CreateSlide makes it.
+      // (internal: the builder's AddNotesText throws on such a slide: it calls setNotes on its own wrapper)
+      var made = AscCommonSlide.CreateNotes();
+      slide.Slide.setNotes(made);
+      made.setNotesMaster(pres.Presentation.notesMasters[0]);
+      made.setSlide(slide.Slide);
     }
     var body = slide.GetNotesPage().GetBodyShape();
+    if (!body) throw new Error("Slide " + idOf(slide) + " has a notes page without a body to hold its notes.");
     body.GetDocContent().RemoveAllElements();
     if (text) setText(body, text);
   }

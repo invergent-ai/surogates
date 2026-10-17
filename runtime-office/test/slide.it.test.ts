@@ -146,6 +146,42 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
     });
   });
 
+  it("writes speaker notes on a slide that has none", async () => {
+    const { agent, user } = await deck();
+    const first = (await outline(agent)).slides[0];
+    expect(first.notes).toBe(false);
+    const before: Any = await office.read(agent, { view: "slide", target: first.id });
+    const text = "Open with the numbers.\nThen the team.";
+    const result: Any = await office.edit(agent, [{ op: "notes", slide: first.id, hash: first.hash, text }]);
+    expect(result).toMatchObject({ applied: true, results: [{ op: 0, notes: text }] });
+    for (const id of [agent, user]) {
+      await eventually(async () => {
+        const view: Any = await office.read(id, { view: "slide", target: first.id });
+        expect(view.notes).toBe("Open with the numbers.\r\nThen the team.");
+        expect(view.shapes).toEqual(before.shapes);
+      });
+    }
+    expect((await outline(user)).slides[0]).toMatchObject({ id: first.id, title: "Quarterly review", notes: true });
+  });
+
+  it("makes the notes page of a slide that has none, as the editor makes a new slide's", async () => {
+    const { agent, user } = await deck();
+    const first = (await outline(agent)).slides[0];
+    // The editor gives every slide it opens a notes page: this one's is taken away first (internal).
+    const page = await pool.get(agent);
+    const hasPage = async (): Promise<unknown> => (await page.command("function () { return !!Api.GetPresentation().GetSlideByIndex(0).GetNotesPage(); }", {})).value;
+    await page.command("function () { Api.GetPresentation().GetSlideByIndex(0).Slide.setNotes(null); return 1; }", {});
+    expect(await hasPage()).toBe(false);
+    const text = "Open with the numbers.\nThen the team.";
+    expect(await office.edit(agent, [{ op: "notes", slide: first.id, hash: first.hash, text }])).toMatchObject({ applied: true, results: [{ op: 0, notes: text }] });
+    expect(await hasPage()).toBe(true);
+    for (const id of [agent, user]) {
+      await eventually(async () => {
+        expect(((await office.read(id, { view: "slide", target: first.id })) as Any).notes).toBe("Open with the numbers.\r\nThen the team.");
+      });
+    }
+  });
+
   it("takes a shape's text change back with the rest of a refused batch", async () => {
     const { agent, user } = await deck();
     const second = (await outline(agent)).slides[1];

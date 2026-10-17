@@ -41,24 +41,33 @@ const paragraphs = (shape: Any) => shape.GetDocContent().paras.map((p: Any) => [
 // A text box; or, with kind, a drawing of that kind; body false: a shape without a text box.
 interface Box { placeholder?: string; text?: string; name?: string; paras?: ParaStub[]; kind?: string; body?: false }
 // A slide's notes page: its body's paragraphs, a line of the notes each. Emptied, the body keeps one empty paragraph.
-function notesPageOf(text: string): Any {
+// Without a body, GetBodyShape gives none.
+function notesPageOf(text: string, withBody = true): Any {
   const content = contentOf(text ? text.split("\n").map((line) => ({ runs: [{ text: line, style: "notes" }] })) : [{ runs: [] }]);
   content.RemoveAllElements = () => { content.paras = [paraOf({ runs: [] })]; return true; };
-  const body = { GetDocContent: () => content };
+  const body = withBody ? { GetDocContent: () => content } : null;
   return { content, GetBodyShapeText: () => content.GetText(), GetBodyShape: () => body };
+}
+// The editor's own notes, as AscCommonSlide.CreateNotes makes them: they record their master and their slide.
+const NOTES_MASTER = { name: "notes master" };
+function internalNotes(): Any {
+  const notes: Any = { master: null, slide: null };
+  notes.setNotesMaster = (master: Any) => { notes.master = master; };
+  notes.setSlide = (slide: Any) => { notes.slide = slide; };
+  return notes;
 }
 // The lines of a slide's notes, as its notes page holds them: a paragraph each.
 const noteLines = (slide: Any) => slide.GetNotesPage()?.content.paras.map((p: Any) => p.items.map((r: Any) => r.text).join(""));
 
 // A slide's own background, transition and comments are what a person can give it without typing. Notes null: the
-// slide has no notes page.
-interface SlideStub { layout?: string; boxes?: Box[]; notes?: string | null; background?: true; transition?: string; comments?: number }
+// slide has no notes page; notesBody false: its notes page has no body.
+interface SlideStub { layout?: string; boxes?: Box[]; notes?: string | null; notesBody?: false; background?: true; transition?: string; comments?: number }
 function deck(slides: SlideStub[]) {
   let next = 100;
   const all: Any[] = [];
-  const makeSlide = ({ layout = "Blank", boxes = [], notes = "", background, transition = "effectNone", comments = 0 }: SlideStub) => {
+  const makeSlide = ({ layout = "Blank", boxes = [], notes = "", notesBody, background, transition = "effectNone", comments = 0 }: SlideStub) => {
     const id = String(next++);
-    let notesPage: Any = notes === null ? null : notesPageOf(notes);
+    let notesPage: Any = notes === null ? null : notesPageOf(notes, notesBody !== false);
     const drawings = boxes.map((b, i) => {
       const content = contentOf(b.paras ?? [{ runs: [{ text: b.text ?? "" }] }]);
       return {
@@ -69,14 +78,19 @@ function deck(slides: SlideStub[]) {
       };
     });
     const slide: Any = {
-      Slide: { Get_Id: () => id, cSld: { spTree: [], Bg: background ? {} : null } }, comments, drawings,
+      Slide: {
+        Get_Id: () => id, cSld: { spTree: [], Bg: background ? {} : null }, notes: null as Any,
+        setNotes: (made: Any) => { slide.Slide.notes = made; notesPage = made ? notesPageOf("") : null; },
+      },
+      comments, drawings,
       GetSlideShowTransition: () => ({ GetEntryEffect: () => transition }),
       GetAllDrawings: () => drawings.slice(),
       GetLayout: () => ({ GetName: () => layout }),
       GetNotesPage: () => notesPage,
-      // As the builder's: the notes page made when the slide has none, the text added to the body's first paragraph.
+      // As the builder's: the text added to the body's first paragraph. On a slide with no notes page it throws, as
+      // the builder's does (it calls setNotes on its own wrapper).
       AddNotesText: (text: string) => {
-        notesPage ??= notesPageOf("");
+        if (!notesPage) throw new TypeError("this.setNotes is not a function");
         notesPage.content.paras[0].items.push(runOf({ text, style: "added" }));
         return true;
       },
@@ -93,6 +107,7 @@ function deck(slides: SlideStub[]) {
     GetWidth: () => 12192000, GetHeight: () => 6858000, GetAllSlides: () => all.slice(), GetSlidesCount: () => all.length,
     AddSlide: (slide: Any, index: number) => all.splice(index, 0, slide), GetMaster: () => null,
     GetAllComments: () => all.flatMap((slide) => Array.from({ length: slide.comments }, () => ({}))),
+    Presentation: { notesMasters: [NOTES_MASTER] },
   };
   const Api = {
     GetPresentation: () => pres, CreateSlide: () => makeSlide({}), CreateRun: () => runOf({ text: "", style: "new" }),
@@ -100,7 +115,7 @@ function deck(slides: SlideStub[]) {
     CreateImage: () => ({ SetPosition: () => undefined, Drawing: { setName: () => undefined } }),
   };
   const run = (scope: Any): Any => {
-    const out = runInNewContext(`(${SCRIPT})()`, { Api, scope, AscFormat: {}, AscCommon: {} });
+    const out = runInNewContext(`(${SCRIPT})()`, { Api, scope, AscFormat: {}, AscCommon: {}, AscCommonSlide: { CreateNotes: internalNotes } });
     if (out?.__error) throw new Error(out.__error);
     return out;
   };
@@ -352,8 +367,17 @@ describe("a slide's speaker notes", () => {
     expect(run({ action: "outline" }).slides[0].notes).toBe(false);
     run({ action: "edit", ops: [{ op: "notes", slide: "101", hash: hashOf(run, 1), text: "" }] });
     expect(all[1].GetNotesPage()).toBeNull();
-    run({ action: "edit", ops: [{ op: "notes", slide: "101", hash: hashOf(run, 1), text: "Say hi." }] });
-    expect(noteLines(all[1])).toEqual(["Say hi."]);
+    run({ action: "edit", ops: [{ op: "notes", slide: "101", hash: hashOf(run, 1), text: "Say hi.\nThen sit." }] });
+    expect(noteLines(all[1])).toEqual(["Say hi.", "Then sit."]);
+    // Made as the editor makes a new slide's: on the notes master, for this slide.
+    expect(all[1].Slide.notes).toMatchObject({ master: NOTES_MASTER, slide: all[1].Slide });
+  });
+
+  it("say so, and change nothing, when the slide's notes page has no body", () => {
+    const { run, all } = deck([{ boxes: [TITLE], notes: "Mention the lease.", notesBody: false }]);
+    expect(() => run({ action: "edit", ops: [notes(run, "Open with the budget.")] }))
+      .toThrow("Slide 100 has a notes page without a body to hold its notes.");
+    expect(paragraphs(all[0].drawings[0])).toEqual([["center", ["title:Next quarter"]]]);
   });
 
   it("go with a shape's text change on the same slide, each op with the hash you read", () => {
