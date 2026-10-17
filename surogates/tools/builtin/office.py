@@ -20,8 +20,10 @@ from PIL import Image
 
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
-from surogates.office.agent import AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
+from surogates.office.agent import AGENT_KINDS, AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
+from surogates.office.kinds import office_kind
 from surogates.office.mentions import ACKNOWLEDGEMENT
+from surogates.office.ops_input import OpsInputError, read_ops
 from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOffice, RuntimeOfficeError
 from surogates.session.files import ComputerAway, session_files
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -118,6 +120,8 @@ EDIT_PARAMETERS = {
 }
 
 Call = Callable[[RuntimeOffice, AgentDocument, Any], Awaitable[dict[str, Any]]]
+# What a call reads of its arguments for the document's kind before the document opens: what its answer says of them.
+BeforeOpen = Callable[[str], dict[str, Any]]
 
 
 def register(registry: ToolRegistry) -> None:
@@ -156,14 +160,17 @@ async def _office_read(arguments: dict[str, Any], **kwargs: Any) -> str:
 
 
 async def _office_edit(arguments: dict[str, Any], **kwargs: Any) -> str:
-    ops = arguments.get("ops")
-    if not isinstance(ops, list) or not ops:
-        return _error('"ops" is a non-empty list of ops.')
+    ops: list[dict[str, Any]] = []
+
+    def read(kind: str) -> dict[str, Any]:
+        nonlocal ops
+        ops, read_as = read_ops(arguments.get("ops"), kind)
+        return {"read_as": read_as} if read_as else {}
 
     async def call(runtime: RuntimeOffice, document: AgentDocument, session: Any) -> dict[str, Any]:
         return await runtime.edit(document.page_id, await _with_pictures(ops, session, kwargs))
 
-    return await _run(arguments, kwargs, create=True, call=call)
+    return await _run(arguments, kwargs, create=True, call=call, before_open=read)
 
 
 async def acknowledge_mention(mention: dict[str, str], **kwargs: Any) -> str:
@@ -183,7 +190,8 @@ async def acknowledge_mention(mention: dict[str, str], **kwargs: Any) -> str:
     return await _run({"path": mention["path"]}, kwargs, create=False, call=call)
 
 
-async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: bool, call: Call) -> str:
+async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: bool, call: Call,
+               before_open: BeforeOpen | None = None) -> str:
     office = load_settings().office
     raw_path = str(arguments.get("path") or "").strip()
     if not raw_path:
@@ -192,6 +200,14 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
     path = relative_path(raw_path, session)
     if not within_folder(path):
         return _error("Name the document by its path in the chat's folder, like docs/report.docx.")
+    kind = office_kind(path)
+    reading: dict[str, Any] = {}
+    # A call that cannot be read opens nothing and makes nothing; a kind the agent cannot edit is refused by opening.
+    if before_open is not None and kind is not None and kind.file_type in AGENT_KINDS:
+        try:
+            reading = before_open(kind.file_type)
+        except OpsInputError as exc:
+            return _error(str(exc))
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
     try:
@@ -209,17 +225,17 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
                 if attempt:
                     raise
     except AgentDocumentError as exc:
-        return _error(str(exc))
+        return _error(str(exc), **reading)
     except OfficeBusy:
         logger.warning("runtime-office is full: %s in session %s", path, session.id)
-        return _error("The office service has as many documents open as it can hold; try again in a minute.")
+        return _error("The office service has as many documents open as it can hold; try again in a minute.", **reading)
     except RuntimeOfficeError as exc:
         if exc.status == 400:
-            return _error(str(exc))
+            return _error(str(exc), **reading)
         logger.warning("runtime-office failed on %s", path, exc_info=True)
-        return _error(f"The editor could not do that: {exc}")
+        return _error(f"The editor could not do that: {exc}", **reading)
     # Named as its saves and notices name it, the computer's spelling of it: the next call finds it at once.
-    answer: dict[str, Any] = {"document": document.document.path, "open_by": _open_by(document)}
+    answer: dict[str, Any] = {"document": document.document.path, "open_by": _open_by(document), **reading}
     if document.created:
         answer["created"] = True
     if result.get("flushed") is False:
@@ -332,5 +348,6 @@ async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) 
             "height": max(1, round(height * shown / width))}
 
 
-def _error(message: str) -> str:
-    return json.dumps({"error": message})
+def _error(message: str, **reading: Any) -> str:
+    """A failed call's answer; *reading* says what it read differently from how the model sent it."""
+    return json.dumps({"error": message, **reading}, ensure_ascii=False)

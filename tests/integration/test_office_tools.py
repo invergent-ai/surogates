@@ -189,6 +189,39 @@ async def test_edit_creates_a_missing_document_and_reads_pictures_for_the_editor
     assert sent["data"]
 
 
+async def test_broken_ops_string_is_read_and_said(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    # As a model server's tool parser passes it on: JSON text, the op's own '}' missing right before the ']'.
+    broken = ('[{"op": "insert", "target": {"end": true}, "content": {"markdown": "# A\\n<?block why?>", '
+              '"blocks": {"why": {"type": "pending", "intent": "Why"}}}]')
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": broken}, **kwargs))
+    assert answer["applied"] is True
+    assert FakeRuntime.calls[-1] == ("edit", [{"op": "insert", "target": {"end": True}, "content": {
+        "markdown": "# A\n<?block why?>", "blocks": {"why": {"type": "pending", "intent": "Why"}}}}])
+    assert len(answer["read_as"]) == 1 and "missing '}'" in answer["read_as"][0]
+    # Ops as sent leave nothing to say.
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": [{"op": "delete"}]}, **kwargs))
+    assert "read_as" not in answer
+
+
+async def test_ops_that_cannot_be_read_open_and_make_nothing(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    answer = json.loads(await office_tools._office_edit({"path": "new.docx", "ops": '[{"op": "delete" "target": {}}]'}, **kwargs))
+    assert "not valid JSON" in answer["error"] and "character 17" in answer["error"]
+    answer = json.loads(await office_tools._office_edit({"path": "new.docx", "ops": [{"op": "rewrite"}]}, **kwargs))
+    assert "insert, replace, delete, move, comment, reply or resolve" in answer["error"]
+    assert FakeRuntime.calls == []
+    assert not await storage.exists("b", session_workspace_key(session.id, "new.docx"))
+
+
+async def test_what_was_read_differently_is_said_when_the_call_fails(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    ops = {"op": "insert", "target": {"end": True}, "content": {"markdown": "<?block p?>", "blocks": {"p": {"type": "image", "path": "gone.png"}}}}
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": ops}, **kwargs))
+    assert answer["error"] == "No picture at gone.png."
+    assert answer["read_as"] == ['"ops" was one op, not a list: read as a list of one.']
+
+
 async def test_a_picture_is_only_ever_read_from_the_workspace(session_factory, storage, redis_client):
     _, kwargs = await _kwargs(session_factory, storage, redis_client)
     ops = [{"op": "insert", "target": {"end": True},
