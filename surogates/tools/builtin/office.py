@@ -44,9 +44,10 @@ MAX_GUIDED_RESULT = 45_000
 _names: dict[str, tuple[float, str]] = {}
 
 READ_DESCRIPTION = (
-    "Read a document in the workspace through your own live editor session: the same one the user may have open in the "
-    "file pane, with everyone's latest edits. Word documents (.docx), spreadsheets (.xlsx), slide decks (.pptx) and "
-    "PDFs (.pdf). Read before every office_edit: what it shows is what office_edit targets.\n"
+    "Read a Word document (.docx), spreadsheet (.xlsx), slide deck (.pptx) or PDF (.pdf) in the workspace through "
+    "your own live editor session: the one the user may have open in the file pane, with everyone's latest edits. Read "
+    "before every office_edit: what it shows is what office_edit targets. Read again to check your edits before you "
+    "answer: once it shows a change, the document has it (a file read any other way can lag the editor).\n"
     'view "outline" (default): a Word document\'s blocks (id, hash, kind, first words; comment threads, tracked '
     "changes; a long one in pages: start=<next>); a spreadsheet's sheets (used range, top rows, merged cells, charts) "
     "and comment threads; a deck's slides (id, number, title, hash) and comment threads; a PDF's pages (first line, "
@@ -55,15 +56,44 @@ READ_DESCRIPTION = (
     'as shown, their formulas and number formats), "slide" (deck; target = a slide id; every shape in canvas px), '
     '"page" (PDF; target = a page number; its text).\n'
     'view "search" (query) finds words: their blocks, cells, slides or pages.\n'
-    "The result says who else has the document open. The office skill has each type's reference."
+    "The result says who else has the document open. Your first office call on each document type also brings that "
+    "type's rules and reference, as guide."
 )
 
 EDIT_DESCRIPTION = (
-    "Edit a document live through your own editor session: the user watches each call's changes appear in the file "
-    "pane under your name, and may be editing too. One piece of work per call (a section, a block of cells, a slide), "
-    "with a short line in the chat between calls. A missing .docx, .xlsx, .pptx or .pdf is created blank and opens in "
-    "the user's pane. While a document is open here, change it only with this tool, never with write_file, patch or "
-    "terminal.\n"
+    "Word documents (.docx), spreadsheets (.xlsx) and slide decks (.pptx), and a PDF's form fields, pages, redactions "
+    "and notes, are made and changed only with office_edit, new ones too: never with a script or a python library "
+    "(python-docx, openpyxl, python-pptx, pypdf), write_file, patch or the terminal: the user can neither watch nor "
+    "edit a document made that way. What office_edit cannot do to a PDF (a new PDF with content; merging, splitting or "
+    "encrypting PDFs) is the pdf skill's work. A missing .docx, .xlsx, .pptx or .pdf is created blank and opens in the "
+    "user's pane, where the user watches each call's changes appear under your name, and may be editing too.\n"
+    "One complete call for each type, to start from. A new Word document's outline, each section a pending block that "
+    'a later call fills (replace, target {"pending": "goals"}):\n'
+    "```json\n"
+    '{"path": "plans/launch.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown": '
+    '"# Launch plan\\n\\n## Goals\\n<?block goals?>\\n\\n## Budget\\n<?block budget?>", "blocks": {"goals": {"type": '
+    '"pending", "intent": "Three goals, each with a date"}, "budget": {"type": "pending", "intent": "Costs by quarter, '
+    'in a table"}}}}]}\n'
+    "```\n"
+    "A spreadsheet's cells and a bold header:\n"
+    "```json\n"
+    '{"path": "data/sales.xlsx", "ops": [{"op": "set", "range": "Sheet1!A1", "values": [["Region", "Q1", "Q2", '
+    '"Total"], ["North", 120, 140, "=B2+C2"]]}, {"op": "format", "range": "Sheet1!A1:D1", "bold": true}]}\n'
+    "```\n"
+    "A new slide:\n"
+    "```json\n"
+    '{"path": "decks/q3.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\'background:#ffffff;'
+    "font-family:Arial;padding:128px;gap:32px'><h1 style='font-size:96px'>Q3 results</h1><p style='font-size:40px'>"
+    'Revenue grew 12%, led by the north</p></section>"}]}]}\n'
+    "```\n"
+    "A PDF form's fields, named as the outline shows them:\n"
+    "```json\n"
+    '{"path": "forms/application.pdf", "ops": [{"op": "fill", "fields": {"full_name": "Ana Silva", "agree": true}}]}\n'
+    "```\n"
+    "About 450 words of body text fill a page: for a length the user asks for, count the words (a Word edit's result "
+    "gives the document's length). Check with office_read before you answer: read the outline again; every fact the "
+    "user gave is in the document; the length is what was asked; then say in one line what was done.\n"
+    "One piece of work per call (a section, a block of cells, a slide), with a short line in the chat between calls. "
     "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
     "result shows it as it is now: the user's edit wins; read again and work from it.\n"
     "Word: insert {target, side: before|after, content}, replace {target, content} (on quoted words, "
@@ -81,11 +111,9 @@ EDIT_DESCRIPTION = (
     "Deck: text {slide, hash, shape, text} changes one shape's text and keeps everything else (its place, style and "
     "placeholder; the slide's notes): use it for a small change, a title, a word, a number (shape ids from view "
     '"slide"). slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole '
-    "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes (the "
-    "office skill's slide reference); order {ids: every slide, in order}; remove {slides: [{id, hash}]}. Before the "
-    "first deck edit of a "
-    "session, read that reference (skill_view name office, file_path references/pptx.md): the format is strict, and a "
-    "refused slide costs a round trip.\n"
+    "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes; order "
+    "{ids: every slide, in order}; remove {slides: [{id, hash}]}. The slide format is strict: your first office call on "
+    "a deck brings its reference.\n"
     "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "
     "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
     "text|checkbox, page, rect: [x1, y1, x2, y2] in points from the page's top-left, name}; redact {text}, alone in "
