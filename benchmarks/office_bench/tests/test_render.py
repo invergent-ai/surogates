@@ -69,6 +69,13 @@ def test_failing_renderer_is_unknown(monkeypatch):
     assert result.pdf is None and "timed out" in result.reason
 
 
+def test_a_renderer_that_cannot_be_parsed_is_unknown(monkeypatch):
+    """A prefix with an unbalanced quote is a reason, not an exception: scoring goes on after the session was spent."""
+    monkeypatch.setenv(RENDER_SHELL_ENV, "sh -c 'unclosed")
+    result = render_pdf(b"x", "pptx")
+    assert result.pdf is None and "OFFICEBENCH_RENDER_SHELL cannot be parsed" in result.reason
+
+
 def test_the_converter_runs_from_its_directory_on_a_parameters_file(monkeypatch, tmp_path):
     """The script the renderer runs: the document in, x2t on a parameters file from x2t's directory, the PDF out."""
     seen = tmp_path / "seen"

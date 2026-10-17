@@ -62,8 +62,12 @@ def render_pdf(document: bytes, file_type: str, timeout: float = TIMEOUT_S) -> R
     prefix = os.environ.get(RENDER_SHELL_ENV, "").strip()
     if not prefix:
         return RenderResult(None, f"{RENDER_SHELL_ENV} is not set: nothing renders the document")
+    try:
+        words = shlex.split(prefix)
+    except ValueError as exc:
+        return RenderResult(None, f"{RENDER_SHELL_ENV} cannot be parsed: {exc}")
     x2t = os.environ.get(X2T_ENV, "").strip() or DEFAULT_X2T
-    argv = shlex.split(prefix) + ["sh", "-c", SCRIPT, "render", x2t, file_type]
+    argv = words + ["sh", "-c", SCRIPT, "render", x2t, file_type]
     try:
         proc = subprocess.run(argv, input=document, capture_output=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
