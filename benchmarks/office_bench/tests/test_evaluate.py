@@ -50,9 +50,44 @@ def test_metrics_from_a_trace():
     assert m["office_errors"] == ['office_edit: "ops" is a non-empty list of ops.']
     assert m["other_tool_errors"] == ["write_file: d.pptx is a slide deck: use office_edit"]
     assert m["skill_views"] == ["office/references/pptx.md"] and m["read_office_skill"]
+    assert m["office_guides"] == []
     assert m["file_tools_on_documents"] and m["file_tools_on_documents"][0].startswith("write_file")
     assert m["turns"] == 1
     assert m["office_events"][0].startswith("office.save_failed")
+
+
+def test_a_guide_an_office_call_delivered_counts_as_reading_the_office_skill():
+    # The harness gives the office skill's rules and the type's reference with the first office call on each type.
+    guide = {"rules": "# Working on documents live with the user", "reference": "# Slide decks (.pptx)"}
+    refused = "ops is not valid JSON: Expecting value at character 1."
+    events = [
+        Event(1, "tool.call", {"name": "office_read", "tool_call_id": "c1", "arguments": {"path": "d.pptx"}}),
+        Event(2, "tool.result", {"name": "office_read", "tool_call_id": "c1",
+                                 "content": json.dumps({"document": "d.pptx", "slides": [], "guide": guide})}),
+        # A call refused for what it says carries it too.
+        Event(3, "tool.call", {"name": "office_edit", "tool_call_id": "c2",
+                               "arguments": json.dumps({"path": "plans/Plan.DOCX", "ops": "[{"})}),
+        Event(4, "tool.result", {"name": "office_edit", "tool_call_id": "c2",
+                                 "content": json.dumps({"error": refused, "guide": guide})}),
+        Event(5, "tool.call", {"name": "office_read", "tool_call_id": "c3", "arguments": {"path": "d.pptx"}}),
+        Event(6, "tool.result", {"name": "office_read", "tool_call_id": "c3",
+                                 "content": json.dumps({"document": "d.pptx", "slides": []})}),
+        # Without its call in the trace, the document it names says the type.
+        Event(7, "tool.result", {"name": "office_read", "content": json.dumps({"document": "b.xlsx", "guide": guide})}),
+    ]
+    m = metrics(events)
+    assert m["office_guides"] == ["pptx", "docx", "xlsx"]
+    assert m["read_office_skill"] and m["skill_views"] == []
+    assert m["office_errors"] == [f"office_edit: {refused}"]
+
+
+def test_neither_a_guide_nor_a_view_is_not_reading_the_office_skill():
+    events = [
+        Event(1, "tool.call", {"name": "skill_view", "arguments": {"name": "pdf"}}),
+        Event(2, "tool.result", {"name": "office_read", "content": json.dumps({"document": "a.xlsx", "sheets": []})}),
+    ]
+    m = metrics(events)
+    assert m["office_guides"] == [] and not m["read_office_skill"]
 
 
 def test_final_message_is_the_last_with_text():
