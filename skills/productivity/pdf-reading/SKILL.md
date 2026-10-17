@@ -1,6 +1,6 @@
 ---
 name: pdf-reading
-description: "Use this skill when read_file is not enough to read a PDF — it failed, timed out, or returned garbled or empty text, or the question is about figures, charts, layout, embedded images, attachments, or form-field values. Covers content inventory, text extraction, page rasterization for visual inspection, embedded image/attachment/table/form-field extraction, and choosing the right reading strategy for different document types (text-heavy, scanned, slide-decks, forms, data-heavy). Do NOT use this skill for PDF creation, form filling, merging, splitting, watermarking, or encryption — use the pdf skill instead."
+description: "Use this skill when read_file is not enough to read a PDF — it failed, timed out, or returned garbled or empty text, or the question is about figures, charts, layout, embedded images, attachments, or form-field values. Covers content inventory, text extraction, page rasterization for visual inspection, embedded image/attachment/table/form-field extraction, and choosing the right reading strategy for different document types (text-heavy, scanned, slide-decks, forms, data-heavy). Do NOT use this skill for PDF creation, merging, splitting, watermarking, or encryption — use the pdf skill instead — nor to fill, annotate, redact or rotate: office_edit where the chat has it, else the pdf-forms skill."
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
@@ -266,8 +266,8 @@ For comprehensive field info (types, options, defaults):
 pdftk form.pdf dump_data_fields
 ```
 
-For anything beyond reading form data — filling forms, creating forms —
-use the `pdf` skill — load it with `skill_view(name="pdf")`.
+To fill a form: office_edit where the chat has it, else the pdf-forms
+skill.
 
 ### Audio, video, and other rare embedded content
 
@@ -309,6 +309,7 @@ even when the font is technically embedded.
 
 ## PDF Form Filling, Creation, Merging, Splitting, and Other Operations
 
-This skill covers **reading and inspection** only. For filling forms,
-creating, merging, splitting, rotating, watermarking, encrypting, or
+This skill covers **reading and inspection** only. To fill, annotate,
+redact or rotate: office_edit where the chat has it, else the pdf-forms
+skill. For creating, merging, splitting, watermarking, encrypting, or
 other PDF manipulation tasks, use the `pdf` skill (`skill_view(name="pdf")`).

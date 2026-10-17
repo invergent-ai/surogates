@@ -77,7 +77,7 @@ def master_refusal(command: str) -> str:
 
 #: The catalog's skills that make a document.  A document written to the
 #: user's request is a thread's work, so a project's master has none of them.
-DOCUMENT_SKILLS = frozenset({"docx", "xlsx", "pptx", "pdf", "doc-coauthoring", "office"})
+DOCUMENT_SKILLS = frozenset({"docx", "xlsx", "pptx", "pdf", "pdf-forms", "doc-coauthoring", "office"})
 
 
 def skills_left_out(config: dict[str, Any] | None) -> frozenset[str]:
