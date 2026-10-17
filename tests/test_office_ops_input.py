@@ -129,6 +129,22 @@ def test_a_redaction_is_never_offered_as_the_nearest():
         assert "redact" in str(refused.value)  # still among the ops it lists
 
 
+def test_a_refusal_says_what_was_read_differently_on_the_way():
+    # The model learns both mistakes: the JSON it broke, and the op it named.
+    with pytest.raises(OpsInputError) as refused:
+        read_ops('[{"op": "rewrite", "target": {"block": "1"}', "docx")
+    assert "insert, replace, delete, move, comment, reply or resolve" in str(refused.value)
+    assert refused.value.read_as == [
+        "\"ops\" was JSON text, not a list: read as the JSON it holds, adding the missing '}]' at the end."
+    ]
+    with pytest.raises(OpsInputError) as refused:
+        read_ops({"type": "pages", "action": "add"}, "docx")
+    assert refused.value.read_as == ['"ops" was one op, not a list: read as a list of one.']
+    with pytest.raises(OpsInputError) as refused:
+        read_ops([{"op": "rewrite"}], "docx")
+    assert refused.value.read_as == []
+
+
 def test_empty_is_refused():
     for empty in ([], "", None):
         with pytest.raises(OpsInputError) as refused:

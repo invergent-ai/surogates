@@ -81,13 +81,26 @@ _AS_TEXT = '"ops" was JSON text, not a list: read as the JSON it holds'
 
 
 class OpsInputError(ValueError):
-    """Why the ops cannot be read: said to the model as the tool's error."""
+    """Why the ops cannot be read: said to the model as the tool's error, beside what was read differently from how it
+    came on the way (``read_as``, empty when nothing was)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.read_as: list[str] = []
 
 
 def read_ops(raw: object, kind: str) -> tuple[list[dict[str, Any]], list[str]]:
     """The ops *raw* means for a document of *kind* (``docx``, ``xlsx``, ``pptx`` or ``pdf``), and what was read
-    differently from how it came (empty when nothing was)."""
+    differently from how it came (empty when nothing was). A refusal carries what was read differently before it."""
     read_as: list[str] = []
+    try:
+        return _read(raw, kind, read_as), read_as
+    except OpsInputError as exc:
+        exc.read_as = read_as
+        raise
+
+
+def _read(raw: object, kind: str, read_as: list[str]) -> list[dict[str, Any]]:
     if isinstance(raw, str):
         if not raw.strip():
             raise OpsInputError(_EMPTY)
@@ -113,7 +126,7 @@ def read_ops(raw: object, kind: str) -> tuple[list[dict[str, Any]], list[str]]:
             said = f' ("type" {_shown(op["type"])} is not a .{kind} op)' if "type" in op else ""
             raise OpsInputError(_unknown(f'op {index} has no "op"{said}', op, op.get("type"), kind))
         ops.append(op)
-    return ops, read_as
+    return ops
 
 
 def close_missing(text: str) -> tuple[str, list[str]] | None:

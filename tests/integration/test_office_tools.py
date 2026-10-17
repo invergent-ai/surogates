@@ -226,6 +226,16 @@ async def test_what_was_read_differently_is_said_when_the_call_fails(session_fac
     assert answer["read_as"] == ['"ops" was one op, not a list: read as a list of one.']
 
 
+async def test_what_was_read_differently_is_said_when_an_op_is_refused(session_factory, storage, redis_client):
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": '[{"op": "rewrite", "target": {"end": true}'}, **kwargs))
+    assert "insert, replace, delete, move, comment, reply or resolve" in answer["error"]
+    assert answer["read_as"] == ["\"ops\" was JSON text, not a list: read as the JSON it holds, adding the missing '}]' at the end."]
+    answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": [{"op": "rewrite"}]}, **kwargs))
+    assert "read_as" not in answer
+    assert FakeRuntime.calls == []
+
+
 async def test_a_picture_is_only_ever_read_from_the_workspace(session_factory, storage, redis_client):
     _, kwargs = await _kwargs(session_factory, storage, redis_client)
     ops = [{"op": "insert", "target": {"end": True},

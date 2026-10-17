@@ -196,7 +196,7 @@ async def _office_edit(arguments: dict[str, Any], **kwargs: Any) -> str:
     def read(kind: str) -> dict[str, Any]:
         nonlocal ops
         ops, read_as = read_ops(arguments.get("ops"), kind)
-        return {"read_as": read_as} if read_as else {}
+        return _read_as(read_as)
 
     async def call(runtime: RuntimeOffice, document: AgentDocument, session: Any) -> dict[str, Any]:
         return await runtime.edit(document.page_id, await _with_pictures(ops, session, kwargs))
@@ -238,7 +238,7 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         try:
             reading = before_open(kind.file_type)
         except OpsInputError as exc:
-            return _error(str(exc))
+            return _error(str(exc), **_read_as(exc.read_as))
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
     try:
@@ -403,6 +403,11 @@ async def _picture(block: dict[str, Any], session: Any, kwargs: dict[str, Any]) 
     shown = int(block.get("width") or width)
     return {"type": "image", "data": base64.b64encode(data).decode(), "mime": mime, "width": shown,
             "height": max(1, round(height * shown / width))}
+
+
+def _read_as(notes: list[str]) -> dict[str, Any]:
+    """What an answer says of the ops read differently from how the model sent them: nothing when nothing was."""
+    return {"read_as": notes} if notes else {}
 
 
 def _error(message: str, **reading: Any) -> str:
