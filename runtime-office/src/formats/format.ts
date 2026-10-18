@@ -22,6 +22,9 @@ export interface Format {
   script: string;
   /** Whether a batch runs inside a group of actions; PDF's editor cannot start one (it wedges). */
   grouped: boolean;
+  /** Whether the editor's modified flag reads false while a change is still unsent: then only a state change after
+   * the send says it reached the document server. */
+  flagLags?: boolean;
   /** The script's scope for a read; a ContentError says what is wrong with it. */
   readScope(body: Record<string, unknown>): Scope;
   /** The batch, checked (and for slides, measured); a ContentError names the op it refuses. */

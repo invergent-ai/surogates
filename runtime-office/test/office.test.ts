@@ -177,6 +177,33 @@ describe("the flush rule", () => {
     expect(await office.flush("p")).toBe(true);
     expect(waitFlushed).not.toHaveBeenCalled();
   });
+
+  it("flushes after an edit once a state change came after its send", async () => {
+    const { office, waitFlushed } = officeAnswering([{ results: [] }], { flushed: [true, true], modified: false });
+    await office.edit("p", ops);
+    expect(await office.flush("p")).toBe(true);
+    expect(waitFlushed).toHaveBeenCalledTimes(2);
+    expect(waitFlushed.mock.calls[1]![0]).toBe(waitFlushed.mock.calls[0]![0]);
+  });
+
+  describe("in a format whose flag reads false until the change is sent", () => {
+    const slide = { slide: { ...word, flagLags: true } };
+
+    it("waits for the state change after the send, never reading the flag", async () => {
+      const { office, waitFlushed, modified } = officeAnswering([{ results: [] }], { kind: "slide", formats: slide, flushed: [true], modified: false });
+      expect((await office.edit("p", ops)).flushed).toBe(true);
+      expect(waitFlushed.mock.calls[0]![1]).toBe(FLUSH_WAIT_MS);
+      expect(modified).not.toHaveBeenCalled();
+    });
+
+    it("says unflushed when none came, and the flush waits for it again", async () => {
+      const { office, waitFlushed, modified } = officeAnswering([{ results: [] }], { kind: "slide", formats: slide, flushed: [false, true], modified: false });
+      expect((await office.edit("p", ops)).flushed).toBe(false);
+      expect(await office.flush("p")).toBe(true);
+      expect(waitFlushed.mock.calls.map(([since, ms]) => [since, ms])).toEqual([[waitFlushed.mock.calls[0]![0], FLUSH_WAIT_MS], [waitFlushed.mock.calls[0]![0], FLUSH_WAIT_MS]]);
+      expect(modified).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("Office edits without a group", () => {

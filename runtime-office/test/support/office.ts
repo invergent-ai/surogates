@@ -3,6 +3,7 @@ import { lookup } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
+import { inflateRawSync } from "node:zlib";
 import { HOST_HTML } from "../../src/host.js";
 import type { Office } from "../../src/office.js";
 
@@ -104,6 +105,40 @@ export async function pair(office: Office, opened: string[], file = "sample.docx
   const user = await office.open({ docKey: key, sessionId: "user", config: editorConfig(key, USER, file), documentServerUrl: IT.dsUrl });
   opened.push(agent, user);
   return { agent, user };
+}
+
+/** Forces a save of the document, as a turn's end does: the text of the file the document server saved (every part of
+ * it, unzipped), or the Command Service's error when it saved none (4: it had nothing unsaved). */
+export async function forceSaved(fixture: Fixture, key: string): Promise<string | number> {
+  const command = { c: "forcesave", key, userdata: newKey() };
+  const response = await fetch(`${IT.dsUrl}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...command, token: sign(command) }),
+  });
+  const { error } = (await response.json()) as { error: number };
+  if (error !== 0) return error;
+  let saved: Record<string, unknown> | undefined;
+  await eventually(async () => {
+    saved = fixture.callbacks.find((callback) => callback.userdata === command.userdata);
+    if (!saved) throw new Error(`the document server sent no save of ${key}`);
+  }, 30_000);
+  return unzipped(Buffer.from(await (await fetch(String(saved!.url))).arrayBuffer()));
+}
+
+// Every part of a zip, one after another: its central directory gives each part's place and size.
+function unzipped(zip: Buffer): string {
+  let end = zip.length - 22;
+  while (end > 0 && zip.readUInt32LE(end) !== 0x06054b50) end--;
+  const parts: string[] = [];
+  for (let at = zip.readUInt32LE(end + 16), n = zip.readUInt16LE(end + 10); n > 0; n--) {
+    const local = zip.readUInt32LE(at + 42);
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const data = zip.subarray(start, start + zip.readUInt32LE(at + 20));
+    parts.push((zip.readUInt16LE(at + 10) === 8 ? inflateRawSync(data) : data).toString("utf8"));
+    at += 46 + zip.readUInt16LE(at + 28) + zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32);
+  }
+  return parts.join("\n");
 }
 
 /** Runs *check* until it passes or *ms* run out: the other editor can still be taking in a change. */
