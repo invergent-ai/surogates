@@ -31,6 +31,8 @@ const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
 const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:(.*)\?>$/;
 // Markdown reads any other <?pending …?>, in any letters, as a tag and writes nothing: the section would be lost unsaid.
 const PENDING_LIKE = /<\?pending/i;
+// It drops any line starting <? the same way, <?php and <?xml too: one that looks meant for a placeholder is refused.
+const PLACEHOLDER_LIKE = /^<\?\s*(?:pending|block)/i;
 const MAX_INTENT = 300;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
@@ -74,6 +76,9 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
     if (PENDING_LIKE.test(trimmed)) throw new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>.");
     const placeholder = PLACEHOLDER.exec(trimmed);
     if (!placeholder) {
+      if (PLACEHOLDER_LIKE.test(trimmed)) {
+        throw new ContentError(`A placeholder is a line of its own, written exactly <?pending key: intent?> or <?block key?>: ${JSON.stringify(trimmed.slice(0, 80))} is neither.`);
+      }
       segment.push(line);
       continue;
     }

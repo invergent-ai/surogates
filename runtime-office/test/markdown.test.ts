@@ -170,6 +170,20 @@ describe("pending blocks, written in the markdown", () => {
     }
   });
 
+  it("refuses a line that is nearly a placeholder, which markdown would drop unsaid, naming both forms", () => {
+    const chart = { type: "chart", rows: [["", "a"], ["x", 1]] };
+    for (const line of ["<? pending k: x?>", "<?BLOCK k?>", "<?Block k?>", "  <? block k ?>", "<?block k?> and more"]) {
+      expect(() => compileContent(`## Risks\n${line}`, { k: chart }), line).toThrow(
+        new ContentError(`A placeholder is a line of its own, written exactly <?pending key: intent?> or <?block key?>: ${JSON.stringify(line.trim())} is neither.`),
+      );
+    }
+  });
+
+  it("writes <?php and <?xml lines as before", () => {
+    expect(compileContent('<?php echo 1; ?>\n\n<?xml version="1.0"?>')).toEqual([]);
+    expect(compileContent('```\n<?php echo 1; ?>\n<?xml version="1.0"?>\n```')).toEqual([{ t: "code", lines: ["<?php echo 1; ?>", '<?xml version="1.0"?>'] }]);
+  });
+
   it("refuses a long run of spaces promptly", () => {
     const started = performance.now();
     expect(() => compileContent(`<?pending k:${" ".repeat(5_000)}x`)).toThrow(/is a line of its own/);
