@@ -1,5 +1,5 @@
-"""What the agent's first office call on each document type in a session carries: the office skill's rules and that
-type's reference, so working by them never waits on the model choosing to open the skill.
+"""What the agent's first office call on each document type in a session carries: the office skill's rules, that
+type's reference and its templates, so working by them never waits on the model choosing to open the skill.
 
 Built-in skills live in the system bundle the API serves, not in the worker: each piece is fetched as the skill stores
 it, through the skill's file route, which stages nothing into the workspace and adds nothing to the text. A type whose
@@ -29,13 +29,16 @@ _unfetchable: dict[str, float] = {}
 
 
 async def guide_for(kind: str, api_client: Any) -> dict[str, str] | None:
-    """The office skill's rules (SKILL.md without its frontmatter) and *kind*'s reference (references/<kind>.md);
-    None, logged, when either cannot be fetched, and for RETRY_AFTER_S after. Never raises: the call it goes with has
-    already done its work."""
+    """The office skill's rules (SKILL.md without its frontmatter), *kind*'s reference (references/<kind>.md) and its
+    templates (templates/<kind>.md; left out for a type the skill has none for, whose file the API does not find);
+    None, logged, when any of them cannot be fetched, and for RETRY_AFTER_S after. Never raises: the call it goes with
+    has already done its work."""
     if api_client is None or _unfetchable.get(kind, 0.0) > monotonic():
         return None
     try:
-        skill, reference = await asyncio.gather(_file(api_client, "SKILL.md"), _file(api_client, f"references/{kind}.md"))
+        skill, reference, templates = await asyncio.gather(
+            _file(api_client, "SKILL.md"), _file(api_client, f"references/{kind}.md"), _templates(api_client, kind),
+        )
     except Exception as exc:
         _unfetchable[kind] = monotonic() + RETRY_AFTER_S
         if isinstance(exc, httpx.HTTPStatusError):
@@ -45,7 +48,20 @@ async def guide_for(kind: str, api_client: Any) -> dict[str, str] | None:
             logger.warning("no office guide for %s for %.0f s", kind, RETRY_AFTER_S, exc_info=True)
         return None
     _unfetchable.pop(kind, None)
-    return {"rules": _FRONTMATTER.sub("", skill, count=1).strip(), "reference": reference.strip()}
+    guide = {"rules": _FRONTMATTER.sub("", skill, count=1).strip(), "reference": reference.strip()}
+    if templates is not None:
+        guide["templates"] = templates.strip()
+    return guide
+
+
+async def _templates(api_client: Any, kind: str) -> str | None:
+    """*kind*'s templates; None for a type the skill has none for."""
+    try:
+        return await _file(api_client, f"templates/{kind}.md")
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return None
+        raise
 
 
 async def _file(api_client: Any, path: str) -> str:

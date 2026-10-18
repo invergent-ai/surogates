@@ -282,10 +282,10 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
 
 
 async def _with_guide(answer: dict[str, Any], kind: str | None, session: Any, kwargs: dict[str, Any]) -> str:
-    """*answer* as JSON, carrying the office skill's rules and *kind*'s reference on the model's first call on that
-    type in the session, done or refused for what it said, which then records the type as given. A guide that would
-    make the result MAX_GUIDED_RESULT long or more is left for the next call. Only a model's call takes it: the
-    worker's own (a mention's acknowledgement) never does."""
+    """*answer* as JSON, carrying the office skill's rules and *kind*'s reference and templates on the model's first
+    call on that type in the session, done or refused for what it said, which then records the type as given. A guide
+    that would make the result MAX_GUIDED_RESULT long or more is left for the next call. Only a model's call takes it:
+    the worker's own (a mention's acknowledgement) never does."""
     text = json.dumps(answer, ensure_ascii=False)
     given = (session.config or {}).get(GUIDES_KEY) or []
     if kind is None or not kwargs.get("tool_call_id") or kind in given or len(text) >= MAX_GUIDED_RESULT:

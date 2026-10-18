@@ -51,11 +51,15 @@ def test_the_office_skill_names_no_skill_its_chats_cannot_open():
 
 
 def test_guides_stay_small():
-    # The first office call on each type carries the skill's rules and that type's reference, whole.
-    rules = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}["office"].content
+    # The first office call on each type carries the skill's rules, that type's reference and its templates, whole.
+    office = SKILLS / "productivity/office"
+    rules = re.sub(r"\A---\n.*?\n---\n", "", (office / "SKILL.md").read_text(), count=1, flags=re.DOTALL).strip()
+    assert rules.startswith("# Working on documents live with the user")
     for kind in ("docx", "xlsx", "pptx", "pdf"):
-        reference = (SKILLS / "productivity/office/references" / f"{kind}.md").read_text()
-        assert len(rules) + len(reference) < 40_000, kind
+        reference = (office / "references" / f"{kind}.md").read_text().strip()
+        templates = office / "templates" / f"{kind}.md"
+        size = len(rules) + len(reference) + (len(templates.read_text().strip()) if templates.exists() else 0)
+        assert size < 40_000, (kind, size)
 
 
 def test_word_templates_state_lengths():

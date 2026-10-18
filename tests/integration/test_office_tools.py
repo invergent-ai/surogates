@@ -340,8 +340,8 @@ OFFICE_SKILL = Path(__file__).parents[2] / "skills/productivity/office"
 
 
 class SkillsAPI:
-    """The API as the worker's client reaches it: the office skill's files as it stores them, one at a time; *failing*,
-    a 404, as the client raises it."""
+    """The API as the worker's client reaches it: the office skill's files as it stores them, one at a time; a file the
+    skill has not, or every file when *failing*, a 404, as the client raises it."""
 
     def __init__(self, *, failing: bool = False) -> None:
         self.failing = failing
@@ -349,7 +349,7 @@ class SkillsAPI:
 
     async def skill_file_bytes(self, name, path):
         self.asked.append((name, path))
-        if self.failing:
+        if self.failing or not (OFFICE_SKILL / path).is_file():
             request = httpx.Request("GET", f"http://api.test/v1/skills/{name}/file")
             raise httpx.HTTPStatusError(f"the skill's file {path} could not be fetched (HTTP 404)", request=request,
                                         response=httpx.Response(404, request=request))
@@ -374,9 +374,33 @@ async def test_first_call_of_a_type_carries_its_guide(session_factory, storage, 
     assert answer["guide"]["reference"].startswith("# office_edit for Word documents")
     assert answer["guide"]["rules"].startswith("# Working on documents live with the user")
     assert "---" not in answer["guide"]["rules"]
+    # A new document starts from its template: the call that makes it brings them.
+    assert "## Meeting minutes" in answer["guide"]["templates"]
     # Through the skill's file route: the whole skill's view stages its files into the workspace.
-    assert sorted(api.asked) == [("office", "SKILL.md"), ("office", "references/docx.md")]
+    assert sorted(api.asked) == [
+        ("office", "SKILL.md"), ("office", "references/docx.md"), ("office", "templates/docx.md"),
+    ]
     assert await _guides(kwargs) == ["docx"]
+
+
+async def test_a_type_without_templates_has_its_guide_without_them(session_factory, storage, redis_client):
+    session, kwargs = await _kwargs(session_factory, storage, redis_client)
+    await storage.write("b", session_workspace_key(session.id, "a.pdf"), b"%PDF")
+    api = SkillsAPI()
+    answer = json.loads(await office_tools._office_read({"path": "a.pdf"}, **_by_the_model(kwargs, api)))
+    assert answer["guide"]["reference"].startswith("#")
+    assert set(answer["guide"]) == {"rules", "reference"}
+    assert ("office", "templates/pdf.md") in api.asked
+    # Given: the next call on the type goes without it.
+    assert await _guides(kwargs) == ["pdf"]
+    assert "guide" not in json.loads(await office_tools._office_read({"path": "a.pdf"}, **_by_the_model(kwargs, api)))
+    assert len(api.asked) == 3
+    # And the type is no less fetchable for it: another chat's first call on a PDF carries its guide.
+    other, other_kwargs = await _kwargs(session_factory, storage, redis_client)
+    await storage.write("b", session_workspace_key(other.id, "a.pdf"), b"%PDF")
+    answer = json.loads(await office_tools._office_read({"path": "a.pdf"}, **_by_the_model(other_kwargs, SkillsAPI())))
+    assert set(answer["guide"]) == {"rules", "reference"}
+    assert await _guides(other_kwargs) == ["pdf"]
 
 
 async def test_second_call_does_not(session_factory, storage, redis_client):
@@ -385,7 +409,7 @@ async def test_second_call_does_not(session_factory, storage, redis_client):
     await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, api))
     answer = json.loads(await office_tools._office_edit({"path": "a.docx", "ops": [{"op": "delete"}]}, **_by_the_model(kwargs, api)))
     assert answer["applied"] is True and "guide" not in answer
-    assert len(api.asked) == 2
+    assert len(api.asked) == 3
     assert await _guides(kwargs) == ["docx"]
 
 
@@ -453,11 +477,12 @@ async def test_a_call_refused_for_what_it_says_carries_the_guide(session_factory
     assert answer["error"] == FakeRuntime.refuses[0]
     assert answer["guide"]["reference"].startswith("# Slide decks (.pptx)")
     assert answer["guide"]["rules"].startswith("# Working on documents live with the user")
+    assert answer["guide"]["templates"].startswith("# Slide templates")
     assert await _guides(kwargs) == ["pptx"]
     # Given once: the next refusal on the type goes without it.
     answer = json.loads(await office_tools._office_edit({"path": "d.pptx", "ops": ops}, **_by_the_model(kwargs, api)))
     assert "error" in answer and "guide" not in answer
-    assert len(api.asked) == 2
+    assert len(api.asked) == 3
 
 
 async def test_ops_that_cannot_be_read_carry_the_guide_beside_what_was_read(session_factory, storage, redis_client):
