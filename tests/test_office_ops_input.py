@@ -48,22 +48,38 @@ def test_extra_closers_at_end():
     # As the benchmark saw it: the list closed, then one '}' too many.
     one = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}]}'
     assert read_ops(one, "docx") == (
-        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra '}' at the end."]
+        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping an extra closing bracket after its end."]
     )
     several = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}]}}\n'
     assert read_ops(several, "docx") == (
-        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra '}}' at the end."]
+        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping 2 extra closing brackets after its end."]
     )
     mixed = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}] ]}\n]'
     assert read_ops(mixed, "docx") == (
-        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra ']}]' at the end."]
+        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping 3 extra closing brackets after its end."]
     )
     # One op whose own closers come one too many is read as that op, as a list of one.
     ops, read_as = read_ops('{"op": "delete", "target": {"block": "1", "hash": "h"}}}', "docx")
     assert ops == [DELETE] and read_as == [
-        "\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra '}' at the end.",
+        "\"ops\" was JSON text, not a list: read as the JSON it holds, dropping an extra closing bracket after its end.",
         '"ops" was one op, not a list: read as a list of one.',
     ]
+
+
+def test_a_long_tail_of_closers_is_counted_not_repeated():
+    tail = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}]' + "}" * 300_000
+    assert read_ops(tail, "docx") == (
+        [DELETE],
+        ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping 300000 extra closing brackets after its end."],
+    )
+
+
+def test_closers_after_an_empty_or_scalar_value_are_refused_without_a_note():
+    for text in ('5]', '{}}', '[]]', '"ops"}', 'true ]', 'null}'):
+        with pytest.raises(OpsInputError) as refused:
+            read_ops(text, "docx")
+        assert str(refused.value).startswith("ops is not valid JSON: Extra data at character"), text
+        assert refused.value.read_as == [], text
 
 
 def test_anything_but_closers_after_the_end_is_refused():

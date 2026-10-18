@@ -182,13 +182,17 @@ def close_missing(text: str) -> tuple[str, list[str]] | None:
     return fixed, added
 
 
-def _extra_closers(text: str, exc: json.JSONDecodeError) -> str | None:
-    """The closers *text* has too many at its end, without the spaces between them: json read one whole value, and only
-    closers and spaces follow it. None when anything else follows, or when *exc* is another failure."""
+def _extra_closers(text: str, exc: json.JSONDecodeError) -> tuple[object, int] | None:
+    """The value *text* holds before closers too many at its end, and how many closers follow it: json read one whole
+    value, a list or an object with something in it, and only closers and spaces follow. None when anything else
+    follows, when the value is empty or not a list or an object, or when *exc* is another failure."""
     if exc.msg != "Extra data":
         return None
     rest = "".join(text[exc.pos:].split())
-    return rest if rest and set(rest) <= set("}]") else None
+    if not rest or not set(rest) <= set("}]"):
+        return None
+    value = json.loads(text[:exc.pos])
+    return (value, len(rest)) if isinstance(value, (list, dict)) and value else None
 
 
 def _parsed(text: str, read_as: list[str]) -> object:
@@ -199,8 +203,10 @@ def _parsed(text: str, read_as: list[str]) -> object:
     except json.JSONDecodeError as exc:
         extra = _extra_closers(text, exc)
         if extra is not None:
-            read_as.append(f"{_AS_TEXT}, dropping the extra '{extra}' at the end.")
-            return json.loads(text[:exc.pos])
+            value, count = extra
+            closers = "an extra closing bracket" if count == 1 else f"{count} extra closing brackets"
+            read_as.append(f"{_AS_TEXT}, dropping {closers} after its end.")
+            return value
         closed = close_missing(text)
         if closed is None:
             before = text[max(0, exc.pos - 40):exc.pos]
