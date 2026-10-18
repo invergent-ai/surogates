@@ -83,8 +83,8 @@ def bisect(good: int, bad: int) -> int | None:
 async def ramp(step: StepRunner, *, sizes: Iterable[int] | None = None) -> list[StepResult]:
     """Run *step* at each of *sizes*, by default :func:`steps`, until one fails; then bisect to the knee.
 
-    A step that fails on the load clients alone, or that they have no room for, ends the ramp: its result is a lower
-    bound. A step the tool spoilt ends it too: it says nothing of the document server.
+    A step that fails on the load clients alone, or that they ran out of room for before anything else broke, ends
+    the ramp: its result is a lower bound. A step the tool spoilt ends it too: it says nothing of the document server.
     """
     results: list[StepResult] = []
     good: int | None = None
@@ -165,7 +165,10 @@ async def run_step(n: int, workload: Workload, fleet: Fleet, settings: Settings,
     hold_from = wall0 + last
     verdict = judge(log.events, hold_from)
     if full is not None and not verdict.invalid:
-        verdict = replace(verdict, holds=False, broken=[f"fleet: {full}", *verdict.broken], client_limited=True)
+        if verdict.holds or verdict.client_limited:  # the step never had its n sessions: a lower bound
+            verdict = replace(verdict, holds=False, broken=[f"fleet: {full}", *verdict.broken], client_limited=True)
+        else:  # the document server broke the bar before the fleet ran out: still a failing step
+            verdict = replace(verdict, broken=[*verdict.broken, f"fleet: {full}"])
     result = StepResult(n, workload, verdict, started, hold_from, time.time(), sum(fleet.leaked), out)
     result.write()
     return result

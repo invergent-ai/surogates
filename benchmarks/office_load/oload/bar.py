@@ -46,9 +46,9 @@ class Verdict:
 def judge(events: Iterable[Event], hold_from: float) -> Verdict:
     """The bar applied to *events* of one step whose hold period began at *hold_from*, a time.time().
 
-    A callback that did not come within the harness's wait counts in the callback times as longer than any; every
-    other failure breaks its row. A failure of the load clients' own (cause ``client``) breaks the bar too, but when
-    nothing else does the step is client-limited.
+    A callback that did not come within the harness's wait is a lost save, and counts in the callback times as longer
+    than any; every other failure breaks its row. A failure of the load clients' own (cause ``client``) breaks the bar
+    too, but when nothing else does the step is client-limited.
     """
     events = list(events)
     held = [e for e in events if e.at >= hold_from or e.what == "open"]
@@ -83,9 +83,8 @@ def _broken(events: list[Event]) -> list[str]:
         broken.append(f"{OPEN}: p95 {_percentile(opened, 95):.2f} s, over {OPEN_P95_MAX_S:g} s")
     failed: dict[str, list[Event]] = {}
     for event in events:
-        row = None if event.ok else _row(event)
-        if row is not None:
-            failed.setdefault(row, []).append(event)
+        if not event.ok:
+            failed.setdefault(_row(event), []).append(event)
     for row in (LOST, FORCESAVE, FLUSH, OPEN, EDITOR):
         if row in failed:
             causes = Counter(f"{e.what} {e.cause}" for e in failed[row])
@@ -95,12 +94,10 @@ def _broken(events: list[Event]) -> list[str]:
     return broken
 
 
-def _row(event: Event) -> str | None:
-    """The row a failed *event* breaks; None for a callback that came too late, which the callback times count."""
-    if event.cause == "lost" or event.what == "marker":
-        return LOST
-    if event.what == "callback":  # the save failed, or its file could not be fetched: it did not land
-        return None if event.cause == "timeout" else LOST
+def _row(event: Event) -> str:
+    """The row a failed *event* breaks."""
+    if event.cause == "lost" or event.what in ("marker", "callback"):
+        return LOST  # a callback that failed, or never came: the turn's save did not land
     return {"forcesave": FORCESAVE, "flush": FLUSH, "open": OPEN}.get(event.what, EDITOR)
 
 

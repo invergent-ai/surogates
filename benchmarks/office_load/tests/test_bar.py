@@ -72,13 +72,18 @@ def test_callback_p99_is_at_most_30_s(p99: float, broken: list[str]) -> None:
     assert rows(timed("callback", [2.0] * 98 + [p99] * 2)) == broken
 
 
-@pytest.mark.parametrize(("late", "broken"), [(1, []), (2, ["callback"])])
-def test_a_callback_that_never_came_counts_past_the_wait(late: int, broken: list[str]) -> None:
-    """The harness waits 30 s: one in a hundred may come later, so it is no lost save, but its p99 counts it."""
-    events = timed("callback", [2.0] * (100 - late)) + [ev("callback", 31.0, ok=False, cause="timeout")] * late
+def test_a_callback_that_never_came_is_a_lost_save() -> None:
+    """The turn's forcesave brought no callback holding its edit within the harness's wait."""
+    events = timed("callback", [2.0] * 199) + [ev("callback", 31.0, ok=False, cause="timeout")]
     verdict = judge(events, HOLD)
-    assert rows(events) == broken
-    assert verdict.stats["callback"]["max"] == math.inf
+    assert not verdict.holds and not verdict.client_limited
+    assert rows(events) == ["lost saves"]  # one in 200: the callback p99 alone would pass it
+    assert verdict.stats["callback"]["max"] == math.inf  # counted in the callback times, as longer than any
+
+
+def test_callbacks_that_never_came_count_in_the_callback_times_too() -> None:
+    events = timed("callback", [2.0] * 98) + [ev("callback", 31.0, ok=False, cause="timeout")] * 2
+    assert rows(events) == ["callback", "lost saves"]
 
 
 # Flush: always acknowledged within 10 s.

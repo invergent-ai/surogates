@@ -244,6 +244,21 @@ async def test_fleet_full_in_a_session_stops_the_step_at_a_lower_bound(sessions:
     assert all(s.closed is not None for s in sessions.made) and the_fleet.placed == (0, 0)
 
 
+async def test_fleet_full_after_the_server_broke_the_bar_is_still_a_failing_step(sessions: type[FakeSession],
+                                                                                  tmp_path: Path) -> None:
+    async def lose_a_save_then_full(session: FakeSession) -> None:
+        if session.index == 2:
+            await asyncio.sleep(0.1)  # into the hold
+            session.event("marker", ok=False, cause="lost")
+            raise FleetFull("no load client has room for 1 more page(s)")
+
+    sessions.behave = lose_a_save_then_full
+    done = await step(3, tmp_path, fleet(), ramp_s=0.2, hold_s=30)
+    assert not done.holds and not done.lower_bound and not done.verdict.client_limited
+    assert done.verdict.broken[0].startswith("lost saves")  # the finding comes first
+    assert done.verdict.broken[-1].startswith("fleet: no load client has room")
+
+
 async def test_leaked_slots_are_reported_and_the_next_step_still_runs(sessions: type[FakeSession],
                                                                       tmp_path: Path) -> None:
     async def leak(session: FakeSession) -> None:
