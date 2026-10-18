@@ -132,8 +132,9 @@ def metrics(events: list[Event], made: str | None = None) -> dict[str, Any]:
                 office_errors.append(f"{name}: {content[:300]}")
     if made:
         created.add(doc_path(made).lower())
-    # The first office_edit call on a document the session made is the one that made it: were its type's templates
-    # opened before it? None when no document of a type with templates was made.
+    # Were the made document's type's templates opened before its first edit, the first office_edit call on its path?
+    # That is the first attempt to make it, which the editor may have refused; None when no document of a type with
+    # templates was made.
     making = next(((at, path) for at, path in edits if path in created), None)
     made_kind = _document_kind(making[1]) if making else "?"
     template_before_create = (

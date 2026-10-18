@@ -31,7 +31,7 @@ def _row(text: str, starts: str) -> list[str]:
     return [cell.strip() for cell in line.strip("|").split("|")]
 
 
-def test_the_report_says_whether_templates_reached_the_model_before_it_made_the_document():
+def test_the_report_says_whether_templates_reached_the_model_before_its_first_edit_on_the_document():
     old = _made("docx-old", templates=True, viewed_first=True)
     # Scored before these were counted: its checks.json has neither.
     del old["metrics"]["office_guides_with_templates"], old["metrics"]["template_viewed_before_create"]
@@ -42,10 +42,10 @@ def test_the_report_says_whether_templates_reached_the_model_before_it_made_the_
     ])
     header = _row(text, "Task |")
     at = header.index("Guides with templates")
-    assert header[at + 1] == "Template opened before making"
+    assert header[at + 1] == "Template opened before first edit"
     assert _row(text, "`docx-a`")[at:at + 2] == ["1/1", "yes"]
     assert _row(text, "`docx-b`")[at:at + 2] == ["0/1", "no"]
     assert _row(text, "`docx-old`")[at:at + 2] == ["-", "-"]
     assert "- guides on a Word document, spreadsheet or deck that carried their templates: 1/2" in text
-    assert ("- documents made after their type's template was opened (skill_view of office templates/<kind>.md "
-            "before the first office_edit on them): 1/2") in text
+    assert ("- documents made whose type's template was opened before their first edit (skill_view of office "
+            "templates/<kind>.md before the first office_edit on them): 1/2") in text

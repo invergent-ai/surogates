@@ -57,7 +57,8 @@ def test_metrics_from_a_trace():
 
 
 def test_a_guide_an_office_call_delivered_counts_as_reading_the_office_skill():
-    # The harness gives the office skill's rules and the type's reference with the first office call on each type.
+    # The harness gives the office skill's rules, the type's reference and its templates (a PDF has none) with the
+    # first office call on each type.
     guide = {"rules": "# Working on documents live with the user", "reference": "# Slide decks (.pptx)"}
     refused = "ops is not valid JSON: Expecting value at character 1."
     events = [

@@ -17,8 +17,8 @@ def _pct(a: int, b: int) -> str:
 
 def _templates(m: dict[str, Any]) -> tuple[int, int, bool | None]:
     """Of a rollout's guides on a type with templates, how many carried them, and how many there were; and whether the
-    type's templates were opened before the document the session made (None: it made none of such a type). A rollout
-    scored before these were counted has neither."""
+    type's templates were opened before the first edit on the document the session made (None: it made none of such a
+    type). A rollout scored before these were counted has neither."""
     if "office_guides_with_templates" not in m:
         return 0, 0, None
     guides = [kind for kind in m.get("office_guides", []) if kind in TEMPLATE_KINDS]
@@ -67,12 +67,12 @@ def render(results: list[dict[str, Any]], run_id: str = "", invalid: list[tuple[
         " (each waits out the sandbox's readiness timeout; office tools do not need the sandbox)",
         f"- 'office service full' results (runtime-office page pool): {sum(r['metrics'].get('office_busy', 0) for r in results)}",
         f"- guides on a Word document, spreadsheet or deck that carried their templates: {carried}/{guides}",
-        f"- documents made after their type's template was opened (skill_view of office templates/<kind>.md before the "
-        f"first office_edit on them): {sum(opened)}/{len(opened)}",
+        f"- documents made whose type's template was opened before their first edit (skill_view of office "
+        f"templates/<kind>.md before the first office_edit on them): {sum(opened)}/{len(opened)}",
         "",
         "## Rollouts",
         "",
-        "| Task | Checks | Status | Wall s | Model calls | Tool calls | office_edit refused / errors | File/terminal calls | Office skill read | Guides with templates | Template opened before making | Claim vs checks |",
+        "| Task | Checks | Status | Wall s | Model calls | Tool calls | office_edit refused / errors | File/terminal calls | Office skill read | Guides with templates | Template opened before first edit | Claim vs checks |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r, (with_templates, of, before) in zip(results, templates):
