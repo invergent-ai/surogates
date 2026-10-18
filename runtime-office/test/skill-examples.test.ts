@@ -6,7 +6,7 @@ import { compilePdfOps } from "../src/formats/pdf.js";
 import { checkSlideOps } from "../src/formats/slide.js";
 import type { Block } from "../src/markdown.js";
 import { compileOps } from "../src/ops.js";
-import { Measurer, type Canvas } from "../src/slides/measure.js";
+import { Measurer, type Canvas, type Para, type ShapeSpec } from "../src/slides/measure.js";
 import { chromiumThere, measuringPage, systemFonts } from "./support/chromium.js";
 
 // The office skill's references teach the agent these ops, and its templates are calls the agent sends as they are:
@@ -125,18 +125,22 @@ describe("the office_edit description's Word call", () => {
   });
 });
 
-describe.skipIf(!chromiumThere)("the slide reference's example slides", () => {
-  let close: () => Promise<void>;
+// A measurer on a Chromium page of its own, opened before the describe it is called in and closed after it.
+function measuring(): () => Measurer {
+  let opened: Awaited<ReturnType<typeof measuringPage>>;
   let measurer: Measurer;
   beforeAll(async () => {
-    const opened = await measuringPage();
-    close = opened.close;
+    opened = await measuringPage();
     measurer = new Measurer(async () => opened.page, systemFonts);
   });
   afterAll(async () => {
-    await close();
+    await opened.close();
   });
+  return () => measurer;
+}
 
+describe.skipIf(!chromiumThere)("the slide reference's example slides", () => {
+  const measurer = measuring();
   const slides = callsOf(reference("pptx.md")).flat().filter((op) => op.op === "slides").flatMap((op) => asTheWorkerSendsIt(op).slides as Raw[]);
 
   it("are found", () => {
@@ -144,13 +148,13 @@ describe.skipIf(!chromiumThere)("the slide reference's example slides", () => {
   });
 
   it.each(slides.map((slide, index) => [index, slide.html as string]))("slide %i measures", async (_index, html) => {
-    await expect(measurer.measure(html, { width: 1920, height: 1080, emuPerPx: 6350 }, {} as EditorPage)).resolves.toBeTruthy();
+    await expect(measurer().measure(html, { width: 1920, height: 1080, emuPerPx: 6350 }, {} as EditorPage)).resolves.toBeTruthy();
   });
 
   it("show a magic move: the second slide arrives by it, and both pin the element that moves by one id", async () => {
     const at = slides.findIndex((slide) => /^<section data-transition="magic"/.test(String(slide.html))) - 1;
     expect(at).toBeGreaterThanOrEqual(0);
-    const measure = (slide: Raw | undefined) => measurer.measure(String(slide?.html), { width: 1920, height: 1080, emuPerPx: 6350 }, {} as EditorPage);
+    const measure = (slide: Raw | undefined) => measurer().measure(String(slide?.html), { width: 1920, height: 1080, emuPerPx: 6350 }, {} as EditorPage);
     const first = await measure(slides[at]), second = await measure(slides[at + 1]);
     expect(first.transition).toBeNull();
     expect(second.transition?.effect).toBe("magic");
@@ -165,26 +169,33 @@ const CANVASES: [string, Canvas][] = [
   ["16:9", { width: 1920, height: 1080, emuPerPx: 12192000 / 1920 }],
   ["4:3", { width: 1920, height: 1440, emuPerPx: 9144000 / 1920 }],
 ];
+// The templates' type scale, in px.
+const SCALE = [128, 64, 44, 32, 24];
+
+// Each run's size in px, from the points the measurer gives it on *canvas*.
+function runSizes(shapes: ShapeSpec[], canvas: Canvas): number[] {
+  const paras = (shape: ShapeSpec): Para[] => {
+    if (shape.kind === "group") return shape.children.flatMap(paras);
+    if (shape.kind === "shape") return shape.text?.paras ?? [];
+    if (shape.kind === "table") return shape.rows.flatMap((row) => row.cells.flatMap((cell) => cell.paras));
+    return [];
+  };
+  const ptPerPx = canvas.emuPerPx / 12700;
+  return shapes.flatMap(paras).flatMap((para) => para.runs.map((run) => Math.round(run.size / ptPerPx)));
+}
 
 describe.skipIf(!chromiumThere)("the slide templates' slides", () => {
-  let close: () => Promise<void>;
-  let measurer: Measurer;
-  beforeAll(async () => {
-    const opened = await measuringPage();
-    close = opened.close;
-    measurer = new Measurer(async () => opened.page, systemFonts);
-  });
-  afterAll(async () => {
-    await close();
-  });
-
+  const measurer = measuring();
   const slides = callsOf(template("pptx.md")).flat().flatMap((op) => op.slides as Raw[]);
   const cases = CANVASES.flatMap(([shape, canvas]) => slides.map((slide, index) => [index, shape, canvas, String(slide.html)] as const));
 
-  // Measured: nothing overflows or reaches past the edge, no text reads under 3:1, and no CSS is taken that the slide
-  // does not keep.
-  it.each(cases)("slide %i measures on a %s deck, with every style kept", async (_index, _shape, canvas, html) => {
-    const spec = await measurer.measure(html, canvas, {} as EditorPage);
+  // Measured: nothing overflows or reaches past the edge, no text reads under 3:1, no CSS is taken that the slide does
+  // not keep, and every run is set in a size of the scale (a tag's own size drifting, or a stray font-size, shows here).
+  it.each(cases)("slide %i measures on a %s deck, every style kept and every size of the scale", async (_index, _shape, canvas, html) => {
+    const spec = await measurer().measure(html, canvas, {} as EditorPage);
     expect(spec.ignored).toEqual([]);
+    const sizes = runSizes(spec.shapes, canvas);
+    expect(sizes.length).toBeGreaterThan(0);
+    expect(sizes.filter((px) => !SCALE.includes(px))).toEqual([]);
   });
 });
