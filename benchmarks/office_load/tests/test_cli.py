@@ -188,6 +188,11 @@ def tool_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
         raise ProbeFailed("no cluster here")
 
     monkeypatch.setattr(cli, "Sampler", functools.partial(Sampler, run=no_cluster))
+
+    async def settled(namespace: str) -> tuple[bool, float]:
+        return True, 0.0
+
+    monkeypatch.setattr(cli, "settle", settled)
     return base
 
 

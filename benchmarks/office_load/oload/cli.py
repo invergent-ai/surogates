@@ -26,7 +26,7 @@ from aiohttp import web
 from oload.clients import OPEN_TIMEOUT_S, Fleet, NoClients, RuntimeOffice, Timed
 from oload.docserver import CallbackState, make_app
 from oload.events import Event, EventLog
-from oload.metrics import IDENTIFIER, Postgres, Sampler
+from oload.metrics import IDENTIFIER, Postgres, Sampler, settle
 from oload.pace import WORKLOADS, Pace, Workload
 from oload.ramp import HOLD_S, RAMP_S, StepResult, StepRunner, ramp, run_step, step_dir
 from oload.report import render
@@ -211,6 +211,9 @@ def _sampled_step(workload: Workload, fleet: Fleet, settings: Settings, state: C
     """The step the ramp runs: :func:`run_step`, with the office namespace's metrics sampled through it."""
 
     async def step(n: int) -> StepResult:
+        settled, waited = await settle(settings.namespace)
+        print(f"step {n}: the conversion queues {'settled' if settled else 'did NOT settle'} after {waited:.0f} s",
+              flush=True)
         print(f"step {n}: {n} {workload} session(s)", flush=True)
         async with Sampler(settings.namespace, out_dir=step_dir(run_dir, n), postgres=postgres):
             result = await run_step(n, workload, fleet, settings, state, run_id=run_id, run_dir=run_dir,

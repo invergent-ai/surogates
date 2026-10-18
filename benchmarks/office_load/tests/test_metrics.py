@@ -16,6 +16,7 @@ from oload.metrics import (
     Postgres,
     ProbeFailed,
     Sampler,
+    settle,
     cpu_millicores,
     error_lines,
     memory_mib,
@@ -214,3 +215,39 @@ async def test_run_command_kills_a_call_past_its_timeout() -> None:
     with pytest.raises(ProbeFailed, match=r"0\.2 s"):
         await run_command([sys.executable, "-c", "import time; time.sleep(30)"], 0.2)
     assert time.monotonic() - started < 5
+
+
+def _settle_run(depths_by_call):
+    """A kubectl stand-in: pod listings answer the RabbitMQ pod; queue listings answer the next depths."""
+    calls = iter(depths_by_call)
+
+    async def run(argv, timeout_s):
+        if "get" in argv:
+            return "pod/office-rabbitmq-0\n"
+        depth = next(calls)
+        return f"ds.converttask6\t{depth}\nds.convertresponse\t0\n"
+    return run
+
+
+async def test_settle_waits_for_the_queues_to_stay_empty():
+    now = [0.0]
+
+    async def sleep(s):
+        now[0] += s
+
+    settled, waited = await settle("ns", quiet_s=30, max_s=600, every_s=10, run=_settle_run([3, 0, 2, 0, 0, 0, 0]),
+                                           clock=lambda: now[0], sleep=sleep)
+    assert settled is True
+    assert waited == 60  # empty from t=30, quiet through t=60; the 2 at t=20 restarted the quiet window
+
+
+async def test_settle_gives_up_after_its_limit():
+    now = [0.0]
+
+    async def sleep(s):
+        now[0] += s
+
+    settled, waited = await settle("ns", quiet_s=30, max_s=50, every_s=10, run=_settle_run([5] * 20),
+                                           clock=lambda: now[0], sleep=sleep)
+    assert settled is False
+    assert waited >= 50

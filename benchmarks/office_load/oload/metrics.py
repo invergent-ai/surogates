@@ -251,3 +251,39 @@ class Sampler:
                          f"labelled {pg.selector}")
         answer = await self._kubectl(pg.namespace, "exec", pod, "-c", "postgres", "--", "psql", "-tAc", pg.query)
         return int(answer.strip())
+
+
+SETTLE_QUIET_S = 30.0  # the document server assembles a closed document's last save some seconds after it closes
+SETTLE_MAX_S = 600.0
+CONVERSION_QUEUES = ("ds.converttask6", "ds.convertresponse")
+
+
+async def settle(namespace: str, *, quiet_s: float = SETTLE_QUIET_S, max_s: float = SETTLE_MAX_S,
+                 every_s: float = 5.0, kubectl: str = "kubectl", run: Runner = run_command,
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> tuple[bool, float]:
+    """Waits until the conversion queues have stayed empty for *quiet_s*, so that a step does not start on the
+    last one's leftover saves; gives up after *max_s*. Returns whether it settled and the seconds it waited. A
+    queue that cannot be read counts as not empty."""
+    selector, container = RABBITMQ
+    started = clock()
+    empty_since: float | None = None
+    while True:
+        try:
+            listing = await run([kubectl, "-n", namespace, "get", "pods", "-l", selector, "-o", "name"], PROBE_TIMEOUT_S)
+            pod = _first_pod(listing, f"labelled {selector}")
+            depths = parse_queues(await run([kubectl, "-n", namespace, "exec", pod, "-c", container, "--",
+                                             "rabbitmqctl", "-q", "list_queues", "name", "messages"], PROBE_TIMEOUT_S))
+            empty = all(depths.get(name, 0) == 0 for name in CONVERSION_QUEUES)
+        except Exception:  # noqa: BLE001 - an unreadable queue is a queue not known to be empty
+            empty = False
+        now = clock()
+        if not empty:
+            empty_since = None
+        elif empty_since is None:
+            empty_since = now
+        if empty_since is not None and now - empty_since >= quiet_s:
+            return True, now - started
+        if now - started >= max_s:
+            return False, now - started
+        await sleep(every_s)
