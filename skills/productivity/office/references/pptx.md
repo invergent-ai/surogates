@@ -60,7 +60,7 @@ shape without a text box has no text to change: rebuild its slide with `slides`.
 
 The new notes take the place of the old, each line a paragraph; an empty `text` clears them. The slide's shapes stay
 exactly as they are, and `text` ops on the same slide go in the same call, each with the hash you read. A slide you
-rebuild with `slides` takes its notes from its HTML's `<aside>` instead: `notes` on it in the same call is refused.
+rebuild with `slides` takes new notes from its HTML's `<aside>` instead: `notes` on it in the same call is refused.
 
 ## The format
 
