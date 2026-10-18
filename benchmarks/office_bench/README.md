@@ -79,8 +79,8 @@ made it wrong.
 
 | File | Responsibility |
 | --- | --- |
-| `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, answers to questions, SSE. HTTP only |
-| `obench/runner.py` | One task to one rollout: create, upload, send, stream (answering questions), wait for the save, collect |
+| `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, answers, SSE. HTTP only |
+| `obench/runner.py` | One task to one rollout: create, upload, send, stream and answer, wait for the save, collect |
 | `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, comments, shapes, fields) |
 | `obench/formula.py` | Small spreadsheet formula evaluator, so checks know what a formula computes |
 | `obench/render.py` | Render a deck with the document server's converter; measure text overflow on the PDF |
@@ -90,9 +90,9 @@ made it wrong.
 | `obench/report.py` | Per-rollout table, questions to the user, failed checks, totals by kind and mode |
 | `obench/cli.py` | `list` / `run` / `check` / `invalidate` / `report` |
 
-Each run writes `runs/<run_id>/<task_id>/r<k>/`: `events.jsonl` (every session event), `meta.json` (session,
-uploads, save wait, collected files, the questions the session asked its user), `documents/` (what was downloaded), `render/` (a deck's PDF from the document
-server's converter), `checks.json`, `trajectory.md`.
+Each run writes `runs/<run_id>/<task_id>/r<k>/`: `events.jsonl` (every session event), `meta.json` (session, uploads,
+save wait, collected files, the questions the session asked its user), `documents/` (what was downloaded), `render/` (a
+deck's PDF from the document server's converter), `checks.json`, `trajectory.md`.
 `runs/` and `.env` are git-ignored (`.gitignore`). Results worth keeping are recorded in [RESULTS.md](RESULTS.md).
 
 A check returns **pass**, **fail** or **unknown** (`None`): unknown is reported, never counted. It is used where the

@@ -1,14 +1,14 @@
 # Spreadsheet templates: a new workbook's first call
 
-Start a new workbook from the template of its kind, in one call: it renames the new workbook's one sheet, Sheet1, then
-writes the headers, the rows and the totals, and sets the number formats and column widths. When no kind fits (a plain
-table, a sheet per month), build from the closest one's parts, in the same header style, formats and formula totals.
-Before you send it, put in the user's path and the user's rows in place of the sample rows. The samples are for a user
-who gave no rows: send them for the user to replace, and say in the chat that they are samples. A row or column the user
-asked for but did not detail (an event's usual costs) is drafted from common practice as a proposal, its figures left
-empty. Any other specific the user did not give (a name, an address, an invoice number, a date, payment terms) stays
-empty, never made up. Ask only when the sheet cannot be made without the answer; say in the chat what you drafted, for
-them to check, and what was missing.
+Start a new workbook from the template of its kind, in one call: it renames Sheet1, then writes the headers, the rows
+and the totals, and sets the number formats and column widths. When no kind fits (a plain table, a sheet per month),
+build from the closest one's parts, in the same header style, formats and formula totals. Put in the user's path and the
+user's rows in place of the sample rows. The samples go in only for a user who gave no rows, and only where they fit the
+request (each kind says what they are): say in the chat that they are samples. Rows the user asked for but did not
+detail, and a request the samples do not fit, are drafted from common practice as a proposal: the usual rows, with the
+figures, owners and dates left empty. Any other specific the user did not give (a name, an address, an invoice number, a
+date, payment terms) stays empty, never made up. Ask only when the sheet cannot be made without the answer; say in the
+chat what you drafted, for them to check, and what was missing.
 
 Totals stay formulas: never type a number the sheet can work out, even one you worked out yourself. A list longer or
 shorter than the sample ends at another row: every range over it (each SUM and COUNTIF, the formats, the chart's)
@@ -18,7 +18,7 @@ in place of `$`: `€#,##0.00` for euros.
 ## Budget
 
 For money in and out: a household's month, an event, a project. For a budget to spend, its income is the money
-available: the allocation, a grant.
+available: the allocation, a grant. The samples are a household's month.
 
 ```json
 {"path": "budgets/monthly-budget.xlsx", "ops": [
@@ -48,7 +48,7 @@ F, and the chart's range. With n incomes, the SUM in B2 and the format over B en
 
 ## Invoice
 
-For a bill to one client: what was sold, the tax and the total due.
+For a bill to one client: what was sold, the tax and the total due. The samples are web design work.
 
 ```json
 {"path": "invoices/inv-0042.xlsx", "ops": [
@@ -76,16 +76,16 @@ For a bill to one client: what was sold, the tax and the total due.
 ]}
 ```
 
-Write the user's seller, client, invoice number and date into B3:B6; a cell the user gave nothing for stays empty,
-never made up. The due date in B7 and the payment line in A12 are filled only from the terms the user gave (their
-days in B7's formula, their words in A12), else both stay empty; with no date in B6, B7 stays empty too. Then the
-items from row 15 (the samples only when the user gave none), one per row, each Amount its row's Quantity times Unit
-price. With n items they end at row 14+n: so do the SUM in D9 and the format over C and D. Subtotal, Tax and Total due
-stay formulas; the tax rate is C10 (0% for none).
+Write the user's seller, client, invoice number and date into B3:B6; a cell the user gave nothing for stays empty, never
+made up. The due date in B7 and the payment line in A12 are filled only from the terms the user gave (their days in B7's
+formula, their words in A12), else both stay empty; with no date in B6, B7 stays empty too. Then the items from row 15,
+one per row, each Amount its row's Quantity times Unit price. With n items they end at row 14+n: so do the SUM in D9 and
+the format over C and D. Subtotal, Tax and Total due stay formulas; the tax rate is C10 (0% for none).
 
 ## Tracker
 
-For tasks with an owner, a due date and a status: a project plan, a to-do list, a launch.
+For tasks with an owner, a due date and a status: a project plan, a to-do list, a launch. The samples are a website
+launch.
 
 ```json
 {"path": "plans/website-tracker.xlsx", "ops": [

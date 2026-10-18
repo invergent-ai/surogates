@@ -67,19 +67,21 @@ class FakeHarness:
 
 class AskingHarness(FakeHarness):
     """A session whose model asks its user *asks* times before it edits the target and answers; each question parks the
-    session (its stream ends, its status stays active) until it is answered."""
+    session (its stream ends, its status stays active) until it is answered. *repeat*: each ask's input request comes
+    twice, as when a recovered worker runs the same call again."""
 
-    def __init__(self, edits: dict[str, bytes], asks: int, input_required: dict | None = None):
+    def __init__(self, edits: dict[str, bytes], asks: int, input_required: dict | None = None, repeat: bool = False):
         super().__init__(edits, status="active")
         self.answers: list[tuple[str, list[dict]]] = []
         timeline = [("user.message", {"content": "x"})]
         for n in range(1, asks + 1):
             question = {"prompt": f"What should slide {n} show?", "allow_other": True}
+            request = ("inbox.input_required", input_required or {"tool_call_id": f"ask-{n}", "questions": [question],
+                                                                  "context": "", "message": ""})
             timeline += [
                 ("tool.call", {"name": "ask_user_question", "tool_call_id": f"ask-{n}",
                                "arguments": {"questions": [question]}}),
-                ("inbox.input_required", input_required or {"tool_call_id": f"ask-{n}", "questions": [question],
-                                                            "context": "", "message": ""}),
+                *([request] * (2 if repeat else 1)),
                 ("tool.result", {"name": "ask_user_question", "tool_call_id": f"ask-{n}", "content": "{}"}),
             ]
         timeline += [
@@ -242,3 +244,11 @@ async def test_a_refused_answer_ends_the_rollout_as_waiting_on_the_user(tmp_path
     r = await run_task(fake, by_id()["pptx-onboarding"], str(tmp_path), wall_clock_cap_s=600)
     assert r.terminal_status == "waiting_on_user" and r.error is None
     assert r.asks[0]["answered"] is False and "HTTP 404" in r.asks[0]["why"]
+
+
+async def test_the_same_call_asking_twice_is_answered_and_counted_once(tmp_path):
+    fake = AskingHarness({"support-onboarding.pptx": b"PK-deck"}, asks=2, repeat=True)
+    r = await run_task(fake, by_id()["pptx-onboarding"], str(tmp_path), wall_clock_cap_s=30)
+    assert [call for call, _ in fake.answers] == ["ask-1", "ask-2"]
+    assert [a["tool_call_id"] for a in r.asks] == ["ask-1", "ask-2"]
+    assert r.terminal_status == "completed"

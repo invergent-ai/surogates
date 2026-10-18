@@ -16,10 +16,11 @@ characters (two lines); only the Statement's sentence runs longer. The `<aside>`
 say, in a sentence or two.
 
 The line under each call says the most its slide holds. More does not shrink: it runs into the margin or the slide is
-refused, so split it over two slides. Less is fine: a slide short of the user's figures, names, dates or sources comes
-out shorter, never with made-up ones. A slide they asked for but did not detail (what the first week looks like, the
-steps of a plan) is drafted from common practice as a proposal, with no specific they did not give. Ask only when the
-deck cannot be made without the answer; say in the chat what you drafted, for them to check, and what was missing.
+refused, so split it over two slides. Less is fine: a slide short of the user's figures, names, dates or sources, or of
+their account of what happened, comes out shorter, never with made-up ones. A slide they asked for but did not detail
+(what the first week looks like, the steps of a plan) is drafted from common practice as a proposal, with no specific
+they did not give. Ask only when the deck cannot be made without the answer; say in the chat what you drafted, for them
+to check, and what was missing.
 
 ## Title
 
@@ -100,8 +101,9 @@ Steps in order: a plan, a launch, a history.
 {"path": "decks/q3-review.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\"background:#FBFBF8;color:#14285A;font-family:Arial, sans-serif;padding:128px;gap:48px\"><h2>Q4: four steps to the new depot</h2><div style=\"display:flex;gap:32px\"><div style=\"flex:1;border-top:12px solid #F2C14E;padding-top:32px;gap:16px\"><h3>October</h3><p>Sign the lease and hire the depot team</p></div><div style=\"flex:1;border-top:12px solid #F2C14E;padding-top:32px;gap:16px\"><h3>November</h3><p>Fit out the building and test the systems</p></div><div style=\"flex:1;border-top:12px solid #F2C14E;padding-top:32px;gap:16px\"><h3>December</h3><p>Ship the first orders from the new depot</p></div><div style=\"flex:1;border-top:12px solid #F2C14E;padding-top:32px;gap:16px\"><h3>January</h3><p>Move all northern orders to the new depot</p></div></div><aside>Each step has an owner; the lease is the one that can slip.</aside></section>"}]}]}
 ```
 
-Replace the heading and the steps: four, each a date or a phase of a word or two (none over 13 letters) and at most 15
-words on what happens; or three; or five when no step's title has a word over 10 letters.
+Replace the heading and the steps: four, each a date where the user gave one, else a phase (Day 1, Week 2), of a word or
+two (none over 13 letters) and at most 15 words on what happens; or three; or five when no step's title has a word over
+10 letters.
 
 ## Closing
 
@@ -129,5 +131,6 @@ Chart for what lies behind it; Table of plan against actual; Cards for what work
 Timeline for the next period; Closing with the decisions asked.
 
 A kind can come twice: two figures that matter are two Big number slides, and a Statement can open each part of a longer
-deck. A kind made of specifics needs the user's: with no figures, no Big number, no Chart and no Table of figures;
-with no names, no Table of who to ask. Any other kind is drafted as a proposal when the user gave nothing for it.
+deck. A kind made of specifics or of what happened needs the user's material: with no figures, no Big number, no Chart
+and no Table of figures; with no names, no Table of who to ask; with nothing on what happened, no Statement of a result
+and no Cards of what worked and what did not. Any other kind is drafted as a proposal when the user gave nothing for it.

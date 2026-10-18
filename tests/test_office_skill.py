@@ -170,8 +170,8 @@ def test_specifics_come_from_the_user_and_are_never_made_up():
             "made up") in headers["docx"]
     assert ("Any other specific the user did not give (a name, an address, an invoice number, a date, payment terms) "
             "stays empty, never made up.") in headers["xlsx"]
-    assert ("a slide short of the user's figures, names, dates or sources comes out shorter, never with made-up "
-            "ones.") in headers["pptx"]
+    assert ("a slide short of the user's figures, names, dates or sources, or of their account of what happened, comes "
+            "out shorter, never with made-up ones.") in headers["pptx"]
     for kind, header in headers.items():
         assert "no kind fits" in header, kind
     # An invoice's payment terms are the user's to give, like its names and numbers.
@@ -181,8 +181,8 @@ def test_specifics_come_from_the_user_and_are_never_made_up():
             and "else both stay empty" in invoice_fill), invoice_fill
     # A deck drops a kind of slide made of specifics the user did not give.
     decks = _flat((OFFICE / "templates/pptx.md").read_text().split("## Decks", 1)[1])
-    assert ("A kind made of specifics needs the user's: with no figures, no Big number, no Chart and no Table of "
-            "figures; with no names, no Table of who to ask.") in decks
+    assert ("A kind made of specifics or of what happened needs the user's material: with no figures, no Big number, no "
+            "Chart and no Table of figures; with no names, no Table of who to ask;") in decks
 
 
 def test_content_asked_for_but_not_detailed_is_drafted_as_a_proposal():
@@ -194,7 +194,11 @@ def test_content_asked_for_but_not_detailed_is_drafted_as_a_proposal():
     check = _check_before_answering()
     assert ("Each part they asked for is there: one they did not detail is drafted as a proposal, never left out or "
             "asked about.") in check
-    assert "Then say in one line what was done, what you drafted for the user to check, and what is missing." in check
+    # One closing line, said once: the workflow's last step points to it.
+    assert ("Then finish with one line in the chat: what was done, what you drafted for the user to check, what is "
+            "missing, and what they can do next.") in check
+    workflow = _flat((OFFICE / "SKILL.md").read_text().split("## The workflow", 1)[1].split("\n## ", 1)[0])
+    assert "then finish with the one line in the chat that the check ends with." in workflow
     for kind, header in _template_headers().items():
         assert "asked for but did not detail" in header and "drafted from common practice" in header, kind
         assert "say in the chat what you drafted, for them to check, and what was missing." in header, kind
@@ -206,6 +210,64 @@ def test_content_asked_for_but_not_detailed_is_drafted_as_a_proposal():
         assert "material names" not in intent, intent
     decks = _flat((OFFICE / "templates/pptx.md").read_text().split("## Decks", 1)[1])
     assert "Any other kind is drafted as a proposal when the user gave nothing for it." in decks
+
+
+#: What a template must never demand of the user's material: a figure, a date or time, a place, a contact, what
+#: happened. Matched in an intent, case aside.
+SPECIFIC = re.compile(r"\b(costs?|totals?|dates?|deadlines?|time|place|durations?|reach them|figures?|findings?|"
+                      r"results?|names?|how likely|by when)\b", re.IGNORECASE)
+#: How an intent says where a specific comes from, or that it is asked for only when given.
+GIVEN = re.compile(r"\b(the (user|material|notes) (gave|gives?|says|records?|covers?|do not fill)|if given|"
+                   r"only (if|where)|if the (user|notes)|from the material|as the user gave|not set yet)\b")
+#: A table column that holds a specific: a cell the user gave nothing for stays empty, or the column is only there
+#: when they gave it.
+SPECIFIC_COLUMN = re.compile(r"\bcolumns? [^—]*\b(Cost|Due date|Duration|End date|Date)\b")
+
+
+def test_no_intent_demands_a_specific_the_user_may_not_have_given():
+    # A small model fills what an intent asks for: an intent that asks for a cost, a contact or a result makes one up
+    # unless it says where it comes from.
+    word = (OFFICE / "templates/docx.md").read_text()
+    intents = re.findall(r"<\?pending ([a-z0-9_-]+): ([^?]+)\?>", word)
+    assert intents
+    for key, intent in intents:
+        if SPECIFIC.search(intent):
+            assert GIVEN.search(intent), (key, intent)
+        if SPECIFIC_COLUMN.search(intent):
+            assert re.search(r"left empty|only if", intent), (key, intent)
+    # A slide's line for a source, a date, a team or who to ask is there only as the user gave it.
+    deck = (OFFICE / "templates/pptx.md").read_text()
+    sections = dict(re.findall(r"^## ([^\n]+)\n(.*?)(?=^## |\Z)", deck, re.MULTILINE | re.DOTALL))
+    checked = 0
+    for kind, section in sections.items():
+        if kind == "Decks":
+            continue
+        fill = _flat(section.split("```", 2)[2])
+        for sentence in re.split(r"(?<=\.) ", fill):
+            if re.search(r"\b(sources?|dates?|who to ask|team|comes from)\b", sentence):
+                checked += 1
+                assert re.search(r"user gave|user did not give|none given|no one named|with neither", sentence), (
+                    kind, sentence)
+    assert checked >= 5
+    # A deck drops a kind made of what happened when the user told it nothing of it, as it drops one of figures.
+    decks = _flat(sections["Decks"])
+    assert ("with nothing on what happened, no Statement of a result and no Cards of what worked and what did not."
+            in decks)
+
+
+def test_spreadsheet_samples_go_in_only_where_they_fit():
+    # An event's budget given the household samples gets a salary and rent; a request the samples do not fit gets its
+    # usual rows drafted, the figures, owners and dates left empty.
+    header = _template_headers()["xlsx"]
+    assert ("The samples go in only for a user who gave no rows, and only where they fit the request (each kind says "
+            "what they are): say in the chat that they are samples.") in header
+    assert ("Rows the user asked for but did not detail, and a request the samples do not fit, are drafted from common "
+            "practice as a proposal: the usual rows, with the figures, owners and dates left empty.") in header
+    sheets = (OFFICE / "templates/xlsx.md").read_text()
+    sections = dict(re.findall(r"^## ([^\n]+)\n(.*?)(?=^## |\Z)", sheets, re.MULTILINE | re.DOTALL))
+    for kind, samples in (("Budget", "a household's month"), ("Invoice", "web design work"),
+                          ("Tracker", "a website launch")):
+        assert f"The samples are {samples}." in _flat(sections[kind].split("```", 1)[0]), kind
 
 
 def test_the_user_is_asked_only_when_the_work_cannot_be_done_without_the_answer():

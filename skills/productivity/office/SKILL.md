@@ -41,8 +41,8 @@ watches and may edit the same document. Work like a colleague in a shared docume
 5. **Never touch an open document any other way.** No `write_file`, `patch`, terminal, script or python library on
    it: the editor is its only writer. The pdf skill's work (merging, splitting, encrypting) writes a new file, never
    over an open one.
-6. **Check before you answer** (below), then finish with one line in the chat saying what you did and what the user
-   can do next. The work belongs in the document, not in the chat.
+6. **Check before you answer** (below), then finish with the one line in the chat that the check ends with. The work
+   belongs in the document, not in the chat.
 
 ## Before you answer
 
@@ -54,8 +54,9 @@ watches and may edit the same document. Work like a colleague in a shared docume
    proposal, never left out or asked about.
 3. The length is what was asked: about 450 words of body text fill a page, and each Word edit's result gives the
    document's `length` in words and pages.
-4. Then say in one line what was done, what you drafted for the user to check, and what is missing. Something short:
-   add it first, from what the user gave or drafted from common practice; never pad, and never make up a specific.
+4. Something short: add it first, from what the user gave or drafted from common practice; never pad, and never make
+   up a specific. Then finish with one line in the chat: what was done, what you drafted for the user to check, what is
+   missing, and what they can do next.
 
 ## Each kind of document
 
