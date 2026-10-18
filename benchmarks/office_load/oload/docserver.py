@@ -224,7 +224,8 @@ async def _take(request: web.Request, state: CallbackState, callback: Callback) 
     except ValueError:
         raise _Refused(400, "The callback is not JSON.") from None
     try:
-        payload = read_signed_body(state.settings.jwt_secret, body, request.headers.get("Authorization"), callback.doc_key)
+        payload = read_signed_body(
+            state.settings.jwt_secret, body, request.headers.get("Authorization"), callback.doc_key)
     except Unverifiable as exc:
         raise _Refused(403, str(exc)) from None
     userdata, url = payload.get("userdata"), payload.get("url")
@@ -250,9 +251,14 @@ async def _take(request: web.Request, state: CallbackState, callback: Callback) 
 async def _download(url: str) -> bytes:
     # A client of its own per download, as the harness has: no save waits for another's connection.
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_S)) as http:
-        # The document server's URL is already encoded: sent as it is.
-        async with http.get(URL(url, encoded=True)) as response:
+        # The document server's URL is already encoded: sent as it is. The runtime's client follows no redirect and
+        # refuses a 3xx as it refuses an error.
+        async with http.get(URL(url, encoded=True), allow_redirects=False) as response:
             response.raise_for_status()
+            if response.status >= 300:
+                raise aiohttp.ClientResponseError(
+                    response.request_info, response.history, status=response.status, message=response.reason or "",
+                    headers=response.headers)
             return await response.read()
 
 

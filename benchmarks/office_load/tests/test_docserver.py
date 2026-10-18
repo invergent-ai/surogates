@@ -57,7 +57,8 @@ class FakeDocumentServer:
 
     def __init__(self, *, saved: bytes = b"saved", command_delay: float = 0.0, command_error: int = 0,
                  command_status: int = 200, command_body: bytes | None = None,
-                 slow_paths: tuple[str, ...] = (), slow_s: float = 0.0, cache_statuses: tuple[int, ...] = ()) -> None:
+                 slow_paths: tuple[str, ...] = (), slow_s: float = 0.0, cache_statuses: tuple[int, ...] = (),
+                 redirects: dict[str, str] | None = None) -> None:
         self.saved = saved
         self.command_delay = command_delay
         self.command_error = command_error
@@ -66,6 +67,7 @@ class FakeDocumentServer:
         self.slow_paths = slow_paths
         self.slow_s = slow_s
         self.cache_statuses = list(cache_statuses)  # answered in turn before the file is
+        self.redirects = redirects or {}  # path -> where it redirects to
         self.downloads: list[str] = []
         self.queries: list[str] = []
         self.commands: list[dict[str, Any]] = []
@@ -82,6 +84,8 @@ class FakeDocumentServer:
         self.queries.append(request.query_string)
         if self.cache_statuses:
             return web.Response(status=self.cache_statuses.pop(0), text="no")
+        if request.path in self.redirects:
+            raise web.HTTPFound(self.redirects[request.path])
         if request.path in self.slow_paths:
             await asyncio.sleep(self.slow_s)
         return web.Response(body=self.saved + request.path.encode())
@@ -304,6 +308,19 @@ async def test_callback_whose_download_answers_an_error_is_502(answer: int) -> N
     assert fake.downloads == ["/cache/x"]
     [recorded] = state.callbacks
     assert (recorded.reply_status, recorded.data) == (502, None) and str(answer) in recorded.error
+
+
+async def test_callback_whose_download_redirects_is_502_without_following() -> None:
+    # The runtime's client follows no redirect, and its raise_for_status refuses a 3xx.
+    fake = FakeDocumentServer(redirects={"/cache/x": "/cache/moved"})
+    async with TestServer(fake.app()) as ds:
+        state = served(str(ds.make_url("")))
+        async with TestClient(TestServer(make_app(state))) as client:
+            response = await client.post("/callback/k1", json=save("t1"))
+            assert response.status == 502
+    assert fake.downloads == ["/cache/x"]
+    [recorded] = state.callbacks
+    assert (recorded.reply_status, recorded.data) == (502, None) and "302" in recorded.error
 
 
 async def test_a_retry_after_a_502_is_the_turns_save() -> None:
