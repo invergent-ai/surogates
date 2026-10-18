@@ -21,8 +21,8 @@ watches and may edit the same document. Work like a colleague in a shared docume
 - Name a document by its path relative to the workspace, the folder the file pane shows. The same on a folder of the
   user's computer and in a project: `office_edit` always reaches the real document, never a thread's copy. Never `~`,
   `$HOME` or an absolute path outside that folder.
-- Nothing to look up first: `office_edit` makes a missing document, and `office_read` says when there is none. No
-  `list_files`, terminal or other tool to find or check the place.
+- Nothing to look up to find the place: `office_edit` makes a missing document, and `office_read` says when there is
+  none. No `list_files`, terminal or other tool to find or check the place.
 - `office_read` is how you check what you wrote: once it shows your change, the document has it. Your own files can lag
   the editor or not have the document at all (a project thread's copy of the folder gets it at its next turn): never
   look for it with `read_file`, `list_files` or the terminal.
@@ -47,20 +47,21 @@ watches and may edit the same document. Work like a colleague in a shared docume
 ## Before you answer
 
 1. Read the outline again with `office_read`, and a block, range, slide or page in full where a detail matters.
-2. Every fact the user gave is in the document: each name, number, date and item they asked for.
+2. Every fact the user gave is in the document: each name, number, date and item they asked for. And nothing is made
+   up: no name, date, figure, place, source or contact they did not give.
 3. The length is what was asked: about 450 words of body text fill a page, and each Word edit's result gives the
    document's `length` in words and pages.
 4. Then say in one line what was done. Something missing or short: add it first.
 
 ## Each kind of document
 
-Your first office call on each type of document brings that type's reference with these rules, as `guide`:
-`references/docx.md`, `references/xlsx.md`, `references/pptx.md` or `references/pdf.md`. They stay in this skill to read
-again.
+Your first office call on each type of document brings these rules, that type's reference and its templates, as
+`guide`: `references/docx.md`, `references/xlsx.md`, `references/pptx.md` or `references/pdf.md`, and
+`templates/docx.md`, `templates/xlsx.md` or `templates/pptx.md` (a PDF has none). They stay in this skill to read again.
 
 Before you create a new document, open its type's template and start from it: `skill_view` with
-`{"name": "office", "file_path": "templates/docx.md"}`, or `templates/xlsx.md` or `templates/pptx.md` (a PDF has none).
-The first office call on the type also brings them, in its `guide` as `templates`.
+`{"name": "office", "file_path": "templates/docx.md"}`, or `templates/xlsx.md` or `templates/pptx.md`. The call that
+makes a new document is the first on it, so its `guide` comes after the outline is written.
 
 - **Word documents:** start a new document from its template, in `templates/docx.md`: plant its outline first, every
   section a pending block saying what it will hold (a line `<?pending name: what it will hold?>`), then fill one
@@ -95,5 +96,7 @@ the message says which thread it is, or, in a PDF, how to find it.
 
 - Lead with the answer; a reader skimming the first line of each section gets the point.
 - Specifics over adjectives: numbers, names, dates.
+- Every name, date, figure, place, source or contact comes from the user or their files: one they did not give is left
+  out, never made up.
 - Short paragraphs; lists for parallel items; a table when the reader compares across rows.
 - Use the document's own styles (headings, lists, table style): never fake a heading with bold text.

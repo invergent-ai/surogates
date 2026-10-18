@@ -1,19 +1,23 @@
 # Slide templates: a new deck's slides
 
-Build a new deck from these eight slides, in the order of one of the decks at the end. Each call adds its slide last,
-and a new deck's empty title slide gives way to the first; send one or two slides per call (two in one call are two
-entries in `slides`). Put in the user's path, words and figures in place of the samples, and keep the styles: the slides
-then sit together as one deck. Each fits a 16:9 deck and a 4:3 one alike, as its boxes grow with their text: only the
-rules and the bars have a height.
+Build a new deck from these eight kinds of slide. A user who gives a number of slides or a list of them gets exactly
+those: pick a kind for each; the decks at the end are for when they did not. A slide no kind fits is built from the
+closest one's parts, in the same palette, sizes and margins. Each call adds its slide last, and a new deck's empty
+title slide gives way to the first; send one or two slides per call (two in one call are two entries in `slides`). Put
+in the user's path, words and figures in place of the samples, and keep the styles: the slides then sit together as
+one deck. Each fits a 16:9 deck and a 4:3 one alike, as its boxes grow with their text: only the rules and the bars
+have a height.
 
 The look: navy #14285A, paper #FBFBF8, mist #DCE3F0 and amber #F2C14E, in Arial. Type at 128 px (the title and the big
 number), 64 (`<h2>`), 44 (`<h3>` and the subtitle), 32 (`<p>` and lists) and 24 (a source): `<h2>`, `<h3>` and `<p>`
 take their size from the tag. Text is navy on paper or mist, and paper, mist or amber on navy, always at full strength.
-A heading says the point ("The North brings a third of all orders"), not the topic ("Orders by region"), in at most 12
-words (two lines). The `<aside>` holds the speaker's notes: what to say, in a sentence or two.
+A heading says the point ("The North brings a third of all orders"), not the topic ("Orders by region"), in at most 80
+characters (two lines); only the Statement's sentence runs longer. The `<aside>` holds the speaker's notes: what to
+say, in a sentence or two.
 
-The line under each call says how much its slide holds. More does not shrink: it runs into the margin or the slide is
-refused, so split it over two slides.
+The line under each call says the most its slide holds. More does not shrink: it runs into the margin or the slide is
+refused, so split it over two slides. Less is fine: thin material makes a shorter slide, never an invented figure,
+name, date or source; say in the chat what was missing.
 
 ## Title
 
@@ -23,7 +27,8 @@ The deck's first slide: what it is about, who gives it and when.
 {"path": "decks/q3-review.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\"background:#14285A;color:#FBFBF8;font-family:Arial, sans-serif;padding:128px;justify-content:center;gap:40px\"><div style=\"width:160px;height:12px;background:#F2C14E\"></div><h1 style=\"font-size:128px\">Online shop: Q3 review</h1><p style=\"font-size:44px;color:#DCE3F0\">Orders, customers and the plan for Q4</p><p style=\"color:#DCE3F0\">Sales and product teams, 14 October 2026</p><aside>Open with the result: 38% more orders. Then what drove it, and the decision we need today.</aside></section>"}]}]}
 ```
 
-Replace the title (at most 50 characters), the subtitle (at most 15 words), the team and the date.
+Replace the title (at most 50 characters), the subtitle (at most 15 words), the team and the date; a line the user
+gave nothing for is left out.
 
 ## Statement
 
@@ -43,8 +48,9 @@ One figure that carries the point: a result, a size, a cost.
 {"path": "decks/q3-review.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\"background:#14285A;color:#FBFBF8;font-family:Arial, sans-serif;padding:128px;justify-content:center;gap:40px\"><div style=\"width:160px;height:12px;background:#F2C14E\"></div><h1 style=\"font-size:128px;color:#F2C14E\">38%</h1><h2>more orders in Q3 than in Q2</h2><p style=\"color:#DCE3F0\">Online shop, July to September against April to June</p><aside>13,400 orders against 9,700 in Q2. The next slides show where they came from.</aside></section>"}]}]}
 ```
 
-Put the figure in the `<h1>`, at most seven characters (38%, $1.2M, 13,400), what it counts in the `<h2>` in at most 12
-words, and its source in the last line.
+Put the figure in the `<h1>`, at most seven characters (38%, $1.2M, 13,400), and what it counts in the `<h2>`, at most
+80 characters. The last line says what it is compared with or where it comes from, as the user gave it: with neither,
+leave the line out.
 
 ## Cards
 
@@ -69,7 +75,7 @@ Figures the audience compares across rows: plan against actual, options against 
 Replace the heading and the rows: at most six under the header, every second one mist. A first-column cell holds up to
 30 characters; with four columns, the other cells up to 15 (two words); with five, a figure or one word of up to 10.
 Each header cell's width is its column's share: 40% for the first, the other 60% split among the rest (20% each for
-three more, 15% each for four).
+three more, 15% each for four). The source line names the user's source: with none given, leave it out.
 
 ## Chart
 
@@ -81,7 +87,8 @@ Values of one measure side by side: by region, product or month.
 
 Replace the heading and the bars: at most six, largest first or months in their order, each label up to 14 characters
 and each value up to 8. A bar's width is its value as a share of the largest: 3,600 of 4,500 is 80%. The bar the heading
-is about is amber, the others navy; each value sits at the right end of its row.
+is about is amber, the others navy; each value sits at the right end of its row. The source line names the user's
+source: with none given, leave it out.
 
 ## Timeline
 
@@ -96,13 +103,14 @@ words on what happens; or three; or five when no step's title has a word over 10
 
 ## Closing
 
-The deck's last slide: the decision or the next steps, and who to ask.
+The deck's last slide: the decision or the next steps, and who to ask when the user named someone.
 
 ```json
 {"path": "decks/q3-review.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\"background:#14285A;color:#FBFBF8;font-family:Arial, sans-serif;padding:128px;justify-content:center;gap:40px\"><div style=\"width:160px;height:12px;background:#F2C14E\"></div><h2>Approve the new depot today</h2><ul><li>Budget: $240,000, paid back in 18 months</li><li>Opens: 1 December, with a team of six</li><li>Next review: 15 January 2027</li></ul><p style=\"color:#DCE3F0\">Questions: sales team, sales@example.com</p><aside>Ask for the decision, then take questions.</aside></section>"}]}]}
 ```
 
-The ask is the heading, at most 12 words; then at most four points of up to 80 characters each, and who to ask.
+The ask is the heading, at most 80 characters; then at most four points of up to 80 characters each, and who to ask as
+the user gave it: with no one named, leave that line out.
 
 ## Decks
 
@@ -111,7 +119,7 @@ Big number for how large it is; Cards for the answer's three parts; Chart for th
 the options; Timeline for the plan; Closing with the ask and its amount.
 
 **Onboarding**, for a new joiner, team or customer: Title; Statement of what the team is for; Cards for the three or
-four things to know first; Timeline for the first weeks; Table of who to ask about what; Closing with the first steps
+four things to know first; Timeline for the first weeks; Table of who to ask about what, from the names the user gave; Closing with the first steps
 today and who to ask.
 
 **Review**, of a quarter, a project or a campaign: Title; Statement of the result; Big number for the headline figure;

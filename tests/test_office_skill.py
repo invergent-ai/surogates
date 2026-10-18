@@ -72,6 +72,8 @@ def test_word_templates_state_lengths():
     assert intents and len(intents) == templates.count("<?pending"), "an intent reads as an instruction, not a question"
     for intent in intents:
         assert re.search(r"\d+ words", intent), intent
+        # The editor keeps an intent's first 300 characters: its length must not be cut off.
+        assert len(intent) <= 300, intent
 
 
 def test_sheet_templates_total_by_formula():
@@ -123,6 +125,30 @@ def test_slide_templates_share_one_look():
     assert sizes and min(sizes) >= 24 and len(sizes) <= 5, sizes
     for unwanted in ("border-radius", "opacity", "rgba("):
         assert unwanted not in templates, "square corners, and text at full strength"
+    # A heading is at most 80 characters, two lines on either canvas; only the Statement's sentence runs longer.
+    for kind in kinds:
+        for heading in re.findall(r"<h2>(.*?)</h2>", sections[kind]):
+            assert kind == "Statement" or len(heading) <= 80, (kind, heading)
+    # The decks are orders for a user who named no slides: one who did gets exactly those.
+    assert "A user who gives a number of slides or a list of them gets exactly those" in " ".join(
+        templates.split("\n## ", 1)[0].split()
+    )
+
+
+def test_nothing_is_made_up():
+    # Templates ask for a document's usual facts; a small model fills each slot unless told what to do without one.
+    office = SKILLS / "productivity/office"
+    rules = (office / "SKILL.md").read_text()
+    writing = " ".join(rules.split("## Writing rules", 1)[1].split())
+    assert ("Every name, date, figure, place, source or contact comes from the user or their files: one they did not "
+            "give is left out, never made up.") in writing
+    check = " ".join(rules.split("## Before you answer", 1)[1].split("\n## ", 1)[0].split())
+    assert "nothing is made up: no name, date, figure, place, source or contact they did not give" in check
+    for kind in ("docx", "xlsx", "pptx"):
+        header = " ".join((office / "templates" / f"{kind}.md").read_text().split("\n## ", 1)[0].split())
+        assert re.search(r"never (an )?(invented|made up)", header), kind
+        assert "say in the chat what was missing" in header, kind
+        assert "no kind fits" in header, kind
 
 
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():
