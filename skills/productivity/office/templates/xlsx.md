@@ -25,8 +25,8 @@ available: the allocation, a grant.
   {"op": "format", "range": "Budget!A6:B6", "bold": true, "fill": "#14285A", "color": "#FFFFFF"},
   {"op": "format", "range": "Budget!D6:F6", "bold": true, "fill": "#14285A", "color": "#FFFFFF"},
   {"op": "format", "range": "Budget!A4:B4", "bold": true, "fill": "#DCE3F0"},
-  {"op": "format", "range": "Budget!B2:B8", "number_format": "$#,##0"},
-  {"op": "format", "range": "Budget!E7:E11", "number_format": "$#,##0"},
+  {"op": "format", "range": "Budget!B2:B8", "number_format": "$#,##0.00"},
+  {"op": "format", "range": "Budget!E7:E11", "number_format": "$#,##0.00"},
   {"op": "format", "range": "Budget!F7:F11", "number_format": "0%"},
   {"op": "format", "range": "Budget!A1", "width": 18},
   {"op": "format", "range": "Budget!B1", "width": 12},
@@ -51,20 +51,20 @@ For a bill to one client: what was sold, the tax and the total due.
   {"op": "set", "range": "Invoice!A1", "values": [["Invoice"], [""],
     ["From", "Harbour Lane Design, 4 Mill Road, Easton"], ["Bill to", "Eastside Walking Club, 18 Park Lane, Easton"],
     ["Invoice no.", "INV-0042"], ["Date", "2026-10-14"], ["Due date", "=B6+30"], [""],
+    ["Subtotal", "", "", "=SUM(D15:D17)"], ["Tax", "", "20%", "=D9*C10"], ["Total due", "", "", "=D9+D10"],
+    ["Payment within 30 days by bank transfer, quoting the invoice number."], [""],
     ["Description", "Quantity", "Unit price", "Amount"],
-    ["Website design", 1, 1800, "=B10*C10"], ["Photography, half days", 2, 350, "=B11*C11"], ["Hosting, months", 12, 15, "=B12*C12"],
-    ["Subtotal", "", "", "=SUM(D10:D12)"], ["Tax", "", "20%", "=D13*C14"], ["Total due", "", "", "=D13+D14"], [""],
-    ["Payment within 30 days by bank transfer, quoting the invoice number."]]},
+    ["Website design", 1, 1800, "=B15*C15"], ["Photography, half days", 2, 350, "=B16*C16"], ["Hosting, months", 12, 15, "=B17*C17"]]},
   {"op": "format", "range": "Invoice!A1:D1", "bold": true, "fill": "#14285A", "color": "#FFFFFF"},
   {"op": "format", "range": "Invoice!A3:A7", "bold": true},
   {"op": "format", "range": "Invoice!B6:B7", "number_format": "d mmm yyyy", "align": "left"},
-  {"op": "format", "range": "Invoice!A9:D9", "bold": true, "fill": "#14285A", "color": "#FFFFFF"},
-  {"op": "format", "range": "Invoice!B9:D9", "align": "right"},
-  {"op": "format", "range": "Invoice!C10:C12", "number_format": "$#,##0.00"},
-  {"op": "format", "range": "Invoice!D10:D15", "number_format": "$#,##0.00"},
-  {"op": "format", "range": "Invoice!C14", "number_format": "0%"},
-  {"op": "format", "range": "Invoice!A15:D15", "bold": true, "fill": "#DCE3F0"},
-  {"op": "format", "range": "Invoice!A17", "italic": true},
+  {"op": "format", "range": "Invoice!D9:D11", "number_format": "$#,##0.00"},
+  {"op": "format", "range": "Invoice!C10", "number_format": "0%"},
+  {"op": "format", "range": "Invoice!A11:D11", "bold": true, "fill": "#DCE3F0"},
+  {"op": "format", "range": "Invoice!A12", "italic": true},
+  {"op": "format", "range": "Invoice!A14:D14", "bold": true, "fill": "#14285A", "color": "#FFFFFF"},
+  {"op": "format", "range": "Invoice!B14:D14", "align": "right"},
+  {"op": "format", "range": "Invoice!C15:D17", "number_format": "$#,##0.00"},
   {"op": "format", "range": "Invoice!A1", "width": 28},
   {"op": "format", "range": "Invoice!B1", "width": 12},
   {"op": "format", "range": "Invoice!C1:D1", "width": 14}
@@ -72,10 +72,10 @@ For a bill to one client: what was sold, the tax and the total due.
 ```
 
 Write the user's seller, client, invoice number and date into B3:B6; a cell the user gave nothing for stays empty,
-never made up. Then the items from row 10, one per row, each Amount its row's Quantity times Unit price. With n items
-they end at row 9+n and Subtotal, Tax and Total due take the three rows under them: the SUM runs from D10 to the last
-item, Tax and Total due name the rows they now sit on, and the formats move with them. The tax rate is the Tax row's
-C cell (0% for none); the days to pay are in B7's formula and the last line.
+never made up, and with no date B7 stays empty too. Then the items from row 15, one per row, each Amount its row's
+Quantity times Unit price. With n items they end at row 14+n: so do the SUM in D9 and the format over C and D.
+Subtotal, Tax and Total due stay formulas; the tax rate is C10 (0% for none), and the days to pay are in B7's formula
+and A12.
 
 ## Tracker
 
@@ -103,5 +103,5 @@ For tasks with an owner, a due date and a status: a project plan, a to-do list, 
 ```
 
 Put the user's tasks in rows 2 to 7, one per row, each due date as 2026-11-02. Status is Not started, In progress or
-Done, spelled as in G2:G4: the counts look for those words. With n tasks the list ends at row n+1: so does every range
-in H2:H7 and the date format over C.
+Done, spelled as in G2:G4: the counts look for those words. H2:H7 stay formulas. With n tasks the list ends at row
+n+1: so does every range in H2:H7 and the date format over C.

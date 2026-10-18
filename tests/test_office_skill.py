@@ -89,17 +89,15 @@ def test_sheet_templates_total_by_formula():
                     cells.update({(chr(ord(column) + j), int(row) + i): value for j, value in enumerate(values)})
         totals = [v for v in cells.values() if isinstance(v, str) and v.startswith("=SUM(")]
         assert totals, name
-        # Each SUM runs over a whole list in one column, from the row under its header to its last row.
+        # Each SUM runs over a whole list in one column, from the row under its header to its last row; the row under
+        # the list is free, so a longer list moves no total, only the SUM's end.
         for column, first, last in re.findall(r"SUM\(([A-Z])(\d+):\1(\d+)\)", " ".join(totals)):
             first, last = int(first), int(last)
             assert not str(cells[(column, first - 1)]).startswith("="), (name, column, first)
             for row in range(first, last + 1):
                 value = cells[(column, row)]
                 assert isinstance(value, (int, float)) or value.startswith("="), (name, column, row)
-            # The row under it is no row of the list: no number there, no formula on its own row.
-            below = cells.get((column, last + 1), "")
-            assert not isinstance(below, (int, float)), (name, column, last)
-            assert not re.search(rf"[A-Z]{last + 1}\b", below), (name, column, last)
+            assert cells.get((column, last + 1), "") == "", (name, column, last)
 
 
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():
