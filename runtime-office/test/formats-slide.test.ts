@@ -10,6 +10,10 @@ const spec = { background: null, shapes: [], notes: null, hidden: false, transit
 describe("a deck's reads", () => {
   const format = slideFormat({} as Measurer);
 
+  it("waits for the editor to send an edit rather than trusting its modified flag", () => {
+    expect(format.flagLags).toBe(true);
+  });
+
   it("asks for the outline, a slide or a search", () => {
     expect(format.readScope({})).toEqual({ action: "outline" });
     expect(format.readScope({ view: "slide", target: "1_402" })).toEqual({ action: "slide", target: "1_402" });
