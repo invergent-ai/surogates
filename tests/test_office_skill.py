@@ -64,7 +64,7 @@ def test_word_templates_state_lengths():
     for heading in ("Report", "Letter", "Meeting minutes", "Proposal", "FAQ", "How-to guide"):
         assert re.search(rf"^## {heading}$", templates, re.MULTILINE), heading
     intents = re.findall(r"<\?pending [a-z0-9_-]+: ([^?]+)\?>", templates)
-    assert intents and len(intents) == templates.count("<?pending"), "each <?pending line is key: intent, no ? inside"
+    assert intents and len(intents) == templates.count("<?pending"), "an intent reads as an instruction, not a question"
     for intent in intents:
         assert re.search(r"\d+ words", intent), intent
 

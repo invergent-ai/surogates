@@ -6,7 +6,9 @@ per call, replacing its pending block:
 `{"op": "replace", "target": {"pending": "findings"}, "content": {"markdown": "…"}}`.
 
 Each intent ends with the section's length in words, and the line under the call gives the total: about 450 words of
-body text fill a page. For another length the user asks for, scale every section's words to it.
+body text fill a page. For another length the user asks for, scale every section's words to it. Write each section to
+its words, within a tenth: each result's `length` gives the document's words so far; check it before you say the
+document is done.
 
 ## Report
 
@@ -17,20 +19,22 @@ For findings a reader must act on: a review, an analysis, a status or research r
   "# Q3 customer support review\n\n## Summary\n<?pending summary: the answer first, then the three findings in one sentence each and the recommendation in one — 100 words?>\n\n## Background\n<?pending background: why this review was done, the period it covers and the data it uses — 120 words?>\n\n## Findings\n<?pending findings: the three findings, each led by its figure, then a table of the results and a chart of them — 350 words?>\n\n## Risks\n<?pending risks: three risks as a list, each with how likely it is and what we do about it — 150 words?>\n\n## Recommendation\n<?pending recommendation: what to do, who does it, by when and what it costs — 180 words?>"}}]}
 ```
 
-Fill findings first (its table in markdown, its chart a `<?block chart?>` line with its entry in `blocks`), then
-background, risks and recommendation, and the summary last: about 900 words, two pages.
+Fill findings first (its table in markdown, its chart a `<?block chart?>` line with its entry in `blocks`, as in
+"Fill one section" in `references/docx.md`), then background, risks and recommendation, and the summary last: about
+900 words, two pages.
 
 ## Letter
 
 For a formal letter to one reader. Write the real sender, date, recipient and subject into this one call: only the
-body is left to fill.
+body is left to fill. A line the user gave nothing for is left out, never made up; the greeting and the closing
+follow the names.
 
 ```json
 {"path": "letters/room-booking.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown":
-  "Dana Brooks, Bookings Manager, Riverside Community Centre\n\n14 October 2026\n\nPriya Shah, Chair, Eastside Walking Club\n\nSubject: Your room booking from 1 November\n\nDear Ms Shah,\n\n<?pending body: why you write in the first sentence, then the details with dates and amounts, then what you ask the reader to do and by when, in three short paragraphs — 200 words?>\n\nKind regards,\n\nDana Brooks"}}]}
+  "Dana Brooks, Bookings Manager, Riverside Community Centre\n\n14 October 2026\n\nPriya Shah, Chair, Eastside Walking Club\n\nSubject: Your room booking from 1 November\n\nDear Ms Shah,\n\n<?pending body: why you write in the first sentence, then the details with dates and amounts, then what you ask the reader to do and by when, in three short paragraphs — 170 words?>\n\nKind regards,\n\nDana Brooks"}}]}
 ```
 
-Fill the body in one call: the letter comes to about 230 words, within 150–250, under a page.
+Fill the body in one call: the letter comes to about 200 words, within 150–250, under a page.
 
 ## Meeting minutes
 
@@ -41,7 +45,7 @@ For the record of a meeting, from the user's notes or transcript.
   "# Website project steering group: minutes, 14 October 2026\n\n## Attendees\n<?pending attendees: two lines, Present and Apologies, each name with its role — 40 words?>\n\n## Decisions\n<?pending decisions: a numbered list, one line per decision, saying what was decided, not what was discussed — 80 words?>\n\n## Discussion\n<?pending discussion: each agenda item under a level-3 heading of its own, with what was raised and where it landed in two or three sentences — 250 words?>\n\n## Actions\n<?pending actions: a table with columns Action, Owner and Due date, one row per action — 60 words?>\n\n## Next meeting\n<?pending next: the date, time and place, and the items it will take — 30 words?>"}}]}
 ```
 
-Fill them in order from the notes, the decisions and actions as they were agreed: about 460 words, one page.
+Fill them in order from the notes, the decisions and actions as they were agreed: about 460 words, about a page.
 
 ## Proposal
 
