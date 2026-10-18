@@ -42,7 +42,8 @@ def test_suite_shape():
     ids = [t.id for t in TASKS]
     assert len(ids) == len(set(ids))
     assert 30 <= len(TASKS) <= 36
-    assert sum(t.mode == "create" for t in TASKS) > sum(t.mode == "edit" for t in TASKS)
+    # Creating from scratch stays close to half the suite as harder edits join it.
+    assert sum(t.mode == "create" for t in TASKS) >= 0.45 * len(TASKS)
     assert {t.kind for t in TASKS} == {"docx", "xlsx", "pptx", "pdf"}
     pilot = [t for t in TASKS if t.pilot]
     assert len(pilot) == 6 and {t.kind for t in pilot} == {"docx", "xlsx", "pptx", "pdf"}
@@ -211,6 +212,252 @@ def test_docx_letter_done_right(tmp_path):
     path = str(tmp_path / "lease-termination-letter.docx")
     d.save(path)
     assert failures(run_checks("docx-letter", path)) == []
+
+
+# --------------------------------------------------------------------------- Word, derived inputs
+
+
+def _derived(task_id: str, tmp_path, name: str = "input.docx") -> str:
+    inp = T[task_id].original_input
+    path = str(tmp_path / name)
+    inp.derive(str(inp.source()), path)
+    return path
+
+
+def _block_text(b) -> str:
+    return b.text if isinstance(b, docs.Para) else " | ".join(" | ".join(r) for r in b.rows)
+
+
+def test_derived_inputs_leave_the_fixture_as_it_is(tmp_path):
+    import hashlib
+
+    source = FIXTURES / "sample.docx"
+    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    for task_id in ("docx-long-edit", "docx-table-edit", "docx-many-threads"):
+        _derived(task_id, tmp_path, f"{task_id}.docx")
+        assert T[task_id].original_input.fixture == "sample.docx"
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+
+
+def test_docx_long_edit_input(tmp_path):
+    from obench.tasks import NEW_BUDGET, OLD_BUDGET
+
+    d = docs.read(_derived("docx-long-edit", tmp_path))
+    sections = [p.text for p in d.headings if p.heading == 2]
+    assert [s.split(".")[0] for s in sections] == [str(n) for n in range(1, 21)]
+    # About twelve pages at the sample's 11 pt body text, its margins and its spacing (some 450-500 words a page).
+    assert 5000 <= d.body_words() <= 6500, d.body_words()
+    places = [b for b in d.blocks if OLD_BUDGET in _block_text(b)]
+    assert len(places) == 4
+    assert sum(isinstance(b, docs.Table) for b in places) == 1
+    assert NEW_BUDGET not in d.text()
+    # Section 17 holds the figure in its text and in its table, which closes the section.
+    blocks = d.blocks
+    start = next(i for i, b in enumerate(blocks) if isinstance(b, docs.Para) and b.text.startswith("17. "))
+    end = next(i for i, b in enumerate(blocks) if isinstance(b, docs.Para) and b.text.startswith("18. "))
+    inside = blocks[start + 1:end]
+    assert isinstance(inside[-1], docs.Table) and OLD_BUDGET in _block_text(inside[-1])
+    assert any(isinstance(b, docs.Para) and OLD_BUDGET in b.text for b in inside)
+    assert len(d.tables) >= 5
+    # The same document every time.
+    again = docs.read(_derived("docx-long-edit", tmp_path, "again.docx"))
+    assert [_block_text(b) for b in again.blocks] == [_block_text(b) for b in d.blocks]
+
+
+def _long_edit(tmp_path, places: str = "all", note: str | None = "The budget figure was corrected on 14 October.",
+               note_after_table: bool = True) -> str:
+    import docx
+
+    from obench.tasks import NEW_BUDGET, OLD_BUDGET
+
+    d = docx.Document(_derived("docx-long-edit", tmp_path))
+    heading = next(p for p in d.paragraphs if p.text.startswith("17. "))
+    table = next(t for t in d.tables if OLD_BUDGET in t._tbl.xml)
+    body = list(d.element.body)
+    in_17 = range(body.index(heading._p), body.index(table._tbl) + 1)
+    cells = [p for row in table.rows for c in row.cells for p in c.paragraphs]
+    for p in list(d.paragraphs) + cells:
+        # "section 17": only the section's own text and table; the summary and the approvals keep the old figure.
+        if places == "section 17" and p not in cells and body.index(p._p) not in in_17:
+            continue
+        for r in p.runs:
+            r.text = r.text.replace(OLD_BUDGET, NEW_BUDGET)
+    if note:
+        p = d.add_paragraph(note)
+        (table._tbl if note_after_table else heading._p).addnext(p._p)
+    path = str(tmp_path / "operations-report.docx")
+    d.save(path)
+    return path
+
+
+def test_docx_long_edit_done_right(tmp_path):
+    assert failures(run_checks("docx-long-edit", _long_edit(tmp_path))) == []
+
+
+def test_docx_long_edit_that_misses_a_place_fails(tmp_path):
+    names = [n for n, _ in failures(run_checks("docx-long-edit", _long_edit(tmp_path, places="section 17")))]
+    assert names == ["'45,800' no longer appears anywhere", "48,500 stands in every place 45,800 was"]
+
+
+def test_docx_long_edit_note_in_the_wrong_place_or_missing_fails(tmp_path):
+    fails = failures(run_checks("docx-long-edit", _long_edit(tmp_path, note_after_table=False)))
+    assert [n for n, _ in fails] == ["a sentence right after section 17's table says it was corrected on 14 October"]
+    fails = failures(run_checks("docx-long-edit", _long_edit(tmp_path, note=None)))
+    assert [n for n, _ in fails] == ["a sentence right after section 17's table says it was corrected on 14 October",
+                                     "one paragraph added, none removed"]
+    fails = failures(run_checks("docx-long-edit", _long_edit(
+        tmp_path, note="The figure was corrected on 14 October. The old one was a typing error.")))
+    assert "2 sentences" in dict(fails)["a sentence right after section 17's table says it was corrected on 14 October"]
+
+
+def test_docx_table_edit_input(tmp_path):
+    from obench.tasks import REGION_TABLE
+
+    d = docs.read(_derived("docx-table-edit", tmp_path))
+    assert len(d.tables) == 1
+    assert d.tables[0].rows == REGION_TABLE
+    assert d.tables[0].style == "Table Grid"
+    assert "North grew fastest, then the east." in [p.text for p in d.paragraphs]
+
+
+def _table_edit(tmp_path, south=("South", "70", "65"), total=("Total", "280", "305")) -> str:
+    import docx
+
+    d = docx.Document(_derived("docx-table-edit", tmp_path))
+    table = d.tables[0]
+    total_tr = table.rows[-1]._tr
+    row = table.add_row()
+    total_tr.addprevious(row._tr)
+    for cell, value in zip(row.cells, south):
+        cell.text = value
+    for cell, value in zip(table.rows[-1].cells, total):
+        cell.text = value
+    path = str(tmp_path / "quarterly-report.docx")
+    d.save(path)
+    return path
+
+
+def test_docx_table_edit_done_right(tmp_path):
+    assert failures(run_checks("docx-table-edit", _table_edit(tmp_path))) == []
+
+
+def test_docx_table_edit_with_the_old_totals_fails(tmp_path):
+    fails = failures(run_checks("docx-table-edit", _table_edit(tmp_path, total=("Total", "210", "240"))))
+    assert [n for n, _ in fails] == ["the Total row reads 280 and 305"]
+    assert "210" in fails[0][1]
+
+
+def test_docx_many_threads_input(tmp_path):
+    from obench.tasks import THREAD_NOTES, THREAD_QUESTIONS
+
+    d = docs.read(_derived("docx-many-threads", tmp_path))
+    threads = {c.text: c for c in d.threads}
+    assert set(threads) == set(THREAD_QUESTIONS) | set(THREAD_NOTES)
+    assert len(d.comments) == 5
+    assert not any(c.resolved or c.replies or c.parent for c in d.comments)
+    assert threads["How many engineers do we plan to hire?"].anchor == "Hiring could slip a quarter."
+    assert threads["Keep 'revenue target' in bold, as finance asked."].anchor == "revenue target"
+    # Each answer is in the document's text, not in the words its question is anchored to.
+    for question, (pattern, _) in THREAD_QUESTIONS.items():
+        import re
+
+        assert re.search(pattern, docs.norm(d.text()))
+        assert not re.search(pattern, docs.norm(threads[question].anchor + " " + question))
+    # The comments add no text to the document: every other Word edit check still reads the sample.
+    assert [p.text for p in d.paragraphs] == [p.text for p in docs.read(str(FIXTURES / "sample.docx")).paragraphs]
+
+
+W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
+
+
+def _threads_saved(tmp_path, replies: dict[str, str], resolved: set[str]) -> str:
+    """The derived input with *replies* (comment text -> reply) and *resolved* threads, written as Word and the editor
+    write them: each reply its own ``w:comment`` with range marks beside its parent's, every comment paragraph carrying
+    a ``w14:paraId``, and ``commentsExtended.xml`` linking a reply to its parent's last paragraph (``w15:paraIdParent``)
+    and marking a resolved thread ``w15:done="1"``."""
+    import docx
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
+    from docx.oxml.ns import qn
+    from docx.oxml.parser import parse_xml
+
+    d = docx.Document(_derived("docx-many-threads", tmp_path))
+    comments = d.part._comments_part.element
+    by_text = {"\n".join(p.text for p in c.paragraphs): c for c in d.comments}
+    body = d.element.body
+    for text, reply_text in replies.items():
+        parent = by_text[text]
+        reply = d.comments.add_comment(text=reply_text, author="Agent", initials="A")
+        pid, rid = parent.comment_id, reply.comment_id
+        start = body.xpath(f".//w:commentRangeStart[@w:id='{pid}']")[0]
+        end = body.xpath(f".//w:commentRangeEnd[@w:id='{pid}']")[0]
+        start.addnext(parse_xml(f'<w:commentRangeStart xmlns:w="{docs.NS["w"]}" w:id="{rid}"/>'))
+        end.addnext(parse_xml(f'<w:commentRangeEnd xmlns:w="{docs.NS["w"]}" w:id="{rid}"/>'))
+        by_text[f"reply to {text}"] = reply
+    para_of = {}
+    n = 0
+    for c in comments.findall(qn("w:comment")):
+        for p in c.findall(qn("w:p")):
+            n += 1
+            p.set(f"{{{W14}}}paraId", f"{n:08X}")
+        para_of[c.get(qn("w:id"))] = f"{n:08X}"  # the comment's last paragraph
+    entries = []
+    for text, c in by_text.items():
+        if text.startswith("reply to "):
+            parent = by_text[text[len("reply to "):]]
+            entries.append(f'<w15:commentEx w15:paraId="{para_of[str(c.comment_id)]}" '
+                           f'w15:paraIdParent="{para_of[str(parent.comment_id)]}" w15:done="0"/>')
+        else:
+            done = "1" if text in resolved else "0"
+            entries.append(f'<w15:commentEx w15:paraId="{para_of[str(c.comment_id)]}" w15:done="{done}"/>')
+    blob = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w15:commentsEx xmlns:w15="{W15}">'
+            + "".join(entries) + "</w15:commentsEx>").encode()
+    part = Part(PackURI("/word/commentsExtended.xml"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml", blob,
+                d.part.package)
+    d.part.relate_to(part, "http://schemas.microsoft.com/office/2011/relationships/commentsExtended")
+    path = str(tmp_path / "quarterly-report.docx")
+    d.save(path)
+    return path
+
+
+ANSWERS = {
+    "How many engineers do we plan to hire?": "Two: the plan lists 'Hire two engineers'.\nBoth are in the hiring plan.",
+    "How much did North grow this quarter?": "North grew 12% this quarter, as the table shows.",
+    "Which city is the new office in?": "Lisbon.",
+}
+
+
+def test_docx_many_threads_done_right(tmp_path):
+    path = _threads_saved(tmp_path, ANSWERS, set(ANSWERS))
+    d = docs.read(path)
+    replied = {c.text: [r.text for r in c.replies] for c in d.threads}
+    assert replied["How many engineers do we plan to hire?"] == [ANSWERS["How many engineers do we plan to hire?"]]
+    assert all(r.parent is not None for c in d.threads for r in c.replies)
+    assert {c.text for c in d.threads if c.resolved} == set(ANSWERS)
+    assert failures(run_checks("docx-many-threads", path)) == []
+
+
+def test_docx_many_threads_wrong_answer_open_thread_or_answered_note_fails(tmp_path):
+    from obench.tasks import THREAD_NOTES
+
+    wrong = dict(ANSWERS, **{"How much did North grow this quarter?": "North grew 14% this quarter."})
+    fails = failures(run_checks("docx-many-threads", _threads_saved(tmp_path, wrong, set(ANSWERS))))
+    assert [n for n, _ in fails] == ["the reply to 'How much did North grow this quarter?' says 12%"]
+
+    fails = failures(run_checks("docx-many-threads", _threads_saved(tmp_path, ANSWERS, set())))
+    assert [n for n, _ in fails] == ["the three questions are resolved"]
+
+    noted = dict(ANSWERS, **{THREAD_NOTES[0]: "Done, it stays bold."})
+    fails = failures(run_checks("docx-many-threads", _threads_saved(tmp_path, noted, set(ANSWERS) | {THREAD_NOTES[1]})))
+    assert [n for n, _ in fails] == ["the two notes are left open, unanswered and as they were"]
+    assert "reply" in fails[0][1] and "resolved" in fails[0][1]
+
+    long = dict(ANSWERS, **{"Which city is the new office in?": "Lisbon. " + "The office opens next year. " * 20})
+    fails = failures(run_checks("docx-many-threads", _threads_saved(tmp_path, long, set(ANSWERS))))
+    assert [n for n, _ in fails] == ["the reply to 'Which city is the new office in?' says Lisbon"]
+    assert "400" in fails[0][1]
 
 
 # --------------------------------------------------------------------------- Spreadsheets, done right

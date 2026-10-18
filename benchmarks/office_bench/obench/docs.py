@@ -76,6 +76,17 @@ class Table:
 
 
 @dataclass
+class Comment:
+    id: str  # its w:id in the comments part
+    author: str
+    text: str  # its paragraphs, joined by newlines
+    anchor: str  # the document text between its range marks; "" when it has none
+    resolved: bool  # w15:done="1" on its commentsExtended entry
+    parent: str | None = None  # for a reply, the id of the thread's first comment
+    replies: list[Comment] = field(default_factory=list)  # for a thread's first comment, its replies in order
+
+
+@dataclass
 class WordDoc:
     blocks: list[Para | Table]
     charts: int
@@ -84,6 +95,12 @@ class WordDoc:
     chart_xml: list[str] = field(default_factory=list)
     num_abstract: dict[str, str] = field(default_factory=dict)  # numId -> abstractNumId
     num_restarts: dict[str, int] = field(default_factory=dict)  # numId -> the value its startOverride restarts at
+    comments: list[Comment] = field(default_factory=list)  # every comment, replies included, in the part's order
+
+    @property
+    def threads(self) -> list[Comment]:
+        """The comments that start a thread (not replies), each with its replies."""
+        return [c for c in self.comments if c.parent is None]
 
     @property
     def paragraphs(self) -> list[Para]:
@@ -199,7 +216,96 @@ def read_docx(path: str) -> WordDoc:
         elif name.startswith("/word/media/"):
             pictures += 1
     return WordDoc(blocks=blocks, charts=charts, pictures=pictures, pending=pending, chart_xml=chart_xml,
-                   num_abstract=num_abstract, num_restarts=num_restarts)
+                   num_abstract=num_abstract, num_restarts=num_restarts, comments=_word_comments(document))
+
+
+W14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+W15 = "{http://schemas.microsoft.com/office/word/2012/wordml}"
+_REL_COMMENTS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+_REL_COMMENTS_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
+
+
+def _word_comments(document) -> list[Comment]:
+    """The comments as OOXML stores them. ``word/comments.xml`` holds every comment, a reply included, as a
+    ``w:comment``. ``word/commentsExtended.xml`` holds a ``w15:commentEx`` per comment, keyed by the ``w14:paraId`` of
+    the comment's last paragraph: ``w15:paraIdParent`` names the paragraph of the comment a reply answers, and
+    ``w15:done="1"`` marks a resolved one. The text a comment is on lies between ``w:commentRangeStart`` and
+    ``w:commentRangeEnd`` with its id in the document. Both parts are found by their relationship from the document."""
+    parts = {}
+    for rel in document.part.rels.values():
+        if not rel.is_external and rel.reltype in (_REL_COMMENTS, _REL_COMMENTS_EXTENDED):
+            parts[rel.reltype] = ET.fromstring(rel.target_part.blob)
+    root = parts.get(_REL_COMMENTS)
+    if root is None:
+        return []
+    extended: dict[str, Any] = {}
+    ext_root = parts.get(_REL_COMMENTS_EXTENDED)
+    for ex in ext_root.findall(W15 + "commentEx") if ext_root is not None else ():
+        if ex.get(W15 + "paraId"):
+            extended[ex.get(W15 + "paraId").upper()] = ex
+
+    anchors = _comment_anchors(document.element.body)
+    comments: list[Comment] = []
+    para_ids: dict[str, list[str]] = {}  # comment id -> its paragraphs' w14:paraId, in order
+    for el in root.findall(W + "comment"):
+        cid = el.get(W + "id") or ""
+        paras = el.findall(f".//{W}p")
+        para_ids[cid] = [p.get(W14 + "paraId").upper() for p in paras if p.get(W14 + "paraId")]
+        text = "\n".join("".join(t.text or "" for t in p.iter(W + "t")) for p in paras)
+        comments.append(Comment(cid, el.get(W + "author") or "", text, anchors.get(cid, ""), False))
+
+    owner = {pid: cid for cid, pids in para_ids.items() for pid in pids}  # a paragraph's comment
+    parent_of: dict[str, str] = {}
+    for c in comments:
+        pids = para_ids[c.id]
+        # The entry names the last paragraph; one naming another of the comment's paragraphs is taken too.
+        ex = next((extended[p] for p in pids[::-1] if p in extended), None)
+        if ex is None:
+            continue
+        c.resolved = (ex.get(W15 + "done") or "").lower() in ("1", "true", "on")
+        up = owner.get((ex.get(W15 + "paraIdParent") or "").upper())
+        if up is not None and up != c.id:
+            parent_of[c.id] = up
+
+    by_id = {c.id: c for c in comments}
+    for c in comments:
+        root_id, seen = parent_of.get(c.id), {c.id}
+        while root_id in parent_of and root_id not in seen:  # a reply to a reply belongs to the thread's first comment
+            seen.add(root_id)
+            root_id = parent_of[root_id]
+        if root_id is not None and root_id in by_id:
+            c.parent = root_id
+            by_id[root_id].replies.append(c)
+    return comments
+
+
+def _comment_anchors(body) -> dict[str, str]:
+    """comment id -> the text between its ``w:commentRangeStart`` and ``w:commentRangeEnd``, paragraphs apart."""
+    open_ids: list[str] = []
+    found: dict[str, list[str]] = {}
+
+    def walk(el) -> None:
+        for child in el:
+            tag = child.tag if isinstance(child.tag, str) else ""
+            if tag == W + "commentRangeStart":
+                cid = child.get(W + "id") or ""
+                open_ids.append(cid)
+                found.setdefault(cid, [])
+            elif tag == W + "commentRangeEnd":
+                cid = child.get(W + "id") or ""
+                if cid in open_ids:
+                    open_ids.remove(cid)
+            elif tag == W + "t":
+                for cid in open_ids:
+                    found[cid].append(child.text or "")
+            else:
+                walk(child)
+                if tag == W + "p":
+                    for cid in open_ids:
+                        found[cid].append(" ")
+
+    walk(body)
+    return {cid: re.sub(r"\s+", " ", "".join(parts)).strip() for cid, parts in found.items()}
 
 
 def _heading_level(name: str, outline: int | None) -> int | None:

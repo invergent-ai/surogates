@@ -7,8 +7,9 @@ runs inside the real agent harness, with every production tool and system prompt
 Surogate Studio Work chat; the agent works through `office_read` / `office_edit` (the live editor the user watches in
 the file pane); the saved document is downloaded and checked automatically.
 
-Most tasks **create new material from scratch** (17 of 33), because that is what the model must do well; the rest
-edit runtime-office's sample documents. Each task's checks read the saved file: structure (headings, lists, tables,
+Almost half the tasks **create new material from scratch** (17 of 36), because that is what the model must do well;
+the rest edit runtime-office's sample documents, or copies made from them (a twelve-page report, a table with a Total
+row, five comment threads). Each task's checks read the saved file: structure (headings, lists, tables,
 charts, slides, fields), values (facts carried over, formulas present and computing the right number, stored values
 agreeing with them), and **nothing the task did not ask for destroyed** (the rest of a sentence, other slides, a bold
 phrase, other cells, notes). Per rollout it also records what the trace shows: model calls, tool calls by name,
@@ -70,11 +71,11 @@ made it wrong.
 | --- | --- |
 | `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, SSE. HTTP only |
 | `obench/runner.py` | One task to one rollout: create, upload, send, stream, wait for the save, collect |
-| `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, shapes, fields) |
+| `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, comments, shapes, fields) |
 | `obench/formula.py` | Small spreadsheet formula evaluator, so checks know what a formula computes |
 | `obench/render.py` | Render a deck with the document server's converter; measure text overflow on the PDF |
 | `obench/checks.py` | Check primitives (factories), each returning pass / fail / unknown with a detail |
-| `obench/tasks.py` | The 33 tasks: prompt, inputs, target document, checks |
+| `obench/tasks.py` | The 36 tasks: prompt, inputs, target document, checks |
 | `obench/evaluate.py` | Score a stored rollout: checks, trace metrics, claim vs checks, trajectory.md |
 | `obench/report.py` | Per-rollout table, failed checks, totals by kind and mode |
 | `obench/cli.py` | `list` / `run` / `check` / `invalidate` / `report` |
@@ -97,7 +98,7 @@ whose final message admits no problem is flagged **claims success despite failed
 the report quotes the words and the check.
 
 `tests/` (offline, no network) pins the fixture contents the edit checks rely on, builds the
-correct document with python-docx/openpyxl/python-pptx/pypdf (21 of the 33 tasks) and asserts **every task check passes it**
+correct document with python-docx/openpyxl/python-pptx/pypdf (24 of the 36 tasks) and asserts **every task check passes it**
 (not "made in the editor", which a scripted file fails by design), while the untouched input **fails** every edit task. That is what makes a check trustworthy.
 
 ## How to run
@@ -140,7 +141,7 @@ cd benchmarks/office_bench
 set -a; . ./.env; set +a
 .venv/bin/obench list                                  # tasks and their checks
 .venv/bin/obench run --pilot                           # the 6 pilot tasks -> runs/pilot-00N
-.venv/bin/obench run --runs 3                          # THE FULL RUN: all 33 tasks x 3 -> runs/full-00N
+.venv/bin/obench run --runs 3                          # THE FULL RUN: all 36 tasks x 3 -> runs/full-00N
 .venv/bin/obench run --kind xlsx,pdf --mode edit       # filtered (any of --tasks/--kind/--mode/--limit) -> runs/smoke-00N
 .venv/bin/obench run --tasks docx-bold,pdf-redact      # re-check specific tasks
 .venv/bin/obench check <run_id>                        # re-score stored documents after changing a check
@@ -159,13 +160,18 @@ the office tools do not need the sandbox, and the report counts these results.
 
 ## Tasks
 
-33 tasks: 17 create, 16 edit; Word 11, spreadsheet 9, deck 10, PDF 3. Edit inputs are
+36 tasks: 17 create, 19 edit; Word 14, spreadsheet 9, deck 10, PDF 3. Edit inputs are
 `runtime-office/test/fixtures/sample.{docx,xlsx,pptx,pdf}`; `xlsx-fix-formula` derives its input from `sample.xlsx`
-at staging (East's total made `=B3+B2`). Every task also has the implicit first check **document saved and opens**,
+at staging (East's total made `=B3+B2`), and `docx-long-edit`, `docx-table-edit` and `docx-many-threads` derive theirs
+from `sample.docx` (each says how; the fixture itself is never changed). Every task also has the implicit first check **document saved and opens**,
 then **made in the editor** (an applied `office_edit` call named the document, and the saved file names the editor as
 its producer: `docProps/app.xml`'s `<Application>`, or a PDF's `/Producer`; a file a script wrote names its library,
 such as python-pptx's PowerPoint, openpyxl or pypdf), and every edit task **the document changed** (fails when the
-download is byte-identical to the upload). Comment tasks are left for later.
+download is byte-identical to the upload). `docx-many-threads` reads comments as OOXML stores them: each comment, a
+reply included, is a `w:comment` in `word/comments.xml`; `word/commentsExtended.xml` gives each a `w15:commentEx` keyed
+by the `w14:paraId` of the comment's last paragraph, where `w15:paraIdParent` names the comment a reply answers and
+`w15:done="1"` marks a resolved thread; a comment's text is what lies between its `w:commentRangeStart` and
+`w:commentRangeEnd` in the document.
 
 ### Word
 
@@ -202,6 +208,18 @@ download is byte-identical to the upload). Comment tasks are left for later.
 - **`docx-bold`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx)
   - *"In quarterly-report.docx, make 'Hiring could slip a quarter' bold."*
   - Checks: 'Hiring could slip a quarter' is bold; 'revenue target' is bold; 'This report covers the quarter' is not bold; the rest of the document is kept; no paragraph added or removed.
+- **`docx-long-edit`** (edit) -> `operations-report.docx`; input `operations-report.docx` (from sample.docx, derived)
+  - *"In section 17 of operations-report.docx the budget is wrong: it is €48,500, not €45,800. Fix it everywhere it appears, and add one sentence after the section's table saying the figure was corrected on 14 October."*
+  - Input: sample.docx rebuilt as a twelve-page operations report in its styles, twenty numbered sections; €45,800 is in the summary, section 17's text and table, and the approvals.
+  - Checks: '45,800' no longer appears anywhere; 48,500 stands in every place 45,800 was; a sentence right after section 17's table says it was corrected on 14 October; the rest of the document is kept; one paragraph added, none removed.
+- **`docx-table-edit`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx, derived)
+  - *"Add a row for South (Q1 70, Q2 65) to the table in quarterly-report.docx and fix its Total row."*
+  - Input: sample.docx with its table made Region, Q1, Q2: North 120, 140; East 90, 100; Total 210, 240.
+  - Checks: a South row reading 70 and 65 above the Total row; the Total row reads 280 and 305; the header and the North and East rows are kept; table style kept; the rest of the document is kept.
+- **`docx-many-threads`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx, derived)
+  - *"Answer the three questions in the comments on quarterly-report.docx and resolve them; leave the other two."*
+  - Input: sample.docx with five open comment threads: three questions its text answers (engineers to hire: two; North's growth: 12%; the new office: Lisbon) and two notes that ask nothing.
+  - Checks: the reply to 'How many engineers do we plan to hire?' says two; the reply to 'How much did North grow this quarter?' says 12%; the reply to 'Which city is the new office in?' says Lisbon; the three questions are resolved; the two notes are left open, unanswered and as they were; the rest of the document is kept.
 
 ### Spreadsheet
 
