@@ -1132,7 +1132,9 @@ export function inspect(args: InspectArgs): Inspected {
         if (!worst || worst.ratio >= 3) continue;
         const fg = worst.fg.alpha < 1 ? `${worst.fg.hex} at ${Math.round(worst.fg.alpha * 100)}%` : worst.fg.hex;
         const better = contrastRatio(rgbOf("#14213D"), worst.bg) >= contrastRatio(rgbOf("#FBFBF8"), worst.bg) ? "#14213D" : "#FBFBF8";
-        fail(`${describe(holder)}: its text (${fg}) on ${hexOf(worst.bg)} reads at ${(Math.floor(worst.ratio * 10) / 10).toFixed(1)}:1; text needs at least 3:1 here: try ${better}.`);
+        // Faded text stays faded in any colour: the fade goes too.
+        const full = worst.fg.alpha < 1 ? ", at full strength (no opacity or alpha)" : "";
+        fail(`${describe(holder)}: its text (${fg}) on ${hexOf(worst.bg)} reads at ${(Math.floor(worst.ratio * 10) / 10).toFixed(1)}:1; text needs at least 3:1 here: try ${better}${full}.`);
       }
     }
 

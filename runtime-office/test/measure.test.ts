@@ -439,7 +439,17 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
       [`<section style="background:#ffffff;padding:128px"><div style="background:#F8FAFC;padding:32px;width:600px"><p style="font-size:48px;color:#38BDF8">30%</p></div></section>`, "its text (#38bdf8) on #f8fafc reads at 2.0:1; text needs at least 3:1 here: try #14213D."],
       [`<section style="background:#14213D;padding:128px"><p style="font-size:48px;color:#1A5C9A">Accent</p></section>`, "its text (#1a5c9a) on #14213d reads at 2.3:1; text needs at least 3:1 here: try #FBFBF8."],
       [`<section style="background:linear-gradient(90deg, #14213D, #F8FAFC);padding:128px"><h2 style="font-size:64px;color:#FBFBF8">Fading out</h2></section>`, "its text (#fbfbf8) on #f8fafc reads at 1.0:1"],
-      [`<section style="background:#14213D;padding:128px"><p style="font-size:48px;color:#FBFBF8;opacity:0.3">Faint</p></section>`, "its text (#fbfbf8 at 30%) on #14213d reads at 2.6:1"],
+      [`<section style="background:#14213D;padding:128px"><p style="font-size:48px;color:#FBFBF8;opacity:0.3">Faint</p></section>`, '<section > p> ("Faint"): its text (#fbfbf8 at 30%) on #14213d reads at 2.6:1; text needs at least 3:1 here: try #FBFBF8, at full strength (no opacity or alpha).'],
+    ]) {
+      await expect(measure(html!), html).rejects.toThrow(said!);
+    }
+  });
+
+  // Faded text keeps its fade whatever colour it is given: the advice says to drop it too.
+  it("advises faded dark text on white to take the dark colour at full strength", async () => {
+    for (const [html, said] of [
+      [`<section style="background:#ffffff;padding:128px"><p style="font-size:48px;color:rgba(20,33,61,0.25)">Faint</p></section>`, '<section > p> ("Faint"): its text (#14213d at 25%) on #ffffff reads at 1.6:1; text needs at least 3:1 here: try #14213D, at full strength (no opacity or alpha).'],
+      [`<section style="background:#ffffff;padding:128px"><p style="font-size:48px;color:#999999;opacity:0.4">Faint</p></section>`, '<section > p> ("Faint"): its text (#999999 at 40%) on #ffffff reads at 1.4:1; text needs at least 3:1 here: try #14213D, at full strength (no opacity or alpha).'],
     ]) {
       await expect(measure(html!), html).rejects.toThrow(said!);
     }
