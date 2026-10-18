@@ -50,6 +50,26 @@ def test_office_edit_writes_a_word_outlines_pending_sections_in_the_markdown():
     assert word["markdown"].count("<?pending ") >= 2, word
     assert "blocks" not in word, word
     assert '"type": "pending"' not in EDIT_DESCRIPTION
+    # Each section says its length, as the templates' do.
+    intents = re.findall(r"<\?pending [a-z0-9_-]+: ([^?]+)\?>", word["markdown"])
+    assert len(intents) == word["markdown"].count("<?pending ")
+    for intent in intents:
+        assert re.search(r" — \d+ words$", intent), intent
+
+
+def test_office_edit_sends_a_new_document_to_its_template():
+    # For the chats that never open the office skill.
+    assert "a new document starts from the office skill's templates/<type>.md" in EDIT_DESCRIPTION
+
+
+def test_office_edit_shows_a_slide_in_the_templates_look():
+    # A model copies the example's colours and sizes into the deck: they are the templates' palette and type scale.
+    templates = (Path(__file__).parents[1] / "skills/productivity/office/templates/pptx.md").read_text()
+    (deck,) = [call for call in _examples() if call["path"].endswith(".pptx")]
+    html = deck["ops"][0]["slides"][0]["html"]
+    colours = set(re.findall(r"#[0-9A-Fa-f]{6}\b", html))
+    assert colours and colours <= set(re.findall(r"#[0-9A-Fa-f]{6}\b", templates)), colours
+    assert {int(px) for px in re.findall(r"font-size:\s*(\d+)px", html)} <= {128, 64, 44, 32, 24}
 
 
 def test_office_edit_shows_the_word_call_runtime_office_compiles():
@@ -77,6 +97,10 @@ def test_office_edit_leaves_the_slide_reference_to_the_first_call():
 
 def test_office_read_is_how_you_check_your_edits():
     assert "check your edits" in READ_DESCRIPTION
+
+
+def test_office_read_says_what_the_first_call_brings():
+    assert "rules, reference and templates, as guide" in READ_DESCRIPTION
 
 
 def test_the_descriptions_stay_short():
