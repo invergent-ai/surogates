@@ -72,8 +72,8 @@ EDIT_DESCRIPTION = (
     '(replace, target {"pending": "goals"}):\n'
     "```json\n"
     '{"path": "plans/launch.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown": '
-    '"# Launch plan\\n\\n## Goals\\n<?pending goals: Three goals, each with its date — 60 words?>\\n\\n## Budget\\n'
-    '<?pending budget: Costs by quarter, in a table — 80 words?>"}}]}\n'
+    '"# Launch plan\\n\\n## Goals\\n<?pending goals: Three goals, each with its date if given — 60 words?>'
+    '\\n\\n## Budget\\n<?pending budget: Costs by quarter, in a table — 80 words?>"}}]}\n'
     "```\n"
     "A spreadsheet's cells and a bold header:\n"
     "```json\n"

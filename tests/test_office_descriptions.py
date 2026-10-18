@@ -55,6 +55,8 @@ def test_office_edit_writes_a_word_outlines_pending_sections_in_the_markdown():
     assert len(intents) == word["markdown"].count("<?pending ")
     for intent in intents:
         assert re.search(r" — \d+ words$", intent), intent
+        # A model fills what an intent asks for: a date the user may not have given is asked for only if given.
+        assert "date" not in intent or "if given" in intent, intent
 
 
 def test_office_edit_sends_a_new_document_to_its_template():
