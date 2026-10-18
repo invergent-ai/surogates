@@ -56,19 +56,23 @@ watches and may edit the same document. Work like a colleague in a shared docume
 
 Your first office call on each type of document brings that type's reference with these rules, as `guide`:
 `references/docx.md`, `references/xlsx.md`, `references/pptx.md` or `references/pdf.md`. They stay in this skill to read
-again. The guide also carries the type's templates, as `templates` (a PDF has none).
+again.
 
-- **Word documents:** start a new document from its template, in the guide's `templates`: plant its outline first,
-  every section a pending block saying what it will hold (a line `<?pending name: what it will hold?>`), then fill one
+Before you create a new document, open its type's template and start from it: `skill_view` with
+`{"name": "office", "file_path": "templates/docx.md"}`, or `templates/xlsx.md` or `templates/pptx.md` (a PDF has none).
+The first office call on the type also brings them, in its `guide` as `templates`.
+
+- **Word documents:** start a new document from its template, in `templates/docx.md`: plant its outline first, every
+  section a pending block saying what it will hold (a line `<?pending name: what it will hold?>`), then fill one
   section per call; re-word with `replace` on quoted words, which keeps their formatting. About 450 words of
   body text fill a page: count them for a length the user asks for.
-- **Spreadsheets:** start a new workbook from its template, in the guide's `templates`. In a sheet with content, read
-  the range before writing it, and pass what it showed as `expect`. Values go in as typed into a cell: a formula starts
+- **Spreadsheets:** start a new workbook from its template, in `templates/xlsx.md`. In a sheet with content, read the
+  range before writing it, and pass what it showed as `expect`. Values go in as typed into a cell: a formula starts
   with `=` and stays live.
-- **Slide decks:** build a new deck from the slide templates, in the guide's `templates`. A small change (a title, a
-  word, a number) is `text` on that one shape, which keeps its place and style. A new or redesigned slide is one
-  `<section>` in the Claude Slides format, built as native shapes the user can edit. A slide too full for its boxes is
-  refused: split it; nothing shrinks.
+- **Slide decks:** build a new deck from the slide templates, in `templates/pptx.md`. A small change (a title, a word, a
+  number) is `text` on that one shape, which keeps its place and style. A new or redesigned slide is one `<section>` in
+  the Claude Slides format, built as native shapes the user can edit. A slide too full for its boxes is refused: split
+  it; nothing shrinks.
 - **PDFs:** fill fields, add, remove or rotate pages, redact, annotate. Existing text cannot be changed.
 
 ## When a comment calls you
