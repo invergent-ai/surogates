@@ -473,6 +473,13 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
       .rejects.toThrow('<section > div > h2> ("On frost"): its text (#fbfbf8) on #d0d3d8 reads at 1.4:1; text needs at least 3:1 here: try #14213D.');
   });
 
+  // The converter draws a container faded over its children whole, as one picture, its text in it.
+  it("skips the text of a container faded with its children", async () => {
+    const spec: Any = await measure(`<section style="background:#ffffff;padding:128px">
+      <div style="background:#14213D;opacity:0.6;padding:40px;width:900px"><h2 style="font-size:64px;color:#ffffff">On the card</h2></div></section>`);
+    expect(spec.shapes.map((s: Any) => s.kind)).toEqual(["picture"]);
+  });
+
   it("skips text over a picture", async () => {
     const spec: Any = await measure(`<section style="background:#ffffff">
       <img src="${PNG}" alt="Lisbon" style="position:absolute;left:0;top:0;width:1920px;height:1080px">

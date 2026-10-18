@@ -654,6 +654,8 @@ export function inspect(args: InspectArgs): Inspected {
 
     // --- what only a picture shows
     const isContainer = (el: Element): boolean => (tagOf(el) === "DIV" && !isText(el)) || tagOf(el) === "SECTION";
+    // CSS fades a container with its children as one; OOXML has no opacity over a group.
+    const fadedWhole = (el: Element): boolean => isContainer(el) && el.children.length > 0 && parseFloat(getComputedStyle(el).opacity) < 1;
     const drawnWhole = (el: Element, t: Transform | null): boolean => {
       const tag = tagOf(el), cs = getComputedStyle(el);
       // Drawn from the icon set, on a page of its own, or as a path: nothing of it is painted here to take.
@@ -661,8 +663,7 @@ export function inspect(args: InspectArgs): Inspected {
       // The editor saves filters and blend modes, then draws the plain shape.
       if (cs.filter !== "none" || cs.backdropFilter !== "none" || cs.mixBlendMode !== "normal" || /^matrix3d/.test(cs.transform)) return true;
       const children = isContainer(el) && el.children.length > 0;
-      // CSS fades a container with its children as one; OOXML has no opacity over a group.
-      if (parseFloat(cs.opacity) < 1 && children) return true;
+      if (fadedWhole(el)) return true;
       if (!t) return false;
       const scaled = Math.abs(t.sx - 1) > 0.001 || Math.abs(t.sy - 1) > 0.001, skewed = Math.abs(t.skew) > 0.01;
       // Children are measured by their turned bounds, and a table cannot turn.
@@ -1111,10 +1112,15 @@ export function inspect(args: InspectArgs): Inspected {
       }
       return colors;
     };
+    // Text in a container faded with its children goes in with it, in one picture: as text over a picture, unchecked.
+    const inFaded = (el: Element): boolean => {
+      for (let at: Element | null = el; at && at !== section; at = at.parentElement) if (fadedWhole(at)) return true;
+      return false;
+    };
     const texts = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
     for (let node = texts.nextNode(); node; node = texts.nextNode()) {
       const holder = node.parentElement!;
-      if (!(node.textContent ?? "").trim() || inside(holder)) continue;
+      if (!(node.textContent ?? "").trim() || inside(holder) || inFaded(holder)) continue;
       const ink = inkOf(holder, holder.closest("h1, h2, h3, p, li, td, th, div") ?? holder);
       const inks = ink.gradient?.type === "linear" ? ink.gradient.stops.map((stop) => stop.color) : [ink.color];
       const range = document.createRange();
