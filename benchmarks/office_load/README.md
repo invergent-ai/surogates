@@ -8,6 +8,15 @@ callbacks and downloads each saved file.
 
 Never point it at a document server people use.
 
+It answers the document server as the runtime does: `{"error": 0}` once a save is kept; 400, 403, 404 or 502
+otherwise, after which the document server retries the callback. Every forcesave and every download gets a client of
+its own, as the harness's do.
+
+One difference makes its numbers slightly optimistic. Its `/files` and its callbacks answer as soon as their own work
+is done: reading the input from memory, fetching the saved file. The runtime also reads and writes storage and the
+database first. Open times, and how long the document server holds each callback, are a little shorter here than in
+production.
+
 ## Settings
 
 Everything site-specific comes from the environment, or from a git-ignored `.env` in this directory:

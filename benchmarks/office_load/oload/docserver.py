@@ -1,12 +1,16 @@
-"""The harness's part toward the document server: input files, callbacks, saved files and forcesave."""
+"""The harness's part toward the document server: input files, callbacks, saved files and forcesave.
+
+The callback answers as the runtime's: ``{"error": 0}`` once a save is kept, and an HTTP error otherwise
+(400, 403, 404, 502), after which the document server retries the callback.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
@@ -23,19 +27,28 @@ SAVE_STATUSES = (2, 6)  # 2: saved after the last editor left; 6: forcesaved
 # This host's clock and the cluster's may differ a little; a token is not refused for it.
 TOKEN_LEEWAY_S = 60
 
+ForceSaveOutcome = Literal["answered", "timeout", "unreachable", "http_error", "bad_answer"]
+
 
 @dataclass(slots=True)
 class Callback:
-    """One callback from the document server."""
+    """One callback attempt from the document server; a retry is another attempt."""
 
     doc_key: str
     status: int | None  # None when it could not be verified
     userdata: str | None  # the forcesave's userdata: the turn it answers
     url: str | None  # the saved file, as the document server names it
-    at: float  # time.time() when it arrived
-    data: bytes | None = None  # the saved file, for status 2 and 6
+    at: float  # time.time() at arrival: for lining up with other timelines
+    mono: float  # time.monotonic() at arrival: latencies are measured from this
+    data: bytes | None = None  # the saved file, for status 2 and 6, until released
     download_s: float | None = None
+    settled_mono: float | None = None  # time.monotonic() once its file was fetched or its failure noted
+    reply_status: int = 200  # the HTTP status the tool answered with
     error: str | None = None  # why it was refused, or its file could not be fetched
+
+    def release(self) -> None:
+        """Drop the saved file's bytes, once checked."""
+        self.data = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,16 +61,25 @@ class Document:
 class ForceSave:
     """The Command Service's answer to a forcesave.
 
-    ``error`` is 0 when a save is coming and 4 when there was nothing unsaved; None when it did not answer
-    within the timeout, or could not be reached.
+    ``error`` is 0 when a save is coming and 4 when there was nothing unsaved; None whenever ``outcome`` is not
+    ``answered``. ``http_status`` is the reply's, when one came.
     """
 
     error: int | None
     seconds: float
+    outcome: ForceSaveOutcome
+    http_status: int | None = None
 
 
 class Unverifiable(Exception):
     """A callback the document server cannot be shown to have sent, about this document."""
+
+
+class _Refused(Exception):
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
 
 
 class CallbackState:
@@ -66,9 +88,10 @@ class CallbackState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.documents: dict[str, Document] = {}
-        self.callbacks: list[Callback] = []  # all, in arrival order
-        self._settled: dict[tuple[str, str | None], Callback] = {}
-        self._waiting: dict[tuple[str, str | None], asyncio.Event] = {}
+        self.callbacks: list[Callback] = []  # every attempt, in arrival order
+        self._kept: dict[tuple[str, str], Callback] = {}  # the first attempt without an error
+        self._failed: dict[tuple[str, str], Callback] = {}  # the last attempt with one
+        self._waiting: dict[tuple[str, str], list[asyncio.Event]] = {}
 
     def add_document(self, doc_key: str, kind: str, data: bytes) -> None:
         """Serve *data* as *doc_key*'s input; a later call replaces it."""
@@ -77,36 +100,47 @@ class CallbackState:
         self.documents[doc_key] = Document(kind, data)
 
     async def wait_for(self, doc_key: str, userdata: str, timeout: float) -> Callback | None:
-        """The first verified callback for *doc_key* carrying *userdata*, once its file is fetched.
+        """The first verified callback for *doc_key* carrying *userdata* that the tool kept, its file fetched.
 
-        None when none came within *timeout* seconds.
+        A failed attempt is not it: the document server retries, and a later attempt may be kept. After *timeout*
+        seconds, the last failed attempt, or None when none came.
         """
         key = (doc_key, userdata)
-        found = self._settled.get(key)
-        if found is not None:
-            return found
-        arrived = self._waiting.setdefault(key, asyncio.Event())
+        kept = self._kept.get(key)
+        if kept is not None:
+            return kept
+        arrived = asyncio.Event()
+        self._waiting.setdefault(key, []).append(arrived)
         try:
             async with asyncio.timeout(timeout):
                 await arrived.wait()
         except TimeoutError:
-            return None
-        return self._settled.get(key)
-
-    def _arrive(self, callback: Callback) -> None:
-        self.callbacks.append(callback)
+            return self._failed.get(key)
+        finally:
+            waiters = self._waiting.get(key)
+            if waiters is not None and arrived in waiters:
+                waiters.remove(arrived)
+                if not waiters:
+                    del self._waiting[key]
+        return self._kept[key]
 
     def _settle(self, callback: Callback) -> None:
         """*callback* is complete: its file fetched, or its failure noted."""
+        callback.settled_mono = time.monotonic()
+        if callback.userdata is None:
+            return  # unverified, or carries no turn: nothing waits for it
         key = (callback.doc_key, callback.userdata)
-        self._settled.setdefault(key, callback)
-        arrived = self._waiting.pop(key, None)
-        if arrived is not None:
+        if callback.error is not None:
+            self._failed[key] = callback
+            return
+        if key in self._kept:
+            return
+        self._kept[key] = callback
+        for arrived in self._waiting.pop(key, []):
             arrived.set()
 
 
 _STATE = web.AppKey("state", CallbackState)
-_HTTP = web.AppKey("http", aiohttp.ClientSession)
 
 
 def make_app(state: CallbackState) -> web.Application:
@@ -115,7 +149,6 @@ def make_app(state: CallbackState) -> web.Application:
     app[_STATE] = state
     app.router.add_get("/files/{doc_key}", _file)
     app.router.add_post("/callback/{doc_key}", _callback)
-    app.cleanup_ctx.append(_downloads)
     return app
 
 
@@ -139,31 +172,22 @@ def read_signed_body(secret: str, body: Any, authorization: str | None, doc_key:
     The token is in the body's ``token``, or in the Authorization header with the body wrapped in ``payload``.
     """
     if not isinstance(body, dict):
-        raise Unverifiable("the callback is not a JSON object")
+        raise Unverifiable("The callback is not a JSON object.")
     token = body.get("token")
     if not token and authorization and authorization.startswith("Bearer "):
         token = authorization.removeprefix("Bearer ")
     if not token:
-        raise Unverifiable("the callback is not signed")
+        raise Unverifiable("The callback is not signed by the document server.")
     try:
         claims = jwt.decode(str(token), secret, algorithms=[ALGORITHM], leeway=TOKEN_LEEWAY_S)
     except jwt.InvalidTokenError as exc:
-        raise Unverifiable(f"the callback's token is not valid: {exc}") from None
+        raise Unverifiable(f"The callback is not signed by the document server: {exc}") from None
     payload = claims.get("payload")
     payload = payload if isinstance(payload, dict) else claims
     # The signature proves the document server sent it, not which document it is about.
     if payload.get("key") != doc_key:
-        raise Unverifiable(f"the callback is for another document: {payload.get('key')!r}")
+        raise Unverifiable(f"The callback is for another document: {payload.get('key')!r}")
     return payload
-
-
-async def _downloads(app: web.Application) -> AsyncIterator[None]:
-    # No connection limit: the tool must not queue the saves it measures.
-    async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=0), timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_S),
-    ) as http:
-        app[_HTTP] = http
-        yield
 
 
 async def _file(request: web.Request) -> web.Response:
@@ -175,73 +199,93 @@ async def _file(request: web.Request) -> web.Response:
 
 async def _callback(request: web.Request) -> web.Response:
     state = request.app[_STATE]
-    doc_key = request.match_info["doc_key"]
-    arrived = time.time()
+    callback = Callback(request.match_info["doc_key"], None, None, None, at=time.time(), mono=time.monotonic())
+    state.callbacks.append(callback)
     try:
-        body = await request.json()
-    except ValueError:
-        body = None
-    try:
-        payload = read_signed_body(state.settings.jwt_secret, body, request.headers.get("Authorization"), doc_key)
-        try:
-            status = int(payload["status"])
-        except (KeyError, TypeError, ValueError):
-            raise Unverifiable(f"the callback has no status: {payload.get('status')!r}") from None
-    except Unverifiable as exc:
-        # Recorded, never matched to a turn: what it says cannot be trusted.
-        state._arrive(Callback(doc_key, None, None, None, arrived, error=str(exc)))
-        return web.json_response({"error": 1})
-
-    userdata, url = payload.get("userdata"), payload.get("url")
-    callback = Callback(
-        doc_key, status, None if userdata is None else str(userdata), None if url is None else str(url), arrived,
-    )
-    state._arrive(callback)
-    try:
-        if status in SAVE_STATUSES:
-            if not callback.url:
-                callback.error = "the save names no file"
-            else:
-                started = time.monotonic()
-                try:
-                    saved = internal_url(callback.url, state.settings.command_url)
-                    callback.data = await _download(request.app[_HTTP], saved)
-                except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-                    callback.error = f"could not download the save: {exc!r}"
-                callback.download_s = time.monotonic() - started
+        await _take(request, state, callback)
+    except _Refused as refused:
+        callback.reply_status, callback.error = refused.status, refused.detail
     except BaseException:
-        callback.error = callback.error or "the callback was interrupted"
+        callback.reply_status, callback.error = 500, "The callback was interrupted."
         raise
     finally:
         state._settle(callback)
-    return web.json_response({"error": 1 if callback.error else 0})
+    if callback.error is not None:
+        return web.json_response({"detail": callback.error}, status=callback.reply_status)
+    return web.json_response({"error": 0})
 
 
-async def _download(http: aiohttp.ClientSession, url: str) -> bytes:
-    # The document server's URL is already encoded: sent as it is.
-    async with http.get(URL(url, encoded=True)) as response:
-        response.raise_for_status()
-        return await response.read()
-
-
-async def forcesave(session: aiohttp.ClientSession, settings: Settings, doc_key: str, userdata: str) -> ForceSave:
-    """Ask the document server to save *doc_key* now, its save callback carrying *userdata*, as the harness does."""
-    command = {"c": "forcesave", "key": doc_key, "userdata": userdata}
+async def _take(request: web.Request, state: CallbackState, callback: Callback) -> None:
+    """Verify *callback* and, for a save, fetch its file; refused as the runtime's route refuses."""
+    if callback.doc_key not in state.documents:
+        raise _Refused(404, "The document is no longer open.")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise _Refused(400, "The callback is not JSON.") from None
+    try:
+        payload = read_signed_body(state.settings.jwt_secret, body, request.headers.get("Authorization"), callback.doc_key)
+    except Unverifiable as exc:
+        raise _Refused(403, str(exc)) from None
+    userdata, url = payload.get("userdata"), payload.get("url")
+    callback.userdata = None if userdata is None else str(userdata)
+    callback.url = None if url is None else str(url)
+    try:
+        callback.status = int(payload.get("status", 0))
+    except (TypeError, ValueError):
+        raise _Refused(500, f"The callback's status is not a number: {payload.get('status')!r}") from None
+    if callback.status not in SAVE_STATUSES:
+        return
+    if not callback.url:
+        raise _Refused(400, "The save names no file.")
     started = time.monotonic()
     try:
-        async with session.post(
-            f"{settings.command_url.rstrip('/')}/command",
-            json={**command, "token": sign(settings.jwt_secret, command)},
-            timeout=aiohttp.ClientTimeout(total=FORCESAVE_TIMEOUT_S),
-        ) as response:
+        callback.data = await _download(internal_url(callback.url, state.settings.command_url))
+    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+        raise _Refused(502, f"Could not download the saved document: {exc!r}") from None
+    finally:
+        callback.download_s = time.monotonic() - started
+
+
+async def _download(url: str) -> bytes:
+    # A client of its own per download, as the harness has: no save waits for another's connection.
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_S)) as http:
+        # The document server's URL is already encoded: sent as it is.
+        async with http.get(URL(url, encoded=True)) as response:
             response.raise_for_status()
-            answer = await response.json(content_type=None)
-    except (aiohttp.ClientError, TimeoutError, ValueError):
-        return ForceSave(None, time.monotonic() - started)
-    seconds = time.monotonic() - started
-    if not isinstance(answer, dict):
-        return ForceSave(None, seconds)
+            return await response.read()
+
+
+async def forcesave(settings: Settings, doc_key: str, userdata: str) -> ForceSave:
+    """Ask the document server to save *doc_key* now, its save callback carrying *userdata*, as the harness does.
+
+    Each command gets a client of its own, as the harness's does, so none waits for another's connection.
+    """
+    command = {"c": "forcesave", "key": doc_key, "userdata": userdata}
+    started = time.monotonic()
+    http_status: int | None = None
     try:
-        return ForceSave(int(answer.get("error", -1)), seconds)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=FORCESAVE_TIMEOUT_S)) as http:
+            async with http.post(
+                f"{settings.command_url.rstrip('/')}/command",
+                json={**command, "token": sign(settings.jwt_secret, command)},
+                allow_redirects=False,
+            ) as response:
+                http_status = response.status
+                body = await response.read()
+    # aiohttp's timeout errors are client errors too: the timeout is caught first.
+    except TimeoutError:
+        return ForceSave(None, time.monotonic() - started, "timeout", http_status)
+    except aiohttp.ClientError:
+        return ForceSave(None, time.monotonic() - started, "unreachable", http_status)
+    seconds = time.monotonic() - started
+    if not 200 <= http_status < 300:
+        return ForceSave(None, seconds, "http_error", http_status)
+    try:
+        answer = json.loads(body)
+        error = int(answer.get("error", -1)) if isinstance(answer, dict) else None
     except (TypeError, ValueError):
-        return ForceSave(None, seconds)
+        error = None
+    if error is None:
+        return ForceSave(None, seconds, "bad_answer", http_status)
+    return ForceSave(error, seconds, "answered", http_status)
