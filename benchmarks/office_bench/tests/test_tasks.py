@@ -5,6 +5,7 @@ document the agent left unchanged. The fixtures' contents the edit checks rely o
 """
 import copy
 import os
+from collections.abc import Callable
 
 import pytest
 
@@ -681,6 +682,80 @@ def test_xlsx_multi_sheet_and_dates_done_right(tmp_path):
     path = str(tmp_path / "launch-plan.xlsx")
     book.save(path)
     assert failures(run_checks("xlsx-dates", path)) == []
+
+
+HOURS = {"Jan": (120, 98, 140), "Feb": (132, 110, 138), "Mar": (128, 105, 150)}
+TOTALS = {"Ana": 380, "Ben": 313, "Carla": 428}
+
+
+def _team_hours(tmp_path, summary: Callable[[int, int], list]) -> str:
+    """team-hours.xlsx with the prompt's month sheets and a Summary whose row for each person (2 to 4) is
+    *summary*(row, index): the cells from B on."""
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    book.active.title = "Jan"
+    for i, (month, hours) in enumerate(HOURS.items()):
+        ws = book[month] if i == 0 else book.create_sheet(month)
+        ws.append(["Person", "Hours"])
+        for name, h in zip(TOTALS, hours):
+            ws.append([name, h])
+    s = book.create_sheet("Summary")
+    s.append(["Person", "Jan", "Feb", "Mar", "Total"])
+    for i, name in enumerate(TOTALS):
+        s.append([name, *summary(i + 2, i)])
+    path = str(tmp_path / "team-hours.xlsx")
+    book.save(path)
+    return path
+
+
+def _total_checks(results) -> dict[str, tuple[bool | None, str]]:
+    return {r.name: (r.passed, r.detail) for r in results if "by formula on Summary" in r.name}
+
+
+@pytest.mark.parametrize("summary", [
+    # Each month's column links to its sheet, and the total adds the row: what the agent most often builds.
+    lambda row, i: [f"=Jan!B{row}", f"=Feb!B{row}", f"=Mar!B{row}", f"=SUM(B{row}:D{row})"],
+    # The total points at the month sheets itself.
+    lambda row, i: [f"=Jan!B{row}+Feb!B{row}+'Mar'!B{row}"],
+    lambda row, i: [f"=SUM(Jan!B{row},Feb!B{row},Mar!B{row})"],
+    # A link through a link is still a link.
+    lambda row, i: [f"=Jan!B{row}", f"=Feb!B{row}", f"=Mar!B{row}", f"=B{row}+C{row}+D{row}", f"=E{row}"],
+], ids=["row-links", "direct", "direct-sum", "link-of-links"])
+def test_xlsx_multi_sheet_total_that_reaches_the_month_sheets_passes(tmp_path, summary):
+    totals = _total_checks(run_checks("xlsx-multi-sheet", _team_hours(tmp_path, summary)))
+    assert len(totals) == 3
+    assert all(passed for passed, _ in totals.values()), totals
+
+
+@pytest.mark.parametrize("summary, why", [
+    # The month values typed again on Summary and added there: a copy, not a link.
+    (lambda row, i: [*(HOURS[m][i] for m in HOURS), f"=SUM(B{row}:D{row})"], "typed on Summary"),
+    # One month typed, two linked.
+    (lambda row, i: [f"=Jan!B{row}", f"=Feb!B{row}", HOURS["Mar"][i], f"=SUM(B{row}:D{row})"], "typed on Summary"),
+    # The total typed as a number, or worked out from numbers in the formula.
+    (lambda row, i: [None, None, None, list(TOTALS.values())[i]], "no formula on Summary gives"),
+    (lambda row, i: [None, None, None, "=" + "+".join(str(HOURS[m][i]) for m in HOURS)], "does not point at"),
+    # Linked, but the wrong months: the value is wrong.
+    (lambda row, i: [f"=Jan!B{row}", f"=Feb!B{row}", None, f"=SUM(B{row}:D{row})"], "no formula on Summary gives"),
+], ids=["typed-copies", "one-typed-copy", "typed-total", "numbers-in-formula", "wrong-value"])
+def test_xlsx_multi_sheet_total_that_does_not_reach_the_month_sheets_fails(tmp_path, summary, why):
+    totals = _total_checks(run_checks("xlsx-multi-sheet", _team_hours(tmp_path, summary)))
+    assert len(totals) == 3
+    for passed, detail in totals.values():
+        assert passed is False and why in detail, totals
+
+
+def test_xlsx_multi_sheet_links_are_followed_a_bounded_number_of_cells_deep(tmp_path):
+    from obench.tasks import LINK_STEPS, _reaches_other_sheets
+
+    # B links to Jan; each next column reads the one before it, so column B + n is n cells away from the link.
+    columns = "BCDEFGH"
+    path = _team_hours(tmp_path, lambda row, i: [f"=Jan!B{row}", *(f"={c}{row}" for c in columns[:LINK_STEPS + 1])])
+    book = docs.read(path)
+    assert _reaches_other_sheets(book, "Summary", f"{columns[LINK_STEPS]}2")[0] is True
+    linked, detail = _reaches_other_sheets(book, "Summary", f"{columns[LINK_STEPS + 1]}2")
+    assert linked is False and f"more than {LINK_STEPS} cells" in detail
 
 
 LAUNCH_PLAN = [("Copy final", "Inês", 3, 7), ("Landing page", "Rui", 5, 14), ("Email campaign", "Ana", 10, 21),

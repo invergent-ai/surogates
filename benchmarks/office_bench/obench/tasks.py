@@ -990,18 +990,68 @@ def _values_on(sheet: str, values: list[float]):
     return C.Check(f"{sheet} holds {values}", fn)
 
 
+LINK_STEPS = 3  # how deep a chain of formula cells of its own sheet a total may go through to reach another sheet
+
+
+def _reaches_other_sheets(book: SheetBook, sheet: str, ref: str) -> tuple[bool, str]:
+    """Whether the formula at *sheet*!*ref* takes its numbers from other sheets: directly (``=Jan!B2+Feb!B2``), or
+    through formula cells of its own sheet that do (``=SUM(B2:D2)`` over ``=Jan!B2`` and the like), at most
+    LINK_STEPS of them deep. A typed number of its own sheet on the way is a copy, not a link, and fails it."""
+    from obench.formula import FormulaError, Unsupported, references
+
+    others: set[str] = set()
+    typed: list[str] = []
+    links: list[str] = []
+    seen, frontier = {ref}, [ref]
+    for _ in range(LINK_STEPS + 1):  # the total's own formula, then each cell it goes through
+        reached: list[str] = []
+        for cell in frontier:
+            try:
+                read = references(book.raw(sheet, cell), sheet)
+            except (Unsupported, FormulaError) as exc:
+                return False, f"cannot follow {sheet}!{cell}: {exc}"
+            for s, r in read:
+                if s.lower() != sheet.lower():
+                    others.add(s)
+                elif r not in seen:
+                    seen.add(r)
+                    raw = book.raw(sheet, r)
+                    if isinstance(raw, str) and raw.startswith("="):
+                        reached.append(r)
+                    elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        typed.append(r)
+        links += reached
+        frontier = reached
+        if not frontier:
+            break
+    total = f"{sheet}!{ref} {book.raw(sheet, ref)}"
+    if frontier:
+        return False, f"{total} goes through more than {LINK_STEPS} cells of {sheet} in a row"
+    if typed:
+        return False, f"{total} adds numbers typed on {sheet} ({', '.join(typed)}), not links to the month sheets"
+    if not others:
+        return False, f"{total} does not point at the month sheets"
+    through = f" through {', '.join(links)}" if links else ""
+    return True, f"{total}{through}, from {', '.join(sorted(others))}"
+
+
 def _formula_on(sheet: str, value: float, label: str, must_ref_other_sheet: bool = False):
     def fn(book: SheetBook, ctx):
         name = book.sheet_named(sheet)
         if name is None:
             return False, f"no sheet {sheet}"
         vals, problems = C.x_eval_all(book)
+        unlinked = None
         for (s, r), v in vals.items():
             if s == name and isinstance(v, (int, float)) and abs(v - value) < 0.01:
-                f = book.raw(s, r)
-                if must_ref_other_sheet and "!" not in f:
-                    return False, f"{s}!{r} {f} does not point at the month sheets"
-                return True, f"{s}!{r} {f}"
+                if not must_ref_other_sheet:
+                    return True, f"{s}!{r} {book.raw(s, r)}"
+                linked, detail = _reaches_other_sheets(book, s, r)
+                if linked:
+                    return True, detail
+                unlinked = unlinked or detail
+        if unlinked:
+            return False, unlinked
         return (None if problems else False), f"no formula on {name} gives {value:g}" + (f"; {problems[:2]}" if problems else "")
     return C.Check(f"{label} = {value:g} by formula on {sheet}", fn, ("formula", "total", "summary"))
 

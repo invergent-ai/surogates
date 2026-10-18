@@ -107,6 +107,17 @@ def to_number(value: Any) -> float:
     raise FormulaError(f"cannot use {type(value).__name__} as a number")
 
 
+def references(text: str, sheet: str) -> list[tuple[str, str]]:
+    """Every cell a formula reads, as (sheet, cell), a range's cells one by one; *sheet* is the formula's own."""
+    return [
+        (ref_sheet, cell)
+        for kind, value in _tokenize(text[1:] if text.startswith("=") else text)
+        if kind == "ref"
+        for ref_sheet, cells in [split_ref(value, sheet)]
+        for cell in expand_range(cells)
+    ]
+
+
 Getter = Callable[[str, str], Any]  # (sheet, cell) -> raw cell content (formula string or value)
 
 
