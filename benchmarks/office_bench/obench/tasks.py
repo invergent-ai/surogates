@@ -10,6 +10,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from obench import checks as C
 from obench import docs
@@ -226,79 +227,99 @@ def _block_text(b) -> str:
 
 OLD_BUDGET, NEW_BUDGET = "45,800", "48,500"
 
-# The areas of the long report with a section of the same shape each: (title, owner, staff, budget 2026, budget 2027,
-# why it moved, the measure, its value at the start and the end of 2026, its target, the main project, its first and
-# last month, the biggest risk, what the team does then, the priorities (none for some), a quarterly spending table).
+
+class _Area(NamedTuple):
+    """An area of the long report, written as a section of the same shape as the others."""
+    title: str
+    owner: str
+    staff: int
+    budget_2026: int
+    budget_2027: int
+    why: str  # why the budget moved
+    measure: str  # what the team is judged on
+    was: str  # the measure at the start of 2026
+    now: str  # the measure at the end of 2026
+    target: str  # the measure's target for 2027
+    project: str  # the main project of the year
+    first: str  # the project's first month
+    last: str  # the project's last month
+    risk: str  # the biggest risk
+    then: str  # what the team does if it happens
+    priorities: tuple[str, ...]  # the year's priorities, as a bulleted list; none for some areas
+    quarterly: bool  # a table of planned spending by quarter
+
+
 _AREAS = {
-    3: ("Staffing", "head of people", 6, 204900, 212400, "the increase covers the pay review agreed in March",
+    3: _Area("Staffing", "head of people", 6, 204900, 212400, "the increase covers the pay review agreed in March",
         "staff turnover", "14%", "11%", "below 10%", "a new pay and grading framework", "February", "July",
         "a wave of resignations after the pay review", "bring the mid-year review forward and use the retention fund",
         ("Publish the new pay bands", "Train every manager on the review", "Bring turnover below 10%"), True),
-    4: ("Recruitment", "recruitment lead", 3, 41300, 38900,
+    4: _Area("Recruitment", "recruitment lead", 3, 41300, 38900,
         "the fall reflects fewer agency fees now that most roles are filled directly",
         "the average time to fill a role", "52 days", "41 days", "35 days", "a careers page with live job listings",
-        "January", "April", "a shortage of engineers in the local market", "widen the search to remote candidates",
-        (), False),
-    5: ("Training", "learning manager", 2, 24100, 27600, "the increase pays for a leadership course for new managers",
-        "training hours per employee", "11", "16", "20", "a leadership course for the twelve new managers", "March",
-        "November", "managers too busy to attend", "move the sessions online and record them",
+        "January", "April", "a shortage of engineers in the local market", "widen the search to remote candidates", (),
+        False),
+    5: _Area("Training", "learning manager", 2, 24100, 27600,
+        "the increase pays for a leadership course for new managers", "training hours per employee", "11", "16", "20",
+        "a leadership course for the twelve new managers", "March", "November", "managers too busy to attend",
+        "move the sessions online and record them",
         ("Run the leadership course", "Refresh the safety training", "Track training hours per person"), False),
-    6: ("Customer support", "support manager", 14, 61800, 64300, "the increase covers two extra weekend shifts",
+    6: _Area("Customer support", "support manager", 14, 61800, 64300, "the increase covers two extra weekend shifts",
         "the share of tickets answered within a day", "81%", "88%", "92%", "a self-service help centre", "April",
         "September", "a spike in tickets after the spring release",
         "move two product specialists onto the queue for a month", (), True),
-    7: ("Sales operations", "sales operations lead", 5, 49700, 51200, "the increase is the new pricing tool's licence",
-        "the time from a signed order to its first invoice", "9 days", "6 days", "4 days",
-        "moving every quote into the pricing tool", "January", "May", "errors in quotes during the move",
-        "check every quote by hand for the first two months",
+    7: _Area("Sales operations", "sales operations lead", 5, 49700, 51200,
+        "the increase is the new pricing tool's licence", "the time from a signed order to its first invoice", "9 days",
+        "6 days", "4 days", "moving every quote into the pricing tool", "January", "May",
+        "errors in quotes during the move", "check every quote by hand for the first two months",
         ("Move all quotes into the pricing tool", "Invoice within four days", "Clean up the customer records"), False),
-    8: ("Marketing", "marketing manager", 7, 79200, 73500, "the fall comes from running the spring campaign online",
-        "qualified leads per month", "140", "185", "220", "an online spring campaign", "February", "June",
-        "a campaign that brings visits but few leads",
+    8: _Area("Marketing", "marketing manager", 7, 79200, 73500,
+        "the fall comes from running the spring campaign online", "qualified leads per month", "140", "185", "220",
+        "an online spring campaign", "February", "June", "a campaign that brings visits but few leads",
         "move the spending to the channels that bring leads within the quarter", (), False),
-    9: ("Product delivery", "head of delivery", 18, 84600, 88100, "the increase pays for a second test environment",
-        "releases shipped on the planned date", "70%", "82%", "90%", "a second test environment", "March", "August",
-        "a late release in the busy autumn period", "freeze new features four weeks before each release",
+    9: _Area("Product delivery", "head of delivery", 18, 84600, 88100,
+        "the increase pays for a second test environment", "releases shipped on the planned date", "70%", "82%", "90%",
+        "a second test environment", "March", "August", "a late release in the busy autumn period",
+        "freeze new features four weeks before each release",
         ("Ship every release on its planned date", "Set up the second test environment", "Cut open defects by a third"),
         True),
-    10: ("Quality", "quality lead", 3, 18400, 19700, "the increase covers the external audit",
-         "defects found after a release", "46", "31", "below 25", "the external quality audit", "May", "June",
-         "audit findings that need large changes", "plan the changes into the autumn releases", (), False),
-    11: ("IT systems", "IT manager", 6, 91000, 96700, "the increase is the move of the file servers to the cloud",
-         "unplanned downtime", "19 hours", "7 hours", "under 5 hours", "moving the file servers to the cloud",
-         "January", "October", "data lost during the move",
-         "keep the old servers running beside the new ones until every folder is checked",
-         ("Move the file servers", "Replace the oldest laptops", "Halve unplanned downtime"), False),
-    12: ("Security", "security officer", 2, 29800, 33400, "the increase pays for a yearly penetration test",
-         "the share of staff who pass the phishing test", "72%", "86%", "95%", "two-factor login for every system",
-         "February", "May", "a successful phishing attack",
-         "lock the affected accounts and reset every password in the team", (), True),
-    13: ("Procurement", "procurement lead", 2, 13500, 12800, "the fall reflects fewer suppliers to manage",
-         "the share of spending under contract", "64%", "77%", "85%", "a single list of approved suppliers", "April",
-         "July", "a key supplier raising its prices", "invite two other suppliers to quote",
-         ("Publish the approved supplier list", "Bring the top twenty suppliers under contract",
-          "Pay invoices within thirty days"), False),
-    14: ("Logistics", "logistics manager", 9, 39900, 41600, "the increase covers higher fuel costs",
-         "orders delivered on time", "91%", "94%", "97%", "a route plan for the new delivery van", "March", "May",
-         "a delay at the main warehouse", "ship from the second warehouse until the delay clears", (), False),
-    15: ("Travel", "office manager", 1, 26700, 22300, "the fall comes from holding more meetings online",
-         "trips taken per month", "38", "29", "25", "a travel booking tool", "January", "March",
-         "trips booked outside the tool", "refund only the trips booked through it", (), True),
-    16: ("Sustainability", "sustainability lead", 1, 11200, 15900, "the increase pays for the first energy audit",
-         "electricity used per employee", "2.9 MWh", "2.6 MWh", "2.3 MWh", "the first energy audit of both offices",
-         "June", "September", "an audit that finds the old office cannot be improved",
-         "fold the findings into the facilities plan in section 17",
-         ("Complete the energy audit", "Switch both offices to green power", "Report emissions for the first time"),
-         False),
-    18: ("Legal and compliance", "legal counsel", 2, 31200, 29500,
-         "the fall reflects fewer contract reviews by outside lawyers", "contracts reviewed within five days", "68%",
-         "80%", "90%", "standard contract templates for sales", "February", "April",
-         "a change in the data protection rules", "review the affected contracts within a month", (), False),
-    19: ("Business continuity", "operations director", 2, 16000, 17200,
-         "the increase pays for a second internet line at each office",
-         "systems restored within four hours in a test", "3 of 6", "5 of 6", "6 of 6",
-         "a tested recovery plan for each office", "April", "October", "a long power cut at the main office",
-         "move the critical work to the second office", (), True),
+    10: _Area("Quality", "quality lead", 3, 18400, 19700, "the increase covers the external audit",
+        "defects found after a release", "46", "31", "below 25", "the external quality audit", "May", "June",
+        "audit findings that need large changes", "plan the changes into the autumn releases", (), False),
+    11: _Area("IT systems", "IT manager", 6, 91000, 96700, "the increase is the move of the file servers to the cloud",
+        "unplanned downtime", "19 hours", "7 hours", "under 5 hours", "moving the file servers to the cloud", "January",
+        "October", "data lost during the move",
+        "keep the old servers running beside the new ones until every folder is checked",
+        ("Move the file servers", "Replace the oldest laptops", "Halve unplanned downtime"), False),
+    12: _Area("Security", "security officer", 2, 29800, 33400, "the increase pays for a yearly penetration test",
+        "the share of staff who pass the phishing test", "72%", "86%", "95%", "two-factor login for every system",
+        "February", "May", "a successful phishing attack",
+        "lock the affected accounts and reset every password in the team", (), True),
+    13: _Area("Procurement", "procurement lead", 2, 13500, 12800, "the fall reflects fewer suppliers to manage",
+        "the share of spending under contract", "64%", "77%", "85%", "a single list of approved suppliers", "April",
+        "July", "a key supplier raising its prices", "invite two other suppliers to quote",
+        ("Publish the approved supplier list", "Bring the top twenty suppliers under contract",
+         "Pay invoices within thirty days"), False),
+    14: _Area("Logistics", "logistics manager", 9, 39900, 41600, "the increase covers higher fuel costs",
+        "orders delivered on time", "91%", "94%", "97%", "a route plan for the new delivery van", "March", "May",
+        "a delay at the main warehouse", "ship from the second warehouse until the delay clears", (), False),
+    15: _Area("Travel", "office manager", 1, 26700, 22300, "the fall comes from holding more meetings online",
+        "trips taken per month", "38", "29", "25", "a travel booking tool", "January", "March",
+        "trips booked outside the tool", "refund only the trips booked through it", (), True),
+    16: _Area("Sustainability", "sustainability lead", 1, 11200, 15900, "the increase pays for the first energy audit",
+        "electricity used per employee", "2.9 MWh", "2.6 MWh", "2.3 MWh", "the first energy audit of both offices",
+        "June", "September", "an audit that finds the old office cannot be improved",
+        "fold the findings into the facilities plan in section 17",
+        ("Complete the energy audit", "Switch both offices to green power", "Report emissions for the first time"),
+        False),
+    18: _Area("Legal and compliance", "legal counsel", 2, 31200, 29500,
+        "the fall reflects fewer contract reviews by outside lawyers", "contracts reviewed within five days", "68%",
+        "80%", "90%", "standard contract templates for sales", "February", "April",
+        "a change in the data protection rules", "review the affected contracts within a month", (), False),
+    19: _Area("Business continuity", "operations director", 2, 16000, 17200,
+        "the increase pays for a second internet line at each office", "systems restored within four hours in a test",
+        "3 of 6", "5 of 6", "6 of 6", "a tested recovery plan for each office", "April", "October",
+        "a long power cut at the main office", "move the critical work to the second office", (), True),
 }
 
 _SUMMARY = [
@@ -343,34 +364,33 @@ _APPROVALS = [
 
 
 def _area_blocks(n: int) -> list[tuple[str, object]]:
-    (title, owner, staff, b26, b27, why, measure, was, now, target, project, first, last, risk, then, priorities,
-     quarterly) = _AREAS[n]
-    team = "one person" if staff == 1 else f"{staff} people"
+    a = _AREAS[n]
+    team = "one person" if a.staff == 1 else f"{a.staff} people"
     out: list[tuple[str, object]] = [
-        ("h", f"{n}. {title}"),
-        ("p", f"{title} is run by the {owner}, with a team of {team}. Its budget for 2027 is €{b27:,}, against "
-              f"€{b26:,} in 2026; {why}. The team reports to the operations board every month and to the whole "
-              "company once a quarter, at the quarterly review."),
-        ("p", f"The team is judged on {measure}. Over 2026 it moved from {was} to {now}, and the target for 2027 is "
-              f"{target}. The figure is read on the first working day of each month and goes into the monthly "
+        ("h", f"{n}. {a.title}"),
+        ("p", f"{a.title} is run by the {a.owner}, with a team of {team}. Its budget for 2027 is €{a.budget_2027:,}, "
+              f"against €{a.budget_2026:,} in 2026; {a.why}. The team reports to the operations board every month and "
+              "to the whole company once a quarter, at the quarterly review."),
+        ("p", f"The team is judged on {a.measure}. Over 2026 it moved from {a.was} to {a.now}, and the target for 2027 "
+              f"is {a.target}. The figure is read on the first working day of each month and goes into the monthly "
               "operations pack, so a change in one month shows in the next pack and in the next edition of this report."),
-        ("p", f"The main project for the year is {project}. It starts in {first} and is due to end in {last}. The "
-              f"{owner} leads it and reports on it at each board meeting. If it slips by more than a month, the team "
-              "agrees a new date with the operations board, and the new date is recorded in this section."),
+        ("p", f"The main project for the year is {a.project}. It starts in {a.first} and is due to end in {a.last}. "
+              f"The {a.owner} leads it and reports on it at each board meeting. If it slips by more than a month, the "
+              "team agrees a new date with the operations board, and the new date is recorded in this section."),
     ]
-    if priorities:
+    if a.priorities:
         out.append(("p", "The team's priorities for 2027, in order:"))
-        out += [("li", p) for p in priorities]
+        out += [("li", p) for p in a.priorities]
     out += [
-        ("p", f"The biggest risk for this area is {risk}. If it happens, the team will {then}. The risk is reviewed at "
-              f"every quarterly review, and its owner is the {owner}."),
-        ("p", f"Spending on {title.lower()} is checked against the plan at the end of each quarter. An overspend of "
+        ("p", f"The biggest risk for this area is {a.risk}. If it happens, the team will {a.then}. The risk is reviewed "
+              f"at every quarterly review, and its owner is the {a.owner}."),
+        ("p", f"Spending on {a.title.lower()} is checked against the plan at the end of each quarter. An overspend of "
               f"more than {3 + n % 4} per cent needs the finance team's agreement before the next payment is made, and "
               "an underspend of the same size is offered back to the central budget for other teams to use."),
     ]
-    if quarterly:
-        q = [round(b27 * share / 100) * 100 for share in (0.23, 0.25, 0.26)]
-        q.append(b27 - sum(q))
+    if a.quarterly:
+        q = [round(a.budget_2027 * share / 100) * 100 for share in (0.23, 0.25, 0.26)]
+        q.append(a.budget_2027 - sum(q))
         out.append(("p", "Planned spending by quarter:"))
         out.append(("table", [["Quarter", "Planned spend"]] + [[f"Q{i}", f"€{v:,}"] for i, v in enumerate(q, 1)]))
     return out
@@ -418,9 +438,19 @@ def _derive_long_report(src: str, dst: str) -> None:
     d.save(dst)
 
 
+LONG_SECTION = 17  # the section whose budget is wrong
+
+
 def _old_budget_gone(doc: WordDoc, ctx):
-    left = [_block_text(b)[:70] for b in doc.blocks if C.has_text(_block_text(b), int(OLD_BUDGET.replace(",", "")))]
-    return not left, "gone" if not left else f"still in {len(left)} block(s): {left[:4]}"
+    """The old figure is nowhere but in the correction sentence after the section's table, which may say what it was."""
+    note, _ = _section_note(doc, LONG_SECTION)
+    quoted = note if note is not None and _correction_sentence(note.text) else None
+    left = [_block_text(b)[:70] for b in doc.blocks
+            if b is not quoted and C.has_text(_block_text(b), int(OLD_BUDGET.replace(",", "")))]
+    if left:
+        return False, f"still in {len(left)} block(s): {left[:4]}"
+    said = quoted is not None and C.has_text(quoted.text, int(OLD_BUDGET.replace(",", "")))
+    return True, "gone" + (" (the correction sentence quotes it)" if said else "")
 
 
 def _with_new_budget(b):
@@ -446,33 +476,54 @@ def _new_budget_in_its_places(doc: WordDoc, ctx):
     return True, f"all {len(places)} places now give {NEW_BUDGET}"
 
 
-_OCT_14 = re.compile(r"\b14(?:th)?(?: of)? oct(?:ober)?\b|\boct(?:ober)?\.? 14(?:th)?\b|\b14[/.]10\b")
+# 14 October as people write it: 14 October, 14th of October, 14-Oct, October 14, Oct. 14th, 14/10, 14.10, 14-10 (a year
+# may follow), 10/14 (US), 2026-10-14.
+_OCT_14 = re.compile(r"\b14(?:th)?(?: of)?[ -]oct(?:ober)?\b|\boct(?:ober)?\.?[ -]?14(?:th)?\b|\b14[/.-]10\b|\b10/14\b"
+                     r"|\b\d{4}-10-14\b")
+# Words that say a figure was put right; "incorrect" is not one of them.
+_CORRECTED = re.compile(r"\b(?:correct(?:ed|ions?|s)?|updated?|revised?|amend(?:ed|ments?|s)?)\b")
+
+
+def _sentences(text: str) -> list[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", (text or "").strip()) if s.strip()]
+
+
+def _correction_sentence(text: str) -> bool:
+    """One sentence saying the figure was corrected (or updated, revised, amended) on 14 October."""
+    t = norm(text)
+    return bool(_CORRECTED.search(t) and _OCT_14.search(t)) and len(_sentences(text)) == 1
+
+
+def _section_note(doc: WordDoc, section: int) -> tuple[docs.Para | None, str]:
+    """Where a note after the section's table is: the first non-empty block after the section's last table and before
+    the next heading, when it is a plain paragraph. Else None, and why."""
+    blocks = doc.blocks
+    heads = [i for i, b in enumerate(blocks) if isinstance(b, docs.Para) and b.heading is not None]
+    start = next((i for i in heads if norm(blocks[i].text).startswith(f"{section}.")), None)
+    if start is None:
+        return None, f"no section {section} heading"
+    end = next((i for i in heads if i > start), len(blocks))
+    tables = [i for i in range(start + 1, end) if isinstance(blocks[i], docs.Table)]
+    if not tables:
+        return None, f"section {section} has no table"
+    after = [b for b in blocks[tables[-1] + 1:end] if not (isinstance(b, docs.Para) and not b.text.strip())]
+    if not after:
+        return None, f"nothing between section {section}'s table and the next heading"
+    b = after[0]
+    if not isinstance(b, docs.Para) or b.list_kind is not None:
+        return None, f"after the table: {'a table' if isinstance(b, docs.Table) else 'a list item'}"
+    return b, ""
 
 
 def _note_after_table(section: int):
-    """The first paragraph after the section's last table, before the next heading: one sentence saying the figure was
-    corrected on 14 October."""
     def fn(doc: WordDoc, ctx):
-        blocks = doc.blocks
-        heads = [i for i, b in enumerate(blocks) if isinstance(b, docs.Para) and b.heading is not None]
-        start = next((i for i in heads if norm(blocks[i].text).startswith(f"{section}.")), None)
-        if start is None:
-            return False, f"no section {section} heading"
-        end = next((i for i in heads if i > start), len(blocks))
-        tables = [i for i in range(start + 1, end) if isinstance(blocks[i], docs.Table)]
-        if not tables:
-            return False, f"section {section} has no table"
-        after = [b for b in blocks[tables[-1] + 1:end] if not (isinstance(b, docs.Para) and not b.text.strip())]
-        if not after:
-            return False, f"nothing between section {section}'s table and the next heading"
-        b = after[0]
-        if not isinstance(b, docs.Para) or b.list_kind is not None:
-            return False, f"after the table: {'a table' if isinstance(b, docs.Table) else 'a list item'}"
-        text = norm(b.text)
-        if not (_OCT_14.search(text) and "correct" in text):
-            return False, f"the paragraph after the table: {b.text[:100]!r}"
-        sentences = [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", b.text.strip()) if s.strip()]
-        n = len(sentences)
+        b, why = _section_note(doc, section)
+        if b is None:
+            return False, why
+        t = norm(b.text)
+        if not (_CORRECTED.search(t) and _OCT_14.search(t)):
+            return False, f"the paragraph after the table does not say it was corrected on 14 October: {b.text[:100]!r}"
+        n = len(_sentences(b.text))
         return n == 1, f"{b.text[:100]!r}" + ("" if n == 1 else f" ({n} sentences)")
     return C.Check(f"a sentence right after section {section}'s table says it was corrected on 14 October", fn,
                    ("sentence", "correct"))
@@ -538,11 +589,17 @@ def _total_row(values: list[str]):
     return C.Check(f"the Total row reads {' and '.join(values)}", fn, ("total",))
 
 
-def _first_rows_kept(rows: list[list[str]]):
+def _rows_kept(rows: list[list[str]]):
+    """The header stays the first row; each other row is still there as it was, in any order (a new row may go first,
+    the regions may be sorted)."""
     def fn(doc: WordDoc, ctx):
-        got = doc.tables[0].rows[:len(rows)] if doc.tables else []
-        same = [[norm(c) for c in r] for r in got] == [[norm(c) for c in r] for r in rows]
-        return same, f"first rows {got}"
+        got = doc.tables[0].rows if doc.tables else []
+        have = [[norm(c) for c in r] for r in got]
+        want = [[norm(c) for c in r] for r in rows]
+        if not have or have[0] != want[0]:
+            return False, f"the header is {got[0] if got else None}"
+        missing = [r for r, w in zip(rows[1:], want[1:]) if w not in have[1:]]
+        return not missing, "kept" if not missing else f"changed or gone: {missing}; the table is {got}"
     return C.Check(f"the header and the {' and '.join(r[0] for r in rows[1:])} rows are kept", fn)
 
 
@@ -552,7 +609,8 @@ def _first_rows_kept(rows: list[list[str]]):
 # reply, normalized) and how the check names it; then the notes that ask nothing.
 THREAD_QUESTIONS = {
     "How many engineers do we plan to hire?": (r"\b(?:two|2)\b", "two"),
-    "How much did North grow this quarter?": (r"(?:(?<![\d.,])12(?:[.,]0)?|\btwelve)\s?(?:%|per\s?cent)", "12%"),
+    # 12, 12%, 12 %, 12 pct, 12 per cent, twelve percent; not 112 or 12.5.
+    "How much did North grow this quarter?": (r"(?<![\d.,])12(?:[.,]0+)?(?![\d]|[.,]\d)|\btwelve\b", "12%"),
     "Which city is the new office in?": (r"\blisbon\b", "Lisbon"),
 }
 THREAD_NOTES = ("Keep 'revenue target' in bold, as finance asked.",
@@ -861,10 +919,11 @@ WORD_TASKS = [
             "€45,800 is in the summary, section 17's text and table, and the approvals."
         ),
         checks=(
-            C.Check(f"'{OLD_BUDGET}' no longer appears anywhere", _old_budget_gone, ("everywhere", "occurrence")),
+            C.Check(f"'{OLD_BUDGET}' no longer appears anywhere except in the correction sentence", _old_budget_gone,
+                    ("everywhere", "occurrence")),
             C.Check(f"{NEW_BUDGET} stands in every place {OLD_BUDGET} was", _new_budget_in_its_places,
                     ("everywhere", NEW_BUDGET)),
-            _note_after_table(17),
+            _note_after_table(LONG_SECTION),
             C.w_keeps_rest(changed=lambda b: OLD_BUDGET in _block_text(b)),
             C.Check("one paragraph added, none removed", _one_paragraph_added),
         ),
@@ -880,7 +939,7 @@ WORD_TASKS = [
         checks=(
             _row_above_total("South", ["70", "65"]),
             _total_row(["280", "305"]),
-            _first_rows_kept(REGION_TABLE[:3]),
+            _rows_kept(REGION_TABLE[:3]),
             C.Check("table style kept", _table_style_kept),
             C.w_keeps_rest(changed=lambda b: isinstance(b, docs.Table)),
         ),
@@ -892,7 +951,7 @@ WORD_TASKS = [
         inputs=(Input("quarterly-report.docx", "sample.docx", derive=_derive_threads),),
         target="quarterly-report.docx",
         prompt=(
-            "Answer the three questions in the comments on quarterly-report.docx and resolve them; leave the other "
+            "Reply to the three questions in the comments on quarterly-report.docx and resolve them; leave the other "
             "two."
         ),
         notes=(

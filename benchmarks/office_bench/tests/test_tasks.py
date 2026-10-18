@@ -10,7 +10,7 @@ import pytest
 
 from obench import docs
 from obench.checks import Ctx
-from obench.tasks import FIXTURES, TASKS, by_id
+from obench.tasks import FIXTURES, TASKS, _block_text, by_id
 
 T = by_id()
 
@@ -224,10 +224,6 @@ def _derived(task_id: str, tmp_path, name: str = "input.docx") -> str:
     return path
 
 
-def _block_text(b) -> str:
-    return b.text if isinstance(b, docs.Para) else " | ".join(" | ".join(r) for r in b.rows)
-
-
 def test_derived_inputs_leave_the_fixture_as_it_is(tmp_path):
     import hashlib
 
@@ -294,20 +290,52 @@ def test_docx_long_edit_done_right(tmp_path):
     assert failures(run_checks("docx-long-edit", _long_edit(tmp_path))) == []
 
 
+OLD_GONE = "'45,800' no longer appears anywhere except in the correction sentence"
+NOTE = "a sentence right after section 17's table says it was corrected on 14 October"
+
+
 def test_docx_long_edit_that_misses_a_place_fails(tmp_path):
     names = [n for n, _ in failures(run_checks("docx-long-edit", _long_edit(tmp_path, places="section 17")))]
-    assert names == ["'45,800' no longer appears anywhere", "48,500 stands in every place 45,800 was"]
+    assert names == [OLD_GONE, "48,500 stands in every place 45,800 was"]
+
+
+@pytest.mark.parametrize("note", [
+    "The budget was corrected from €45,800 to €48,500 on 14 October.",
+    "This figure was updated on 2026-10-14.",
+    "The budget was revised on 14/10.",
+    "The 2027 figure was amended on October 14.",
+    "Correction made on the 14th of October: the budget is €48,500.",
+])
+def test_docx_long_edit_correction_sentence_in_other_words_passes(tmp_path, note):
+    assert failures(run_checks("docx-long-edit", _long_edit(tmp_path, note=note))) == []
+
+
+def test_docx_long_edit_old_figure_outside_the_correction_sentence_fails(tmp_path):
+    # In a second sentence of the note.
+    fails = dict(failures(run_checks("docx-long-edit", _long_edit(
+        tmp_path, note="The budget was corrected on 14 October. It was €45,800."))))
+    assert list(fails) == [OLD_GONE, NOTE] and "2 sentences" in fails[NOTE]
+    # In a correction sentence put under the heading, not after the table.
+    fails = dict(failures(run_checks("docx-long-edit", _long_edit(
+        tmp_path, note="The budget was corrected from €45,800 to €48,500 on 14 October.", note_after_table=False))))
+    assert list(fails) == [OLD_GONE, NOTE]
+
+
+@pytest.mark.parametrize("note", ["The figure here was incorrect until 14 October.",
+                                  "The budget figure was corrected.",
+                                  "The budget figure was corrected on 4 October."])
+def test_docx_long_edit_note_that_does_not_say_corrected_on_14_october_fails(tmp_path, note):
+    assert [n for n, _ in failures(run_checks("docx-long-edit", _long_edit(tmp_path, note=note)))] == [NOTE]
 
 
 def test_docx_long_edit_note_in_the_wrong_place_or_missing_fails(tmp_path):
     fails = failures(run_checks("docx-long-edit", _long_edit(tmp_path, note_after_table=False)))
-    assert [n for n, _ in fails] == ["a sentence right after section 17's table says it was corrected on 14 October"]
+    assert [n for n, _ in fails] == [NOTE]
     fails = failures(run_checks("docx-long-edit", _long_edit(tmp_path, note=None)))
-    assert [n for n, _ in fails] == ["a sentence right after section 17's table says it was corrected on 14 October",
-                                     "one paragraph added, none removed"]
+    assert [n for n, _ in fails] == [NOTE, "one paragraph added, none removed"]
     fails = failures(run_checks("docx-long-edit", _long_edit(
         tmp_path, note="The figure was corrected on 14 October. The old one was a typing error.")))
-    assert "2 sentences" in dict(fails)["a sentence right after section 17's table says it was corrected on 14 October"]
+    assert "2 sentences" in dict(fails)[NOTE]
 
 
 def test_docx_table_edit_input(tmp_path):
@@ -347,6 +375,37 @@ def test_docx_table_edit_with_the_old_totals_fails(tmp_path):
     assert "210" in fails[0][1]
 
 
+def _table_rows(tmp_path, rows: list[list[str]]) -> str:
+    """The derived input with its table's rows under the header replaced by *rows*."""
+    import docx
+
+    d = docx.Document(_derived("docx-table-edit", tmp_path))
+    table = d.tables[0]
+    for tr in table._tbl.tr_lst[1:]:
+        table._tbl.remove(tr)
+    for values in rows:
+        for cell, value in zip(table.add_row().cells, values):
+            cell.text = value
+    path = str(tmp_path / "quarterly-report.docx")
+    d.save(path)
+    return path
+
+
+@pytest.mark.parametrize("rows", [
+    [["South", "70", "65"], ["North", "120", "140"], ["East", "90", "100"], ["Total", "280", "305"]],
+    [["East", "90", "100"], ["North", "120", "140"], ["South", "70", "65"], ["Total", "280", "305"]],
+], ids=["south-first", "sorted-by-name"])
+def test_docx_table_edit_in_another_row_order_passes(tmp_path, rows):
+    assert failures(run_checks("docx-table-edit", _table_rows(tmp_path, rows))) == []
+
+
+def test_docx_table_edit_that_changes_a_region_fails(tmp_path):
+    rows = [["North", "125", "140"], ["East", "90", "100"], ["South", "70", "65"], ["Total", "280", "305"]]
+    fails = failures(run_checks("docx-table-edit", _table_rows(tmp_path, rows)))
+    assert [n for n, _ in fails] == ["the header and the North and East rows are kept"]
+    assert "['North', '120', '140']" in fails[0][1]
+
+
 def test_docx_many_threads_input(tmp_path):
     from obench.tasks import THREAD_NOTES, THREAD_QUESTIONS
 
@@ -365,6 +424,8 @@ def test_docx_many_threads_input(tmp_path):
         assert not re.search(pattern, docs.norm(threads[question].anchor + " " + question))
     # The comments add no text to the document: every other Word edit check still reads the sample.
     assert [p.text for p in d.paragraphs] == [p.text for p in docs.read(str(FIXTURES / "sample.docx")).paragraphs]
+    # The person asks for replies in the threads, not answers anywhere.
+    assert T["docx-many-threads"].prompt.startswith("Reply to the three questions in the comments on ")
 
 
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
@@ -458,6 +519,30 @@ def test_docx_many_threads_wrong_answer_open_thread_or_answered_note_fails(tmp_p
     fails = failures(run_checks("docx-many-threads", _threads_saved(tmp_path, long, set(ANSWERS))))
     assert [n for n, _ in fails] == ["the reply to 'Which city is the new office in?' says Lisbon"]
     assert "400" in fails[0][1]
+
+
+@pytest.mark.parametrize("answer,right", [
+    ("North grew 12%.", True), ("North grew 12.", True), ("12 % this quarter.", True), ("12 pct.", True),
+    ("North grew 12 per cent.", True), ("North grew twelve percent.", True),
+    ("North grew 112%.", False), ("North grew 12.5%.", False),
+])
+def test_docx_many_threads_north_growth_written_any_way(tmp_path, answer, right):
+    answers = dict(ANSWERS, **{"How much did North grow this quarter?": answer})
+    names = [n for n, _ in failures(run_checks("docx-many-threads", _threads_saved(tmp_path, answers, set(ANSWERS))))]
+    assert names == ([] if right else ["the reply to 'How much did North grow this quarter?' says 12%"])
+
+
+def test_docx_many_threads_answer_left_as_a_new_thread_is_named(tmp_path):
+    import docx
+
+    d = docx.Document(_derived("docx-many-threads", tmp_path))
+    para = next(p for p in d.paragraphs if p.text == "North grew fastest, then the east.")
+    d.add_comment(para.runs[0], text="North grew 12% this quarter.", author="Agent", initials="A")
+    path = str(tmp_path / "quarterly-report.docx")
+    d.save(path)
+    details = dict(failures(run_checks("docx-many-threads", path)))
+    assert details["the reply to 'How much did North grow this quarter?' says 12%"] == (
+        "no reply; a new thread says it instead: ['North grew 12% this quarter.']")
 
 
 # --------------------------------------------------------------------------- Spreadsheets, done right

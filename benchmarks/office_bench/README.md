@@ -211,13 +211,13 @@ by the `w14:paraId` of the comment's last paragraph, where `w15:paraIdParent` na
 - **`docx-long-edit`** (edit) -> `operations-report.docx`; input `operations-report.docx` (from sample.docx, derived)
   - *"In section 17 of operations-report.docx the budget is wrong: it is €48,500, not €45,800. Fix it everywhere it appears, and add one sentence after the section's table saying the figure was corrected on 14 October."*
   - Input: sample.docx rebuilt as a twelve-page operations report in its styles, twenty numbered sections; €45,800 is in the summary, section 17's text and table, and the approvals.
-  - Checks: '45,800' no longer appears anywhere; 48,500 stands in every place 45,800 was; a sentence right after section 17's table says it was corrected on 14 October; the rest of the document is kept; one paragraph added, none removed.
+  - Checks: '45,800' no longer appears anywhere except in the correction sentence; 48,500 stands in every place 45,800 was; a sentence right after section 17's table says it was corrected on 14 October; the rest of the document is kept; one paragraph added, none removed.
 - **`docx-table-edit`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx, derived)
   - *"Add a row for South (Q1 70, Q2 65) to the table in quarterly-report.docx and fix its Total row."*
   - Input: sample.docx with its table made Region, Q1, Q2: North 120, 140; East 90, 100; Total 210, 240.
   - Checks: a South row reading 70 and 65 above the Total row; the Total row reads 280 and 305; the header and the North and East rows are kept; table style kept; the rest of the document is kept.
 - **`docx-many-threads`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx, derived)
-  - *"Answer the three questions in the comments on quarterly-report.docx and resolve them; leave the other two."*
+  - *"Reply to the three questions in the comments on quarterly-report.docx and resolve them; leave the other two."*
   - Input: sample.docx with five open comment threads: three questions its text answers (engineers to hire: two; North's growth: 12%; the new office: Lisbon) and two notes that ask nothing.
   - Checks: the reply to 'How many engineers do we plan to hire?' says two; the reply to 'How much did North grow this quarter?' says 12%; the reply to 'Which city is the new office in?' says Lisbon; the three questions are resolved; the two notes are left open, unanswered and as they were; the rest of the document is kept.
 
