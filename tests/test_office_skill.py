@@ -1,6 +1,7 @@
 """The office skill loads as a built-in, gated on office_edit; the file skills point to it and hide where it is offered,
 and the pdf skill leaves what office_edit does to a PDF to pdf-forms."""
 
+import json
 import re
 from pathlib import Path
 
@@ -67,6 +68,38 @@ def test_word_templates_state_lengths():
     assert intents and len(intents) == templates.count("<?pending"), "an intent reads as an instruction, not a question"
     for intent in intents:
         assert re.search(r"\d+ words", intent), intent
+
+
+def test_sheet_templates_total_by_formula():
+    # A small model types a number where a total belongs unless the template's totals are formulas over their rows.
+    templates = (SKILLS / "productivity/office/templates/xlsx.md").read_text()
+    assert len(templates) <= 8_000
+    sections = dict(re.findall(r"^## ([^\n]+)\n(.*?)(?=^## |\Z)", templates, re.MULTILINE | re.DOTALL))
+    assert list(sections) == ["Budget", "Invoice", "Tracker"]
+    calls = {}
+    for name, section in sections.items():
+        (calls[name],) = [json.loads(block) for block in re.findall(r"```json\n(.*?)```", section, re.DOTALL)]
+    assert any(op["op"] == "chart" for op in calls["Budget"]["ops"])
+    for name, call in calls.items():
+        cells = {}
+        for op in call["ops"]:
+            if op["op"] == "set":
+                column, row = re.fullmatch(r"\w+!([A-Z])(\d+)", op["range"]).groups()
+                for i, values in enumerate(op["values"]):
+                    cells.update({(chr(ord(column) + j), int(row) + i): value for j, value in enumerate(values)})
+        totals = [v for v in cells.values() if isinstance(v, str) and v.startswith("=SUM(")]
+        assert totals, name
+        # Each SUM runs over a whole list in one column, from the row under its header to its last row.
+        for column, first, last in re.findall(r"SUM\(([A-Z])(\d+):\1(\d+)\)", " ".join(totals)):
+            first, last = int(first), int(last)
+            assert not str(cells[(column, first - 1)]).startswith("="), (name, column, first)
+            for row in range(first, last + 1):
+                value = cells[(column, row)]
+                assert isinstance(value, (int, float)) or value.startswith("="), (name, column, row)
+            # The row under it is no row of the list: no number there, no formula on its own row.
+            below = cells.get((column, last + 1), "")
+            assert not isinstance(below, (int, float)), (name, column, last)
+            assert not re.search(rf"[A-Z]{last + 1}\b", below), (name, column, last)
 
 
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():

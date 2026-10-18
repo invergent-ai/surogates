@@ -62,8 +62,9 @@ again.
   section a pending block saying what it will hold (a line `<?pending name: what it will hold?>`), then fill one
   section per call; re-word with `replace` on quoted words, which keeps their formatting. About 450 words of
   body text fill a page: count them for a length the user asks for.
-- **Spreadsheets:** read the range before writing it, and pass what it showed as `expect`. Values go in as typed into
-  a cell: a formula starts with `=` and stays live.
+- **Spreadsheets:** start a new workbook from its template, in `templates/xlsx.md`. In a sheet with content, read the
+  range before writing it, and pass what it showed as `expect`. Values go in as typed into a cell: a formula starts
+  with `=` and stays live.
 - **Slide decks:** a small change (a title, a word, a number) is `text` on that one shape, which keeps its place and
   style. A new or redesigned slide is one `<section>` in the Claude Slides format, built as native shapes the user can
   edit. A slide too full for its boxes is refused: split it; nothing shrinks.

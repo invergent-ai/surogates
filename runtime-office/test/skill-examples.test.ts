@@ -72,7 +72,10 @@ describe.each(CHECKS)("the office skill's %s examples", (name, check, least) => 
 });
 
 // Each type's templates: at least so many calls.
-const TEMPLATES: [string, Check, number][] = [["docx.md", compileOps, 6]];
+const TEMPLATES: [string, Check, number][] = [
+  ["docx.md", compileOps, 6],
+  ["xlsx.md", compileCellOps, 3],
+];
 
 describe.each(TEMPLATES)("the office skill's %s templates", (name, check, least) => {
   const calls = callsOf(template(name));
