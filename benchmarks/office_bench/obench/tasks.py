@@ -481,7 +481,7 @@ def _new_budget_in_its_places(doc: WordDoc, ctx):
 _OCT_14 = re.compile(r"\b14(?:th)?(?: of)?[ -]oct(?:ober)?\b|\boct(?:ober)?\.?[ -]?14(?:th)?\b|\b14[/.-]10\b|\b10/14\b"
                      r"|\b\d{4}-10-14\b")
 # Words that say a figure was put right; "incorrect" is not one of them.
-_CORRECTED = re.compile(r"\b(?:correct(?:ed|ions?|s)?|updated?|revised?|amend(?:ed|ments?|s)?)\b")
+_CORRECTED = re.compile(r"\b(?:correct(?:ed|ions?|s)?|updated?|revised?|amend(?:ed|ments?|s)?|fix(?:ed|es)?)\b")
 
 
 def _sentences(text: str) -> list[str]:
@@ -489,7 +489,7 @@ def _sentences(text: str) -> list[str]:
 
 
 def _correction_sentence(text: str) -> bool:
-    """One sentence saying the figure was corrected (or updated, revised, amended) on 14 October."""
+    """One sentence saying the figure was corrected (or updated, revised, amended, fixed) on 14 October."""
     t = norm(text)
     return bool(_CORRECTED.search(t) and _OCT_14.search(t)) and len(_sentences(text)) == 1
 

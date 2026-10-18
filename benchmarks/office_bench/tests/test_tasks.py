@@ -305,6 +305,8 @@ def test_docx_long_edit_that_misses_a_place_fails(tmp_path):
     "The budget was revised on 14/10.",
     "The 2027 figure was amended on October 14.",
     "Correction made on the 14th of October: the budget is €48,500.",
+    "The figure was fixed on 14 October.",
+    "Fixed on 14 October: the budget is €48,500.",
 ])
 def test_docx_long_edit_correction_sentence_in_other_words_passes(tmp_path, note):
     assert failures(run_checks("docx-long-edit", _long_edit(tmp_path, note=note))) == []
