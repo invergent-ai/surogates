@@ -7,6 +7,9 @@
 (function () {
   "use strict";
   var doc = Api.GetDocument(), TEXT_BUDGET = 30000, MAX_MATCHES = 50, MAX_SEARCH_PAGES = 200, MAX_REPLIES = 10;
+  // The editor rounds a new stamp's rect to whole millimetres and, when it next draws it, scales the stamp to that
+  // rect: measured, up to about 6 points a side beyond the size it was made at.
+  var STAMP_GROWTH = 6;
 
   function clip(text, max) { return text.length > max ? text.slice(0, max) + " …" : text; }
   // A page's text: the builder has no call for it, so the whole page is selected and the selection read; the
@@ -142,6 +145,80 @@
     return { results: ops.map(function (op, index) { return { op: index }; }) };
   }
 
+  // --- a note placed by its words
+
+  // A quad's box, [x1, y1, x2, y2]: the editor gives words and lines as their four corners.
+  function box(quad) {
+    var xs = [quad[0], quad[2], quad[4], quad[6]], ys = [quad[1], quad[3], quad[5], quad[7]];
+    return [Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys)];
+  }
+  function overlaps(a, b) { return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]; }
+  function tenth(n) { return Math.round(n * 10) / 10; }
+  function clamp(n, low, high) { return Math.max(low, Math.min(n, high)); }
+
+  // A page's text lines, a box each: the whole page selected, as pageText selects it. Internal: the editor answers
+  // with the boxes it kept from an earlier selection, another page's too, which SetSelection leaves; no builder call
+  // clears them.
+  function lineBoxes(page) {
+    doc.Document.GetFile().removeSelection();
+    page.SetSelection({ x: 0.01, y: 0.01 }, { x: 100000, y: 100000 });
+    return page.GetSelectionQuads().map(box);
+  }
+
+  // The first place, of w by h points, beside the words at `match` that lies inside the page and covers no text line
+  // and nothing `taken` (the page's annotations and fields): right of their line, in the left margin, below the line,
+  // above it. Null when none is free.
+  function placeBeside(pageW, pageH, match, lines, taken, w, h) {
+    var cx = (match[0] + match[2]) / 2, cy = (match[1] + match[3]) / 2;
+    var line = lines.filter(function (l) { return l[0] <= cx && cx <= l[2] && l[1] <= cy && cy <= l[3]; })[0] || match;
+    var gap = 8, top = clamp(match[1] - 2, 0, pageH - h), covered = lines.concat(taken);
+    var candidates = [
+      [line[2] + gap, top, line[2] + gap + w, top + h],
+      [line[0] - gap - w, top, line[0] - gap, top + h],
+      [match[0], line[3] + gap, match[0] + w, line[3] + gap + h],
+      [match[0], line[1] - gap - h, match[0] + w, line[1] - gap],
+    ].map(function (rect) { return rect.map(tenth); });
+    return candidates.filter(function (rect) {
+      return rect[0] >= 0 && rect[1] >= 0 && rect[2] <= pageW && rect[3] <= pageH && !covered.some(function (b) { return overlaps(rect, b); });
+    })[0] || null;
+  }
+
+  // A note's box: 200 points wide, a 14-point line for every 192 points of its text at about 5.5 points a letter, and
+  // 8 more; at most 300 points tall.
+  function noteSize(text) { return [200, Math.min(300, 14 * Math.ceil(text.length * 5.5 / 192) + 8)]; }
+  // A stamp's size, the editor's own for its kind (the builder's stamp takes only its top-left corner). Internal: the
+  // editor's drawing of the stamp, in millimetres; it changes nothing.
+  function stampSize(type, author) {
+    var drawn = doc.Document.CreateStampRender(type, author);
+    return [drawn.Width * 72 / 25.4, drawn.Height * 72 / 25.4];
+  }
+
+  // The nth match of an anchor's words, counted through the pages in order as the op finds them (`order` holds each
+  // page's index before the batch, -1 for a page the batch adds): its page number then, its index, its box.
+  function findWords(anchor, index, order) {
+    var seen = 0;
+    for (var n = 0; n < order.length; n++) {
+      if (order[n] < 0) continue;   // a page the batch adds is blank
+      var quads = doc.GetPage(order[n]).Search({ text: anchor.find, matchCase: anchor.match_case, wholeWords: false });
+      if (seen + quads.length >= anchor.nth) return { page: n + 1, source: order[n], match: box(quads[anchor.nth - seen - 1]) };
+      seen += quads.length;
+    }
+    if (!seen) throw new Refusal(index, "\"" + anchor.find + "\" is not in the document.");
+    throw new Refusal(index, "\"" + anchor.find + "\" is in the document " + seen + " times: nth counts from 1 up to " + seen + ".");
+  }
+
+  // An annotate placed by its words gets its page here, and the place of `size` beside them, clear of what the page
+  // holds and of what the batch's earlier ops put there (`added`, by page index before the batch).
+  function placeByWords(op, index, order, added, size) {
+    var found = findWords(op.anchor, index, order), page = doc.GetPage(found.source), pageSize = sizeOf(found.source);
+    var taken = page.GetAllAnnots().map(function (a) { return a.GetRect(); })
+      .concat(page.GetAllWidgets().map(function (w) { return w.GetRect(); }), added[found.source] || []);
+    var rect = placeBeside(pageSize[0], pageSize[1], found.match, lineBoxes(page), taken, size[0], size[1]);
+    if (!rect) throw new Refusal(index, "There is no free place beside \"" + op.anchor.find + "\" on page " + found.page + ": give \"page\" and \"rect\".");
+    op.page = found.page;
+    return rect;
+  }
+
   // --- the batch
 
   function Refusal(op, reason) { this.op = op; this.reason = reason; }
@@ -161,10 +238,16 @@
   }
 
   // Every refusal before any change, against the document as each op will find it (an added page counts for the
-  // ops after it): a refused batch changes nothing, and so needs no Undo.
-  function check(ops) {
-    var count = doc.GetPagesCount(), original = count, fields = {};
+  // ops after it): a refused batch changes nothing, and so needs no Undo. A note placed by its words gets its page and
+  // rect here.
+  function check(ops, agent) {
+    var count = doc.GetPagesCount(), original = count, fields = {}, order = [], added = {};
+    for (var i = 0; i < count; i++) order.push(i);
     doc.GetAllFields().forEach(function (f) { fields[f.GetFullName()] = f.GetClassType(); });
+    function take(n, rect) {
+      var source = order[n - 1];
+      if (source >= 0) (added[source] = added[source] || []).push(rect);
+    }
     ops.forEach(function (op, index) {
       function page(n) { if (n < 1 || n > count) throw new Refusal(index, "There is no page " + n + ": at this op the document has " + count + "."); }
       function inside(n, rect) {
@@ -176,11 +259,13 @@
         if (op.action === "add") {
           if (op.page > count) throw new Refusal(index, "There is no page " + op.page + " to add after: at this op the document has " + count + ".");
           count++;
+          order.splice(op.page, 0, -1);
         } else {
           page(op.page);
           if (op.action === "remove") {
             if (count === 1) throw new Refusal(index, "A PDF keeps at least one page.");
             count--;
+            order.splice(op.page - 1, 1);
           }
         }
       } else if (op.op === "fill") {
@@ -200,9 +285,18 @@
         inside(op.page, op.rect);
         if (fields[op.name]) throw new Refusal(index, "A field named " + op.name + " exists.");
         fields[op.name] = op.type === "checkbox" ? "checkboxField" : "textField";
+        take(op.page, op.rect);
       } else if (op.op === "annotate") {
-        page(op.page);
-        inside(op.page, op.rect);
+        // A stamp takes the room it can grow into: STAMP_GROWTH a side beyond its size, its corner that far in.
+        var stamp = op.kind === "stamp" ? stampSize(op.stamp, agent.name) : null, grow = STAMP_GROWTH;
+        if (op.anchor) {
+          var at = placeByWords(op, index, order, added, stamp ? [stamp[0] + 2 * grow, stamp[1] + 2 * grow] : noteSize(op.text));
+          op.rect = stamp ? [at[0] + grow, at[1] + grow, at[0] + grow + stamp[0], at[1] + grow + stamp[1]].map(tenth) : at;
+        } else {
+          page(op.page);
+          inside(op.page, op.rect);
+        }
+        take(op.page, stamp ? [op.rect[0] - grow, op.rect[1] - grow, op.rect[0] + stamp[0] + grow, op.rect[1] + stamp[1] + grow] : op.rect);
       } else if (op.op === "redact") {
         // Applying a redaction applies every unapplied mark in the document, the person's too.
         if (pendingMarks()) throw new Refusal(index, "The document has redaction marks someone made and has not applied: applying this redaction would apply theirs too. Ask the user to apply or remove them first.");
@@ -254,29 +348,33 @@
       doc.ApplyRedact();
       return { op: index, redacted: marks.length };
     },
+    // The result says where the note or stamp landed, as the editor holds it, and which words it sits beside.
     annotate: function (op, index, agent) {
-      var page = doc.GetPage(op.page - 1);
+      var page = doc.GetPage(op.page - 1), made;
       if (op.kind === "stamp") {
-        var stamp = Api.CreateStampAnnot(corners(op.rect), op.stamp, agent.name);
-        page.AddObject(stamp);
-        return { op: index };
+        made = Api.CreateStampAnnot(corners(op.rect), op.stamp, agent.name);
+        page.AddObject(made);
+      } else {
+        var run = Api.CreateRichRun();
+        made = Api.CreateFreeTextAnnot(corners(op.rect));
+        run.AddText(op.text);
+        made.GetContent().GetElement(0).AddElement(run, 0);
+        made.SetAuthorName(agent.name);
+        page.AddObject(made);
+        // Internal: the editor commits a free text's rich text when its box loses focus, which a builder edit never
+        // does, and no builder call commits it: without this the saved note is an empty box.
+        var impl = made.private_GetImpl();
+        impl.SetRichContents(impl.GetRichContents(true));
+        made.SetContents(op.text);
       }
-      var note = Api.CreateFreeTextAnnot(corners(op.rect)), run = Api.CreateRichRun();
-      run.AddText(op.text);
-      note.GetContent().GetElement(0).AddElement(run, 0);
-      note.SetAuthorName(agent.name);
-      page.AddObject(note);
-      // Internal: the editor commits a free text's rich text when its box loses focus, which a builder edit never
-      // does, and no builder call commits it: without this the saved note is an empty box.
-      var impl = note.private_GetImpl();
-      impl.SetRichContents(impl.GetRichContents(true));
-      note.SetContents(op.text);
-      return { op: index };
+      var out = { op: index, page: op.page, rect: made.GetRect().map(tenth) };
+      if (op.anchor) out.beside = op.anchor.find;
+      return out;
     },
   };
 
   function edit(ops, agent) {
-    check(ops);
+    check(ops, agent);
     return { results: ops.map(function (op, index) { return APPLY[op.op](op, index, agent); }) };
   }
 

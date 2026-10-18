@@ -82,6 +82,12 @@ def test_op_name_as_key():
     assert read_ops([{"fill": {"fields": {"client": "A"}}}], "pdf")[0] == [{"op": "fill", "fields": {"client": "A"}}]
 
 
+def test_a_slides_notes_op_reads_as_notes():
+    ops, read_as = read_ops([{"notes": {"slide": "1", "hash": "h", "text": "Hi"}}], "pptx")
+    assert ops == [{"op": "notes", "slide": "1", "hash": "h", "text": "Hi"}]
+    assert read_as == ['op 0: read {"notes": {…}} as {"op": "notes", …}.']
+
+
 def test_type_as_op():
     ops, read_as = read_ops([{"type": "fill", "fields": {"client": "A"}}], "pdf")
     assert ops == [{"op": "fill", "fields": {"client": "A"}}] and read_as
@@ -162,11 +168,12 @@ def test_each_types_ops_and_their_shapes():
     assert OP_NAMES == {
         "docx": ("insert", "replace", "delete", "move", "comment", "reply", "resolve"),
         "xlsx": ("set", "format", "chart", "sheet", "reply", "resolve"),
-        "pptx": ("slides", "text", "order", "remove", "reply", "resolve"),
+        "pptx": ("slides", "text", "notes", "order", "remove", "reply", "resolve"),
         "pdf": ("pages", "fill", "add_field", "redact", "annotate", "reply", "resolve"),
     }
     assert set(OP_NAMES) == set(AGENT_KINDS)  # every type office_edit opens
     assert OP_SHAPES["pptx"]["text"] == '{"op": "text", "slide": "<id>", "hash": "<hash>", "shape": "<id>", "text": "…"}'
+    assert OP_SHAPES["pptx"]["notes"] == '{"op": "notes", "slide": "<id>", "hash": "<hash>", "text": "…"}'
     for shapes in OP_SHAPES.values():
         for name, shape in shapes.items():
             assert json.loads(shape)["op"] == name

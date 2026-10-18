@@ -71,9 +71,8 @@ EDIT_DESCRIPTION = (
     'a later call fills (replace, target {"pending": "goals"}):\n'
     "```json\n"
     '{"path": "plans/launch.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown": '
-    '"# Launch plan\\n\\n## Goals\\n<?block goals?>\\n\\n## Budget\\n<?block budget?>", "blocks": {"goals": {"type": '
-    '"pending", "intent": "Three goals, each with a date"}, "budget": {"type": "pending", "intent": "Costs by quarter, '
-    'in a table"}}}}]}\n'
+    '"# Launch plan\\n\\n## Goals\\n<?pending goals: Three goals, each with a date?>\\n\\n## Budget\\n'
+    '<?pending budget: Costs by quarter, in a table?>"}}]}\n'
     "```\n"
     "A spreadsheet's cells and a bold header:\n"
     "```json\n"
@@ -96,29 +95,30 @@ EDIT_DESCRIPTION = (
     "One piece of work per call (a section, a block of cells, a slide), with a short line in the chat between calls. "
     "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
     "result shows it as it is now: the user's edit wins; read again and work from it.\n"
-    "Word: insert {target, side: before|after, content}, replace {target, content} (on quoted words, "
+    'Word: insert {target, side: before|after, content} (list items next to a list item continue its list; "list": '
+    '"new" starts a new one), replace {target, content} (on quoted words, '
     '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side}, comment '
     '{anchor: {find}, body}, reply {thread, body}, resolve {thread}; a replaced or moved block keeps its comment '
     'threads. Targets: {"block": "<id>", "hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, '
-    '{"end": true}. Content: {"markdown": '
-    '"…", "blocks": {…}}; a line <?block k?> places blocks[k]: {"type": "pending", "intent": "…"}, {"type": "chart", '
-    '"chart": "bar|column|line|pie|…", "title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG '
-    'or JPEG>", "width": <px>}.\n'
+    '{"end": true}. Content: {"markdown": "…", "blocks": {…}}; a line <?pending k: what it will hold?> (k: one word) '
+    'is a pending block; a line <?block k?> places blocks[k]: {"type": "chart", "chart": "bar|column|line|pie|…", '
+    '"title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG or JPEG>", "width": <px>}.\n'
     'Spreadsheet: set {range: "Sheet!A1", values: [[…]], expect?: [[the range as you read it]]} (each value is typed '
     'in as into a cell: "=…" is a live formula, a leading \' keeps text); format {range, number_format, bold, italic, '
     "fill, color, align, valign, wrap, width}; chart {range, type: column|bar|line|pie|area|doughnut|scatter, title, "
     'anchor: "F2"}; sheet {action: add|rename|delete, name, to, after}.\n'
     "Deck: text {slide, hash, shape, text} changes one shape's text and keeps everything else (its place, style and "
     "placeholder; the slide's notes): use it for a small change, a title, a word, a number (shape ids from view "
-    '"slide"). slides {slides: [{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole '
+    '"slide"). notes {slide, hash, text} sets a slide\'s speaker notes and changes nothing else. slides {slides: '
+    "[{html, after?: <slide id>}, or {id, hash, html} to replace one]} adds or rebuilds whole "
     "slides, each one <section> in the Claude Slides format on a 1920 px wide canvas, built as native shapes; order "
     "{ids: every slide, in order}; remove {slides: [{id, hash}]}. The slide format is strict: your first office call on "
     "a deck brings its reference.\n"
     "PDF: pages {action: add|remove|rotate, page, degrees}; fill {fields: {name: text or true/false}, expect?: {name: "
     "its value as the outline showed it}} (a field changed since your read refuses the call); add_field {type: "
     "text|checkbox, page, rect: [x1, y1, x2, y2] in points from the page's top-left, name}; redact {text}, alone in "
-    "its call (gone for good once saved); annotate {kind: free_text|stamp, page, rect, text | stamp}. A PDF's "
-    "existing text cannot be changed.\n"
+    "its call (gone for good once saved); annotate {kind: free_text|stamp, anchor: {find, nth?} | page + rect, text | "
+    "stamp}. A PDF's existing text cannot be changed.\n"
     "Comment threads, in every type: reply {thread, body} and resolve {thread}, where thread is a thread's id as "
     "office_read's outline shows it. In a spreadsheet, deck or PDF they go in a call of their own. A reply in a thread "
     "states only the result, in one or two sentences (at most 400 characters): your reasoning, the steps and the "

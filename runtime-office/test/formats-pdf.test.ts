@@ -30,6 +30,31 @@ describe("PDF ops", () => {
     expect(compilePdfOps([{ op: "redact", text: "thirty" }])).toEqual([{ op: "redact", text: "thirty", match_case: false, whole_words: false }]);
   });
 
+  it("places a note or a stamp by the words it is about, or at a page and a rect", () => {
+    expect(compilePdfOps([
+      { op: "annotate", kind: "free_text", anchor: { find: "thirty days" }, text: "Net 30 from the invoice date." },
+      { op: "annotate", kind: "stamp", anchor: { find: "Invoice", nth: 2, match_case: true }, stamp: "approved" },
+      { op: "annotate", kind: "free_text", page: 1, rect: [60, 560, 280, 600], text: "Checked against the order." },
+    ])).toEqual([
+      { op: "annotate", kind: "free_text", anchor: { find: "thirty days", nth: 1, match_case: false }, text: "Net 30 from the invoice date." },
+      { op: "annotate", kind: "stamp", anchor: { find: "Invoice", nth: 2, match_case: true }, stamp: "SB_Approved" },
+      { op: "annotate", kind: "free_text", page: 1, rect: [60, 560, 280, 600], text: "Checked against the order." },
+    ]);
+  });
+
+  it("takes an anchor or a page and a rect, not both and not neither", () => {
+    const both = 'annotate takes "anchor" or "page" and "rect", not both.';
+    const neither = 'annotate needs "anchor": {"find": "words on the page"}, or "page" and "rect".';
+    const note = { op: "annotate", kind: "free_text", text: "Net 30." };
+    expect(() => compilePdfOps([{ ...note, anchor: { find: "thirty days" }, page: 1, rect: [60, 560, 280, 600] }])).toThrow(both);
+    expect(() => compilePdfOps([{ ...note, anchor: { find: "thirty days" }, page: 1 }])).toThrow(both);
+    expect(() => compilePdfOps([note])).toThrow(neither);
+    expect(() => compilePdfOps([{ ...note, anchor: { find: "  " } }])).toThrow('"find" quotes words that are in the document.');
+    expect(() => compilePdfOps([{ ...note, anchor: "thirty days" }])).toThrow('"anchor" is {"find": "words on the page", "nth": 1}');
+    expect(() => compilePdfOps([{ ...note, anchor: { find: "thirty days", nth: 0 } }])).toThrow('"nth" counts matches from 1.');
+    expect(() => compilePdfOps([{ ...note, page: 1 }])).toThrow('"rect" is [x1, y1, x2, y2]');
+  });
+
   it("sends a redaction in a call of its own", () => {
     const own = "send each redaction as a call of its own";
     expect(() => compilePdfOps([{ op: "redact", text: "thirty" }, { op: "pages", action: "add", page: 1 }])).toThrow(own);

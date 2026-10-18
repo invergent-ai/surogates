@@ -660,6 +660,25 @@
     for (var k = content.GetElementsCount() - 1; k >= lines.length; k--) content.RemoveElement(k);
   }
 
+  // --- a slide's speaker notes, the rest of the slide as it is
+
+  // The notes body emptied, then each line a paragraph of it; an empty text leaves it empty.
+  function setNotes(slide, text) {
+    if (!slide.GetNotesPage()) {
+      if (!text) return;
+      // The editor gives every slide it opens or makes a notes page; one without gets one as Api.CreateSlide makes it.
+      // (internal: the builder's AddNotesText throws on such a slide: it calls setNotes on its own wrapper)
+      var made = AscCommonSlide.CreateNotes();
+      slide.Slide.setNotes(made);
+      made.setNotesMaster(pres.Presentation.notesMasters[0]);
+      made.setSlide(slide.Slide);
+    }
+    var body = slide.GetNotesPage().GetBodyShape();
+    if (!body) throw new Error("Slide " + idOf(slide) + " has a notes page without a body to hold its notes.");
+    body.GetDocContent().RemoveAllElements();
+    if (text) setText(body, text);
+  }
+
   // --- the batch: every check first, then the changes in order
 
   function Refusal(op, reason, slide) { this.op = op; this.reason = reason; this.slide = slide ? entry(slide) : undefined; }
@@ -670,7 +689,12 @@
     return slide;
   }
   function check(ops) {
-    var ids = pres.GetAllSlides().map(idOf), removed = {};
+    var ids = pres.GetAllSlides().map(idOf), removed = {}, rebuilt = {}, gone = {};
+    // A notes change is refused on a slide the call rebuilds or removes, whichever op comes first.
+    ops.forEach(function (op) {
+      if (op.op === "slides") op.slides.forEach(function (s) { if (s.id !== undefined) rebuilt[s.id] = true; });
+      else if (op.op === "remove") op.slides.forEach(function (s) { gone[s.id] = true; });
+    });
     ops.forEach(function (op, index) {
       if (op.op === "slides") {
         op.slides.forEach(function (s) {
@@ -688,6 +712,10 @@
         if (removed[op.slide]) throw new Refusal(index, "Slide " + op.slide + " is removed by this call.");
         guarded({ id: op.slide, hash: op.hash }, index);
         textShape(op, index);
+      } else if (op.op === "notes") {
+        if (gone[op.slide]) throw new Refusal(index, "Slide " + op.slide + " is removed by this call.");
+        if (rebuilt[op.slide]) throw new Refusal(index, "Slide " + op.slide + " is rebuilt by this call: give its notes in the rebuild's <aside>.");
+        guarded({ id: op.slide, hash: op.hash }, index);
       } else if (op.op === "order") {
         if (op.ids.slice().sort().join(",") !== ids.slice().sort().join(",")) {
           throw new Refusal(index, "\"order\" lists every slide of the deck once, by id. Its slides are now: " + ids.join(", ") + ".");
@@ -697,11 +725,14 @@
   }
   // A new deck is the blank template's one empty title slide. Slides added to it take its place, as Word writes a new
   // document's first blocks in place of its one empty line. A slide anyone has typed in or changed (its background,
-  // transition or comments), or one this call replaces, stays.
+  // transition or comments), or one this call replaces or sets the text or notes of, stays.
   function emptyTemplate(ops) {
     var all = pres.GetAllSlides(), slide = all[0];
     if (all.length !== 1 || !ops.some(function (op) { return op.op === "slides" && op.slides.some(function (s) { return s.id === undefined; }); })) return null;
-    if (ops.some(function (op) { return op.op === "text" ? op.slide === idOf(slide) : op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); }); })) return null;
+    if (ops.some(function (op) {
+      if (op.op === "text" || op.op === "notes") return op.slide === idOf(slide);
+      return op.op !== "order" && op.slides.some(function (s) { return s.id === idOf(slide); });
+    })) return null;
     var layout = slide.GetLayout(), transition = slide.GetSlideShowTransition();
     if (!layout || layout.GetName() !== "Title Slide" || !slide.GetVisible() || notesOf(slide) || connectorsOf(slide).length) return null;
     // internal: the builder reads no background; a slide that follows its layout has none of its own
@@ -729,6 +760,10 @@
       if (op.op === "text") {
         setText(textShape(op, index), op.text);
         return { op: index };
+      }
+      if (op.op === "notes") {
+        setNotes(slideById(op.slide), op.text);
+        return { op: index, notes: op.text };
       }
       op.ids.forEach(function (id, at) { var slide = slideById(id); if (slide.GetSlideIndex() !== at) slide.MoveTo(at); });
       return { op: index, order: pres.GetAllSlides().map(idOf) };

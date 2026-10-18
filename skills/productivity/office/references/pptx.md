@@ -15,6 +15,7 @@ pictures and tables at the measured places: the user gets a slide they can click
 
 - `text`: the text of one shape, by its slide's `id` and `hash` and the shape's `id` from view `slide`; everything
   else of the slide stays as it is. Use it for a small change: a title, a word, a number.
+- `notes`: a slide's speaker notes, by its `id` and `hash`; nothing else of the slide changes.
 - `slides`: add slides from HTML (`after` a slide id, `"start"`, or last), or replace one in place with its `id` and
   the `hash` the outline gave: that rebuilds the whole slide from your HTML, so use it to redesign a slide, not to
   change its words. A slide the user changed since you read it refuses the call: read it again.
@@ -50,6 +51,16 @@ The shape keeps its place, size, placeholder, alignment and font: the new text t
 line of `text` is a paragraph, set in the style of the shape's paragraph in that place (a line past them, as its last
 one). Several shapes of one slide change in one call, each its own op with the hash you read. A picture, a table or a
 shape without a text box has no text to change: rebuild its slide with `slides`.
+
+### Changing notes
+
+```json
+{"op": "notes", "slide": "1473", "hash": "dc3285c8", "text": "Open with the budget.\nThen the lease."}
+```
+
+The new notes take the place of the old, each line a paragraph; an empty `text` clears them. The slide's shapes stay
+exactly as they are, and `text` ops on the same slide go in the same call, each with the hash you read. A slide you
+rebuild with `slides` takes new notes from its HTML's `<aside>` instead: `notes` on it in the same call is refused.
 
 ## The format
 
@@ -120,7 +131,8 @@ A build or a magic-move `id` inside another moving element is refused, and so is
 table its own motion. A connector or a build inside a box that goes in as one picture (see Styles) is refused too.
 
 **Notes:** one `<aside>` of plain text, the section's last child. A slide you replace keeps its notes when its HTML has
-no `<aside>`; an `<aside>` replaces them, and an empty `<aside></aside>` clears them.
+no `<aside>`; an `<aside>` replaces them, and an empty `<aside></aside>` clears them. To change only a slide's notes,
+use `notes` (Changing notes).
 
 **Fonts:** the document server's own, so the text sets exactly as measured. A `font-family` list resolves to its first
 font the server has, then the generic: Arial, Calibri, Cambria, Georgia, Montserrat, Noto Sans, Open Sans, Times New
@@ -133,7 +145,7 @@ elements per slide.
 - **A type scale of four or five sizes** (for example 120 / 72 / 44 / 32 / 24) and one or two fonts; emphasise with
   weight, italic or colour, not a new size.
 - **A hex palette, chosen once:** one dark, one light, one or two accents; toned whites and blacks (#FBFBF8, #14213D)
-  rather than pure. Text holds 4.5:1 contrast on its background (3:1 from 44 px).
+  rather than pure. Text holds 4.5:1 contrast on its background (3:1 from 44 px); below 3:1 the slide is refused.
 - **The vertical space adds up:** 824 px inside the margins on 16:9. A heading is about size × lines × 1.1; a card is
   lines × size × line height plus its padding. Leave a card's height out and let it fit its text.
 - **Too much? Split the slide.** Nothing shrinks.

@@ -44,6 +44,7 @@ OP_SHAPES: dict[str, dict[str, str]] = {
     "pptx": {
         "slides": '{"op": "slides", "slides": [{"html": "<section>…</section>", "after": "<slide id>"}]}',
         "text": '{"op": "text", "slide": "<id>", "hash": "<hash>", "shape": "<id>", "text": "…"}',
+        "notes": '{"op": "notes", "slide": "<id>", "hash": "<hash>", "text": "…"}',
         "order": '{"op": "order", "ids": ["<slide id>", "…"]}',
         "remove": '{"op": "remove", "slides": [{"id": "<slide id>", "hash": "<hash>"}]}',
         "reply": _REPLY,
@@ -54,7 +55,8 @@ OP_SHAPES: dict[str, dict[str, str]] = {
         "fill": '{"op": "fill", "fields": {"<field name>": "text, or true/false"}}',
         "add_field": '{"op": "add_field", "type": "text|checkbox", "page": 1, "rect": [72, 72, 288, 96], "name": "<field name>"}',
         "redact": '{"op": "redact", "text": "…"}',
-        "annotate": '{"op": "annotate", "kind": "free_text|stamp", "page": 1, "rect": [72, 72, 288, 144], "text": "…"}',
+        "annotate": '{"op": "annotate", "kind": "free_text|stamp", "anchor": {"find": "words on the page", "nth": 1}, '
+                    '"text": "…"}',
         "reply": _REPLY,
         "resolve": _RESOLVE,
     },

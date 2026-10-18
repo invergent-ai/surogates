@@ -654,6 +654,8 @@ export function inspect(args: InspectArgs): Inspected {
 
     // --- what only a picture shows
     const isContainer = (el: Element): boolean => (tagOf(el) === "DIV" && !isText(el)) || tagOf(el) === "SECTION";
+    // CSS fades a container with its children as one; OOXML has no opacity over a group.
+    const fadedWhole = (el: Element): boolean => isContainer(el) && el.children.length > 0 && parseFloat(getComputedStyle(el).opacity) < 1;
     const drawnWhole = (el: Element, t: Transform | null): boolean => {
       const tag = tagOf(el), cs = getComputedStyle(el);
       // Drawn from the icon set, on a page of its own, or as a path: nothing of it is painted here to take.
@@ -661,8 +663,7 @@ export function inspect(args: InspectArgs): Inspected {
       // The editor saves filters and blend modes, then draws the plain shape.
       if (cs.filter !== "none" || cs.backdropFilter !== "none" || cs.mixBlendMode !== "normal" || /^matrix3d/.test(cs.transform)) return true;
       const children = isContainer(el) && el.children.length > 0;
-      // CSS fades a container with its children as one; OOXML has no opacity over a group.
-      if (parseFloat(cs.opacity) < 1 && children) return true;
+      if (fadedWhole(el)) return true;
       if (!t) return false;
       const scaled = Math.abs(t.sx - 1) > 0.001 || Math.abs(t.sy - 1) > 0.001, skewed = Math.abs(t.skew) > 0.01;
       // Children are measured by their turned bounds, and a table cannot turn.
@@ -687,19 +688,38 @@ export function inspect(args: InspectArgs): Inspected {
       return { ...(el.id ? { magic: el.id } : {}), ...(into || out ? { build: { ...(into ? { in: into } : {}), ...(out ? { out } : {}) } } : {}) };
     };
 
+    // CSS fades an element with everything in it: the opacity it shows at, every element's up to the section.
+    const opacityOf = (el: Element): number => {
+      let opacity = 1;
+      for (let at: Element | null = el; at && at !== section.parentElement; at = at.parentElement) opacity *= parseFloat(getComputedStyle(at).opacity);
+      return opacity;
+    };
+    // What a run of text in *from* is drawn with: its colour, faded by its opacity, or the gradient of the element up to
+    // its paragraph *container* that clips its background to its text.
+    const inkOf = (from: Element, container: Element): { color: Color; gradient?: Fill } => {
+      const own = color(getComputedStyle(from).color) ?? { hex: "#000000", alpha: 1 }, opacity = opacityOf(from);
+      const ink: { color: Color; gradient?: Fill } = { color: opacity < 1 ? { ...own, alpha: round(own.alpha * opacity) } : own };
+      for (let at: Element | null = from; at && at !== container.parentElement; at = at.parentElement) {
+        const clip = getComputedStyle(at);
+        if (clip.backgroundClip !== "text") continue;
+        const g = gradientOf(clip.backgroundImage, box(at).w, box(at).h);
+        if (g && g !== "picture") ink.gradient = g;
+        break;
+      }
+      return ink;
+    };
     const runs = (container: Element): Run[] => {
       const out: Run[] = [];
       const add = (text: string, from: Element) => {
         const cs = getComputedStyle(from);
-        let underline = false, strike = false, opacity = 1;
+        let underline = false, strike = false;
         for (let at: Element | null = from; at && at !== container.parentElement; at = at.parentElement) {
           const line = getComputedStyle(at).textDecorationLine;
           if (line.includes("underline")) underline = true;
           if (line.includes("line-through")) strike = true;
         }
-        // CSS fades an element with everything in it.
-        for (let at: Element | null = from; at && at !== section.parentElement; at = at.parentElement) opacity *= parseFloat(getComputedStyle(at).opacity);
-        const run: Run = { text, size: round(parseFloat(cs.fontSize) * ptPerPx), font: family(cs), color: color(cs.color) ?? { hex: "#000000", alpha: 1 } };
+        const ink = inkOf(from, container);
+        const run: Run = { text, size: round(parseFloat(cs.fontSize) * ptPerPx), font: family(cs), color: ink.color };
         if (parseInt(cs.fontWeight, 10) >= 600) run.b = true;
         if (cs.fontStyle === "italic") run.i = true;
         if (underline) run.u = true;
@@ -714,16 +734,8 @@ export function inspect(args: InspectArgs): Inspected {
           run.text = run.text.replace(/(^|\s)(\p{L})/gu, (all, space: string, letter: string, offset: number) => (offset === 0 && before && !/\s$/.test(before) ? all : space + letter.toUpperCase()));
         }
         const outline = parseFloat(cs.getPropertyValue("-webkit-text-stroke-width"));
-        if (outline > 0) run.outline = { w: emu(outline), color: color(cs.getPropertyValue("-webkit-text-stroke-color")) ?? run.color, dash: "solid" };
-        // Gradient text: the gradient of the element that clips its background to its text.
-        for (let at: Element | null = from; at && at !== container.parentElement; at = at.parentElement) {
-          const clip = getComputedStyle(at);
-          if (clip.backgroundClip !== "text") continue;
-          const g = gradientOf(clip.backgroundImage, box(at).w, box(at).h);
-          if (g && g !== "picture") run.gradient = g;
-          break;
-        }
-        if (opacity < 1) run.color = { ...run.color, alpha: round(run.color.alpha * opacity) };
+        if (outline > 0) run.outline = { w: emu(outline), color: color(cs.getPropertyValue("-webkit-text-stroke-color")) ?? color(cs.color) ?? { hex: "#000000", alpha: 1 }, dash: "solid" };
+        if (ink.gradient) run.gradient = ink.gradient;
         const link = from.closest("a");
         if (link && container.contains(link)) run.href = link.getAttribute("href")!;
         out.push(run);
@@ -1013,34 +1025,131 @@ export function inspect(args: InspectArgs): Inspected {
     };
     // Claude Slides' paint order: in a host, its flow content is one layer where its first flow child sits. In the
     // section, pinned children listed before that layer paint below it and the rest above; in any other host (a
-    // position:relative or pinned div) pinned children always paint over its flow.
-    const layer = (host: Element): ShapeSpec[] => {
-      const below: ShapeSpec[] = [], flow: ShapeSpec[] = [], above: ShapeSpec[] = [];
+    // position:relative or pinned div) pinned children always paint over its flow. What *draw* makes of each element, in
+    // that order; *move* takes a pinned element's with what is inside it.
+    const layer = <T>(host: Element, draw: (el: Element) => T[], move: (el: Element, drawn: T[]) => T[]): T[] => {
+      const below: T[] = [], flow: T[] = [], above: T[] = [];
       let seen = false;
-      // own() first: it says whether the element is drawn whole, its children with it.
+      // draw() first: own() says whether the element is drawn whole, its children with it.
       const inner = (el: Element) => isContainer(el) && !whole.has(el);
       const walk = (parent: Element) => {
         for (const child of Array.from(parent.children)) {
           if (tagOf(child) === "ASIDE" || getComputedStyle(child).display === "none") continue;
           if (pinned(child)) {
-            const mine = own(child);
-            (seen || host !== section ? above : below).push(...moving(child, [...mine, ...(inner(child) ? layer(child) : [])]));
+            const mine = draw(child);
+            (seen || host !== section ? above : below).push(...move(child, [...mine, ...(inner(child) ? layer(child, draw, move) : [])]));
             continue;
           }
           seen = true;
-          flow.push(...own(child));
-          if (inner(child)) flow.push(...(isHost(child) ? layer(child) : (walk(child), [])));
+          flow.push(...draw(child));
+          if (inner(child)) flow.push(...(isHost(child) ? layer(child, draw, move) : (walk(child), [])));
         }
       };
       walk(host);
       return [...below, ...flow, ...above];
     };
+
+    // --- text that reads on what is under it, 3:1 at least. At the middle of each of its lines, what paints below the
+    // text in the slide's order, as the editor draws it, is laid over the page's white: each fill with its alpha, faded by
+    // its opacity, until one is opaque. A gradient reads as its worst stop; a picture under the text is not checked.
+    type Rgb = [number, number, number];
+    const rgbOf = (hex: string): Rgb => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as Rgb;
+    const hexOf = (c: Rgb): string => `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+    const over = (top: Color, under: Rgb): Rgb => rgbOf(top.hex).map((v, i) => v * top.alpha + under[i]! * (1 - top.alpha)) as Rgb;
+    const luminance = (c: Rgb): number => {
+      const [r, g, b] = c.map((v) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+    };
+    // WCAG's contrast ratio, from 1 to 21.
+    const contrastRatio = (a: Rgb, b: Rgb): number => {
+      const [x, y] = [luminance(a), luminance(b)];
+      return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+    };
+    // Each drawing element's place in layer()'s order, bottom first. A cell, a list item or a span is drawn with its
+    // table or text box and has its place.
+    const ranks = new Map(layer<Element>(section, (el) => [el], (_el, drawn) => drawn).map((el, i) => [el, i]));
+    const rankOf = (el: Element): number => {
+      for (let at: Element | null = el; at && at !== section; at = at.parentElement) if (ranks.has(at)) return ranks.get(at)!;
+      return -1;
+    };
+    const PICTURES = new Set(["IMG", "SVG", "X-ICON", "X-EMBED"]);
+    // The colours under *holder*'s text at (x, y), one per mix of the gradients' stops; null over a picture, a filter or
+    // a blend mode, which Chromium draws.
+    const under = (holder: Element, x: number, y: number): Rgb[] | null => {
+      // Chromium's hit test passes over a row, whose fill is its cells'.
+      const hits = document.elementsFromPoint(x, y).filter((el) => section.contains(el))
+        .flatMap((el) => (["TD", "TH"].includes(tagOf(el)) ? [el, el.parentElement!] : [el]));
+      const order = hits.map((el, i) => ({ el, rank: rankOf(el), i })).sort((a, b) => b.rank - a.rank || a.i - b.i).map((hit) => hit.el);
+      const from = order.findIndex((el) => el.contains(holder));
+      if (from < 0) return null;
+      const layers: Color[][] = [];
+      for (const el of order.slice(from)) {
+        const cs = getComputedStyle(el);
+        if (PICTURES.has(tagOf(el)) || inside(el) || cs.filter !== "none" || cs.backdropFilter !== "none" || cs.mixBlendMode !== "normal") return null;
+        // The editor fills a shape, a table's rows and cells, and the slide; a list item or a paragraph of a text box
+        // has no fill of its own.
+        if (el !== section && !ranks.has(el) && !["TR", "TD", "TH"].includes(tagOf(el))) continue;
+        const fill = fillOfStyle(cs, box(el));
+        if (fill === "picture") return null;
+        if (!fill) continue;
+        const opacity = opacityOf(el);
+        const colors = (fill.type === "solid" ? [fill.color] : fill.stops.map((stop) => stop.color)).map((c) => ({ hex: c.hex, alpha: c.alpha * opacity }));
+        layers.push(colors);
+        if (colors.every((c) => c.alpha >= 1)) break;
+      }
+      let colors: Rgb[] = [[255, 255, 255]];
+      for (const fill of layers.reverse()) {
+        const mixed = new Map<string, Rgb>();
+        for (const below of colors) {
+          for (const top of fill) {
+            const mix = over(top, below);
+            mixed.set(hexOf(mix), mix);
+          }
+        }
+        colors = [...mixed.values()];
+        // Translucent gradient upon gradient: too many mixes to tell.
+        if (colors.length > 64) return null;
+      }
+      return colors;
+    };
+    // Text in a container faded with its children goes in with it, in one picture: as text over a picture, unchecked.
+    const inFaded = (el: Element): boolean => {
+      for (let at: Element | null = el; at && at !== section; at = at.parentElement) if (fadedWhole(at)) return true;
+      return false;
+    };
+    const texts = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
+    for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+      const holder = node.parentElement!;
+      if (!(node.textContent ?? "").trim() || inside(holder) || inFaded(holder)) continue;
+      const ink = inkOf(holder, holder.closest("h1, h2, h3, p, li, td, th, div") ?? holder);
+      const inks = ink.gradient?.type === "linear" ? ink.gradient.stops.map((stop) => stop.color) : [ink.color];
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      for (const line of Array.from(range.getClientRects())) {
+        if (line.width < 1 || line.height < 1) continue;
+        const colors = under(holder, line.left + line.width / 2, line.top + line.height / 2);
+        let worst: { ratio: number; fg: Color; bg: Rgb } | null = null;
+        for (const bg of colors ?? []) {
+          for (const fg of inks) {
+            const ratio = contrastRatio(over(fg, bg), bg);
+            if (!worst || ratio < worst.ratio) worst = { ratio, fg, bg };
+          }
+        }
+        if (!worst || worst.ratio >= 3) continue;
+        const fg = worst.fg.alpha < 1 ? `${worst.fg.hex} at ${Math.round(worst.fg.alpha * 100)}%` : worst.fg.hex;
+        const better = contrastRatio(rgbOf("#14213D"), worst.bg) >= contrastRatio(rgbOf("#FBFBF8"), worst.bg) ? "#14213D" : "#FBFBF8";
+        // Faded text stays faded in any colour: the fade goes too.
+        const full = worst.fg.alpha < 1 ? ", at full strength (no opacity or alpha)" : "";
+        fail(`${describe(holder)}: its text (${fg}) on ${hexOf(worst.bg)} reads at ${(Math.floor(worst.ratio * 10) / 10).toFixed(1)}:1; text needs at least 3:1 here: try ${better}${full}.`);
+      }
+    }
+
     const sectionStyle = getComputedStyle(section), sectionBox = box(section);
     const background = fillOfStyle(sectionStyle, sectionBox);
     const transition = section.getAttribute("data-transition");
     const spec: Omit<SlideSpec, "ignored"> = {
       background: background === "picture" ? null : background,
-      shapes: [...(background === "picture" ? [shot(section, "box", sectionBox)] : []), ...layer(section)],
+      shapes: [...(background === "picture" ? [shot(section, "box", sectionBox)] : []), ...layer(section, own, moving)],
       notes: section.querySelector(":scope > aside")?.textContent?.trim() ?? null, hidden: section.hasAttribute("hidden"),
       transition: transition ? { effect: transition, ms: transition === "magic" ? 1000 : 700 } : null,
     };

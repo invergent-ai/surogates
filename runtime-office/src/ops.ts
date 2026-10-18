@@ -7,7 +7,7 @@ export type Side = "before" | "after";
 
 /** An op as the editor script runs it. */
 export type EditorOp =
-  | { op: "insert"; target: Target; side: Side; blocks: Block[] }
+  | { op: "insert"; target: Target; side: Side; blocks: Block[]; list?: "new" }
   | { op: "replace"; target: Target; blocks: Block[] }
   | { op: "reword"; target: Found; text: string }
   | { op: "delete"; target: Target }
@@ -28,7 +28,7 @@ export function compileOps(input: unknown): EditorOp[] {
 function compileOp(raw: Raw): EditorOp {
   switch (raw.op) {
     case "insert":
-      return { op: "insert", target: target(raw.target, true), side: side(raw.side), blocks: markdownOf(raw.content) };
+      return { op: "insert", target: target(raw.target, true), side: side(raw.side), blocks: markdownOf(raw.content), ...list(raw.list) };
     case "replace": {
       const content = (raw.content ?? {}) as Raw;
       const where = target(raw.target, false);
@@ -99,6 +99,13 @@ function side(input: unknown): Side {
   if (input === undefined) return "after";
   if (input === "before" || input === "after") return input;
   throw new ContentError('"side" is "before" or "after".');
+}
+
+// List items inserted right next to an item of a list of their kind continue that list, unless the op asks for a new one.
+function list(input: unknown): { list?: "new" } {
+  if (input === undefined) return {};
+  if (input === "new") return { list: "new" };
+  throw new ContentError('"list" is "new" (a list of its own) or left out.');
 }
 
 function text(input: unknown, name: string, max: number): string {

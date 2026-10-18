@@ -10,11 +10,12 @@ export interface Run {
   href?: string;
 }
 
-/** One block the editor script builds. */
+/** One block the editor script builds. A list item's `list` is the numbering it shares; its `root` is the top-level
+ * list it is written under, a list nested in an item of the other kind included. */
 export type Block =
   | { t: "h"; level: 1 | 2 | 3; runs: Run[] }
   | { t: "p"; runs: Run[] }
-  | { t: "li"; list: number; ordered: boolean; level: number; runs: Run[] }
+  | { t: "li"; list: number; root: number; ordered: boolean; level: number; runs: Run[] }
   | { t: "table"; rows: Run[][][] }
   | { t: "code"; lines: string[] }
   | { t: "pending"; key: string; intent: string }
@@ -26,25 +27,69 @@ export class ContentError extends Error {}
 
 const MAX_BLOCKS = 400;
 const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
+// The intent is trimmed after the match: spaces matched on both sides of a lazy intent backtrack cubically on a run.
+// [^\n], not ., so a \r, U+2028 or U+2029 inside the intent is read as any other character.
+const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:([^\n]*)\?>$/;
+// Markdown reads any other <?pending …?>, in any letters, as a tag and writes nothing: the section would be lost unsaid.
+const PENDING_LIKE = /<\?pending/i;
+// It drops any line starting <? the same way, <?php and <?xml too: one that looks meant for a placeholder is refused.
+const PLACEHOLDER_LIKE = /^<\?\s*(?:pending|block)/i;
+const MAX_INTENT = 300;
+const PENDING_OPEN = "<?pending";
+const OWN_LINE = "A pending block is a line of its own, with nothing before or after it: <?pending name: what it will hold?>";
+const PENDING_FORM = "A pending line is <?pending key: what the section will hold?>, its key one word of letters, digits, - or _";
+const KEY = /^[A-Za-z0-9_-]+$/;
+// Between the words of a key written wrong: anything a key cannot hold. One class repeated, so a split scans once.
+const NOT_KEY = /[^A-Za-z0-9_-]+/;
+// Accents a key cannot hold, once letters are taken apart: é is e and an accent.
+const MARKS = /\p{M}/gu;
+const LETTER_OR_DIGIT = /[A-Za-z0-9]/;
+const MAX_QUOTED = 80;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
 const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
+// A top-level list whose first item is indented two or three spaces is a sub-item written on its own: its items so
+// indented are one level down, as nested ones would be. A later item indented so in a list that starts flush is a
+// sibling, as markdown reads it. The editor counts the level below the list item it lands next to; a top-level list
+// that joins none starts at its shallowest level, its nested lists with it.
+const INDENTED = /^ {2,3}\S/;
 
 type Style = Omit<Run, "text">;
 type Lists = { next: number };
 
-/** The blocks of one op's content: markdown, where a line `<?block k?>` stands for the typed block `blocks[k]`. */
+/** The blocks of one op's content: markdown, where a line `<?pending k: intent?>` is a pending block saying what its
+ * section will hold, and a line `<?block k?>` stands for the typed block `blocks[k]`, a chart or a picture. */
 export function compileContent(markdown: string, blocks: Record<string, unknown> = {}): Block[] {
+  for (const [key, block] of Object.entries(blocks)) {
+    if ((block as Record<string, unknown> | null)?.type === "pending") {
+      throw new ContentError(`Pending blocks are written in the markdown now: <?pending ${key}: what it will hold?>.`);
+    }
+  }
   const out: Block[] = [];
   const lists: Lists = { next: 0 };
+  const keys = new Set<string>();
   let segment: string[] = [];
   const flush = () => {
     if (segment.length) out.push(...blocksOf(marked.lexer(segment.join("\n")), lists));
     segment = [];
   };
   for (const line of markdown.split("\n")) {
-    const placeholder = PLACEHOLDER.exec(line.trim());
+    const trimmed = line.trim();
+    const pending = pendingOf(trimmed);
+    if (pending) {
+      flush();
+      const { key, intent } = pending;
+      if (keys.has(key)) throw new ContentError(`<?pending ${key}: …?> is used twice in one op.`);
+      keys.add(key);
+      out.push({ t: "pending", key, intent });
+      continue;
+    }
+    if (PENDING_LIKE.test(trimmed)) throw new ContentError(pendingFault(trimmed));
+    const placeholder = PLACEHOLDER.exec(trimmed);
     if (!placeholder) {
+      if (PLACEHOLDER_LIKE.test(trimmed)) {
+        throw new ContentError(`A placeholder is a line of its own, written exactly <?pending key: intent?> or <?block key?>: ${JSON.stringify(trimmed.slice(0, 80))} is neither.`);
+      }
       segment.push(line);
       continue;
     }
@@ -58,6 +103,52 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
     throw new ContentError(`One op writes at most ${MAX_BLOCKS} blocks; split the content over several ops or calls.`);
   }
   return out;
+}
+
+/** A pending line's key and its intent, trimmed and cut to its most; none for any other line. */
+function pendingOf(line: string): { key: string; intent: string } | undefined {
+  const match = PENDING.exec(line);
+  const intent = match?.[2]!.trim();
+  return intent ? { key: match![1]!, intent: intent.slice(0, MAX_INTENT) } : undefined;
+}
+
+/** What is wrong with a line holding `<?pending` that is no pending block, said so that the next try can be right. */
+function pendingFault(line: string): string {
+  const quoted = JSON.stringify(line.slice(0, MAX_QUOTED));
+  if (!line.startsWith(PENDING_OPEN)) {
+    // After other text: markdown drops it whatever it holds.
+    if (line.slice(0, PENDING_OPEN.length).toLowerCase() !== PENDING_OPEN) return OWN_LINE;
+    const lowered = PENDING_OPEN + line.slice(PENDING_OPEN.length);
+    const pending = pendingOf(lowered);
+    const fault = `A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and ${quoted} does not`;
+    // Whatever else is wrong with it is said too, so one more try can be right.
+    return pending ? `${fault}: write <?pending ${pending.key}: ${pending.intent}?> instead.` : `${fault}. ${pendingFault(lowered)}`;
+  }
+  if (!line.endsWith("?>")) {
+    if (line.includes("?>")) return OWN_LINE;
+    return `A pending line ends in ?>, and ${quoted} does not.`;
+  }
+  const body = line.slice(PENDING_OPEN.length, -2);
+  const colon = body.indexOf(":");
+  // Which of several words is the key is not for the reader to guess: the form is said instead.
+  if (colon < 0) return `${PENDING_FORM}; ${quoted} has no colon after its key.`;
+  const key = body.slice(0, colon).trim();
+  const intent = body.slice(colon + 1).trim().slice(0, MAX_INTENT);
+  if (!key) return `${PENDING_FORM}; ${quoted} has no key before its colon.`;
+  if (!KEY.test(key)) {
+    const written = JSON.stringify(key.slice(0, MAX_QUOTED));
+    return `A pending key is one word of letters, digits, - or _, and ${written} is not: write <?pending ${keyFrom(key)}: ${intent || "what it will hold"}?> instead.`;
+  }
+  if (!intent) return `A pending line says after the colon what its section will hold, and ${quoted} says nothing there.`;
+  if (body.trimStart() === body) return `A pending line has a space between <?pending and its key, and ${quoted} has none: write <?pending ${key}: ${intent}?> instead.`;
+  // No line reaches here while PENDING reads what the checks above do; a change to either is said plainly, not wrongly.
+  return `A pending line is written exactly <?pending name: what it will hold?>, and ${quoted} is not.`;
+}
+
+/** A key made of one written wrong: its words joined by _, accents dropped, so "leave types" is leave_types. */
+function keyFrom(written: string): string {
+  const words = written.normalize("NFKD").replace(MARKS, "").split(NOT_KEY);
+  return words.filter((word) => LETTER_OR_DIGIT.test(word)).join("_").slice(0, MAX_QUOTED) || "name";
 }
 
 function blocksOf(tokens: Token[], lists: Lists): Block[] {
@@ -76,9 +167,11 @@ function blocksOf(tokens: Token[], lists: Lists): Block[] {
         if (runs.length) out.push({ t: "p", runs });
         break;
       }
-      case "list":
-        out.push(...listOf(token as Tokens.List, lists.next++, 0, lists));
+      case "list": {
+        const id = lists.next++;
+        out.push(...listOf(token as Tokens.List, id, id, 0, lists));
         break;
+      }
       case "table": {
         const table = token as Tokens.Table;
         out.push({
@@ -105,9 +198,11 @@ function blocksOf(tokens: Token[], lists: Lists): Block[] {
   return out;
 }
 
-function listOf(list: Tokens.List, id: number, level: number, lists: Lists): Block[] {
+function listOf(list: Tokens.List, id: number, root: number, level: number, lists: Lists): Block[] {
   const out: Block[] = [];
+  const sunk = level === 0 && INDENTED.test(list.items[0]?.raw ?? "");
   for (const item of list.items) {
+    const own = sunk && INDENTED.test(item.raw) ? 1 : level;
     const runs: Run[] = [];
     const after: Token[] = [];
     for (const part of item.tokens) {
@@ -116,12 +211,12 @@ function listOf(list: Tokens.List, id: number, level: number, lists: Lists): Blo
         runs.push(...runsOf((part as Tokens.Text).tokens ?? [part]));
       } else after.push(part);
     }
-    out.push({ t: "li", list: id, ordered: list.ordered, level, runs: merge(runs) });
+    out.push({ t: "li", list: id, root, ordered: list.ordered, level: own, runs: merge(runs) });
     // The item's code, tables, quotes and nested lists follow its line in order.
     for (const part of after) {
       if (part.type !== "list") out.push(...blocksOf([part], lists));
       // A nested list of the same kind continues its parent's numbering one level down.
-      else out.push(...listOf(part as Tokens.List, (part as Tokens.List).ordered === list.ordered ? id : lists.next++, level + 1, lists));
+      else out.push(...listOf(part as Tokens.List, (part as Tokens.List).ordered === list.ordered ? id : lists.next++, root, own + 1, lists));
     }
   }
   return out;
@@ -179,11 +274,6 @@ function runsOf(tokens: Token[] | undefined, style: Style = {}): Run[] {
 function typedBlock(key: string, value: unknown): Block {
   const block = (value ?? {}) as Record<string, unknown>;
   switch (block.type) {
-    case "pending": {
-      const intent = typeof block.intent === "string" ? block.intent.trim() : "";
-      if (!intent) throw new ContentError(`Pending block ${key} needs an "intent": the section it stands for.`);
-      return { t: "pending", key, intent: intent.slice(0, 300) };
-    }
     case "image": {
       if (typeof block.data !== "string" || typeof block.mime !== "string") {
         throw new ContentError(`Image block ${key} needs a "path" to a PNG or JPEG in the workspace.`);
@@ -196,7 +286,7 @@ function typedBlock(key: string, value: unknown): Block {
     case "chart":
       return chartOf(key, block);
     default:
-      throw new ContentError(`Block ${key} has type ${JSON.stringify(block.type)}; use "pending", "chart" or "image".`);
+      throw new ContentError(`Block ${key} has type ${JSON.stringify(block.type)}; use "chart" or "image".`);
   }
 }
 

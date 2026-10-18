@@ -115,7 +115,7 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
   });
 
   it("puts a box's opacity on its shape and into its text", async () => {
-    const [label] = await one(`<p style="position:absolute;left:100px;top:100px;font-size:48px;background:#14285a;color:#ffffff;opacity:0.5">Faded</p>`);
+    const [label] = await one(`<p style="position:absolute;left:100px;top:100px;font-size:48px;background:#14285a;color:#ffffff;opacity:0.5">Faded</p>`, "background:#14213D");
     expect(label).toMatchObject({ opacity: 0.5, fill: { color: { alpha: 1 } } });
     expect(label.text.paras[0].runs[0].color).toEqual({ hex: "#ffffff", alpha: 0.5 });
   });
@@ -130,7 +130,7 @@ describe.skipIf(!chromiumThere)("measuring Claude Slides' styling and motion", (
   });
 
   it("draws a translucent container whole, and none of its children again", async () => {
-    const shapes = await one(`<div style="${box};background:#14285a;opacity:0.5;padding:24px"><p style="font-size:32px;color:#ffffff">Inside</p></div>`);
+    const shapes = await one(`<div style="${box};background:#14285a;opacity:0.5;padding:24px"><p style="font-size:32px;color:#ffffff">Inside</p></div>`, "background:#14213D");
     expect(shapes).toHaveLength(1);
     expect(shapes[0]).toMatchObject({ kind: "picture", x: 100 * E, w: 400 * E, rot: 0 });
   });

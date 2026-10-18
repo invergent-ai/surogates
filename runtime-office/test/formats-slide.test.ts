@@ -41,15 +41,27 @@ describe("slide ops", () => {
     expect(() => checkSlideOps([{ op: "text", slide: "1473", hash: "h", text: "x" }])).toThrow('"shape" is required');
     expect(() => checkSlideOps([{ op: "text", slide: "1473", hash: "h", shape: "1482" }])).toThrow('"text" is the shape\'s new text, a line per paragraph.');
     expect(() => checkSlideOps([{ op: "text", slide: "1473", hash: "h", shape: "1482", text: "x".repeat(2001) }])).toThrow('"text" is at most 2000 characters');
-    expect(() => checkSlideOps([{ op: "rename" }])).toThrow('unknown op "rename"; use slides, text, order, remove, reply or resolve.');
+    expect(() => checkSlideOps([{ op: "rename" }])).toThrow('unknown op "rename"; use slides, text, notes, order, remove, reply or resolve.');
   });
 
-  it("sends a text change to the editor as it is: there is nothing to measure", async () => {
+  it("sets a slide's speaker notes by its id and hash, a line per paragraph", () => {
+    expect(checkSlideOps([{ op: "notes", slide: "1473", hash: "dc3285c8", text: "Open with the budget.\r\nThen the lease." }]))
+      .toEqual([{ op: "notes", slide: "1473", hash: "dc3285c8", text: "Open with the budget.\nThen the lease." }]);
+    expect(checkSlideOps([{ op: "notes", slide: 1473, hash: "h", text: "" }])).toEqual([{ op: "notes", slide: "1473", hash: "h", text: "" }]);
+    expect(checkSlideOps([{ op: "notes", slide: "1473", hash: "h", text: "x".repeat(5000) }])).toHaveLength(1);
+    expect(() => checkSlideOps([{ op: "notes", slide: "1473", text: "x" }])).toThrow("op 0: a notes change carries the hash its slide had when you read it.");
+    expect(() => checkSlideOps([{ op: "notes", hash: "h", text: "x" }])).toThrow('"slide" is required');
+    expect(() => checkSlideOps([{ op: "notes", slide: "1473", hash: "h" }])).toThrow('op 0: "text" is the slide\'s speaker notes, a line per paragraph.');
+    expect(() => checkSlideOps([{ op: "notes", slide: "1473", hash: "h", text: "x".repeat(5001) }])).toThrow('op 0: "text" is at most 5000 characters.');
+  });
+
+  it("sends a text or notes change to the editor as it is: there is nothing to measure", async () => {
     const measure = vi.fn();
     const format = slideFormat({ measure } as unknown as Measurer);
     const context = { page: {} as EditorPage, run: vi.fn() };
     const op = { op: "text", slide: "1473", hash: "dc3285c8", shape: "1482", text: "Q3 plan" };
-    expect(await format.compile([op], context)).toEqual([op]);
+    const notes = { op: "notes", slide: "1473", hash: "dc3285c8", text: "Open with the budget." };
+    expect(await format.compile([op, notes], context)).toEqual([op, notes]);
     expect(context.run).not.toHaveBeenCalled();
     expect(measure).not.toHaveBeenCalled();
   });

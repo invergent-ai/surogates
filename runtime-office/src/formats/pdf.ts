@@ -11,6 +11,9 @@ const STAMPS: Record<string, string> = {
 };
 
 type Raw = Record<string, unknown>;
+// Where a note or a stamp goes: beside the words it is about (the editor finds the place), or at a page and a rect.
+type Anchor = { find: string; nth: number; match_case: boolean };
+type Place = { anchor: Anchor } | { page: number; rect: number[] };
 export type PdfOp =
   | { op: "pages"; action: "add"; page: number }
   | { op: "pages"; action: "remove"; page: number }
@@ -18,8 +21,8 @@ export type PdfOp =
   | { op: "fill"; fields: Record<string, string | boolean>; expect?: Record<string, string | boolean> }
   | { op: "add_field"; type: "text" | "checkbox"; page: number; rect: number[]; name: string; value?: string | boolean }
   | { op: "redact"; text: string; match_case: boolean; whole_words: boolean }
-  | { op: "annotate"; kind: "free_text"; page: number; rect: number[]; text: string }
-  | { op: "annotate"; kind: "stamp"; page: number; rect: number[]; stamp: string }
+  | ({ op: "annotate"; kind: "free_text"; text: string } & Place)
+  | ({ op: "annotate"; kind: "stamp"; stamp: string } & Place)
   | CommentOp;
 
 function rect(value: unknown): number[] {
@@ -27,6 +30,28 @@ function rect(value: unknown): number[] {
     && value[0] < value[2] && value[1] < value[3];
   if (!ok) throw new ContentError('"rect" is [x1, y1, x2, y2] in points from the page\'s top-left corner, x1 < x2 and y1 < y2.');
   return value as number[];
+}
+
+function place(raw: Raw): Place {
+  const placed = raw.page !== undefined || raw.rect !== undefined;
+  if (raw.anchor !== undefined) {
+    if (placed) throw new ContentError('annotate takes "anchor" or "page" and "rect", not both.');
+    return { anchor: anchor(raw.anchor) };
+  }
+  if (!placed) throw new ContentError('annotate needs "anchor": {"find": "words on the page"}, or "page" and "rect".');
+  return { page: wholeNumber(raw.page, "page", 1), rect: rect(raw.rect) };
+}
+
+function anchor(value: unknown): Anchor {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ContentError('"anchor" is {"find": "words on the page", "nth": 1}: the words the note is about, as the page reads them.');
+  }
+  const raw = value as Raw;
+  if (typeof raw.find !== "string" || !raw.find.trim()) throw new ContentError('"find" quotes words that are in the document.');
+  if (raw.find.length > 500) throw new ContentError('"find" is at most 500 characters.');
+  const nth = raw.nth === undefined ? 1 : Number(raw.nth);
+  if (!Number.isInteger(nth) || nth < 1) throw new ContentError('"nth" counts matches from 1.');
+  return { find: raw.find, nth, match_case: raw.match_case === true };
 }
 
 function name(value: unknown, label: string): string {
@@ -92,16 +117,16 @@ function compileOp(raw: Raw): PdfOp {
       return { op: "redact", text, match_case: raw.match_case === true, whole_words: raw.whole_words === true };
     }
     case "annotate": {
-      const page = wholeNumber(raw.page, "page", 1);
+      const at = place(raw);
       if (raw.kind === "free_text") {
         const text = textArg(raw.text, "text");
         if (text.length > 2000) throw new ContentError('"text" is at most 2000 characters.');
-        return { op: "annotate", kind: "free_text", page, rect: rect(raw.rect), text };
+        return { op: "annotate", kind: "free_text", ...at, text };
       }
       if (raw.kind === "stamp") {
         const stamp = STAMPS[String(raw.stamp)];
         if (!stamp) throw new ContentError(`"stamp" is one of ${Object.keys(STAMPS).join(", ")}.`);
-        return { op: "annotate", kind: "stamp", page, rect: rect(raw.rect), stamp };
+        return { op: "annotate", kind: "stamp", ...at, stamp };
       }
       throw new ContentError('"kind" is "free_text" or "stamp".');
     }

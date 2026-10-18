@@ -4,9 +4,10 @@
 
 - Target blocks by the `id` and `hash` the outline gives. Quote words with `find` only for a phrase inside a block.
 - A new document: one call inserts the title and every section's heading, each followed by a pending block saying what
-  it will hold. The user sees the whole shape at once and can delete a section before you write it. Then fill one
-  section per call, replacing its pending block. A pending block the user deleted is a section they do not want: leave
-  it out.
+  it will hold: a line of its own, `<?pending name: what it will hold?>`, each name once and one word of letters,
+  digits, - or _ (`leave_types`, not `leave types`). The user sees the whole shape at once and can delete a section
+  before you write it. Then fill one section per call, replacing its pending block (target `{"pending": "name"}`). A
+  pending block the user deleted is a section they do not want: leave it out.
 - Re-word with `replace` on quoted words; replace a whole block only when it all changes.
 - Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced, moved or deleted is
   gone for the later ones (a moved block gets a new id, found in that op's result `ids`), and one it re-worded has a
@@ -38,13 +39,8 @@ kept) from the top, from 1: quote enough words to be unique (the `search` view i
 ## Plant a new document's outline
 
 ```json
-{"path": "reports/Q3.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {
-  "markdown": "# Q3 report\n\n## Summary\n<?block summary?>\n\n## Results\n<?block results?>\n\n## Risks\n<?block risks?>",
-  "blocks": {
-    "summary": {"type": "pending", "intent": "Three sentences: what happened this quarter and what it means"},
-    "results": {"type": "pending", "intent": "Revenue and costs by region, with a chart"},
-    "risks": {"type": "pending", "intent": "What could slip next quarter, and what we do about it"}
-  }}}]}
+{"path": "reports/Q3.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown":
+  "# Q3 report\n\n## Summary\n<?pending summary: Three sentences on what happened this quarter and what it means?>\n\n## Results\n<?pending results: Revenue and costs by region, with a chart?>\n\n## Risks\n<?pending risks: What could slip next quarter, and what we do about it?>"}}]}
 ```
 
 ## Fill one section
@@ -56,7 +52,8 @@ kept) from the top, from 1: quote enough words to be unique (the `search` view i
                         "rows": [["", "Q2", "Q3"], ["North", 3.75, 4.2], ["East", 2.87, 3.1]]}}}}]}
 ```
 
-A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "width": 480}` (PNG or JPEG, at most 5 MB).
+A line `<?block name?>` places `blocks[name]`: a chart, as above, or a picture from the workspace,
+`{"type": "image", "path": "charts/funnel.png", "width": 480}` (PNG or JPEG, at most 5 MB).
 
 ## Change what is there
 
@@ -68,8 +65,19 @@ A picture from the workspace: `{"type": "image", "path": "charts/funnel.png", "w
 {"op": "move", "target": {"block": "880", "hash": "33cc44dd"}, "to": {"block": "853", "hash": "a1b2c3d4"}, "side": "before"}
 ```
 
-A list you insert starts its own numbering. A block you replace or move keeps the comment threads anchored in it: over
-the same words when they are still in it, otherwise over the whole new block.
+A block you replace or move keeps the comment threads anchored in it: over the same words when they are still in it,
+otherwise over the whole new block.
+
+List items you insert right before or after a list item of their kind (numbered or bulleted) continue its list and take
+its numbering, whatever number the markdown writes; indented two spaces, they go one level below the item they are next
+to. `"list": "new"` starts a list of their own instead. A list of its own starts at its first level, however far you
+indent it:
+
+```json
+{"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "3. Renew the support contract"}}
+{"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "  1. Ask for three quotes"}}
+{"op": "insert", "target": {"block": "857", "hash": "5e6f7a8b"}, "side": "after", "content": {"markdown": "1. Book the venue\n2. Send the invitations"}, "list": "new"}
+```
 
 ## Comments
 
