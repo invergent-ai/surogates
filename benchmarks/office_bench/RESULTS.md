@@ -14,6 +14,7 @@ its row **and its failing classes**: the failing classes are the backlog, and a 
 | 2026-10-17 | full-001 | DEV | surogate3.7-flash | 33 × 3 | 692/724 (96%) | 76/99 |
 | 2026-10-17 | full-002 | DEV | surogate3.7-flash | 33 × 3 | 711/727 (98%) | 83/99 |
 | 2026-10-18 | full-003 | DEV | surogate3.7-flash | 33 × 3 | 709/722 (98%) | 89/99 |
+| 2026-10-18 | full-005 | DEV | surogate3.7-flash | 36 × 3 | 787/792 (99%) | 104/108 |
 
 **full-001** — the bar model's baseline, before any change to the protocol, the tool descriptions or the office
 skill. 99 sessions, every one completed on the `studio` channel; no harness or runner error, no rollout set aside, no
@@ -265,3 +266,167 @@ What moved from full-002:
   of the data left without euro formats (xlsx-budget r1) and the fee split from its `%` (pptx-pitch r2). The dates
   check counts typed dates only, and a DATE formula's dates are real: the check is the thing to fix, and full-003 to be
   re-scored with it before the next row is read against it.
+
+**full-005** — the 33 tasks and three new ones, × 3, on the templates build, scored by this branch's checks. The office
+skill carries templates for new documents. Word: a report, letter, minutes, proposal, FAQ and how-to, each an outline
+whose pending lines end with the section's length in words. Spreadsheets: a budget, invoice and tracker, their totals
+formulas. Slides: eight kinds on one palette and type scale, fitting 16:9 and 4:3 decks, their limits in characters and
+lines. SKILL.md says to open the type's template before making a document, and the first office call's guide carries
+the templates too. A rule on what may not be made up: specifics (names, dates, times, figures, places, sources,
+contacts, what happened) come only from the user or their files; content asked for but not detailed is drafted as a
+proposal, and the chat says so; the user is asked only when the work cannot be done without the answer. `ops` sent as
+JSON text with closing brackets too many after it is read as meant, and `read_as` says how many were dropped. The tool
+descriptions and the references agree with the templates. The build also has the pending-line refusals that name their
+fault, which full-003 did not measure. The benchmark adds three harder Word edits: docx-long-edit (a figure wrong in
+four places of a twelve-page report), docx-table-edit (a row added to a table and its Total row fixed) and
+docx-many-threads (three of five comment threads answered and resolved; the checks read Word comments now). Checks that
+failed right answers were fixed (below). The runner answers a model's question as a busy user would, at most twice a
+session, and counts the asks; the report says whether each guide carried templates and whether the template was
+opened before the first edit. 108 sessions, every one completed on the `studio` channel; no harness or runner error, no
+rollout set aside, no `sandbox_unavailable` result. 144 minutes of sessions, 773 model calls, 764 tool calls.
+
+| Slice | Checks | Clean rollouts |
+| --- | --- | --- |
+| create | 411/414 (99%) | 48/51 |
+| edit | 376/378 (99%) | 56/57 |
+| Word | 302/306 (99%) | 39/42 |
+| spreadsheet | 185/186 (99%) | 26/27 |
+| deck | 243/243 (100%) | 30/30 |
+| PDF | 57/57 (100%) | 9/9 |
+
+4 rollouts failed at least one check, each for one cause:
+
+| What went wrong | Rollouts | Why |
+| --- | --- | --- |
+| A document under the check's word floor | docx-report r2 (550 words for "two pages", 600 at least) | It reached 702 words by the editor's count, then cut 144 to bring the count's three pages down to the two asked. The count stayed at three, with the chart and the table in it; r3, whose chart was dropped, fit 669 words on two |
+| A chart asked for left out | docx-report r3 | Its chart went in `blocks` with no `<?block chart?>` line to place it. The editor applied the call and dropped the entry without a word. Neither the result's `reads` nor the outline showed a chart; the model saw that, reasoned that a failed chart would have been refused, and told the user the chart was there |
+| A figure fixed in 2 of its 4 places | docx-long-edit r1: €45,800 left in the summary and in section 17's first paragraph | It searched for "48,500 45,800 budget", which no block holds, then worked from the outline, whose texts are cut short. It never searched for the figure alone, as r2 and r3 did, and said it had fixed "the other place" |
+| A task's name cut short | xlsx-dates r1: "Copy final" written "Final" | It read "Copy" as asking it to copy the list (full-002's r2 wrote "Copy"). The dates and durations are right |
+
+How to read the run:
+
+- **The model alone, with no advisor.** As in full-003: `surogate3.7-flash` served every model call, one session at a
+  time, and no session's events name an advisor.
+- **Like for like: against full-003 re-scored, on the tasks both ran.** This branch's checks count a date a formula
+  makes as a real date, find a percentage key fact written "70 percent" or in words, let the correction sentence say
+  the figure was fixed or quote the old one, and let a Summary total reach the month sheets through its row's links.
+  full-003's row was scored before them, so its 99 stored rollouts were copied and re-scored with this branch's checks
+  (`runs/full-003-rescored/`): 714/724 and 92/99, against 709/722 and 89/99. Three verdicts changed: xlsx-dates r1 and
+  r3, whose `=DATE(...)` starts and ends now count as real dates and whose durations, unknown before, are judged and
+  right; and pptx-pitch r2, whose fee, written "2" and "percent per sale", now gives the 2%. The comparison below is
+  on the 33 tasks the two runs share; the three new tasks are reported apart.
+- **The Summary check was fixed after the first scoring, and both runs re-scored with it.** xlsx-multi-sheet asks for
+  totals by formulas that point at the month sheets, and the check read only the total's own formula. full-005's r1
+  and r3 give each month a Summary column of links (`=Jan!B2`, `=Feb!B2`, `=Mar!B2`) and total the row
+  (`=SUM(B2:D2)`): 380, 313 and 428, by formula, from the month sheets, failed as "does not point at the month
+  sheets". The check now follows the total's references through cells of its own sheet, up to three deep, and still
+  fails a typed total, numbers written in the formula, or typed copies of the month values. Scored before the fix,
+  full-005 read 781/792 and 102/108; the re-score changed those two rollouts' 6 checks and nothing else, in either
+  run (full-003's totals point at the month sheets directly).
+- **full-004 was stopped, and is not a row.** It ran the build before the never-invent rule was split, with a runner
+  that did not answer questions: rollout 1 of all 36 tasks, then rollout 2 from docx-report to pptx-report-summary, 62
+  of 108 rollouts, 60 of them clean. The next, pptx-onboarding r2, asked the user what the "first week" slide should
+  show: the rule then said nothing is made up, and the model read it as drafting nothing the user had not spelled out.
+  Nobody answers a benchmark session, so it waited out the runner's 30-minute cap, and the run was stopped. The rule
+  now separates specifics, which only the user gives, from content asked for but not detailed, which is drafted as a
+  proposal and said so, and the runner answers a question as a busy user would. full-005 is the run of the final
+  build; full-004's 62 rollouts are kept in `runs/full-004/`.
+- **Nobody asked.** 0 of 108 sessions asked the user, so the runner never had to answer. All three pptx-onboarding
+  rollouts drafted the first week and said so.
+- **Unknown is not counted.** 12 checks came back unknown: the contrast of the 12 edits of the sample deck (theme
+  colours). The kpi charts' values are judged now (below).
+- **What the model said.** All 4 failing rollouts ended telling the user the work was done, 3 of them in the words of
+  a check that failed: "a two-page report" at 550 words (docx-report r2), "a column chart" (docx-report r3; the claim
+  analysis missed it, reading its "didn't detail" as owning up to a problem) and €48,500 in "the other place"
+  (docx-long-edit r1). docx-report r1 also said "two-page" with three pages in its `length`; no check reads pages.
+- **One run is three samples.** Every failing class is at 1/3, so none is systematic on this run alone; saying the
+  work is done is in every failing rollout.
+
+What moved from full-003 re-scored, on the 33 shared tasks:
+
+| | full-003 re-scored | full-005 |
+| --- | --- | --- |
+| Checks | 714/724 | 723/726 |
+| Clean rollouts | 92/99 | 96/99 |
+| Clean Word / spreadsheet / deck / PDF | 27/33, 26/27, 30/30, 9/9 | 31/33, 26/27, 30/30, 9/9 |
+| docx-report words (r1, r2, r3) | 455, 438, 360 | 684, 550, 663 |
+| docx-guide words (r1, r2, r3) | 5, 97, 150 | 170, 206, 261 |
+| Under the word floor | 4, and docx-guide r1's title alone | 1 |
+| Guides delivered / on a Word document, spreadsheet or deck, with templates | 102 / 0 of 93 | 101 / 92 of 92 |
+| Documents made with their template opened before the first edit | 0/51 | 51/51 |
+| Sessions that asked the user | 0 | 0 |
+| Made documents whose answer says what was drafted or left out | 1/51 | 22/51 |
+| `skill_view` calls / sessions that opened an office reference | 100 / 26 | 157 / 28 |
+| `office_edit` calls | 273 | 264 |
+| `office_edit` errors | 51 | 22 |
+| of them a pending line refused | 18 | 1 |
+| `ops` with closers too many after it: read as meant (applied) | 0 (2 refused, docx-guide r1) | 10 (9) |
+| `office_edit` refused: target changed / no such slide or sheet / pending block gone | 2 / 5 / 0 | 3 / 1 / 2 |
+| Terminal calls / `read_file` calls | 7 / 34 | 1 / 3 |
+| Lowest judged slide contrast / refused while editing | 3.3:1 / 1 | 4.8:1 / 2 |
+| Session minutes making Word / spreadsheet / deck documents | 40 / 25 / 41 | 32 / 29 / 29 |
+| Model calls / tool calls / session minutes | 727 / 707 / 147 | 710 / 692 / 131 |
+
+- **Short documents, mostly gone.** Every docx-report outline gave each section its words, 770 to 840 in all, and
+  every docx-guide outline 260 to 340. The reports reached 698, 702 and 669 words by the editor's count, and two kept
+  them. In full-003 all three passed 500 too (740, 501 and 559) and were then cut back to two pages, to 360 to 455; now
+  only r2 cut. The guides end at 170 to 261 words, over the floor of 120 though under the template's 380. Under the
+  floor: 4 and a title alone, now 1.
+- **Templates carried and opened.** Every guide on a Word document, spreadsheet or deck carried its templates (101/101
+  with the new tasks), and every one of the 51 documents made had its template opened with `skill_view` before its
+  first `office_edit`, though the guide carries them too. The skill's files are opened with `skill_view` now:
+  `read_file` on the office references fell from 26 calls to 1, and terminal calls from 7 to 1 (a `pwd; ls -la`).
+- **Drafts are said.** 22 of the 51 made documents ended saying what was drafted for the user to check or what was left
+  out for want of it: the onboarding deck's first week and the pitch's drafted parts in all three rollouts, the
+  invoice's seller and terms in all three, the next meeting's time and place, a letter's sender address. 1 did in
+  full-003.
+- **Decks.** All 30 deck rollouts pass. The lowest judged contrast is 4.8:1 (3.3:1). The refusal fired twice, both on
+  the template's amber (F2C14E) put on its paper (FBFBF8), 1.6:1, where the template keeps amber for navy; both decks
+  end at 8.4:1 or more. The kpi charts are drawn from shapes, as the template's Chart is, so their six values are read
+  and pass, where full-003's SVG pictures came back unknown. The 15 decks made took 29 minutes and 103 model calls
+  (41 and 116).
+- **Errors 51 → 22.** `ops` with closers too many after it was read as meant in 10 calls in 5 sessions, 9 of them
+  applied; in full-003 docx-guide r1's 2 such calls were refused and its turn ended on a call written as text. One
+  pending line was refused (18 in full-003): docx-report r2's outline, its newlines sent as the two characters `\n`;
+  the next call was applied. Of the 22: the closers at the end of JSON text in the wrong order, `]}]}` where `]]}]`
+  belongs (6, xlsx-multi-sheet r1 and r2); a sheet added after one the same call renames (3, every xlsx-multi-sheet
+  rollout); an op whose `"op"` sits inside its `content` (2, docx-proposal r1); a `<?block chart?>` with no entry (2,
+  docx-report r2); slide text below 3:1 (2); slide markup the format does not take (2).
+- **A right answer after 52 model calls.** xlsx-multi-sheet r2 wrote its Summary formulas with the sheet names in
+  capitals (`=JAN!B2+FEB!B2+MAR!B2`). Each call with them was applied and stored nothing, without a word; the model
+  spent 36 calls trying formulas before it found the case. The rollout passes, in 338 s.
+- **Not moved, or worse.** Spreadsheets stay 26/27: the budget's euro formats are right in all three, and a task's
+  name is copied short again (xlsx-dates r1), as in full-002. And every failing rollout still ends saying the work is
+  done.
+
+The three new tasks: 64/66 checks, 8 of 9 rollouts clean, 63 model calls, 13 minutes. docx-table-edit 3/3 and
+docx-many-threads 3/3, each in one `office_edit` call (many-threads r3 in three) and under 70 s. docx-long-edit 2/3:
+r2 and r3 searched for "45,800", fixed all four places and searched again (13 and 15 model calls, 204 and 146 s); r1 is
+above. The 3 refusals and the 1 error of these 9 rollouts are all docx-long-edit's: a `find` across a table row's cells
+(2), a block an earlier op of the same call had changed (1), and the same phrase replaced four times in one call (1).
+
+What is left, for deciding on fine-tuning. Every failure class still in full-005, and those full-003 re-scored had:
+
+- **Keeping a length when the page count disagrees.** docx-report r2; 1/3, from 3/3 and docx-guide r2 in full-003
+  re-scored. The outline set each section's words and every result gave words and pages; r2 wrote 702 words, then cut
+  to the page count, as all three reports did in full-003. The template's 450 words to a page does not hold once a
+  chart and a table are in, and the page count says so; keeping the words and saying the report runs onto a third
+  page, or asking what to drop, is the model's call.
+- **Claiming what no result showed.** docx-report r3 (a chart), docx-long-edit r1 (the figure fixed everywhere),
+  docx-report r1 and r2 ("a two-page report" with three pages in `length`). Each time the answer was one look away: no
+  chart in `reads` or the outline, three pages in `length`, a search for the old figure it never ran. Checking a claim
+  against the last result before making it is the model's. One part of r3 is a gap in the editor: an entry in `blocks`
+  that no line places is dropped without a word, where a `<?block?>` line with no entry is refused.
+- **Fixing a figure everywhere it appears.** docx-long-edit r1; 1/3, a new task. The search view finds every place: r2
+  and r3 searched "45,800" and found all four. r1 searched three words at once, found none, fell back on the outline's
+  cut-short texts and never searched after the edit. Searching for the exact string, and again after, is the model's.
+- **Copying names exactly.** xlsx-dates r1, "Copy final" written "Final"; 1/3 (full-002 1/3, full-003 0/3). A name
+  that starts with a verb was read as an instruction. Taking the user's list items as written is the model's.
+- **Cross-sheet formulas: gone, a check fault.** xlsx-multi-sheet r1 and r3 were right and failed by the check, which
+  is fixed, and both runs are re-scored with it (above); every xlsx-multi-sheet rollout's totals come by formula from
+  the month sheets. Where the model did slip, r2's capitals, the editor stored nothing without a word: a gap in the
+  editor, which cost 36 calls, not a wrong answer.
+- **Gone:** a question heading written as a statement (docx-faq r1 in full-003, 0/3 now; the FAQ template writes every
+  heading as a question); amounts not all in the user's currency (xlsx-budget r1, 0/3; the template writes the user's
+  currency into its number formats); a turn ended on a call written as text (docx-guide r1, 0; the extra `}` that
+  began it is read as meant); a how-to under its floor (docx-guide r2, 0/3).
