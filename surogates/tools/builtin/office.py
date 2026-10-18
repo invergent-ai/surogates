@@ -100,9 +100,9 @@ EDIT_DESCRIPTION = (
     '{"text": "…"} re-words them keeping their formatting), delete {target}, move {target, to, side}, comment '
     '{anchor: {find}, body}, reply {thread, body}, resolve {thread}; a replaced or moved block keeps its comment '
     'threads. Targets: {"block": "<id>", "hash": "<hash>"}, {"find": "exact words", "nth": 1}, {"pending": "<key>"}, '
-    '{"end": true}. Content: {"markdown": "…", "blocks": {…}}; a line <?pending k: what it will hold?> is a pending '
-    'block; a line <?block k?> places blocks[k]: {"type": "chart", "chart": "bar|column|line|pie|…", "title": "…", '
-    '"rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG or JPEG>", "width": <px>}.\n'
+    '{"end": true}. Content: {"markdown": "…", "blocks": {…}}; a line <?pending k: what it will hold?> (k: one word) '
+    'is a pending block; a line <?block k?> places blocks[k]: {"type": "chart", "chart": "bar|column|line|pie|…", '
+    '"title": "…", "rows": [["", "A"], ["x", 1]]} or {"type": "image", "path": "<PNG or JPEG>", "width": <px>}.\n'
     'Spreadsheet: set {range: "Sheet!A1", values: [[…]], expect?: [[the range as you read it]]} (each value is typed '
     'in as into a cell: "=…" is a live formula, a leading \' keeps text); format {range, number_format, bold, italic, '
     "fill, color, align, valign, wrap, width}; chart {range, type: column|bar|line|pie|area|doughnut|scatter, title, "

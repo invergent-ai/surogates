@@ -187,7 +187,7 @@ describe("pending blocks, written in the markdown", () => {
   it("refuses a pending line with no colon, saying the form rather than guessing which word is the key", () => {
     for (const line of ["<?pending leave types?>", "<?pending summary Three sentences on the quarter?>", "<?pending summary?>"]) {
       expect(() => compileContent(line), line).toThrow(
-        new ContentError(`A pending line is <?pending key: what the section will hold?>; ${JSON.stringify(line)} has no colon after its key.`),
+        new ContentError(`A pending line is <?pending key: what the section will hold?>, its key one word of letters, digits, - or _; ${JSON.stringify(line)} has no colon after its key.`),
       );
     }
   });
@@ -200,13 +200,13 @@ describe("pending blocks, written in the markdown", () => {
 
   it("refuses a pending line with text beside it", () => {
     for (const line of ["## Summary <?pending summary: Three sentences?>", "<?pending summary: Three sentences?> and more", "<?pending summary: Three sentences?>."]) {
-      expect(() => compileContent(line), line).toThrow(new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>."));
+      expect(() => compileContent(line), line).toThrow(new ContentError("A pending block is a line of its own, with nothing before or after it: <?pending name: what it will hold?>"));
     }
   });
 
   it("refuses a pending line with no key", () => {
     expect(() => compileContent("<?pending: Three sentences?>")).toThrow(
-      new ContentError('A pending line names its key before the colon, one word of letters, digits, - or _ for its section, and "<?pending: Three sentences?>" names none.'),
+      new ContentError('A pending line is <?pending key: what the section will hold?>, its key one word of letters, digits, - or _; "<?pending: Three sentences?>" has no key before its colon.'),
     );
   });
 
@@ -222,10 +222,15 @@ describe("pending blocks, written in the markdown", () => {
     );
   });
 
-  it("refuses any other pending line, naming the exact form", () => {
-    expect(() => compileContent("<?pending summary: One\rtwo?>")).toThrow(
-      new ContentError('A pending line is written exactly <?pending name: what it will hold?>, and "<?pending summary: One\\rtwo?>" is not.'),
-    );
+  it("reads a \\r, U+2028 or U+2029 inside an intent as any other character, in the line and in its suggested fix", () => {
+    for (const intent of ["One\rtwo", "One\u2028two", "One\u2029two"]) {
+      expect(compileContent(`<?pending summary: ${intent}?>`), intent).toEqual([{ t: "pending", key: "summary", intent }]);
+      const fixed = `<?pending leave_types: ${intent}?>`;
+      expect(() => compileContent(`<?pending leave types: ${intent}?>`), intent).toThrow(
+        new ContentError(`A pending key is one word of letters, digits, - or _, and "leave types" is not: write ${fixed} instead.`),
+      );
+      expect(compileContent(fixed), intent).toEqual([{ t: "pending", key: "leave_types", intent }]);
+    }
   });
 
   it("refuses a pending line in other letters, which markdown would drop unsaid, giving it back in lowercase", () => {
@@ -246,13 +251,13 @@ describe("pending blocks, written in the markdown", () => {
     expect(() => compileContent("<?PENDING summary?>")).toThrow(
       new ContentError(
         'A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and "<?PENDING summary?>" does not. '
-        + 'A pending line is <?pending key: what the section will hold?>; "<?pending summary?>" has no colon after its key.',
+        + 'A pending line is <?pending key: what the section will hold?>, its key one word of letters, digits, - or _; "<?pending summary?>" has no colon after its key.',
       ),
     );
     expect(() => compileContent("<?PENDING summary: Three sentences?> and more")).toThrow(
       new ContentError(
         'A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and "<?PENDING summary: Three sentences?> and more" does not. '
-        + "A pending block is a line of its own: <?pending name: what it will hold?>.",
+        + "A pending block is a line of its own, with nothing before or after it: <?pending name: what it will hold?>",
       ),
     );
   });
@@ -289,12 +294,21 @@ describe("pending blocks, written in the markdown", () => {
       [`<?Pending k:${" ".repeat(run)}x${" ".repeat(run)}?>`, /in lowercase.*write <\?pending k: x\?> instead/],
       [`<?pending ${"?".repeat(run)}`, /ends in \?>/],
       [`<?pending k:${" ".repeat(run)}?>`, /says nothing there/],
-      [`<?pending k: ${"x\r".repeat(run)}?>`, /written exactly/],
+      [`<?pending k: ${"?>".repeat(run)}x`, /line of its own/],
     ];
     for (const [line, message] of lines) {
       const started = performance.now();
       expect(() => compileContent(line)).toThrow(message);
       expect(performance.now() - started, line.slice(0, 20)).toBeLessThan(1_000);
+    }
+  });
+
+  it("reads a long intent of any characters promptly", () => {
+    const run = 100_000;
+    for (const intent of ["x\r".repeat(run), "?>".repeat(run), "x\u2028".repeat(run)]) {
+      const started = performance.now();
+      expect(compileContent(`<?pending k: ${intent}?>`)).toEqual([{ t: "pending", key: "k", intent: intent.slice(0, 300) }]);
+      expect(performance.now() - started).toBeLessThan(1_000);
     }
   });
 });

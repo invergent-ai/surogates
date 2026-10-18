@@ -28,14 +28,16 @@ export class ContentError extends Error {}
 const MAX_BLOCKS = 400;
 const PLACEHOLDER = /^<\?block\s+([A-Za-z0-9_-]+)\s*\?>$/;
 // The intent is trimmed after the match: spaces matched on both sides of a lazy intent backtrack cubically on a run.
-const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:(.*)\?>$/;
+// [^\n], not ., so a \r, U+2028 or U+2029 inside the intent is read as any other character.
+const PENDING = /^<\?pending\s+([A-Za-z0-9_-]+)\s*:([^\n]*)\?>$/;
 // Markdown reads any other <?pending …?>, in any letters, as a tag and writes nothing: the section would be lost unsaid.
 const PENDING_LIKE = /<\?pending/i;
 // It drops any line starting <? the same way, <?php and <?xml too: one that looks meant for a placeholder is refused.
 const PLACEHOLDER_LIKE = /^<\?\s*(?:pending|block)/i;
 const MAX_INTENT = 300;
 const PENDING_OPEN = "<?pending";
-const OWN_LINE = "A pending block is a line of its own: <?pending name: what it will hold?>.";
+const OWN_LINE = "A pending block is a line of its own, with nothing before or after it: <?pending name: what it will hold?>";
+const PENDING_FORM = "A pending line is <?pending key: what the section will hold?>, its key one word of letters, digits, - or _";
 const KEY = /^[A-Za-z0-9_-]+$/;
 // Between the words of a key written wrong: anything a key cannot hold. One class repeated, so a split scans once.
 const NOT_KEY = /[^A-Za-z0-9_-]+/;
@@ -129,16 +131,17 @@ function pendingFault(line: string): string {
   const body = line.slice(PENDING_OPEN.length, -2);
   const colon = body.indexOf(":");
   // Which of several words is the key is not for the reader to guess: the form is said instead.
-  if (colon < 0) return `A pending line is <?pending key: what the section will hold?>; ${quoted} has no colon after its key.`;
+  if (colon < 0) return `${PENDING_FORM}; ${quoted} has no colon after its key.`;
   const key = body.slice(0, colon).trim();
   const intent = body.slice(colon + 1).trim().slice(0, MAX_INTENT);
-  if (!key) return `A pending line names its key before the colon, one word of letters, digits, - or _ for its section, and ${quoted} names none.`;
+  if (!key) return `${PENDING_FORM}; ${quoted} has no key before its colon.`;
   if (!KEY.test(key)) {
     const written = JSON.stringify(key.slice(0, MAX_QUOTED));
     return `A pending key is one word of letters, digits, - or _, and ${written} is not: write <?pending ${keyFrom(key)}: ${intent || "what it will hold"}?> instead.`;
   }
   if (!intent) return `A pending line says after the colon what its section will hold, and ${quoted} says nothing there.`;
   if (body.trimStart() === body) return `A pending line has a space between <?pending and its key, and ${quoted} has none: write <?pending ${key}: ${intent}?> instead.`;
+  // No line reaches here while PENDING reads what the checks above do; a change to either is said plainly, not wrongly.
   return `A pending line is written exactly <?pending name: what it will hold?>, and ${quoted} is not.`;
 }
 
