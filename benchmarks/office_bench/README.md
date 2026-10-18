@@ -40,6 +40,15 @@ made it wrong.
 4. **Stream to a terminal state** with GAIA's discipline: the server closes every stream after 300 s and a failed
    session never closes its own, so poll the status and reconnect from the last event id. The stream's `stream.live`
    markers and keepalives are not events.
+   **A question to the user is answered like a busy user would.** A session that asks its user (`inbox.input_required`:
+   an `ask_user_question` call, or a final reply the harness turned into one) waits for the answer, and nobody else
+   gives one: unanswered, it would wait out the cap. So the runner answers the ask through the chat's answer endpoint
+   (`POST /v1/api/sessions/{id}/ask_user_question/{tool_call_id}/respond`), each of its questions with *"I can't answer
+   that now: do what you can with what you have, and tell me what's missing."*, for at most two asks per session. A
+   third ask, or an input request with no question to answer, ends the rollout at once with the status
+   `waiting_on_user`. `meta.json` records how many times the session asked (`asked_user`) and each ask (`asks`: its
+   questions, whether it was answered, and why not); the report gives the count per rollout, lists the questions, and
+   counts the sessions that asked.
 5. **Wait for the save.** The editor saves each document the turn edited as the turn ends; the save lands in the
    workspace a few seconds *after* `session.complete` and emits no event when it works (`office.saved` is only sent
    after a save that had to wait; `office.save_failed`/`office.conflict` when one fails). So the runner downloads
@@ -54,7 +63,8 @@ made it wrong.
    it is idle, and holds a limited number of pages (`RUNTIME_OFFICE_MAX_PAGES`); sessions left open back to back fill
    them, and the next session's `office_read` gets "The office service has as many documents open as it can hold". The
    runner deletes each session after collecting it so pages are freed: the office reaper closes an archived chat's
-   documents on its next pass. The events stay in the database; the documents are in `runs/`.
+   documents on its next pass. A session ended as `waiting_on_user` is deleted too, which ends its question's wait.
+   The events stay in the database; the documents are in `runs/`.
 8. **Check** (also offline, `obench check <run_id>`): the task's checks on its document, the trace metrics, the claim
    analysis. Writes `checks.json` and `trajectory.md`. A deck whose task checks overflow is first rendered to PDF by
    the document server's own converter, x2t (`OFFICEBENCH_RENDER_SHELL`); each rendered line of text is matched to
@@ -69,19 +79,19 @@ made it wrong.
 
 | File | Responsibility |
 | --- | --- |
-| `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, SSE. HTTP only |
-| `obench/runner.py` | One task to one rollout: create, upload, send, stream, wait for the save, collect |
+| `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, answers to questions, SSE. HTTP only |
+| `obench/runner.py` | One task to one rollout: create, upload, send, stream (answering questions), wait for the save, collect |
 | `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, comments, shapes, fields) |
 | `obench/formula.py` | Small spreadsheet formula evaluator, so checks know what a formula computes |
 | `obench/render.py` | Render a deck with the document server's converter; measure text overflow on the PDF |
 | `obench/checks.py` | Check primitives (factories), each returning pass / fail / unknown with a detail |
 | `obench/tasks.py` | The 36 tasks: prompt, inputs, target document, checks |
 | `obench/evaluate.py` | Score a stored rollout: checks, trace metrics, claim vs checks, trajectory.md |
-| `obench/report.py` | Per-rollout table, failed checks, totals by kind and mode |
+| `obench/report.py` | Per-rollout table, questions to the user, failed checks, totals by kind and mode |
 | `obench/cli.py` | `list` / `run` / `check` / `invalidate` / `report` |
 
 Each run writes `runs/<run_id>/<task_id>/r<k>/`: `events.jsonl` (every session event), `meta.json` (session,
-uploads, save wait, collected files), `documents/` (what was downloaded), `render/` (a deck's PDF from the document
+uploads, save wait, collected files, the questions the session asked its user), `documents/` (what was downloaded), `render/` (a deck's PDF from the document
 server's converter), `checks.json`, `trajectory.md`.
 `runs/` and `.env` are git-ignored (`.gitignore`). Results worth keeping are recorded in [RESULTS.md](RESULTS.md).
 

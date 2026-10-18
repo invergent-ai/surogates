@@ -317,6 +317,8 @@ def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
         "error": meta.get("error"),
         "wall_clock_s": meta.get("wall_clock_s"),
         "save": meta.get("save"),
+        # Each time the session asked its user and what (None: run before the runner answered questions).
+        "asks": meta.get("asks"),
         "checks": [r.__dict__ for r in results],
         "passed": sum(1 for r in results if r.passed is True),
         "failed": sum(1 for r in results if r.passed is False),

@@ -113,3 +113,27 @@ async def test_delete_session(client):
     async with client:
         await client.delete_session("s1")
     assert route.called
+
+
+@respx.mock
+async def test_answer_question_answers_each_question_of_the_call(client):
+    route = respx.post(f"{BASE}/v1/api/sessions/s1/ask_user_question/call-1/respond").mock(
+        return_value=httpx.Response(201, json={"event_id": 42})
+    )
+    responses = [{"question": "What should the first week slide show?", "answer": "Do what you can.", "is_other": True}]
+    async with client:
+        assert await client.answer_question("s1", "call-1", responses) == 42
+    request = route.calls.last.request
+    assert request.url.params["agent_id"] == "agent-1"
+    assert json.loads(request.content) == {"responses": responses}
+
+
+@respx.mock
+async def test_a_refused_answer_keeps_its_status(client):
+    respx.post(f"{BASE}/v1/api/sessions/s1/ask_user_question/call-1/respond").mock(
+        return_value=httpx.Response(404, json={"detail": "Session s1 not found."})
+    )
+    async with client:
+        with pytest.raises(HarnessError) as err:
+            await client.answer_question("s1", "call-1", [{"question": "Q?", "answer": "A", "is_other": True}])
+    assert err.value.status == 404

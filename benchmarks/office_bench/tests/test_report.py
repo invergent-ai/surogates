@@ -49,3 +49,31 @@ def test_the_report_says_whether_templates_reached_the_model_before_its_first_ed
     assert "- guides on a Word document, spreadsheet or deck that carried their templates: 1/2" in text
     assert ("- documents made whose type's template was opened before their first edit (skill_view of office "
             "templates/<kind>.md before the first office_edit on them): 1/2") in text
+
+
+def test_the_report_says_which_sessions_asked_the_user_and_what():
+    answered = {"tool_call_id": "a1", "questions": ["What should the first week slide show?"], "answered": True}
+    unanswered = {"tool_call_id": "a3", "questions": ["Which tools?", "Who leads?"], "answered": False,
+                  "why": "asked again after 2 answers"}
+    once = {**_made("pptx-once", templates=True, viewed_first=True), "asks": [answered]}
+    waiting = {**_made("pptx-waiting", templates=True, viewed_first=True), "asks": [answered, answered, unanswered],
+               "terminal_status": "waiting_on_user"}
+    never = {**_made("pptx-never", templates=True, viewed_first=True), "asks": []}
+    old = _made("pptx-old", templates=True, viewed_first=True)  # run before the runner answered questions
+    text = render([once, waiting, never, old])
+    at = _row(text, "Task |").index("Asked the user")
+    assert _row(text, "`pptx-once`")[at] == "1 (1 answered)"
+    assert _row(text, "`pptx-waiting`")[at] == "3 (2 answered)"
+    assert _row(text, "`pptx-never`")[at] == "0"
+    assert _row(text, "`pptx-old`")[at] == "-"
+    assert "- sessions that asked the user: 2 (1 ended waiting on the user, past the runner's answers)" in text
+    questions = text.split("## Questions to the user", 1)[1].split("\n## ", 1)[0]
+    assert "- `pptx-once` r1, answered: What should the first week slide show?" in questions
+    assert ("- `pptx-waiting` r1, not answered (asked again after 2 answers): Which tools? / Who leads?"
+            in questions)
+
+
+def test_a_run_where_no_session_asked_says_so():
+    text = render([_made("docx-a", templates=True, viewed_first=True)])
+    assert "- sessions that asked the user: 0 (0 ended waiting on the user, past the runner's answers)" in text
+    assert text.split("## Questions to the user", 1)[1].split("\n## ", 1)[0].strip() == "None."
