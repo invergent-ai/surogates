@@ -122,6 +122,9 @@ export function slideFormat(measurer: Measurer): Format {
   return {
     script: SLIDE,
     grouped: true,
+    // The flag reads false from the commit until the autosave sends the change, a second or two later when nobody
+    // else has the deck open; every edit, one that changed nothing too, fires a state change as it is sent.
+    flagLags: true,
     readScope,
     compile: (raw, context) => compile(raw, context, measurer),
     edit: async (context, ops) => (await context.run({ action: "edit", ops, agent: context.page.user })) as Outcome,

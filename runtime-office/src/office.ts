@@ -7,8 +7,9 @@ import { PageGone, type PagePool, type OpenRequest } from "./pages.js";
 // document unchanged (common/plugins.js): a command is tried again before it counts as failed.
 const RETRIES = 8;
 const RETRY_MS = 300;
-// An edit's changes reach the document server within about 0.1 s, a PDF's edited alone within about 1 s; an edit that
-// changed nothing fires no state change, so the editor's flag decides after this long without one.
+// An edit's changes reach the document server within about 0.1 s with a co-editor connected, else on the editor's
+// autosave, a second or two later; an edit that changed nothing fires no state change, so the editor's flag decides
+// after this long without one.
 const QUICK_FLUSH_MS = 1_500;
 export const FLUSH_WAIT_MS = 10_000;
 // The editor answers its lock request and finishes a save within a fraction of a second.
@@ -31,6 +32,8 @@ export class Office {
   // Each page's calls, one after another: between a failed command and its Undo nothing else may run, and in a PDF
   // even a read is an undo point.
   private readonly queues = new Map<string, Promise<unknown>>();
+  // When each page last sent an edit: a flush waits until that reached the document server.
+  private readonly sent = new WeakMap<EditorPage, number>();
 
   constructor(private readonly pool: PagePool, formats?: Record<string, Format>) {
     this.formats = formats ?? formatsFor(pool);
@@ -59,13 +62,17 @@ export class Office {
       const { outcome, sentAt } = format.grouped ? await this.inGroup(id, page, work) : await this.undoing(id, page, work);
       if ("refused" in outcome) return { applied: false, refused: outcome.refused };
       const { results, length } = outcome;
+      this.sent.set(page, sentAt);
       return { applied: true, results, ...(length ? { length } : {}), flushed: await this.flushed(page, sentAt) };
     });
   }
 
-  /** Whether everything the agent's editor changed has reached the document server. */
+  /** Whether everything the agent's editor changed has reached the document server: its last edit did, when it made
+   * one. */
   async flush(id: string): Promise<boolean> {
     const page = await this.pool.get(id);
+    const sentAt = this.sent.get(page);
+    if (sentAt !== undefined) return this.flushed(page, sentAt);
     return !(await page.modified()) || page.waitFlushed(Date.now(), FLUSH_WAIT_MS);
   }
 
@@ -200,10 +207,11 @@ export class Office {
   }
 
   // The editor says its changes reached the document server with a state change after the last send. Its modified
-  // flag decides only when none came: an edit that changed nothing fires none. (Right after a commit the slide
-  // editor's flag already reads false, and inside a command the spreadsheet editor's always reads true: it is read
-  // from the editor's frame, after the wait.)
+  // flag decides only when none came: an edit that changed nothing fires none. (Inside a command the spreadsheet
+  // editor's flag always reads true: it is read from the editor's frame, after the wait.) A format whose flag lags
+  // has only the state change.
   private async flushed(page: EditorPage, since: number): Promise<boolean> {
+    if (this.formatOf(page).flagLags) return page.waitFlushed(since, FLUSH_WAIT_MS);
     if (await page.waitFlushed(since, QUICK_FLUSH_MS)) return true;
     if (!(await page.modified())) return true;
     return page.waitFlushed(since, FLUSH_WAIT_MS);
