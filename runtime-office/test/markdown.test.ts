@@ -165,10 +165,68 @@ describe("pending blocks, written in the markdown", () => {
     );
   });
 
-  it("refuses a pending line without a key and an intent, or with text beside it", () => {
-    for (const line of ["<?pending summary?>", "<?pending summary: ?>", "<?pending: Three sentences?>", "## Summary <?pending summary: Three sentences?>"]) {
-      expect(() => compileContent(line), line).toThrow(/<\?pending name: what it will hold\?>/);
+  it("refuses a key of two words, naming it as written and the key it can be", () => {
+    const line = "<?pending leave types: Table of annual, sick, parental and unpaid leave allowances?>";
+    const fixed = "<?pending leave_types: Table of annual, sick, parental and unpaid leave allowances?>";
+    expect(() => compileContent(`## Leave\n${line}`)).toThrow(
+      new ContentError(`A pending key is one word of letters, digits, - or _, and "leave types" is not: write ${fixed} instead.`),
+    );
+    expect(compileContent(fixed)).toEqual([
+      { t: "pending", key: "leave_types", intent: "Table of annual, sick, parental and unpaid leave allowances" },
+    ]);
+  });
+
+  it("refuses a key with other characters, its words joined by _ and its accents dropped", () => {
+    for (const [key, fixed] of [["Q3 résumé (draft)", "Q3_resume_draft"], ["leave - types", "leave_types"], ["sales.north", "sales_north"], ["概要", "name"]]) {
+      expect(() => compileContent(`<?pending ${key}: Three sentences?>`), key).toThrow(
+        new ContentError(`A pending key is one word of letters, digits, - or _, and ${JSON.stringify(key)} is not: write <?pending ${fixed}: Three sentences?> instead.`),
+      );
     }
+  });
+
+  it("refuses a pending line with no colon, the intent written after one", () => {
+    expect(() => compileContent("<?pending summary Three sentences on the quarter?>")).toThrow(
+      new ContentError('In a pending line the intent follows a colon after the key, and "<?pending summary Three sentences on the quarter?>" has none: write <?pending summary: Three sentences on the quarter?> instead.'),
+    );
+    expect(() => compileContent("<?pending summary?>")).toThrow(
+      new ContentError('In a pending line the intent follows a colon after the key, and "<?pending summary?>" has none: write <?pending summary: what it will hold?> instead.'),
+    );
+  });
+
+  it("refuses a pending line that does not end in ?>", () => {
+    for (const line of ["<?pending summary: Three sentences", "<?pending summary: Three sentences?", "<?pending summary: Three sentences>"]) {
+      expect(() => compileContent(line), line).toThrow(new ContentError(`A pending line ends in ?>, and ${JSON.stringify(line)} does not.`));
+    }
+  });
+
+  it("refuses a pending line with text beside it", () => {
+    for (const line of ["## Summary <?pending summary: Three sentences?>", "<?pending summary: Three sentences?> and more", "<?pending summary: Three sentences?>."]) {
+      expect(() => compileContent(line), line).toThrow(new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>."));
+    }
+  });
+
+  it("refuses a pending line with no key", () => {
+    expect(() => compileContent("<?pending: Three sentences?>")).toThrow(
+      new ContentError('A pending line names its key before the colon, one word of letters, digits, - or _ for its section, and "<?pending: Three sentences?>" names none.'),
+    );
+  });
+
+  it("refuses a pending line with nothing after the colon", () => {
+    expect(() => compileContent("<?pending summary:   ?>")).toThrow(
+      new ContentError('A pending line says after the colon what its section will hold, and "<?pending summary:   ?>" says nothing there.'),
+    );
+  });
+
+  it("refuses a pending line with no space before its key", () => {
+    expect(() => compileContent("<?pendingsummary: Three sentences?>")).toThrow(
+      new ContentError('A pending line has a space between <?pending and its key, and "<?pendingsummary: Three sentences?>" has none: write <?pending summary: Three sentences?> instead.'),
+    );
+  });
+
+  it("refuses any other pending line, naming the exact form", () => {
+    expect(() => compileContent("<?pending summary: One\rtwo?>")).toThrow(
+      new ContentError('A pending line is written exactly <?pending name: what it will hold?>, and "<?pending summary: One\\rtwo?>" is not.'),
+    );
   });
 
   it("refuses a pending line in other letters, which markdown would drop unsaid", () => {
@@ -193,8 +251,27 @@ describe("pending blocks, written in the markdown", () => {
 
   it("refuses a long run of spaces promptly", () => {
     const started = performance.now();
-    expect(() => compileContent(`<?pending k:${" ".repeat(5_000)}x`)).toThrow(/is a line of its own/);
+    expect(() => compileContent(`<?pending k:${" ".repeat(5_000)}x`)).toThrow(/ends in \?>/);
     expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it("says what is wrong with a long or crafted pending line promptly", () => {
+    const run = 100_000;
+    const lines: [string, RegExp][] = [
+      [`<?pending ${"a ".repeat(run)}: x?>`, /pending key is one word/],
+      [`<?pending ${"a-".repeat(run)} ${"_".repeat(run)}: x?>`, /pending key is one word/],
+      [`<?pending ${"é".repeat(run)} x: y?>`, /pending key is one word/],
+      [`<?pending ${"a ".repeat(run)}?>`, /follows a colon/],
+      [`<?pending${" ".repeat(run)}?>`, /follows a colon/],
+      [`<?pending ${"?".repeat(run)}`, /ends in \?>/],
+      [`<?pending k:${" ".repeat(run)}?>`, /says nothing there/],
+      [`<?pending k: ${"x\r".repeat(run)}?>`, /written exactly/],
+    ];
+    for (const [line, message] of lines) {
+      const started = performance.now();
+      expect(() => compileContent(line)).toThrow(message);
+      expect(performance.now() - started, line.slice(0, 20)).toBeLessThan(1_000);
+    }
   });
 });
 

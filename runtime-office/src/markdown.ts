@@ -34,6 +34,16 @@ const PENDING_LIKE = /<\?pending/i;
 // It drops any line starting <? the same way, <?php and <?xml too: one that looks meant for a placeholder is refused.
 const PLACEHOLDER_LIKE = /^<\?\s*(?:pending|block)/i;
 const MAX_INTENT = 300;
+const PENDING_OPEN = "<?pending";
+const OWN_LINE = "A pending block is a line of its own: <?pending name: what it will hold?>.";
+const KEY = /^[A-Za-z0-9_-]+$/;
+// Between the words of a key written wrong: anything a key cannot hold. One class repeated, so a split scans once.
+const NOT_KEY = /[^A-Za-z0-9_-]+/;
+// Accents a key cannot hold, once letters are taken apart: é is e and an accent.
+const MARKS = /\p{M}/gu;
+const SPACE = /\s/;
+const LETTER_OR_DIGIT = /[A-Za-z0-9]/;
+const MAX_QUOTED = 80;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
 const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
@@ -74,7 +84,7 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
       out.push({ t: "pending", key, intent: intent.slice(0, MAX_INTENT) });
       continue;
     }
-    if (PENDING_LIKE.test(trimmed)) throw new ContentError("A pending block is a line of its own: <?pending name: what it will hold?>.");
+    if (PENDING_LIKE.test(trimmed)) throw new ContentError(pendingFault(trimmed));
     const placeholder = PLACEHOLDER.exec(trimmed);
     if (!placeholder) {
       if (PLACEHOLDER_LIKE.test(trimmed)) {
@@ -93,6 +103,43 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
     throw new ContentError(`One op writes at most ${MAX_BLOCKS} blocks; split the content over several ops or calls.`);
   }
   return out;
+}
+
+/** What is wrong with a line holding `<?pending` that is no pending block, said so that the next try can be right. */
+function pendingFault(line: string): string {
+  // In other letters, or after other text: markdown drops it whatever it holds.
+  if (!line.startsWith(PENDING_OPEN)) return OWN_LINE;
+  const quoted = JSON.stringify(line.slice(0, MAX_QUOTED));
+  if (!line.endsWith("?>")) {
+    if (line.includes("?>")) return OWN_LINE;
+    return `A pending line ends in ?>, and ${quoted} does not.`;
+  }
+  const body = line.slice(PENDING_OPEN.length, -2);
+  const colon = body.indexOf(":");
+  if (colon < 0) {
+    // Most likely the key and the intent with no colon between: the key is the first word.
+    const written = body.trim();
+    const space = written.search(SPACE);
+    const key = keyFrom(space < 0 ? written : written.slice(0, space));
+    const intent = (space < 0 ? "" : written.slice(space).trim()).slice(0, MAX_INTENT) || "what it will hold";
+    return `In a pending line the intent follows a colon after the key, and ${quoted} has none: write <?pending ${key}: ${intent}?> instead.`;
+  }
+  const key = body.slice(0, colon).trim();
+  const intent = body.slice(colon + 1).trim().slice(0, MAX_INTENT);
+  if (!key) return `A pending line names its key before the colon, one word of letters, digits, - or _ for its section, and ${quoted} names none.`;
+  if (!KEY.test(key)) {
+    const written = JSON.stringify(key.slice(0, MAX_QUOTED));
+    return `A pending key is one word of letters, digits, - or _, and ${written} is not: write <?pending ${keyFrom(key)}: ${intent || "what it will hold"}?> instead.`;
+  }
+  if (!intent) return `A pending line says after the colon what its section will hold, and ${quoted} says nothing there.`;
+  if (body.trimStart() === body) return `A pending line has a space between <?pending and its key, and ${quoted} has none: write <?pending ${key}: ${intent}?> instead.`;
+  return `A pending line is written exactly <?pending name: what it will hold?>, and ${quoted} is not.`;
+}
+
+/** A key made of one written wrong: its words joined by _, accents dropped, so "leave types" is leave_types. */
+function keyFrom(written: string): string {
+  const words = written.normalize("NFKD").replace(MARKS, "").split(NOT_KEY);
+  return words.filter((word) => LETTER_OR_DIGIT.test(word)).join("_").slice(0, MAX_QUOTED) || "name";
 }
 
 function blocksOf(tokens: Token[], lists: Lists): Block[] {

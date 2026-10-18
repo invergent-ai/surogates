@@ -4,9 +4,10 @@
 
 - Target blocks by the `id` and `hash` the outline gives. Quote words with `find` only for a phrase inside a block.
 - A new document: one call inserts the title and every section's heading, each followed by a pending block saying what
-  it will hold: a line of its own, `<?pending name: what it will hold?>`, each name once. The user sees the whole
-  shape at once and can delete a section before you write it. Then fill one section per call, replacing its pending
-  block (target `{"pending": "name"}`). A pending block the user deleted is a section they do not want: leave it out.
+  it will hold: a line of its own, `<?pending name: what it will hold?>`, each name once and one word of letters,
+  digits, - or _ (`leave_types`, not `leave types`). The user sees the whole shape at once and can delete a section
+  before you write it. Then fill one section per call, replacing its pending block (target `{"pending": "name"}`). A
+  pending block the user deleted is a section they do not want: leave it out.
 - Re-word with `replace` on quoted words; replace a whole block only when it all changes.
 - Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced, moved or deleted is
   gone for the later ones (a moved block gets a new id, found in that op's result `ids`), and one it re-worded has a
