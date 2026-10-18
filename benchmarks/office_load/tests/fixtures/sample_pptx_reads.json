@@ -1,0 +1,105 @@
+{
+  "outline": {
+    "canvas": [
+      1920,
+      1080
+    ],
+    "slides": [
+      {
+        "id": "1428",
+        "number": 1,
+        "title": "Quarterly review",
+        "layout": "Title and Content",
+        "shapes": 2,
+        "notes": false,
+        "hidden": false,
+        "hash": "aa23bba2"
+      },
+      {
+        "id": "1473",
+        "number": 2,
+        "title": "Next quarter",
+        "layout": "Title Only",
+        "shapes": 2,
+        "notes": true,
+        "hidden": false,
+        "hash": "dc3285c8"
+      }
+    ],
+    "comments": []
+  },
+  "slide": {
+    "id": "1473",
+    "number": 2,
+    "hidden": false,
+    "hash": "dc3285c8",
+    "shapes": [
+      {
+        "id": "1482",
+        "kind": "shape",
+        "x": 72,
+        "y": 43,
+        "w": 1296,
+        "h": 180,
+        "name": "Title 1",
+        "placeholder": "title",
+        "fill": "none",
+        "line": "none",
+        "paras": [
+          {
+            "align": "center",
+            "runs": [
+              {
+                "text": "Next quarter",
+                "size": 88,
+                "font": "Calibri",
+                "color": "#000000"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "1498",
+        "kind": "shape",
+        "x": 144,
+        "y": 288,
+        "w": 864,
+        "h": 144,
+        "name": "TextBox 2",
+        "fill": "none",
+        "line": "none",
+        "paras": [
+          {
+            "align": "left",
+            "runs": [
+              {
+                "text": "Open the Lisbon office",
+                "size": 56,
+                "font": "Calibri",
+                "color": "#000000"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "notes": "Mention the lease."
+  },
+  "text_op": {
+    "op": "text",
+    "hash": "dc3285c8",
+    "text": "Q3 plan",
+    "shape": "1482",
+    "slide": "1473"
+  },
+  "edit_answer": {
+    "applied": true,
+    "results": [
+      {
+        "op": 0
+      }
+    ],
+    "flushed": true
+  }
+}

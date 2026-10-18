@@ -1,0 +1,8 @@
+Timeout: 60.0 seconds ...
+Listing queues for vhost / ...
+name	messages
+ds.converttask	17
+ds.convertresponse	3
+ds.convertdead	0
+ds.delayed	0
+amq.gen-7nq2Fh0RkGdNw7mMl_ZcQw	0

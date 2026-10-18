@@ -1,0 +1,34 @@
+[project]
+name = "oload"
+version = "0.1.0"
+description = "Office load tool: how many concurrent editing sessions one document server holds while every save meets the bar"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.9",  # client and server; 3.9 adds AppKey
+    "pyjwt>=2.8",
+    # Marker checks read the saved documents.
+    "python-docx>=1.2",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
+    "pypdf>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+oload = "oload.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["oload"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
