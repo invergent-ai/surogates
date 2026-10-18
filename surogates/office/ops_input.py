@@ -1,12 +1,12 @@
 """office_edit's ops, read as the model meant them before any op runs.
 
 A small model's call often says clearly what it means in a form the tool does not take: the ops as JSON text (the
-model server's tool parser passes on a list it cannot parse as a string), that text with its last closers missing,
-one op without the list, the op's name as a key, or "type" where "op" belongs. Each is read as meant and said in the
-result (``read_as``), but one: a list sent as valid JSON text is parsed before the tool runs, by the harness's
-argument coercion (``surogates.tools.coerce``), and arrives as a list with nothing said. Anything else is refused with
-what is wrong and where. Nothing else is guessed: not quotes, commas or keys, and not a closer missing anywhere but
-right before another closer or at the end.
+model server's tool parser passes on a list it cannot parse as a string), that text with its last closers missing or
+with closers too many after its end, one op without the list, the op's name as a key, or "type" where "op" belongs.
+Each is read as meant and said in the result (``read_as``), but one: a list sent as valid JSON text is parsed before
+the tool runs, by the harness's argument coercion (``surogates.tools.coerce``), and arrives as a list with nothing
+said. Anything else is refused with what is wrong and where. Nothing else is guessed: not quotes, commas or keys, not a
+closer missing anywhere but right before another closer or at the end, and nothing after the end but closers.
 """
 
 from __future__ import annotations
@@ -182,12 +182,25 @@ def close_missing(text: str) -> tuple[str, list[str]] | None:
     return fixed, added
 
 
+def _extra_closers(text: str, exc: json.JSONDecodeError) -> str | None:
+    """The closers *text* has too many at its end, without the spaces between them: json read one whole value, and only
+    closers and spaces follow it. None when anything else follows, or when *exc* is another failure."""
+    if exc.msg != "Extra data":
+        return None
+    rest = "".join(text[exc.pos:].split())
+    return rest if rest and set(rest) <= set("}]") else None
+
+
 def _parsed(text: str, read_as: list[str]) -> object:
     try:
         parsed = json.loads(text)
     except RecursionError:
         raise OpsInputError('"ops" is nested too deeply.') from None
     except json.JSONDecodeError as exc:
+        extra = _extra_closers(text, exc)
+        if extra is not None:
+            read_as.append(f"{_AS_TEXT}, dropping the extra '{extra}' at the end.")
+            return json.loads(text[:exc.pos])
         closed = close_missing(text)
         if closed is None:
             before = text[max(0, exc.pos - 40):exc.pos]

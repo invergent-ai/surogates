@@ -44,6 +44,42 @@ def test_missing_closers_at_end():
     assert any("'}}]'" in note for note in read_as)
 
 
+def test_extra_closers_at_end():
+    # As the benchmark saw it: the list closed, then one '}' too many.
+    one = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}]}'
+    assert read_ops(one, "docx") == (
+        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra '}' at the end."]
+    )
+    several = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}]}}\n'
+    assert read_ops(several, "docx") == (
+        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra '}}' at the end."]
+    )
+    mixed = '[{"op": "delete", "target": {"block": "1", "hash": "h"}}] ]}\n]'
+    assert read_ops(mixed, "docx") == (
+        [DELETE], ["\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra ']}]' at the end."]
+    )
+    # One op whose own closers come one too many is read as that op, as a list of one.
+    ops, read_as = read_ops('{"op": "delete", "target": {"block": "1", "hash": "h"}}}', "docx")
+    assert ops == [DELETE] and read_as == [
+        "\"ops\" was JSON text, not a list: read as the JSON it holds, dropping the extra '}' at the end.",
+        '"ops" was one op, not a list: read as a list of one.',
+    ]
+
+
+def test_anything_but_closers_after_the_end_is_refused():
+    for extra, where in (
+        ('[{"op": "delete", "target": {"block": "1", "hash": "h"}}] x', 58),  # a word
+        ('[{"op": "delete", "target": {"block": "1", "hash": "h"}}]}, {"op": "delete"}', 57),  # closers, then more
+        ('[{"op": "delete", "target": {"block": "1", "hash": "h"}}][]', 57),  # another list
+    ):
+        with pytest.raises(OpsInputError) as refused:
+            read_ops(extra, "docx")
+        assert str(refused.value) == (
+            f"ops is not valid JSON: Extra data at character {where}, just after {extra[where - 40:where]!r}."
+        ), extra
+        assert refused.value.read_as == []
+
+
 def test_other_breakage_is_refused():
     for broken in (
         '[{"op": "delete" "target": {}}]',  # a missing comma
