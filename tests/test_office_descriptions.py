@@ -7,11 +7,14 @@ answering. The ops' summaries come after.
 
 import json
 import re
+from pathlib import Path
 
 from surogates.office.ops_input import OP_NAMES, OP_SHAPES
 from surogates.tools.builtin.office import EDIT_DESCRIPTION, READ_DESCRIPTION
 
 _EXAMPLE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+# runtime-office's suite compiles this copy of the Word call through the Word checks.
+_WORD_CALL = Path(__file__).parents[1] / "runtime-office" / "test" / "edit-description-word.json"
 
 
 def _first_sentence(text: str) -> str:
@@ -47,6 +50,10 @@ def test_office_edit_writes_a_word_outlines_pending_sections_in_the_markdown():
     assert word["markdown"].count("<?pending ") >= 2, word
     assert "blocks" not in word, word
     assert '"type": "pending"' not in EDIT_DESCRIPTION
+
+
+def test_office_edit_shows_the_word_call_runtime_office_compiles():
+    assert _EXAMPLE.findall(EDIT_DESCRIPTION)[0] == _WORD_CALL.read_text().strip()
 
 
 def test_office_edit_says_how_many_words_fill_a_page_and_to_check_before_answering():

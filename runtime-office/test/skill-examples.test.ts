@@ -4,6 +4,7 @@ import type { EditorPage } from "../src/connector.js";
 import { compileCellOps } from "../src/formats/cell.js";
 import { compilePdfOps } from "../src/formats/pdf.js";
 import { checkSlideOps } from "../src/formats/slide.js";
+import type { Block } from "../src/markdown.js";
 import { compileOps } from "../src/ops.js";
 import { Measurer } from "../src/slides/measure.js";
 import { chromiumThere, measuringPage, systemFonts } from "./support/chromium.js";
@@ -57,6 +58,20 @@ describe.each(CHECKS)("the office skill's %s examples", (name, check, least) => 
 
   it.each(calls.map((ops, index) => [index, ops.map((op) => op.op).join(", "), ops] as const))("call %i (%s) is accepted", (_index, _names, ops) => {
     expect(() => check(ops.map(asTheWorkerSendsIt))).not.toThrow();
+  });
+});
+
+// office_edit's description shows a new Word document's outline as this call, word for word: the Python suite holds the
+// description to this copy, and this test holds the copy to the Word checks.
+describe("the office_edit description's Word call", () => {
+  const call = JSON.parse(readFileSync(new URL("./edit-description-word.json", import.meta.url), "utf8")) as { ops: Raw[] };
+
+  it("is accepted, as an outline whose sections are pending blocks under their headings", () => {
+    const kinds = compileOps(call.ops).flatMap((op) => ("blocks" in op ? op.blocks : [])).map((block: Block) => block.t);
+    expect(kinds.filter((kind) => kind === "pending").length).toBeGreaterThanOrEqual(2);
+    kinds.forEach((kind, i) => {
+      if (kind === "pending") expect(kinds[i - 1], kinds.join(", ")).toBe("h");
+    });
   });
 });
 
