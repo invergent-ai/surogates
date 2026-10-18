@@ -467,6 +467,10 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     const spec: Any = await measure(`<section style="background:#14213D;padding:128px">
       <div style="background:rgba(255,255,255,0.1);padding:40px;width:900px"><h2 style="font-size:64px;color:#FBFBF8">On glass</h2></div></section>`);
     expect(spec.shapes.map((s: Any) => s.text?.paras[0].runs[0].text ?? null)).toEqual([null, "On glass"]);
+    // A card white enough reads as white, though the slide under it is navy.
+    await expect(measure(`<section style="background:#14213D;padding:128px">
+      <div style="background:rgba(255,255,255,0.8);padding:40px;width:900px"><h2 style="font-size:64px;color:#FBFBF8">On frost</h2></div></section>`))
+      .rejects.toThrow('<section > div > h2> ("On frost"): its text (#fbfbf8) on #d0d3d8 reads at 1.4:1; text needs at least 3:1 here: try #14213D.');
   });
 
   it("skips text over a picture", async () => {
