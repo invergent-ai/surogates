@@ -77,24 +77,42 @@ async def test_a_type_the_skill_has_no_templates_for_has_its_guide_without_them(
     assert caplog.records == [] and "pdf" not in guide._unfetchable
 
 
-async def test_templates_that_fail_otherwise_withhold_the_whole_guide(clock, caplog):
-    def templates_broken(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("path") == "templates/docx.md":
-            return httpx.Response(503, json={"detail": "Surogate Hub did not answer."})
-        return the_skill(request)
+def _templates_broken(how: str):
+    """The skill as the API serves it, but for the docx templates: a 503, a timeout, a refused connection or an empty
+    file."""
 
-    client, asked = api(templates_broken)
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("path") != "templates/docx.md":
+            return the_skill(request)
+        if how == "503":
+            return httpx.Response(503, json={"detail": "Surogate Hub did not answer."})
+        if how == "timeout":
+            raise httpx.ReadTimeout("timed out", request=request)
+        if how == "refused":
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, content=b"\n")
+
+    return answer
+
+
+@pytest.mark.parametrize("how", ["503", "timeout", "refused", "empty"])
+async def test_templates_that_fail_otherwise_leave_the_guide_its_rules_and_reference(how, caplog):
+    # The templates are the optional part: the rules and the reference reach the model without them.
+    client, asked = api(_templates_broken(how))
     with caplog.at_level(logging.WARNING, logger=guide.__name__):
-        assert await guide_for("docx", client) is None
+        found = await guide_for("docx", client)
+    assert set(found) == {"rules", "reference"}
+    assert found["reference"] == (OFFICE_SKILL / "references/docx.md").read_text().strip()
     assert sorted(request.url.params["path"] for request in asked) == [
         "SKILL.md", "references/docx.md", "templates/docx.md",
     ]
-    assert len(caplog.records) == 1 and "503" in caplog.records[0].getMessage()
-    # Not asked for again for a while, as for rules or a reference that could not be fetched.
-    clock[0] += RETRY_AFTER_S - 1
-    other, asked_again = api(the_skill)
-    assert await guide_for("docx", other) is None and asked_again == []
-    clock[0] += 2
+    # Said once, and an answer of the API's in one line.
+    assert len(caplog.records) == 1 and "without its templates" in caplog.records[0].getMessage()
+    assert ("503" in caplog.records[0].getMessage()) == (how == "503")
+    assert (caplog.records[0].exc_info is None) == (how == "503")
+    # The type stays fetchable: the next chat's first call asks again and has them.
+    assert "docx" not in guide._unfetchable
+    other, _ = api(the_skill)
     assert "## Meeting minutes" in (await guide_for("docx", other))["templates"]
 
 

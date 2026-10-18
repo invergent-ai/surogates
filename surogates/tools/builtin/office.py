@@ -242,7 +242,7 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         try:
             reading = before_open(file_type)
         except OpsInputError as exc:
-            # Refused for what it says: the type's rules and reference are what the model needs now.
+            # Refused for what it says: the type's rules, reference and templates are what the model needs now.
             return await _with_guide({"error": str(exc), **_read_as(exc.read_as)}, file_type, session, kwargs)
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
@@ -286,8 +286,9 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
 async def _with_guide(answer: dict[str, Any], kind: str | None, session: Any, kwargs: dict[str, Any]) -> str:
     """*answer* as JSON, carrying the office skill's rules and *kind*'s reference and templates on the model's first
     call on that type in the session, done or refused for what it said, which then records the type as given. A guide
-    that would make the result MAX_GUIDED_RESULT long or more is left for the next call. Only a model's call takes it:
-    the worker's own (a mention's acknowledgement) never does."""
+    that would make the result MAX_GUIDED_RESULT long or more goes without its templates (the skill keeps them), and is
+    left for the next call when even that is too long. Only a model's call takes it: the worker's own (a mention's
+    acknowledgement) never does."""
     text = json.dumps(answer, ensure_ascii=False)
     given = (session.config or {}).get(GUIDES_KEY) or []
     if kind is None or not kwargs.get("tool_call_id") or kind in given or len(text) >= MAX_GUIDED_RESULT:
@@ -296,6 +297,9 @@ async def _with_guide(answer: dict[str, Any], kind: str | None, session: Any, kw
     if guide is None:
         return text
     guided = json.dumps({**answer, "guide": guide}, ensure_ascii=False)
+    if len(guided) >= MAX_GUIDED_RESULT and "templates" in guide:
+        guide = {"rules": guide["rules"], "reference": guide["reference"]}
+        guided = json.dumps({**answer, "guide": guide}, ensure_ascii=False)
     if len(guided) >= MAX_GUIDED_RESULT:
         return text
     try:

@@ -453,6 +453,28 @@ async def test_a_result_too_long_for_the_guide_leaves_it_for_the_next(session_fa
     assert await _guides(kwargs) == ["docx"]
 
 
+async def test_a_result_too_long_for_the_whole_guide_takes_it_without_its_templates(session_factory, storage, redis_client):
+    # The rules and the reference matter most; the templates stay in the skill.
+    _, kwargs = await _kwargs(session_factory, storage, redis_client)
+    whole = await office_guide.guide_for("docx", SkillsAPI())
+    lean = {"rules": whole["rules"], "reference": whole["reference"]}
+
+    def length(text: int, guide: dict) -> int:
+        answer = {"document": "a.docx", "open_by": [], "blocks": [{"id": "1", "text": "x" * text}], "guide": guide}
+        return len(json.dumps(answer, ensure_ascii=False))
+
+    # An outline the guide without its templates fits beside, with a little to spare, and the whole guide does not.
+    text = office_tools.MAX_GUIDED_RESULT - length(0, lean) - 100
+    assert length(text, whole) >= office_tools.MAX_GUIDED_RESULT
+    FakeRuntime.outline = {"blocks": [{"id": "1", "text": "x" * text}]}
+    result = await office_tools._office_read({"path": "a.docx"}, **_by_the_model(kwargs, SkillsAPI()))
+    answer = json.loads(result)
+    assert answer["guide"] == lean and len(result) < office_tools.MAX_GUIDED_RESULT
+    assert answer["blocks"] == FakeRuntime.outline["blocks"]
+    # Given: the next call on the type goes without it.
+    assert await _guides(kwargs) == ["docx"]
+
+
 async def test_a_failed_call_leaves_the_guide_for_the_next(session_factory, storage, redis_client):
     _, kwargs = await _kwargs(session_factory, storage, redis_client)
     api = SkillsAPI()
