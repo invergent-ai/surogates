@@ -57,6 +57,18 @@ def test_guides_stay_small():
         assert len(rules) + len(reference) < 40_000, kind
 
 
+def test_word_templates_state_lengths():
+    # A new document starts from its template; a small model writes a section to the length its intent states.
+    templates = (SKILLS / "productivity/office/templates/docx.md").read_text()
+    assert len(templates) <= 12_000
+    for heading in ("Report", "Letter", "Meeting minutes", "Proposal", "FAQ", "How-to guide"):
+        assert re.search(rf"^## {heading}$", templates, re.MULTILINE), heading
+    intents = re.findall(r"<\?pending [a-z0-9_-]+: ([^?]+)\?>", templates)
+    assert intents and len(intents) == templates.count("<?pending"), "each <?pending line is key: intent, no ? inside"
+    for intent in intents:
+        assert re.search(r"\d+ words", intent), intent
+
+
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():
     # A frontmatter the loader cannot parse drops its skill silently: each one must be here.
     skills = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}

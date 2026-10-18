@@ -9,9 +9,14 @@ import { compileOps } from "../src/ops.js";
 import { Measurer } from "../src/slides/measure.js";
 import { chromiumThere, measuringPage, systemFonts } from "./support/chromium.js";
 
-// The office skill's references teach the agent these ops: each example call must still pass its format's checks.
+// The office skill's references teach the agent these ops, and its templates are calls the agent sends as they are:
+// each example call and each template must still pass its format's checks.
 type Raw = Record<string, unknown>;
-const reference = (name: string) => readFileSync(new URL(`../../skills/productivity/office/references/${name}`, import.meta.url), "utf8");
+type Check = (ops: unknown[]) => unknown;
+const bundle = (folder: "references" | "templates") => (name: string) =>
+  readFileSync(new URL(`../../skills/productivity/office/${folder}/${name}`, import.meta.url), "utf8");
+const reference = bundle("references");
+const template = bundle("templates");
 
 // Each ```json block is one call, or one call or op per line.
 function examples(text: string): Raw[] {
@@ -42,7 +47,14 @@ function asTheWorkerSendsIt(op: Raw): Raw {
   return { ...op, content: { ...content, blocks: read } };
 }
 
-const CHECKS: [string, (ops: unknown[]) => unknown, number][] = [
+function eachAccepted(calls: Raw[][], check: Check) {
+  it.each(calls.map((ops, index) => [index, ops.map((op) => op.op).join(", "), ops] as const))("call %i (%s) is accepted", (_index, _names, ops) => {
+    expect(() => check(ops.map(asTheWorkerSendsIt))).not.toThrow();
+  });
+}
+
+// Each reference's examples: at least so many ops.
+const CHECKS: [string, Check, number][] = [
   ["docx.md", compileOps, 10],
   ["xlsx.md", compileCellOps, 6],
   ["pptx.md", checkSlideOps, 3],
@@ -56,8 +68,29 @@ describe.each(CHECKS)("the office skill's %s examples", (name, check, least) => 
     expect(calls.flat().length).toBeGreaterThanOrEqual(least);
   });
 
-  it.each(calls.map((ops, index) => [index, ops.map((op) => op.op).join(", "), ops] as const))("call %i (%s) is accepted", (_index, _names, ops) => {
-    expect(() => check(ops.map(asTheWorkerSendsIt))).not.toThrow();
+  eachAccepted(calls, check);
+});
+
+// Each type's templates: at least so many calls.
+const TEMPLATES: [string, Check, number][] = [["docx.md", compileOps, 6]];
+
+describe.each(TEMPLATES)("the office skill's %s templates", (name, check, least) => {
+  const calls = callsOf(template(name));
+
+  it("are found", () => {
+    expect(calls.length).toBeGreaterThanOrEqual(least);
+  });
+
+  eachAccepted(calls, check);
+});
+
+describe("the Word templates", () => {
+  it("each plant a new document in one insert at its end, with sections still to write", () => {
+    for (const ops of callsOf(template("docx.md"))) {
+      expect(ops.map((op) => [op.op, op.target])).toEqual([["insert", { end: true }]]);
+      const kinds = compileOps(ops).flatMap((op) => ("blocks" in op ? op.blocks : [])).map((block: Block) => block.t);
+      expect(kinds).toContain("pending");
+    }
   });
 });
 
