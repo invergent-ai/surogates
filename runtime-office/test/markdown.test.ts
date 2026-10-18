@@ -184,13 +184,12 @@ describe("pending blocks, written in the markdown", () => {
     }
   });
 
-  it("refuses a pending line with no colon, the intent written after one", () => {
-    expect(() => compileContent("<?pending summary Three sentences on the quarter?>")).toThrow(
-      new ContentError('In a pending line the intent follows a colon after the key, and "<?pending summary Three sentences on the quarter?>" has none: write <?pending summary: Three sentences on the quarter?> instead.'),
-    );
-    expect(() => compileContent("<?pending summary?>")).toThrow(
-      new ContentError('In a pending line the intent follows a colon after the key, and "<?pending summary?>" has none: write <?pending summary: what it will hold?> instead.'),
-    );
+  it("refuses a pending line with no colon, saying the form rather than guessing which word is the key", () => {
+    for (const line of ["<?pending leave types?>", "<?pending summary Three sentences on the quarter?>", "<?pending summary?>"]) {
+      expect(() => compileContent(line), line).toThrow(
+        new ContentError(`A pending line is <?pending key: what the section will hold?>; ${JSON.stringify(line)} has no colon after its key.`),
+      );
+    }
   });
 
   it("refuses a pending line that does not end in ?>", () => {
@@ -229,10 +228,33 @@ describe("pending blocks, written in the markdown", () => {
     );
   });
 
-  it("refuses a pending line in other letters, which markdown would drop unsaid", () => {
-    for (const line of ["<?PENDING summary: Three sentences?>", "<?Pending summary: Three sentences?>"]) {
-      expect(() => compileContent(line), line).toThrow(/<\?pending name: what it will hold\?>/);
+  it("refuses a pending line in other letters, which markdown would drop unsaid, giving it back in lowercase", () => {
+    for (const line of ["<?PENDING summary: Three sentences?>", "<?Pending summary:Three sentences  ?>"]) {
+      expect(() => compileContent(line), line).toThrow(
+        new ContentError(`A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and ${JSON.stringify(line)} does not: write <?pending summary: Three sentences?> instead.`),
+      );
     }
+  });
+
+  it("refuses a pending line in other letters and wrong otherwise, saying both", () => {
+    expect(() => compileContent("<?Pending leave types: Leave allowances?>")).toThrow(
+      new ContentError(
+        'A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and "<?Pending leave types: Leave allowances?>" does not. '
+        + 'A pending key is one word of letters, digits, - or _, and "leave types" is not: write <?pending leave_types: Leave allowances?> instead.',
+      ),
+    );
+    expect(() => compileContent("<?PENDING summary?>")).toThrow(
+      new ContentError(
+        'A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and "<?PENDING summary?>" does not. '
+        + 'A pending line is <?pending key: what the section will hold?>; "<?pending summary?>" has no colon after its key.',
+      ),
+    );
+    expect(() => compileContent("<?PENDING summary: Three sentences?> and more")).toThrow(
+      new ContentError(
+        'A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and "<?PENDING summary: Three sentences?> and more" does not. '
+        + "A pending block is a line of its own: <?pending name: what it will hold?>.",
+      ),
+    );
   });
 
   it("refuses a line that is nearly a placeholder, which markdown would drop unsaid, naming both forms", () => {
@@ -261,8 +283,10 @@ describe("pending blocks, written in the markdown", () => {
       [`<?pending ${"a ".repeat(run)}: x?>`, /pending key is one word/],
       [`<?pending ${"a-".repeat(run)} ${"_".repeat(run)}: x?>`, /pending key is one word/],
       [`<?pending ${"é".repeat(run)} x: y?>`, /pending key is one word/],
-      [`<?pending ${"a ".repeat(run)}?>`, /follows a colon/],
-      [`<?pending${" ".repeat(run)}?>`, /follows a colon/],
+      [`<?pending ${"a ".repeat(run)}?>`, /has no colon after its key/],
+      [`<?pending${" ".repeat(run)}?>`, /has no colon after its key/],
+      [`<?PENDING ${"a ".repeat(run)}: x?>`, /in lowercase.*pending key is one word/],
+      [`<?Pending k:${" ".repeat(run)}x${" ".repeat(run)}?>`, /in lowercase.*write <\?pending k: x\?> instead/],
       [`<?pending ${"?".repeat(run)}`, /ends in \?>/],
       [`<?pending k:${" ".repeat(run)}?>`, /says nothing there/],
       [`<?pending k: ${"x\r".repeat(run)}?>`, /written exactly/],

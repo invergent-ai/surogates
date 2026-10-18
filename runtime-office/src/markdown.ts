@@ -41,7 +41,6 @@ const KEY = /^[A-Za-z0-9_-]+$/;
 const NOT_KEY = /[^A-Za-z0-9_-]+/;
 // Accents a key cannot hold, once letters are taken apart: é is e and an accent.
 const MARKS = /\p{M}/gu;
-const SPACE = /\s/;
 const LETTER_OR_DIGIT = /[A-Za-z0-9]/;
 const MAX_QUOTED = 80;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
@@ -74,14 +73,13 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
   };
   for (const line of markdown.split("\n")) {
     const trimmed = line.trim();
-    const pending = PENDING.exec(trimmed);
-    const intent = pending?.[2]!.trim();
-    if (intent) {
+    const pending = pendingOf(trimmed);
+    if (pending) {
       flush();
-      const key = pending![1]!;
+      const { key, intent } = pending;
       if (keys.has(key)) throw new ContentError(`<?pending ${key}: …?> is used twice in one op.`);
       keys.add(key);
-      out.push({ t: "pending", key, intent: intent.slice(0, MAX_INTENT) });
+      out.push({ t: "pending", key, intent });
       continue;
     }
     if (PENDING_LIKE.test(trimmed)) throw new ContentError(pendingFault(trimmed));
@@ -105,25 +103,33 @@ export function compileContent(markdown: string, blocks: Record<string, unknown>
   return out;
 }
 
+/** A pending line's key and its intent, trimmed and cut to its most; none for any other line. */
+function pendingOf(line: string): { key: string; intent: string } | undefined {
+  const match = PENDING.exec(line);
+  const intent = match?.[2]!.trim();
+  return intent ? { key: match![1]!, intent: intent.slice(0, MAX_INTENT) } : undefined;
+}
+
 /** What is wrong with a line holding `<?pending` that is no pending block, said so that the next try can be right. */
 function pendingFault(line: string): string {
-  // In other letters, or after other text: markdown drops it whatever it holds.
-  if (!line.startsWith(PENDING_OPEN)) return OWN_LINE;
   const quoted = JSON.stringify(line.slice(0, MAX_QUOTED));
+  if (!line.startsWith(PENDING_OPEN)) {
+    // After other text: markdown drops it whatever it holds.
+    if (line.slice(0, PENDING_OPEN.length).toLowerCase() !== PENDING_OPEN) return OWN_LINE;
+    const lowered = PENDING_OPEN + line.slice(PENDING_OPEN.length);
+    const pending = pendingOf(lowered);
+    const fault = `A pending line starts with <?pending in lowercase, exactly <?pending key: intent?>, and ${quoted} does not`;
+    // Whatever else is wrong with it is said too, so one more try can be right.
+    return pending ? `${fault}: write <?pending ${pending.key}: ${pending.intent}?> instead.` : `${fault}. ${pendingFault(lowered)}`;
+  }
   if (!line.endsWith("?>")) {
     if (line.includes("?>")) return OWN_LINE;
     return `A pending line ends in ?>, and ${quoted} does not.`;
   }
   const body = line.slice(PENDING_OPEN.length, -2);
   const colon = body.indexOf(":");
-  if (colon < 0) {
-    // Most likely the key and the intent with no colon between: the key is the first word.
-    const written = body.trim();
-    const space = written.search(SPACE);
-    const key = keyFrom(space < 0 ? written : written.slice(0, space));
-    const intent = (space < 0 ? "" : written.slice(space).trim()).slice(0, MAX_INTENT) || "what it will hold";
-    return `In a pending line the intent follows a colon after the key, and ${quoted} has none: write <?pending ${key}: ${intent}?> instead.`;
-  }
+  // Which of several words is the key is not for the reader to guess: the form is said instead.
+  if (colon < 0) return `A pending line is <?pending key: what the section will hold?>; ${quoted} has no colon after its key.`;
   const key = body.slice(0, colon).trim();
   const intent = body.slice(colon + 1).trim().slice(0, MAX_INTENT);
   if (!key) return `A pending line names its key before the colon, one word of letters, digits, - or _ for its section, and ${quoted} names none.`;
