@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from obench import checks as C
 from obench import docs
@@ -216,6 +217,478 @@ def _list_continued(items: list[str]):
             return False, f"the item is there but not as the list's next number: {found}; numbered now {shown}"
         return False, f"numbered items now {shown}"
     return C.Check(f"the numbered list continues with {items[-1]!r} as item {len(items)}", fn, ("list", "item", "third"))
+
+
+def _block_text(b) -> str:
+    return b.text if isinstance(b, docs.Para) else "\n".join(" | ".join(r) for r in b.rows)
+
+
+# --------------------------------------------------------------------------- Word: a long document
+
+OLD_BUDGET, NEW_BUDGET = "45,800", "48,500"
+
+
+class _Area(NamedTuple):
+    """An area of the long report, written as a section of the same shape as the others."""
+    title: str
+    owner: str
+    staff: int
+    budget_2026: int
+    budget_2027: int
+    why: str  # why the budget moved
+    measure: str  # what the team is judged on
+    was: str  # the measure at the start of 2026
+    now: str  # the measure at the end of 2026
+    target: str  # the measure's target for 2027
+    project: str  # the main project of the year
+    first: str  # the project's first month
+    last: str  # the project's last month
+    risk: str  # the biggest risk
+    then: str  # what the team does if it happens
+    priorities: tuple[str, ...]  # the year's priorities, as a bulleted list; none for some areas
+    quarterly: bool  # a table of planned spending by quarter
+
+
+_AREAS = {
+    3: _Area("Staffing", "head of people", 6, 204900, 212400, "the increase covers the pay review agreed in March",
+        "staff turnover", "14%", "11%", "below 10%", "a new pay and grading framework", "February", "July",
+        "a wave of resignations after the pay review", "bring the mid-year review forward and use the retention fund",
+        ("Publish the new pay bands", "Train every manager on the review", "Bring turnover below 10%"), True),
+    4: _Area("Recruitment", "recruitment lead", 3, 41300, 38900,
+        "the fall reflects fewer agency fees now that most roles are filled directly",
+        "the average time to fill a role", "52 days", "41 days", "35 days", "a careers page with live job listings",
+        "January", "April", "a shortage of engineers in the local market", "widen the search to remote candidates", (),
+        False),
+    5: _Area("Training", "learning manager", 2, 24100, 27600,
+        "the increase pays for a leadership course for new managers", "training hours per employee", "11", "16", "20",
+        "a leadership course for the twelve new managers", "March", "November", "managers too busy to attend",
+        "move the sessions online and record them",
+        ("Run the leadership course", "Refresh the safety training", "Track training hours per person"), False),
+    6: _Area("Customer support", "support manager", 14, 61800, 64300, "the increase covers two extra weekend shifts",
+        "the share of tickets answered within a day", "81%", "88%", "92%", "a self-service help centre", "April",
+        "September", "a spike in tickets after the spring release",
+        "move two product specialists onto the queue for a month", (), True),
+    7: _Area("Sales operations", "sales operations lead", 5, 49700, 51200,
+        "the increase is the new pricing tool's licence", "the time from a signed order to its first invoice", "9 days",
+        "6 days", "4 days", "moving every quote into the pricing tool", "January", "May",
+        "errors in quotes during the move", "check every quote by hand for the first two months",
+        ("Move all quotes into the pricing tool", "Invoice within four days", "Clean up the customer records"), False),
+    8: _Area("Marketing", "marketing manager", 7, 79200, 73500,
+        "the fall comes from running the spring campaign online", "qualified leads per month", "140", "185", "220",
+        "an online spring campaign", "February", "June", "a campaign that brings visits but few leads",
+        "move the spending to the channels that bring leads within the quarter", (), False),
+    9: _Area("Product delivery", "head of delivery", 18, 84600, 88100,
+        "the increase pays for a second test environment", "releases shipped on the planned date", "70%", "82%", "90%",
+        "a second test environment", "March", "August", "a late release in the busy autumn period",
+        "freeze new features four weeks before each release",
+        ("Ship every release on its planned date", "Set up the second test environment", "Cut open defects by a third"),
+        True),
+    10: _Area("Quality", "quality lead", 3, 18400, 19700, "the increase covers the external audit",
+        "defects found after a release", "46", "31", "below 25", "the external quality audit", "May", "June",
+        "audit findings that need large changes", "plan the changes into the autumn releases", (), False),
+    11: _Area("IT systems", "IT manager", 6, 91000, 96700, "the increase is the move of the file servers to the cloud",
+        "unplanned downtime", "19 hours", "7 hours", "under 5 hours", "moving the file servers to the cloud", "January",
+        "October", "data lost during the move",
+        "keep the old servers running beside the new ones until every folder is checked",
+        ("Move the file servers", "Replace the oldest laptops", "Halve unplanned downtime"), False),
+    12: _Area("Security", "security officer", 2, 29800, 33400, "the increase pays for a yearly penetration test",
+        "the share of staff who pass the phishing test", "72%", "86%", "95%", "two-factor login for every system",
+        "February", "May", "a successful phishing attack",
+        "lock the affected accounts and reset every password in the team", (), True),
+    13: _Area("Procurement", "procurement lead", 2, 13500, 12800, "the fall reflects fewer suppliers to manage",
+        "the share of spending under contract", "64%", "77%", "85%", "a single list of approved suppliers", "April",
+        "July", "a key supplier raising its prices", "invite two other suppliers to quote",
+        ("Publish the approved supplier list", "Bring the top twenty suppliers under contract",
+         "Pay invoices within thirty days"), False),
+    14: _Area("Logistics", "logistics manager", 9, 39900, 41600, "the increase covers higher fuel costs",
+        "orders delivered on time", "91%", "94%", "97%", "a route plan for the new delivery van", "March", "May",
+        "a delay at the main warehouse", "ship from the second warehouse until the delay clears", (), False),
+    15: _Area("Travel", "office manager", 1, 26700, 22300, "the fall comes from holding more meetings online",
+        "trips taken per month", "38", "29", "25", "a travel booking tool", "January", "March",
+        "trips booked outside the tool", "refund only the trips booked through it", (), True),
+    16: _Area("Sustainability", "sustainability lead", 1, 11200, 15900, "the increase pays for the first energy audit",
+        "electricity used per employee", "2.9 MWh", "2.6 MWh", "2.3 MWh", "the first energy audit of both offices",
+        "June", "September", "an audit that finds the old office cannot be improved",
+        "fold the findings into the facilities plan in section 17",
+        ("Complete the energy audit", "Switch both offices to green power", "Report emissions for the first time"),
+        False),
+    18: _Area("Legal and compliance", "legal counsel", 2, 31200, 29500,
+        "the fall reflects fewer contract reviews by outside lawyers", "contracts reviewed within five days", "68%",
+        "80%", "90%", "standard contract templates for sales", "February", "April",
+        "a change in the data protection rules", "review the affected contracts within a month", (), False),
+    19: _Area("Business continuity", "operations director", 2, 16000, 17200,
+        "the increase pays for a second internet line at each office", "systems restored within four hours in a test",
+        "3 of 6", "5 of 6", "6 of 6", "a tested recovery plan for each office", "April", "October",
+        "a long power cut at the main office", "move the critical work to the second office", (), True),
+}
+
+_SUMMARY = [
+    "This report sets out the operations plan for 2027: what each area will do, what it will cost and how its progress "
+    "will be measured. It has twenty sections, from staffing to the approvals, and replaces the plan issued in January.",
+    "The three largest budget lines are staffing (€212,400, section 3), IT systems (€96,700, section 11) and product "
+    f"delivery (€88,100, section 9). The facilities budget, €{OLD_BUDGET}, pays for the move of the support team to the "
+    "new office and is set out in section 17.",
+    "Each section names the team that owns the area, its budget for 2027 against 2026, the measure it is judged on and "
+    "its main project for the year. Every figure in this report is in euros and excludes VAT.",
+]
+_SCOPE = (
+    ["The plan covers every team in the company except the two subsidiaries, which publish their own plans. It runs "
+     "from 1 January to 31 December 2027 and is reviewed once a quarter by the operations board.",
+     "The following are outside its scope:"],
+    ["Capital projects above €250,000, which the board approves one by one",
+     "The subsidiaries' own budgets",
+     "Pay for the leadership team, which the remuneration committee sets"],
+    ["Where a figure here differs from the finance system, the finance system is right, and this report is corrected "
+     "in its next edition."],
+)
+_FACILITIES = [
+    f"Facilities is run by the facilities manager, with a team of 4 people. Its budget for 2027 is €{OLD_BUDGET}, "
+    "against €43,900 in 2026; the increase pays for the move of the support team to the new office on the second "
+    "floor.",
+    "The team is judged on the share of maintenance requests closed within a week. Over 2026 it moved from 74% to 83%, "
+    "and the target for 2027 is 90%. The main project for the year is the move itself, planned for the summer so that "
+    "support keeps its weekend shifts.",
+    "The biggest risk is a delay in the fit-out of the new floor. If it happens, the support team stays where it is "
+    "until the work is finished, and the move is planned again with the support manager.",
+    "The facilities budget over the last three years:",
+]
+_FACILITIES_TABLE = [["Year", "Budget", "Main item"], ["2025", "€41,200", "Roof repairs"],
+                     ["2026", "€43,900", "New heating"], ["2027", f"€{OLD_BUDGET}", "Office move"]]
+_APPROVALS = [
+    f"The finance committee approved the facilities budget of €{OLD_BUDGET} on 2 October, together with the budgets in "
+    "sections 3 to 16. The budgets in sections 18 and 19 were approved by the board on 9 October.",
+    "A change to any figure in this report after its approval is made in the section the figure belongs to, with a "
+    "sentence saying when it was made. The operations board hears of every change at its next meeting.",
+    "This report was prepared by the operations team and is next reviewed at the end of the first quarter of 2027.",
+]
+
+
+def _area_blocks(n: int) -> list[tuple[str, object]]:
+    a = _AREAS[n]
+    team = "one person" if a.staff == 1 else f"{a.staff} people"
+    out: list[tuple[str, object]] = [
+        ("h", f"{n}. {a.title}"),
+        ("p", f"{a.title} is run by the {a.owner}, with a team of {team}. Its budget for 2027 is €{a.budget_2027:,}, "
+              f"against €{a.budget_2026:,} in 2026; {a.why}. The team reports to the operations board every month and "
+              "to the whole company once a quarter, at the quarterly review."),
+        ("p", f"The team is judged on {a.measure}. Over 2026 it moved from {a.was} to {a.now}, and the target for 2027 "
+              f"is {a.target}. The figure is read on the first working day of each month and goes into the monthly "
+              "operations pack, so a change in one month shows in the next pack and in the next edition of this report."),
+        ("p", f"The main project for the year is {a.project}. It starts in {a.first} and is due to end in {a.last}. "
+              f"The {a.owner} leads it and reports on it at each board meeting. If it slips by more than a month, the "
+              "team agrees a new date with the operations board, and the new date is recorded in this section."),
+    ]
+    if a.priorities:
+        out.append(("p", "The team's priorities for 2027, in order:"))
+        out += [("li", p) for p in a.priorities]
+    out += [
+        ("p", f"The biggest risk for this area is {a.risk}. If it happens, the team will {a.then}. The risk is reviewed "
+              f"at every quarterly review, and its owner is the {a.owner}."),
+        ("p", f"Spending on {a.title.lower()} is checked against the plan at the end of each quarter. An overspend of "
+              f"more than {3 + n % 4} per cent needs the finance team's agreement before the next payment is made, and "
+              "an underspend of the same size is offered back to the central budget for other teams to use."),
+    ]
+    if a.quarterly:
+        q = [round(a.budget_2027 * share / 100) * 100 for share in (0.23, 0.25, 0.26)]
+        q.append(a.budget_2027 - sum(q))
+        out.append(("p", "Planned spending by quarter:"))
+        out.append(("table", [["Quarter", "Planned spend"]] + [[f"Q{i}", f"€{v:,}"] for i, v in enumerate(q, 1)]))
+    return out
+
+
+def _long_report_blocks() -> list[tuple[str, object]]:
+    """The long report, block by block: ("h", heading), ("p", paragraph), ("li", bullet), ("table", rows)."""
+    out: list[tuple[str, object]] = [("h", "1. Summary")] + [("p", t) for t in _SUMMARY]
+    intro, bullets, outro = _SCOPE
+    out += [("h", "2. Scope of this report")] + [("p", t) for t in intro] + [("li", t) for t in bullets]
+    out += [("p", t) for t in outro]
+    for n in range(3, 20):
+        if n == 17:
+            out += [("h", "17. Facilities")] + [("p", t) for t in _FACILITIES] + [("table", _FACILITIES_TABLE)]
+        else:
+            out += _area_blocks(n)
+    out += [("h", "20. Approvals")] + [("p", t) for t in _APPROVALS]
+    return out
+
+
+def _derive_long_report(src: str, dst: str) -> None:
+    """sample.docx's body replaced by a twelve-page operations report in its styles: twenty numbered sections of
+    figures, with section 17's budget (€45,800) in the summary, in the section's text and table, and in the approvals."""
+    import docx
+
+    d = docx.Document(src)
+    body = d.element.body
+    for el in list(body):
+        if el.tag != docs.W + "sectPr":
+            body.remove(el)
+    d.add_heading("Operations report 2027", level=1)
+    for kind, value in _long_report_blocks():
+        if kind == "h":
+            d.add_heading(value, level=2)
+        elif kind == "p":
+            d.add_paragraph(value)
+        elif kind == "li":
+            d.add_paragraph(value, style="List Bullet")
+        else:
+            table = d.add_table(rows=len(value), cols=len(value[0]))
+            table.style = "Table Grid"
+            for r, row in enumerate(value):
+                for c, text in enumerate(row):
+                    table.cell(r, c).text = text
+    d.save(dst)
+
+
+LONG_SECTION = 17  # the section whose budget is wrong
+
+
+def _old_budget_gone(doc: WordDoc, ctx):
+    """The old figure is nowhere but in the correction sentence after the section's table, which may say what it was."""
+    note, _ = _section_note(doc, LONG_SECTION)
+    quoted = note if note is not None and _correction_sentence(note.text) else None
+    left = [_block_text(b)[:70] for b in doc.blocks
+            if b is not quoted and C.has_text(_block_text(b), int(OLD_BUDGET.replace(",", "")))]
+    if left:
+        return False, f"still in {len(left)} block(s): {left[:4]}"
+    said = quoted is not None and C.has_text(quoted.text, int(OLD_BUDGET.replace(",", "")))
+    return True, "gone" + (" (the correction sentence quotes it)" if said else "")
+
+
+def _with_new_budget(b):
+    if isinstance(b, docs.Para):
+        return replace(b, text=b.text.replace(OLD_BUDGET, NEW_BUDGET))
+    return docs.Table([[c.replace(OLD_BUDGET, NEW_BUDGET) for c in r] for r in b.rows], b.style)
+
+
+def _new_budget_in_its_places(doc: WordDoc, ctx):
+    """Each block that gave the old figure reads as it did with the new one, in the original order."""
+    if ctx.original is None:
+        return None, "no original"
+    places = [b for b in ctx.original.blocks if OLD_BUDGET in _block_text(b)]
+    have = [C.w_sig(b) for b in doc.blocks]
+    missing, pos = [], 0
+    for b in places:
+        try:
+            pos = have.index(C.w_sig(_with_new_budget(b)), pos) + 1
+        except ValueError:
+            missing.append(_block_text(b)[:70])
+    if missing:
+        return False, f"{len(missing)} of {len(places)} places do not read as before with {NEW_BUDGET}: {missing}"
+    return True, f"all {len(places)} places now give {NEW_BUDGET}"
+
+
+# 14 October as people write it: 14 October, 14th of October, 14-Oct, October 14, Oct. 14th, 14/10, 14.10, 14-10 (a year
+# may follow), 10/14 (US), 2026-10-14.
+_OCT_14 = re.compile(r"\b14(?:th)?(?: of)?[ -]oct(?:ober)?\b|\boct(?:ober)?\.?[ -]?14(?:th)?\b|\b14[/.-]10\b|\b10/14\b"
+                     r"|\b\d{4}-10-14\b")
+# Words that say a figure was put right; "incorrect" is not one of them.
+_CORRECTED = re.compile(r"\b(?:correct(?:ed|ions?|s)?|updated?|revised?|amend(?:ed|ments?|s)?|fix(?:ed|es)?)\b")
+
+
+def _sentences(text: str) -> list[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", (text or "").strip()) if s.strip()]
+
+
+def _correction_sentence(text: str) -> bool:
+    """One sentence saying the figure was corrected (or updated, revised, amended, fixed) on 14 October."""
+    t = norm(text)
+    return bool(_CORRECTED.search(t) and _OCT_14.search(t)) and len(_sentences(text)) == 1
+
+
+def _section_note(doc: WordDoc, section: int) -> tuple[docs.Para | None, str]:
+    """Where a note after the section's table is: the first non-empty block after the section's last table and before
+    the next heading, when it is a plain paragraph. Else None, and why."""
+    blocks = doc.blocks
+    heads = [i for i, b in enumerate(blocks) if isinstance(b, docs.Para) and b.heading is not None]
+    start = next((i for i in heads if norm(blocks[i].text).startswith(f"{section}.")), None)
+    if start is None:
+        return None, f"no section {section} heading"
+    end = next((i for i in heads if i > start), len(blocks))
+    tables = [i for i in range(start + 1, end) if isinstance(blocks[i], docs.Table)]
+    if not tables:
+        return None, f"section {section} has no table"
+    after = [b for b in blocks[tables[-1] + 1:end] if not (isinstance(b, docs.Para) and not b.text.strip())]
+    if not after:
+        return None, f"nothing between section {section}'s table and the next heading"
+    b = after[0]
+    if not isinstance(b, docs.Para) or b.list_kind is not None:
+        return None, f"after the table: {'a table' if isinstance(b, docs.Table) else 'a list item'}"
+    return b, ""
+
+
+def _note_after_table(section: int):
+    def fn(doc: WordDoc, ctx):
+        b, why = _section_note(doc, section)
+        if b is None:
+            return False, why
+        t = norm(b.text)
+        if not (_CORRECTED.search(t) and _OCT_14.search(t)):
+            return False, f"the paragraph after the table does not say it was corrected on 14 October: {b.text[:100]!r}"
+        n = len(_sentences(b.text))
+        return n == 1, f"{b.text[:100]!r}" + ("" if n == 1 else f" ({n} sentences)")
+    return C.Check(f"a sentence right after section {section}'s table says it was corrected on 14 October", fn,
+                   ("sentence", "correct"))
+
+
+def _one_paragraph_added(doc: WordDoc, ctx):
+    if ctx.original is None:
+        return None, "no original"
+    a = len([p for p in ctx.original.paragraphs if p.text.strip()])
+    b = len([p for p in doc.paragraphs if p.text.strip()])
+    return b == a + 1, f"{a} paragraphs -> {b}"
+
+
+# --------------------------------------------------------------------------- Word: a table with a Total row
+
+REGION_TABLE = [["Region", "Q1", "Q2"], ["North", "120", "140"], ["East", "90", "100"], ["Total", "210", "240"]]
+
+
+def _derive_region_table(src: str, dst: str) -> None:
+    """sample.docx with its table made Q1 and Q2 by region with a Total row, in the table's own style."""
+    import docx
+
+    d = docx.Document(src)
+    old = d.tables[0]
+    new = d.add_table(rows=len(REGION_TABLE), cols=len(REGION_TABLE[0]))
+    new.style = old.style
+    for r, row in enumerate(REGION_TABLE):
+        for c, text in enumerate(row):
+            new.cell(r, c).text = text
+    old._tbl.addprevious(new._tbl)
+    old._tbl.getparent().remove(old._tbl)
+    d.save(dst)
+
+
+def _row_above_total(name: str, values: list[str]):
+    def fn(doc: WordDoc, ctx):
+        if not doc.tables:
+            return False, "no table"
+        rows = doc.tables[0].rows
+        firsts = [norm(r[0]) if r else "" for r in rows]
+        if norm(name) not in firsts:
+            return False, f"no {name} row: {rows}"
+        i = firsts.index(norm(name))
+        if [norm(c) for c in rows[i][1:]] != [norm(v) for v in values]:
+            return False, f"the {name} row reads {rows[i]}"
+        if "total" in firsts and i > firsts.index("total"):
+            return False, f"the {name} row is below the Total row: {rows}"
+        return True, f"row {i + 1}: {rows[i]}"
+    return C.Check(f"a {name} row reading {' and '.join(values)} above the Total row", fn, ("row", name.lower()))
+
+
+def _total_row(values: list[str]):
+    def fn(doc: WordDoc, ctx):
+        if not doc.tables:
+            return False, "no table"
+        rows = doc.tables[0].rows
+        totals = [r for r in rows if r and norm(r[0]) == "total"]
+        if not totals:
+            return False, f"no Total row: {rows}"
+        if rows[-1] is not totals[0]:
+            return False, f"the Total row {totals[0]} is not the last row: {rows}"
+        return [norm(c) for c in totals[0][1:]] == [norm(v) for v in values], f"the Total row reads {totals[0]}"
+    return C.Check(f"the Total row reads {' and '.join(values)}", fn, ("total",))
+
+
+def _rows_kept(rows: list[list[str]]):
+    """The header stays the first row; each other row is still there as it was, in any order (a new row may go first,
+    the regions may be sorted)."""
+    def fn(doc: WordDoc, ctx):
+        got = doc.tables[0].rows if doc.tables else []
+        have = [[norm(c) for c in r] for r in got]
+        want = [[norm(c) for c in r] for r in rows]
+        if not have or have[0] != want[0]:
+            return False, f"the header is {got[0] if got else None}"
+        missing = [r for r, w in zip(rows[1:], want[1:]) if w not in have[1:]]
+        return not missing, "kept" if not missing else f"changed or gone: {missing}; the table is {got}"
+    return C.Check(f"the header and the {' and '.join(r[0] for r in rows[1:])} rows are kept", fn)
+
+
+# --------------------------------------------------------------------------- Word: comment threads
+
+# Questions whose answers are in sample.docx's own text, each with what its answer must state (a pattern over the
+# reply, normalized) and how the check names it; then the notes that ask nothing.
+THREAD_QUESTIONS = {
+    "How many engineers do we plan to hire?": (r"\b(?:two|2)\b", "two"),
+    # 12, 12%, 12 %, 12 pct, 12 per cent, twelve percent; not 112 or 12.5.
+    "How much did North grow this quarter?": (r"(?<![\d.,])12(?:[.,]0+)?(?![\d]|[.,]\d)|\btwelve\b", "12%"),
+    "Which city is the new office in?": (r"\blisbon\b", "Lisbon"),
+}
+THREAD_NOTES = ("Keep 'revenue target' in bold, as finance asked.",
+                "The regional leads signed off these figures on 3 October.")
+# (the paragraph, the run the comment is on or None for the whole paragraph, the comment, its author)
+_THREADS = [
+    ("Quarterly report", None, "Which city is the new office in?", "Marta"),
+    ("This report covers the quarter. The revenue target was met in all regions.", 1, THREAD_NOTES[0], "Jon"),
+    ("North grew fastest, then the east.", None, "How much did North grow this quarter?", "Jon"),
+    ("East", None, THREAD_NOTES[1], "Marta"),
+    ("Hiring could slip a quarter.", None, "How many engineers do we plan to hire?", "Marta"),
+]
+MAX_REPLY = 400
+
+
+def _derive_threads(src: str, dst: str) -> None:
+    """sample.docx with five open comment threads: three questions its text answers, two notes."""
+    import datetime as dt
+
+    import docx
+
+    d = docx.Document(src)
+    for text, run, comment, author in _THREADS:
+        para = next(p for p in d.paragraphs if p.text == text)
+        runs = para.runs if run is None else [para.runs[run]]
+        c = d.add_comment(runs, text=comment, author=author, initials=author[0])
+        c._comment_elm.date = dt.datetime(2026, 10, 15, 9, 0, tzinfo=dt.timezone.utc)
+    d.save(dst)
+
+
+def _thread(doc: WordDoc, text: str):
+    return next((c for c in doc.threads if norm(c.text) == norm(text)), None)
+
+
+def _answered(question: str):
+    pattern, fact = THREAD_QUESTIONS[question]
+
+    def fn(doc: WordDoc, ctx):
+        t = _thread(doc, question)
+        if t is None:
+            return False, "the question's comment is gone or changed"
+        if not t.replies:
+            loose = [c.text[:60] for c in doc.threads if c is not t and re.search(pattern, norm(c.text))]
+            return False, "no reply" + (f"; a new thread says it instead: {loose}" if loose else "")
+        long = [len(r.text) for r in t.replies if len(r.text) > MAX_REPLY]
+        if long:
+            return False, f"a reply of {long[0]} characters ({MAX_REPLY} at most)"
+        if not any(re.search(pattern, norm(r.text)) for r in t.replies):
+            return False, f"the replies do not say {fact}: {[r.text[:80] for r in t.replies]}"
+        return True, f"{t.replies[-1].text[:80]!r}"
+    return C.Check(f"the reply to {question!r} says {fact}", fn, ("answer", "repl"))
+
+
+def _questions_resolved(doc: WordDoc, ctx):
+    bad = []
+    for q in THREAD_QUESTIONS:
+        t = _thread(doc, q)
+        if t is None or not t.resolved:
+            bad.append(f"{q!r} {'gone' if t is None else 'open'}")
+    return not bad, "all three resolved" if not bad else "; ".join(bad)
+
+
+def _notes_left(doc: WordDoc, ctx):
+    if ctx.original is None:
+        return None, "no original"
+    bad = []
+    for note in THREAD_NOTES:
+        was, now = _thread(ctx.original, note), _thread(doc, note)
+        if now is None:
+            bad.append(f"{note[:30]!r} gone or changed")
+            continue
+        if now.replies:
+            bad.append(f"{note[:30]!r} has a reply: {now.replies[0].text[:60]!r}")
+        if now.resolved:
+            bad.append(f"{note[:30]!r} resolved")
+        if was is not None and (norm(now.anchor) != norm(was.anchor) or now.author != was.author):
+            bad.append(f"{note[:30]!r} now on {now.anchor!r} by {now.author!r}")
+    return not bad, "both open, unanswered, as they were" if not bad else "; ".join(bad)
 
 
 WORD_TASKS = [
@@ -430,6 +903,68 @@ WORD_TASKS = [
             C.Check("no paragraph added or removed", _para_count_same),
         ),
     ),
+    Task(
+        id="docx-long-edit",
+        kind="docx",
+        mode="edit",
+        inputs=(Input("operations-report.docx", "sample.docx", derive=_derive_long_report),),
+        target="operations-report.docx",
+        prompt=(
+            "In section 17 of operations-report.docx the budget is wrong: it is €48,500, not €45,800. Fix it "
+            "everywhere it appears, and add one sentence after the section's table saying the figure was corrected "
+            "on 14 October."
+        ),
+        notes=(
+            "Input: sample.docx rebuilt as a twelve-page operations report in its styles, twenty numbered sections; "
+            "€45,800 is in the summary, section 17's text and table, and the approvals."
+        ),
+        checks=(
+            C.Check(f"'{OLD_BUDGET}' no longer appears anywhere except in the correction sentence", _old_budget_gone,
+                    ("everywhere", "occurrence")),
+            C.Check(f"{NEW_BUDGET} stands in every place {OLD_BUDGET} was", _new_budget_in_its_places,
+                    ("everywhere", NEW_BUDGET)),
+            _note_after_table(LONG_SECTION),
+            C.w_keeps_rest(changed=lambda b: OLD_BUDGET in _block_text(b)),
+            C.Check("one paragraph added, none removed", _one_paragraph_added),
+        ),
+    ),
+    Task(
+        id="docx-table-edit",
+        kind="docx",
+        mode="edit",
+        inputs=(Input("quarterly-report.docx", "sample.docx", derive=_derive_region_table),),
+        target="quarterly-report.docx",
+        prompt="Add a row for South (Q1 70, Q2 65) to the table in quarterly-report.docx and fix its Total row.",
+        notes="Input: sample.docx with its table made Region, Q1, Q2: North 120, 140; East 90, 100; Total 210, 240.",
+        checks=(
+            _row_above_total("South", ["70", "65"]),
+            _total_row(["280", "305"]),
+            _rows_kept(REGION_TABLE[:3]),
+            C.Check("table style kept", _table_style_kept),
+            C.w_keeps_rest(changed=lambda b: isinstance(b, docs.Table)),
+        ),
+    ),
+    Task(
+        id="docx-many-threads",
+        kind="docx",
+        mode="edit",
+        inputs=(Input("quarterly-report.docx", "sample.docx", derive=_derive_threads),),
+        target="quarterly-report.docx",
+        prompt=(
+            "Reply to the three questions in the comments on quarterly-report.docx and resolve them; leave the other "
+            "two."
+        ),
+        notes=(
+            "Input: sample.docx with five open comment threads: three questions its text answers (engineers to hire: "
+            "two; North's growth: 12%; the new office: Lisbon) and two notes that ask nothing."
+        ),
+        checks=(
+            *(_answered(q) for q in THREAD_QUESTIONS),
+            C.Check("the three questions are resolved", _questions_resolved, ("resolv",)),
+            C.Check("the two notes are left open, unanswered and as they were", _notes_left),
+            C.w_keeps_rest(),
+        ),
+    ),
 ]
 
 
@@ -455,18 +990,68 @@ def _values_on(sheet: str, values: list[float]):
     return C.Check(f"{sheet} holds {values}", fn)
 
 
+LINK_STEPS = 3  # how deep a chain of formula cells of its own sheet a total may go through to reach another sheet
+
+
+def _reaches_other_sheets(book: SheetBook, sheet: str, ref: str) -> tuple[bool, str]:
+    """Whether the formula at *sheet*!*ref* takes its numbers from other sheets: directly (``=Jan!B2+Feb!B2``), or
+    through formula cells of its own sheet that do (``=SUM(B2:D2)`` over ``=Jan!B2`` and the like), at most
+    LINK_STEPS of them deep. A typed number of its own sheet on the way is a copy, not a link, and fails it."""
+    from obench.formula import FormulaError, Unsupported, references
+
+    others: set[str] = set()
+    typed: list[str] = []
+    links: list[str] = []
+    seen, frontier = {ref}, [ref]
+    for _ in range(LINK_STEPS + 1):  # the total's own formula, then each cell it goes through
+        reached: list[str] = []
+        for cell in frontier:
+            try:
+                read = references(book.raw(sheet, cell), sheet)
+            except (Unsupported, FormulaError) as exc:
+                return False, f"cannot follow {sheet}!{cell}: {exc}"
+            for s, r in read:
+                if s.lower() != sheet.lower():
+                    others.add(s)
+                elif r not in seen:
+                    seen.add(r)
+                    raw = book.raw(sheet, r)
+                    if isinstance(raw, str) and raw.startswith("="):
+                        reached.append(r)
+                    elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        typed.append(r)
+        links += reached
+        frontier = reached
+        if not frontier:
+            break
+    total = f"{sheet}!{ref} {book.raw(sheet, ref)}"
+    if frontier:
+        return False, f"{total} goes through more than {LINK_STEPS} cells of {sheet} in a row"
+    if typed:
+        return False, f"{total} adds numbers typed on {sheet} ({', '.join(typed)}), not links to the month sheets"
+    if not others:
+        return False, f"{total} does not point at the month sheets"
+    through = f" through {', '.join(links)}" if links else ""
+    return True, f"{total}{through}, from {', '.join(sorted(others))}"
+
+
 def _formula_on(sheet: str, value: float, label: str, must_ref_other_sheet: bool = False):
     def fn(book: SheetBook, ctx):
         name = book.sheet_named(sheet)
         if name is None:
             return False, f"no sheet {sheet}"
         vals, problems = C.x_eval_all(book)
+        unlinked = None
         for (s, r), v in vals.items():
             if s == name and isinstance(v, (int, float)) and abs(v - value) < 0.01:
-                f = book.raw(s, r)
-                if must_ref_other_sheet and "!" not in f:
-                    return False, f"{s}!{r} {f} does not point at the month sheets"
-                return True, f"{s}!{r} {f}"
+                if not must_ref_other_sheet:
+                    return True, f"{s}!{r} {book.raw(s, r)}"
+                linked, detail = _reaches_other_sheets(book, s, r)
+                if linked:
+                    return True, detail
+                unlinked = unlinked or detail
+        if unlinked:
+            return False, unlinked
         return (None if problems else False), f"no formula on {name} gives {value:g}" + (f"; {problems[:2]}" if problems else "")
     return C.Check(f"{label} = {value:g} by formula on {sheet}", fn, ("formula", "total", "summary"))
 
@@ -551,14 +1136,28 @@ def _chart_covers(points: int):
 
 
 def _dates_real(minimum: int):
+    """At least *minimum* cells show a date in November 2026: a date typed in, or a formula's stored value (=DATE(…)),
+    in a date format. The reader gives a stored number as a date only when its cell's format is a date format."""
     def fn(book: SheetBook, ctx):
         import datetime as dt
 
-        dates = [c.raw for s in book.sheets for c in book.cells[s].values() if isinstance(c.raw, dt.datetime)]
-        nov = [d for d in dates if d.year == 2026 and d.month == 11]
+        from openpyxl.styles.numbers import is_date_format
+
+        nov, by_formula = 0, 0
+        for s in book.sheets:
+            for c in book.cells[s].values():
+                formula = isinstance(c.raw, str) and c.raw.startswith("=")
+                value = c.cached if formula else c.raw
+                if (isinstance(value, dt.datetime) and is_date_format(c.number_format)
+                        and (value.year, value.month) == (2026, 11)):
+                    nov += 1
+                    by_formula += formula
         texty = [c.raw for s in book.sheets for c in book.cells[s].values()
                  if isinstance(c.raw, str) and re.search(r"\bnov", c.raw, re.IGNORECASE) and re.search(r"\d", c.raw)]
-        return len(nov) >= minimum, f"{len(nov)} real dates in Nov 2026" + (f"; dates typed as text: {texty[:3]}" if texty else "")
+        return nov >= minimum, (
+            f"{nov} real dates in Nov 2026" + (f" ({by_formula} from formulas)" if by_formula else "")
+            + (f"; dates typed as text: {texty[:3]}" if texty else "")
+        )
     return C.Check(f"start and end are real dates ({minimum}+ in Nov 2026)", fn, ("date",))
 
 

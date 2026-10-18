@@ -19,8 +19,9 @@ exactly as typed into the cell:
 - A leading `'` keeps text as text: `"'0042"` stays `0042`.
 - `""` or `null` empties a cell.
 
-Pass `expect`: the range's `values` exactly as `office_read` showed them. If anyone changed a cell since, nothing
-applies and the result shows the range as it is now.
+Writing over a range of a sheet with content, pass `expect`: the range's `values` exactly as `office_read` showed them.
+If anyone changed a cell since, nothing applies and the result shows the range as it is now. A new workbook's first
+write needs none.
 
 ```json
 {"op": "set", "range": "Sales!A6", "values": [["West", 50, 60, "=B6+C6"]], "expect": [["", "", "", ""]]}

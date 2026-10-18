@@ -146,6 +146,8 @@ def one_line(result: dict) -> str:
         flags.append(f"{len(m['office_errors'])} office errors")
     if result["claims"]["contradicted"]:
         flags.append("claim contradicted")
+    if result.get("asks"):
+        flags.append(f"asked the user {len(result['asks'])}x")
     return (f"{result['task_id']} r{result['index']}: {result['passed']}/{result['passed'] + result['failed']} checks, "
             f"{result['terminal_status']}, {result['wall_clock_s']}s, {m['model_calls']} model calls, "
             f"{m['tool_calls_total']} tool calls" + (f" [{'; '.join(flags)}]" if flags else ""))

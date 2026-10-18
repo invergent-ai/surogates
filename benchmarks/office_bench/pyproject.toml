@@ -7,7 +7,7 @@ dependencies = [
     "httpx>=0.27,<1",
     "httpx-sse>=0.4",
     # Checks read the documents the agent saved.
-    "python-docx>=1.1",
+    "python-docx>=1.2",  # 1.2 adds comments, which docx-many-threads derives its input with
     "openpyxl>=3.1",
     "python-pptx>=1.0",
     "pypdf>=5.0",

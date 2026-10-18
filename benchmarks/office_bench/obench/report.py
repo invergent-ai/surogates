@@ -1,4 +1,5 @@
-"""Render a run: a row per rollout, the failed checks, and the totals by kind and mode.
+"""Render a run: a row per rollout, the questions sessions asked their user, the failed checks, and the totals by kind
+and mode.
 
 The failed checks are the product: each names what the document lacks or what the edit destroyed, which is where
 the model or the tools fail.
@@ -8,9 +9,33 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from obench.evaluate import TEMPLATE_KINDS
+from obench.runner import WAITING_ON_USER
+
 
 def _pct(a: int, b: int) -> str:
     return f"{100.0 * a / b:.0f}%" if b else "-"
+
+
+def _templates(m: dict[str, Any]) -> tuple[int, int, bool | None]:
+    """Of a rollout's guides on a type with templates, how many carried them, and how many there were; and whether the
+    type's templates were opened before the first edit on the document the session made (None: it made none of such a
+    type). A rollout scored before these were counted has neither."""
+    if "office_guides_with_templates" not in m:
+        return 0, 0, None
+    guides = [kind for kind in m.get("office_guides", []) if kind in TEMPLATE_KINDS]
+    return len(m["office_guides_with_templates"]), len(guides), m.get("template_viewed_before_create")
+
+
+def _asked(r: dict[str, Any]) -> str:
+    """How many times the rollout's session asked its user, and how many the runner answered; "-" for a rollout run
+    before the runner answered questions."""
+    asks = r.get("asks")
+    if asks is None:
+        return "-"
+    if not asks:
+        return "0"
+    return f"{len(asks)} ({sum(1 for a in asks if a.get('answered'))} answered)"
 
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -38,6 +63,9 @@ def render(results: list[dict[str, Any]], run_id: str = "", invalid: list[tuple[
     out.append("")
 
     off_channel = [r for r in results if r.get("channel") != "studio"]
+    templates = [_templates(r["metrics"]) for r in results]
+    carried, guides = sum(t[0] for t in templates), sum(t[1] for t in templates)
+    opened = [t[2] for t in templates if t[2] is not None]
     served = sorted({m for r in results for m in r["metrics"]["served_models"]})
     out += [
         "## Run health",
@@ -45,31 +73,46 @@ def render(results: list[dict[str, Any]], run_id: str = "", invalid: list[tuple[
         f"- served models: {', '.join(served) or '(none)'}",
         f"- sessions not on the studio channel: {len(off_channel)}",
         f"- sessions not completed: {sum(1 for r in results if r['terminal_status'] != 'completed')}",
+        f"- sessions that asked the user: {sum(1 for r in results if r.get('asks'))} "
+        f"({sum(1 for r in results if r['terminal_status'] == WAITING_ON_USER)} ended waiting on the user, past the "
+        f"runner's answers)",
         f"- rollouts with a harness/runner error: {sum(1 for r in results if r.get('error'))}",
         f"- rollouts set aside as infrastructure-invalid (not scored): {len(invalid or [])}",
         *[f"  - `{name}`: {why}" for name, why in invalid or []],
         f"- sandbox_unavailable tool results: {sum(r['metrics'].get('sandbox_unavailable', 0) for r in results)}"
         " (each waits out the sandbox's readiness timeout; office tools do not need the sandbox)",
         f"- 'office service full' results (runtime-office page pool): {sum(r['metrics'].get('office_busy', 0) for r in results)}",
+        f"- guides on a Word document, spreadsheet or deck that carried their templates: {carried}/{guides}",
+        f"- documents made whose type's template was opened before their first edit (skill_view of office "
+        f"templates/<kind>.md before the first office_edit on them): {sum(opened)}/{len(opened)}",
         "",
         "## Rollouts",
         "",
-        "| Task | Checks | Status | Wall s | Model calls | Tool calls | office_edit refused / errors | File/terminal calls | Office skill read | Claim vs checks |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Task | Checks | Status | Asked the user | Wall s | Model calls | Tool calls | office_edit refused / errors | File/terminal calls | Office skill read | Guides with templates | Template opened before first edit | Claim vs checks |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for r in results:
+    for r, (with_templates, of, before) in zip(results, templates):
         m = r["metrics"]
         tools = ", ".join(f"{k} {v}" for k, v in sorted(m["tool_calls"].items(), key=lambda kv: -kv[1]))
+        carried_here = f"{with_templates}/{of}" if of else "-"
+        before_here = {True: "yes", False: "no", None: "-"}[before]
         claim = "contradicted" if r["claims"]["contradicted"] else (
             "claims success despite failed checks" if r["claims"]["claims_success_despite_failures"] else "ok")
         out.append(
             f"| `{r['task_id']}` r{r.get('index')} | {r['passed']}/{r['passed'] + r['failed']}"
             + (f" (+{r['unknown']}?)" if r["unknown"] else "")
-            + f" | {r['terminal_status']} | {r['wall_clock_s']} | {m['model_calls']} | {tools or '-'} | "
+            + f" | {r['terminal_status']} | {_asked(r)} | {r['wall_clock_s']} | {m['model_calls']} | {tools or '-'} | "
             f"{len(m['refusals'])} / {len(m['office_errors'])} | {m.get('file_or_terminal_calls', 0)} | "
-            f"{'yes' if m['read_office_skill'] else 'no'} | {claim} |"
+            f"{'yes' if m['read_office_skill'] else 'no'} | {carried_here} | {before_here} | {claim} |"
         )
     out.append("")
+
+    out += ["## Questions to the user", ""]
+    asked = [(r, a) for r in results for a in r.get("asks") or []]
+    for r, a in asked:
+        how = "answered" if a.get("answered") else f"not answered ({a.get('why') or 'no reason recorded'})"
+        out.append(f"- `{r['task_id']}` r{r.get('index')}, {how}: {' / '.join(a.get('questions') or []) or '(no question)'}")
+    out += [""] if asked else ["None.", ""]
 
     out += ["## Failed checks", ""]
     any_failed = False

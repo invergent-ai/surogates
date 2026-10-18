@@ -3,8 +3,13 @@
 A fresh session per rollout, always: its workspace is the task's filesystem. Flow: create the session as a Work chat
 (channel studio, the operator stamp ops adds) -> upload the inputs at the workspace root, as the file pane's upload
 does -> send the message (its HTTP status checked) -> stream events to a terminal state (the server closes every
-stream after 300 s and a failed session never closes its own, so poll status and reconnect from the cursor) -> wait
-for the turn's saves to land -> download every document in the workspace.
+stream after 300 s and a failed session never closes its own, so poll status and reconnect from the cursor), answering
+a question the session asks its user like a busy user would -> wait for the turn's saves to land -> download every
+document in the workspace.
+
+Nobody else answers a benchmark session's question, and an unanswered one parks the session until the runner's cap. So
+the runner answers each, at most MAX_ANSWERS times, with BUSY_USER_ANSWER, as the chat's question widget would. A
+question past those, or an input request it cannot answer, ends the rollout at once as WAITING_ON_USER.
 
 The documents are written by the editor's save at the turn's end, which lands in the workspace a few seconds after
 the session completes and announces nothing when it works. So the runner downloads each document the agent edited
@@ -19,6 +24,7 @@ import json
 import os
 import posixpath
 import time
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +35,16 @@ from obench.docs import kind_of
 from obench.tasks import Task
 
 TERMINAL_STATUSES = {"completed", "archived", "failed"}
+#: The rollout's status when the session waits on its user for an answer the runner does not give.
+WAITING_ON_USER = "waiting_on_user"
+#: The event a session emits when it asks its user and waits (an ask_user_question call, or a final reply the harness
+#: turned into one): its data carries the call's tool_call_id and its questions.
+INPUT_REQUIRED = "inbox.input_required"
+#: The runner's answer to every question: a busy user who leaves the work to the agent.
+BUSY_USER_ANSWER = "I can't answer that now: do what you can with what you have, and tell me what's missing."
+#: Asks answered per session (each of an ask's questions gets the answer); the next ask ends the rollout as waiting on
+#: the user.
+MAX_ANSWERS = 2
 STUDIO_CHANNEL = "studio"
 SAVE_SETTLE_S = 8.0  # the earliest a document is taken as saved, after the session completes
 SAVE_POLL_S = 3.0
@@ -54,6 +70,8 @@ class Rollout:
     other_files: list[str] = field(default_factory=list)
     save: dict[str, Any] = field(default_factory=dict)
     released: str | None = None  # "yes", or why the session was kept
+    # Each time the session asked its user: {tool_call_id, questions (their text), answered, and why when not}.
+    asks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def sha(data: bytes) -> str:
@@ -109,15 +127,47 @@ def stage_inputs(task: Task, out_dir: str) -> list[tuple[str, str]]:
     return staged
 
 
+async def _answer(client: Any, session_id: str, ev: Event, asks: list[dict[str, Any]]) -> bool:
+    """Answer the ask *ev* puts to the user as a busy user would, and record it in *asks*. False when the rollout ends
+    as waiting on the user instead: an ask past MAX_ANSWERS, or one the runner cannot answer."""
+    data = ev.data or {}
+    tool_call_id = str(data.get("tool_call_id") or "")
+    if tool_call_id and any(a["answered"] and a["tool_call_id"] == tool_call_id for a in asks):
+        return True  # the same call asking again: the answer already given is in the log
+    asked = data.get("questions") if isinstance(data.get("questions"), list) else []
+    prompts = [str(q.get("prompt") or "").strip() if isinstance(q, dict) else "" for q in asked]
+    ask: dict[str, Any] = {"tool_call_id": tool_call_id, "questions": [p for p in prompts if p], "answered": False}
+    answered = sum(1 for a in asks if a["answered"])
+    asks.append(ask)
+    if answered >= MAX_ANSWERS:
+        ask["why"] = f"asked again after {MAX_ANSWERS} answers"
+        return False
+    if not tool_call_id or not prompts or not all(prompts):
+        ask["why"] = "an input request with no question to answer"
+        return False
+    try:
+        await client.answer_question(session_id, tool_call_id, [
+            {"question": prompt, "answer": BUSY_USER_ANSWER, "is_other": True} for prompt in prompts
+        ])
+    except (HarnessError, httpx.TransportError) as exc:
+        ask["why"] = f"the answer did not go through: {exc}"[:300]
+        return False
+    ask["answered"] = True
+    return True
+
+
 async def _stream_until_terminal(client: Any, session_id: str, events: list[Event], started: float,
-                                 cap_s: float) -> str:
+                                 cap_s: float, asks: list[dict[str, Any]]) -> str:
     cursor = events[-1].id if events else 0
     while True:
         try:
-            async for ev in client.stream_events(session_id, after=cursor):
-                if ev.id > cursor:
-                    events.append(ev)
-                    cursor = ev.id
+            async with aclosing(client.stream_events(session_id, after=cursor)) as stream:
+                async for ev in stream:
+                    if ev.id > cursor:
+                        events.append(ev)
+                        cursor = ev.id
+                        if ev.type == INPUT_REQUIRED and not await _answer(client, session_id, ev, asks):
+                            return WAITING_ON_USER
         except httpx.TransportError:
             pass  # a slow turn outlasted the read timeout: reconnect from the cursor
         status = await client.get_session_status(session_id)
@@ -207,7 +257,8 @@ async def run_task(client: Any, task: Task, rollout_dir: str, index: int = 1, wa
             with open(local, "rb") as fh:
                 r.uploaded[key] = sha(fh.read())
         await client.send_message(r.session_id, task.prompt)
-        r.terminal_status = await _stream_until_terminal(client, r.session_id, r.events, started, wall_clock_cap_s)
+        r.terminal_status = await _stream_until_terminal(client, r.session_id, r.events, started, wall_clock_cap_s,
+                                                         r.asks)
         r.save = await _await_saves(client, r.session_id, edited_paths(r.events), r.uploaded, save_cap_s)
         # Events that came after the turn (a save that failed or had to wait announces itself).
         late_from = len(r.events)
@@ -234,11 +285,12 @@ async def _release(client: Any, r: Rollout, release: bool) -> str:
     runtime-office keeps a document's page open until it is idle, and holds a limited number of pages; sessions left
     open back to back fill them, and later sessions then get "The office service has as many documents open as it can
     hold". Deleting each session after collecting it frees its pages: the office reaper closes an archived chat's
-    documents on its next pass.
+    documents on its next pass. A session left waiting on its user is deleted too, as a user who never answers deletes
+    the chat: its question stops waiting.
     """
     if not release:
         return "kept (--keep-sessions)"
-    if r.terminal_status not in TERMINAL_STATUSES or r.terminal_status == "archived":
+    if r.terminal_status not in TERMINAL_STATUSES | {WAITING_ON_USER} or r.terminal_status == "archived":
         return f"kept ({r.terminal_status})"
     try:
         await client.delete_session(r.session_id)
@@ -280,6 +332,9 @@ def write_rollout(rollout_dir: str, task: Task, r: Rollout) -> None:
             "other_files": r.other_files,
             "save": r.save,
             "released": r.released,
+            # How many times the session asked its user, and what.
+            "asked_user": len(r.asks),
+            "asks": r.asks,
         }, fh, indent=2)
 
 

@@ -72,9 +72,10 @@ layer where its first flow child sits: a pinned backdrop listed before it paints
 In a `position:relative` div, pinned children paint over its flow. `hidden` skips the slide; `data-transition="fade|
 push|magic"` is how it arrives from the slide before it.
 
-**Text:** `<h1>` `<h2>` `<h3>` `<p>` (start at 96/64/44/32 px; set `font-size` yourself, **never under 24 px**),
-`<ul>`/`<ol>` of plain `<li>` (one level), `<br>`, and inline `<b>` `<i>` `<u>` `<a href="https://…">` `<span
-style="color:…">` (no size, font, background or border on them: a badge is a `<div>` of its own). A `<div>` holding only
+**Text:** `<h1>` `<h2>` `<h3>` `<p>` (96/64/44/32 px from the tag; a `font-size` only for a size it does not give,
+**never under 24 px**), `<ul>`/`<ol>` of plain `<li>` (one level), `<br>`, and inline `<b>` `<i>` `<u>`
+`<a href="https://…">` `<span style="color:…">` (no size, font, background or border on them: a badge is a `<div>`
+of its own). A `<div>` holding only
 text and those inline tags is one text box of one paragraph, set by its own font, colour, alignment, background, border
 and padding; pieces its own flex or grid layout sets apart go in a `<p>` each. `<div data-text>` of plain
 `<p>`/`<ul>`/`<ol>` is one text box of several paragraphs. Text beside blocks in one div, or directly in the section, is

@@ -79,12 +79,43 @@ def num_pattern(value: float | int | str) -> str:
     return rf"(?<![\d.,]){re.escape(text)}(?![\d]|[.,]\d)"
 
 
+_ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+         "seventeen eighteen nineteen").split()
+_TENS = "twenty thirty forty fifty sixty seventy eighty ninety".split()
+_PERCENT = r"\s?(?:%|percent\b|per[ -]cent\b|pct\b)"
+# A number word right after another, or after "hundred and", is the end of a bigger number: "seventy seven", "a
+# hundred and seven".
+_NOT_PART_OF_A_NUMBER = r"(?<![\w-])" + "".join(f"(?<!{w} )" for w in (*_TENS, "hundred")) + r"(?<!hundred and )"
+
+
+def number_words(n: int) -> list[str]:
+    """*n* spelled out, each way it is written, from zero to ninety-nine and a hundred; none beyond."""
+    if 0 <= n < 20:
+        return [_ONES[n]]
+    if 20 <= n < 100:
+        tens, unit = _TENS[n // 10 - 2], n % 10
+        return [f"{tens}-{_ONES[unit]}", f"{tens} {_ONES[unit]}"] if unit else [tens]
+    return ["a hundred", "one hundred"] if n == 100 else []
+
+
+def percent_pattern(value: str) -> str:
+    """A regex for a percentage however it is written: 70 matches 70%, 70 %, 70 percent, 70 per cent, 70 pct and
+    seventy percent; not 170%, 7% or 70.5%."""
+    ways = [num_pattern(value) + _PERCENT]
+    if re.fullmatch(r"\d+", value) and (spelled := number_words(int(value))):
+        ways.append(_NOT_PART_OF_A_NUMBER + "(?:" + "|".join(spelled) + r")\s?(?:percent|per[ -]cent)\b")
+    return "|".join(f"(?:{way})" for way in ways)
+
+
 def has_text(text: str, item: str | tuple[str, ...]) -> bool:
-    """*item* is a phrase, a number (as int/float), or a tuple of alternatives."""
+    """*item* is a phrase, a number (as int/float), a percentage ("70%"), or a tuple of alternatives."""
     options = item if isinstance(item, tuple) else (item,)
     hay = norm(text)
     for opt in options:
-        if isinstance(opt, (int, float)) or re.fullmatch(r"[\d.]+", str(opt)):
+        if isinstance(opt, str) and (percent := re.fullmatch(r"(\d+(?:\.\d+)?)\s?%", opt.strip())):
+            if re.search(percent_pattern(percent.group(1)), hay):
+                return True
+        elif isinstance(opt, (int, float)) or re.fullmatch(r"[\d.]+", str(opt)):
             if re.search(num_pattern(opt), hay):
                 return True
         elif norm(opt) in hay:

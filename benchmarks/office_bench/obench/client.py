@@ -21,6 +21,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from httpx_sse import aconnect_sse
@@ -212,6 +213,22 @@ class HarnessClient:
                 json={"content": content},
             )
             self._check(resp, "send_message")
+            return resp
+
+        resp = await self._retry(_post)
+        return resp.json()["event_id"]
+
+    async def answer_question(self, session_id: str, tool_call_id: str, responses: list[dict[str, Any]]) -> int:
+        """Answer the session's ask_user_question call *tool_call_id*, as the chat's question widget submits it: one
+        response per question, in the order asked, each ``{question, answer, is_other}``. The answer unparks the
+        waiting call. Returns the response event's id."""
+
+        async def _post() -> httpx.Response:
+            resp = await self._http.post(
+                f"{self._base}/sessions/{session_id}/ask_user_question/{quote(tool_call_id, safe='')}/respond",
+                json={"responses": responses},
+            )
+            self._check(resp, "answer_question")
             return resp
 
         resp = await self._retry(_post)

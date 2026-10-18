@@ -21,6 +21,9 @@ from obench.tasks import Task
 FILE_TOOLS = {"write_file", "patch", "read_file", "terminal", "execute_code", "list_files", "search_files"}
 _DOC_EXT = re.compile(r"\.(docx|xlsx|pptx|pdf)\b", re.IGNORECASE)
 _DOC_KIND = re.compile(r"\.(docx|xlsx|pptx|pdf)$", re.IGNORECASE)
+# The document types the office skill has templates for, and a skill_view of one: templates/<kind>.md.
+TEMPLATE_KINDS = ("docx", "xlsx", "pptx")
+_TEMPLATE_FILE = re.compile(r"^(?:\./)?templates/(docx|xlsx|pptx)\.md$")
 _ADMITS = re.compile(
     r"\b(couldn'?t|could not|can'?t|cannot|unable|not able|wasn'?t able|failed|didn'?t|did not|isn'?t supported|"
     r"not supported|doesn'?t support|no way to|not possible|unfortunately|however)\b",
@@ -65,7 +68,9 @@ def _document_kind(*paths: Any) -> str:
     return "?"
 
 
-def metrics(events: list[Event]) -> dict[str, Any]:
+def metrics(events: list[Event], made: str | None = None) -> dict[str, Any]:
+    """What the trace says the agent did. *made*: the path of the document the task had the agent make, when known; an
+    office_edit result saying ``created`` names one too (a call refused by the editor says nothing of it)."""
     tools: Counter[str] = Counter()
     refusals: list[str] = []
     office_errors: list[str] = []
@@ -73,11 +78,18 @@ def metrics(events: list[Event]) -> dict[str, Any]:
     reads_of_missing = 0
     office_busy = 0
     skill_views: list[str] = []
-    # The document types whose guide (the office skill's rules and the type's reference) an office call delivered.
+    # The document types whose guide (the office skill's rules, the type's reference and its templates) an office call
+    # delivered, and those of them whose guide carried the templates.
     office_guides: list[str] = []
+    office_guides_with_templates: list[str] = []
+    # Where in the trace the office skill's templates were opened, and of which type; each office_edit call's place and
+    # document; and the documents an office_edit said it created.
+    template_views: list[tuple[int, str]] = []
+    edits: list[tuple[int, str]] = []
+    created: set[str] = set()
     file_tools_on_docs: list[str] = []
     calls: dict[str, tuple[str, dict]] = {}
-    for ev in events:
+    for at, ev in enumerate(events):
         d = ev.data or {}
         if ev.type == "tool.call":
             name = d.get("name") or "?"
@@ -86,15 +98,24 @@ def metrics(events: list[Event]) -> dict[str, Any]:
             calls[d.get("tool_call_id") or str(ev.id)] = (name, args)
             if name == "skill_view":
                 skill_views.append(f"{args.get('name')}{'/' + args['file_path'] if args.get('file_path') else ''}")
+                viewed = _TEMPLATE_FILE.match(str(args.get("file_path") or "").strip())
+                if args.get("name") == "office" and viewed:
+                    template_views.append((at, viewed.group(1)))
+            if name == "office_edit":
+                edits.append((at, doc_path(str(args.get("path") or "")).lower()))
             if name in FILE_TOOLS and _DOC_EXT.search(json.dumps(args)):
                 file_tools_on_docs.append(f"{name} {json.dumps(args)[:160]}")
         elif ev.type == "tool.result":
             name = d.get("name") or "?"
             content = _parse(d.get("content"))
+            _, called = calls.get(d.get("tool_call_id") or "", ("", {}))
             if isinstance(content, dict) and name.startswith("office_") and isinstance(content.get("guide"), dict):
                 # Delivered with a done call or one refused for what it said: the latter is still counted below.
-                _, called = calls.get(d.get("tool_call_id") or "", ("", {}))
                 office_guides.append(_document_kind(called.get("path"), content.get("document")))
+                if content["guide"].get("templates"):
+                    office_guides_with_templates.append(office_guides[-1])
+            if isinstance(content, dict) and name == "office_edit" and content.get("created") is True:
+                created.add(doc_path(str(called.get("path") or content.get("document") or "")).lower())
             if isinstance(content, dict) and name == "office_read" and str(content.get("error", "")).startswith("No document at"):
                 # The documented answer for a document not made yet, not a tool failure.
                 reads_of_missing += 1
@@ -109,6 +130,17 @@ def metrics(events: list[Event]) -> dict[str, Any]:
                 refusals.append(f"op {refused.get('op')}: {str(refused.get('reason') or content)[:300]}")
             elif isinstance(content, str) and name.startswith("office_") and content.lower().startswith("error"):
                 office_errors.append(f"{name}: {content[:300]}")
+    if made:
+        created.add(doc_path(made).lower())
+    # Were the made document's type's templates opened before its first edit, the first office_edit call on its path?
+    # That is the first attempt to make it, which the editor may have refused; None when no document of a type with
+    # templates was made.
+    making = next(((at, path) for at, path in edits if path in created), None)
+    made_kind = _document_kind(making[1]) if making else "?"
+    template_before_create = (
+        any(at < making[0] and kind == made_kind for at, kind in template_views)
+        if making and made_kind in TEMPLATE_KINDS else None
+    )
     served = Counter(
         str(ev.data.get("model")) for ev in events if ev.type == "llm.response" and ev.data.get("model")
     )
@@ -126,6 +158,8 @@ def metrics(events: list[Event]) -> dict[str, Any]:
         "other_tool_errors": other_errors,
         "skill_views": skill_views,
         "office_guides": office_guides,
+        "office_guides_with_templates": office_guides_with_templates,
+        "template_viewed_before_create": template_before_create,
         "read_office_skill": bool(office_guides) or any(s.split("/")[0] == "office" for s in skill_views),
         "file_tools_on_documents": file_tools_on_docs,
         "file_or_terminal_calls": sum(n for name, n in tools.items() if name in FILE_TOOLS),
@@ -238,8 +272,8 @@ def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
         meta = json.load(fh)
     events = load_events(rollout_dir)
     message = final_message(events)
-    m = metrics(events)
     found, note = find_document(task, meta)
+    m = metrics(events, made=found["path"] if found is not None and task.mode == "create" else None)
     results: list[CheckResult] = []
     doc = None
     if found is None:
@@ -283,6 +317,8 @@ def evaluate(task: Task, rollout_dir: str) -> dict[str, Any]:
         "error": meta.get("error"),
         "wall_clock_s": meta.get("wall_clock_s"),
         "save": meta.get("save"),
+        # Each time the session asked its user and what (None: run before the runner answered questions).
+        "asks": meta.get("asks"),
         "checks": [r.__dict__ for r in results],
         "passed": sum(1 for r in results if r.passed is True),
         "failed": sum(1 for r in results if r.passed is False),

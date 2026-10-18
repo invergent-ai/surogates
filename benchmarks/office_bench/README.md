@@ -7,8 +7,9 @@ runs inside the real agent harness, with every production tool and system prompt
 Surogate Studio Work chat; the agent works through `office_read` / `office_edit` (the live editor the user watches in
 the file pane); the saved document is downloaded and checked automatically.
 
-Most tasks **create new material from scratch** (17 of 33), because that is what the model must do well; the rest
-edit runtime-office's sample documents. Each task's checks read the saved file: structure (headings, lists, tables,
+Almost half the tasks **create new material from scratch** (17 of 36), because that is what the model must do well;
+the rest edit runtime-office's sample documents, or copies made from them (a twelve-page report, a table with a Total
+row, five comment threads). Each task's checks read the saved file: structure (headings, lists, tables,
 charts, slides, fields), values (facts carried over, formulas present and computing the right number, stored values
 agreeing with them), and **nothing the task did not ask for destroyed** (the rest of a sentence, other slides, a bold
 phrase, other cells, notes). Per rollout it also records what the trace shows: model calls, tool calls by name,
@@ -39,6 +40,15 @@ made it wrong.
 4. **Stream to a terminal state** with GAIA's discipline: the server closes every stream after 300 s and a failed
    session never closes its own, so poll the status and reconnect from the last event id. The stream's `stream.live`
    markers and keepalives are not events.
+   **A question to the user is answered like a busy user would.** A session that asks its user (`inbox.input_required`:
+   an `ask_user_question` call, or a final reply the harness turned into one) waits for the answer, and nobody else
+   gives one: unanswered, it would wait out the cap. So the runner answers the ask through the chat's answer endpoint
+   (`POST /v1/api/sessions/{id}/ask_user_question/{tool_call_id}/respond`), each of its questions with *"I can't answer
+   that now: do what you can with what you have, and tell me what's missing."*, for at most two asks per session. A
+   third ask, or an input request with no question to answer, ends the rollout at once with the status
+   `waiting_on_user`. `meta.json` records how many times the session asked (`asked_user`) and each ask (`asks`: its
+   questions, whether it was answered, and why not); the report gives the count per rollout, lists the questions, and
+   counts the sessions that asked.
 5. **Wait for the save.** The editor saves each document the turn edited as the turn ends; the save lands in the
    workspace a few seconds *after* `session.complete` and emits no event when it works (`office.saved` is only sent
    after a save that had to wait; `office.save_failed`/`office.conflict` when one fails). So the runner downloads
@@ -53,7 +63,8 @@ made it wrong.
    it is idle, and holds a limited number of pages (`RUNTIME_OFFICE_MAX_PAGES`); sessions left open back to back fill
    them, and the next session's `office_read` gets "The office service has as many documents open as it can hold". The
    runner deletes each session after collecting it so pages are freed: the office reaper closes an archived chat's
-   documents on its next pass. The events stay in the database; the documents are in `runs/`.
+   documents on its next pass. A session ended as `waiting_on_user` is deleted too, which ends its question's wait.
+   The events stay in the database; the documents are in `runs/`.
 8. **Check** (also offline, `obench check <run_id>`): the task's checks on its document, the trace metrics, the claim
    analysis. Writes `checks.json` and `trajectory.md`. A deck whose task checks overflow is first rendered to PDF by
    the document server's own converter, x2t (`OFFICEBENCH_RENDER_SHELL`); each rendered line of text is matched to
@@ -68,20 +79,20 @@ made it wrong.
 
 | File | Responsibility |
 | --- | --- |
-| `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, SSE. HTTP only |
-| `obench/runner.py` | One task to one rollout: create, upload, send, stream, wait for the save, collect |
-| `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, shapes, fields) |
+| `obench/client.py` | Async harness API client: sessions, upload, tree, download, messages, answers, SSE. HTTP only |
+| `obench/runner.py` | One task to one rollout: create, upload, send, stream and answer, wait for the save, collect |
+| `obench/docs.py` | Read a saved .docx/.xlsx/.pptx/.pdf into a plain model (styles, lists, charts, comments, shapes, fields) |
 | `obench/formula.py` | Small spreadsheet formula evaluator, so checks know what a formula computes |
 | `obench/render.py` | Render a deck with the document server's converter; measure text overflow on the PDF |
 | `obench/checks.py` | Check primitives (factories), each returning pass / fail / unknown with a detail |
-| `obench/tasks.py` | The 33 tasks: prompt, inputs, target document, checks |
+| `obench/tasks.py` | The 36 tasks: prompt, inputs, target document, checks |
 | `obench/evaluate.py` | Score a stored rollout: checks, trace metrics, claim vs checks, trajectory.md |
-| `obench/report.py` | Per-rollout table, failed checks, totals by kind and mode |
+| `obench/report.py` | Per-rollout table, questions to the user, failed checks, totals by kind and mode |
 | `obench/cli.py` | `list` / `run` / `check` / `invalidate` / `report` |
 
-Each run writes `runs/<run_id>/<task_id>/r<k>/`: `events.jsonl` (every session event), `meta.json` (session,
-uploads, save wait, collected files), `documents/` (what was downloaded), `render/` (a deck's PDF from the document
-server's converter), `checks.json`, `trajectory.md`.
+Each run writes `runs/<run_id>/<task_id>/r<k>/`: `events.jsonl` (every session event), `meta.json` (session, uploads,
+save wait, collected files, the questions the session asked its user), `documents/` (what was downloaded), `render/` (a
+deck's PDF from the document server's converter), `checks.json`, `trajectory.md`.
 `runs/` and `.env` are git-ignored (`.gitignore`). Results worth keeping are recorded in [RESULTS.md](RESULTS.md).
 
 A check returns **pass**, **fail** or **unknown** (`None`): unknown is reported, never counted. It is used where the
@@ -97,7 +108,7 @@ whose final message admits no problem is flagged **claims success despite failed
 the report quotes the words and the check.
 
 `tests/` (offline, no network) pins the fixture contents the edit checks rely on, builds the
-correct document with python-docx/openpyxl/python-pptx/pypdf (21 of the 33 tasks) and asserts **every task check passes it**
+correct document with python-docx/openpyxl/python-pptx/pypdf (24 of the 36 tasks) and asserts **every task check passes it**
 (not "made in the editor", which a scripted file fails by design), while the untouched input **fails** every edit task. That is what makes a check trustworthy.
 
 ## How to run
@@ -140,7 +151,7 @@ cd benchmarks/office_bench
 set -a; . ./.env; set +a
 .venv/bin/obench list                                  # tasks and their checks
 .venv/bin/obench run --pilot                           # the 6 pilot tasks -> runs/pilot-00N
-.venv/bin/obench run --runs 3                          # THE FULL RUN: all 33 tasks x 3 -> runs/full-00N
+.venv/bin/obench run --runs 3                          # THE FULL RUN: all 36 tasks x 3 -> runs/full-00N
 .venv/bin/obench run --kind xlsx,pdf --mode edit       # filtered (any of --tasks/--kind/--mode/--limit) -> runs/smoke-00N
 .venv/bin/obench run --tasks docx-bold,pdf-redact      # re-check specific tasks
 .venv/bin/obench check <run_id>                        # re-score stored documents after changing a check
@@ -159,13 +170,18 @@ the office tools do not need the sandbox, and the report counts these results.
 
 ## Tasks
 
-33 tasks: 17 create, 16 edit; Word 11, spreadsheet 9, deck 10, PDF 3. Edit inputs are
+36 tasks: 17 create, 19 edit; Word 14, spreadsheet 9, deck 10, PDF 3. Edit inputs are
 `runtime-office/test/fixtures/sample.{docx,xlsx,pptx,pdf}`; `xlsx-fix-formula` derives its input from `sample.xlsx`
-at staging (East's total made `=B3+B2`). Every task also has the implicit first check **document saved and opens**,
+at staging (East's total made `=B3+B2`), and `docx-long-edit`, `docx-table-edit` and `docx-many-threads` derive theirs
+from `sample.docx` (each says how; the fixture itself is never changed). Every task also has the implicit first check **document saved and opens**,
 then **made in the editor** (an applied `office_edit` call named the document, and the saved file names the editor as
 its producer: `docProps/app.xml`'s `<Application>`, or a PDF's `/Producer`; a file a script wrote names its library,
 such as python-pptx's PowerPoint, openpyxl or pypdf), and every edit task **the document changed** (fails when the
-download is byte-identical to the upload). Comment tasks are left for later.
+download is byte-identical to the upload). `docx-many-threads` reads comments as OOXML stores them: each comment, a
+reply included, is a `w:comment` in `word/comments.xml`; `word/commentsExtended.xml` gives each a `w15:commentEx` keyed
+by the `w14:paraId` of the comment's last paragraph, where `w15:paraIdParent` names the comment a reply answers and
+`w15:done="1"` marks a resolved thread; a comment's text is what lies between its `w:commentRangeStart` and
+`w:commentRangeEnd` in the document.
 
 ### Word
 
@@ -202,6 +218,18 @@ download is byte-identical to the upload). Comment tasks are left for later.
 - **`docx-bold`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx)
   - *"In quarterly-report.docx, make 'Hiring could slip a quarter' bold."*
   - Checks: 'Hiring could slip a quarter' is bold; 'revenue target' is bold; 'This report covers the quarter' is not bold; the rest of the document is kept; no paragraph added or removed.
+- **`docx-long-edit`** (edit) -> `operations-report.docx`; input `operations-report.docx` (from sample.docx, derived)
+  - *"In section 17 of operations-report.docx the budget is wrong: it is €48,500, not €45,800. Fix it everywhere it appears, and add one sentence after the section's table saying the figure was corrected on 14 October."*
+  - Input: sample.docx rebuilt as a twelve-page operations report in its styles, twenty numbered sections; €45,800 is in the summary, section 17's text and table, and the approvals.
+  - Checks: '45,800' no longer appears anywhere except in the correction sentence; 48,500 stands in every place 45,800 was; a sentence right after section 17's table says it was corrected on 14 October; the rest of the document is kept; one paragraph added, none removed.
+- **`docx-table-edit`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx, derived)
+  - *"Add a row for South (Q1 70, Q2 65) to the table in quarterly-report.docx and fix its Total row."*
+  - Input: sample.docx with its table made Region, Q1, Q2: North 120, 140; East 90, 100; Total 210, 240.
+  - Checks: a South row reading 70 and 65 above the Total row; the Total row reads 280 and 305; the header and the North and East rows are kept; table style kept; the rest of the document is kept.
+- **`docx-many-threads`** (edit) -> `quarterly-report.docx`; input `quarterly-report.docx` (from sample.docx, derived)
+  - *"Reply to the three questions in the comments on quarterly-report.docx and resolve them; leave the other two."*
+  - Input: sample.docx with five open comment threads: three questions its text answers (engineers to hire: two; North's growth: 12%; the new office: Lisbon) and two notes that ask nothing.
+  - Checks: the reply to 'How many engineers do we plan to hire?' says two; the reply to 'How much did North grow this quarter?' says 12%; the reply to 'Which city is the new office in?' says Lisbon; the three questions are resolved; the two notes are left open, unanswered and as they were; the rest of the document is kept.
 
 ### Spreadsheet
 

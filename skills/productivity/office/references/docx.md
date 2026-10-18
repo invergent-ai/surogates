@@ -40,10 +40,12 @@ kept) from the top, from 1: quote enough words to be unique (the `search` view i
 
 ```json
 {"path": "reports/Q3.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown":
-  "# Q3 report\n\n## Summary\n<?pending summary: Three sentences on what happened this quarter and what it means?>\n\n## Results\n<?pending results: Revenue and costs by region, with a chart?>\n\n## Risks\n<?pending risks: What could slip next quarter, and what we do about it?>"}}]}
+  "# Q3 report\n\n## Summary\n<?pending summary: Three sentences on what happened this quarter and what it means — 60 words?>\n\n## Results\n<?pending results: Revenue and costs by region, with a chart — 200 words?>\n\n## Risks\n<?pending risks: What could slip next quarter, and what we do about it — 120 words?>"}}]}
 ```
 
 ## Fill one section
+
+Shortened here: the body runs to the words its pending intent asks, 200 for `results`.
 
 ```json
 {"path": "reports/Q3.docx", "ops": [{"op": "replace", "target": {"pending": "results"}, "content": {

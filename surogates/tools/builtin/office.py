@@ -57,7 +57,7 @@ READ_DESCRIPTION = (
     '"page" (PDF; target = a page number; its text).\n'
     'view "search" (query) finds words: their blocks, cells, slides or pages.\n'
     "The result says who else has the document open. Your first office call on each document type also brings that "
-    "type's rules and reference, as guide."
+    "type's rules, reference and templates, as guide."
 )
 
 EDIT_DESCRIPTION = (
@@ -67,12 +67,13 @@ EDIT_DESCRIPTION = (
     "edit a document made that way. What office_edit cannot do to a PDF (a new PDF with content; merging, splitting or "
     "encrypting PDFs) is the pdf skill's work. A missing .docx, .xlsx, .pptx or .pdf is created blank and opens in the "
     "user's pane, where the user watches each call's changes appear under your name, and may be editing too.\n"
-    "One complete call for each type, to start from. A new Word document's outline, each section a pending block that "
-    'a later call fills (replace, target {"pending": "goals"}):\n'
+    "One complete call for each type, to start from; a new document starts from the office skill's "
+    "templates/<type>.md. A new Word document's outline, each section a pending block that a later call fills "
+    '(replace, target {"pending": "goals"}):\n'
     "```json\n"
     '{"path": "plans/launch.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown": '
-    '"# Launch plan\\n\\n## Goals\\n<?pending goals: Three goals, each with a date?>\\n\\n## Budget\\n'
-    '<?pending budget: Costs by quarter, in a table?>"}}]}\n'
+    '"# Launch plan\\n\\n## Goals\\n<?pending goals: Three goals, each with its date if given — 60 words?>'
+    '\\n\\n## Budget\\n<?pending budget: Costs by quarter, in a table — 80 words?>"}}]}\n'
     "```\n"
     "A spreadsheet's cells and a bold header:\n"
     "```json\n"
@@ -81,8 +82,8 @@ EDIT_DESCRIPTION = (
     "```\n"
     "A new slide:\n"
     "```json\n"
-    '{"path": "decks/q3.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\'background:#ffffff;'
-    "font-family:Arial;padding:128px;gap:32px'><h1 style='font-size:96px'>Q3 results</h1><p style='font-size:40px'>"
+    '{"path": "decks/q3.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\'background:#FBFBF8;'
+    "color:#14285A;font-family:Arial;padding:128px;gap:40px'><h1 style='font-size:128px'>Q3 results</h1><p>"
     'Revenue grew 12%, led by the north</p></section>"}]}]}\n'
     "```\n"
     "A PDF form's fields, named as the outline shows them:\n"
@@ -91,7 +92,9 @@ EDIT_DESCRIPTION = (
     "```\n"
     "About 450 words of body text fill a page: for a length the user asks for, count the words (a Word edit's result "
     "gives the document's length). Check with office_read before you answer: read the outline again; every fact the "
-    "user gave is in the document; the length is what was asked; then say in one line what was done.\n"
+    "user gave is in the document; no name, date, figure or contact they did not give is made up, and a part they "
+    "asked for but did not detail is drafted as a proposal, not asked about; the length is what was asked; then say "
+    "in one line what was done and what you drafted for them to check.\n"
     "One piece of work per call (a section, a block of cells, a slide), with a short line in the chat between calls. "
     "A call's ops apply together or not at all. If what you target changed since you read it, nothing applies and the "
     "result shows it as it is now: the user's edit wins; read again and work from it.\n"
@@ -240,7 +243,7 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
         try:
             reading = before_open(file_type)
         except OpsInputError as exc:
-            # Refused for what it says: the type's rules and reference are what the model needs now.
+            # Refused for what it says: the type's rules, reference and templates are what the model needs now.
             return await _with_guide({"error": str(exc), **_read_as(exc.read_as)}, file_type, session, kwargs)
     agent_id = str(kwargs.get("agent_id") or session.agent_id)
     runtime = RuntimeOffice(office)
@@ -282,10 +285,11 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
 
 
 async def _with_guide(answer: dict[str, Any], kind: str | None, session: Any, kwargs: dict[str, Any]) -> str:
-    """*answer* as JSON, carrying the office skill's rules and *kind*'s reference on the model's first call on that
-    type in the session, done or refused for what it said, which then records the type as given. A guide that would
-    make the result MAX_GUIDED_RESULT long or more is left for the next call. Only a model's call takes it: the
-    worker's own (a mention's acknowledgement) never does."""
+    """*answer* as JSON, carrying the office skill's rules and *kind*'s reference and templates on the model's first
+    call on that type in the session, done or refused for what it said, which then records the type as given. A guide
+    that would make the result MAX_GUIDED_RESULT long or more goes without its templates (the skill keeps them), and is
+    left for the next call when even that is too long. Only a model's call takes it: the worker's own (a mention's
+    acknowledgement) never does."""
     text = json.dumps(answer, ensure_ascii=False)
     given = (session.config or {}).get(GUIDES_KEY) or []
     if kind is None or not kwargs.get("tool_call_id") or kind in given or len(text) >= MAX_GUIDED_RESULT:
@@ -294,6 +298,9 @@ async def _with_guide(answer: dict[str, Any], kind: str | None, session: Any, kw
     if guide is None:
         return text
     guided = json.dumps({**answer, "guide": guide}, ensure_ascii=False)
+    if len(guided) >= MAX_GUIDED_RESULT and "templates" in guide:
+        guide = {"rules": guide["rules"], "reference": guide["reference"]}
+        guided = json.dumps({**answer, "guide": guide}, ensure_ascii=False)
     if len(guided) >= MAX_GUIDED_RESULT:
         return text
     try:
