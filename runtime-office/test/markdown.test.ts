@@ -54,6 +54,13 @@ describe("compileContent", () => {
     expect(compileContent(" - z")).toEqual([{ t: "li", list: 0, root: 0, ordered: false, level: 0, runs: [{ text: "z" }] }]);
   });
 
+  it("keeps a later item indented two spaces at its list's level, as markdown reads a sibling", () => {
+    expect(compileContent("1. a\n  2. b")).toEqual([
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "a" }] },
+      { t: "li", list: 0, root: 0, ordered: true, level: 0, runs: [{ text: "b" }] },
+    ]);
+  });
+
   it("keeps a table's header as its first row", () => {
     expect(compileContent("| A | B |\n|---|---|\n| 1 | **2** |")).toEqual([
       { t: "table", rows: [[[{ text: "A" }], [{ text: "B" }]], [[{ text: "1" }], [{ text: "2", b: true }]]] },

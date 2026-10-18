@@ -37,9 +37,10 @@ const MAX_INTENT = 300;
 // Any other scheme (javascript:, data:, file:, relative) would let injected content plant an active link.
 const SAFE_LINK = /^(?:https?|mailto):/i;
 const CHARTS = ["bar", "column", "horizontal-bar", "line", "pie", "area", "doughnut", "scatter"];
-// An item of a top-level list indented two or three spaces is one level down, as a nested one would be: a sub-item
-// written on its own. The editor counts it below the list item it lands next to; a top-level list that joins none
-// starts at its shallowest level, its nested lists with it.
+// A top-level list whose first item is indented two or three spaces is a sub-item written on its own: its items so
+// indented are one level down, as nested ones would be. A later item indented so in a list that starts flush is a
+// sibling, as markdown reads it. The editor counts the level below the list item it lands next to; a top-level list
+// that joins none starts at its shallowest level, its nested lists with it.
 const INDENTED = /^ {2,3}\S/;
 
 type Style = Omit<Run, "text">;
@@ -143,8 +144,9 @@ function blocksOf(tokens: Token[], lists: Lists): Block[] {
 
 function listOf(list: Tokens.List, id: number, root: number, level: number, lists: Lists): Block[] {
   const out: Block[] = [];
+  const sunk = level === 0 && INDENTED.test(list.items[0]?.raw ?? "");
   for (const item of list.items) {
-    const own = level === 0 && INDENTED.test(item.raw) ? 1 : level;
+    const own = sunk && INDENTED.test(item.raw) ? 1 : level;
     const runs: Run[] = [];
     const after: Token[] = [];
     for (const part of item.tokens) {
