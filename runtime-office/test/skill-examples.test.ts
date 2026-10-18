@@ -6,7 +6,7 @@ import { compilePdfOps } from "../src/formats/pdf.js";
 import { checkSlideOps } from "../src/formats/slide.js";
 import type { Block } from "../src/markdown.js";
 import { compileOps } from "../src/ops.js";
-import { Measurer } from "../src/slides/measure.js";
+import { Measurer, type Canvas } from "../src/slides/measure.js";
 import { chromiumThere, measuringPage, systemFonts } from "./support/chromium.js";
 
 // The office skill's references teach the agent these ops, and its templates are calls the agent sends as they are:
@@ -75,6 +75,7 @@ describe.each(CHECKS)("the office skill's %s examples", (name, check, least) => 
 const TEMPLATES: [string, Check, number][] = [
   ["docx.md", compileOps, 6],
   ["xlsx.md", compileCellOps, 3],
+  ["pptx.md", checkSlideOps, 8],
 ];
 
 describe.each(TEMPLATES)("the office skill's %s templates", (name, check, least) => {
@@ -85,6 +86,19 @@ describe.each(TEMPLATES)("the office skill's %s templates", (name, check, least)
   });
 
   eachAccepted(calls, check);
+});
+
+describe("the slide templates", () => {
+  it("are eight calls, each one slide of one <section>", () => {
+    const calls = callsOf(template("pptx.md"));
+    expect(calls).toHaveLength(8);
+    for (const ops of calls) {
+      expect(ops.map((op) => op.op)).toEqual(["slides"]);
+      const slides = ops[0]!.slides as Raw[];
+      expect(slides).toHaveLength(1);
+      expect(String(slides[0]!.html).match(/<section\b/g)).toHaveLength(1);
+    }
+  });
 });
 
 describe("the Word templates", () => {
@@ -142,5 +156,35 @@ describe.skipIf(!chromiumThere)("the slide reference's example slides", () => {
     expect(second.transition?.effect).toBe("magic");
     const names = (shapes: { magic?: string }[]) => shapes.flatMap((s) => (s.magic ? [s.magic] : []));
     expect(names(first.shapes).filter((name) => names(second.shapes).includes(name))).toHaveLength(1);
+  });
+});
+
+// A deck is 16:9 or 4:3: 1920 px wide either way, 1080 or 1440 tall, each in its own EMU per px, as slide.ts sizes the
+// canvas from the deck. A template slide grows by flow, so one section fits both.
+const CANVASES: [string, Canvas][] = [
+  ["16:9", { width: 1920, height: 1080, emuPerPx: 12192000 / 1920 }],
+  ["4:3", { width: 1920, height: 1440, emuPerPx: 9144000 / 1920 }],
+];
+
+describe.skipIf(!chromiumThere)("the slide templates' slides", () => {
+  let close: () => Promise<void>;
+  let measurer: Measurer;
+  beforeAll(async () => {
+    const opened = await measuringPage();
+    close = opened.close;
+    measurer = new Measurer(async () => opened.page, systemFonts);
+  });
+  afterAll(async () => {
+    await close();
+  });
+
+  const slides = callsOf(template("pptx.md")).flat().flatMap((op) => op.slides as Raw[]);
+  const cases = CANVASES.flatMap(([shape, canvas]) => slides.map((slide, index) => [index, shape, canvas, String(slide.html)] as const));
+
+  // Measured: nothing overflows or reaches past the edge, no text reads under 3:1, and no CSS is taken that the slide
+  // does not keep.
+  it.each(cases)("slide %i measures on a %s deck, with every style kept", async (_index, _shape, canvas, html) => {
+    const spec = await measurer.measure(html, canvas, {} as EditorPage);
+    expect(spec.ignored).toEqual([]);
   });
 });

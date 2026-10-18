@@ -100,6 +100,27 @@ def test_sheet_templates_total_by_formula():
             assert cells.get((column, last + 1), "") == "", (name, column, last)
 
 
+def test_slide_templates_share_one_look():
+    # Eight kinds of slide a deck is built from, in one palette and type scale, so slides from them sit in one deck;
+    # then decks as orders of them. Small, as the slide guide they join is already the largest.
+    templates = (SKILLS / "productivity/office/templates/pptx.md").read_text()
+    assert len(templates) <= 14_000
+    sections = dict(re.findall(r"^## ([^\n]+)\n(.*?)(?=^## |\Z)", templates, re.MULTILINE | re.DOTALL))
+    kinds = ["Title", "Statement", "Big number", "Cards", "Table", "Chart", "Timeline", "Closing"]
+    assert list(sections) == [*kinds, "Decks"]
+    for kind in kinds:
+        (call,) = [json.loads(block) for block in re.findall(r"```json\n(.*?)```", sections[kind], re.DOTALL)]
+        assert [op["op"] for op in call["ops"]] == ["slides"], kind
+    assert "```" not in sections["Decks"]
+    for deck in ("pitch", "onboarding", "review"):
+        assert deck in sections["Decks"].lower(), deck
+    assert len(set(re.findall(r"#[0-9A-Fa-f]{6}\b", templates))) <= 5, "one palette"
+    sizes = {int(size) for size in re.findall(r"font-size:\s*(\d+)px", templates)}
+    assert sizes and min(sizes) >= 24 and len(sizes) <= 5, sizes
+    for unwanted in ("border-radius", "opacity", "rgba("):
+        assert unwanted not in templates, "square corners, and text at full strength"
+
+
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():
     # A frontmatter the loader cannot parse drops its skill silently: each one must be here.
     skills = {s.name: s for s in ResourceLoader()._load_skills_from_dir(str(SKILLS), "platform")}

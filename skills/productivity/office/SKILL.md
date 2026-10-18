@@ -65,9 +65,10 @@ again.
 - **Spreadsheets:** start a new workbook from its template, in `templates/xlsx.md`. In a sheet with content, read the
   range before writing it, and pass what it showed as `expect`. Values go in as typed into a cell: a formula starts
   with `=` and stays live.
-- **Slide decks:** a small change (a title, a word, a number) is `text` on that one shape, which keeps its place and
-  style. A new or redesigned slide is one `<section>` in the Claude Slides format, built as native shapes the user can
-  edit. A slide too full for its boxes is refused: split it; nothing shrinks.
+- **Slide decks:** build a new deck from the slide templates, in `templates/pptx.md`. A small change (a title, a word, a
+  number) is `text` on that one shape, which keeps its place and style. A new or redesigned slide is one `<section>` in
+  the Claude Slides format, built as native shapes the user can edit. A slide too full for its boxes is refused: split
+  it; nothing shrinks.
 - **PDFs:** fill fields, add, remove or rotate pages, redact, annotate. Existing text cannot be changed.
 
 ## When a comment calls you
