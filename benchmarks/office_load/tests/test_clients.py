@@ -86,6 +86,8 @@ class FakeRuntimeOffice:
             return web.json_response({"page_id": f"{body['doc_key']}.{body['session_id']}"})
         if request.path.endswith("/edit"):
             return web.json_response({"ops": len(body["ops"]), "pages": 2})
+        if request.path.endswith("/read"):
+            return web.json_response({"read": body})
         return web.json_response({"flushed": True})
 
 
@@ -105,10 +107,13 @@ async def call(runtime: RuntimeOffice, what: str, page: str = "load-r1-0-abc.s0"
         return await runtime.edit(page, [{"insert": {"end": True}, "paragraph": "m1"}])
     if what == "flush":
         return await runtime.flush(page)
+    if what == "read":
+        return await runtime.read(page, READ)
     return await runtime.close(page)
 
 
-CALLS = ("open", "edit", "flush", "close")
+READ = {"view": "slide", "target": "1473"}
+CALLS = ("open", "read", "edit", "flush", "close")
 
 
 # The calls.
@@ -135,6 +140,17 @@ async def test_calls_name_runtime_office_routes_with_the_bearer_token() -> None:
         ("DELETE", "/pages/load-r1-0-abc.s0", None),
     ]
     assert {seen.authorization for seen in fake.requests} == {f"Bearer {TOKEN}"}
+
+
+async def test_read_posts_the_request_and_answers_what_runtime_office_read() -> None:
+    fake = FakeRuntimeOffice()
+    async with TestServer(fake.app()) as server:
+        read = await call(at(server), "read")
+    assert isinstance(read, Timed) and read.value == {"read": READ}
+    assert 0 <= read.seconds < 5
+    assert [(seen.method, seen.raw_path, seen.authorization, seen.body) for seen in fake.requests] == [
+        ("POST", "/pages/load-r1-0-abc.s0/read", f"Bearer {TOKEN}", READ),
+    ]
 
 
 async def test_the_page_id_is_one_path_segment() -> None:
@@ -198,7 +214,8 @@ async def test_a_client_that_drops_the_call_is_client_down() -> None:
 
 
 @pytest.mark.parametrize(("what", "timeout"), [
-    ("open", "OPEN_TIMEOUT_S"), ("edit", "EDIT_TIMEOUT_S"), ("flush", "CALL_TIMEOUT_S"), ("close", "CALL_TIMEOUT_S"),
+    ("open", "OPEN_TIMEOUT_S"), ("read", "CALL_TIMEOUT_S"), ("edit", "EDIT_TIMEOUT_S"), ("flush", "CALL_TIMEOUT_S"),
+    ("close", "CALL_TIMEOUT_S"),
 ])
 async def test_no_answer_within_the_calls_timeout_is_a_timeout(
     what: str, timeout: str, monkeypatch: pytest.MonkeyPatch,
@@ -218,7 +235,7 @@ def test_the_timeouts_are_the_harness_ones() -> None:
 
 
 @pytest.mark.parametrize("status", [404, 410])
-@pytest.mark.parametrize("what", ["edit", "flush"])
+@pytest.mark.parametrize("what", ["read", "edit", "flush"])
 async def test_a_page_not_open_is_page_gone(what: str, status: int) -> None:
     fake = FakeRuntimeOffice(status=status, answer={"error": "the editor stopped answering"})
     async with TestServer(fake.app()) as server:
@@ -263,6 +280,7 @@ async def test_a_refused_request_is_no_load_failure(status: int) -> None:
     ("open", {"id": "load-r1-0-abc.s0"}),
     ("flush", {"ok": True}),
     ("edit", None),
+    ("read", None),
 ])
 async def test_an_answer_runtime_office_does_not_give_is_the_clients(what: str, answer: Any) -> None:
     fake = FakeRuntimeOffice(answer=answer) if answer is not None else FakeRuntimeOffice(raw=b"<html>hi</html>")

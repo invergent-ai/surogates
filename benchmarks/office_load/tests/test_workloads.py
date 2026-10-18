@@ -2,19 +2,35 @@
 
 from __future__ import annotations
 
+import copy
 import io
+import json
 import random
 import statistics
 from collections import Counter
+from pathlib import Path
+from typing import Any
 
 import pytest
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from oload.pace import RECORDED_EDITS, RECORDED_GAPS, Pace
-from oload.workloads import FIXTURES, KIND_SHARES, edit_ops, fixture, pick_kind
+from oload.workloads import (
+    FIXTURES,
+    KIND_SHARES,
+    OUTLINE_READ,
+    DeckChanged,
+    edit_ops,
+    fixture,
+    pick_kind,
+    slide_read,
+)
 
 MARKER = "load-r1-3-7-0-ab12"
+# sample.pptx read by runtime-office in the office benchmark's final run on the templates build, as the outline and
+# slide 2's view it answered (the harness's own keys left out), and the text op an agent then applied to it.
+READS: dict[str, Any] = json.loads((Path(__file__).parent / "fixtures" / "sample_pptx_reads.json").read_text())
 
 
 def test_docx_edit_inserts_a_paragraph_at_the_end() -> None:
@@ -32,14 +48,54 @@ def test_xlsx_edit_sets_one_cell_of_the_first_sheet_in_row_n_plus_2_of_a_free_co
     assert all(sheet.cell(row=row, column=5).value is None for row in range(1, 200))
 
 
-def test_pptx_edit_adds_one_slide_with_the_marker_as_its_text() -> None:
-    [op] = edit_ops("pptx", MARKER, 0)
-    assert op["op"] == "slides"
-    [slide] = op["slides"]
-    assert set(slide) == {"html"}  # no "after": the slide goes last
-    html = slide["html"]
-    assert html.startswith('<section style="background:') and html.endswith("</section>")
-    assert f"<p>{MARKER}</p>" in html
+def test_a_deck_edit_reads_its_slide_by_the_id_the_outline_gives() -> None:
+    assert OUTLINE_READ == {"view": "outline"}
+    assert slide_read(READS["outline"]) == {"view": "slide", "target": "1473"}
+
+
+def test_pptx_edit_rewrites_the_text_box_of_the_slide_it_read() -> None:
+    assert edit_ops("pptx", MARKER, 0, read=READS["slide"]) == [
+        {"op": "text", "slide": "1473", "hash": "dc3285c8", "shape": "1498", "text": MARKER},
+    ]
+
+
+def test_pptx_edit_has_the_shape_of_the_text_op_the_recorded_agent_applied() -> None:
+    [op] = edit_ops("pptx", MARKER, 3, read=READS["slide"])
+    recorded = READS["text_op"]
+    assert READS["edit_answer"]["applied"] is True
+    assert set(op) == set(recorded) and all(type(op[key]) is type(recorded[key]) for key in op)
+    assert (op["slide"], op["hash"]) == (recorded["slide"], recorded["hash"])
+    # runtime-office's slide check (formats/slide.ts): slide and shape named, the hash it was read with, at most 2000
+    # characters of text.
+    assert op["slide"].strip() and op["shape"].strip() and op["hash"] and len(op["text"]) <= 2000
+
+
+def test_pptx_edit_takes_the_hash_of_each_fresh_read() -> None:
+    read = copy.deepcopy(READS["slide"])
+    read["hash"] = "2a096f2c"
+    read["shapes"][1]["paras"][0]["runs"][0]["text"] = "load-r1-3-7-0-ab11"
+    [op] = edit_ops("pptx", MARKER, 1, read=read)
+    assert (op["hash"], op["shape"]) == ("2a096f2c", "1498")
+
+
+def test_only_a_deck_edit_takes_a_read_and_it_needs_one() -> None:
+    with pytest.raises(ValueError, match="read"):
+        edit_ops("pptx", MARKER, 0)
+    with pytest.raises(ValueError, match="read"):
+        edit_ops("docx", MARKER, 0, read=READS["slide"])
+
+
+def test_a_deck_that_is_not_the_sample_is_deck_changed() -> None:
+    no_slide = {**READS["outline"], "slides": READS["outline"]["slides"][:1]}
+    no_box = {**READS["slide"], "shapes": READS["slide"]["shapes"][:1]}
+    unread = {"error": "No slide 1473: read the outline again."}
+    with pytest.raises(DeckChanged, match="slide 2"):
+        slide_read(no_slide)
+    with pytest.raises(DeckChanged, match="text box"):
+        edit_ops("pptx", MARKER, 0, read=no_box)
+    with pytest.raises(DeckChanged, match="No slide 1473"):
+        edit_ops("pptx", MARKER, 0, read=unread)
+    assert issubclass(DeckChanged, ValueError)
 
 
 def test_pdf_edit_places_a_note_by_rect_on_page_1_inside_the_page_and_below_its_text() -> None:

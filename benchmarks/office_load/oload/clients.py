@@ -21,7 +21,7 @@ from yarl import URL
 # The harness's timeouts. Opening loads the whole editor in a browser; a deck's edit can take about 292 s.
 OPEN_TIMEOUT_S = 90.0
 EDIT_TIMEOUT_S = 300.0
-CALL_TIMEOUT_S = 60.0  # flush and close
+CALL_TIMEOUT_S = 60.0  # read, flush and close
 
 LABEL = "app=office-load-client"
 # runtime-office's own defaults, for a pod that does not set them.
@@ -120,6 +120,11 @@ class RuntimeOffice:
             "doc_key": doc_key, "session_id": session_id, "config": config, "document_server_url": document_server_url,
         }, OPEN_TIMEOUT_S)
         return Timed(str(_field(answered, "page_id")), answered.seconds)
+
+    async def read(self, page: str, request: dict[str, Any]) -> Timed[dict[str, Any]]:
+        """What *page*'s editor reads for *request*, an office_read's view: ``{"view": "slide", "target": "1473"}``."""
+        answered = await self._call("POST", f"{_page_path(page)}/read", request, CALL_TIMEOUT_S)
+        return Timed(_answer(answered), answered.seconds)
 
     async def edit(self, page: str, ops: list[Any]) -> Timed[dict[str, Any]]:
         answered = await self._call("POST", f"{_page_path(page)}/edit", {"ops": ops}, EDIT_TIMEOUT_S)

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import io
-import re
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +21,13 @@ from oload.markers import has_marker
 from oload.workloads import KIND_SHARES, edit_ops, fixture
 
 MARKER = "load-r1-3-7-0-ab12"
+# sample.pptx's slide 2 as runtime-office read it (see test_workloads.py).
+READS = Path(__file__).parent / "fixtures" / "sample_pptx_reads.json"
+SLIDE_VIEW: dict[str, Any] = json.loads(READS.read_text())["slide"]
+
+
+def ops(kind: str, marker: str, n: int) -> list[dict[str, Any]]:
+    return edit_ops(kind, marker, n, read=SLIDE_VIEW if kind == "pptx" else None)
 
 
 def _saved(build: Callable[[Any], None], document: Any) -> bytes:
@@ -43,11 +51,13 @@ def saved_xlsx(op: dict[str, Any]) -> bytes:
 
 
 def saved_pptx(op: dict[str, Any]) -> bytes:
-    [text] = re.findall(r"<p>(.*?)</p>", op["slides"][0]["html"])
+    # The editor's ids are its own: the slide and the shape are found by the number and the name its read gave them.
+    assert (op["slide"], op["hash"]) == (SLIDE_VIEW["id"], SLIDE_VIEW["hash"])
+    [name] = [shape["name"] for shape in SLIDE_VIEW["shapes"] if shape["id"] == op["shape"]]
 
     def build(deck: Any) -> None:
-        slide = deck.slides.add_slide(deck.slide_layouts[6])
-        slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1)).text_frame.text = text
+        [shape] = [shape for shape in deck.slides[SLIDE_VIEW["number"] - 1].shapes if shape.name == name]
+        shape.text_frame.text = op["text"]
 
     return _saved(build, Presentation(io.BytesIO(fixture("pptx"))))
 
@@ -82,7 +92,7 @@ SAVED: dict[str, Callable[[dict[str, Any]], bytes]] = {
 
 @pytest.mark.parametrize("kind", list(KIND_SHARES))
 def test_the_saved_file_holds_the_edits_marker(kind: str) -> None:
-    [op] = edit_ops(kind, MARKER, 4)
+    [op] = ops(kind, MARKER, 4)
     assert has_marker(kind, SAVED[kind](op), MARKER)
 
 
@@ -93,7 +103,7 @@ def test_the_untouched_fixture_holds_no_marker(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", list(KIND_SHARES))
 def test_a_later_marker_that_starts_with_this_one_is_not_this_one(kind: str) -> None:
-    [op] = edit_ops(kind, MARKER + "0", 4)
+    [op] = ops(kind, MARKER + "0", 4)
     saved = SAVED[kind](op)
     assert has_marker(kind, saved, MARKER + "0")
     assert not has_marker(kind, saved, MARKER)
