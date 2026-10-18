@@ -8,10 +8,11 @@ formulas themselves and compare with the stored value where there is one.
 
 Covers what office tasks write: numbers, percentages, cell references
 (``A1``, ``$B$2``, ``Sheet!A1``, ``'Q3 plan'!A1``), ranges inside the
-aggregate functions, ``+ - * / ^ &``, parentheses, unary minus, and SUM,
+aggregate functions, ``+ - * / ^ &``, parentheses, unary minus, SUM,
 AVERAGE, MIN, MAX, COUNT, ROUND, ABS, PRODUCT, SUMPRODUCT and IF with
-comparisons. Anything else raises :class:`Unsupported`, which a check
-reports as "cannot evaluate" rather than as a failure of the agent.
+comparisons, and the dates of DATE, DAYS, DATEDIF in days and NETWORKDAYS
+(a date is its day number). Anything else raises :class:`Unsupported`, which
+a check reports as "cannot evaluate" rather than as a failure of the agent.
 """
 from __future__ import annotations
 
@@ -330,6 +331,18 @@ class _Parser:
             if cond if isinstance(cond, bool) else to_number(cond) != 0:
                 return _scalar(args[1])
             return _scalar(args[2]) if len(args) > 2 else False
+        if name == "DATE":
+            if len(args) != 3:
+                raise Unsupported("DATE without a year, a month and a day")
+            year, month, day = (int(to_number(_scalar(a))) for a in args)
+            # As a spreadsheet reads them: a year under 1900 counts from 1900, a month past 12 runs into the next year,
+            # and a day past the month's end into the next month.
+            year = year + 1900 if 0 <= year < 1900 else year
+            year, month = year + (month - 1) // 12, (month - 1) % 12 + 1
+            try:
+                return to_number(_dt.datetime(year, month, 1)) + day - 1
+            except ValueError:
+                raise FormulaError(f"DATE({year}, {month}, {day}) is no date") from None
         if name == "DAYS":
             return to_number(_scalar(args[0])) - to_number(_scalar(args[1]))
         if name == "DATEDIF":

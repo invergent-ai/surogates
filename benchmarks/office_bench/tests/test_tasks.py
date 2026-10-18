@@ -683,6 +683,73 @@ def test_xlsx_multi_sheet_and_dates_done_right(tmp_path):
     assert failures(run_checks("xlsx-dates", path)) == []
 
 
+LAUNCH_PLAN = [("Copy final", "Inês", 3, 7), ("Landing page", "Rui", 5, 14), ("Email campaign", "Ana", 10, 21),
+               ("Press kit", "Inês", 12, 19), ("Launch event", "Marta", 24, 24)]
+
+
+def _store_computed(path: str, values: dict[str, float]) -> None:
+    """Store each formula's computed value in the first sheet, as the editor's save does: openpyxl stores none."""
+    import re
+    import zipfile
+
+    with zipfile.ZipFile(path) as z:
+        parts = {name: z.read(name) for name in z.namelist()}
+    sheet = parts["xl/worksheets/sheet1.xml"].decode()
+    for ref, value in values.items():
+        sheet, found = re.subn(rf'(<c r="{ref}"[^>]*><f>[^<]*</f>)<v></v>', rf"\g<1><v>{value}</v>", sheet)
+        assert found == 1, ref
+    parts["xl/worksheets/sheet1.xml"] = sheet.encode()
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+
+
+def _launch_plan(path: str, *, formulas: bool, year: int = 2026, number_format: str = "d mmm yyyy") -> str:
+    """launch-plan.xlsx with the prompt's rows, each start and end in November of *year*, in *number_format*: dates
+    typed in, or =DATE formulas whose values the file stores; the days by formula."""
+    import datetime as dt
+
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    ws = book.active
+    ws.append(["Task", "Owner", "Start", "End", "Days"])
+    stored: dict[str, float] = {}
+    for row, (task, owner, start, end) in enumerate(LAUNCH_PLAN, start=2):
+        ws.append([task, owner, None, None, f"=D{row}-C{row}+1"])
+        stored[f"E{row}"] = end - start + 1
+        for column, day in (("C", start), ("D", end)):
+            cell = ws[f"{column}{row}"]
+            date = dt.datetime(year, 11, day)
+            if formulas:
+                cell.value = f"=DATE({year},11,{day})"
+                stored[cell.coordinate] = (date - dt.datetime(1899, 12, 30)).days
+            else:
+                cell.value = date
+            cell.number_format = number_format
+    book.save(path)
+    _store_computed(path, stored)
+    return path
+
+
+@pytest.mark.parametrize("formulas", [False, True], ids=["typed", "=DATE"])
+def test_xlsx_dates_counts_a_date_typed_or_made_by_a_formula(tmp_path, formulas):
+    path = _launch_plan(str(tmp_path / "launch-plan.xlsx"), formulas=formulas, number_format="dd-mmm-yyyy")
+    results = run_checks("xlsx-dates", path)
+    assert failures(results) == []
+    # The days are worked out from the dates, whichever way they were written.
+    assert [r.passed for r in results if r.name == "durations computed by formula"] == [True]
+
+
+@pytest.mark.parametrize("formulas", [False, True], ids=["typed", "=DATE"])
+@pytest.mark.parametrize("year, number_format", [(2025, "d mmm yyyy"), (2026, "General")], ids=["wrong year", "a number"])
+def test_xlsx_dates_fails_a_wrong_date_or_a_number_not_shown_as_a_date(tmp_path, formulas, year, number_format):
+    path = _launch_plan(str(tmp_path / "launch-plan.xlsx"), formulas=formulas, year=year, number_format=number_format)
+    assert ("start and end are real dates (9+ in Nov 2026)", "0 real dates in Nov 2026") in failures(
+        run_checks("xlsx-dates", path)
+    )
+
+
 def test_xlsx_invoice_done_right(tmp_path):
     import openpyxl
 

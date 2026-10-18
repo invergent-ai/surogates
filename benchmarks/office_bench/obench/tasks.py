@@ -1086,14 +1086,28 @@ def _chart_covers(points: int):
 
 
 def _dates_real(minimum: int):
+    """At least *minimum* cells show a date in November 2026: a date typed in, or a formula's stored value (=DATE(…)),
+    in a date format. The reader gives a stored number as a date only when its cell's format is a date format."""
     def fn(book: SheetBook, ctx):
         import datetime as dt
 
-        dates = [c.raw for s in book.sheets for c in book.cells[s].values() if isinstance(c.raw, dt.datetime)]
-        nov = [d for d in dates if d.year == 2026 and d.month == 11]
+        from openpyxl.styles.numbers import is_date_format
+
+        nov, by_formula = 0, 0
+        for s in book.sheets:
+            for c in book.cells[s].values():
+                formula = isinstance(c.raw, str) and c.raw.startswith("=")
+                value = c.cached if formula else c.raw
+                if (isinstance(value, dt.datetime) and is_date_format(c.number_format)
+                        and (value.year, value.month) == (2026, 11)):
+                    nov += 1
+                    by_formula += formula
         texty = [c.raw for s in book.sheets for c in book.cells[s].values()
                  if isinstance(c.raw, str) and re.search(r"\bnov", c.raw, re.IGNORECASE) and re.search(r"\d", c.raw)]
-        return len(nov) >= minimum, f"{len(nov)} real dates in Nov 2026" + (f"; dates typed as text: {texty[:3]}" if texty else "")
+        return nov >= minimum, (
+            f"{nov} real dates in Nov 2026" + (f" ({by_formula} from formulas)" if by_formula else "")
+            + (f"; dates typed as text: {texty[:3]}" if texty else "")
+        )
     return C.Check(f"start and end are real dates ({minimum}+ in Nov 2026)", fn, ("date",))
 
 
