@@ -137,8 +137,8 @@ def test_slide_templates_share_one_look():
 
 OFFICE = SKILLS / "productivity/office"
 #: The spreadsheet templates' sample rows: the one exception to specifics coming from the user, said in both places.
-SAMPLES = ("The one exception: a spreadsheet template's sample rows, for a user who gave no rows, said in the chat to be "
-           "samples.")
+SAMPLES = ("The one exception: a spreadsheet template's sample rows, for a user who gave no rows where they fit the request, "
+           "said in the chat to be samples.")
 
 
 def _flat(text: str) -> str:

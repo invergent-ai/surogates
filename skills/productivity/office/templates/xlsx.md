@@ -80,7 +80,7 @@ Write the user's seller, client, invoice number and date into B3:B6; a cell the 
 made up. The due date in B7 and the payment line in A12 are filled only from the terms the user gave (their days in B7's
 formula, their words in A12), else both stay empty; with no date in B6, B7 stays empty too. Then the items from row 15,
 one per row, each Amount its row's Quantity times Unit price. With n items they end at row 14+n: so do the SUM in D9 and
-the format over C and D. Subtotal, Tax and Total due stay formulas; the tax rate is C10 (0% for none).
+the format over C and D. Subtotal, Tax and Total due stay formulas; C10 is the user's tax rate, else empty.
 
 ## Tracker
 
