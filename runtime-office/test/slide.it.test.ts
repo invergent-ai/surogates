@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ContentError } from "../src/markdown.js";
-import { Office } from "../src/office.js";
+import { FLUSH_WAIT_MS, Office } from "../src/office.js";
 import { PagePool } from "../src/pages.js";
-import { eventually, itEnabled, pair, startFixture, type Fixture } from "./support/office.js";
+import { AGENT, IT, editorConfig, eventually, forceSaved, itEnabled, newKey, pair, startFixture, type Fixture } from "./support/office.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -120,6 +120,28 @@ describe.skipIf(!itEnabled)("a slide deck", () => {
       });
     }
     expect((await outline(user)).slides[1]).toMatchObject({ id: second.id, title: "Q3 plan", layout: "Title Only", notes: true });
+  });
+
+  it("is flushed only once a text change reached the document server, so the turn's save holds it", async () => {
+    // The agent's editor alone, as when a chat edits a deck nobody has open, sends a change on its autosave: a second or
+    // two later, two when the change comes just after it sent the one before.
+    const key = newKey();
+    const agent = await office.open({ docKey: key, sessionId: "agent", config: editorConfig(key, AGENT, "sample.pptx"), documentServerUrl: IT.dsUrl });
+    opened.push(agent);
+    const page = await pool.get(agent);
+    const titleOf = async (slide: Any): Promise<Any> =>
+      ((await office.read(agent, { view: "slide", target: slide.id })) as Any).shapes.find((s: Any) => s.placeholder === "title");
+    for (const turn of [1, 2, 3]) {
+      const [first, second] = (await outline(agent)).slides;
+      const [firstTitle, secondTitle] = [await titleOf(first), await titleOf(second)];
+      const sentAt = Date.now();
+      await office.edit(agent, [{ op: "text", slide: first.id, hash: first.hash, shape: firstTitle.id, text: `Review ${turn}` }]);
+      expect(await page.waitFlushed(sentAt, FLUSH_WAIT_MS)).toBe(true);
+      const text = `Plan ${turn}`;
+      expect(await office.edit(agent, [{ op: "text", slide: second.id, hash: second.hash, shape: secondTitle.id, text }])).toMatchObject({ applied: true, flushed: true });
+      expect(await office.flush(agent)).toBe(true);
+      expect(await forceSaved(fixture, key)).toEqual(expect.stringContaining(`<a:t>${text}</a:t>`));
+    }
   });
 
   it("sets a slide's speaker notes, a line per paragraph, and keeps its shapes as they were", async () => {
