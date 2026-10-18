@@ -25,6 +25,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
+from surogates.tools.skill_visibility import fallback_hidden
 from surogates.workstreams import is_project_master, is_project_thread
 
 if TYPE_CHECKING:
@@ -748,9 +749,7 @@ class PromptBuilder:
     ) -> bool:
         """Return whether a regular skill should appear for this toolset
         and sub-agent catalog."""
-        if fallback_for_tools and all(
-            tool in self._available_tools for tool in fallback_for_tools
-        ):
+        if fallback_hidden(fallback_for_tools, frozenset(self._available_tools)):
             return False
         if requires_tools and not all(
             tool in self._available_tools for tool in requires_tools

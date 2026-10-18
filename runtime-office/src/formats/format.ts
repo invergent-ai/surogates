@@ -4,8 +4,11 @@ import { ContentError } from "../markdown.js";
 /** A request to an editor script: `scope` inside it. */
 export type Scope = Record<string, unknown>;
 
-/** What a batch came to: each op's result, or the refusal that stopped it before anything applied. */
-export type Outcome = { results: unknown[] } | { refused: unknown };
+/**
+ * What a batch came to: each op's result, with the document's length where the format measures it, or the refusal
+ * that stopped it before anything applied.
+ */
+export type Outcome = { results: unknown[]; length?: { words: number; pages: number } } | { refused: unknown };
 
 /** What a format runs its commands with. */
 export interface EditContext {

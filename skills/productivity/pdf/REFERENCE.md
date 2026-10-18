@@ -541,9 +541,8 @@ with open("cropped.pdf", "wb") as output:
 - `pdfimages` is much faster than rendering pages
 - Use low resolution for previews, high resolution for final output
 
-### 4. For Form Filling
-- pdf-lib maintains form structure better than most alternatives
-- Pre-validate form fields before processing
+### 4. For Forms, Notes, Redaction and Rotation
+- To fill, annotate, redact or rotate: office_edit where the chat has it, else the pdf-forms skill
 
 ### 5. Memory Management
 ```python

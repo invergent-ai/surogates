@@ -58,7 +58,8 @@ export class Office {
       const work = () => format.edit(context, ops);
       const { outcome, sentAt } = format.grouped ? await this.inGroup(id, page, work) : await this.undoing(id, page, work);
       if ("refused" in outcome) return { applied: false, refused: outcome.refused };
-      return { applied: true, results: outcome.results, flushed: await this.flushed(page, sentAt) };
+      const { results, length } = outcome;
+      return { applied: true, results, ...(length ? { length } : {}), flushed: await this.flushed(page, sentAt) };
     });
   }
 

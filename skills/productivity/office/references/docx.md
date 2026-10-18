@@ -11,7 +11,8 @@
 - Ops in one call run in order, each on what the earlier ops left: a block an earlier op replaced, moved or deleted is
   gone for the later ones (a moved block gets a new id, found in that op's result `ids`), and one it re-worded has a
   new hash.
-- For a length the user asks for, count words: about 450 words of body text fill a page.
+- For a length the user asks for, count words: about 450 words of body text fill a page. Each applied edit's result
+  gives the document's `length` in words and pages: check it against what was asked before you answer.
 
 ## Read
 
@@ -25,6 +26,10 @@
 The outline lists blocks as `{"id", "hash", "kind", "text"}`, where `text` is the first words only; a long document
 comes in pages, continue with `start` = its `next`. Kinds include `heading1`–`heading9`, `paragraph`, `bullet`,
 `numbered`, `table`, `image`, `pending` (with `key` and `intent`). Comment threads come with their `id`, a string.
+
+A list item (`bullet` or `numbered`) also has a `label`: what a reader sees before its text, such as `"3."`, `"a."` or
+`"•"`. It stays apart from `text`, which is exactly what a `find` matches: quote the text, never the label. A list
+level that shows no label reads as `"•"`.
 
 The `block` view gives one block's exact text, tabs and spaces kept (a table's cells): copy the words for a
 `{"find": …}` target from it. `find` searches the whole document and `nth` counts its exact matches (case and spacing
@@ -77,6 +82,19 @@ the same words when they are still in it, otherwise over the whole new block.
 `thread` is a comment's `id` from the outline, or the `thread` a `comment` op returned. The outline lists each thread's
 latest replies. A reply in a thread states only the result, in one or two sentences (at most 400 characters): the
 reasoning and the conversation stay in the chat.
+
+## Results
+
+```
+{"applied": true, "length": {"words": 912, "pages": 2},
+ "results": [{"op": 0, "ids": ["912"], "reads": [{"id": "912", "kind": "numbered", "label": "3.", "text": "Renew the support contract"}]}]}
+```
+
+`results` has one entry per op, in order (`op` counts from 0). An `insert`, a `replace` of a block or a pending block,
+and a `move` give the blocks they made: their `ids`, and `reads`, each block as a reader sees it now (`kind`, `label`
+for a list item, `text`; a pending block's `key` and `intent`). A numbered item you inserted shows the number it really
+got, whatever the markdown wrote. A `comment` gives its `thread`. `length` is the whole document's once the call
+applied.
 
 ## Refusals
 

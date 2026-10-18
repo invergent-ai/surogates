@@ -20,6 +20,7 @@ from surogates.devices.workspace import DeviceOperationError
 from surogates.storage.skill_staging import stage_in_folder, staging_preamble
 from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.skill_visibility import fallback_hidden, fallback_refusal, offered_fallback_tools
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.workstreams import master_skill_refusal, skills_left_out
 
@@ -258,12 +259,16 @@ async def _skills_list_handler(
         return json.dumps({"error": "No tenant context available"})
 
     skills = await _load_all_skills(**kwargs)
+    offered = offered_fallback_tools(kwargs.get("channel"), kwargs.get("session_config"))
 
     category_filter = arguments.get("category")
 
     skill_list: list[dict[str, Any]] = []
     for s in skills:
         if category_filter and s.category != category_filter:
+            continue
+        # A skill standing in for tools this chat is sent: the api's list leaves it out too.
+        if fallback_hidden(getattr(s, "fallback_for_tools", None) or (), offered):
             continue
         # Experts are not skills you read -- they are models you
         # consult, and their SKILL.md is the *expert's* system prompt.
@@ -475,6 +480,13 @@ async def _skill_view_handler(
 
     if matching_skill is not None and getattr(matching_skill, "is_expert", False):
         return _expert_refusal(name)
+
+    # A skill standing in for tools this chat is sent: none of it is read, as the api refuses it.
+    if matching_skill is not None and fallback_hidden(
+        getattr(matching_skill, "fallback_for_tools", None) or (),
+        offered_fallback_tools(kwargs.get("channel"), kwargs.get("session_config")),
+    ):
+        return json.dumps({"success": False, "error": fallback_refusal(name)}, ensure_ascii=False)
 
     if matching_skill is None:
         available = [s.name for s in skills[:20]]

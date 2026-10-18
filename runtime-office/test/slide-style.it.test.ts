@@ -204,4 +204,21 @@ describe.skipIf(!itEnabled)("Claude Slides' styling on a live deck", () => {
       });
     }
   });
+
+  it("builds a table and a list given CSS that changes nothing, and says it can be left out", async () => {
+    const { agent } = await pair(office, opened, "sample.pptx");
+    const html = `<section style="background:#ffffff;font-family:Arial;padding:128px">
+      <table style="width:800px;font-size:32px;border-collapse:collapse"><tr><td>North</td><td>120</td></tr></table>
+      <ul style="font-size:32px;list-style-type:disc"><li>Hire two engineers</li></ul></section>`;
+    const result: Any = await office.edit(agent, [{ op: "slides", slides: [{ html }] }]);
+    expect(result).toMatchObject({ applied: true, flushed: true });
+    const { id, number } = result.results[0].slides[0];
+    expect(result.results[0].note).toBe(`Slide ${number} is built, but this CSS changes nothing there and can be left out: `
+      + "border-collapse: collapse on a table: native tables already collapse; list-style-type: disc on a ul: a native bulleted list already shows •.");
+    const kinds = `function () {
+      var s = Api.GetPresentation().GetAllSlides().filter(function (x) { return String(x.Slide.Get_Id()) === scope.id; })[0];
+      return s ? JSON.stringify(s.GetAllDrawings().map(function (x) { return x.GetClassType(); }).sort()) : null;
+    }`;
+    expect(JSON.parse((await (await pool.get(agent)).command(kinds, { id })).value as string)).toEqual(["shape", "table"]);
+  });
 });

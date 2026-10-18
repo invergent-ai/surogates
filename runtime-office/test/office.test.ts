@@ -89,6 +89,16 @@ describe("Office edits in a group", () => {
     expect(waitFlushed).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the document's length through", async () => {
+    const measured: Format = {
+      script: "function () {}", grouped: true, readScope: () => ({}),
+      compile: async (raw) => raw as unknown[],
+      edit: async () => ({ results: [{ op: 0 }], length: { words: 120, pages: 1 } }),
+    };
+    const { office } = officeAnswering([], { kind: "measured", formats: { measured } });
+    expect(await office.edit("p", ops)).toEqual({ applied: true, results: [{ op: 0 }], length: { words: 120, pages: 1 }, flushed: true });
+  });
+
   it("cancels the group of a refused edit", async () => {
     const refused = { op: 0, reason: "gone", block: null };
     const { office, method } = officeAnswering([{ refused }]);

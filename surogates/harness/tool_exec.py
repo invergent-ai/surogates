@@ -219,13 +219,15 @@ COPY_REMADE_HANDED_ON = (
 
 
 def _noted(content: str, note: str) -> str:
-    """*content* with *note*: a key of its own in a result that is a JSON object, a line after any other."""
+    """*content* with *note*: a key of its own in a result that is a JSON object, after any note it has; a line
+    after any other."""
     try:
         answer = json.loads(content)
     except ValueError:
         answer = None
     if isinstance(answer, dict):
-        return json.dumps({**answer, "note": note})
+        said = answer.get("note")
+        return json.dumps({**answer, "note": f"{said} {note}" if said else note}, ensure_ascii=False)
     return f"{content}\n\n[{note}]"
 
 
@@ -1851,6 +1853,8 @@ async def _run_single_tool(
     )
     start = time.monotonic()
     tool_failed = False
+    # When a terminal command began in the sandbox: what it left behind is looked for after it.
+    began_in_sandbox: float | None = None
     # Whether this step put the thread's copy on its hand-off, for a helper it started; and the
     # helpers' files the copy then kept its own version of.
     handed_on: list[bool] = []
@@ -1958,6 +1962,9 @@ async def _run_single_tool(
             # NOTE: The tool-executor inside the sandbox image must strip
             # _trace_context from args before dispatching to the handler.
             # It can use the values for its own structured logging.
+            if tool_name == "terminal":
+                # Once the pod is there: a thread's copy made for it now is not the command's work.
+                began_in_sandbox = time.time()
             result_content = await sandbox_pool.execute(
                 sandbox_owner, tool_name, args_str,
             )
@@ -2122,6 +2129,25 @@ async def _run_single_tool(
 
         note = await open_document_note(tool_args, session, session_factory=session_factory)
         if note:
+            result_content = _noted(result_content, note)
+
+    # A command names a script, not the documents the script makes: those it left behind are looked for after it,
+    # and its result says the user can neither watch nor co-edit them. A document it named or changed that the
+    # editor holds gets a read's note. A background process is not followed.
+    if tool_name == "terminal" and not tool_failed:
+        from surogates.office.scripted import terminal_notes
+
+        try:
+            notes = await terminal_notes(
+                tool_args, session, began_in_sandbox, sandbox_pool=sandbox_pool, session_factory=session_factory,
+            )
+        except Exception:
+            # The command ran: its result goes back as it is.
+            logger.warning(
+                "Could not make the office notes of a terminal call in session %s", session.id, exc_info=True,
+            )
+            notes = []
+        for note in notes:
             result_content = _noted(result_content, note)
 
     # A thread on a copy just made is told, by that step's result whatever the

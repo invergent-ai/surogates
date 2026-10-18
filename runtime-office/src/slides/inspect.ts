@@ -9,8 +9,9 @@ export interface InspectArgs { phase: "check" | "faces" | "shapes"; canvas: Canv
 export type Shot = "element" | "box" | "text" | "shadow" | "region";
 export type Inspected =
   | { error: string }
-  | { stacks: string[]; faces: { family: string; bold: boolean; italic: boolean }[] }
-  | { spec: SlideSpec; icons: { name: string; color: string; px: number }[]; embeds: { html: string; w: number; h: number }[]; shots: Shot[] };
+  // "check" also says which inline CSS it took though it changes nothing in the native shape (SlideSpec's ignored).
+  | { stacks: string[]; faces: { family: string; bold: boolean; italic: boolean }[]; ignored?: string[] }
+  | { spec: Omit<SlideSpec, "ignored">; icons: { name: string; color: string; px: number }[]; embeds: { html: string; w: number; h: number }[]; shots: Shot[] };
 
 // Runs in the measuring page. "check" holds the slide to Claude Slides' format and says which font stacks and faces
 // its text uses; "faces" only says which; "shapes" measures it into a SlideSpec. An svg, an icon, an embed or what only
@@ -33,6 +34,14 @@ export function inspect(args: InspectArgs): Inspected {
   const EMPTY = new Set(["X-SHAPE", "X-ICON", "X-CONNECTOR", "HR"]);
   // Claude Slides' style properties, as the longhands Chromium expands them into.
   const STYLE = /^(position|left|top|right|bottom|width|height|min-width|min-height|max-width|max-height|display|flex-direction|flex-wrap|row-gap|column-gap|align-items|justify-content|justify-items|align-self|justify-self|flex-grow|flex-shrink|flex-basis|grid-template-columns|grid-template-rows|grid-template-areas|grid-column-start|grid-column-end|grid-row-start|grid-row-end|aspect-ratio|padding-(top|right|bottom|left)|overflow-x|overflow-y|font-family|font-size|font-weight|font-style|font-variant-.+|font-stretch|font-size-adjust|font-kerning|font-optical-sizing|font-feature-settings|font-variation-settings|line-height|letter-spacing|text-align|text-transform|white-space|white-space-collapse|text-wrap|text-wrap-mode|text-wrap-style|text-decoration-.+|-webkit-text-stroke-(width|color)|color|background-.+|-webkit-text-fill-color|border-(top|right|bottom|left)-(width|style|color)|border-(top-left|top-right|bottom-right|bottom-left)-radius|border-image-.+|box-shadow|text-shadow|opacity|transform|filter|backdrop-filter|mix-blend-mode|object-fit|margin-(top|right|bottom|left)|box-sizing)$/;
+  // Inline CSS outside the format that the native shape already does, by tag, property and value: taken as it is, and
+  // said in the result so it can be left out. Native tables always collapse their borders; a native bulleted list
+  // shows •, and a numbered one counts from 1.
+  const UNCHANGED: Record<string, string> = {
+    "TABLE border-collapse: collapse": "border-collapse: collapse on a table: native tables already collapse",
+    "UL list-style-type: disc": "list-style-type: disc on a ul: a native bulleted list already shows •",
+    "OL list-style-type: decimal": "list-style-type: decimal on an ol: a native numbered list already counts 1., 2., 3.",
+  };
   const UNITS = /\d(?:\.\d+)?(?:rem|vw|vh|vmin|vmax|ch|ex|cm|mm|in|pc|q)\b/i;
   const { canvas } = args;
   const ptPerPx = canvas.emuPerPx / 12700;
@@ -172,7 +181,7 @@ export function inspect(args: InspectArgs): Inspected {
     const elements = [section, ...Array.from(section.querySelectorAll("*"))].filter((el) => !inside(el));
 
     // --- the text's font stacks and faces, and its size
-    const fontsUsed = (): Inspected => {
+    const fontsUsed = (): Extract<Inspected, { stacks: string[] }> => {
       const stacks = new Set<string>();
       const faces = new Map<string, { family: string; bold: boolean; italic: boolean }>();
       const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
@@ -193,6 +202,7 @@ export function inspect(args: InspectArgs): Inspected {
     // Checked once: the measurer then writes each element's resolved family inline, which the format refuses on a span.
     if (args.phase === "check") {
       if (elements.length > 200) fail("A slide has at most 200 elements: split it.");
+      const ignored = new Set<string>();
       // An svg inside another is walked with it.
       for (const el of Array.from(section.querySelectorAll("svg"))) if (!el.parentElement?.closest("svg")) svgTree(el, () => describe(el));
       let embeds = 0;
@@ -306,7 +316,12 @@ export function inspect(args: InspectArgs): Inspected {
           const value = style.getPropertyValue(property);
           // A shorthand sets its other longhands to their initial value.
           if (value === "initial") continue;
-          if (!STYLE.test(property)) fail(`${describe(el)} uses ${property}, which is not in the slide format.`);
+          if (!STYLE.test(property)) {
+            const unchanged = UNCHANGED[`${tag} ${property}: ${value}`];
+            if (unchanged === undefined) fail(`${describe(el)} uses ${property}, which is not in the slide format.`);
+            else ignored.add(unchanged);
+            continue;
+          }
           // Pulled back, a box lets Chromium fit text where the editor's runs and paragraphs need more room.
           if (/^margin-/.test(property) && parseFloat(getComputedStyle(el).getPropertyValue(property)) < 0) fail(`${describe(el)}: no negative margin: use gap or padding.`);
           if (/var\(|currentcolor/i.test(value)) fail(`${describe(el)}: no var() or currentcolor.`);
@@ -333,7 +348,7 @@ export function inspect(args: InspectArgs): Inspected {
         if (down !== "start") el.setAttribute("data-anchor", down === "center" ? "ctr" : "b");
         el.style.display = cs.display.startsWith("inline") ? "inline-block" : "block";
       }
-      return fontsUsed();
+      return { ...fontsUsed(), ignored: [...ignored] };
     }
 
     // --- with the resolved fonts loaded: nothing past the slide's edge, nothing overflowing its box
@@ -1023,7 +1038,7 @@ export function inspect(args: InspectArgs): Inspected {
     const sectionStyle = getComputedStyle(section), sectionBox = box(section);
     const background = fillOfStyle(sectionStyle, sectionBox);
     const transition = section.getAttribute("data-transition");
-    const spec: SlideSpec = {
+    const spec: Omit<SlideSpec, "ignored"> = {
       background: background === "picture" ? null : background,
       shapes: [...(background === "picture" ? [shot(section, "box", sectionBox)] : []), ...layer(section)],
       notes: section.querySelector(":scope > aside")?.textContent?.trim() ?? null, hidden: section.hasAttribute("hidden"),

@@ -457,6 +457,32 @@ describe.skipIf(!chromiumThere)("measuring a Claude Slides slide", () => {
     await expect(measure(`<section class="x" data-section="Intro" style="background:#fff"><p data-note="y" style="font-size:32px">ok</p></section>`)).resolves.toBeTruthy();
   });
 
+  it("takes CSS that changes nothing in the native shape, saying so, and refuses what would change it", async () => {
+    const table: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial">
+      <table style="width:800px;font-size:32px;border-collapse:collapse"><tr><td>North</td><td>120</td></tr></table></section>`);
+    expect(table.shapes[0].kind).toBe("table");
+    expect(table.ignored).toEqual(["border-collapse: collapse on a table: native tables already collapse"]);
+    const lists: Any = await measure(`<section style="background:#fff;padding:128px;font-family:Arial">
+      <ul style="font-size:32px;list-style-type:disc"><li>One</li><li>Two</li></ul>
+      <ol style="font-size:32px;list-style-type:decimal"><li>First</li><li>Second</li></ol></section>`);
+    expect(lists.shapes.map((s: Any) => s.text.paras[0].bullet ?? (s.text.paras[0].numbered && "numbered"))).toEqual(["•", "numbered"]);
+    expect(lists.ignored).toEqual([
+      "list-style-type: disc on a ul: a native bulleted list already shows •",
+      "list-style-type: decimal on an ol: a native numbered list already counts 1., 2., 3.",
+    ]);
+    expect((await measure(`<section style="background:#fff"><p style="font-size:32px">Plain</p></section>`)).ignored).toEqual([]);
+    for (const html of [
+      `<table style="font-size:32px;border-collapse:separate"><tr><td>North</td></tr></table>`,
+      `<ol style="font-size:32px;list-style-type:lower-roman"><li>First</li></ol>`,
+      `<ul style="font-size:32px;list-style-type:decimal"><li>One</li></ul>`,
+      `<ol style="font-size:32px;list-style-type:disc"><li>First</li></ol>`,
+      `<div style="border-collapse:collapse"><p style="font-size:32px">Not a table</p></div>`,
+    ]) {
+      const property = /(border-collapse|list-style-type)/.exec(html)![1];
+      await expect(measure(`<section style="background:#fff;padding:128px">${html}</section>`), html).rejects.toThrow(`uses ${property}, which is not in the slide format`);
+    }
+  });
+
   it("resolves a font stack to a face the document server has", async () => {
     const spec: Any = await measure(`<section style="background:#fff;font-family:'DM Sans', Georgia, serif"><p style="font-size:32px">x</p></section>`);
     expect(spec.shapes[0].text.paras[0].runs[0].font).toBe("Georgia");

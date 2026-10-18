@@ -738,10 +738,18 @@
     results.forEach(function (r) {
       if (!r.slides) return;
       r.slides = r.slides.map(function (slide) { return { id: idOf(slide), number: slide.GetSlideIndex() + 1 }; });
-      var note = magicNote(ops[r.op].slides.map(function (s) { return s.spec; }), r.slides);
-      if (note) r.note = note;
+      var specs = ops[r.op].slides.map(function (s) { return s.spec; });
+      var notes = [magicNote(specs, r.slides)].concat(ignoredNotes(specs, r.slides)).filter(Boolean);
+      if (notes.length) r.note = notes.join(" ");
     });
     return { results: results };
+  }
+  // CSS a slide was built with though it changes nothing in its native shapes: said, so the next slide leaves it out.
+  function ignoredNotes(specs, slides) {
+    return specs.map(function (spec, i) {
+      if (!spec.ignored.length) return null;
+      return "Slide " + slides[i].number + " is built, but this CSS changes nothing there and can be left out: " + spec.ignored.join("; ") + ".";
+    });
   }
   // A slide's transition plays as the slide is entered, so Morph moves what two neighbouring slides both name only when
   // the second arrives by it: ids shared with the slide built before it here, on a slide that does not, move nothing.

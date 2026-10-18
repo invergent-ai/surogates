@@ -12,8 +12,9 @@ edit runtime-office's sample documents. Each task's checks read the saved file: 
 charts, slides, fields), values (facts carried over, formulas present and computing the right number, stored values
 agreeing with them), and **nothing the task did not ask for destroyed** (the rest of a sentence, other slides, a bold
 phrase, other cells, notes). Per rollout it also records what the trace shows: model calls, tool calls by name,
-`office_edit` refusals and errors with their texts, whether the agent read the office skill, file/terminal tool use,
-turns, wall time, and whether the final message claims something the checks contradict.
+`office_edit` refusals and errors with their texts, whether the agent read the office skill (a `skill_view` of it, or
+the guide an office call delivers), file/terminal tool use, turns, wall time, and whether the final message claims
+something the checks contradict.
 
 It is a measurement tool for the model-in-the-harness, not a unit test of the editor: the same philosophy as
 `benchmarks/gaia` and `benchmarks/workspace_bench`. A task fails when the document is wrong; the trace says which call

@@ -42,9 +42,9 @@ function asTheWorkerSendsIt(op: Raw): Raw {
 }
 
 const CHECKS: [string, (ops: unknown[]) => unknown, number][] = [
-  ["word.md", compileOps, 10],
-  ["cell.md", compileCellOps, 6],
-  ["slide.md", checkSlideOps, 3],
+  ["docx.md", compileOps, 10],
+  ["xlsx.md", compileCellOps, 6],
+  ["pptx.md", checkSlideOps, 3],
   ["pdf.md", compilePdfOps, 5],
 ];
 
@@ -72,7 +72,7 @@ describe.skipIf(!chromiumThere)("the slide reference's example slides", () => {
     await close();
   });
 
-  const slides = callsOf(reference("slide.md")).flat().filter((op) => op.op === "slides").flatMap((op) => asTheWorkerSendsIt(op).slides as Raw[]);
+  const slides = callsOf(reference("pptx.md")).flat().filter((op) => op.op === "slides").flatMap((op) => asTheWorkerSendsIt(op).slides as Raw[]);
 
   it("are found", () => {
     expect(slides.length).toBeGreaterThanOrEqual(2);

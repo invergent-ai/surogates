@@ -1,6 +1,6 @@
 ---
 name: pdf
-description: "To fill in, redact, annotate, or add, remove or rotate pages of a PDF in the workspace when the office_edit tool is available, use the office skill instead: the user watches it live. Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill."
+description: "Use this skill to merge PDFs, split them apart, create new PDFs, add watermarks, encrypt or decrypt them, extract their tables or images, or OCR a scanned PDF to make it searchable. If the user asks to produce a .pdf file, use this skill."
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
@@ -8,7 +8,7 @@ license: Proprietary. LICENSE.txt has complete terms
 
 ## Overview
 
-This guide covers PDF **transformations** — merging, splitting, rotating, watermarking, encrypting, filling forms, extracting images, and OCRing scanned PDFs. **Reading text/tables is handled by `read_file` directly; do NOT use this skill for plain reading.** See REFERENCE.md for advanced library usage and FORMS.md for form filling.
+This guide covers PDF **transformations** — merging, splitting, creating, watermarking, encrypting, extracting images, and OCRing scanned PDFs. To fill, annotate, redact or rotate: office_edit where the chat has it, else the pdf-forms skill. **Reading text/tables is handled by `read_file` directly; do NOT use this skill for plain reading.** See REFERENCE.md for advanced library usage.
 
 **Dependencies are pre-installed in the sandbox image — do NOT `pip install` or `npm install` anything.** Just import or invoke directly.
 
@@ -75,19 +75,6 @@ print(f"Title: {meta.title}")
 print(f"Author: {meta.author}")
 print(f"Subject: {meta.subject}")
 print(f"Creator: {meta.creator}")
-```
-
-#### Rotate Pages
-```python
-reader = PdfReader("input.pdf")
-writer = PdfWriter()
-
-page = reader.pages[0]
-page.rotate(90)  # Rotate 90 degrees clockwise
-writer.add_page(page)
-
-with open("rotated.pdf", "wb") as output:
-    writer.write(output)
 ```
 
 ### pdfplumber - Layout-aware text + tables (fallback only)
@@ -262,9 +249,6 @@ qpdf --empty --pages file1.pdf file2.pdf -- merged.pdf
 qpdf input.pdf --pages . 1-5 -- pages1-5.pdf
 qpdf input.pdf --pages . 6-10 -- pages6-10.pdf
 
-# Rotate pages
-qpdf input.pdf output.pdf --rotate=+90:1  # Rotate page 1 by 90 degrees
-
 # Remove password
 qpdf --password=mypassword --decrypt encrypted.pdf decrypted.pdf
 ```
@@ -276,9 +260,6 @@ pdftk file1.pdf file2.pdf cat output merged.pdf
 
 # Split
 pdftk input.pdf burst
-
-# Rotate
-pdftk input.pdf rotate 1east output rotated.pdf
 ```
 
 ## Common Tasks
@@ -351,11 +332,11 @@ with open("encrypted.pdf", "wb") as output:
 | Watermark | `scripts/watermark.py` | `python scripts/watermark.py in.pdf out.pdf "CONFIDENTIAL"` |
 | Command line merge | qpdf | `qpdf --empty --pages ...` |
 | OCR scanned PDFs | `pdf-reading` skill or pytesseract | Convert to image first |
-| Fill PDF forms | pdf-lib or pypdf (see FORMS.md) | See FORMS.md |
+| Fill, annotate, redact or rotate | office_edit where the chat has it, else the pdf-forms skill | — |
 
 ## Next Steps
 
 - For advanced pypdfium2 usage, see REFERENCE.md
 - For JavaScript libraries (pdf-lib), see REFERENCE.md
-- If you need to fill out a PDF form, follow the instructions in FORMS.md
+- To fill, annotate, redact or rotate: office_edit where the chat has it, else the pdf-forms skill
 - For troubleshooting guides, see REFERENCE.md

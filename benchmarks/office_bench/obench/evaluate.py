@@ -20,6 +20,7 @@ from obench.tasks import Task
 
 FILE_TOOLS = {"write_file", "patch", "read_file", "terminal", "execute_code", "list_files", "search_files"}
 _DOC_EXT = re.compile(r"\.(docx|xlsx|pptx|pdf)\b", re.IGNORECASE)
+_DOC_KIND = re.compile(r"\.(docx|xlsx|pptx|pdf)$", re.IGNORECASE)
 _ADMITS = re.compile(
     r"\b(couldn'?t|could not|can'?t|cannot|unable|not able|wasn'?t able|failed|didn'?t|did not|isn'?t supported|"
     r"not supported|doesn'?t support|no way to|not possible|unfortunately|however)\b",
@@ -55,6 +56,15 @@ def final_message(events: list[Event]) -> str:
     return ""
 
 
+def _document_kind(*paths: Any) -> str:
+    """The document type the first of *paths* that names one is: docx, xlsx, pptx or pdf; "?" when none does."""
+    for path in paths:
+        found = _DOC_KIND.search(path.strip()) if isinstance(path, str) else None
+        if found:
+            return found.group(1).lower()
+    return "?"
+
+
 def metrics(events: list[Event]) -> dict[str, Any]:
     tools: Counter[str] = Counter()
     refusals: list[str] = []
@@ -63,6 +73,8 @@ def metrics(events: list[Event]) -> dict[str, Any]:
     reads_of_missing = 0
     office_busy = 0
     skill_views: list[str] = []
+    # The document types whose guide (the office skill's rules and the type's reference) an office call delivered.
+    office_guides: list[str] = []
     file_tools_on_docs: list[str] = []
     calls: dict[str, tuple[str, dict]] = {}
     for ev in events:
@@ -79,6 +91,10 @@ def metrics(events: list[Event]) -> dict[str, Any]:
         elif ev.type == "tool.result":
             name = d.get("name") or "?"
             content = _parse(d.get("content"))
+            if isinstance(content, dict) and name.startswith("office_") and isinstance(content.get("guide"), dict):
+                # Delivered with a done call or one refused for what it said: the latter is still counted below.
+                _, called = calls.get(d.get("tool_call_id") or "", ("", {}))
+                office_guides.append(_document_kind(called.get("path"), content.get("document")))
             if isinstance(content, dict) and name == "office_read" and str(content.get("error", "")).startswith("No document at"):
                 # The documented answer for a document not made yet, not a tool failure.
                 reads_of_missing += 1
@@ -109,7 +125,8 @@ def metrics(events: list[Event]) -> dict[str, Any]:
         "office_busy": office_busy,
         "other_tool_errors": other_errors,
         "skill_views": skill_views,
-        "read_office_skill": any(s.split("/")[0] == "office" for s in skill_views),
+        "office_guides": office_guides,
+        "read_office_skill": bool(office_guides) or any(s.split("/")[0] == "office" for s in skill_views),
         "file_tools_on_documents": file_tools_on_docs,
         "file_or_terminal_calls": sum(n for name, n in tools.items() if name in FILE_TOOLS),
         "sandbox_unavailable": sum(1 for x in other_errors if "sandbox_unavailable" in x),

@@ -1,10 +1,16 @@
 ---
 name: office
-description: "Use whenever a Word document (.docx), spreadsheet (.xlsx), slide deck (.pptx) or PDF in the workspace is to be written, filled in, edited or commented on and the office_edit tool is available: the user watches your edits appear live in the file pane, under your name, and may edit beside you. Covers drafting a document section by section, filling and formatting sheets, building slides in the Claude Slides format, and filling, redacting or annotating a PDF. Use the docx, xlsx and pptx skills only when the office tools are not available."
+description: "Use whenever a Word document (.docx), spreadsheet (.xlsx), slide deck (.pptx) or PDF in the workspace is to be written, filled in, edited or commented on and the office_edit tool is available: the user watches your edits appear live in the file pane, under your name, and may edit beside you. Covers drafting a document section by section, filling and formatting sheets, building slides in the Claude Slides format, and filling, redacting or annotating a PDF."
 requires_tools: [office_edit]
 ---
 
 # Working on documents live with the user
+
+Make a new document with `office_edit` too, not only change one: a missing `.docx`, `.xlsx`, `.pptx` or `.pdf` is made
+blank and opens in the user's file pane. Never make or change one with a script, a python library (python-docx,
+openpyxl, python-pptx, pypdf), `write_file`, `patch` or the terminal: the user can neither watch nor edit a document
+made that way. What `office_edit` cannot do to a PDF (a new PDF with content; merging, splitting or encrypting PDFs)
+is the pdf skill's work.
 
 The document is open in the user's file pane, or opens there once your first edit to it has run (once per document:
 a user who closes it is not pulled back). Every `office_edit` call appears whole, under your name, while the user
@@ -32,23 +38,35 @@ watches and may edit the same document. Work like a colleague in a shared docume
 4. **When an edit is refused,** nothing of the call applied. The result says why, and shows what you targeted as it
    is now: someone edited it, and their edit wins. Read again and work from what is there; never put your old version
    back over theirs. A user editing the very cells or slide you want: wait, or ask them.
-5. **Never touch an open document any other way.** No `write_file`, `patch`, terminal, python libraries or the docx,
-   xlsx, pptx or pdf skills on it: the editor is its only writer.
-6. **Finish with one line** in the chat saying what you did and what the user can do next. The work belongs in the
-   document, not in the chat.
+5. **Never touch an open document any other way.** No `write_file`, `patch`, terminal, script or python library on
+   it: the editor is its only writer. The pdf skill's work (merging, splitting, encrypting) writes a new file, never
+   over an open one.
+6. **Check before you answer** (below), then finish with one line in the chat saying what you did and what the user
+   can do next. The work belongs in the document, not in the chat.
+
+## Before you answer
+
+1. Read the outline again with `office_read`, and a block, range, slide or page in full where a detail matters.
+2. Every fact the user gave is in the document: each name, number, date and item they asked for.
+3. The length is what was asked: about 450 words of body text fill a page, and each Word edit's result gives the
+   document's `length` in words and pages.
+4. Then say in one line what was done. Something missing or short: add it first.
 
 ## Each kind of document
 
+Your first office call on each type of document brings that type's reference with these rules, as `guide`:
+`references/docx.md`, `references/xlsx.md`, `references/pptx.md` or `references/pdf.md`. They stay in this skill to read
+again.
+
 - **Word documents:** plant a new document's outline first, every section a pending block saying what it will hold,
-  then fill one section per call; re-word with `replace` on quoted words, which keeps their formatting. See
-  `references/word.md`.
+  then fill one section per call; re-word with `replace` on quoted words, which keeps their formatting. About 450
+  words of body text fill a page: count them for a length the user asks for.
 - **Spreadsheets:** read the range before writing it, and pass what it showed as `expect`. Values go in as typed into
-  a cell: a formula starts with `=` and stays live. See `references/cell.md`.
+  a cell: a formula starts with `=` and stays live.
 - **Slide decks:** a small change (a title, a word, a number) is `text` on that one shape, which keeps its place and
   style. A new or redesigned slide is one `<section>` in the Claude Slides format, built as native shapes the user can
-  edit. A slide too full for its boxes is refused: split it; nothing shrinks. See `references/slide.md`.
-- **PDFs:** fill fields, add, remove or rotate pages, redact, annotate. Existing text cannot be changed. See
-  `references/pdf.md`.
+  edit. A slide too full for its boxes is refused: split it; nothing shrinks.
+- **PDFs:** fill fields, add, remove or rotate pages, redact, annotate. Existing text cannot be changed.
 
 ## When a comment calls you
 
