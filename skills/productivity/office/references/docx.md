@@ -45,6 +45,8 @@ kept) from the top, from 1: quote enough words to be unique (the `search` view i
 
 ## Fill one section
 
+Shortened here: the body runs to the words its pending intent asks, 200 for `results`.
+
 ```json
 {"path": "reports/Q3.docx", "ops": [{"op": "replace", "target": {"pending": "results"}, "content": {
   "markdown": "Revenue grew **12%** in the north and 8% in the east.\n\n<?block chart?>\n\n| Region | Revenue | Growth |\n|---|---|---|\n| North | 4.2M | 12% |\n| East | 3.1M | 8% |",

@@ -140,15 +140,52 @@ def test_nothing_is_made_up():
     office = SKILLS / "productivity/office"
     rules = (office / "SKILL.md").read_text()
     writing = " ".join(rules.split("## Writing rules", 1)[1].split())
+    # The spreadsheet templates' sample rows are the one exception, and both places say so.
+    samples = ("The one exception: a spreadsheet template's sample rows, for a user who gave no rows, said in the chat "
+               "to be samples.")
     assert ("Every name, date, figure, place, source or contact comes from the user or their files: one they did not "
-            "give is left out, never made up.") in writing
+            f"give is left out, never made up. {samples}") in writing
     check = " ".join(rules.split("## Before you answer", 1)[1].split("\n## ", 1)[0].split())
-    assert "nothing is made up: no name, date, figure, place, source or contact they did not give" in check
+    assert f"nothing is made up: no name, date, figure, place, source or contact they did not give. {samples}" in check
+    # Short of material, the model says so instead of padding.
+    assert ("Something missing or short: add it first, from what the user gave; if there is no more, say so in the "
+            "chat, never pad or invent.") in check
     for kind in ("docx", "xlsx", "pptx"):
         header = " ".join((office / "templates" / f"{kind}.md").read_text().split("\n## ", 1)[0].split())
         assert re.search(r"never (an )?(invented|made up)", header), kind
         assert "say in the chat what was missing" in header, kind
         assert "no kind fits" in header, kind
+    # An invoice's payment terms are the user's to give, like its names and numbers.
+    invoice = " ".join((office / "templates/xlsx.md").read_text().split("## Invoice", 1)[1].split("\n## ", 1)[0].split())
+    invoice_fill = invoice.split("```", 2)[2]
+    assert ("The due date in B7 and the payment line in A12 are filled only from the terms the user gave" in invoice_fill
+            and "else both stay empty" in invoice_fill), invoice_fill
+    # A deck drops a kind of slide the user gave nothing for.
+    decks = " ".join((office / "templates/pptx.md").read_text().split("## Decks", 1)[1].split())
+    assert "A kind the user gave no material for is left out, never filled with invented content" in decks
+
+
+def test_the_word_references_examples_say_when_they_are_shorter_than_asked():
+    # A model copies an example's length: one far under its section's words says it is shortened.
+    reference = (SKILLS / "productivity/office/references/docx.md").read_text()
+    asked = {key: int(words) for key, words in re.findall(r"<\?pending ([a-z0-9_-]+): [^?]*?(\d+) words\?>", reference)}
+    fills = 0
+    for heading, section in re.findall(r"^## ([^\n]+)\n(.*?)(?=^## |\Z)", reference, re.MULTILINE | re.DOTALL):
+        for block in re.findall(r"```json\n(.*?)```", section, re.DOTALL):
+            # One call per block, or one call or op per line.
+            try:
+                examples = [json.loads(block)]
+            except json.JSONDecodeError:
+                examples = [json.loads(line) for line in block.strip().splitlines()]
+            for op in (op for example in examples for op in example.get("ops", [example] if "op" in example else [])):
+                key = (op.get("target") or {}).get("pending")
+                if op["op"] != "replace" or key not in asked:
+                    continue
+                fills += 1
+                words = len(re.findall(r"[A-Za-z0-9%.]+", re.sub(r"<\?block [^?]+\?>", "", op["content"]["markdown"])))
+                if words < asked[key] / 2:
+                    assert re.search(r"^Shortened here\b", section, re.MULTILINE), (heading, words, asked[key])
+    assert fills, "the reference fills a section its outline planted"
 
 
 def test_each_file_skill_loads_and_sends_the_agent_to_the_office_skill_first():

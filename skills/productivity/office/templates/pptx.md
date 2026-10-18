@@ -119,12 +119,13 @@ Big number for how large it is; Cards for the answer's three parts; Chart for th
 the options; Timeline for the plan; Closing with the ask and its amount.
 
 **Onboarding**, for a new joiner, team or customer: Title; Statement of what the team is for; Cards for the three or
-four things to know first; Timeline for the first weeks; Table of who to ask about what, from the names the user gave; Closing with the first steps
-today and who to ask.
+four things to know first; Timeline for the first weeks; Table of who to ask about what, from the names the user
+gave; Closing with the first steps today and who to ask.
 
 **Review**, of a quarter, a project or a campaign: Title; Statement of the result; Big number for the headline figure;
 Chart for what lies behind it; Table of plan against actual; Cards for what worked, what did not and what changes;
 Timeline for the next period; Closing with the decisions asked.
 
 A kind can come twice: two figures that matter are two Big number slides, and a Statement can open each part of a longer
-deck.
+deck. A kind the user gave no material for is left out, never filled with invented content: with no figures, no Big
+number, no Chart and no Table of figures.
