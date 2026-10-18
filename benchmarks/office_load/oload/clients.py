@@ -196,7 +196,11 @@ def _field(answered: Timed[dict[str, Any] | None], name: str) -> Any:
 
 
 class Fleet:
-    """The load clients, and how many pages the tool has placed on each."""
+    """The load clients, and how many pages the tool has placed on each.
+
+    A page that may live on in its pod (its open went unanswered, or its close failed) is leaked: its slot is never
+    handed out again in the run, since runtime-office's close does not stop an open under way.
+    """
 
     def __init__(self, clients: Sequence[RuntimeOffice], pages_per_client: int) -> None:
         if pages_per_client < 1:
@@ -204,16 +208,23 @@ class Fleet:
         self.clients = tuple(clients)
         self.pages_per_client = pages_per_client
         self._placed = [0] * len(self.clients)
+        self._leaked = [0] * len(self.clients)
         self._next = 0
 
     @property
     def capacity(self) -> int:
-        return len(self.clients) * self.pages_per_client
+        """The pages the fleet holds, less those leaked."""
+        return len(self.clients) * self.pages_per_client - sum(self._leaked)
 
     @property
     def placed(self) -> tuple[int, ...]:
-        """The pages placed on each client, in :attr:`clients` order."""
+        """The pages placed on each client, in :attr:`clients` order; leaked ones are not."""
         return tuple(self._placed)
+
+    @property
+    def leaked(self) -> tuple[int, ...]:
+        """The slots lost on each client, in :attr:`clients` order."""
+        return tuple(self._leaked)
 
     def place(self, pages: int = 1) -> RuntimeOffice:
         """A client for one session's *pages*, all on it: the next client round-robin with room for them."""
@@ -222,21 +233,31 @@ class Fleet:
         count = len(self.clients)
         for step in range(count):
             index = (self._next + step) % count
-            if self._placed[index] + pages <= self.pages_per_client:
+            if self._placed[index] + self._leaked[index] + pages <= self.pages_per_client:
                 self._placed[index] += pages
                 self._next = (index + 1) % count
                 return self.clients[index]
+        leaked = f", {sum(self._leaked)} leaked" if any(self._leaked) else ""
         raise FleetFull(f"no load client has room for {pages} more page(s): the fleet holds {self.capacity} "
-                        f"({count} clients of {self.pages_per_client})")
+                        f"({count} clients of {self.pages_per_client}{leaked})")
 
     def release(self, client: RuntimeOffice, pages: int = 1) -> None:
         """Give back *pages* placed on *client*, once closed."""
+        self._placed[self._index(client, pages)] -= pages
+
+    def leak(self, client: RuntimeOffice, pages: int = 1) -> None:
+        """Give up *pages* placed on *client* that may live on in its pod: their slots are never placed again."""
+        index = self._index(client, pages)
+        self._placed[index] -= pages
+        self._leaked[index] += pages
+
+    def _index(self, client: RuntimeOffice, pages: int) -> int:
         index = next((i for i, placed in enumerate(self.clients) if placed is client), None)
         if index is None:
             raise ValueError(f"{client!r} is not in the fleet")
         if not 1 <= pages <= self._placed[index]:
-            raise ValueError(f"{client!r} has {self._placed[index]} page(s) placed, not {pages} to release")
-        self._placed[index] -= pages
+            raise ValueError(f"{client!r} has {self._placed[index]} page(s) placed, not {pages}")
+        return index
 
     @classmethod
     def from_pods(cls, pods: dict[str, Any], token: str, *, pages_per_client: int | None = None) -> Fleet:

@@ -13,7 +13,16 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from oload.clients import Fleet, FleetFull, PageGone, RequestRefused, RuntimeOffice, RuntimeOfficeError
+from oload.clients import (
+    CallTimedOut,
+    ClientDown,
+    Fleet,
+    FleetFull,
+    PageGone,
+    RequestRefused,
+    RuntimeOffice,
+    RuntimeOfficeError,
+)
 from oload.docserver import CallbackState, callback_url, file_url, forcesave
 from oload.editor import editor_config
 from oload.events import Cause, Event, EventLog, What
@@ -37,6 +46,7 @@ class _Page:
     plugins: bool
     client: RuntimeOffice | None = None  # once an open was tried, until the page is given up
     id: str | None = None  # while open
+    leaked: bool = False  # it may live on in its pod: its slot is the fleet's no more
 
 
 class VirtualSession:
@@ -60,7 +70,7 @@ class VirtualSession:
         self.agent = _Page(f"agent-{index}", f"agent-{index}", f"Load agent {index}", plugins=False)
         self.watcher = (_Page(f"person-{index}", f"person-{index}", f"Load person {index}", plugins=True)
                         if workload == "chat" else None)
-        self._held: list[RuntimeOffice] = []  # one per page slot placed on the fleet
+        self._held: list[RuntimeOffice] = []  # one per page slot placed on the fleet and not yet given back
         self._edits = 0
         self._losses = 0
         self._slide: dict[str, Any] | None = None  # a deck's slide read, from its outline
@@ -190,7 +200,7 @@ class VirtualSession:
         callback.release()
 
     async def _open(self, page: _Page, client: RuntimeOffice, *, again: bool = False) -> bool:
-        page.client = client
+        page.client, page.leaked = client, False
         config = editor_config(
             self.settings, doc_key=self.doc_key, kind=self.kind, user_id=page.user_id, user_name=page.user_name,
             file_url=file_url(self.settings, self.doc_key), callback_url=callback_url(self.settings, self.doc_key),
@@ -202,8 +212,9 @@ class VirtualSession:
             self._error(exc)
             return False
         except RuntimeOfficeError as exc:
-            # Its slot stays counted until the session ends: a page that timed out or dropped may still be opening.
             self._failed("open", exc)
+            if isinstance(exc, (CallTimedOut, ClientDown)):
+                self._leak(page)  # it may still be opening, and a close does not stop it
             return False
         page.id = opened.value
         self._event("open", True, opened.seconds, detail="again" if again else None)
@@ -248,7 +259,7 @@ class VirtualSession:
                 try:
                     await page.client.close(page.id or f"{self.doc_key}.{page.session_id}")  # runtime-office's id
                 except (RuntimeOfficeError, RequestRefused):
-                    pass
+                    self._leak(page)  # it may live on
         finally:
             for client in self._held:
                 self.fleet.release(client)
@@ -257,6 +268,14 @@ class VirtualSession:
             for callback in self.state.callbacks:
                 if callback.doc_key == self.doc_key:
                     callback.release()
+
+    def _leak(self, page: _Page) -> None:
+        """*page*'s slot is never handed out again in the run: the page may live on in its pod."""
+        if page.leaked or page.client is None:
+            return
+        page.leaked = True
+        self._held.remove(page.client)
+        self.fleet.leak(page.client)
 
     def _failed(self, what: What, exc: RuntimeOfficeError) -> None:
         self._event(what, False, exc.seconds, exc.cause, detail=str(exc)[:300])

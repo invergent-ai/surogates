@@ -360,6 +360,23 @@ def test_released_pages_make_room_again() -> None:
         spread.release(RuntimeOffice("http://192.0.2.99:8080", TOKEN))
 
 
+def test_a_leaked_page_is_never_placed_again() -> None:
+    spread = fleet(clients_=2, pages_per_client=2)
+    first = spread.place(2)
+    spread.leak(first, 1)  # its page may live on in the pod: its slot is gone for the run
+    assert (spread.placed, spread.leaked, spread.capacity) == ((1, 0), (1, 0), 3)
+    spread.release(first, 1)  # its other page, closed, is given back as usual
+    assert spread.placed == (0, 0)
+    assert spread.clients.index(spread.place(2)) == 1  # the first client has room for one page only
+    assert spread.place(1) is first
+    with pytest.raises(FleetFull):
+        spread.place(1)
+    with pytest.raises(ValueError):
+        spread.leak(first, 2)  # only placed pages leak
+    with pytest.raises(ValueError):
+        spread.leak(RuntimeOffice("http://192.0.2.99:8080", TOKEN))
+
+
 def test_more_pages_than_a_client_holds_is_an_error() -> None:
     with pytest.raises(ValueError):
         fleet(pages_per_client=1).place(2)

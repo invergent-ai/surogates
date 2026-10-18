@@ -26,7 +26,17 @@ from pptx import Presentation
 from pptx.util import Inches
 
 from oload import docserver, session
-from oload.clients import CallTimedOut, Fleet, PageGone, RequestRefused, Timed
+from oload.clients import (
+    CallTimedOut,
+    ClientBusy,
+    ClientDown,
+    Fleet,
+    FleetFull,
+    PageGone,
+    RequestRefused,
+    RuntimeOfficeError,
+    Timed,
+)
 from oload.docserver import CallbackState, make_app
 from oload.events import Event, EventLog
 from oload.session import VirtualSession
@@ -217,6 +227,7 @@ class FakeOffice:
         self.placed_at_close.append(self.fleet.placed)
         self.closed.append(page)
         self.pages.pop(page, None)
+        self._scripted("close")
 
 
 class ScriptedPace:
@@ -310,7 +321,7 @@ async def test_a_turn_logs_open_edits_flush_forcesave_callback_marker(world: Wor
     assert len(set(world.ds.sent[one.doc_key])) == 2
     # Its page closed, its placement given back and the saved file's bytes dropped once checked.
     assert world.office.closed == [f"{one.doc_key}.agent-{one.index}"]
-    assert world.fleet.placed == (0,)
+    assert (world.fleet.placed, world.fleet.leaked) == ((0,), (0,))
     assert all(callback.data is None for callback in world.state.callbacks)
 
 
@@ -457,17 +468,45 @@ async def test_a_page_gone_at_the_flush_still_forcesaves_and_opens_again_for_the
     ]
 
 
-async def test_an_open_that_timed_out_keeps_its_placement_until_closed(world: World) -> None:
-    world.office.script["open"] = [CallTimedOut("no answer within 90 s", seconds=90.0)]
+@pytest.mark.parametrize("error", [CallTimedOut("no answer within 90 s", seconds=90.0),
+                                   ClientDown("the client dropped the call", seconds=90.0)])
+async def test_an_open_that_timed_out_or_dropped_leaks_its_slot(world: World, error: Exception) -> None:
+    world.office.script["open"] = [error]
     one = world.session()
     await run(one, turns=1)
 
-    assert world.seen() == [("open", False, "timeout")]
+    assert world.seen() == [("open", False, error.cause)]  # type: ignore[attr-defined]
     assert world.log.events[0].seconds == 90.0
-    # The page may be opening still: closed by its id, its slot still counted, then given back.
+    # The page may be opening still, and a close does not stop an open: closed by its id all the same, its slot
+    # never handed out again.
     assert world.office.closed == [f"{one.doc_key}.agent-{one.index}"]
-    assert world.office.placed_at_close == [(1,)]
-    assert world.fleet.placed == (0,)
+    assert (world.fleet.placed, world.fleet.leaked) == ((0,), (1,))
+    world.fleet.place(1)
+    with pytest.raises(FleetFull):
+        world.fleet.place(1)
+
+
+@pytest.mark.parametrize("error", [ClientBusy("6 documents open", status=503, seconds=0.01),
+                                   RuntimeOfficeError("internal error", status=500, seconds=30.0)])
+async def test_an_open_answered_with_a_failure_gives_its_slot_back(world: World, error: Exception) -> None:
+    world.office.script["open"] = [error]
+    await run(world.session(), turns=1)
+    assert world.seen() == [("open", False, error.cause)]  # type: ignore[attr-defined]
+    assert (world.fleet.placed, world.fleet.leaked) == ((0,), (0,))
+
+
+async def test_a_page_whose_open_and_close_both_failed_leaks_one_slot(world: World) -> None:
+    world.office.script["open"] = [CallTimedOut("no answer within 90 s", seconds=90.0)]
+    world.office.script["close"] = [ClientDown("the client could not be reached", seconds=0.01)]
+    await run(world.session(), turns=1)
+    assert (world.fleet.placed, world.fleet.leaked) == ((0,), (1,))
+
+
+async def test_a_page_that_did_not_close_leaks_its_slot(world: World) -> None:
+    world.office.script["close"] = [None, CallTimedOut("no answer within 60 s", seconds=60.0)]
+    await run(world.session(workload="chat"), turns=1)
+    # The agent's page closed and its slot is back; the watcher's may live on.
+    assert (world.fleet.placed, world.fleet.leaked) == ((0,), (1,))
 
 
 # Decks.
