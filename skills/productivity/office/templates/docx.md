@@ -9,8 +9,12 @@ block:
 Each intent ends with the section's length in words, and the line under the call gives the total: about 450 words of
 body text fill a page. For another length the user asks for, scale every section's words to it. Write each section to
 its words, within a tenth: each result's `length` gives the document's words so far; check it before you say the
-document is done. The lengths hold when the material does: thin material makes a shorter section, never invented
-detail; say in the chat what was missing.
+document is done. A section the user asked for but did not detail (the points to make, the steps of a process) is
+drafted from common practice to its length, as a proposal. A specific they did not give (a name, date, time, figure,
+place, source or contact) is left out, never made up, and so is anything said to have happened that their material does
+not say: a section made of those (a meeting's decisions, a review's findings) comes out shorter, never padded. Ask only
+when the document cannot be written without the answer; say in the chat what you drafted, for them to check, and what
+was missing.
 
 ## Report
 
@@ -18,7 +22,7 @@ For findings a reader must act on: a review, an analysis, a status or research r
 
 ```json
 {"path": "reports/support-review.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown":
-  "# Q3 customer support review\n\n## Summary\n<?pending summary: the answer first, then the three findings in one sentence each and the recommendation in one — 100 words?>\n\n## Background\n<?pending background: why this review was done, the period it covers and the data it uses, as the material gives them — 120 words?>\n\n## Findings\n<?pending findings: the three findings, each led by its figure, then a table of the results and a chart of them — 350 words?>\n\n## Risks\n<?pending risks: the risks the material names, as a list, each with what we do about it, and how likely it is where the material says — 150 words?>\n\n## Recommendation\n<?pending recommendation: what to do and who does it, with the date and the cost where the material gives them — 180 words?>"}}]}
+  "# Q3 customer support review\n\n## Summary\n<?pending summary: the answer first, then the three findings in one sentence each and the recommendation in one — 100 words?>\n\n## Background\n<?pending background: why this review was done, the period it covers and the data it uses, as the material gives them — 120 words?>\n\n## Findings\n<?pending findings: the three findings, each led by its figure, then a table of the results and a chart of them — 350 words?>\n\n## Risks\n<?pending risks: the risks, as a list, each with what we do about it, and how likely it is where the material says — 150 words?>\n\n## Recommendation\n<?pending recommendation: what to do and who does it, with the date and the cost where the material gives them — 180 words?>"}}]}
 ```
 
 Fill findings first (its table in markdown, its chart a `<?block chart?>` line with its entry in `blocks`, as in
@@ -79,7 +83,7 @@ For a task the reader follows step by step: a procedure, a setup, a routine.
 
 ```json
 {"path": "guides/expense-claim.docx", "ops": [{"op": "insert", "target": {"end": true}, "content": {"markdown":
-  "# How to submit an expense claim\n\n## Purpose\n<?pending purpose: what this guide helps the reader do, who it is for and what they need before they start — 60 words?>\n\n## Steps\n<?pending steps: a numbered list, one action per step, each starting with a verb — 200 words?>\n\n## If something goes wrong\n<?pending problems: a table with columns Problem and What to do, one row per problem the user's material names — 100 words?>\n\n## Remember\n<?pending remember: the one thing to remember, as one sentence in bold — 20 words?>"}}]}
+  "# How to submit an expense claim\n\n## Purpose\n<?pending purpose: what this guide helps the reader do, who it is for and what they need before they start — 60 words?>\n\n## Steps\n<?pending steps: a numbered list, one action per step, each starting with a verb — 200 words?>\n\n## If something goes wrong\n<?pending problems: a table with columns Problem and What to do, one row per problem the reader is likely to meet — 100 words?>\n\n## Remember\n<?pending remember: the one thing to remember, as one sentence in bold — 20 words?>"}}]}
 ```
 
 Fill the steps first, then the table, the purpose and the one thing to remember: about 380 words, under a page.

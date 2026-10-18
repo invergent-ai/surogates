@@ -83,6 +83,12 @@ def test_office_edit_says_how_many_words_fill_a_page_and_to_check_before_answeri
     assert "office_read before you answer" in EDIT_DESCRIPTION
 
 
+def test_office_edit_drafts_what_was_asked_and_makes_up_no_specific():
+    # "Nothing is made up" alone sent a small model to ask the user what a slide should show instead of drafting it.
+    assert ("no name, date, figure or contact they did not give is made up, and a part they asked for but did not "
+            "detail is drafted as a proposal, not asked about") in EDIT_DESCRIPTION
+
+
 def test_office_edit_says_it_in_order_before_the_ops():
     made_only = EDIT_DESCRIPTION.index("only with office_edit")
     first_example = EDIT_DESCRIPTION.index("```json")

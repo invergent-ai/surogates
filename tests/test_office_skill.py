@@ -135,34 +135,85 @@ def test_slide_templates_share_one_look():
     )
 
 
-def test_nothing_is_made_up():
+OFFICE = SKILLS / "productivity/office"
+#: The spreadsheet templates' sample rows: the one exception to specifics coming from the user, said in both places.
+SAMPLES = ("The one exception: a spreadsheet template's sample rows, for a user who gave no rows, said in the chat to be "
+           "samples.")
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _writing_rules() -> str:
+    return _flat((OFFICE / "SKILL.md").read_text().split("## Writing rules", 1)[1])
+
+
+def _check_before_answering() -> str:
+    return _flat((OFFICE / "SKILL.md").read_text().split("## Before you answer", 1)[1].split("\n## ", 1)[0])
+
+
+def _template_headers() -> dict[str, str]:
+    return {kind: _flat((OFFICE / "templates" / f"{kind}.md").read_text().split("\n## ", 1)[0])
+            for kind in ("docx", "xlsx", "pptx")}
+
+
+def test_specifics_come_from_the_user_and_are_never_made_up():
     # Templates ask for a document's usual facts; a small model fills each slot unless told what to do without one.
-    office = SKILLS / "productivity/office"
-    rules = (office / "SKILL.md").read_text()
-    writing = " ".join(rules.split("## Writing rules", 1)[1].split())
-    # The spreadsheet templates' sample rows are the one exception, and both places say so.
-    samples = ("The one exception: a spreadsheet template's sample rows, for a user who gave no rows, said in the chat "
-               "to be samples.")
-    assert ("Every name, date, figure, place, source or contact comes from the user or their files: one they did not "
-            f"give is left out, never made up. {samples}") in writing
-    check = " ".join(rules.split("## Before you answer", 1)[1].split("\n## ", 1)[0].split())
-    assert f"nothing is made up: no name, date, figure, place, source or contact they did not give. {samples}" in check
-    # Short of material, the model says so instead of padding.
-    assert ("Something missing or short: add it first, from what the user gave; if there is no more, say so in the "
-            "chat, never pad or invent.") in check
-    for kind in ("docx", "xlsx", "pptx"):
-        header = " ".join((office / "templates" / f"{kind}.md").read_text().split("\n## ", 1)[0].split())
-        assert re.search(r"never (an )?(invented|made up)", header), kind
-        assert "say in the chat what was missing" in header, kind
+    assert ("**Specifics** (names, dates, times, figures, places, sources, contacts, and what happened: a meeting's "
+            "decisions, a study's results) come from the user or their files: one they did not give is left out, never "
+            f"made up. {SAMPLES}") in _writing_rules()
+    assert ("No specific is made up: no name, date, time, figure, place, source or contact they did not give, and "
+            f"nothing said to have happened that their material does not say. {SAMPLES}") in _check_before_answering()
+    headers = _template_headers()
+    assert ("A specific they did not give (a name, date, time, figure, place, source or contact) is left out, never "
+            "made up") in headers["docx"]
+    assert ("Any other specific the user did not give (a name, an address, an invoice number, a date, payment terms) "
+            "stays empty, never made up.") in headers["xlsx"]
+    assert ("a slide short of the user's figures, names, dates or sources comes out shorter, never with made-up "
+            "ones.") in headers["pptx"]
+    for kind, header in headers.items():
         assert "no kind fits" in header, kind
     # An invoice's payment terms are the user's to give, like its names and numbers.
-    invoice = " ".join((office / "templates/xlsx.md").read_text().split("## Invoice", 1)[1].split("\n## ", 1)[0].split())
+    invoice = _flat((OFFICE / "templates/xlsx.md").read_text().split("## Invoice", 1)[1].split("\n## ", 1)[0])
     invoice_fill = invoice.split("```", 2)[2]
     assert ("The due date in B7 and the payment line in A12 are filled only from the terms the user gave" in invoice_fill
             and "else both stay empty" in invoice_fill), invoice_fill
-    # A deck drops a kind of slide the user gave nothing for.
-    decks = " ".join((office / "templates/pptx.md").read_text().split("## Decks", 1)[1].split())
-    assert "A kind the user gave no material for is left out, never filled with invented content" in decks
+    # A deck drops a kind of slide made of specifics the user did not give.
+    decks = _flat((OFFICE / "templates/pptx.md").read_text().split("## Decks", 1)[1])
+    assert ("A kind made of specifics needs the user's: with no figures, no Big number, no Chart and no Table of "
+            "figures; with no names, no Table of who to ask.") in decks
+
+
+def test_content_asked_for_but_not_detailed_is_drafted_as_a_proposal():
+    # Told only never to make anything up, a small model asked the user what a first week looks like instead of drafting
+    # it: content is drafted, and only specifics are held back.
+    assert ("**Content** the user asked for but did not detail (a first-week plan, the points of a section, the steps "
+            "of a process) is drafted from common practice as a proposal, with no specific they did not give; say in "
+            "the chat what you drafted, for them to check.") in _writing_rules()
+    check = _check_before_answering()
+    assert ("Each part they asked for is there: one they did not detail is drafted as a proposal, never left out or "
+            "asked about.") in check
+    assert "Then say in one line what was done, what you drafted for the user to check, and what is missing." in check
+    for kind, header in _template_headers().items():
+        assert "asked for but did not detail" in header and "drafted from common practice" in header, kind
+        assert "say in the chat what you drafted, for them to check, and what was missing." in header, kind
+    assert ("A slide they asked for but did not detail (what the first week looks like, the steps of a plan) is drafted "
+            "from common practice as a proposal, with no specific they did not give.") in _template_headers()["pptx"]
+    # No section or slide is dropped for want of detail the model can draft.
+    word = (OFFICE / "templates/docx.md").read_text()
+    for intent in re.findall(r"<\?pending [a-z0-9_-]+: ([^?]+)\?>", word):
+        assert "material names" not in intent, intent
+    decks = _flat((OFFICE / "templates/pptx.md").read_text().split("## Decks", 1)[1])
+    assert "Any other kind is drafted as a proposal when the user gave nothing for it." in decks
+
+
+def test_the_user_is_asked_only_when_the_work_cannot_be_done_without_the_answer():
+    # In a chat nobody answers at once, a needless question stalls the work.
+    assert ("**Ask the user** only when the work cannot be done without the answer (which of two documents to change); "
+            "otherwise do the work, and say in the chat what is missing or proposed.") in _writing_rules()
+    for kind, header in _template_headers().items():
+        assert re.search(r"Ask only when the (document|sheet|deck) cannot be (written|made) without the answer", header), kind
 
 
 def test_the_word_references_examples_say_when_they_are_shorter_than_asked():

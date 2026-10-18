@@ -1,12 +1,14 @@
 # Spreadsheet templates: a new workbook's first call
 
-Start a new workbook from the template of its kind, in one call: it renames the new workbook's one sheet, Sheet1,
-then writes the headers, the rows and the totals, and sets the number formats and column widths. When no kind fits (a
-plain table, a sheet per month), build from the closest one's parts, in the same header style, formats and formula
-totals. Before you send it, put in the user's path and the user's rows in place of the sample rows. The samples are
-for a user who gave no rows: send them for the user to replace, and say in the chat that they are samples. Any other
-detail the user did not give (a name, an address, an invoice number, a date, payment terms) stays empty, never made
-up: say in the chat what was missing.
+Start a new workbook from the template of its kind, in one call: it renames the new workbook's one sheet, Sheet1, then
+writes the headers, the rows and the totals, and sets the number formats and column widths. When no kind fits (a plain
+table, a sheet per month), build from the closest one's parts, in the same header style, formats and formula totals.
+Before you send it, put in the user's path and the user's rows in place of the sample rows. The samples are for a user
+who gave no rows: send them for the user to replace, and say in the chat that they are samples. A row or column the user
+asked for but did not detail (an event's usual costs) is drafted from common practice as a proposal, its figures left
+empty. Any other specific the user did not give (a name, an address, an invoice number, a date, payment terms) stays
+empty, never made up. Ask only when the sheet cannot be made without the answer; say in the chat what you drafted, for
+them to check, and what was missing.
 
 Totals stay formulas: never type a number the sheet can work out, even one you worked out yourself. A list longer or
 shorter than the sample ends at another row: every range over it (each SUM and COUNTIF, the formats, the chart's)

@@ -16,8 +16,10 @@ characters (two lines); only the Statement's sentence runs longer. The `<aside>`
 say, in a sentence or two.
 
 The line under each call says the most its slide holds. More does not shrink: it runs into the margin or the slide is
-refused, so split it over two slides. Less is fine: thin material makes a shorter slide, never an invented figure,
-name, date or source; say in the chat what was missing.
+refused, so split it over two slides. Less is fine: a slide short of the user's figures, names, dates or sources comes
+out shorter, never with made-up ones. A slide they asked for but did not detail (what the first week looks like, the
+steps of a plan) is drafted from common practice as a proposal, with no specific they did not give. Ask only when the
+deck cannot be made without the answer; say in the chat what you drafted, for them to check, and what was missing.
 
 ## Title
 
@@ -27,8 +29,8 @@ The deck's first slide: what it is about, who gives it and when.
 {"path": "decks/q3-review.pptx", "ops": [{"op": "slides", "slides": [{"html": "<section style=\"background:#14285A;color:#FBFBF8;font-family:Arial, sans-serif;padding:128px;justify-content:center;gap:40px\"><div style=\"width:160px;height:12px;background:#F2C14E\"></div><h1 style=\"font-size:128px\">Online shop: Q3 review</h1><p style=\"font-size:44px;color:#DCE3F0\">Orders, customers and the plan for Q4</p><p style=\"color:#DCE3F0\">Sales and product teams, 14 October 2026</p><aside>Open with the result: 38% more orders. Then what drove it, and the decision we need today.</aside></section>"}]}]}
 ```
 
-Replace the title (at most 50 characters), the subtitle (at most 15 words), the team and the date; a line the user
-gave nothing for is left out.
+Replace the title (at most 50 characters), the subtitle (at most 15 words), the team and the date; a team or a date
+the user did not give is left out.
 
 ## Statement
 
@@ -127,5 +129,5 @@ Chart for what lies behind it; Table of plan against actual; Cards for what work
 Timeline for the next period; Closing with the decisions asked.
 
 A kind can come twice: two figures that matter are two Big number slides, and a Statement can open each part of a longer
-deck. A kind the user gave no material for is left out, never filled with invented content: with no figures, no Big
-number, no Chart and no Table of figures.
+deck. A kind made of specifics needs the user's: with no figures, no Big number, no Chart and no Table of figures;
+with no names, no Table of who to ask. Any other kind is drafted as a proposal when the user gave nothing for it.
