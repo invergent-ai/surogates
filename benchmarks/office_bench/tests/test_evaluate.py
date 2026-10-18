@@ -81,6 +81,67 @@ def test_a_guide_an_office_call_delivered_counts_as_reading_the_office_skill():
     assert m["office_errors"] == [f"office_edit: {refused}"]
 
 
+RULES = {"rules": "# Working on documents live with the user", "reference": "# office_edit for Word documents"}
+
+
+def _view(n, kind, skill="office"):
+    return Event(n, "tool.call", {"name": "skill_view", "arguments": {"name": skill, "file_path": f"templates/{kind}.md"}})
+
+
+def _edit(n, call_id, path, answer):
+    return [
+        Event(n, "tool.call", {"name": "office_edit", "tool_call_id": call_id, "arguments": json.dumps({"path": path, "ops": []})}),
+        Event(n + 1, "tool.result", {"name": "office_edit", "tool_call_id": call_id, "content": json.dumps(answer)}),
+    ]
+
+
+def test_a_template_opened_before_the_document_was_made():
+    events = [
+        _view(1, "docx"),
+        Event(2, "tool.call", {"name": "office_read", "tool_call_id": "c0", "arguments": {"path": "out/plan.docx"}}),
+        Event(3, "tool.result", {"name": "office_read", "tool_call_id": "c0",
+                                 "content": json.dumps({"error": "No document at out/plan.docx."})}),
+        # The call that makes it brings the guide, templates and all.
+        *_edit(4, "c1", "/workspace/out/plan.docx", {"document": "out/plan.docx", "created": True, "applied": True,
+                                                     "guide": {**RULES, "templates": "# Word templates"}}),
+        *_edit(6, "c2", "out/plan.docx", {"document": "out/plan.docx", "applied": True}),
+    ]
+    m = metrics(events)
+    assert m["office_guides"] == ["docx"] and m["office_guides_with_templates"] == ["docx"]
+    assert m["template_viewed_before_create"] is True
+
+
+def test_a_template_opened_after_the_document_was_made_or_of_another_type_is_not_before():
+    made = _edit(1, "c1", "out/plan.docx", {"document": "out/plan.docx", "created": True, "applied": True,
+                                            "guide": RULES})
+    m = metrics([*made, _view(3, "docx")])
+    assert m["template_viewed_before_create"] is False
+    # A guide that came without its templates.
+    assert m["office_guides"] == ["docx"] and m["office_guides_with_templates"] == []
+    assert metrics([_view(0, "xlsx"), *made])["template_viewed_before_create"] is False
+    # Another skill's file of that name is not the office skill's template.
+    assert metrics([_view(0, "docx", skill="docx"), *made])["template_viewed_before_create"] is False
+
+
+def test_the_made_document_is_known_by_its_path_when_the_editor_refused_the_call_that_made_it():
+    # A first slide the editor refuses makes the deck but says nothing of it; the next call finds it there.
+    events = [
+        *_edit(1, "c1", "/workspace/decks/pitch.pptx", {"error": "op 0: slide 1: the title overflows its box by 120 px."}),
+        _view(3, "pptx"),
+        *_edit(4, "c2", "decks/pitch.pptx", {"document": "decks/pitch.pptx", "applied": True}),
+    ]
+    assert metrics(events)["template_viewed_before_create"] is None
+    assert metrics(events, made="decks/Pitch.pptx")["template_viewed_before_create"] is False
+    assert metrics([_view(0, "pptx"), *events], made="decks/pitch.pptx")["template_viewed_before_create"] is True
+
+
+def test_no_document_made_of_a_type_with_templates_says_nothing_of_them():
+    edited = _edit(1, "c1", "in/report.docx", {"document": "in/report.docx", "applied": True})
+    assert metrics([_view(0, "docx"), *edited])["template_viewed_before_create"] is None
+    form = _edit(1, "c1", "forms/new.pdf", {"document": "forms/new.pdf", "created": True, "applied": True})
+    assert metrics([_view(0, "docx"), *form])["template_viewed_before_create"] is None
+
+
 def test_neither_a_guide_nor_a_view_is_not_reading_the_office_skill():
     events = [
         Event(1, "tool.call", {"name": "skill_view", "arguments": {"name": "pdf"}}),
