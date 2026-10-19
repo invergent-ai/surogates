@@ -344,14 +344,21 @@ async def test_a_missed_streak_waits_in_the_inbox_until_resolved(sf):
     assert item.title == "Needs your attention: Ion Pop"
     assert item.payload["until_resolved"] is True
     # A retried pass finds the item it already raised.
-    assert await store.raise_escalation_inbox_item(
-        sf, None, org_id=ORG, session_id=session_id, service_account_id=operator,
-        event_type="checkin.missed_replies", name="Ion Pop", reason="x",
-        payload={"escalation": item.payload["escalation"]},
-    )
-    async with sf() as db:
-        assert len((await db.execute(sa.select(InboxItem))).scalars().all()) == 1
+    assert await store.escalation_inbox_item_exists(sf, org_id=ORG, escalation=item.payload["escalation"])
 
     await store.resolve_escalation(sf, org_id=ORG, agent_id=AGENT, escalation_id=inv)
     async with sf() as db:
         assert (await db.get(InboxItem, item.id)).status == "acknowledged"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_inbox_target_still_marks_the_streak(sf):
+    """A bad id raised after the team was told, so every pass told them again."""
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    async with sf() as db:
+        row = (await db.execute(sa.select(ProgramScheduleRow))).scalar_one()
+        row.config = {**row.config, "escalation_service_account_id": "abc"}
+        await db.commit()
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    assert await _state(sf, inv) == "raised"

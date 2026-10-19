@@ -1284,16 +1284,8 @@ async def raise_escalation_inbox_item(
 ) -> bool:
     """Raise a hand in the operator's Inbox until the escalation in
     ``payload["escalation"]`` is resolved.  False when the target is no
-    service account this database knows; True, without a second row, when
-    the escalation already has its item (a pass retried after a crash)."""
+    service account this database knows."""
     async with session_factory() as db:
-        if await db.scalar(
-            sa.select(InboxItem.id)
-            .where(InboxItem.org_id == org_id)
-            .where(InboxItem.payload["escalation"].as_string() == payload["escalation"])
-            .limit(1)
-        ):
-            return True
         # inbox_items.source_event_id is NOT NULL and unique, so the
         # escalation is first an event on the person's own session.
         event = Event(
@@ -1328,6 +1320,23 @@ async def raise_escalation_inbox_item(
             await db.rollback()
             logger.warning("[followup] escalation target %s is not a service account", service_account_id)
             return False
+
+
+async def escalation_inbox_item_exists(session_factory: Any, *, org_id: uuid.UUID, escalation: str) -> bool:
+    async with session_factory() as db:
+        return await db.scalar(
+            sa.select(InboxItem.id)
+            .where(InboxItem.org_id == org_id)
+            .where(InboxItem.payload["escalation"].as_string() == escalation)
+            .limit(1)
+        ) is not None
+
+
+def uuid_or_none(value: Any) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(value).strip()) if value else None
+    except ValueError:
+        return None
 
 
 async def close_escalation_inbox_items(

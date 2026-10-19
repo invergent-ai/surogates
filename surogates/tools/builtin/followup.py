@@ -753,13 +753,6 @@ def _chosen(settings: Any, names: dict, wanted: Any) -> list[uuid.UUID]:
     ]
 
 
-def _uuid_or_none(value: Any) -> uuid.UUID | None:
-    try:
-        return uuid.UUID(str(value)) if value else None
-    except ValueError:
-        return None
-
-
 _RED = frozenset({"red", "rosu", "roșu", "urgent", "critical"})
 
 #: Severity marks a model may put before its reason, with their variation
@@ -802,7 +795,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
             )
 
     # Inside a check-in the Program's operator; outside one the agent's.
-    target_id = _uuid_or_none(
+    target_id = followup_store.uuid_or_none(
         program_target or (settings.escalation_service_account_id if settings else None)
     )
     payload: dict[str, Any] = (

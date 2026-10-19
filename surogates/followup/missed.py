@@ -13,7 +13,6 @@ completed the streak, so a re-scan never alerts twice.
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -336,17 +335,23 @@ async def _alert_if_streak(
     )
     # Silence needs a person to act as much as an alert the agent raised
     # does, so it waits in the same Inbox, until resolved.
-    target = config.get("escalation_service_account_id") or getattr(
-        settings_cache[key], "escalation_service_account_id", None,
+    target = followup_store.uuid_or_none(
+        config.get("escalation_service_account_id")
+        or getattr(settings_cache[key], "escalation_service_account_id", None)
     )
-    if target and inv.session_id:
+    escalation = followup_store.escalation_key(inv.id, inv.id)
+    # A pass retried after a crash finds the item it already raised.  One
+    # ticker runs these passes, so the check needs no lock.
+    if target and inv.session_id and not await followup_store.escalation_inbox_item_exists(
+        session_factory, org_id=inv.org_id, escalation=escalation,
+    ):
         await followup_store.raise_escalation_inbox_item(
             session_factory, settings_cache[key], org_id=inv.org_id,
-            session_id=inv.session_id, service_account_id=uuid.UUID(str(target)),
+            session_id=inv.session_id, service_account_id=target,
             event_type="checkin.missed_replies", name=person.label(settings_cache[key]) or "?",
             reason=text,
             payload={
-                "escalation": followup_store.escalation_key(inv.id, inv.id),
+                "escalation": escalation,
                 "program_id": str(inv.program_id), "occurrence_id": str(inv.occurrence_id),
                 "user_id": str(person_id),
             },
