@@ -119,6 +119,16 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0012,
         supports_vision=True,
     ),
+    # OpenRouter has served the base tier as this id since 2026-10-18: its own
+    # build at its own price, OpenRouter's listed $0.15 / $0.60 per million.
+    "deepseek/deepseek-v4.1-flash-1017": ModelInfo(
+        id="deepseek/deepseek-v4.1-flash-1017",
+        context_window=1_048_576,
+        max_output_tokens=384_000,
+        input_cost_per_1k=0.00015,
+        output_cost_per_1k=0.0006,
+        supports_vision=True,
+    ),
     # --- Meta ---------------------------------------------------------------
     # What ``pro_llm_model`` resolves the ``surogate-pro`` tier -- and the
     # hidden advisor -- to.  Reasoning is MANDATORY on this model (OpenRouter
@@ -338,10 +348,6 @@ _ALIASES: dict[str, str] = {
     "deepseek-v4.1-flash": "deepseek/deepseek-v4.1-flash",
     "deepseek/deepseek-v4.1-flash-20260910": "deepseek/deepseek-v4.1-flash",
     "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek/deepseek-v4.1-flash",
-    # OpenRouter has served the base tier as this id since 2026-10-18.  Priced
-    # as V4.1 Flash, above OpenRouter's listed $0.15 / $0.60 per million: a
-    # session reads at or above its cost until DeepSeek lists its own rates.
-    "deepseek/deepseek-v4.1-flash-1017": "deepseek/deepseek-v4.1-flash",
     # Undated Flash ids point at the current release rather than the older
     # 0423 build they originally named.
     "deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-flash-0731",
