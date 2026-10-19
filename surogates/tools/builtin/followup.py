@@ -14,19 +14,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.capabilities import initiating_platforms
 from surogates.db.models import (
-    Event,
-    InboxItem,
     ProgramInvitationRow,
     ProgramScheduleRow,
 )
-from surogates.channels.identity import mask_readable_phones, normalize_wa_id
+from surogates.channels.identity import normalize_wa_id
 from surogates.followup import people
 from surogates.followup import store as followup_store
-from surogates.session.inbox_payload import UNTIL_RESOLVED
 from surogates.followup.context import (
     Context,
     channel_names,
@@ -757,61 +753,6 @@ def _chosen(settings: Any, names: dict, wanted: Any) -> list[uuid.UUID]:
     ]
 
 
-async def _inbox(
-    sf: Any,
-    ctx: Context,
-    settings: Any,
-    *,
-    service_account_id: uuid.UUID,
-    event_type: str,
-    reason: str,
-    payload: dict,
-) -> bool:
-    """Raise a hand in the operator's inbox.  False when the target is invalid."""
-    async with sf() as db:
-        # inbox_items.source_event_id is NOT NULL and unique, so the
-        # escalation is first an event on the person's own session.
-        event = Event(
-            session_id=ctx.session_id, org_id=ctx.org_id, type=event_type,
-            data={"reason": reason, **payload},
-        )
-        db.add(event)
-        await db.flush()
-        db.add(
-            InboxItem(
-                org_id=ctx.org_id,
-                # The designated operator, never the acting principal: an
-                # item raised against the person reaches nobody but them.
-                user_id=None,
-                service_account_id=service_account_id,
-                session_id=ctx.session_id,
-                source_event_id=event.id,
-                # An existing InboxKind; the ops Inbox filters on a Literal.
-                kind="action_required",
-                # The inbox is a list anyone with access scrolls: the full
-                # number stays on the alert sent to the team member.
-                title=followup_store.wording(
-                    settings, "inbox_attention_title",
-                    name=mask_readable_phones(await ctx.person_label(sf, settings)),
-                ),
-                body=reason,
-                payload={**payload, "user_id": str(ctx.user_id), UNTIL_RESOLVED: True},
-            )
-        )
-        try:
-            await db.commit()
-            return True
-        except IntegrityError:
-            # The target is not a service account this database knows — a
-            # human's id pasted where a principal belongs.
-            await db.rollback()
-            logger.warning(
-                "[followup] escalation target %s for agent %s is not a "
-                "service account", service_account_id, ctx.agent_id,
-            )
-            return False
-
-
 def _uuid_or_none(value: Any) -> uuid.UUID | None:
     try:
         return uuid.UUID(str(value)) if value else None
@@ -876,10 +817,11 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     escalation = followup_store.escalation_key(
         escalation_id, invitation.id if invitation is not None else None,
     )
-    inboxed = target_id is not None and await _inbox(
-        sf, ctx, settings, service_account_id=target_id,
+    inboxed = target_id is not None and await followup_store.raise_escalation_inbox_item(
+        sf, settings, org_id=ctx.org_id, session_id=ctx.session_id, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
-        reason=reason, payload={**payload, "escalation": escalation},
+        name=await ctx.person_label(sf, settings), reason=reason,
+        payload={**payload, "escalation": escalation, "user_id": str(ctx.user_id)},
     )
     team = [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])]
     to = _chosen(settings, await followup_store.display_names(sf, team), arguments.get("to"))

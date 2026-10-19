@@ -323,3 +323,35 @@ async def test_a_telegram_chat_id_is_never_shown_as_a_phone(sf):
     await alert_missed_checkins(sf, now=NOW)
     [alert] = await _alerts(sf)
     assert alert.text.startswith("Ion Pop (?) has not answered")
+
+
+@pytest.mark.asyncio
+async def test_a_missed_streak_waits_in_the_inbox_until_resolved(sf):
+    from surogates.db.models import InboxItem
+
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    operator, session_id = uuid.uuid4(), uuid.uuid4()
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=operator)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    async with sf() as db:
+        (await db.get(ProgramInvitationRow, inv)).session_id = session_id
+        await db.commit()
+
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    async with sf() as db:
+        [item] = (await db.execute(sa.select(InboxItem))).scalars().all()
+    assert (item.service_account_id, item.session_id, item.status) == (operator, session_id, "pending")
+    assert item.title == "Needs your attention: Ion Pop"
+    assert item.payload["until_resolved"] is True
+    # A retried pass finds the item it already raised.
+    assert await store.raise_escalation_inbox_item(
+        sf, None, org_id=ORG, session_id=session_id, service_account_id=operator,
+        event_type="checkin.missed_replies", name="Ion Pop", reason="x",
+        payload={"escalation": item.payload["escalation"]},
+    )
+    async with sf() as db:
+        assert len((await db.execute(sa.select(InboxItem))).scalars().all()) == 1
+
+    await store.resolve_escalation(sf, org_id=ORG, agent_id=AGENT, escalation_id=inv)
+    async with sf() as db:
+        assert (await db.get(InboxItem, item.id)).status == "acknowledged"

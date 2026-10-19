@@ -13,6 +13,7 @@ completed the streak, so a re-scan never alerts twice.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -333,6 +334,23 @@ async def _alert_if_streak(
         reason=text, state="raised" if queued else "failed", platform=inv.platform,
         invitation_id=inv.id, program_id=inv.program_id, session_id=inv.session_id,
     )
+    # Silence needs a person to act as much as an alert the agent raised
+    # does, so it waits in the same Inbox, until resolved.
+    target = config.get("escalation_service_account_id") or getattr(
+        settings_cache[key], "escalation_service_account_id", None,
+    )
+    if target and inv.session_id:
+        await followup_store.raise_escalation_inbox_item(
+            session_factory, settings_cache[key], org_id=inv.org_id,
+            session_id=inv.session_id, service_account_id=uuid.UUID(str(target)),
+            event_type="checkin.missed_replies", name=person.label(settings_cache[key]) or "?",
+            reason=text,
+            payload={
+                "escalation": followup_store.escalation_key(inv.id, inv.id),
+                "program_id": str(inv.program_id), "occurrence_id": str(inv.occurrence_id),
+                "user_id": str(person_id),
+            },
+        )
     # Visible, never silent: when nobody could be told, the history says so
     # and the pass moves on.  Every copy of the step is marked, so a
     # contact's copy is not judged again as a streak of its own.
