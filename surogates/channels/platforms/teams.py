@@ -353,6 +353,9 @@ class TeamsPlatform:
         # way.  Keyed on the bot as well: two bots in one conversation each
         # hold their own.
         self._typing: dict[tuple[str, str], _Typing] = {}
+        # conversation id -> (service url, app id) of the last message parsed
+        # there: a nudge is given the conversation alone.
+        self._replied_to: dict[str, tuple[str, str]] = {}
 
     # ------------------------------------------------------------------
     # Routing
@@ -428,7 +431,29 @@ class TeamsPlatform:
     def parse(
         self, body: Any, *, creds: dict | None = None, identifier: str | None = None,
     ) -> InboundMessage | None:
-        return parse(body, app_id=identifier or "")
+        msg = parse(body, app_id=identifier or "")
+        if msg is not None and msg.source.get("teams_service_url"):
+            if len(self._replied_to) > 10_000:
+                self._replied_to.clear()  # ponytail: dropped wholesale, an LRU if nudges start missing
+            self._replied_to[msg.identifier] = (msg.source["teams_service_url"], identifier or "")
+        return msg
+
+    async def post_input_nudge(
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str,
+    ) -> str | None:
+        """Post a status line (the AI disclosure, a ``/stop`` ack); its id, or None."""
+        service_url, app_id = self._replied_to.get(channel, ("", ""))
+        url, token, _error = await self._prepare({
+            "conversation_id": channel, "service_url": service_url,
+            "reply_to_id": thread_ts, "channel_identifier": app_id,
+        }, creds)
+        if url is None or token is None:
+            return None
+        posted, error = await self._call("POST", url, token, {"type": "message", "text": text})
+        if posted is None:
+            logger.warning("[teams] nudge not posted: %s", error)
+            return None
+        return str(posted.get("id") or "") or None
 
     async def handle_non_message_update(
         self, body: Any, *, routing: Any, creds: dict, deps: Any,

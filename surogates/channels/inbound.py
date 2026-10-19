@@ -260,8 +260,9 @@ _Attachments = Callable[[Any, Any], Awaitable[dict]]
 #: Async callable: (session_id) -> pending input dict | None.
 _PendingInput = Callable[[Any], Awaitable[dict | None]]
 
-#: Async callable: (session_id, msg, text) -> None. Posts a nudge to the channel/thread.
-_InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[None]]
+#: Async callable: (session_id, msg, text) -> the posted message's id, or None
+#: when nothing was posted.  Posts a nudge to the channel/thread.
+_InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[str | None]]
 
 #: Async callable: (session_id, msg) -> None. Shows the sender the agent is
 #: working on *msg* for as long as its turn runs; returns at once.
@@ -1343,12 +1344,11 @@ class ChannelInboundPipeline:
 
         Delivery rides ``deps.input_nudge`` (the same seam as the /stop
         acknowledgement), which posts a plain platform message.  On
-        platforms without ``post_input_nudge`` the nudge is a silent
-        no-op — those channels must not be enabled for
-        disclosure-required agents (see docs/governance-and-security).
-        A ``disclosure.presented`` event records the delivery attempt
-        with level + channel for the per-session audit trail.  Failures
-        never drop the inbound message.
+        platforms without ``post_input_nudge`` nothing is posted.  A
+        ``disclosure.presented`` event, with level + channel, records it
+        for the per-session audit trail only once the platform says it
+        posted it; otherwise the agent is not told the person saw it.
+        Failures never drop the inbound message.
         """
         from surogates.runtime.governance import disclosure_config
 
@@ -1370,7 +1370,12 @@ class ChannelInboundPipeline:
                 )
             ):
                 return None
-            await deps.input_nudge(session_id, msg, cfg["text"])
+            if not await deps.input_nudge(session_id, msg, cfg["text"]):
+                logger.warning(
+                    "[channels] AI disclosure not posted on %s for session %s",
+                    routing.platform, session_id,
+                )
+                return None
             await deps.session_store.emit_event(
                 session_id,
                 EventType.DISCLOSURE_PRESENTED,
