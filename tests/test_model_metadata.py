@@ -41,9 +41,9 @@ def test_sentinel_session_prices_against_the_served_model() -> None:
     # What the base tier resolves to in PROD: the sentinel rides the
     # request, OpenRouter reports the concrete model back in usage.
     cost, priced = estimate_call_cost(
-        "surogate", "deepseek/deepseek-v4.1-flash", 1_000, 1_000,
+        "surogate", "deepseek/deepseek-v4.1-flash-1017", 1_000, 1_000,
     )
-    assert priced == "deepseek/deepseek-v4.1-flash"
+    assert priced == "deepseek/deepseek-v4.1-flash-1017"
     assert cost > 0
 
 
