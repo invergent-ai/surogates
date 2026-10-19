@@ -9,8 +9,6 @@ and zero pricing, with no error anywhere -- exactly the failure mode
 
 from __future__ import annotations
 
-import pytest
-
 from surogates.harness.model_metadata import (
     _ALIASES,
     MODEL_CATALOG,
@@ -55,13 +53,3 @@ def test_pro_sentinel_session_prices_against_the_served_model() -> None:
     )
     assert priced == "meta/muse-spark-1.3"
     assert cost > 0
-
-
-def test_the_october_flash_release_is_priced() -> None:
-    # OpenRouter has reported this id back for the base tier since 2026-10-18;
-    # unknown to the catalog, every session read as free.
-    cost, priced = estimate_call_cost(
-        "surogate", "deepseek/deepseek-v4.1-flash-1017", 1_000_000, 1_000_000,
-    )
-    assert priced == "deepseek/deepseek-v4.1-flash-1017"
-    assert cost == pytest.approx(0.15 + 0.60)

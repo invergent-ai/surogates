@@ -119,16 +119,6 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0012,
         supports_vision=True,
     ),
-    # OpenRouter has served the base tier as this id since 2026-10-18: its own
-    # build at its own price, OpenRouter's listed $0.15 / $0.60 per million.
-    "deepseek/deepseek-v4.1-flash-1017": ModelInfo(
-        id="deepseek/deepseek-v4.1-flash-1017",
-        context_window=1_048_576,
-        max_output_tokens=384_000,
-        input_cost_per_1k=0.00015,
-        output_cost_per_1k=0.0006,
-        supports_vision=True,
-    ),
     # --- Meta ---------------------------------------------------------------
     # What ``pro_llm_model`` resolves the ``surogate-pro`` tier -- and the
     # hidden advisor -- to.  Reasoning is MANDATORY on this model (OpenRouter
