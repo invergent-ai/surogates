@@ -32,7 +32,6 @@ from surogates.channels.constants import (
     INTERACTIVE_PROMPT_CHANNELS,
     outbound_dm,
 )
-from surogates.session.interactive_input import render_input_prompt
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
     SOURCE_SESSION,
@@ -60,6 +59,7 @@ from surogates.session.acting_principal import (
     resolve_principal_from_event_data,
 )
 from surogates.session.events import OPENER_SYNTHETIC_MARKERS, SILENT_REPLY, EventType
+from surogates.session.interactive_input import render_input_prompt
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     ASK_USER_QUESTION_RESCUE_PREFIX,
@@ -271,12 +271,12 @@ def _strip_trailing_question(content: str, questions: Any) -> str:
     return content[: repeat.start()].rstrip()
 
 
-
 #: A final reply that is no message: a lone "." after a tool call, or an
 #: emphasised stage direction such as "*(no new message; the question is
 #: still pending)*".  Both reached patients as messages.  A plain
 #: "(Thank you.)" is a reply and goes out.
 _NOT_A_MESSAGE = re.compile(r"[\s.\u2026]*|\s*([_*])\([^()\n]*\)\1[\s.]*")
+
 
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to

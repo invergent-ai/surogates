@@ -1322,11 +1322,11 @@ async def raise_escalation_inbox_item(
             return False
 
 
-async def escalation_inbox_item_exists(session_factory: Any, *, org_id: uuid.UUID, escalation: str) -> bool:
+async def escalation_inbox_item_exists(session_factory: Any, *, session_id: uuid.UUID, escalation: str) -> bool:
     async with session_factory() as db:
         return await db.scalar(
             sa.select(InboxItem.id)
-            .where(InboxItem.org_id == org_id)
+            .where(InboxItem.session_id == session_id)
             .where(InboxItem.payload["escalation"].as_string() == escalation)
             .limit(1)
         ) is not None

@@ -296,6 +296,7 @@ async def _alert_if_streak(
         settings_cache[key] = await followup_store.get_settings(
             session_factory, org_id=inv.org_id, agent_id=inv.agent_id,
         )
+    settings = settings_cache[key]
     [person] = (await describe_people(
         session_factory, org_id=inv.org_id, agent_id=inv.agent_id, user_ids=[person_id],
     )).values()
@@ -306,15 +307,16 @@ async def _alert_if_streak(
         if capabilities_for(inv.platform).identity == "phone" and person_id == inv.user_id
         else person.wa_id
     )
+    name = person.label(settings) or "?"
     text = render_missed_text(
         config.get("missed_alert_text"),
-        name=person.label(settings_cache[key]) or "?",
+        name=name,
         phone=readable_phone(phone) if phone else "?",
         count=threshold,
         program=str(config.get("name") or "step"),
     )
     queued, _why_not = await followup_store.notify_team(
-        session_factory, settings_cache[key], org_id=inv.org_id,
+        session_factory, settings, org_id=inv.org_id,
         agent_id=inv.agent_id, kind="alert", text=text,
         created_by="missed-checkins", subject_user_id=person_id,
         dedupe_prefix=f"missed:{inv.id}", topic="missed_replies",
@@ -337,18 +339,18 @@ async def _alert_if_streak(
     # does, so it waits in the same Inbox, until resolved.
     target = followup_store.uuid_or_none(
         config.get("escalation_service_account_id")
-        or getattr(settings_cache[key], "escalation_service_account_id", None)
+        or getattr(settings, "escalation_service_account_id", None)
     )
     escalation = followup_store.escalation_key(inv.id, inv.id)
     # A pass retried after a crash finds the item it already raised.  One
     # ticker runs these passes, so the check needs no lock.
     if target and inv.session_id and not await followup_store.escalation_inbox_item_exists(
-        session_factory, org_id=inv.org_id, escalation=escalation,
+        session_factory, session_id=inv.session_id, escalation=escalation,
     ):
         await followup_store.raise_escalation_inbox_item(
-            session_factory, settings_cache[key], org_id=inv.org_id,
+            session_factory, settings, org_id=inv.org_id,
             session_id=inv.session_id, service_account_id=target,
-            event_type="checkin.missed_replies", name=person.label(settings_cache[key]) or "?",
+            event_type="checkin.missed_replies", name=name,
             reason=text,
             payload={
                 "escalation": escalation,

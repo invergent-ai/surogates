@@ -550,7 +550,7 @@ async def test_the_ai_disclosure_is_posted_into_the_conversation_it_came_from(pl
     msg = platform.parse(_activity(), identifier=APP_ID)
 
     posted = await platform.post_input_nudge(
-        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, text="Sunt un program de IA.",
+        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, msg=msg, text="Sunt un program de IA.",
     )
 
     assert posted == "nudge-1"
@@ -564,7 +564,7 @@ async def test_a_nudge_answered_without_an_id_was_still_posted(platform):
     msg = platform.parse(_activity(), identifier=APP_ID)
 
     assert await platform.post_input_nudge(
-        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, text="x",
+        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, msg=msg, text="x",
     )
 
 

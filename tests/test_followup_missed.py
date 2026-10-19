@@ -344,7 +344,7 @@ async def test_a_missed_streak_waits_in_the_inbox_until_resolved(sf):
     assert item.title == "Needs your attention: Ion Pop"
     assert item.payload["until_resolved"] is True
     # A retried pass finds the item it already raised.
-    assert await store.escalation_inbox_item_exists(sf, org_id=ORG, escalation=item.payload["escalation"])
+    assert await store.escalation_inbox_item_exists(sf, session_id=session_id, escalation=item.payload["escalation"])
 
     await store.resolve_escalation(sf, org_id=ORG, agent_id=AGENT, escalation_id=inv)
     async with sf() as db:

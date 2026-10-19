@@ -1563,18 +1563,8 @@ def test_a_reply_that_is_no_message_is_not_sent(content):
     ) == {}
 
 
-def test_a_short_real_reply_is_still_sent():
-    from surogates.session.events import EventType
-    from surogates.session.store import _build_channel_payload
-
-    payload = _build_channel_payload(
-        EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "👍"}}, "discord",
-    )
-    assert payload["content"] == "👍"
-
-
-@pytest.mark.parametrize("content", ["(Mulțumesc!)", "(Mulțumesc!) Ne auzim mâine.", "Luați pastila (cea albă).", "(1)\n(2)"])
-def test_a_reply_with_parentheses_is_still_sent(content):
+@pytest.mark.parametrize("content", ["👍", "(Mulțumesc!)", "(Mulțumesc!) Ne auzim mâine.", "Luați pastila (cea albă).", "(1)\n(2)"])
+def test_a_short_or_parenthesised_reply_is_still_sent(content):
     from surogates.session.events import EventType
     from surogates.session.store import _build_channel_payload
 

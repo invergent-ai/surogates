@@ -332,6 +332,7 @@ def _make_deps_factory(
                 channel=msg.identifier,
                 thread_ts=msg.thread_key,
                 text=text,
+                msg=msg,
             )
 
         async def _keep_typing(session_id: Any, msg: Any) -> None:

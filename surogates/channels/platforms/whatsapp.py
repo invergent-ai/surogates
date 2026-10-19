@@ -1170,7 +1170,7 @@ class WhatsAppPlatform:
         return wamid is not None
 
     async def post_input_nudge(
-        self, *, creds: dict, channel: str, thread_ts: Any, text: str,
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str, msg: Any = None,
     ) -> str | None:
         """Deliver a status line to the conversation.
 

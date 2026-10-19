@@ -1222,7 +1222,8 @@ class ChannelInboundPipeline:
 
     @staticmethod
     async def _taps_an_opener(deps: Any, routing: Any, msg: InboundMessage) -> bool:
-        reply_to = (msg.source or {}).get("reply_to") if (msg.source or {}).get("template_reply") else None
+        source = msg.source or {}
+        reply_to = source.get("template_reply") and source.get("reply_to")
         if not reply_to or deps.session_factory is None:
             return False
         try:
@@ -1336,11 +1337,9 @@ class ChannelInboundPipeline:
         return its text so the person's message carries it for the model.
 
         Fires only for agents whose runtime-config governance carries an
-        enabled disclosure config.  "First contact" is detected via the
-        session row's ``message_count`` — zero means no USER_MESSAGE has
-        been recorded yet (the pipeline emits it after this hook), which
-        also covers resumed-but-never-messaged sessions; a re-disclosure
-        on such a session is harmless, a missing one is not.
+        enabled disclosure config, on every message until a
+        ``disclosure.presented`` event exists: a re-disclosure is harmless,
+        a missing one is not.
 
         Delivery rides ``deps.input_nudge`` (the same seam as the /stop
         acknowledgement), which posts a plain platform message.  On

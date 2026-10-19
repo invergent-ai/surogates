@@ -61,5 +61,6 @@ def test_the_october_flash_release_is_priced() -> None:
     cost, priced = estimate_call_cost(
         "surogate", "deepseek/deepseek-v4.1-flash-1017", 1_000, 1_000,
     )
+    base, _ = estimate_call_cost("surogate", "deepseek/deepseek-v4.1-flash", 1_000, 1_000)
     assert priced == "deepseek/deepseek-v4.1-flash-1017"
-    assert cost > 0
+    assert cost == base > 0

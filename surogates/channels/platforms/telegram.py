@@ -760,7 +760,7 @@ class TelegramPlatform:
     # ------------------------------------------------------------------
 
     async def post_input_nudge(
-        self, *, creds: dict, channel: str, thread_ts: Any, text: str,
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str, msg: Any = None,
     ) -> str | None:
         """Post a short status line (answer ack, /stop ack) to the chat.
 
