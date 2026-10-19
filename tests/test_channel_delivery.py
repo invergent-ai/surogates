@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 
 from surogates.channels.base import SendResult
 from surogates.channels.dispatcher import ChannelDeliveryDispatcher
@@ -1512,3 +1514,57 @@ class TestMediaGateIsCapabilityBased:
         assert platform.send_calls == []
         assert len(platform.send_files_calls) == 1
         assert delivery.delivered == [(11, "FA2")]
+
+
+def _question_payload(channel):
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    return _build_channel_payload(
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "c1",
+            "message": "Bună ziua. Sunt agentul doctorului.",
+            "questions": [{"prompt": "Ați avut TAVI?", "choices": [{"label": "Da"}, {"label": "Nu"}]}],
+        },
+        channel,
+    )
+
+
+@pytest.mark.parametrize("channel", ["discord", "teams"])
+def test_a_question_reaches_a_channel_without_buttons_as_text(channel):
+    """On Discord and Teams the whole reply was dropped: the agent asked with
+    ask_user_question and those channels had no way to show it."""
+    payload = _question_payload(channel)
+
+    assert "input_prompt" not in payload
+    assert payload["content"] == "Bună ziua. Sunt agentul doctorului.\nAți avut TAVI?\n  • Da\n  • Nu"
+
+
+def test_a_channel_with_buttons_still_gets_the_prompt():
+    assert _question_payload("whatsapp")["input_prompt"] is True
+
+
+def test_a_web_chat_question_stays_out_of_the_outbox():
+    assert _question_payload("web") == {}
+
+
+@pytest.mark.parametrize("content", [".", " … ", "..."])
+def test_a_reply_of_only_dots_is_not_sent(content):
+    """After an escalate the model wrote "." and the patient got a message of one dot."""
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    assert _build_channel_payload(
+        EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": content}}, "discord",
+    ) == {}
+
+
+def test_a_short_real_reply_is_still_sent():
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    payload = _build_channel_payload(
+        EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "👍"}}, "discord",
+    )
+    assert payload["content"] == "👍"

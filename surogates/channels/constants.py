@@ -87,11 +87,9 @@ def outbound_dm(channel: str | None, config: dict | None) -> bool:
 
 #: Channels whose platform can render an ``ask_user_question`` prompt
 #: (Slack: buttons for a few short choices, else Answer button + modal; Telegram: inline keyboard; WhatsApp:
-#: reply buttons or a list, else bulleted text).  A channel OUTSIDE this set gets no
-#: ``input_prompt`` outbox row at all — ``_build_channel_payload`` returns
-#: an empty payload and ``store`` drops it — so the user sees nothing and
-#: the session parks waiting for an answer that can never arrive.  Adding a
-#: channel here therefore REQUIRES a prompt renderer in its ``send``.
+#: reply buttons or a list, else bulleted text).  Another adapter channel
+#: (Discord, Teams) gets the prompt as plain text, answered by typing.  Adding
+#: a channel here therefore REQUIRES a prompt renderer in its ``send``.
 INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 
 #: Channels whose sessions represent a real end-user talking to the

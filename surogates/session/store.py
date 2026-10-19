@@ -284,6 +284,8 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
         if content and content.strip() == SILENT_REPLY:
             content = ""  # the agent chose to write nothing
+        if content and not content.strip().strip(".\u2026"):
+            content = ""  # a lone "." after a tool call reached a patient as a message
         if content:
             payload["content"] = content
             # Delivered either way: the model writes to the person beside its
@@ -310,7 +312,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
         payload["flow"] = data.get("interactive") or {}
     elif (
         event_type == EventType.INBOX_INPUT_REQUIRED
-        and channel in INTERACTIVE_PROMPT_CHANNELS
+        and channel in ADAPTER_CHANNELS
     ):
         questions = data.get("questions") or []
         if questions:
@@ -332,6 +334,13 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 # ``message`` is the schema's field for words to the person;
                 # an invented ``context`` stays the operator's.
                 payload["context"] = _strip_trailing_question(data["message"], questions)
+            if channel not in INTERACTIVE_PROMPT_CHANNELS:
+                # No buttons to draw (Discord, Teams): dropped, the whole
+                # reply went with it.  As text, a typed answer still resolves
+                # the question (``_intercept_pending_input``).
+                from surogates.channels.platforms.whatsapp import _render_input_prompt
+
+                payload = {"content": _render_input_prompt(payload)}
     return payload
 
 
