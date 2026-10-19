@@ -270,6 +270,12 @@ def _strip_trailing_question(content: str, questions: Any) -> str:
     return content[: repeat.start()].rstrip()
 
 
+
+#: A final reply that is no message: a lone "." after a tool call, or a stage
+#: direction such as "*(no new message; the question is still pending)*".
+#: Both reached patients as messages.
+_NOT_A_MESSAGE = re.compile(r"[\s.\u2026]*|[\s_*]*\([^()\n]*\)[\s_*.]*")
+
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
     deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
@@ -284,8 +290,8 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
         if content and content.strip() == SILENT_REPLY:
             content = ""  # the agent chose to write nothing
-        if content and not content.strip().strip(".\u2026"):
-            content = ""  # a lone "." after a tool call reached a patient as a message
+        if content and _NOT_A_MESSAGE.fullmatch(content):
+            content = ""
         if content:
             payload["content"] = content
             # Delivered either way: the model writes to the person beside its
