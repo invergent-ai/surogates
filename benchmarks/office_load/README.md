@@ -27,6 +27,11 @@ A **step** is a number of concurrent sessions: they start spread over 60 s, then
 ramp runs 5, 10, 20, 40, 80, 160, … sessions until a step breaks the bar, then bisects between the last step that held
 and the first that broke until they are within a tenth of the holding step, or 2 sessions.
 
+At a step's deadline each session stops without saving at once. A turn whose forcesave has not gone by then is
+abandoned, with no flush or forcesave, and its events are not judged; a forcesave sent before the deadline is still
+waited for and judged. No turn starts after the deadline, and none is cut short to save before it, so the step's last
+seconds carry its steady save rate.
+
 - **The capacity** is the highest step that held.
 - **The knee** is the lowest step that broke the bar on the document server's side; its first broken row is the
   first finding.
@@ -49,7 +54,7 @@ production.
 
 ## The bar
 
-A step holds when, through its hold period:
+A step holds when, through its hold period (from its last session's start to its deadline):
 
 | What | Bar |
 | --- | --- |
@@ -166,7 +171,8 @@ containers, the deepest RabbitMQ queue, the database connections and the first e
 runs/<run-id>/
   run.json            what ran: the command, workload, profile, pages per client, clients, settings (no secret), git sha
   step-<n>/           one per step
-    events.jsonl      every open, edit, flush, forcesave, callback and marker check, as it came
+    events.jsonl      every open, edit, flush, forcesave, callback and marker check, as it came; those of a turn
+                      the deadline abandoned marked "abandoned"
     step.json         the step judged: its verdict against the bar, its stats, its leaked client slots
     metrics.jsonl     the namespace's samples
   editors-<n>/        one per editors count (preflight-cap): events.jsonl, metrics.jsonl, cap.json

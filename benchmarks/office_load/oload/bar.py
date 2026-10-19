@@ -1,7 +1,9 @@
 """The bar a step holds to: every save lands, each call answers in its time, and nothing fails.
 
-A step is judged on its hold period, the steady part once every session has started. Opens are the exception: every
-session opens while the step ramps up, so its opens are judged wherever they came.
+A step is judged on its hold period, the steady part from the last session's start to the step's deadline. Opens are
+the exception: every session opens while the step ramps up, so its opens are judged wherever they came. Past the
+deadline only the saves sent before it are judged: a turn whose forcesave had not gone is abandoned, its events marked
+so.
 """
 
 from __future__ import annotations
@@ -48,10 +50,11 @@ def judge(events: Iterable[Event], hold_from: float) -> Verdict:
 
     A callback that did not come within the harness's wait is a lost save, and counts in the callback times as longer
     than any; every other failure breaks its row. A failure of the load clients' own (cause ``client``) breaks the bar
-    too, but when nothing else does the step is client-limited.
+    too, but when nothing else does the step is client-limited. The events of turns the deadline abandoned are not
+    judged, but a request of the tool's own refused in one still makes the step invalid.
     """
     events = list(events)
-    held = [e for e in events if e.at >= hold_from or e.what == "open"]
+    held = [e for e in events if (e.at >= hold_from or e.what == "open") and not e.abandoned]
     stats = _stats(held)
     tool = [e for e in events if e.cause == "tool"]
     if tool:

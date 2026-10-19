@@ -236,12 +236,12 @@ def _samples(result: StepResult) -> list[dict[str, Any]]:
 
 
 def _rates(result: StepResult) -> tuple[float | None, float | None]:
-    """Edits and forcesaves sent per minute through the step's hold."""
+    """Edits and forcesaves sent per minute through the step's hold, but for the turns its deadline abandoned."""
     path = None if result.dir is None else result.dir / "events.jsonl"
     minutes = (result.ended - result.hold_from) / 60
     if path is None or not path.is_file() or minutes <= 0:
         return None, None
-    held = [e for e in EventLog.read(path) if result.hold_from <= e.at <= result.ended]
+    held = [e for e in EventLog.read(path) if result.hold_from <= e.at <= result.ended and not e.abandoned]
     return (sum(e.what == "edit" for e in held) / minutes, sum(e.what == "forcesave" for e in held) / minutes)
 
 

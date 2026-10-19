@@ -220,9 +220,11 @@ Where the difference could move the knee:
 - **Slightly optimistic.** The tool answers file requests and callbacks as soon as its own work is done; the runtime
   also reads and writes storage and its database first. Opens and callbacks are a little faster here than in
   production.
-- **The step's end is a burst.** Every session's turn is cut short at the step's end and saves at once, so a rollout
-  step's last 30 s carry about twice its save rate. Production has no such instant, though anything that ends many
-  turns together would. Read the timeouts in those seconds as what a burst does, not as the steady rate's limit.
+- **The step's end was a burst.** In these runs every session's turn was cut short at the step's end and saved at
+  once, so a rollout step's last 30 s carry about twice its save rate. Production has no such instant, though anything
+  that ends many turns together would. Read the timeouts in those seconds as what a burst does, not as the steady
+  rate's limit. The tool no longer does this from #540 on: at a step's deadline a turn not yet saved is abandoned,
+  unsaved and not judged, and the hold judged ends there.
 - **The profiles.** Production: the chart's defaults, docservice at 2 CPU and two converters at 2 CPU each, with CPU
   limits equal to the requests. DEV: docservice and each converter at 0.5 CPU. The proxy and RabbitMQ have no CPU
   limit in either, as in production. The 4- and 8-converter runs change only the converters' number.

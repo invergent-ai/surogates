@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
+import random
+import selectors
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from oload import ramp as ramp_module
+from oload import session as session_module
 from oload.bar import Verdict
 from oload.clients import ClientDown, Fleet, FleetFull, Timed
-from oload.docserver import CallbackState
+from oload.docserver import Callback, CallbackState, ForceSave
 from oload.events import Event, EventLog
+from oload.pace import Pace
 from oload.ramp import StepResult, bisect, ramp, run_step, steps
 from oload.settings import Settings
+from oload.workloads import OUTLINE_READ
 
 SETTINGS = Settings(
     ds_url="http://office-docs.example.svc", command_url="http://127.0.0.1:9", jwt_secret="s" * 32,
@@ -293,7 +300,9 @@ class DyingOffice:
     read = edit = flush = close = _gone
 
 
-async def test_a_load_client_dying_mid_step_makes_it_client_limited(tmp_path: Path) -> None:
+async def test_a_load_client_dying_mid_step_makes_it_client_limited(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    monkeypatch.setattr(Pace, "edits_in_turn", lambda _: 1)  # no gap: the turn ends, judged, before the deadline
     office = DyingOffice()
     the_fleet = Fleet([office], pages_per_client=4)  # type: ignore[list-item]
     done = await step(2, tmp_path, the_fleet, ramp_s=0, hold_s=0.3)
@@ -301,3 +310,101 @@ async def test_a_load_client_dying_mid_step_makes_it_client_limited(tmp_path: Pa
     assert not done.holds and done.verdict.client_limited and done.lower_bound and not done.invalid
     assert done.verdict.stats["failures"]["client"] > 0
     assert the_fleet.placed == (0,)
+
+
+# A step's end, with the real sessions at the recorded pace on a virtual clock.
+
+READS: dict[str, Any] = json.loads((Path(__file__).parent / "fixtures" / "sample_pptx_reads.json").read_text())
+SAVE_S = 1.5  # how long each save takes to call back
+
+
+class VirtualClock(asyncio.SelectorEventLoop):
+    """An event loop whose clock jumps to its next timer instead of waiting for it: a step's minutes in a blink."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        super().__init__(_Jumping(self))
+
+    def time(self) -> float:
+        return self.now
+
+
+class _Jumping(selectors.DefaultSelector):  # type: ignore[misc, valid-type]
+    def __init__(self, clock: VirtualClock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def select(self, timeout: float | None = None) -> Any:
+        if timeout is None:
+            raise RuntimeError("nothing left to wait for: the simulation is stuck")
+        self.clock.now += timeout
+        return super().select(0)
+
+
+class InstantOffice:
+    """A load client whose every call answers at once."""
+
+    async def open(self, doc_key: str, session_id: str, config: dict[str, Any],
+                   document_server_url: str) -> Timed[str]:
+        return Timed(f"{doc_key}.{session_id}", 0.0)
+
+    async def read(self, page: str, request: dict[str, Any]) -> Timed[dict[str, Any]]:
+        return Timed(READS["outline"] if request == OUTLINE_READ else READS["slide"], 0.0)
+
+    async def edit(self, page: str, ops: list[Any]) -> Timed[dict[str, Any]]:
+        return Timed({"applied": True}, 0.0)
+
+    async def flush(self, page: str) -> Timed[bool]:
+        return Timed(True, 0.0)
+
+    async def close(self, page: str) -> None:
+        pass
+
+
+class SavingState:
+    """The callbacks of a document server that saves every forcesave SAVE_S after it."""
+
+    def __init__(self) -> None:
+        self.callbacks: list[Callback] = []
+
+    def add_document(self, doc_key: str, kind: str, data: bytes) -> None:
+        pass
+
+    async def wait_for(self, doc_key: str, userdata: str, timeout: float) -> Callback:
+        await asyncio.sleep(SAVE_S)
+        return Callback(doc_key, 6, userdata, None, 0.0, 0.0, data=b"saved")
+
+
+async def answered(*_: Any) -> ForceSave:
+    return ForceSave(0, 0.05, "answered", 200)
+
+
+async def inline(function: Callable[..., Any], *args: Any) -> Any:
+    return function(*args)
+
+
+def test_a_steps_saves_keep_their_pace_to_its_deadline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    clock = VirtualClock()
+    fake_time = SimpleNamespace(monotonic=clock.time, time=lambda: 1_700_000_000.0 + clock.now)
+    monkeypatch.setattr(ramp_module, "time", fake_time)
+    monkeypatch.setattr(session_module, "time", fake_time)
+    monkeypatch.setattr(session_module, "forcesave", answered)
+    monkeypatch.setattr(session_module, "_holds_any", lambda *_: True)
+    monkeypatch.setattr(asyncio, "to_thread", inline)  # the marker check, on the virtual clock
+    the_fleet = Fleet([InstantOffice() for _ in range(3)], pages_per_client=20)  # type: ignore[misc]
+    try:
+        done = clock.run_until_complete(run_step(
+            60, "rollout", the_fleet, SETTINGS, SavingState(),  # type: ignore[arg-type]
+            run_id="r1", run_dir=tmp_path, rng=random.Random(1)))
+    finally:
+        clock.close()
+
+    assert done.holds and the_fleet.placed == (0, 0, 0)
+    deadline = done.hold_from + ramp_module.HOLD_S
+    judged = [e.at for e in EventLog.read(done.dir / "events.jsonl")
+              if e.what == "forcesave" and not e.abandoned and e.at >= done.hold_from]
+    assert max(judged) < deadline  # none sent after it
+    last = sum(at >= deadline - 30 for at in judged)
+    per_30_s = (len(judged) - last) / ((ramp_module.HOLD_S - 30) / 30)
+    assert per_30_s > 30  # 60 sessions saving steadily
+    assert last < 1.5 * per_30_s, f"{last} forcesaves in the last 30 s, {per_30_s:.1f} per 30 s before"

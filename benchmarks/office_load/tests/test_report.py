@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -105,9 +106,11 @@ def test_the_knee_comes_with_its_evidence_and_its_pace(tmp_path: Path) -> None:
     write_step(run_dir, 7, 2)
     knee_start = T0 + 3 * 1000
     hold_from = knee_start + 60
-    # The knee's hold: 600 s, 30 edits and 20 forcesaves; the ramp-up's 4 edits are not counted.
+    # The knee's hold: 600 s, 30 edits and 20 forcesaves; the ramp-up's 4 edits and the 3 of turns the deadline
+    # abandoned are not counted.
     knee_events = ([event("edit", knee_start + 5) for _ in range(4)]
                    + [event("edit", hold_from + 10 * i) for i in range(30)]
+                   + [replace(event("edit", hold_from + 595), abandoned=True) for _ in range(3)]
                    + [event("forcesave", hold_from + 20 * i) for i in range(20)])
     write_step(run_dir, 8, 3, holds=False, events=knee_events,
                broken=["callback: p95 10.50 s, over 10 s", "flush: 1 acknowledged after 10 s"],
