@@ -335,7 +335,8 @@ async def deliver_pending(
                         OutreachMessageRow.sent_at >= now - OUTCOME_LOOKBACK,
                     ),
                 ))
-                .order_by(OutreachMessageRow.created_at)
+                # Whoever opens what piled up reads the alerts first.
+                .order_by(OutreachMessageRow.kind != "alert", OutreachMessageRow.created_at)
             )
         ).scalars().all()
     if not rows or await _busy(session_factory, session_id, now):

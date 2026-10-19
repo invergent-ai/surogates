@@ -343,6 +343,27 @@ async def test_only_queued_rows_are_picked_up(sf, doctor_session):
 
 
 @pytest.mark.asyncio
+async def test_held_alerts_are_delivered_before_routine_notices(sf, doctor_session):
+    """A doctor who tapped to read an alert found it under the day's enrolment notices."""
+    doctor = uuid.uuid4()
+    await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=doctor, platform="whatsapp",
+        channel_identifier=SENDER, kind="enrolment", text="New patient enrolled",
+        template_name="alert", template_language="ro",
+    )
+    await _queue(sf, doctor, text="Patient fainted")
+    await _send(sf, _Store(), _Delivery())
+
+    reply_store = _Store()
+    await outreach.deliver_pending(
+        sf, reply_store, org_id=ORG, agent_id=AGENT, user_id=doctor,
+        platform="whatsapp", channel_identifier=SENDER, session_id=uuid.uuid4(),
+    )
+
+    assert [e[2]["message"]["content"] for e in reply_store.events] == ["Patient fainted", "New patient enrolled"]
+
+
+@pytest.mark.asyncio
 async def test_an_alert_never_rides_on_a_routine_notice(sf, doctor_session):
     doctor = uuid.uuid4()
     await store.queue_outreach(
