@@ -842,6 +842,7 @@ class TestInboundTaps:
         assert msg is not None
         assert msg.text == "Obosit"
         assert msg.kind == "text"
+        assert "template_reply" not in msg.source
 
     def test_list_row_tap_is_its_title_without_the_description(self):
         from surogates.channels.platforms.telegram_interactive import resolve_text_answer
@@ -875,6 +876,8 @@ class TestInboundTaps:
         )
         assert msg is not None
         assert msg.text == "Încep acum"
+        assert msg.source["template_reply"] is True
+        assert msg.source["reply_to"] == "wamid.opener"
 
     def test_flow_completion_is_rendered_as_key_value_lines(self):
         msg = self._parse(

@@ -521,6 +521,8 @@ def _build_message(
     # A Flow's form fields are never a pending question's answer.
     flow_reply = msg_type == "interactive" and interactive.get("type") == "nfm_reply"
     flow_text, flow_source = _flow_reply(interactive.get("nfm_reply") or {}) if flow_reply else ("", {})
+    # A template's quick reply arrives as "button"; an interactive message's as "interactive".
+    template_reply = msg_type == "button"
     if msg_type == "text":
         text = ((raw_message.get("text") or {}).get("body")) or ""
     elif msg_type in _TAP_TYPES:
@@ -542,6 +544,9 @@ def _build_message(
     if flow_reply:
         source["flow_reply"] = True
         source.update(flow_source)
+    if template_reply:
+        source["template_reply"] = True
+        source["reply_to"] = str((raw_message.get("context") or {}).get("id") or "")
     if msg_type == "audio":
         source["voice"] = bool((raw_message.get("audio") or {}).get("voice"))
 

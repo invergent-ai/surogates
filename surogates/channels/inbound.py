@@ -48,7 +48,9 @@ from surogates.channels.source import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
-from surogates.followup.outreach import busy_line_for, deliver_pending, first_busy_line
+from surogates.followup.outreach import (
+    busy_line_for, deliver_pending, first_busy_line, is_opener,
+)
 from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note, disclosure_note
 
 logger = logging.getLogger(__name__)
@@ -871,6 +873,17 @@ class ChannelInboundPipeline:
                     exc_info=True,
                 )
 
+        # A tap on the template that reopened the window only asked for what
+        # was held behind it, which has just gone out.  Handed to the agent,
+        # the button's label ("Send the alert") read as an instruction and
+        # the agent raised the same alert a second time.
+        if await self._taps_an_opener(deps, routing, msg):
+            logger.info(
+                "[followup] %s tapped a reopening template on %s; held messages "
+                "delivered, nothing for the agent", msg.platform_user_id, routing.agent_id,
+            )
+            return InboundOutcome.DROPPED
+
         # ------------------------------------------------------------------
         # /stop — interrupt the running turn OUT-OF-BAND.  A normal message
         # would queue behind the busy worker and never reach it in time (a
@@ -1205,6 +1218,20 @@ class ChannelInboundPipeline:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _taps_an_opener(deps: Any, routing: Any, msg: InboundMessage) -> bool:
+        reply_to = (msg.source or {}).get("reply_to") if (msg.source or {}).get("template_reply") else None
+        if not reply_to or deps.session_factory is None:
+            return False
+        try:
+            return await is_opener(
+                deps.session_factory, org_id=UUID(str(routing.org_id)),
+                agent_id=routing.agent_id, provider_message_id=reply_to,
+            )
+        except Exception:  # noqa: BLE001 — when unsure, the agent reads it
+            logger.warning("[followup] could not check the tapped template", exc_info=True)
+            return False
 
     @staticmethod
     async def _intercept_pending_input(
