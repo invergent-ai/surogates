@@ -243,6 +243,7 @@ async def mutate_memory(
     limit = _char_limit(body.target)
     current_entries = store.get_entries(body.target)
 
+    done = "added" if body.action == "add" else body.action + "d"
     if body.action == "add":
         if not body.content:
             raise HTTPException(
@@ -252,7 +253,7 @@ async def mutate_memory(
         scan_err = scan_memory_content(body.content)
         if scan_err:
             return MemoryMutateResponse(success=False, error=scan_err)
-        merged, _ = merge_entry(current_entries, body.content)
+        merged, replaced = merge_entry(current_entries, body.content)
         used = sum(len(e) for e in merged)
         if used > limit:
             return MemoryMutateResponse(
@@ -263,6 +264,8 @@ async def mutate_memory(
                 ),
             )
         await store.add(body.target, body.content)
+        if replaced:
+            done = "replaced"
 
     elif body.action == "replace":
         if not body.old_text:
@@ -340,7 +343,7 @@ async def mutate_memory(
     entries = store.get_entries(body.target)
     return MemoryMutateResponse(
         success=True,
-        message=f"Entry {'added' if body.action == 'add' else body.action + 'd'}.",
+        message=f"Entry {done}.",
         entries=entries,
         usage=_format_usage(entries, limit),
         entry_count=len(entries),
