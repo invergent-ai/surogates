@@ -32,6 +32,7 @@ from surogates.channels.constants import (
     INTERACTIVE_PROMPT_CHANNELS,
     outbound_dm,
 )
+from surogates.session.interactive_input import render_input_prompt
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
     SOURCE_SESSION,
@@ -271,10 +272,11 @@ def _strip_trailing_question(content: str, questions: Any) -> str:
 
 
 
-#: A final reply that is no message: a lone "." after a tool call, or a stage
-#: direction such as "*(no new message; the question is still pending)*".
-#: Both reached patients as messages.
-_NOT_A_MESSAGE = re.compile(r"[\s.\u2026]*|[\s_*]*\([^()\n]*\)[\s_*.]*")
+#: A final reply that is no message: a lone "." after a tool call, or an
+#: emphasised stage direction such as "*(no new message; the question is
+#: still pending)*".  Both reached patients as messages.  A plain
+#: "(Thank you.)" is a reply and goes out.
+_NOT_A_MESSAGE = re.compile(r"[\s.\u2026]*|\s*([_*])\([^()\n]*\)\1[\s.]*")
 
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
@@ -286,7 +288,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
         content = msg.get("content", "") if isinstance(msg, dict) else ""
         if content and isinstance(content, str):
             content = strip_next_action_blocks(content)
-            if channel in INTERACTIVE_PROMPT_CHANNELS:
+            if channel in ADAPTER_CHANNELS:
                 content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
         if content and content.strip() == SILENT_REPLY:
             content = ""  # the agent chose to write nothing
@@ -344,9 +346,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 # No buttons to draw (Discord, Teams): dropped, the whole
                 # reply went with it.  As text, a typed answer still resolves
                 # the question (``_intercept_pending_input``).
-                from surogates.channels.platforms.whatsapp import _render_input_prompt
-
-                payload = {"content": _render_input_prompt(payload)}
+                payload = {"content": render_input_prompt(payload)}
     return payload
 
 

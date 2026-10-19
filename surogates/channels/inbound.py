@@ -1358,17 +1358,10 @@ class ChannelInboundPipeline:
         if cfg is None or not cfg["enabled"] or not cfg["text"]:
             return None
         try:
-            session = await deps.session_store.get_session(session_id)
-            if getattr(session, "message_count", 0) and (
-                # Messages refused for want of a plan were kept, not answered:
-                # the person still meets the disclosure on their first turn.
-                not await deps.session_store.has_event(
-                    session_id, EventType.USER_MESSAGE, with_key="held",
-                )
-                or await deps.session_store.has_event(
-                    session_id, EventType.DISCLOSURE_PRESENTED,
-                )
-            ):
+            # Until it has been shown, whatever came before: a post that
+            # failed is tried again on the next message, and messages
+            # refused for want of a plan were kept, not answered.
+            if await deps.session_store.has_event(session_id, EventType.DISCLOSURE_PRESENTED):
                 return None
             if not await deps.input_nudge(session_id, msg, cfg["text"]):
                 logger.warning(

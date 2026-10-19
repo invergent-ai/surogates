@@ -70,7 +70,7 @@ from surogates.channels.whatsapp_flows import (
     form_reply_text,
 )
 from surogates.programs.delivery import schedule_status_apply
-from surogates.session.interactive_input import fold_label
+from surogates.session.interactive_input import fold_label, render_input_prompt
 
 __all__ = [
     "WhatsAppPlatform",
@@ -569,46 +569,6 @@ def _build_message(
     )
 
 
-def _render_input_prompt(payload: dict) -> str:
-    """Render an ``ask_user_question`` prompt as plain text.
-
-    The fallback for prompts :func:`_interactive_prompt` cannot carry
-    (several questions, open-ended ones, labels over Meta's limits): the
-    choices are listed in the message body.  A typed reply naming a choice,
-    or any reply to a single open question, answers it; anything else,
-    including any reply to several questions, reaches the agent as the
-    person's message and dismisses the question.
-
-    The question shape is the one normalised by
-    ``tools.builtin.ask_user_question._validate_questions`` and emitted
-    verbatim into ``INBOX_INPUT_REQUIRED`` — ``prompt`` and ``choices``
-    (each with a ``label``), NOT ``question``/``options``.
-
-    Choices are bulleted rather than numbered, matching Telegram's text
-    fallback: ``resolve_text_answer`` matches choice *labels*, so numbering
-    would invite a "1" that the resolver records as a free-form answer.
-
-    No header or footer of our own: the people on the other end are
-    end users writing in their own language.
-    """
-    lines: list[str] = []
-    context = (payload.get("context") or "").strip()
-    if context:
-        lines.append(context)
-
-    questions = [q for q in payload.get("questions") or [] if isinstance(q, dict)]
-    for index, question in enumerate(questions):
-        prompt = (question.get("prompt") or f"Question {index + 1}").strip()
-        prefix = f"{index + 1}. " if len(questions) > 1 else ""
-        lines.append(f"{prefix}{prompt}")
-        for choice in question.get("choices") or []:
-            label = choice.get("label") if isinstance(choice, dict) else str(choice)
-            if label:
-                lines.append(f"  • {label}")
-
-    return "\n".join(line for line in lines if line)
-
-
 #: The list message's button text when the agent gives none.  A glyph, not a
 #: word: people read the prompt in their own language and an English
 #: "Choose" would be the only foreign text on the screen.
@@ -925,7 +885,7 @@ class WhatsAppPlatform:
                 if flow or not _INTERACTIVE_REFUSED.match(error or ""):
                     return SendResult(success=False, error=error or "send failed")
                 logger.warning("[whatsapp] interactive prompt refused, sending it as text: %s", error)
-            text = _render_input_prompt(item.payload)
+            text = render_input_prompt(item.payload)
         else:
             text = render_whatsapp(item.payload.get("content", "") or "")
 

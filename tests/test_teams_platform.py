@@ -557,5 +557,16 @@ async def test_the_ai_disclosure_is_posted_into_the_conversation_it_came_from(pl
     assert json.loads(post.calls[0].request.content)["text"] == "Sunt un program de IA."
 
 
+@respx.mock
+async def test_a_nudge_answered_without_an_id_was_still_posted(platform):
+    _mock_token(respx)
+    respx.post(ACTIVITIES).mock(return_value=httpx.Response(201, json={}))
+    msg = platform.parse(_activity(), identifier=APP_ID)
+
+    assert await platform.post_input_nudge(
+        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, text="x",
+    )
+
+
 async def test_a_nudge_for_a_conversation_never_seen_posts_nothing(platform):
     assert await platform.post_input_nudge(creds=_creds(), channel="a:unknown", thread_ts=None, text="x") is None

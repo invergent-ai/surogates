@@ -453,7 +453,8 @@ class TeamsPlatform:
         if posted is None:
             logger.warning("[teams] nudge not posted: %s", error)
             return None
-        return str(posted.get("id") or "") or None
+        # Bot Framework may answer a post with no id: it was still shown.
+        return str(posted.get("id") or "") or "posted"
 
     async def handle_non_message_update(
         self, body: Any, *, routing: Any, creds: dict, deps: Any,

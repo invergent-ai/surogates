@@ -1573,7 +1573,7 @@ def test_a_short_real_reply_is_still_sent():
     assert payload["content"] == "👍"
 
 
-@pytest.mark.parametrize("content", ["(Mulțumesc!) Ne auzim mâine.", "Luați pastila (cea albă).", "(1)\n(2)"])
+@pytest.mark.parametrize("content", ["(Mulțumesc!)", "(Mulțumesc!) Ne auzim mâine.", "Luați pastila (cea albă).", "(1)\n(2)"])
 def test_a_reply_with_parentheses_is_still_sent(content):
     from surogates.session.events import EventType
     from surogates.session.store import _build_channel_payload

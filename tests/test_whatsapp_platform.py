@@ -773,9 +773,9 @@ async def test_app_level_event_is_acknowledged_and_dropped():
 def test_input_prompt_carries_no_english_chrome() -> None:
     """End users read this in their own language: only the agent's words
     and the choices go out."""
-    from surogates.channels.platforms.whatsapp import _render_input_prompt
+    from surogates.session.interactive_input import render_input_prompt
 
-    text = _render_input_prompt({
+    text = render_input_prompt({
         "context": "Am notat data procedurii.",
         "questions": [{"prompt": "Sunteți de acord?", "choices": [{"label": "Da"}]}],
     })
@@ -800,8 +800,8 @@ def test_channel_prompt_drops_the_models_own_context() -> None:
     assert payload["input_prompt"] is True
     assert "context" not in payload
 
-    from surogates.channels.platforms.whatsapp import _render_input_prompt
-    assert "Pasul 4" not in _render_input_prompt(payload)
+    from surogates.session.interactive_input import render_input_prompt
+    assert "Pasul 4" not in render_input_prompt(payload)
 
 
 def test_channel_prompt_keeps_the_rescued_reply() -> None:
@@ -965,10 +965,13 @@ class TestQuestionNotRepeated:
         )
         assert "context" not in no_message
 
-    def test_the_closing_repeat_is_cut(self):
+    @pytest.mark.parametrize("channel", ["whatsapp", "teams", "discord"])
+    def test_the_closing_repeat_is_cut(self, channel):
+        """Teams and Discord get the prompt as a text message of its own, so they repeat it too."""
         payload = self._payload(
             "Mulțumesc.\n\nCum  vă numiți?\n(numele și prenumele)\n",
             {"prompt": "Cum vă numiți? (numele și prenumele)"},
+            channel=channel,
         )
         assert payload["content"] == "Mulțumesc."
 
