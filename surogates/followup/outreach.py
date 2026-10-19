@@ -279,6 +279,24 @@ async def _deliver_now(
     return True
 
 
+async def is_opener(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, provider_message_id: str,
+) -> bool:
+    """Whether *provider_message_id* is a template we sent to reopen a window."""
+    if not provider_message_id:
+        return False
+    async with session_factory() as db:
+        return (
+            await db.execute(
+                sa.select(OutreachMessageRow.id)
+                .where(OutreachMessageRow.org_id == org_id)
+                .where(OutreachMessageRow.agent_id == agent_id)
+                .where(OutreachMessageRow.provider_message_id == provider_message_id)
+                .limit(1)
+            )
+        ).first() is not None
+
+
 async def deliver_pending(
     session_factory: Any,
     session_store: Any,
@@ -654,7 +672,9 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
 
     One notice per message: a failure of anything they asked for (their
     message, the welcome of someone they enrolled, a notice to a colleague),
-    and the delivery of their own message after a held wait.  A text
+    and the delivery of their own message after a held wait.  Notices that
+    would read the same to the same member in one pass (several messages
+    to one person expiring together) go out once.  A text
     written straight into an open window needs none: the tool already told
     them it went out.  The row is marked reported only once its notice is
     queued, and the notice is keyed on the row, so a pass that dies in
@@ -686,6 +706,7 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
         session_factory, ((r.org_id, r.agent_id, r.user_id) for r in rows),
     )
     reported = 0
+    told: set[tuple] = set()
     for row in rows:
         requester = _requester(row.created_by)
         try:
@@ -702,12 +723,15 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                     settings, "undelivered_notice",
                     name=name, why=plain_reason(row.reason, settings.texts if settings else None), phone=phone,
                 )
-            queued, _ = await _tell_requester(
-                session_factory, settings, row, requester,
-                text=text, dedupe_prefix=f"outcome:{row.id}",
-            )
+            said = (row.org_id, row.agent_id, requester, text)
+            if said not in told:
+                queued, _ = await _tell_requester(
+                    session_factory, settings, row, requester,
+                    text=text, dedupe_prefix=f"outcome:{row.id}",
+                )
+                told.add(said)
+                reported += queued
             await _mark_reported(session_factory, OutreachMessageRow, [row.id], now)
-            reported += queued
         except Exception:  # noqa: BLE001 — one notice, not the pass
             logger.exception("[outreach] could not report the outcome of %s", row.id)
     return reported

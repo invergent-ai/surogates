@@ -861,6 +861,24 @@ async def test_an_outcome_is_marked_reported_and_never_read_again(sf, doctor_ses
 
 
 @pytest.mark.asyncio
+async def test_messages_to_one_person_expiring_together_are_reported_once(sf, doctor_session):
+    member, row = await _team_message(sf)
+    second = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=row.user_id, platform="whatsapp",
+        channel_identifier=SENDER, kind="operator", text="And bring the results",
+        template_name="msg", template_language="ro", subject_user_id=row.user_id,
+        created_by=f"team:{member}",
+    )
+    await _send(sf, _Store(), _Delivery())
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=25))
+
+    assert {(await _row(sf, r)).state for r in (row.id, second.id)} == {"failed"}
+    [notice] = await _notices(sf)
+    assert notice.text.startswith("⚠️ Ion Pop did not receive your message: no answer")
+    assert (await _row(sf, second.id)).reported_at is not None
+
+
+@pytest.mark.asyncio
 async def test_a_reminder_that_could_not_be_queued_is_retried(sf, doctor_session, monkeypatch):
     await _red_alert(sf, [uuid.uuid4()])
     await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=31))
