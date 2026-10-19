@@ -48,7 +48,9 @@ from surogates.channels.source import (
 )
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
-from surogates.followup.outreach import busy_line_for, deliver_pending, first_busy_line
+from surogates.followup.outreach import (
+    busy_line_for, deliver_pending, first_busy_line, is_opener,
+)
 from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note, disclosure_note
 
 logger = logging.getLogger(__name__)
@@ -258,8 +260,9 @@ _Attachments = Callable[[Any, Any], Awaitable[dict]]
 #: Async callable: (session_id) -> pending input dict | None.
 _PendingInput = Callable[[Any], Awaitable[dict | None]]
 
-#: Async callable: (session_id, msg, text) -> None. Posts a nudge to the channel/thread.
-_InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[None]]
+#: Async callable: (session_id, msg, text) -> the posted message's id, or None
+#: when nothing was posted.  Posts a nudge to the channel/thread.
+_InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[str | None]]
 
 #: Async callable: (session_id, msg) -> None. Shows the sender the agent is
 #: working on *msg* for as long as its turn runs; returns at once.
@@ -871,6 +874,17 @@ class ChannelInboundPipeline:
                     exc_info=True,
                 )
 
+        # A tap on the template that reopened the window only asked for what
+        # was held behind it, which has just gone out.  Handed to the agent,
+        # the button's label ("Send the alert") read as an instruction and
+        # the agent raised the same alert a second time.
+        if await self._taps_an_opener(deps, routing, msg):
+            logger.info(
+                "[followup] %s tapped a reopening template on %s; held messages "
+                "delivered, nothing for the agent", msg.platform_user_id, routing.agent_id,
+            )
+            return InboundOutcome.DROPPED
+
         # ------------------------------------------------------------------
         # /stop — interrupt the running turn OUT-OF-BAND.  A normal message
         # would queue behind the busy worker and never reach it in time (a
@@ -1207,6 +1221,21 @@ class ChannelInboundPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
+    async def _taps_an_opener(deps: Any, routing: Any, msg: InboundMessage) -> bool:
+        source = msg.source or {}
+        reply_to = source.get("template_reply") and source.get("reply_to")
+        if not reply_to or deps.session_factory is None:
+            return False
+        try:
+            return await is_opener(
+                deps.session_factory, org_id=UUID(str(routing.org_id)),
+                agent_id=routing.agent_id, provider_message_id=reply_to,
+            )
+        except Exception:  # noqa: BLE001 — when unsure, the agent reads it
+            logger.warning("[followup] could not check the tapped template", exc_info=True)
+            return False
+
+    @staticmethod
     async def _intercept_pending_input(
         msg: InboundMessage,
         *,
@@ -1308,20 +1337,17 @@ class ChannelInboundPipeline:
         return its text so the person's message carries it for the model.
 
         Fires only for agents whose runtime-config governance carries an
-        enabled disclosure config.  "First contact" is detected via the
-        session row's ``message_count`` — zero means no USER_MESSAGE has
-        been recorded yet (the pipeline emits it after this hook), which
-        also covers resumed-but-never-messaged sessions; a re-disclosure
-        on such a session is harmless, a missing one is not.
+        enabled disclosure config, on every message until a
+        ``disclosure.presented`` event exists: a re-disclosure is harmless,
+        a missing one is not.
 
         Delivery rides ``deps.input_nudge`` (the same seam as the /stop
         acknowledgement), which posts a plain platform message.  On
-        platforms without ``post_input_nudge`` the nudge is a silent
-        no-op — those channels must not be enabled for
-        disclosure-required agents (see docs/governance-and-security).
-        A ``disclosure.presented`` event records the delivery attempt
-        with level + channel for the per-session audit trail.  Failures
-        never drop the inbound message.
+        platforms without ``post_input_nudge`` nothing is posted.  A
+        ``disclosure.presented`` event, with level + channel, records it
+        for the per-session audit trail only once the platform says it
+        posted it; otherwise the agent is not told the person saw it.
+        Failures never drop the inbound message.
         """
         from surogates.runtime.governance import disclosure_config
 
@@ -1331,19 +1357,17 @@ class ChannelInboundPipeline:
         if cfg is None or not cfg["enabled"] or not cfg["text"]:
             return None
         try:
-            session = await deps.session_store.get_session(session_id)
-            if getattr(session, "message_count", 0) and (
-                # Messages refused for want of a plan were kept, not answered:
-                # the person still meets the disclosure on their first turn.
-                not await deps.session_store.has_event(
-                    session_id, EventType.USER_MESSAGE, with_key="held",
-                )
-                or await deps.session_store.has_event(
-                    session_id, EventType.DISCLOSURE_PRESENTED,
-                )
-            ):
+            # Until it has been shown, whatever came before: a post that
+            # failed is tried again on the next message, and messages
+            # refused for want of a plan were kept, not answered.
+            if await deps.session_store.has_event(session_id, EventType.DISCLOSURE_PRESENTED):
                 return None
-            await deps.input_nudge(session_id, msg, cfg["text"])
+            if not await deps.input_nudge(session_id, msg, cfg["text"]):
+                logger.warning(
+                    "[channels] AI disclosure not posted on %s for session %s",
+                    routing.platform, session_id,
+                )
+                return None
             await deps.session_store.emit_event(
                 session_id,
                 EventType.DISCLOSURE_PRESENTED,

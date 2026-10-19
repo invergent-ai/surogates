@@ -323,15 +323,16 @@ def _make_deps_factory(
                 logger.warning("[channels] pending_input lookup failed", exc_info=True)
                 return None
 
-        async def _input_nudge(session_id: Any, msg: Any, text: str) -> None:
+        async def _input_nudge(session_id: Any, msg: Any, text: str) -> str | None:
             post = getattr(platform, "post_input_nudge", None)
             if post is None:
-                return
-            await post(
+                return None
+            return await post(
                 creds=creds,
                 channel=msg.identifier,
                 thread_ts=msg.thread_key,
                 text=text,
+                msg=msg,
             )
 
         async def _keep_typing(session_id: Any, msg: Any) -> None:

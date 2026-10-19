@@ -18,10 +18,12 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.capabilities import capabilities_for, initiating_platforms
+from surogates.channels.identity import mask_readable_phones
 from surogates.db.models import (
     ChannelContactRow,
     ChannelIdentity,
     EscalationRow,
+    Event,
     FollowupContactRow,
     FollowupEnrollmentRow,
     FollowupSettingsRow,
@@ -33,6 +35,7 @@ from surogates.db.models import (
 )
 from surogates.followup.eligibility import Audience
 from surogates.followup.wording import wording
+from surogates.session.inbox_payload import UNTIL_RESOLVED
 
 logger = logging.getLogger(__name__)
 
@@ -1273,6 +1276,67 @@ async def handle_escalations(
         await db.commit()
     for escalation_id in resolve:
         await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+
+
+async def raise_escalation_inbox_item(
+    session_factory: Any, settings: Any, *, org_id: uuid.UUID, session_id: uuid.UUID,
+    service_account_id: uuid.UUID, event_type: str, name: str, reason: str, payload: dict,
+) -> bool:
+    """Raise a hand in the operator's Inbox until the escalation in
+    ``payload["escalation"]`` is resolved.  False when the target is no
+    service account this database knows."""
+    async with session_factory() as db:
+        # inbox_items.source_event_id is NOT NULL and unique, so the
+        # escalation is first an event on the person's own session.
+        event = Event(
+            session_id=session_id, org_id=org_id, type=event_type,
+            data={"reason": reason, **payload},
+        )
+        db.add(event)
+        await db.flush()
+        db.add(
+            InboxItem(
+                org_id=org_id,
+                # The designated operator, never the acting principal: an
+                # item raised against the person reaches nobody but them.
+                user_id=None,
+                service_account_id=service_account_id,
+                session_id=session_id,
+                source_event_id=event.id,
+                # An existing InboxKind; the ops Inbox filters on a Literal.
+                kind="action_required",
+                # The inbox is a list anyone with access scrolls: the full
+                # number stays on the alert sent to the team member.
+                title=wording(settings, "inbox_attention_title", name=mask_readable_phones(name)),
+                body=reason,
+                payload={**payload, UNTIL_RESOLVED: True},
+            )
+        )
+        try:
+            await db.commit()
+            return True
+        except IntegrityError:
+            # A human's id pasted where a principal belongs.
+            await db.rollback()
+            logger.warning("[followup] escalation target %s is not a service account", service_account_id)
+            return False
+
+
+async def escalation_inbox_item_exists(session_factory: Any, *, session_id: uuid.UUID, escalation: str) -> bool:
+    async with session_factory() as db:
+        return await db.scalar(
+            sa.select(InboxItem.id)
+            .where(InboxItem.session_id == session_id)
+            .where(InboxItem.payload["escalation"].as_string() == escalation)
+            .limit(1)
+        ) is not None
+
+
+def uuid_or_none(value: Any) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(value).strip()) if value else None
+    except ValueError:
+        return None
 
 
 async def close_escalation_inbox_items(

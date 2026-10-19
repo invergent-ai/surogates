@@ -343,6 +343,27 @@ async def test_only_queued_rows_are_picked_up(sf, doctor_session):
 
 
 @pytest.mark.asyncio
+async def test_held_alerts_are_delivered_before_routine_notices(sf, doctor_session):
+    """A doctor who tapped to read an alert found it under the day's enrolment notices."""
+    doctor = uuid.uuid4()
+    await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=doctor, platform="whatsapp",
+        channel_identifier=SENDER, kind="enrolment", text="New patient enrolled",
+        template_name="alert", template_language="ro",
+    )
+    await _queue(sf, doctor, text="Patient fainted")
+    await _send(sf, _Store(), _Delivery())
+
+    reply_store = _Store()
+    await outreach.deliver_pending(
+        sf, reply_store, org_id=ORG, agent_id=AGENT, user_id=doctor,
+        platform="whatsapp", channel_identifier=SENDER, session_id=uuid.uuid4(),
+    )
+
+    assert [e[2]["message"]["content"] for e in reply_store.events] == ["Patient fainted", "New patient enrolled"]
+
+
+@pytest.mark.asyncio
 async def test_an_alert_never_rides_on_a_routine_notice(sf, doctor_session):
     doctor = uuid.uuid4()
     await store.queue_outreach(
@@ -858,6 +879,24 @@ async def test_an_outcome_is_marked_reported_and_never_read_again(sf, doctor_ses
     assert (await _row(sf, row.id)).reported_at is not None
     assert await outreach._report_outcomes(sf, now=NOW + timedelta(hours=26)) == 0
     assert len(await _notices(sf)) == 1
+
+
+@pytest.mark.asyncio
+async def test_messages_to_one_person_expiring_together_are_reported_once(sf, doctor_session):
+    member, row = await _team_message(sf)
+    second = await store.queue_outreach(
+        sf, org_id=ORG, agent_id=AGENT, user_id=row.user_id, platform="whatsapp",
+        channel_identifier=SENDER, kind="operator", text="And bring the results",
+        template_name="msg", template_language="ro", subject_user_id=row.user_id,
+        created_by=f"team:{member}",
+    )
+    await _send(sf, _Store(), _Delivery())
+    await _send(sf, _Store(), _Delivery(), now=NOW + timedelta(hours=25))
+
+    assert {(await _row(sf, r)).state for r in (row.id, second.id)} == {"failed"}
+    [notice] = await _notices(sf)
+    assert notice.text.startswith("⚠️ Ion Pop did not receive your message: no answer")
+    assert (await _row(sf, second.id)).reported_at is not None
 
 
 @pytest.mark.asyncio

@@ -965,6 +965,7 @@ class SlackPlatform:
         channel: str,
         thread_ts: Any,
         text: str,
+        msg: Any = None,
     ) -> str | None:
         """Post a nudge to prompt the user to use the Answer button; return its ts or None."""
         bot_token: str = (creds or {}).get("bot_token") or ""

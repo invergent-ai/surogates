@@ -208,3 +208,42 @@ async def test_an_unknown_session_is_a_404():
     with pytest.raises(HTTPException) as exc:
         await _mutate(request, tenant, agent_runtime, uuid4())
     assert exc.value.status_code == 404
+
+
+class _KeepingBackend(_RecordingBackend):
+    """Storage backend that reads back what was written."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.objects: dict[str, bytes] = {}
+
+    async def read(self, bucket, key):
+        if key not in self.objects:
+            raise KeyError(key)
+        return self.objects[key]
+
+    async def write(self, bucket, key, data):
+        await super().write(bucket, key, data)
+        self.objects[key] = data
+
+
+async def test_adding_a_titled_record_again_says_it_replaced_it():
+    # The agent re-adds its whole "FIȘA" record each turn; told "Entry added."
+    # every time, it could not tell an update from a second copy.
+    org_id = uuid4()
+    session = _session(org_id, {"memory_boundary": "whatsapp:dm:4071"})
+    _, request, tenant, agent_runtime = _fixtures(session, org_id=org_id)
+    request.app.state.storage = _KeepingBackend()
+
+    async def add(content):
+        return await memory_route.mutate_memory(
+            memory_route.MemoryMutateRequest(action="add", target="user", content=content),
+            request, session.id, tenant, agent_runtime,
+        )
+
+    first = await add("FIȘA\nPatient: Ion\nLast contact: day 0")
+    second = await add("FIȘA\nPatient: Ion\nLast contact: day 1")
+
+    assert first.message == "Entry added."
+    assert second.message == "Entry replaced."
+    assert second.entries == ["FIȘA\nPatient: Ion\nLast contact: day 1"]

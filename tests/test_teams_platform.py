@@ -540,3 +540,33 @@ def test_the_teams_prompt_hint_loads_and_teams_has_no_artifact_panel():
     hint = PromptLibrary().platform_hint("teams")
     assert hint and "Microsoft Teams" in hint and "MEDIA:" in hint
     assert "teams" in CHANNELS_WITHOUT_ARTIFACT_PANEL
+
+
+@respx.mock
+async def test_the_ai_disclosure_is_posted_into_the_conversation_it_came_from(platform):
+    """Teams had no post_input_nudge: the disclosure was never shown, yet recorded as shown."""
+    _mock_token(respx)
+    post = respx.post(ACTIVITIES).mock(return_value=httpx.Response(201, json={"id": "nudge-1"}))
+    msg = platform.parse(_activity(), identifier=APP_ID)
+
+    posted = await platform.post_input_nudge(
+        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, msg=msg, text="Sunt un program de IA.",
+    )
+
+    assert posted == "nudge-1"
+    assert json.loads(post.calls[0].request.content)["text"] == "Sunt un program de IA."
+
+
+@respx.mock
+async def test_a_nudge_answered_without_an_id_was_still_posted(platform):
+    _mock_token(respx)
+    respx.post(ACTIVITIES).mock(return_value=httpx.Response(201, json={}))
+    msg = platform.parse(_activity(), identifier=APP_ID)
+
+    assert await platform.post_input_nudge(
+        creds=_creds(), channel=msg.identifier, thread_ts=msg.thread_key, msg=msg, text="x",
+    )
+
+
+async def test_a_nudge_for_a_conversation_never_seen_posts_nothing(platform):
+    assert await platform.post_input_nudge(creds=_creds(), channel="a:unknown", thread_ts=None, text="x") is None

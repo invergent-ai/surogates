@@ -372,7 +372,7 @@ class DiscordPlatform:
         return sent
 
     async def post_input_nudge(
-        self, *, creds: dict, channel: str, thread_ts: Any, text: str,
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str, msg: Any = None,
     ) -> str | None:
         """Post a short status line (``/stop`` ack); its id, or None."""
         token = (creds or {}).get("bot_token") or ""

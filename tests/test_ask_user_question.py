@@ -555,6 +555,24 @@ async def test_a_rescued_reply_reaches_the_person_word_for_word():
     assert json.loads(message["tool_calls"][0]["function"]["arguments"])["context"] == reply
 
 
+def test_a_tool_call_without_reasoning_gets_some_when_the_model_reasons():
+    """DeepSeek's thinking mode refused the next request: the rescued tool call had no reasoning."""
+    from surogates.harness.loop import _to_api_messages
+
+    call = {"role": "assistant", "content": "", "tool_calls": [{"id": "c"}]}
+    api = _to_api_messages([{"role": "assistant", "content": "ok", "reasoning": "thinking"}, call])
+    assert api[0]["reasoning_content"] == "thinking"
+    assert api[1]["reasoning_content"]
+    assert "reasoning_content" not in call
+
+
+def test_no_reasoning_is_added_for_a_model_that_never_reasoned():
+    from surogates.harness.loop import _to_api_messages
+
+    api = _to_api_messages([{"role": "assistant", "content": "", "tool_calls": [{"id": "c"}]}])
+    assert "reasoning_content" not in api[0]
+
+
 _SIX = [{"label": f"Opțiunea {i}"} for i in range(6)]
 
 

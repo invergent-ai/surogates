@@ -323,3 +323,42 @@ async def test_a_telegram_chat_id_is_never_shown_as_a_phone(sf):
     await alert_missed_checkins(sf, now=NOW)
     [alert] = await _alerts(sf)
     assert alert.text.startswith("Ion Pop (?) has not answered")
+
+
+@pytest.mark.asyncio
+async def test_a_missed_streak_waits_in_the_inbox_until_resolved(sf):
+    from surogates.db.models import InboxItem
+
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    operator, session_id = uuid.uuid4(), uuid.uuid4()
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=operator)
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    async with sf() as db:
+        (await db.get(ProgramInvitationRow, inv)).session_id = session_id
+        await db.commit()
+
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    async with sf() as db:
+        [item] = (await db.execute(sa.select(InboxItem))).scalars().all()
+    assert (item.service_account_id, item.session_id, item.status) == (operator, session_id, "pending")
+    assert item.title == "Needs your attention: Ion Pop"
+    assert item.payload["until_resolved"] is True
+    # A retried pass finds the item it already raised.
+    assert await store.escalation_inbox_item_exists(sf, session_id=session_id, escalation=item.payload["escalation"])
+
+    await store.resolve_escalation(sf, org_id=ORG, agent_id=AGENT, escalation_id=inv)
+    async with sf() as db:
+        assert (await db.get(InboxItem, item.id)).status == "acknowledged"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_inbox_target_still_marks_the_streak(sf):
+    """A bad id raised after the team was told, so every pass told them again."""
+    program_id, patient, _ = await _setup(sf, threshold=1)
+    async with sf() as db:
+        row = (await db.execute(sa.select(ProgramScheduleRow))).scalar_one()
+        row.config = {**row.config, "escalation_service_account_id": "abc"}
+        await db.commit()
+    inv = await _invitation(sf, program_id, patient, days_ago=0.10)
+    assert await alert_missed_checkins(sf, now=NOW) == 1
+    assert await _state(sf, inv) == "raised"

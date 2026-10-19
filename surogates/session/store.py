@@ -59,6 +59,7 @@ from surogates.session.acting_principal import (
     resolve_principal_from_event_data,
 )
 from surogates.session.events import OPENER_SYNTHETIC_MARKERS, SILENT_REPLY, EventType
+from surogates.session.interactive_input import render_input_prompt
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     ASK_USER_QUESTION_RESCUE_PREFIX,
@@ -270,6 +271,13 @@ def _strip_trailing_question(content: str, questions: Any) -> str:
     return content[: repeat.start()].rstrip()
 
 
+#: A final reply that is no message: a lone "." after a tool call, or an
+#: emphasised stage direction such as "*(no new message; the question is
+#: still pending)*".  Both reached patients as messages.  A plain
+#: "(Thank you.)" is a reply and goes out.
+_NOT_A_MESSAGE = re.compile(r"[\s.\u2026]*|\s*([_*])\([^()\n]*\)\1[\s.]*")
+
+
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
     deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
@@ -280,10 +288,12 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
         content = msg.get("content", "") if isinstance(msg, dict) else ""
         if content and isinstance(content, str):
             content = strip_next_action_blocks(content)
-            if channel in INTERACTIVE_PROMPT_CHANNELS:
+            if channel in ADAPTER_CHANNELS:
                 content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
         if content and content.strip() == SILENT_REPLY:
             content = ""  # the agent chose to write nothing
+        if content and _NOT_A_MESSAGE.fullmatch(content):
+            content = ""
         if content:
             payload["content"] = content
             # Delivered either way: the model writes to the person beside its
@@ -310,7 +320,7 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
         payload["flow"] = data.get("interactive") or {}
     elif (
         event_type == EventType.INBOX_INPUT_REQUIRED
-        and channel in INTERACTIVE_PROMPT_CHANNELS
+        and channel in ADAPTER_CHANNELS
     ):
         questions = data.get("questions") or []
         if questions:
@@ -332,6 +342,11 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 # ``message`` is the schema's field for words to the person;
                 # an invented ``context`` stays the operator's.
                 payload["context"] = _strip_trailing_question(data["message"], questions)
+            if channel not in INTERACTIVE_PROMPT_CHANNELS:
+                # No buttons to draw (Discord, Teams): dropped, the whole
+                # reply went with it.  As text, a typed answer still resolves
+                # the question (``_intercept_pending_input``).
+                payload = {"content": render_input_prompt(payload)}
     return payload
 
 

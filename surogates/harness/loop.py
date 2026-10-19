@@ -532,6 +532,22 @@ def _to_api_message(msg: dict) -> dict:
     return api_msg
 
 
+def _to_api_messages(msgs: list[dict]) -> list[dict]:
+    """*msgs* for the wire, each tool call carrying reasoning where the model reasons.
+
+    A thinking model (DeepSeek) refuses a history holding a tool call
+    without its reasoning, and the harness makes some calls up (a final
+    reply turned into ``ask_user_question``).  Only once the model has
+    reasoned: one that never did may not accept the field.
+    """
+    api = [_to_api_message(m) for m in msgs]
+    if any(m.get("role") == "assistant" and m.get("reasoning_content") for m in api):
+        for m in api:
+            if m.get("role") == "assistant" and m.get("tool_calls") and not m.get("reasoning_content"):
+                m["reasoning_content"] = "(no reasoning recorded)"
+    return api
+
+
 def _looks_unfinished(text: str) -> bool:
     """True when *text* states an intention instead of concluding.
 
@@ -3056,7 +3072,7 @@ class AgentHarness(
                         "role": "assistant",
                         "content": "Understood, I have the memory context.",
                     })
-                api.extend(_to_api_message(m) for m in msgs)
+                api.extend(_to_api_messages(msgs))
                 await _prepare_messages_for_model_vision_support(
                     api,
                     model_id=model_id,
@@ -5677,7 +5693,7 @@ class AgentHarness(
         try:
             async def _build_api_messages(msgs: list[dict]) -> list[dict]:
                 api = [{"role": "system", "content": system_prompt}]
-                api.extend(_to_api_message(m) for m in msgs)
+                api.extend(_to_api_messages(msgs))
                 await _prepare_messages_for_model_vision_support(
                     api,
                     model_id=model_id,

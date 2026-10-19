@@ -177,3 +177,57 @@ async def test_no_busy_line_unless_the_business_wrote_one(sf):
 
     assert all_default_texts()["busy_safety_line"] == ""
     assert await _busy_line_case(sf, line=None, busy=True) == []
+
+
+async def _held_alert_behind(sf, provider_message_id):
+    held = await store.queue_outreach(
+        sf, org_id=AGENT_ORG_ID, agent_id=_whatsapp_routing().agent_id,
+        user_id=USER_ID, platform="whatsapp", channel_identifier="pn1",
+        kind="alert", text="Ion, day 1: «fever: yes»", severity="yellow",
+        template_name="alert", template_language="ro",
+    )
+    async with sf() as db:
+        row = await db.get(OutreachMessageRow, held.id)
+        row.state = "awaiting_reply"
+        row.provider_message_id = provider_message_id
+        await db.commit()
+    return held
+
+
+def _tap(reply_to):
+    msg = _make_msg(is_dm=True, platform_user_id="40711111111", text="Send the alert")
+    return dataclasses.replace(msg, source={"template_reply": True, "reply_to": reply_to})
+
+
+@pytest.mark.asyncio
+async def test_a_tap_on_the_reopening_template_delivers_and_does_not_wake_the_agent(sf):
+    held = await _held_alert_behind(sf, "wamid.OPENER")
+    base = _make_deps()
+    deps = dataclasses.replace(base, session_factory=sf)
+
+    result = await ChannelInboundPipeline().handle(
+        _tap("wamid.OPENER"), routing=_whatsapp_routing(), config=_make_config(), deps=deps,
+    )
+
+    assert result == InboundOutcome.DROPPED
+    types = [e[1] for e in deps.session_store.events]
+    assert EventType.LLM_RESPONSE in types
+    assert EventType.USER_MESSAGE not in types
+    assert base._enqueued == []
+    async with sf() as db:
+        assert (await db.get(OutreachMessageRow, held.id)).state == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_a_tap_on_any_other_message_still_reaches_the_agent(sf):
+    await _held_alert_behind(sf, "wamid.OPENER")
+    base = _make_deps()
+    deps = dataclasses.replace(base, session_factory=sf)
+
+    result = await ChannelInboundPipeline().handle(
+        _tap("wamid.SOMETHING-ELSE"), routing=_whatsapp_routing(), config=_make_config(), deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    assert any(e[1] == EventType.USER_MESSAGE for e in deps.session_store.events)
+    assert len(base._enqueued) == 1

@@ -23,6 +23,7 @@ Two rules keep a conversation intact:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -279,6 +280,22 @@ async def _deliver_now(
     return True
 
 
+async def is_opener(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, provider_message_id: str,
+) -> bool:
+    """Whether *provider_message_id* is a template we sent to reopen a window."""
+    async with session_factory() as db:
+        return (
+            await db.execute(
+                sa.select(OutreachMessageRow.id)
+                .where(OutreachMessageRow.org_id == org_id)
+                .where(OutreachMessageRow.agent_id == agent_id)
+                .where(OutreachMessageRow.provider_message_id == provider_message_id)
+                .limit(1)
+            )
+        ).first() is not None
+
+
 async def deliver_pending(
     session_factory: Any,
     session_store: Any,
@@ -317,7 +334,8 @@ async def deliver_pending(
                         OutreachMessageRow.sent_at >= now - OUTCOME_LOOKBACK,
                     ),
                 ))
-                .order_by(OutreachMessageRow.created_at)
+                # Whoever opens what piled up reads the alerts first.
+                .order_by(OutreachMessageRow.kind != "alert", OutreachMessageRow.created_at)
             )
         ).scalars().all()
     if not rows or await _busy(session_factory, session_id, now):
@@ -654,10 +672,12 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
 
     One notice per message: a failure of anything they asked for (their
     message, the welcome of someone they enrolled, a notice to a colleague),
-    and the delivery of their own message after a held wait.  A text
+    and the delivery of their own message after a held wait.  A notice is
+    keyed on what it says and the day, so several messages to one person
+    expiring together tell the member once.  A text
     written straight into an open window needs none: the tool already told
     them it went out.  The row is marked reported only once its notice is
-    queued, and the notice is keyed on the row, so a pass that dies in
+    queued, and the key is the same on a retry, so a pass that dies in
     between is retried without telling anyone twice.
     """
     async with session_factory() as db:
@@ -702,9 +722,10 @@ async def _report_outcomes(session_factory: Any, *, now: datetime) -> int:
                     settings, "undelivered_notice",
                     name=name, why=plain_reason(row.reason, settings.texts if settings else None), phone=phone,
                 )
+            said = hashlib.sha1(f"{row.agent_id}|{text}".encode()).hexdigest()[:16]
             queued, _ = await _tell_requester(
                 session_factory, settings, row, requester,
-                text=text, dedupe_prefix=f"outcome:{row.id}",
+                text=text, dedupe_prefix=f"outcome:{said}:{now.date()}",
             )
             await _mark_reported(session_factory, OutreachMessageRow, [row.id], now)
             reported += queued

@@ -430,6 +430,25 @@ class TeamsPlatform:
     ) -> InboundMessage | None:
         return parse(body, app_id=identifier or "")
 
+    async def post_input_nudge(
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str, msg: Any = None,
+    ) -> str | None:
+        """Post a status line (the AI disclosure, a ``/stop`` ack) into *msg*'s
+        conversation; its id, or None."""
+        source = getattr(msg, "source", None) or {}
+        url, token, _error = await self._prepare({
+            "conversation_id": channel, "service_url": source.get("teams_service_url"),
+            "reply_to_id": thread_ts, "channel_identifier": source.get("app_id"),
+        }, creds)
+        if url is None or token is None:
+            return None
+        posted, error = await self._call("POST", url, token, {"type": "message", "text": text})
+        if posted is None:
+            logger.warning("[teams] nudge not posted: %s", error)
+            return None
+        # Bot Framework may answer a post with no id: it was still shown.
+        return str(posted.get("id") or "posted")
+
     async def handle_non_message_update(
         self, body: Any, *, routing: Any, creds: dict, deps: Any,
     ) -> bool:

@@ -1351,6 +1351,7 @@ async def test_plan_refusal_comes_before_the_ai_disclosure():
 
     async def _nudge(session_id, m, text):
         nudges.append(text)
+        return f"posted-{len(nudges)}"
 
     deps.input_nudge = _nudge
     await ChannelInboundPipeline().handle(
@@ -1381,6 +1382,7 @@ async def test_allowance_block_nudge_names_reason_and_includes_buy_link():
 
     async def _nudge(session_id, m, text):
         nudges.append(text)
+        return f"posted-{len(nudges)}"
 
     deps.input_nudge = _nudge
 
@@ -1469,6 +1471,7 @@ async def test_allowance_gate_forwards_the_channel_and_blocks_excluded():
 
     async def _nudge(session_id, msg_in, text):
         nudges.append(text)
+        return f"posted-{len(nudges)}"
 
     deps2.input_nudge = _nudge
     result = await ChannelInboundPipeline().handle(
@@ -1504,6 +1507,7 @@ async def test_let_through_the_sender_meets_the_ai_disclosure():
 
     async def _nudge(session_id, m, text):
         nudges.append(text)
+        return f"posted-{len(nudges)}"
 
     deps.input_nudge = _nudge
     result = await ChannelInboundPipeline().handle(
@@ -1517,3 +1521,58 @@ async def test_let_through_the_sender_meets_the_ai_disclosure():
 
     [said] = [d for _, t, d in deps.session_store.events if t == EventType.USER_MESSAGE]
     assert disclosure_note("I am an AI.") in build_user_message_dict(said)["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_disclosure_that_failed_is_posted_on_the_next_message():
+    """One failed post meant the person never saw it: later messages skipped it."""
+    from types import SimpleNamespace as _NS
+
+    msg = _make_msg(is_dm=True, ts="disc.retry")
+    deps = _make_deps()
+    _fresh_conversation(deps.session_store)
+
+    async def _second_message(session_id):
+        return _NS(message_count=1)
+
+    async def _rc(agent_id):
+        return {"governance": {"transparency": {"enabled": True, "text": "I am an AI."}}}
+
+    nudges = []
+
+    async def _nudge(session_id, m, text):
+        nudges.append(text)
+        return "posted"
+
+    deps.session_store.get_session = _second_message
+    deps.runtime_config = _rc
+    deps.input_nudge = _nudge
+    await ChannelInboundPipeline().handle(msg, routing=_make_routing(), config=_make_config(), deps=deps)
+
+    assert nudges == ["I am an AI."]
+    assert [t for _, t, _ in deps.session_store.events if t == EventType.DISCLOSURE_PRESENTED]
+
+
+@pytest.mark.asyncio
+async def test_a_disclosure_the_channel_could_not_post_is_not_recorded_as_shown():
+    """Teams posted nothing, yet the audit trail said the person was told they talk to an AI."""
+    msg = _make_msg(is_dm=True, ts="disc.unposted")
+    deps = _make_deps()
+    _fresh_conversation(deps.session_store)
+
+    async def _rc(agent_id):
+        return {"governance": {"transparency": {"enabled": True, "text": "I am an AI."}}}
+
+    async def _not_posted(session_id, m, text):
+        return None
+
+    deps.runtime_config = _rc
+    deps.input_nudge = _not_posted
+    await ChannelInboundPipeline().handle(msg, routing=_make_routing(), config=_make_config(), deps=deps)
+
+    assert not [t for _, t, _ in deps.session_store.events if t == EventType.DISCLOSURE_PRESENTED]
+    from surogates.harness.loop_context_replay import build_user_message_dict
+    from surogates.session.events import disclosure_note
+
+    [said] = [d for _, t, d in deps.session_store.events if t == EventType.USER_MESSAGE]
+    assert disclosure_note("I am an AI.") not in build_user_message_dict(said)["content"]
