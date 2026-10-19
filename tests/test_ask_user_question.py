@@ -555,6 +555,39 @@ async def test_a_rescued_reply_reaches_the_person_word_for_word():
     assert json.loads(message["tool_calls"][0]["function"]["arguments"])["context"] == reply
 
 
+async def _rescue(history):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from surogates.harness.loop import AgentHarness
+
+    harness = SimpleNamespace(
+        _judge_final_response_user_action=AsyncMock(return_value={
+            "action_kind": "ask_user_question", "question": "Ce medicamente?", "context": "",
+        }),
+        _can_ask_user_question=lambda: True,
+    )
+    session = SimpleNamespace(channel="whatsapp", user_id=uuid4(), service_account_id=None, parent_id=None, id=uuid4())
+    message = {"role": "assistant", "content": "Ce medicamente sunt pe rețetă?"}
+    out = await AgentHarness._maybe_route_final_response_to_inbox(
+        harness, session=session, messages=history, assistant_message=message, model="m", tool_filter=None)
+    assert out == "ask_user_question"
+    return message
+
+
+@pytest.mark.asyncio
+async def test_a_rescued_question_carries_reasoning_when_the_model_reasons():
+    """DeepSeek's thinking mode refused the next request: the rescued tool call had no reasoning."""
+    message = await _rescue([{"role": "assistant", "content": "ok", "reasoning_content": "thinking"}])
+    assert message["reasoning_content"]
+
+
+@pytest.mark.asyncio
+async def test_a_rescued_question_adds_no_reasoning_for_a_model_that_never_reasoned():
+    message = await _rescue([{"role": "assistant", "content": "ok"}])
+    assert "reasoning_content" not in message and "reasoning" not in message
+
+
 _SIX = [{"label": f"Opțiunea {i}"} for i in range(6)]
 
 

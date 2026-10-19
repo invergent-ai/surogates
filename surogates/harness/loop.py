@@ -4905,6 +4905,15 @@ class AgentHarness(
                 },
             },
         ]
+        # A thinking model (DeepSeek) refuses a request whose history holds a
+        # tool call without its reasoning, and this one was made up here from
+        # a plain reply that had none.  Only for a model that reasons: one
+        # that never did may not accept the field.
+        if not (assistant_message.get("reasoning") or assistant_message.get("reasoning_content")) and any(
+            m.get("role") == "assistant" and (m.get("reasoning") or m.get("reasoning_content"))
+            for m in messages
+        ):
+            assistant_message["reasoning_content"] = f"Asking the person: {question[:200]}"
         logger.info(
             "Session %s: converted final response into ask_user_question tool call "
             "(reason=%s)",
