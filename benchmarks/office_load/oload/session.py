@@ -2,6 +2,9 @@
 
 A turn makes its edits, then saves as the harness's turn end does: flush the agent's page, force a save, wait for the
 save's callback. The saved file must hold the turn's last marker; any other save is a lost one.
+
+A session runs to a deadline, the step's end, and stops there without saving at once: a turn whose forcesave has not
+gone by then is abandoned, unsaved, and its events are marked so; a forcesave sent before it is still waited for.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ import asyncio
 import random
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from oload.clients import (
@@ -78,11 +81,13 @@ class VirtualSession:
         # then those whose edit may have applied (it failed past sending).
         self._expect: list[str] = []
         self._edited = False  # an edit applied this turn
+        self._turn_events: list[Event] | None = None  # this turn's, logged once its forcesave goes or it is abandoned
 
     async def run(self, until: float, *, turns: int | None = None) -> None:
         """Turn after turn until *until*, a time.monotonic() deadline, or *turns* turns; then close the pages.
 
-        Raises FleetFull when the fleet has no room for the session's pages.
+        No turn starts at or after *until*, and none is cut short to save before it: one whose forcesave has not gone
+        by then is abandoned. Raises FleetFull when the fleet has no room for the session's pages.
         """
         client = self.fleet.place(1 if self.watcher is None else 2)
         self._held = [client] * (1 if self.watcher is None else 2)
@@ -93,28 +98,43 @@ class VirtualSession:
             if self.watcher is not None:
                 await self._open(self.watcher, client)
             turn = 0
-            while time.monotonic() < until:
-                await self._turn(turn, until)
+            while time.monotonic() < until and await self._turn(turn, until):
                 turn += 1
                 if turns is not None and turn >= turns:
                     break
-                await asyncio.sleep(max(0.0, min(self.pace.idle_s(), until - time.monotonic())))
+                if not await _wait(self.pace.idle_s(), until):
+                    break
         except _Ended:
             pass
         finally:
             await self._close()
 
-    async def _turn(self, turn: int, until: float) -> None:
+    async def _turn(self, turn: int, until: float) -> bool:
+        """The turn's edits at the session's pace, then its save; False when *until* came before its forcesave went.
+
+        Such a turn is abandoned: no flush or forcesave is sent for it, its events are logged as abandoned, and the
+        session waits out to *until*, as it would for the turn's next edit.
+        """
         self._expect, self._edited = [], False
-        for i in range(self.pace.edits_in_turn()):
-            if i:
-                gap = self.pace.gap_s()
-                if time.monotonic() + gap >= until:
-                    break  # the turn ends here: what it edited is saved
-                await asyncio.sleep(gap)
-            await self._edit(f"load-{self.index}-{self._nonce}-t{turn}-e{i}")
-        if await self._flush():
+        self._turn_events, cut = [], False
+        try:
+            for i in range(self.pace.edits_in_turn()):
+                if i and not await _wait(self.pace.gap_s(), until):
+                    cut = True
+                    break
+                await self._edit(f"load-{self.index}-{self._nonce}-t{turn}-e{i}")
+            cut = cut or time.monotonic() >= until
+            save = not cut and await self._flush()
+            cut = cut or time.monotonic() >= until
+        finally:
+            events, self._turn_events = self._turn_events, None
+            for event in events:
+                self.log.add(replace(event, abandoned=True) if cut else event)
+        if cut:
+            return False
+        if save:
             await self._save(turn)
+        return True
 
     async def _edit(self, marker: str) -> None:
         n, self._edits = self._edits, self._edits + 1
@@ -288,7 +308,20 @@ class VirtualSession:
         """Log *what*; *began* is its time.monotonic() start, by default *seconds* before now."""
         now = time.monotonic()
         began = now - seconds if began is None else began
-        self.log.add(Event(self.index, self.kind, what, ok, seconds, cause, time.time() - (now - began), detail))
+        event = Event(self.index, self.kind, what, ok, seconds, cause, time.time() - (now - began), detail)
+        if self._turn_events is None:
+            self.log.add(event)
+        else:
+            self._turn_events.append(event)
+
+
+async def _wait(seconds: float, until: float) -> bool:
+    """Sleep *seconds*; or, when that would reach *until*, sleep to *until* and say so: False."""
+    if time.monotonic() + seconds >= until:
+        await asyncio.sleep(max(0.0, until - time.monotonic()))
+        return False
+    await asyncio.sleep(seconds)
+    return True
 
 
 def _holds_any(kind: str, data: bytes, markers: tuple[str, ...]) -> bool:

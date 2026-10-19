@@ -1,7 +1,8 @@
 """Steps of concurrent sessions judged against the bar: up to the first that breaks it, then bisected to the knee.
 
-A step's files go to ``<run_dir>/step-<n>/``: ``events.jsonl``, every event as it came, and ``step.json``, the
-step's result once judged (:meth:`StepResult.read` reads it back).
+A step's files go to ``<run_dir>/step-<n>/``: ``events.jsonl``, every event as it came (a turn's once its forcesave
+goes or the deadline abandons it), and ``step.json``, the step's result once judged (:meth:`StepResult.read` reads it
+back).
 """
 
 from __future__ import annotations
@@ -121,6 +122,9 @@ async def run_step(n: int, workload: Workload, fleet: Fleet, settings: Settings,
                    run_id: str, run_dir: str | Path, ramp_s: float = RAMP_S, hold_s: float = HOLD_S,
                    rng: random.Random | None = None) -> StepResult:
     """*n* sessions starting spread evenly over *ramp_s*, all to a deadline *hold_s* after the last start; judged.
+
+    The hold judged runs from the last start to the deadline, where every session stops without saving at once: a turn
+    whose forcesave has not gone is abandoned (:meth:`VirtualSession.run`).
 
     Every session has closed its pages and given back its slots when it returns. A fleet that still has pages placed
     from before, or no room for *n* sessions, runs nothing: the step is client-limited.

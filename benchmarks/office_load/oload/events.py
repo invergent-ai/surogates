@@ -22,6 +22,7 @@ class Event:
     cause: Cause | None  # None when ok
     at: float  # time.time() when it began: for lining up with the metrics and the servers' logs
     detail: str | None = None  # what failed, in the call's words
+    abandoned: bool = False  # of a turn the step's deadline cut short, unsaved: judged by no bar
 
 
 class EventLog:

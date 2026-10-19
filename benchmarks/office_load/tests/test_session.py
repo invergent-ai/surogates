@@ -26,6 +26,7 @@ from pptx import Presentation
 from pptx.util import Inches
 
 from oload import docserver, session
+from oload.bar import judge
 from oload.clients import (
     CallTimedOut,
     ClientBusy,
@@ -344,6 +345,44 @@ async def test_the_session_ends_at_until_even_in_its_idle(world: World) -> None:
     assert world.fleet.placed == (0,)
 
 
+# The step's deadline.
+
+@pytest.mark.parametrize(("edits", "gap", "edit_s", "until_s"), [
+    ([2], 0.6, 0.0, 0.3),  # the deadline comes before the turn's next edit
+    ([1], 0.0, 0.4, 0.2),  # it comes while the turn's last edit is answered
+])
+async def test_a_turn_the_deadline_cuts_is_abandoned_unsaved(
+    world: World, edits: list[int], gap: float, edit_s: float, until_s: float,
+) -> None:
+    world.office.on_edit = lambda: time.sleep(edit_s)
+    started = time.monotonic()
+    await world.session(edits=edits, gap=gap).run(started + until_s)
+
+    assert time.monotonic() - started >= until_s  # its page stayed open to the deadline
+    assert "flush" not in world.office.calls and world.ds.commands == []
+    assert world.seen() == [("open", True, None), ("edit", True, None)]
+    assert [event.abandoned for event in world.log.events] == [False, True]
+    verdict = judge(world.log.events, 0.0)
+    assert verdict.holds and "edit" not in verdict.stats and verdict.stats["events"] == 1  # the open alone
+
+
+@pytest.mark.parametrize("lost", [False, True])
+async def test_a_forcesave_sent_before_the_deadline_is_still_awaited_and_judged(world: World, lost: bool) -> None:
+    world.ds.delays[0] = 1.0  # the save calls back after the deadline
+    if lost:
+        world.ds.partial.add(0)
+    started, deadline = time.monotonic(), time.time() + 0.5
+    await world.session(edits=[1, 1]).run(started + 0.5)
+
+    assert time.monotonic() - started >= 1.0
+    assert world.seen() == [("open", True, None), *OK_TURN[:-1], ("marker", not lost, "lost" if lost else None)]
+    assert not any(event.abandoned for event in world.log.events)
+    assert world.log.events[-1].at > deadline  # checked after it, and judged all the same
+    verdict = judge(world.log.events, 0.0)
+    assert verdict.stats["forcesave"]["n"] == verdict.stats["callback"]["n"] == 1
+    assert verdict.holds is not lost
+
+
 # Saves that are not the turn's.
 
 async def test_stale_callback_is_a_lost_save(world: World) -> None:
@@ -572,5 +611,6 @@ def test_event_log_writes_and_reads_events_jsonl(tmp_path: Path) -> None:
     assert log.events == [first, second]
     lines = path.read_text().splitlines()
     assert json.loads(lines[1]) == {"session": 3, "kind": "docx", "what": "marker", "ok": False, "seconds": 0.02,
-                                    "cause": "lost", "at": 1700000009.5, "detail": "the save lacks m"}
+                                    "cause": "lost", "at": 1700000009.5, "detail": "the save lacks m",
+                                    "abandoned": False}
     assert EventLog.read(path) == [first, second]

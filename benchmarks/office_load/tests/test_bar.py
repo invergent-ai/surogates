@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -129,6 +130,13 @@ def test_the_ramp_up_is_not_judged() -> None:
     verdict = judge(healthy() + ramp_up, HOLD)
     assert verdict.holds
     assert verdict.stats["forcesave"]["max"] == 0.5 and verdict.stats["failures"]["lost"] == 0
+
+
+def test_a_turn_the_deadline_abandoned_is_not_judged() -> None:
+    abandoned = [replace(ev("edit", 1.0, ok=False, cause="server"), abandoned=True),
+                 replace(ev("flush", 12.0), abandoned=True)]
+    verdict = judge(healthy() + abandoned, HOLD)
+    assert verdict.holds and verdict.stats["flush"]["max"] == 0.5 and verdict.stats["failures"]["server"] == 0
 
 
 def test_opens_are_judged_through_the_ramp_up_where_every_session_opens() -> None:
