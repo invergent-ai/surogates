@@ -59,6 +59,10 @@ function loadConverter(): Promise<Converter> {
         import("mathjax-full/js/input/tex.js"),
         import("mathjax-full/js/mathjax.js"),
         import("mathjax-full/js/output/svg.js"),
+        // `packages: ["ams"]` only names a package; this import is what
+        // registers it. Without it `\dfrac` and friends are undefined and
+        // MathJax's error box rasterises as a solid black rectangle.
+        import("mathjax-full/js/input/tex/ams/AmsConfiguration.js"),
       ]);
       const adaptor = liteAdaptor();
       RegisterHTMLHandler(adaptor);
