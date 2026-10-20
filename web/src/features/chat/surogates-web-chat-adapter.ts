@@ -84,6 +84,7 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
       input.content,
       images,
       attachments,
+      input.metadata,
     );
     return { eventId: response.event_id, status: response.status };
   },

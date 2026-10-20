@@ -100,6 +100,7 @@ export async function sendMessage(
     mime_type?: string;
     size?: number;
   }[],
+  metadata?: Record<string, unknown>,
 ): Promise<{ event_id: number; status: string }> {
   const payload: Record<string, unknown> = { content };
   if (images?.length) {
@@ -107,6 +108,9 @@ export async function sendMessage(
   }
   if (attachments?.length) {
     payload.attachments = attachments;
+  }
+  if (metadata && Object.keys(metadata).length) {
+    payload.metadata = metadata;
   }
   const response = await authFetch(
     `/api/v1/sessions/${sessionId}/messages`,
