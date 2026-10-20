@@ -130,7 +130,9 @@ def workspace_boundary(session: object) -> str | None:
 
     An evaluation boundary is memory-only: a row's memory partition is already
     its own, and its workspace stays the per-session one, so a file written
-    while answering one row cannot show up while answering the next.
+    while answering one row cannot show up while answering the next. A
+    buyer's boundary is memory-only too: each of their chats is its own
+    conversation.
     """
     cfg = getattr(session, "config", None) or {}
     pinned = str(cfg.get("workspace_boundary") or "").strip()
@@ -138,12 +140,13 @@ def workspace_boundary(session: object) -> str | None:
         return pinned
 
     from surogates.channels.memory_boundary import (
-        is_eval_session,
+        BUYER_BOUNDARY_PREFIX,
+        EVAL_BOUNDARY_PREFIX,
         session_memory_boundary,
     )
 
     boundary = session_memory_boundary(session)
-    if is_eval_session(session):
+    if (boundary or "").startswith((EVAL_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX)):
         return None
     return boundary
 
