@@ -45,7 +45,7 @@ from surogates.channels.constants import (
     STUDIO_CHANNEL,
     outbound_dm,
 )
-from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import BUYER_BOUNDARY_PREFIX, EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
 from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -74,7 +74,7 @@ from surogates.runtime import (
     rate_limit_dep,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
-from surogates.tenant.auth.service_account import ServiceAccountStore
+from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL, ServiceAccountStore
 from surogates.tenant.context import TenantContext
 from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master
 from surogates.workstreams.history import landing_on_a_computer
@@ -591,7 +591,9 @@ async def _get_session_for_tenant(
 _EVAL_PARTITION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
-def apply_eval_isolation(config: dict, *, channel: str) -> dict:
+def apply_eval_isolation(
+    config: dict, *, channel: str, buyer_principal: bool = False,
+) -> dict:
     """Return *config* with the evaluation memory boundary resolved.
 
     The boundary is server-owned. A client-supplied ``memory_boundary`` is
@@ -621,6 +623,11 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     facade composes the value as ``<run id>-<short unique suffix>``, so a
     whole run's partitions still share the run id as a common prefix and can
     be swept together later.
+
+    A ``public_buyer_id`` gets a ``buyer:<id>`` partition only when
+    ``buyer_principal`` says the caller is the agent's own principal, the
+    account its buy page forwards every buyer through. Any other key holder
+    naming a buyer id would otherwise read that buyer's memory.
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
@@ -632,24 +639,45 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
         resolved.pop(key, None)
     if channel != API_CHANNEL:
         return resolved
-    partition_id = str(resolved.get("eval_partition_id") or "").strip()
+    if buyer_principal and resolved.get("public_buyer_id"):
+        key, prefix = "public_buyer_id", BUYER_BOUNDARY_PREFIX
+    else:
+        key, prefix = "eval_partition_id", EVAL_BOUNDARY_PREFIX
+    partition_id = str(resolved.get(key) or "").strip()
     if not partition_id:
         return resolved
     if not _EVAL_PARTITION_ID_RE.fullmatch(partition_id):
         # The id is interpolated into memory object keys and into on-disk
         # memory directory components, so anything outside this alphabet
         # could walk out of the agent's asset root.  Refuse loudly: dropping
-        # the boundary silently would run the evaluation against the agent's
+        # the boundary silently would run the session against the agent's
         # real memory.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "eval_partition_id must be 1-64 characters of letters, "
+                f"{key} must be 1-64 characters of letters, "
                 "digits, '.', '_' or '-'."
             ),
         )
-    resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{partition_id}"
+    resolved["memory_boundary"] = f"{prefix}{partition_id}"
     return resolved
+
+
+async def _is_agent_principal(
+    request: Request, tenant: TenantContext, agent_id: str,
+    service_account_id: UUID | None,
+) -> bool:
+    """True when the caller is *agent_id*'s own principal, not an API key."""
+    if service_account_id is None:
+        return False
+    account = await ServiceAccountStore(request.app.state.session_factory).get_by_id(
+        service_account_id, tenant.org_id,
+    )
+    return (
+        account is not None
+        and account.kind == KIND_AGENT_PRINCIPAL
+        and account.agent_id == agent_id
+    )
 
 
 def _eval_service_account_name(org_id: UUID) -> str:
@@ -822,7 +850,14 @@ async def _create_session(
             request, tenant, agent_id, execution, channel=channel, user_id=user_id,
         )
 
-    config = apply_eval_isolation(body.config.copy(), channel=channel)
+    buyer_principal = (
+        channel == API_CHANNEL
+        and bool(body.config.get("public_buyer_id"))
+        and await _is_agent_principal(request, tenant, agent_id, service_account_id)
+    )
+    config = apply_eval_isolation(
+        body.config.copy(), channel=channel, buyer_principal=buyer_principal,
+    )
     if body.system:
         config["system"] = body.system
 
