@@ -822,6 +822,26 @@ async def test_keels_message_makes_a_reported_step_the_sessions_again(
     assert (await session_store.get_session(step.id)).config["case_step"]["reported"] == reported
 
 
+async def test_a_reports_mark_never_hides_a_message_keel_sent_since_the_report_began(
+    link, org, session_store, redis_client,
+):
+    step = await completed_step(link, org, session_store, redis_client)
+    began = await session_store.last_event_id(step.id)
+    # Keel took the draft, and the reviewer's changes reached the step before the worker marked it.
+    revised = await send(link, step.id, kind="revision", text="Lower the offer to 175000.", key="keel:c:1:revise:1")
+    assert revised.json() == {"delivered": True}
+
+    await session_store.mark_case_step_reported(step.id, "drafted", since=began)
+
+    assert "reported" not in (await session_store.get_session(step.id)).config["case_step"]
+
+    # A message from before a report began does not hold its mark back.
+    began = await session_store.last_event_id(step.id)
+    await session_store.mark_case_step_reported(step.id, "drafted", since=began)
+
+    assert (await session_store.get_session(step.id)).config["case_step"]["reported"] == "drafted"
+
+
 async def test_status_reads_the_session(link, org, session_store, redis_client):
     step = await completed_step(link, org, session_store, redis_client)
 

@@ -233,12 +233,25 @@ async def _redact(store: Any, session_id: UUID) -> None:
         logger.warning("Session %s: the step's inputs were not redacted (%s)", session_id, type(exc).__name__)
 
 
-async def _mark(store: Any, session_id: UUID, result: str) -> None:
-    """A report ended the step for this round, with *result*: the session's row says so until Keel writes to it."""
+async def _mark(store: Any, session_id: UUID, result: str, *, since: int | None) -> None:
+    """A report ended the step for this round, with *result*: the session's row says so until Keel writes to it.
+
+    *since* is the session's last event id when the report began: a message
+    of Keel's written after it leaves the step unmarked.
+    """
     try:
-        await store.mark_case_step_reported(session_id, result)
+        await store.mark_case_step_reported(session_id, result, since=since)
     except Exception as exc:
         logger.warning("Session %s: the step's report was not marked (%s)", session_id, type(exc).__name__)
+
+
+async def _began(store: Any, session_id: UUID) -> int | None:
+    """The session's last event id, read as a report to Keel begins; ``None``, logged, when it cannot be read."""
+    try:
+        return await store.last_event_id(session_id)
+    except Exception as exc:
+        logger.warning("Session %s: its last event was not read (%s)", session_id, type(exc).__name__)
+        return None
 
 
 def _transient(answer: KeelAnswer) -> bool:
@@ -250,7 +263,8 @@ def _transient(answer: KeelAnswer) -> bool:
 
 
 async def _stopped(
-    client: KeelClient | None, store: Any, session_id: UUID, usage: dict[str, Any], *, status: int | None = None,
+    client: KeelClient | None, store: Any, session_id: UUID, usage: dict[str, Any], *,
+    status: int | None = None, since: int | None = None,
 ) -> str:
     """Keel refused the step's report for good, or there is no Keel to report to: Keel is told the step
     failed, and its inputs leave the session."""
@@ -262,7 +276,7 @@ async def _stopped(
         await client.ended(session_id, reason="failed", detail=f"keel-{status}", usage=usage)
         text = f"{STEP_STOPPED} Keel refused this step's report ({status}); people take the step."
     await _redact(store, session_id)
-    await _mark(store, session_id, _STOPPED)
+    await _mark(store, session_id, _STOPPED, since=since)
     return text
 
 
@@ -280,6 +294,7 @@ def _rejection(answer: KeelAnswer, tool: str) -> str:
 
 async def _answered(
     answer: KeelAnswer, *, tool: str, client: KeelClient, store: Any, session_id: UUID, usage: dict[str, Any],
+    since: int | None,
 ) -> str:
     """What the model is told of Keel's *answer* to a step tool's report."""
     if answer.status == 200:
@@ -289,7 +304,7 @@ async def _answered(
         if result not in _RESULTS:
             # Keel took it without saying how: as the tool's own report would end the step.
             result = "completed" if tool == "complete_step" else "hand-raised"
-        await _mark(store, session_id, result)
+        await _mark(store, session_id, result, since=since)
         return f"{STEP_ENDED} {answer.message or 'Keel took the report.'}"
     if answer.status == 409 and answer.code == "not-running":
         return _NO_LONGER
@@ -297,7 +312,7 @@ async def _answered(
         return _rejection(answer, tool)
     if _transient(answer):
         return _error(f"Keel could not be reached; call {tool} again.")
-    return await _stopped(client, store, session_id, usage, status=answer.status)
+    return await _stopped(client, store, session_id, usage, status=answer.status, since=since)
 
 
 def _ended_in_this_wake(kwargs: dict[str, Any]) -> bool:
@@ -330,6 +345,7 @@ async def _send_report(
             "call_id": kwargs["tool_call_id"], **fields,
             "pages_read": await _pages_read(store, session), "usage": usage,
         }
+        since = await _began(store, session_id)
         try:
             answer = await send(session_id, body)
         except BodyTooLarge as exc:
@@ -337,7 +353,9 @@ async def _send_report(
                 f"The report is {exc.size:,} bytes, over the {exc.limit:,} bytes Keel takes. "
                 f"Shorten {shorten} and call {tool} again.",
             )
-        result = await _answered(answer, tool=tool, client=client, store=store, session_id=session_id, usage=usage)
+        result = await _answered(
+            answer, tool=tool, client=client, store=store, session_id=session_id, usage=usage, since=since,
+        )
     if result.startswith((STEP_ENDED, STEP_STOPPED)):
         _remember_the_end(kwargs)
     return result
@@ -368,16 +386,20 @@ async def step_awaiting_report(store: Any, session: Any) -> Any | None:
     return row
 
 
-async def _tell_keel(session_id: Any, **end: Any) -> None:
-    """Send Keel one ``ended`` for *session_id*; log by session id what was not sent.  Never raises."""
+async def _tell_keel(session_id: Any, **end: Any) -> KeelAnswer | None:
+    """Send Keel one ``ended`` for *session_id*, and return its answer; log by session id what was not sent.
+
+    Never raises: ``None`` when nothing was sent.
+    """
     try:
         client = keel_client()
         if client is None:
             logger.warning("Session %s: no link to Keel; Keel is not told how its step ended", session_id)
-            return
-        await client.ended(session_id, **end)
+            return None
+        return await client.ended(session_id, **end)
     except Exception as exc:
         logger.warning("Session %s: Keel was not told how its step ended (%s)", session_id, type(exc).__name__)
+        return None
 
 
 async def report_no_outcome(store: Any, session: Any, *, reason: str) -> None:
@@ -385,14 +407,20 @@ async def report_no_outcome(store: Any, session: Any, *, reason: str) -> None:
 
     Keel gets ``no-outcome``, with *reason*, the turn end's own code, and the
     step's usage, and decides what comes of the step; the inputs stay.
-    Nothing is sent unless the step awaits its report
-    (:func:`step_awaiting_report`).  Never raises: the turn ends whatever
-    Keel answers.
+    When Keel takes it as a raised hand, a person answers in the session, and
+    the step is marked so, as a raised hand of the model's is.  Nothing is
+    sent unless the step awaits its report (:func:`step_awaiting_report`).
+    Never raises: the turn ends whatever Keel answers.
     """
     row = await step_awaiting_report(store, session)
     if row is None:
         return
-    await _tell_keel(session.id, reason="no-outcome", detail=reason, usage=_usage(row))
+    since = await _began(store, session.id)
+    answer = await _tell_keel(session.id, reason="no-outcome", detail=reason, usage=_usage(row))
+    if answer is not None and answer.status == 200 and isinstance(answer.data, dict) and (
+        answer.data.get("result") == "hand-raised"
+    ):
+        await _mark(store, session.id, "hand-raised", since=since)
 
 
 async def report_step_failed(store: Any, session: Any, *, code: str) -> None:

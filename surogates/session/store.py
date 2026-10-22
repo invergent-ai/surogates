@@ -55,7 +55,7 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
-from surogates.keel.steps import CASE_STEP_KEY, REPORTED_KEY
+from surogates.keel.steps import ANSWER_MARKER, CASE_STEP_KEY, REPORTED_KEY, REVISION_MARKER
 from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
@@ -2503,7 +2503,7 @@ class SessionStore:
             await self._announce_event(pause)
         return paused
 
-    async def mark_case_step_reported(self, session_id: UUID, result: str) -> None:
+    async def mark_case_step_reported(self, session_id: UUID, result: str, *, since: int | None = None) -> None:
         """Mark the step contract in *session_id*'s config as reported, with Keel's *result*.
 
         A report ended the step for this round: until Keel writes to the step
@@ -2511,6 +2511,13 @@ class SessionStore:
         the session is nudged to report, and no end of one is told to Keel.
         Under the session row's lock, as a redaction.  A session with no
         contract is left as it is.
+
+        *since* is the session's last event id when the report began.  An
+        answer or a revision of Keel's written after it reached the step
+        first: its write cleared no mark yet, so none is written now, and the
+        step stays the session's to work on.  The check holds the lock that
+        message's write takes, so one or the other comes first, never both
+        at once.  Without *since* the mark is written unchecked.
         """
         async with self._sf() as db:
             row = (await db.execute(
@@ -2520,6 +2527,15 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             marked = _reported_case_config(row.config, result)
             if marked is None:
+                return
+            if since is not None and (await db.execute(select(
+                select(EventRow.id).where(
+                    EventRow.session_id == session_id,
+                    EventRow.id > since,
+                    EventRow.type == EventType.USER_MESSAGE.value,
+                    EventRow.data["synthetic"].as_string().in_((ANSWER_MARKER, REVISION_MARKER)),
+                ).exists()
+            ))).scalar_one():
                 return
             row.config = marked
             row.updated_at = func.now()

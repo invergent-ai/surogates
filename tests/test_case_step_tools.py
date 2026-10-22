@@ -135,8 +135,26 @@ class _StepStore(FakeStore):
         if redacted is not None:
             self.row.config = redacted
 
-    async def mark_case_step_reported(self, session_id, result) -> None:
+    async def last_event_id(self, session_id) -> int:
+        assert session_id == self.row.id
+        return self.next_event_id - 1
+
+    async def mark_case_step_reported(self, session_id, result, *, since=None) -> None:
+        # Not over a message of Keel's that revived the step after the report began.
+        if since is not None and any(
+            e.id > since and e.type == EventType.USER_MESSAGE.value
+            and e.data.get("synthetic") in ("keel_answer", "keel_revision")
+            for e in self.log
+        ):
+            return
         self.row.config = {**self.row.config, "case_step": {**self.row.config["case_step"], "reported": result}}
+
+    def keel_writes(self, kind: str, content: str) -> None:
+        """Keel's answer or revision reaching the step through the link: written, the report's mark cleared."""
+        self.write(EventType.USER_MESSAGE, {"content": content, "synthetic": f"keel_{kind}", "keel_key": f"keel:{kind}:1"})
+        self.row.config = {
+            **self.row.config, "case_step": {k: v for k, v in self.row.config["case_step"].items() if k != "reported"},
+        }
 
     def redacted(self) -> bool:
         step = self.row.config["case_step"]
@@ -461,8 +479,9 @@ async def _wake(
     A reply that is an exception is the model's call raising it.  *streaming*
     runs the tool calls as a streamed answer's are, each started as it
     arrives.  *opening* is what woke the session: the event written to its
-    log, and the message the model reads of it; by default Keel's kickoff for
-    a step, and a person's message for any other session.
+    log (``None`` when it is there already), and the message the model reads
+    of it; by default Keel's kickoff for a step, and a person's message for
+    any other session.
     """
     sent: list[dict] = []
     script = iter(replies)
@@ -503,7 +522,8 @@ async def _wake(
     contract = step_contract_in(store.row.config)
     if opening is not None:
         kind, data, kickoff = opening
-        store.write(kind, data)
+        if data is not None:
+            store.write(kind, data)
     elif contract is not None:
         kickoff = render_kickoff(contract)
         store.write(EventType.USER_MESSAGE, {"content": kickoff, "synthetic": "keel_step"})

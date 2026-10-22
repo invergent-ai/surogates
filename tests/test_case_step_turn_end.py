@@ -408,3 +408,67 @@ async def test_a_child_of_a_step_is_never_nudged_or_reported(fake_keel, monkeypa
     assert [d["reason"] for sid, kind, d in store.events if sid == child.id and kind is EventType.SESSION_COMPLETE] == ["completed"]
     assert fake_keel.requests == []
     assert not store.redacted()
+
+
+REVISION = "The person reviewing your draft asks for changes: lower the offer to 175000."
+ANSWER = "A person answered your raised hand: count the current employer only."
+
+
+@pytest.mark.parametrize("report", ["drafted", "ended-hand-raised"])
+async def test_keels_message_racing_the_reports_mark_leaves_the_step_live(fake_keel, monkeypatch, store, report):
+    if report == "drafted":
+        fake_keel.answer(200, DRAFTED)
+        first = [_calls("complete_step", COMPLETION)]
+        kind, content = "revision", REVISION
+    else:
+        # Keel takes a turn with no outcome as a raised hand: a person answers in the session.
+        fake_keel.answer(200, HAND_RAISED)
+        first = [_says("I read the checklist."), _says("It looks complete.")]
+        kind, content = "answer", ANSWER
+    marking = store.mark_case_step_reported
+
+    async def keel_answers_first(session_id, result, **guard):
+        # Between Keel's 200 and the mark: Keel's message reaches the step through the link.
+        store.mark_case_step_reported = marking
+        store.keel_writes(kind, content)
+        await marking(session_id, result, **guard)
+
+    store.mark_case_step_reported = keel_answers_first
+    await _wake(monkeypatch, store, first)
+
+    assert store.mark_case_step_reported is marking
+    assert store.reported() is None
+    ended = len(fake_keel.bodies("/ended"))
+
+    # Keel's message wakes the step, which is its own again: nudged, and its end told to Keel.
+    sent = await _wake(
+        monkeypatch, store, [_says("Noted."), _says("The offer stands at 175000 now.")],
+        opening=(EventType.USER_MESSAGE, None, content),
+    )
+
+    assert len(sent) == 2
+    assert content in json.dumps(sent[0]["messages"])
+    assert _last_user_message(sent[1]) == NUDGE
+    assert _ended_with(store) == "completed"
+    assert len(fake_keel.bodies("/ended")) == ended + 1
+    assert fake_keel.bodies("/ended")[-1]["reason"] == "no-outcome"
+
+
+async def test_a_turn_keel_takes_as_a_raised_hand_is_left_to_the_person(fake_keel, monkeypatch, store):
+    fake_keel.answer(200, HAND_RAISED)
+    await _wake(monkeypatch, store, [_says("I read the checklist."), _says("It looks complete.")])
+
+    assert fake_keel.bodies("/ended") == [{"reason": "no-outcome", "detail": "completed", "usage": USAGE}]
+    assert store.reported() == "hand-raised"
+    assert not store.redacted()
+
+    # A helper's report wakes the step before the person answers.
+    helper_done = "A helper you started finished: the payslips are summarized."
+    sent = await _wake(
+        monkeypatch, store, [_says("Noted: the payslips are summarized."), _says("Still waiting on the answer.")],
+        opening=(EventType.WORKER_COMPLETE, {"worker_session_id": str(uuid4()), "result": helper_done}, helper_done),
+    )
+
+    assert len(sent) == 1
+    assert NUDGE not in json.dumps(sent)
+    assert len(fake_keel.bodies("/ended")) == 1
