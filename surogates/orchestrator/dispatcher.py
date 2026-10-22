@@ -506,8 +506,10 @@ class Orchestrator:
                 org_id=dequeued.org_id,
                 agent_id=dequeued.agent_id,
                 session_id=UUID(dequeued.session_id),
-                # Back where it was: a phone call's at the front, a case's behind chats.
-                priority=dequeued.priority,
+                # Back at its session's place: a phone call's at the front, a
+                # case's behind chats.  Not its dequeued score, which may
+                # carry a busy tenant's backoff.
+                priority=await self._queue_place(UUID(dequeued.session_id)),
             )
         except Exception:
             # The orphan sweep finds it once its lease has expired.
@@ -553,6 +555,17 @@ class Orchestrator:
             # The turn may have given its slots back while it waited, and ended
             # before taking them again: release only what it holds.
             await slots.release_owned()
+
+    async def _queue_place(self, session_id: UUID) -> float:
+        """*session_id*'s work-queue score; ordinary work's when its row cannot be read."""
+        try:
+            return session_queue_priority(await self.session_store.get_session(session_id))
+        except Exception as exc:
+            logger.warning(
+                "Could not read session %s (%s); queueing it as ordinary work",
+                session_id, type(exc).__name__,
+            )
+            return 0.0
 
     async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)

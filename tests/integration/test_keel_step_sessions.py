@@ -8,6 +8,8 @@ public API never serves those routes.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import uuid
 from uuid import UUID
@@ -17,6 +19,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import API_CHANNEL
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
@@ -49,7 +52,15 @@ class _Agents:
     """The runtime configs ops answers for the agents Keel names."""
 
     def __init__(self, org_id: UUID) -> None:
-        self.org_id = org_id
+        # Each agent's org; a test may add an agent of its own.
+        self.orgs = {
+            AGENT: org_id,
+            "second-agent": org_id,
+            "flaky-agent": org_id,
+            "down-agent": org_id,
+            "stopped-agent": org_id,
+            "elsewhere-agent": uuid.uuid4(),
+        }
         # Calls ops fails before it answers, per agent.
         self.failures = {"flaky-agent": 1, "down-agent": 2}
 
@@ -57,18 +68,11 @@ class _Agents:
         if self.failures.get(agent_id, 0) > 0:
             self.failures[agent_id] -= 1
             raise ConnectionError("ops is restarting")
-        orgs = {
-            AGENT: self.org_id,
-            "flaky-agent": self.org_id,
-            "down-agent": self.org_id,
-            "stopped-agent": self.org_id,
-            "elsewhere-agent": uuid.uuid4(),
-        }
-        if agent_id not in orgs:
+        if agent_id not in self.orgs:
             raise LookupError(agent_id)
         return {
             "agent_id": agent_id,
-            "org_id": str(orgs[agent_id]),
+            "org_id": str(self.orgs[agent_id]),
             "project_id": "test-project",
             "enabled": agent_id != "stopped-agent",
             "version": 3,
@@ -279,7 +283,10 @@ async def test_concurrent_creates_make_one_session_and_one_kickoff(link, org, se
 async def test_every_wake_of_a_step_session_stays_behind_chats(
     link, link_app, org, session_store, redis_client, monkeypatch,
 ):
-    created = await post(link, body(org))
+    # An agent of this test's own: the sweep below takes every orphan of its agent.
+    agent = f"wake-agent-{uuid.uuid4().hex[:8]}"
+    link_app.state.runtime_config_cache.orgs[agent] = org
+    created = await post(link, body(org), agent=agent)
     assert created.status_code == 201, created.text
     step = await session_store.get_session(UUID(created.json()["session_id"]))
     # An integrator's chat with the same agent, waiting on its message.
@@ -289,7 +296,7 @@ async def test_every_wake_of_a_step_session_stays_behind_chats(
         settings=link_app.state.settings,
         org_id=org,
         user_id=None,
-        agent_id=AGENT,
+        agent_id=agent,
         channel=API_CHANNEL,
     )
     await session_store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Hello"})
@@ -299,7 +306,7 @@ async def test_every_wake_of_a_step_session_stays_behind_chats(
         redis_client=redis_client,
         session_store=session_store,
         harness_factory=lambda _sid: None,
-        agent_id=AGENT,
+        agent_id=agent,
         queue_key=SHARED_WORK_QUEUE_KEY,
         max_concurrent=1,
     )
@@ -494,3 +501,47 @@ async def test_a_key_of_another_step_is_in_use(link, org, session_store):
     assert await session_store.get_session_by_idempotency_key(org, "keel:c:2:0") is None
     messages = await user_messages(session_store, step_id)
     assert [m.data.get("synthetic") for m in messages] == ["keel_step"]
+
+
+async def test_the_same_key_for_another_agent_is_in_use(link, org, session_store):
+    request = body(org)
+    first = await post(link, request)
+    assert first.status_code == 201, first.text
+
+    elsewhere = await post(link, request, agent="second-agent")
+
+    assert elsewhere.status_code == 409, elsewhere.text
+    assert code_of(elsewhere) == "key-in-use"
+    step = await session_store.get_session(UUID(request["session_id"]))
+    assert step.agent_id == AGENT
+    messages = await user_messages(session_store, step.id)
+    assert [m.data.get("synthetic") for m in messages] == ["keel_step"]
+
+
+async def test_an_unrelated_integrity_failure_answers_500_and_logs_no_inputs(
+    link, link_app, org, session_store, monkeypatch, caplog,
+):
+    # An insert that breaks a constraint other than the key or the id.  The
+    # database's error quotes the row it could not write, the case step's
+    # inputs among it, and SQLAlchemy's text adds the bound parameters.
+    async def refused_insert(**row):
+        config = json.dumps(row["config"])
+        raise IntegrityError(
+            "INSERT INTO sessions (config) VALUES ($1::JSONB)",
+            (config,),
+            Exception(f"new row violates a check constraint\nDETAIL:  Failing row contains ({config})."),
+        )
+
+    monkeypatch.setattr(link_app.state.session_store, "create_session", refused_insert)
+    request = body(org, inputs={"applicant": "Ioana Marinescu", "amount": "987654.32"})
+    caplog.set_level(logging.INFO)
+
+    failed = await post(link, request)
+
+    assert failed.status_code == 500, failed.text
+    assert code_of(failed) == "internal-error"
+    assert "IntegrityError" in caplog.text
+    for value in ("Marinescu", "987654.32"):
+        assert value not in caplog.text
+        assert value not in failed.text
+    assert await session_store.get_session_by_idempotency_key(org, KEY) is None

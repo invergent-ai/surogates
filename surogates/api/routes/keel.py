@@ -170,11 +170,14 @@ async def _start(request: Request, session: Any, contract: StepContract, key: st
     )
 
 
-async def _found(request: Request, existing: Any, body: StepSessionRequest) -> JSONResponse:
+async def _found(
+    request: Request, existing: Any, body: StepSessionRequest, agent_id: str,
+) -> JSONResponse:
     """The session a key already holds: this very step's, or the key is in use."""
     held = step_contract_of(existing)
     if (
         existing.id != body.session_id
+        or existing.agent_id != agent_id
         or held is None
         or held.case_id != body.contract.case_id
         or held.token != body.contract.token
@@ -221,7 +224,7 @@ async def create_step_session(request: Request) -> JSONResponse:
     store = request.app.state.session_store
     existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
     if existing is not None:
-        return await _found(request, existing, body)
+        return await _found(request, existing, body, agent_id)
 
     account_id = await ServiceAccountStore(request.app.state.session_factory).case_type_account(
         body.org_id, body.case_type,
@@ -250,10 +253,18 @@ async def create_step_session(request: Request) -> JSONResponse:
         # A concurrent call with the key made it first, or the id is taken.
         existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
         if existing is not None:
-            return await _found(request, existing, body)
-        if not await _exists(store, body.session_id):
-            raise exc
-        raise _key_in_use() from None
+            return await _found(request, existing, body, agent_id)
+        if await _exists(store, body.session_id):
+            raise _key_in_use() from None
+        # Another constraint broke.  Its text quotes the row, the case's
+        # inputs among it: the class name alone is logged and answered.
+        logger.warning(
+            "keel-link: the step session of case %s could not be created (%s)",
+            contract.case_id, type(exc).__name__,
+        )
+        raise _refused(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", "The step session could not be created.",
+        ) from None
 
     await _start(request, session, contract, body.idempotency_key)
     return _answer(session, created=True)
