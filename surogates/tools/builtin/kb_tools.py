@@ -46,6 +46,14 @@ server-side and only lets a caller-supplied ``kb_ids`` narrow it (see
 ``_kb_search_pages_handler``). The one check that must stay
 harness-side either way is the sender's pinned plan entitlement
 (``kb_allowed``/``session_config``), which ops has no way to see.
+
+A Keel case's sessions also read the KBs their case's scope grants, of
+the session's project only, though their agent has them not attached:
+the attachment check takes the grant, and every call to ops's KB routes
+names it (``granted_kb_ids``) for ops to apply the same rule. Each page
+a case's session reads is written to the case root's log as a
+``kb.page_read`` event, with the SHA-256 of the content read, so the
+step's report to Keel carries it.
 """
 
 from __future__ import annotations
@@ -56,13 +64,18 @@ import logging
 import re
 import uuid
 from collections import Counter
+from collections.abc import Collection
 from itertools import zip_longest
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import sqlalchemy as sa
 
 from surogates.db.ops_engine import ensure_ops_session_factory
+from surogates.keel.steps import case_scope_in, is_case_config
+from surogates.session.attachment_ingest import workspace_root_id
+from surogates.session.events import EventType
 from surogates.runtime.entitlements import dimension_allowlist, kb_allowed
 from surogates.db.ops_models import (
     OpsKBWikiPage,
@@ -122,12 +135,32 @@ def _agent_id_from_kwargs(kwargs: dict[str, Any]) -> str:
     return agent_id
 
 
+def _case_grant(kwargs: dict[str, Any]) -> tuple[frozenset[str], str | None]:
+    """The KBs a Keel case grants the session, and the project they must be of.
+
+    Read per call from the session's config (the case's scope) and its
+    tenant: in the shared runtime no environment variable names either.
+    A session of no case is granted nothing.
+    """
+    config = kwargs.get("session_config")
+    if not is_case_config(config):
+        return frozenset(), None
+    scope = case_scope_in(config, session_id=kwargs.get("session_id"))
+    org_id = getattr(kwargs.get("tenant"), "org_id", None)
+    if scope is None or not scope.knowledge or org_id is None:
+        return frozenset(), None
+    return frozenset(scope.knowledge), str(org_id)
+
+
 async def _is_kb_attached(
     session: Any, *, agent_id: str, kb_id: str,
+    granted: Collection[str] = frozenset(), org_id: str | None = None,
 ) -> bool:
-    """Check the M2M table for (agent_id, kb_id).
+    """Check the M2M table for (agent_id, kb_id), or the case's grant.
 
-    Returns True only if the row exists. We don't cache here -- the
+    True when the row exists, or when *kb_id* is one a Keel case grants
+    (*granted*) and a KB of the session's project (*org_id*): a granted
+    KB of another project is never read. We don't cache here -- the
     overhead of a primary-key lookup is sub-millisecond and the worst
     case (miss after detach) is a stale-tool error message that the
     LLM can recover from on the next iteration.
@@ -138,7 +171,33 @@ async def _is_kb_attached(
             agent_knowledge_bases.c.kb_id == kb_id,
         )
     )
+    if result.first() is not None:
+        return True
+    if kb_id not in granted or not org_id:
+        return False
+    result = await session.execute(
+        sa.select(OpsKnowledgeBase.id).where(
+            OpsKnowledgeBase.id == kb_id,
+            OpsKnowledgeBase.project_id == org_id,
+        )
+    )
     return result.first() is not None
+
+
+async def _record_page_read(kwargs: dict[str, Any], *, kb_id: str, path: str, raw: bytes) -> None:
+    """Write a page a session of a case read to the case root's log.
+
+    The root's log, not the session's own: the step's report to Keel reads
+    the pages every session of the case read from there (see
+    ``workspace_root_id``, which a child's config points at its step).
+    The digest is the SHA-256 of the content read.
+    """
+    session = SimpleNamespace(id=kwargs["session_id"], config=kwargs.get("session_config"))
+    await kwargs["session_store"].emit_event(
+        uuid.UUID(workspace_root_id(session)),
+        EventType.KB_PAGE_READ,
+        {"kb_id": kb_id, "path": path, "sha256": hashlib.sha256(raw).hexdigest()},
+    )
 
 
 # Section order in the rendered tree, shared with _select_tree_pages so
@@ -289,6 +348,7 @@ async def _kb_list_pages_handler(
         return "Error: kb_id is required."
 
     agent_id = _agent_id_from_kwargs(kwargs)
+    granted, org_id = _case_grant(kwargs)
     denied = _kb_plan_denied(kb_id, kwargs)
     if denied is not None:
         return denied
@@ -303,6 +363,7 @@ async def _kb_list_pages_handler(
     async with factory() as session:
         if not await _is_kb_attached(
             session, agent_id=agent_id, kb_id=kb_id,
+            granted=granted, org_id=org_id,
         ):
             return (
                 f"Error: knowledge base {kb_id!r} is not attached to "
@@ -461,6 +522,65 @@ def _format_page_range(
     return f"# {title}\n\n_Pages {start}-{end}._\n\n{body}"
 
 
+def _render_read(
+    raw: bytes, page: OpsKBWikiPage, *, kb_id: str, path: str, passage_id: str,
+    context: str, page_range: tuple[int, int] | None, offset: int, limit: int,
+    link_text: str, conflict_text: str,
+) -> str:
+    """What ``kb_read_page`` answers for the verified content *raw* of *page*, or an ``Error:``."""
+    if context == "conflicts":
+        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{conflict_text}"
+    if context == "links":
+        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{link_text}\n\n{conflict_text}"
+    link_suffix = "".join("\n\n" + text for text in (link_text, conflict_text) if text)
+
+    provenance = f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}"
+    if context == "surrounding":
+        if not page.content_sha256 or page.source_start is None or page.source_end is None:
+            return "Error: surrounding context requires a verified passage. Rebuild the KB first."
+        try:
+            spans = surrounding_spans(
+                raw, page_number=page.page_number, start=page.source_start,
+                end=page.source_end, budget=limit,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}."
+        provenance += (
+            f"; passage={passage_id}; anchor_page={page.page_number}; "
+            f"anchor_characters={page.source_start}-{page.source_end}; context=surrounding_"
+        )
+        return provenance + f"\n\n# {page.title}\n\n" + render_surrounding(spans) + link_suffix
+    if passage_id:
+        content = raw.decode("utf-8", errors="replace")
+        if page.page_number is not None:
+            try:
+                content = next(p.get("content") or "" for p in json.loads(content)
+                               if int(p.get("page", 0)) == page.page_number)
+            except (ValueError, TypeError, StopIteration, AttributeError):
+                return "Error: indexed PDF page is missing from its published artifact."
+        if page.source_start is None or page.source_end is None:
+            return "Error: passage has no source offsets. Search again after rebuilding the KB."
+        if not 0 <= page.source_start < page.source_end <= len(content):
+            return "Error: indexed passage offsets do not match the published artifact."
+        evidence = content[page.source_start:page.source_end]
+        provenance += (f"; passage={passage_id}; page={page.page_number}; "
+                       f"characters={page.source_start}-{page.source_end}_")
+        return provenance + "\n\n" + _format_page_window(page.title, evidence, offset, limit) + link_suffix
+
+    provenance += "_"
+    if page_range is not None and path.endswith(".json"):
+        rendered = _format_page_range(page.title, raw, *page_range)
+        if rendered.startswith("Error:"):
+            return rendered
+        # Range requests obey the same character ceiling and pagination rules
+        # as Markdown. A dense 40-page span must not bypass the tool budget.
+        return provenance + "\n\n" + _format_page_window(page.title, rendered, offset, limit) + link_suffix
+
+    return provenance + "\n\n" + _format_page_window(
+        page.title, raw.decode("utf-8", errors="replace"), offset, limit,
+    ) + link_suffix
+
+
 async def _kb_read_page_handler(
     arguments: dict[str, Any], **kwargs: Any,
 ) -> str:
@@ -508,6 +628,7 @@ async def _kb_read_page_handler(
         )
 
     agent_id = _agent_id_from_kwargs(kwargs)
+    granted, org_id = _case_grant(kwargs)
     denied = _kb_plan_denied(kb_id, kwargs)
     if denied is not None:
         return denied
@@ -530,6 +651,7 @@ async def _kb_read_page_handler(
     async with factory() as session:
         if not await _is_kb_attached(
             session, agent_id=agent_id, kb_id=kb_id,
+            granted=granted, org_id=org_id,
         ):
             return (
                 f"Error: knowledge base {kb_id!r} is not attached to "
@@ -582,6 +704,7 @@ async def _kb_read_page_handler(
             result = await platform_client.get_agent_kb_document_links(
                 agent_id, file_id=page.source_file_id, kb_ids=[kb_id],
                 expected_artifact_sha256=page.content_sha256,
+                granted_kb_ids=sorted(granted),
             )
             if result.get("status") in ("extracted", "partial") and result.get("artifact_sha256") != page.content_sha256:
                 result = {"status": "stale"}
@@ -599,57 +722,15 @@ async def _kb_read_page_handler(
         link_text = "Document links require a verified original source and a configured platform connection."
     if not conflict_text and (page.page_type == "source" or context == "conflicts"):
         conflict_text = format_statement_conflicts(None)
-    if context == "conflicts":
-        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{conflict_text}"
-    if context == "links":
-        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{link_text}\n\n{conflict_text}"
-    link_suffix = "".join("\n\n" + text for text in (link_text, conflict_text) if text)
-
-    provenance = f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}"
-    if context == "surrounding":
-        if not page.content_sha256 or page.source_start is None or page.source_end is None:
-            return "Error: surrounding context requires a verified passage. Rebuild the KB first."
-        try:
-            spans = surrounding_spans(
-                raw, page_number=page.page_number, start=page.source_start,
-                end=page.source_end, budget=limit,
-            )
-        except ValueError as exc:
-            return f"Error: {exc}."
-        provenance += (
-            f"; passage={passage_id}; anchor_page={page.page_number}; "
-            f"anchor_characters={page.source_start}-{page.source_end}; context=surrounding_"
-        )
-        return provenance + f"\n\n# {page.title}\n\n" + render_surrounding(spans) + link_suffix
-    if passage_id:
-        content = raw.decode("utf-8", errors="replace")
-        if page.page_number is not None:
-            try:
-                content = next(p.get("content") or "" for p in json.loads(content)
-                               if int(p.get("page", 0)) == page.page_number)
-            except (ValueError, TypeError, StopIteration, AttributeError):
-                return "Error: indexed PDF page is missing from its published artifact."
-        if page.source_start is None or page.source_end is None:
-            return "Error: passage has no source offsets. Search again after rebuilding the KB."
-        if not 0 <= page.source_start < page.source_end <= len(content):
-            return "Error: indexed passage offsets do not match the published artifact."
-        evidence = content[page.source_start:page.source_end]
-        provenance += (f"; passage={passage_id}; page={page.page_number}; "
-                       f"characters={page.source_start}-{page.source_end}_")
-        return provenance + "\n\n" + _format_page_window(page.title, evidence, offset, limit) + link_suffix
-
-    provenance += "_"
-    if page_range is not None and path.endswith(".json"):
-        rendered = _format_page_range(page.title, raw, *page_range)
-        if rendered.startswith("Error:"):
-            return rendered
-        # Range requests obey the same character ceiling and pagination rules
-        # as Markdown. A dense 40-page span must not bypass the tool budget.
-        return provenance + "\n\n" + _format_page_window(page.title, rendered, offset, limit) + link_suffix
-
-    return provenance + "\n\n" + _format_page_window(
-        page.title, raw.decode("utf-8", errors="replace"), offset, limit,
-    ) + link_suffix
+    text = _render_read(
+        raw, page, kb_id=kb_id, path=path, passage_id=passage_id, context=context,
+        page_range=page_range, offset=offset, limit=limit,
+        link_text=link_text, conflict_text=conflict_text,
+    )
+    # A page a session of a Keel case read is recorded for the step's report.
+    if is_case_config(kwargs.get("session_config")) and not text.startswith("Error:"):
+        await _record_page_read(kwargs, kb_id=kb_id, path=path, raw=raw)
+    return text
 
 
 # Ranked-search caps. The result is a triage list, not a corpus: 10
@@ -774,6 +855,9 @@ async def _kb_search_pages_handler(
     limit = _clamp_limit(arguments.get("limit"))
 
     agent_id = _agent_id_from_kwargs(kwargs)
+    # A Keel case's grants go to ops, which adds each one of the agent's
+    # project to the attached set.
+    granted = sorted(_case_grant(kwargs)[0])
 
     platform_client = kwargs.get("platform_client")
     if platform_client is None:
@@ -826,10 +910,12 @@ async def _kb_search_pages_handler(
         if mode == "documents":
             result = await platform_client.find_agent_kb_documents(
                 agent_id, query=query, kb_ids=kb_ids, limit=limit,
+                granted_kb_ids=granted,
             )
             return _format_document_matches(result, query)
         hits = await platform_client.search_agent_kb(
             agent_id, query=query, kb_ids=kb_ids, limit=limit,
+            granted_kb_ids=granted,
         )
     except (PlatformAuthError, httpx.HTTPError):
         # A failed search must not kill the turn: the LLM can fall back

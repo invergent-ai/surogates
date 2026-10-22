@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -24,7 +25,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import has_file_pane
-from surogates.keel.steps import gate_case_tools
+from surogates.keel.steps import case_scope_of, gate_case_tools, is_case_session
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
@@ -820,8 +821,15 @@ async def _load_attached_kbs(
     *,
     agent_id: str,
     ops_db_url: str,
+    granted: Sequence[str] = (),
+    org_id: str | None = None,
 ) -> list[dict]:
     """Look up the KBs attached to *agent_id* in the ops DB.
+
+    A Keel case's sessions also read the KBs their case grants (*granted*):
+    each one of the session's project (*org_id*) is added, once, in mode
+    ``grounding``, though the agent has it not attached.  A granted KB of
+    another project is left out.
 
     Empty list is the safe default and is returned in three cases:
 
@@ -910,6 +918,32 @@ async def _load_attached_kbs(
                 }
                 for row in result.all()
             ]
+            attached = {kb["id"] for kb in kbs}
+            wanted = [kb_id for kb_id in dict.fromkeys(granted) if kb_id not in attached]
+            if wanted and org_id:
+                result = await session.execute(
+                    sa.select(
+                        OpsKnowledgeBase.id,
+                        OpsKnowledgeBase.name,
+                        OpsKnowledgeBase.display_name,
+                        OpsKnowledgeBase.description,
+                    )
+                    .where(
+                        OpsKnowledgeBase.id.in_(wanted),
+                        OpsKnowledgeBase.project_id == org_id,
+                    )
+                    .order_by(OpsKnowledgeBase.name.asc())
+                )
+                kbs += [
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "display_name": row[2],
+                        "description": row[3],
+                        "mode": "grounding",
+                    }
+                    for row in result.all()
+                ]
             if not kbs:
                 return []
 
@@ -981,6 +1015,30 @@ async def _load_attached_kbs(
             exc_info=True,
         )
         return []
+
+
+async def _load_session_kbs(session: Any, *, ops_db_url: str) -> list[dict]:
+    """The knowledge bases *session* may read, as :func:`_load_attached_kbs` describes them.
+
+    Its agent's own and, in every session of a Keel case, children
+    included, the ones the case grants of the session's project; narrowed to
+    the sender's purchased package when one is pinned.  The package filter
+    is applied before the empty-list tool gate in ``harness_factory`` so a
+    plan with zero included KBs also drops the KB tools; kb_read_page
+    re-checks per call (kb_tools) so a remembered kb_id from another user's
+    turn still refuses.
+    """
+    scope = case_scope_of(session) if is_case_session(session) else None
+    kbs = await _load_attached_kbs(
+        agent_id=session.agent_id,
+        ops_db_url=ops_db_url,
+        granted=scope.knowledge if scope is not None else (),
+        org_id=str(session.org_id) if scope is not None else None,
+    )
+    entitled_kb_ids = dimension_allowlist(session.config, "kb_ids")
+    if entitled_kb_ids is not None:
+        kbs = [kb for kb in kbs if str(kb.get("id")) in entitled_kb_ids]
+    return kbs
 
 
 async def _load_prompt_catalogs(
@@ -1906,24 +1964,11 @@ async def run_worker(settings: Settings) -> None:
                 s for s in available_skills if not is_advisor_expert(s)
             ]
 
-        # Knowledge bases attached to this agent. Empty list when
-        # KB tools are unavailable (no ops DB) or no KBs are wired
-        # to this agent yet.
-        attached_kbs = await _load_attached_kbs(
-            agent_id=session.agent_id,
-            ops_db_url=settings.ops_db.url,
+        # The knowledge bases this session may read. Empty list when
+        # KB tools are unavailable (no ops DB) or it has none to read.
+        attached_kbs = await _load_session_kbs(
+            session, ops_db_url=settings.ops_db.url,
         )
-        # Purchased-package KB filter: the sender's plan may include only
-        # a subset of the agent's KBs. Applied before the empty-list tool
-        # gate below so a plan with zero included KBs also drops the KB
-        # tools; kb_read_page re-checks per call (kb_tools) so a
-        # remembered kb_id from another user's turn still refuses.
-        entitled_kb_ids = dimension_allowlist(session.config, "kb_ids")
-        if entitled_kb_ids is not None:
-            attached_kbs = [
-                kb for kb in attached_kbs
-                if str(kb.get("id")) in entitled_kb_ids
-            ]
         # Filter the tool set to drop kb_list_pages / kb_read_page /
         # kb_search_pages when this agent has nothing to navigate. Keeps
         # the LLM from ever seeing tool schemas it cannot meaningfully

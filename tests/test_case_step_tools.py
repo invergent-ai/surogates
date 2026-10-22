@@ -247,6 +247,19 @@ async def test_an_accepted_completion_carries_its_call_pages_and_usage(fake_keel
     assert store.redacted()
 
 
+async def test_a_page_read_without_a_sha256_digest_is_left_out_of_the_report(fake_keel, store):
+    # Keel refuses a whole report whose page carries anything but a SHA-256 hex digest.
+    for sha256 in ("legacy", "A" * 64, "a" * 63, "g" * 64, None):
+        store.write(EventType.KB_PAGE_READ, {**OTHER_PAGE, "sha256": sha256})
+    store.write(EventType.KB_PAGE_READ, PAGE)
+
+    result = await _call("complete_step", COMPLETION, store)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert json.loads(request.content)["pages_read"] == [PAGE]
+
+
 async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
     store = _store_for(tmp_path, files={"offer": "one", "payslips": "list"})
     offer, march, april = b"%PDF-1.7 offer", b"%PDF-1.7 march", b"%PDF-1.7 april"

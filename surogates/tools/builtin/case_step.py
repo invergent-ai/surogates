@@ -45,6 +45,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 from collections import OrderedDict
 from decimal import Decimal
 from typing import Any
@@ -78,6 +79,8 @@ CHOICE_CHARS = 200
 MAX_EVIDENCE = 50
 
 _NOT_A_STEP = "This session works no step of a case: there is no step to report."
+#: A page's digest, as Keel takes it: SHA-256, in lowercase hex.
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 #: What a report Keel took came to, as the step's mark; and the mark of a report Keel refused for good.
 _RESULTS = frozenset({"completed", "drafted", "hand-raised"})
 _STOPPED = "stopped"
@@ -216,12 +219,18 @@ def _usage(session: Any) -> dict[str, Any]:
 
 
 async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
-    """The pages the case's sessions read, from the case root's log: each once, in order, at most :data:`MAX_PAGES_READ`."""
+    """The pages the case's sessions read, from the case root's log: each once, in order, at most :data:`MAX_PAGES_READ`.
+
+    A page whose digest is not a SHA-256 hex digest is left out: Keel refuses
+    the whole report for one.
+    """
     events = await store.get_events(UUID(workspace_root_id(session)), types=[EventType.KB_PAGE_READ])
     pages = {
         (data["kb_id"], data["path"], data["sha256"])
         for data in (event.data for event in events)
-        if isinstance(data, dict) and all(isinstance(data.get(key), str) for key in ("kb_id", "path", "sha256"))
+        if isinstance(data, dict)
+        and all(isinstance(data.get(key), str) for key in ("kb_id", "path", "sha256"))
+        and _SHA256.fullmatch(data["sha256"])
     }
     return [
         {"kb_id": kb_id, "path": path, "sha256": sha256}
