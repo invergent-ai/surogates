@@ -18,9 +18,11 @@ import pytest
 from sqlalchemy import text
 
 import surogates.harness.loop as loop_module
-from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
+from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member, enqueue_session
 from surogates.devices.operations import DeviceOperations
-from surogates.orchestrator.dispatcher import Orchestrator
+from surogates.orchestrator import dispatcher
+from surogates.orchestrator.dispatcher import Orchestrator, dequeue_next_session
+from surogates.runtime.turn_gate import TurnConcurrencyGate
 from surogates.session.events import EventType
 from tests.test_wake_slash_command_gate import _harness, _permissive
 
@@ -363,3 +365,155 @@ async def test_an_idle_chat_whose_browser_opened_or_closed_since_its_turn_is_lef
     written = len(await session_store.get_events(session.id))
     assert await _turns_of_a_wake(session_store, monkeypatch, session) == 0
     assert len(await session_store.get_events(session.id)) == written
+
+
+async def _queued_chat(session_store, session_factory, redis_client, agent_id: str):
+    """A chat of *agent_id* whose user wrote, its wake queued as the API queues it."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    chat = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=agent_id)
+    await session_store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
+    await enqueue_session(redis_client, org_id=str(org_id), agent_id=agent_id, session_id=chat.id)
+    return chat
+
+
+def _member(session) -> str:
+    return encode_queue_member(org_id=str(session.org_id), agent_id=session.agent_id, session_id=str(session.id))
+
+
+async def _what_the_sweeper_did(session_store, session) -> tuple[int, list, str]:
+    """How often the sweeper recovered *session*, why it failed it if it did, and its status."""
+    recovered = await session_store.get_events(session.id, types=[EventType.HARNESS_RECOVERED])
+    failed = await session_store.get_events(session.id, types=[EventType.SESSION_FAIL])
+    return len(recovered), [event.data["reason"] for event in failed], (await session_store.get_session(session.id)).status
+
+
+async def test_a_chat_waiting_behind_its_agents_full_gate_is_never_recovered_and_runs_once_a_slot_frees(
+    session_store, session_factory, redis_client, monkeypatch,
+):
+    agent_id = "sweeper-gate-agent"
+    await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+    # Every sweep takes any leaseless chat of the agent whose turn has not ended for one its worker left.
+    monkeypatch.setattr(dispatcher, "_ORPHAN_STALE_SECONDS", 0)
+    monkeypatch.setattr(dispatcher, "_ORPHAN_BOOT_STALE", 0)
+    monkeypatch.setattr(dispatcher, "_ORPHAN_SWEEP_INTERVAL", 0.05)
+    chat = await _queued_chat(session_store, session_factory, redis_client, agent_id)
+    # The agent's only turn slot is a live turn's, of another chat.
+    gate = TurnConcurrencyGate(redis_client, default_max=1)
+    live_turn = f"{uuid4()}:live"
+    assert await gate.try_acquire(str(chat.org_id), agent_id, holder=live_turn)
+
+    swept: list[bool] = []
+    find = session_store.find_orphaned_sessions
+
+    async def watched(**query):
+        found = await find(**query)
+        swept.append(chat.id in {session.id for session in found})
+        return found
+
+    monkeypatch.setattr(session_store, "find_orphaned_sessions", watched)
+    woken: list = []
+
+    class _Harness:
+        async def wake(self, session_id):
+            woken.append(session_id)
+
+    orchestrator = Orchestrator(
+        redis_client=redis_client, session_store=session_store, harness_factory=lambda _sid: _Harness(),
+        agent_id=agent_id, queue_key=SHARED_WORK_QUEUE_KEY, max_concurrent=4, poll_timeout=1, turn_gate=gate,
+    )
+    running = asyncio.create_task(orchestrator.run())
+    try:
+        async with asyncio.timeout(10):
+            while swept.count(True) < 5 and len(swept) < 40:
+                await asyncio.sleep(0.05)
+        assert await _what_the_sweeper_did(session_store, chat) == (0, [], "active")
+        # Sweep after sweep found the chat leaseless with its turn to come, while it waited for a slot.
+        assert swept.count(True) >= 5
+        assert woken == []
+
+        await gate.release(str(chat.org_id), agent_id, holder=live_turn)
+        async with asyncio.timeout(10):
+            while not woken:
+                await asyncio.sleep(0.05)
+        assert woken == [chat.id]
+        assert await _what_the_sweeper_did(session_store, chat) == (0, [], "active")
+    finally:
+        await orchestrator.shutdown()
+        await asyncio.wait_for(running, 10)
+        await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+
+
+async def test_a_chat_whose_worker_keeps_dying_is_recovered_three_times_then_failed(
+    session_store, session_factory, redis_client,
+):
+    agent_id = "sweeper-dying-agent"
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    chat = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=agent_id)
+    await session_store.emit_event(chat.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
+    sweeper = _sweeper(session_store, redis_client, agent_id)
+
+    for recovery in range(1, 4):
+        # A worker took the chat off the queue and died in its turn.
+        await redis_client.zrem(SHARED_WORK_QUEUE_KEY, _member(chat))
+        await _backdate(session_factory, chat.id, seconds=120)
+        assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
+        assert await redis_client.zscore(SHARED_WORK_QUEUE_KEY, _member(chat)) is not None
+        assert await _what_the_sweeper_did(session_store, chat) == (recovery, [], "active")
+
+    await redis_client.zrem(SHARED_WORK_QUEUE_KEY, _member(chat))
+    await _backdate(session_factory, chat.id, seconds=120)
+    assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 0
+    assert await _what_the_sweeper_did(session_store, chat) == (3, ["recovery_loop"], "failed")
+    assert await redis_client.zscore(SHARED_WORK_QUEUE_KEY, _member(chat)) is None
+
+
+async def test_a_chat_queued_behind_the_slot_its_dead_turn_still_holds_is_let_in(
+    session_store, session_factory, redis_client,
+):
+    agent_id = "sweeper-dead-slot-agent"
+    await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+    # The chat's worker died in its turn, holding the agent's only slot; its user wrote again since.
+    chat = await _queued_chat(session_store, session_factory, redis_client, agent_id)
+    gate = TurnConcurrencyGate(redis_client, default_max=1)
+    assert await gate.try_acquire(str(chat.org_id), agent_id, holder=f"{chat.id}:dead")
+    assert await dequeue_next_session(redis_client, gate=gate, timeout=1) is None
+    await _backdate(session_factory, chat.id, seconds=120)
+
+    sweeper = Orchestrator(
+        redis_client=redis_client, session_store=session_store, harness_factory=lambda _sid: None,
+        agent_id=agent_id, queue_key=SHARED_WORK_QUEUE_KEY, turn_gate=gate,
+    )
+    try:
+        # Its wake is queued: nothing to recover, but the slot its dead turn held is freed.
+        assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 0
+        assert await _what_the_sweeper_did(session_store, chat) == (0, [], "active")
+        dequeued = await dequeue_next_session(redis_client, gate=gate, timeout=1)
+        assert dequeued is not None and dequeued.session_id == str(chat.id)
+    finally:
+        await redis_client.delete(SHARED_WORK_QUEUE_KEY, f"surogates:turn_holders:{chat.org_id}:{agent_id}")
+
+
+async def test_a_chat_waiting_its_turn_leaves_the_sweeps_next_page_to_the_chats_behind_it(
+    session_store, session_factory, redis_client, monkeypatch,
+):
+    agent_id = "sweeper-page-agent"
+    await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+    waiting = await _queued_chat(session_store, session_factory, redis_client, agent_id)
+    # A worker took the other chat off the queue and died in its turn.
+    dead = await _queued_chat(session_store, session_factory, redis_client, agent_id)
+    await redis_client.zrem(SHARED_WORK_QUEUE_KEY, _member(dead))
+    await _backdate(session_factory, waiting.id, seconds=300)
+    await _backdate(session_factory, dead.id, seconds=120)
+    # A page of one chat: the sweep reads the quietest first.
+    find = session_store.find_orphaned_sessions
+    monkeypatch.setattr(session_store, "find_orphaned_sessions", lambda **query: find(**{**query, "limit": 1}))
+    sweeper = _sweeper(session_store, redis_client, agent_id)
+    try:
+        assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 0
+        assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
+        assert await _what_the_sweeper_did(session_store, waiting) == (0, [], "active")
+        assert await _what_the_sweeper_did(session_store, dead) == (1, [], "active")
+    finally:
+        await redis_client.delete(SHARED_WORK_QUEUE_KEY)

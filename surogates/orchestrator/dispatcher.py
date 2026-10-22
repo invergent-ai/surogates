@@ -27,6 +27,7 @@ from surogates.channels.constants import session_queue_priority
 from surogates.config import (
     INTERRUPT_CHANNEL_PREFIX,
     SHARED_WORK_QUEUE_KEY,
+    encode_queue_member,
     enqueue_session,
     parse_queue_member,
 )
@@ -157,6 +158,13 @@ _SESSION_GONE_REASONS = frozenset({"session deleted", "call_ended"})
 # the queue without starving everyone else.  Tuned for ~30s deferral
 # at typical pop rates.
 _GATE_REQUEUE_BACKOFF: float = 30.0
+
+# The dispatcher takes a session off the work queue to try its agent's turn
+# gate, and puts it back with ``_GATE_REQUEUE_BACKOFF`` when the gate is full:
+# for that moment a session waiting its turn is not on the queue.  The orphan
+# sweep reads the queue again this long after for a session it did not find
+# there, before it takes the session for one whose worker died.
+_QUEUE_RECHECK_SECONDS: float = 0.25
 
 # How long the dispatcher sleeps when dequeue_next_session returned
 # None (either the queue was empty within ``timeout`` or the only
@@ -1032,6 +1040,9 @@ class Orchestrator:
         except Exception:
             logger.exception("Orphan sweep failed; continuing")
             return 0
+        waiting = await self._waiting_their_turn(orphans)
+        if waiting is None:
+            return 0
         for session in orphans:
             # browser_setup sessions are interactive and have no agent loop to
             # recover; their lifecycle is the pod TTL + the capture/cancel
@@ -1039,6 +1050,9 @@ class Orchestrator:
             # sweeper would otherwise re-wake them every cycle and re-provision
             # the browser out from under the live view.
             if getattr(session, "channel", None) == "browser_setup":
+                continue
+            if session.id in waiting:
+                await self._leave_waiting(session)
                 continue
             try:
                 # Checked BEFORE the recovery emit: emit_event bumps
@@ -1095,6 +1109,61 @@ class Orchestrator:
                     session.id,
                 )
         return recovered
+
+    async def _waiting_their_turn(self, sessions: list[Any]) -> set[UUID] | None:
+        """The ids of *sessions* whose wake waits on the work queue: queued, or put back by a full turn gate.
+
+        A worker takes each from there once its agent has a free turn slot, so
+        none of them is a session its worker left.  A session not found on
+        the queue is looked for once more, ``_QUEUE_RECHECK_SECONDS`` later:
+        the dispatcher may have had it off the queue to try the gate.  One
+        whose ids no queue entry can hold is never queued.  ``None`` when the
+        queue cannot be read: the sweep leaves every session to its next pass.
+        """
+        members: dict[UUID, str] = {}
+        for session in sessions:
+            try:
+                members[session.id] = encode_queue_member(
+                    org_id=str(session.org_id), agent_id=str(session.agent_id), session_id=str(session.id),
+                )
+            except ValueError:
+                continue
+        try:
+            waiting = await self._queued(members)
+            unseen = {session_id: member for session_id, member in members.items() if session_id not in waiting}
+            if unseen:
+                await asyncio.sleep(_QUEUE_RECHECK_SECONDS)
+                waiting |= await self._queued(unseen)
+        except Exception:
+            logger.warning(
+                "Could not read the work queue; the orphan sweep leaves %d session(s) to its next pass",
+                len(members), exc_info=True,
+            )
+            return None
+        return waiting
+
+    async def _queued(self, members: dict[UUID, str]) -> set[UUID]:
+        """The ids of *members*, by session id, that are on the work queue now."""
+        if not members:
+            return set()
+        scores = await self.redis.zmscore(SHARED_WORK_QUEUE_KEY, list(members.values()))
+        return {session_id for session_id, score in zip(members, scores) if score is not None}
+
+    async def _leave_waiting(self, session: Any) -> None:
+        """Leave *session*, waiting on the work queue for its turn, to the worker that takes it from there.
+
+        It is not recovered, so no recovery of it is counted: waiting never
+        fails a session.  A turn of it whose worker died holding a slot of its
+        agent's turn gate gives the slot back, as a recovery does, or the
+        session could wait behind its own dead turn.  Its ``updated_at`` moves
+        to now, as a recovery's event moved it, so the sweep's next page
+        reaches the sessions behind it.
+        """
+        await self._release_dead_owner_gate_slot(session)
+        try:
+            await self.session_store.touch_session(session.id)
+        except Exception:
+            logger.warning("Could not mark waiting session %s", session.id, exc_info=True)
 
     async def _release_dead_owner_gate_slot(self, session: Any) -> None:
         """Compensate the TurnConcurrencyGate for a session's dead owner.

@@ -2995,6 +2995,22 @@ class SessionStore:
             await db.commit()
             return result.rowcount > 0
 
+    async def touch_session(self, session_id: UUID) -> None:
+        """Move an active session's ``updated_at`` to now, and change nothing else.
+
+        The orphan sweep's mark on a session it found waiting on the work
+        queue for its turn: as a recovery's event did, it takes the session
+        out of the stale ones for a while, so the sweep's next page reaches
+        the sessions behind it.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(updated_at=func.now())
+            )
+            await db.commit()
+
     async def find_orphaned_sessions(
         self,
         *,

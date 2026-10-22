@@ -20,7 +20,7 @@ from sqlalchemy import select, text
 import surogates.api.routes.openai as openai_route
 import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import CodingRunOutcome
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.models import Mission as MissionRow
 from surogates.db.models import Session as SessionRow
 from surogates.db.models import Task
@@ -225,7 +225,22 @@ class Workers:
         harness._drain_background_tasks = drained
         for name in HANDLERS:
             setattr(harness, name, self._watched(name, getattr(harness, name)))
+        wake = harness.wake
+
+        async def taken_from_the_queue(session_id):
+            # A worker wakes a chat it took off the queue.
+            await self.taken_off_the_queue(session_id)
+            return await wake(session_id)
+
+        harness.wake = taken_from_the_queue
         return harness
+
+    async def taken_off_the_queue(self, chat: UUID) -> None:
+        """A worker takes the chat's wake off the queue, as a dispatcher does before it wakes the chat."""
+        session = await self.store.get_session(chat)
+        await self.api.app.state.redis.zrem(SHARED_WORK_QUEUE_KEY, encode_queue_member(
+            org_id=str(session.org_id), agent_id=session.agent_id, session_id=str(session.id),
+        ))
 
     def _watched(self, name: str, handler):
         async def run(*args, **kwargs):
@@ -1281,6 +1296,8 @@ async def a_turn_cut_off(workers: Workers, chat: UUID, *, at: str, command: str 
         )
         await store.advance_harness_cursor(chat, result, lease.lease_token)
     await store.release_lease(chat, lease.lease_token)
+    # The worker that died had taken the chat's wakes off the queue: its turn's, and one it held for after the turn.
+    await workers.taken_off_the_queue(chat)
 
 
 @pytest.mark.parametrize("at", ["in the call", "after the call's result"])
@@ -2286,6 +2303,7 @@ async def test_a_message_sent_during_a_coding_run_is_answered_and_the_sweeper_do
     await workers.wake(chat)
 
     # The wake the message queued is lost: every pass of the sweeper, and the wake it would queue.
+    await workers.taken_off_the_queue(chat)  # by a worker that never ran it
     recovered = []
     for _ in range(4):
         recovered.append(await workers.swept(chat))

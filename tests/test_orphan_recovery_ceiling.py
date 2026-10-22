@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from surogates.config import encode_queue_member
 from surogates.orchestrator.dispatcher import (
     _MAX_RECOVERY_ATTEMPTS,
     Orchestrator,
@@ -264,3 +265,53 @@ async def test_streak_lookup_failure_falls_back_to_recovering(
 
     assert recovered == 1
     assert enqueue.await_count == 1
+
+
+class _BackOnTheQueueInAMoment(_FakeQueueRedis):
+    """The work queue as the dispatcher leaves it while it tries the agent's full
+    turn gate for *member*: off the queue at one look, back with its backoff at the next."""
+
+    def __init__(self, member: str) -> None:
+        super().__init__()
+        self._member = member
+        self._looks = 0
+
+    async def zmscore(self, key: str, members: list[str]) -> list[float | None]:
+        self._looks += 1
+        return [30.0 if member == self._member and self._looks > 1 else None for member in members]
+
+
+class _UnreadableQueue(_FakeQueueRedis):
+    async def zmscore(self, key: str, members: list[str]) -> list[float | None]:
+        raise ConnectionError("connection reset")
+
+
+def _queue_member(session: SimpleNamespace) -> str:
+    return encode_queue_member(org_id=str(session.org_id), agent_id=session.agent_id, session_id=str(session.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue", ["back-in-a-moment", "unreadable"])
+async def test_a_session_waiting_its_turn_is_neither_recovered_nor_failed(
+    monkeypatch: pytest.MonkeyPatch, queue: str,
+):
+    """Seen on the queue at a second look, or not seen for want of a queue to
+    read: either way the sweep counts no recovery, even past the ceiling."""
+    enqueue = AsyncMock()
+    monkeypatch.setattr(
+        "surogates.orchestrator.dispatcher.enqueue_session", enqueue,
+    )
+
+    orphan = _make_orphan(org_id=uuid4())
+    store = _make_store(orphans=[orphan], streak=_MAX_RECOVERY_ATTEMPTS)
+    redis = _BackOnTheQueueInAMoment(_queue_member(orphan)) if queue == "back-in-a-moment" else _UnreadableQueue()
+
+    orchestrator = _make_orchestrator(session_store=store, redis=redis)
+    recovered = await orchestrator._sweep_orphans_once(
+        stale_seconds=60, reason="orchestrator_sweeper",
+    )
+
+    assert recovered == 0
+    assert enqueue.await_count == 0
+    assert store.emit_event.await_count == 0
+    store.fail_if_active.assert_not_awaited()

@@ -1726,11 +1726,15 @@ async def test_a_routine_that_crashes_for_good_says_so_where_its_results_go(api,
 
 
 async def given_up_on(api, thread) -> None:
-    """*thread*'s worker kept dying: the sweeper recovered it three times, and it went quiet."""
+    """*thread*'s worker kept dying: the sweeper recovered it three times, a worker took it off the queue
+    each time, and it went quiet."""
     for _ in range(3):
         await api.app.state.session_store.emit_event(
             thread.id, EventType.HARNESS_RECOVERED, {"recovered_by": "orchestrator_sweeper"},
         )
+    await api.app.state.redis.zrem(SHARED_WORK_QUEUE_KEY, encode_queue_member(
+        org_id=str(thread.org_id), agent_id=thread.agent_id, session_id=str(thread.id),
+    ))
     await quiet_for(api, thread, 1)
 
 
