@@ -42,7 +42,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from surogates.api.routes._commerce_turn import runtime_commerce_payload
-from surogates.channels.constants import API_CHANNEL
+from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.openai_conversation import (
     CONVERSATION_HEADER,
     ConversationScope,
@@ -640,6 +640,7 @@ async def _start_turn(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session.id,
+        priority=session_queue_priority(session),
     )
     return event_id
 

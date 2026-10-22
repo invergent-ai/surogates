@@ -121,7 +121,7 @@ async def _start_turn(orchestrator, monkeypatch, process) -> tuple[asyncio.Task,
 def _recording_enqueue(monkeypatch) -> list[UUID]:
     enqueued: list[UUID] = []
 
-    async def enqueue(redis, *, org_id, agent_id, session_id):
+    async def enqueue(redis, *, org_id, agent_id, session_id, priority=0):
         enqueued.append(session_id)
 
     monkeypatch.setattr("surogates.orchestrator.dispatcher.enqueue_session", enqueue)
@@ -151,6 +151,52 @@ async def test_shutdown_hands_a_turn_waiting_on_a_computer_to_another_worker(mon
     assert gate.calls.count("release") == 1
     await orchestrator.semaphore.acquire()
     assert orchestrator.semaphore.locked(), "the semaphore slot was released twice"
+
+
+@pytest.mark.parametrize(
+    ("config", "score"),
+    [({}, 0.0), ({"memory_boundary": "case:6f1d6c0e-9b0a-4c35-9a53-2d1f3b7c1a11"}, 1.0)],
+    ids=["chat", "case-step"],
+)
+async def test_a_handed_over_turn_queues_at_its_sessions_place(monkeypatch, config, score):
+    """Not at the score it was dequeued with, which may carry a busy tenant's backoff."""
+    orchestrator = orchestrator_with(CountingGate(held=1))
+
+    class Sessions:
+        async def get_session(self, session_id):
+            return SimpleNamespace(id=session_id, channel="api", config=config)
+
+    orchestrator.session_store = Sessions()
+    await orchestrator.semaphore.acquire()
+    waiting = asyncio.Event()
+    queued: list[tuple[UUID, float]] = []
+
+    async def enqueue(redis, *, org_id, agent_id, session_id, priority=0):
+        queued.append((session_id, priority))
+
+    monkeypatch.setattr("surogates.orchestrator.dispatcher.enqueue_session", enqueue)
+
+    async def process(session_id, *args, **kwargs):
+        async with turn_joining():
+            async with turn_activity():
+                async with turn_waiting(resumable=True):
+                    waiting.set()
+                    await asyncio.Event().wait()
+
+    monkeypatch.setattr(orchestrator, "_process", process)
+    session_id = str(uuid4())
+    # Dequeued after a busy tenant pushed it back.
+    turn = DequeuedSession(
+        org_id="org", agent_id="agent", session_id=session_id, priority=30.0,
+        gate_holder=f"{session_id}:turn",
+    )
+    task = asyncio.create_task(orchestrator._guarded_process(UUID(session_id), dequeued=turn))
+    orchestrator._tasks.add(task)
+    task.add_done_callback(orchestrator._task_done)
+    await asyncio.wait_for(waiting.wait(), 5.0)
+    await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
+
+    assert queued == [(UUID(session_id), score)]
 
 
 async def test_shutdown_does_not_hand_over_a_turn_the_loss_of_its_lease_already_detached(monkeypatch):

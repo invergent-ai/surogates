@@ -27,6 +27,7 @@ from shlex import split as shlex_split
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
 from surogates.db.narrative import (
     narrative_tsquery_sql,
@@ -558,6 +559,14 @@ async def session_search(
                 hidden_clause = "AND s.channel NOT IN ({})".format(
                     ", ".join(f"'{c}'" for c in _HIDDEN_SESSION_CHANNELS)
                 )
+                # A Keel case's sessions are found by no search, owner
+                # scope included (``is_case_session``); the recent listing
+                # leaves them out in ``SessionStore.list_sessions``.
+                case_clause = (
+                    "AND COALESCE(s.config->>'memory_boundary', '') "
+                    "NOT LIKE :case_boundary"
+                )
+                params["case_boundary"] = f"{CASE_BOUNDARY_PREFIX}%"
                 type_clause = "AND e.type IN ({})".format(
                     narrative_type_list_sql(type_filter)
                 )
@@ -585,6 +594,7 @@ async def session_search(
                     WHERE s.org_id = :org_id
                       {principal_clause}
                       {hidden_clause}
+                      {case_clause}
                       {type_clause}
                       AND s.agent_id = :agent_id
                       AND s.status != 'archived'

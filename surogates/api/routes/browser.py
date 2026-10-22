@@ -18,11 +18,12 @@ from pydantic import BaseModel
 from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
+from surogates.api.session_guards import require_not_case_session
 from surogates.browser.control import HANDED_BACK_FROM, RESUMES, AcquireOutcome
 from surogates.browser.shell import ShellSession
 from surogates.devices.binding import device_of, is_binding_root
 from surogates.session.events import EventType
-from surogates.session.store import BrowserControlBusy, BrowserControlTold
+from surogates.session.store import BrowserControlBusy, BrowserControlTold, SessionNotFoundError
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.auth.middleware import (
     authenticate_websocket_tenant,
@@ -185,13 +186,24 @@ async def _require_its_browser(
     Takes app state rather than a ``Request`` so the live-view WebSocket
     handler — which has a ``WebSocket``, not a request — is covered by the
     same guard as the HTTP routes.
+
+    The session is read for every caller all the same, that service's token
+    included: a Keel case's browser is its own session token's alone
+    (``require_not_case_session``).
     """
-    if _a_services(tenant) and tenant.service_account_agent_id is None:
-        return
+    every_browser = _a_services(tenant) and tenant.service_account_agent_id is None
     try:
         session = await app_state.session_store.get_session(session_id)
+    except SessionNotFoundError:
+        if every_browser:
+            # No session, so no case's: that token reaches what it always did.
+            return
+        raise HTTPException(status_code=404, detail="No browser for session")
     except Exception:
         raise HTTPException(status_code=404, detail="No browser for session")
+    require_not_case_session(session, tenant, detail="No browser for session")
+    if every_browser:
+        return
     if not reaches_its_browser(tenant, session):
         raise HTTPException(status_code=404, detail="No browser for session")
 
@@ -229,6 +241,7 @@ async def _on_computer(app_state: Any, session_id: UUID, tenant: TenantContext) 
         session = await store.get_session(session_id)
     except Exception:
         return None
+    require_not_case_session(session, tenant, detail="No browser for session")
     if device_of(session.config) is None:
         return None
     if not _its_own(tenant, session.org_id, session.user_id, session_id):

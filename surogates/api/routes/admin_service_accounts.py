@@ -180,7 +180,8 @@ async def revoke_service_account(
     Requires the ``admin`` permission.  Revocation is immediate —
     subsequent requests carrying the token return 401.  The row is
     loaded first so the org scope comes from the database, not the
-    client; already-revoked or unknown ids return 404.
+    client; already-revoked or unknown ids return 404, and so does a
+    case-type account, which Keel owns and no admin revokes.
     """
     _require_admin(tenant)
 
@@ -198,7 +199,8 @@ async def revoke_service_account(
     )
     if not revoked:
         # Row existed but was already revoked — 404 so repeated delete
-        # calls don't silently succeed after the first one.
+        # calls don't silently succeed after the first one.  A case-type
+        # account lands here too: the store never revokes one.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Service account {service_account_id} not found.",

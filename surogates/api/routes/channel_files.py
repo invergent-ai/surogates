@@ -64,7 +64,7 @@ async def _resolve_session(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    await require_session_visible(request, session)
+    await require_session_visible(request, session, tenant=tenant)
     return session
 
 

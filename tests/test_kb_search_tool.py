@@ -75,6 +75,7 @@ async def test_unrestricted_session_sends_no_kb_ids_filter() -> None:
         query="electron transfer",
         kb_ids=None,
         limit=kb_tools._SEARCH_LIMIT_DEFAULT,
+        granted_kb_ids=[],
     )
 
 
@@ -106,7 +107,7 @@ async def test_named_kb_within_the_package_narrows_to_one() -> None:
 
     platform_client.search_agent_kb.assert_awaited_once_with(
         AGENT_ID, query="light", kb_ids=[KB_A],
-        limit=kb_tools._SEARCH_LIMIT_DEFAULT,
+        limit=kb_tools._SEARCH_LIMIT_DEFAULT, granted_kb_ids=[],
     )
 
 

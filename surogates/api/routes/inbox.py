@@ -23,6 +23,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.session.events import EventType
@@ -180,6 +181,7 @@ async def _wake_session_from_request(request: Request, session_id: UUID) -> None
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
 

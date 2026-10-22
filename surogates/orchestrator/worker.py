@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -24,6 +25,8 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import has_file_pane
+from surogates.keel.intake import intake_case_types
+from surogates.keel.steps import case_scope_of, gate_case_tools, is_case_session
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
@@ -228,6 +231,9 @@ def _filter_effective_tools(
     # Same safe default: an agent not known to run Programs gets none of the
     # follow-up tools.
     programs_enabled: bool = False,
+    # The case types Keel lets this agent start: none, no ``start_case``.
+    # Only a root session that works on no case is offered it.
+    intake: Sequence[dict] = (),
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
@@ -253,7 +259,10 @@ def _filter_effective_tools(
        the rule.  Dropping it here alone told the model in prose that
        the tool was gone while still handing it the schema.
 
-    All other tools pass through unchanged.
+    Execution-context self-tools and other per-session groups follow, and
+    the Keel case gate runs last: a case's sessions keep only the case's
+    tools (:func:`surogates.keel.steps.gate_case_tools`), so none starts a
+    case even when Keel lets its agent start one (*intake*).
     """
     result = set(tools)
 
@@ -361,7 +370,18 @@ def _filter_effective_tools(
     if not has_file_pane(session):
         result -= {"office_read", "office_edit"}
 
-    return result
+    # ``start_case`` goes only to an agent Keel lets start a case of some type,
+    # and only to a conversation's own session: a helper it started would
+    # start cases of its own, each session up to Keel's limit.  Never to an
+    # evaluation row, which would start real cases for no one.  The same rule
+    # the schemas keep (``AgentHarness._tool_filter_for_session_impl``).
+    if not intake or getattr(session, "parent_id", None) is not None or is_eval_session(session):
+        result.discard("start_case")
+
+    # Last: a Keel case's sessions are offered only the case's tools, and only
+    # its step's own session the step tools.  The schemas apply the same gate
+    # last (``AgentHarness._tool_filter_for_session_impl``).
+    return gate_case_tools(result, session)
 
 
 _warned_missing_model_metadata: set[str] = set()
@@ -814,8 +834,15 @@ async def _load_attached_kbs(
     *,
     agent_id: str,
     ops_db_url: str,
+    granted: Sequence[str] = (),
+    org_id: str | None = None,
 ) -> list[dict]:
     """Look up the KBs attached to *agent_id* in the ops DB.
+
+    A Keel case's sessions also read the KBs their case grants (*granted*):
+    each one of the session's project (*org_id*) is added, once, in mode
+    ``grounding``, though the agent has it not attached.  A granted KB of
+    another project is left out.
 
     Empty list is the safe default and is returned in three cases:
 
@@ -904,6 +931,32 @@ async def _load_attached_kbs(
                 }
                 for row in result.all()
             ]
+            attached = {kb["id"] for kb in kbs}
+            wanted = [kb_id for kb_id in dict.fromkeys(granted) if kb_id not in attached]
+            if wanted and org_id:
+                result = await session.execute(
+                    sa.select(
+                        OpsKnowledgeBase.id,
+                        OpsKnowledgeBase.name,
+                        OpsKnowledgeBase.display_name,
+                        OpsKnowledgeBase.description,
+                    )
+                    .where(
+                        OpsKnowledgeBase.id.in_(wanted),
+                        OpsKnowledgeBase.project_id == org_id,
+                    )
+                    .order_by(OpsKnowledgeBase.name.asc())
+                )
+                kbs += [
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "display_name": row[2],
+                        "description": row[3],
+                        "mode": "grounding",
+                    }
+                    for row in result.all()
+                ]
             if not kbs:
                 return []
 
@@ -975,6 +1028,30 @@ async def _load_attached_kbs(
             exc_info=True,
         )
         return []
+
+
+async def _load_session_kbs(session: Any, *, ops_db_url: str) -> list[dict]:
+    """The knowledge bases *session* may read, as :func:`_load_attached_kbs` describes them.
+
+    Its agent's own and, in every session of a Keel case, children
+    included, the ones the case grants of the session's project; narrowed to
+    the sender's purchased package when one is pinned.  The package filter
+    is applied before the empty-list tool gate in ``harness_factory`` so a
+    plan with zero included KBs also drops the KB tools; kb_read_page
+    re-checks per call (kb_tools) so a remembered kb_id from another user's
+    turn still refuses.
+    """
+    scope = case_scope_of(session) if is_case_session(session) else None
+    kbs = await _load_attached_kbs(
+        agent_id=session.agent_id,
+        ops_db_url=ops_db_url,
+        granted=scope.knowledge if scope is not None else (),
+        org_id=str(session.org_id) if scope is not None else None,
+    )
+    entitled_kb_ids = dimension_allowlist(session.config, "kb_ids")
+    if entitled_kb_ids is not None:
+        kbs = [kb for kb in kbs if str(kb.get("id")) in entitled_kb_ids]
+    return kbs
 
 
 async def _load_prompt_catalogs(
@@ -1900,24 +1977,11 @@ async def run_worker(settings: Settings) -> None:
                 s for s in available_skills if not is_advisor_expert(s)
             ]
 
-        # Knowledge bases attached to this agent. Empty list when
-        # KB tools are unavailable (no ops DB) or no KBs are wired
-        # to this agent yet.
-        attached_kbs = await _load_attached_kbs(
-            agent_id=session.agent_id,
-            ops_db_url=settings.ops_db.url,
+        # The knowledge bases this session may read. Empty list when
+        # KB tools are unavailable (no ops DB) or it has none to read.
+        attached_kbs = await _load_session_kbs(
+            session, ops_db_url=settings.ops_db.url,
         )
-        # Purchased-package KB filter: the sender's plan may include only
-        # a subset of the agent's KBs. Applied before the empty-list tool
-        # gate below so a plan with zero included KBs also drops the KB
-        # tools; kb_read_page re-checks per call (kb_tools) so a
-        # remembered kb_id from another user's turn still refuses.
-        entitled_kb_ids = dimension_allowlist(session.config, "kb_ids")
-        if entitled_kb_ids is not None:
-            attached_kbs = [
-                kb for kb in attached_kbs
-                if str(kb.get("id")) in entitled_kb_ids
-            ]
         # Filter the tool set to drop kb_list_pages / kb_read_page /
         # kb_search_pages when this agent has nothing to navigate. Keeps
         # the LLM from ever seeing tool schemas it cannot meaningfully
@@ -1956,6 +2020,13 @@ async def run_worker(settings: Settings) -> None:
                 for e in tool_registry.get_all()
                 if e.toolset == "user_reports"
             )
+        # The case types Keel lets this agent start, which ``start_case``
+        # takes.  Never asked for a case's session, a helper's, or an
+        # evaluation row's: none is offered the tool whatever Keel grants.
+        intake = (
+            [] if is_case_session(session) or session.parent_id is not None or is_eval_session(session)
+            else await intake_case_types(session.org_id, session.agent_id)
+        )
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
@@ -1970,6 +2041,7 @@ async def run_worker(settings: Settings) -> None:
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
             whiteboard_enabled=ctx.whiteboard_enabled,
             programs_enabled=ctx.programs_enabled,
+            intake=intake,
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding
@@ -2005,7 +2077,9 @@ async def run_worker(settings: Settings) -> None:
         # ``skill_step`` is bookkeeping for procedure skills: only offer it
         # (prompt surface here; schema surface is the harness's
         # ``_tool_filter_for_session``, which must agree) when a
-        # graph-backed skill is in this session's catalog.
+        # graph-backed skill is in this session's catalog.  It runs after the
+        # case gate in ``_filter_effective_tools``, and may: the case's tools
+        # include ``skill_step`` too.
         effective_tools = gate_skill_step(
             effective_tools,
             all_tools=tool_registry.tool_names,
@@ -2190,6 +2264,7 @@ async def run_worker(settings: Settings) -> None:
             # this config names.
             runtime_config_cache=runtime_config_cache,
             whatsapp_forms=ctx.whatsapp_forms,
+            intake=intake,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

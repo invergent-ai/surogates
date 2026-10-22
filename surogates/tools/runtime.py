@@ -51,10 +51,12 @@ class ToolRuntime:
             artifact,
             ask_user_question,
             browser,
+            case_step,
             channel_files,
             channel_messages,
             checkin,
             followup,
+            intake,
             send_form,
             team,
             voice_call,
@@ -127,6 +129,8 @@ class ToolRuntime:
             team,  # team_* (only for the agent's alert recipients)
             send_form,  # send_form (a WhatsApp Flow, for agents with published forms)
             voice_call,  # end_call (a phone call's agent hangs up)
+            case_step,  # complete_step, raise_hand (a case step's report to Keel)
+            intake,  # start_case (an intake agent starts a case through Keel)
         ]
 
         for mod in modules:

@@ -44,6 +44,7 @@ from surogates.channels.constants import (
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
     outbound_dm,
+    session_queue_priority,
 )
 from surogates.channels.memory_boundary import BUYER_BOUNDARY_PREFIX, EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
@@ -60,6 +61,7 @@ from surogates.devices.binding import device_of, is_binding_root
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceRecord, DeviceStore
 from surogates.devices.workspace import DeviceOperationError
+from surogates.keel.steps import CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -579,7 +581,7 @@ async def _get_session_for_tenant(
         )
 
     await require_session_visible(
-        request, session, multi_session=agent_runtime.multi_session,
+        request, session, multi_session=agent_runtime.multi_session, tenant=tenant,
     )
 
     return session
@@ -628,6 +630,10 @@ def apply_eval_isolation(
     ``buyer_principal`` says the caller is the agent's own principal, the
     account its buy page forwards every buyer through. Any other key holder
     naming a buyer id would otherwise read that buyer's memory.
+
+    A case's step contract and scope go too, on every channel: only the Keel
+    link stamps them, and a client naming them would make its session a
+    case's step.
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
@@ -637,6 +643,8 @@ def apply_eval_isolation(
     # which decides its tools, its prompt and the lists it shows in.
     for key in SERVER_OWNED_KEYS:
         resolved.pop(key, None)
+    resolved.pop(CASE_STEP_KEY, None)
+    resolved.pop(CASE_SCOPE_KEY, None)
     if channel != API_CHANNEL:
         return resolved
     if buyer_principal and resolved.get("public_buyer_id"):
@@ -1494,6 +1502,7 @@ async def deliver_message(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
     return SendMessageResponse(event_id=event_id)
@@ -1849,6 +1858,7 @@ async def resume_session(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
     return await store.get_session(session_id)
@@ -1890,6 +1900,7 @@ async def retry_session(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
     return await store.get_session(session_id)

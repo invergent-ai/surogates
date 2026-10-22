@@ -32,6 +32,7 @@ from surogates.channels.constants import (
     INTERACTIVE_PROMPT_CHANNELS,
     outbound_dm,
 )
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
     SOURCE_SESSION,
@@ -54,6 +55,7 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
+from surogates.keel.steps import ANSWER_MARKER, CASE_STEP_KEY, REPORTED_KEY, REVISION_MARKER
 from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
@@ -80,6 +82,10 @@ logger = logging.getLogger(__name__)
 
 class SessionNotFoundError(Exception):
     """Raised when a session lookup finds no matching row."""
+
+
+class StepFinishedError(Exception):
+    """Raised when a message would wake a case step that is over: its inputs are redacted."""
 
 
 @dataclass(slots=True)
@@ -214,6 +220,47 @@ _DELIVERABLE_EVENTS = frozenset({
 # user gets a terminal confirmation after the optimistic "Stopping…" ack.
 _STOPPED_CONFIRMATION = "⏹ Stopped."
 
+
+#: The statuses of a session at rest, which a message written to wake it sets active.
+_RESUMABLE_STATUSES = frozenset({"completed", "paused", "failed"})
+
+
+def _step_is_over(config: Any) -> bool:
+    """Whether *config* holds a step contract whose inputs were redacted: the step is over."""
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    return isinstance(contract, dict) and contract.get("inputs_redacted") is True
+
+
+def _redacted_case_config(config: Any) -> dict | None:
+    """*config* with its step contract's inputs emptied and marked redacted.
+
+    ``None`` when there is nothing to redact: no contract, or one redacted already.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    if not isinstance(contract, dict) or (
+        contract.get("inputs") == {} and contract.get("inputs_redacted") is True
+    ):
+        return None
+    return {**config, CASE_STEP_KEY: {**contract, "inputs": {}, "inputs_redacted": True}}
+
+
+def _reported_case_config(config: Any, result: str) -> dict | None:
+    """*config* with its step contract marked as reported, with *result*.
+
+    ``None`` when there is nothing to mark: no contract, or one marked so already.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    if not isinstance(contract, dict) or contract.get(REPORTED_KEY) == result:
+        return None
+    return {**config, CASE_STEP_KEY: {**contract, REPORTED_KEY: result}}
+
+
+def _unreported_case_config(config: Any) -> dict | None:
+    """*config* with its step contract's report mark cleared; ``None`` when it has none."""
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    if not isinstance(contract, dict) or REPORTED_KEY not in contract:
+        return None
+    return {**config, CASE_STEP_KEY: {k: v for k, v in contract.items() if k != REPORTED_KEY}}
 
 _INBOX_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
@@ -358,6 +405,14 @@ _SINGLE_SESSION_MARKER = or_(
     # (surogates.channels.outbound) is the one a step waits in for their
     # next visit, so it counts as their dedicated conversation too.
     SessionRow.config["channel_session_key"].astext.startswith("agent:web:dm:"),
+)
+
+# Not a Keel case's session, as a SQL predicate (``is_case_session``): a
+# session with no boundary is none.
+_NOT_A_CASE_SESSION = not_(
+    func.coalesce(SessionRow.config["memory_boundary"].astext, "").startswith(
+        CASE_BOUNDARY_PREFIX, autoescape=True,
+    )
 )
 
 # Delivery-destination field per adapter channel and the session-config
@@ -1336,6 +1391,10 @@ class SessionStore:
         ops owner-console scope of ``session_search`` (see
         ``_is_owner_scoped`` there), which requires a service-account
         principal plus the ops-stamped session config.
+
+        A Keel case's sessions are never listed, whatever the scope: no
+        listing reaches a case's session (see ``require_not_case_session``),
+        and Keel's link loads its sessions directly.
         """
         if any_principal:
             principal_filter = true()
@@ -1364,6 +1423,7 @@ class SessionStore:
                     SessionRow.parent_id.is_(None),
                     marker_filter,
                     master_filter,
+                    _NOT_A_CASE_SESSION,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(limit)
@@ -2346,6 +2406,161 @@ class SessionStore:
         async with self._sf() as db:
             return int((await db.execute(stmt)).scalar_one())
 
+    @staticmethod
+    def _synthetic_message(session_id: UUID, synthetic: str, key: str | None) -> Any:
+        """The ids of *session_id*'s synthetic user messages of one kind, for one Keel key when given."""
+        stmt = select(EventRow.id).where(
+            EventRow.session_id == session_id,
+            EventRow.type == EventType.USER_MESSAGE.value,
+            EventRow.data["synthetic"].as_string() == synthetic,
+        )
+        if key is not None:
+            stmt = stmt.where(EventRow.data["keel_key"].as_string() == key)
+        return stmt
+
+    async def emit_keyed_synthetic_message(
+        self, session_id: UUID, *, content: str, synthetic: str, key: str, resume: bool = False,
+    ) -> int | None:
+        """Write a synthetic user message for one Keel key, unless the session has it.
+
+        The check and the write are one transaction under the session row's
+        lock, so calls racing on one key write it once.  Returns the new
+        event's id, or ``None`` when the message was there already.
+
+        With *resume*, a session at rest (completed, paused or failed) is set
+        ``active`` with a ``session.resume`` before the message, in the same
+        transaction: the message wakes the session it is written to, and a
+        retry of one already written wakes nothing.  A case step that is over
+        takes no new message: it raises :class:`StepFinishedError` and writes
+        nothing.  The check holds the same lock as a cancel's redaction, so a
+        message racing a cancel never revives the step.  A message written
+        with *resume* also clears the step's report mark in the same
+        transaction, whatever the session's status: the step is the
+        session's to work on again.
+        """
+        message = await self._ready_event(
+            session_id,
+            EventType.USER_MESSAGE,
+            {"content": content, "synthetic": synthetic, "keel_key": key},
+        )
+        resumed = await self._ready_event(session_id, EventType.SESSION_RESUME, {}) if resume else None
+        async with self._sf() as db:
+            locked = (await db.execute(
+                select(SessionRow.status, SessionRow.config).where(SessionRow.id == session_id).with_for_update()
+            )).one_or_none()
+            if locked is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            written = (await db.execute(
+                select(self._synthetic_message(session_id, synthetic, key).exists())
+            )).scalar_one()
+            if written:
+                await db.rollback()
+                return None
+            if resumed is not None and _step_is_over(locked.config):
+                await db.rollback()
+                raise StepFinishedError(f"the step of session {session_id} is over")
+            if resume and (unreported := _unreported_case_config(locked.config)) is not None:
+                await db.execute(
+                    update(SessionRow).where(SessionRow.id == session_id).values(config=unreported, updated_at=func.now())
+                )
+            if resumed is not None and locked.status not in _RESUMABLE_STATUSES:
+                resumed = None
+            if resumed is not None:
+                await self._write_event(db, resumed, status="active")
+            await self._write_event(db, message)
+            await db.commit()
+        if resumed is not None:
+            await self._announce_event(resumed)
+        await self._announce_event(message)
+        return message.id
+
+    async def cancel_case_step(self, session_id: UUID, data: dict) -> bool:
+        """End a case step: redact its inputs, and pause its session with a
+        ``session.pause`` whose data is *data* unless it is paused already;
+        whether this call paused it.
+
+        Both are one transaction under the session row's lock, so a message
+        racing the cancel finds the step either running or over, and calls
+        racing on one session pause it once.  An archived session stays as
+        it is.
+        """
+        pause = await self._ready_event(session_id, EventType.SESSION_PAUSE, data)
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            redacted = _redacted_case_config(row.config)
+            if redacted is not None:
+                row.config = redacted
+                row.updated_at = func.now()
+            paused = row.status not in ("paused", "archived")
+            if paused:
+                await self._write_event(db, pause, status="paused")
+            await db.commit()
+        if paused:
+            await self._announce_event(pause)
+        return paused
+
+    async def mark_case_step_reported(self, session_id: UUID, result: str, *, since: int | None = None) -> None:
+        """Mark the step contract in *session_id*'s config as reported, with Keel's *result*.
+
+        A report ended the step for this round: until Keel writes to the step
+        again (:meth:`emit_keyed_synthetic_message` with *resume*), no turn of
+        the session is nudged to report, and no end of one is told to Keel.
+        Under the session row's lock, as a redaction.  A session with no
+        contract is left as it is.
+
+        *since* is the session's last event id when the report began.  An
+        answer or a revision of Keel's written after it reached the step
+        first: its write cleared no mark yet, so none is written now, and the
+        step stays the session's to work on.  The check holds the lock that
+        message's write takes, so one or the other comes first, never both
+        at once.  Without *since* the mark is written unchecked.
+        """
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            marked = _reported_case_config(row.config, result)
+            if marked is None:
+                return
+            if since is not None and (await db.execute(select(
+                select(EventRow.id).where(
+                    EventRow.session_id == session_id,
+                    EventRow.id > since,
+                    EventRow.type == EventType.USER_MESSAGE.value,
+                    EventRow.data["synthetic"].as_string().in_((ANSWER_MARKER, REVISION_MARKER)),
+                ).exists()
+            ))).scalar_one():
+                return
+            row.config = marked
+            row.updated_at = func.now()
+            await db.commit()
+
+    async def redact_case_inputs(self, session_id: UUID) -> None:
+        """Empty the inputs of the step contract in *session_id*'s config, and mark them redacted.
+
+        Once a step ends for its session, the case's inputs leave the
+        session's config; the rest of the contract stays.  A session with no
+        contract, or one redacted already, is left as it is.
+        """
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            redacted = _redacted_case_config(row.config)
+            if redacted is None:
+                return
+            row.config = redacted
+            row.updated_at = func.now()
+            await db.commit()
+
     async def count_recoveries_since_progress(self, session_id: UUID) -> int:
         """Count ``harness.recovered`` events since the session last progressed.
 
@@ -2779,6 +2994,22 @@ class SessionStore:
             )
             await db.commit()
             return result.rowcount > 0
+
+    async def touch_session(self, session_id: UUID) -> None:
+        """Move an active session's ``updated_at`` to now, and change nothing else.
+
+        The orphan sweep's mark on a session it found waiting on the work
+        queue for its turn: as a recovery's event did, it takes the session
+        out of the stale ones for a while, so the sweep's next page reaches
+        the sessions behind it.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(updated_at=func.now())
+            )
+            await db.commit()
 
     async def find_orphaned_sessions(
         self,

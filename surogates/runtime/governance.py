@@ -82,6 +82,10 @@ PROJECT_THREAD_TOOLS: frozenset[str] = frozenset({
     "start_thread", "message_thread", "stop_thread", "list_threads", "read_thread",
     "resolve_thread", "propose_threads",
 })
+# How a Keel case's step ends: only the step's own session is offered them
+# (``surogates.keel.steps.gate_case_tools``).  Protected as well: a step
+# whose agent policy took them away could never finish nor ask for help.
+CASE_STEP_TOOLS: frozenset[str] = frozenset({"complete_step", "raise_hand"})
 
 # Tools no agent policy may take away. The ops catalog omits these names
 # so Studio cannot offer them and the policy validator rejects them with
@@ -89,6 +93,7 @@ PROJECT_THREAD_TOOLS: frozenset[str] = frozenset({
 # hand-written or legacy blobs.
 PROTECTED_TOOLS: frozenset[str] = (
     WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS | PROJECT_THREAD_TOOLS
+    | CASE_STEP_TOOLS
 )
 
 # Tools a channel brings with it (``tool_schemas.channel_tool_flags``): ``end_call`` exists only on phone

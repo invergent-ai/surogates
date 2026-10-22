@@ -31,6 +31,7 @@ from uuid import UUID
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.db.models import Session as ORMSession, Task
 from surogates.harness.worker_notify import notify_parent_of_task_event
@@ -321,6 +322,7 @@ async def _enqueue_ready_tasks(
             org_id=str(child.org_id),
             agent_id=child.agent_id,
             session_id=child.id,
+            priority=session_queue_priority(child),
         )
         enqueued += 1
 

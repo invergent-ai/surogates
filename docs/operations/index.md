@@ -44,6 +44,7 @@ Returns `503` when any check fails:
 | Worker | Side-car `HealthServer` (Starlette/uvicorn) | `healthPort` (default `8080`) | `surogates/health/server.py` — standalone HTTP server started alongside the orchestrator loop |
 | Channel adapters | Side-car `HealthServer` (Starlette/uvicorn) | `healthPort` (default `8080`) | Same as worker — started alongside the channel adapter event loop |
 | MCP proxy | Primary HTTP server | `8001` | `/health` only (no `/health/ready` yet) |
+| keel-link | FastAPI routes on its primary HTTP server | `8090` | The API's `surogates/api/routes/health.py`; see [keel-link](keel-link.md) |
 
 The worker and channel adapters do not serve HTTP normally, so they spin up a lightweight side-car `HealthServer` on a dedicated port. The API server and MCP proxy serve health endpoints on their primary port.
 

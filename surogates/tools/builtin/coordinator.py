@@ -25,6 +25,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.devices.binding import device_of
 from surogates.session.events import EventType
@@ -473,6 +474,7 @@ async def _spawn_worker_handler(
                 org_id=str(tenant.org_id),
                 agent_id=agent_id,
                 session_id=child_id,
+                priority=session_queue_priority(child_session),
             )
 
         return json.dumps({
@@ -551,6 +553,7 @@ async def _send_worker_message_handler(
                 org_id=str(worker_session.org_id),
                 agent_id=worker_session.agent_id,
                 session_id=worker_id,
+                priority=session_queue_priority(worker_session),
             )
 
         return json.dumps({

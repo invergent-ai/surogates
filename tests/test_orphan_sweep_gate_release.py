@@ -31,17 +31,22 @@ from tests.test_turn_gate_holders import FakeRedis as _FakeRedisGate
 
 
 class _FakeQueueRedis:
-    """Minimal Redis shim covering the calls ``enqueue_session`` makes
-    on the orchestrator's queue object.  We don't assert on what
-    landed in the queue here -- a separate test pins that -- but the
-    sweeper does call into it so the mock must accept the calls."""
+    """Minimal Redis shim covering the calls the sweeper makes on the
+    orchestrator's queue object: ``enqueue_session``'s, and its look for
+    sessions waiting on the queue.  We don't assert on what landed in the
+    queue here -- a separate test pins that -- but the sweeper does call
+    into it so the mock must accept the calls."""
 
     def __init__(self) -> None:
         self.zadd_calls: list[tuple[str, dict[str, float]]] = []
 
-    async def zadd(self, key: str, mapping: dict[str, float]) -> int:
+    async def zadd(self, key: str, mapping: dict[str, float], **_flags) -> int:
         self.zadd_calls.append((key, mapping))
         return len(mapping)
+
+    async def zmscore(self, key: str, members: list[str]) -> list[float | None]:
+        queued = {member: score for at, mapping in self.zadd_calls if at == key for member, score in mapping.items()}
+        return [queued.get(member) for member in members]
 
     async def zincrby(self, key: str, amount: float, member: str) -> float:
         return amount

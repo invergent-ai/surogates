@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.devices.binding import device_of
 from surogates.session.events import EventType
@@ -309,6 +310,7 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     if redis is not None:
         await enqueue_session(
             redis, org_id=str(thread.org_id), agent_id=thread.agent_id, session_id=thread.id,
+            priority=session_queue_priority(thread),
         )
     return json.dumps({"status": "sent", "thread_id": str(thread.id)})
 

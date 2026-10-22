@@ -891,6 +891,27 @@ class OfficeSettings(BaseSettings):
         return self
 
 
+class KeelSettings(BaseSettings):
+    """The link to Keel, the case engine, whose agent steps run here.
+
+    Keel creates and steers step sessions through ``surogates keel-link``,
+    an internal process that checks ``link_key``.  The worker reports a
+    step's outcome to Keel's door at ``url`` with ``door_key``.  Each process
+    holds only its own key, and empty settings turn the integration off.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_KEEL_"}
+
+    # The base URL of Keel's door, which the worker calls.
+    url: str = ""
+    # The bearer the worker shows Keel's door.  Never shown in a repr.
+    door_key: str = Field("", repr=False)
+    # The bearer Keel shows keel-link.  Never shown in a repr.
+    link_key: str = Field("", repr=False)
+    # The port keel-link serves on.
+    link_port: int = 8090
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -920,6 +941,7 @@ class Settings(BaseSettings):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     vapid: VapidSettings = Field(default_factory=VapidSettings)
     office: OfficeSettings = Field(default_factory=OfficeSettings)
+    keel: KeelSettings = Field(default_factory=KeelSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem

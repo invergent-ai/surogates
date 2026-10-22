@@ -23,7 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
-from surogates.channels.constants import API_CHANNEL
+from surogates.channels.constants import API_CHANNEL, session_queue_priority
+from surogates.channels.memory_boundary import is_case_session
 from surogates.config import enqueue_session
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -31,6 +32,7 @@ from surogates.runtime import (
     rate_limit_dep,
 )
 from surogates.session.events import EventType
+from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -47,6 +49,10 @@ MAX_BATCH_SIZE = 100
 # beyond what any current model accepts in a single message — and keeps
 # ``events.data`` JSONB rows from ballooning under malicious input.
 MAX_PROMPT_LENGTH = 200_000
+# Keel's link keys every step session it creates ``keel:<effect key>``, in
+# the same per-org key space: a client's key there could replay into a
+# case's session, so no client may use one.
+_KEEL_KEY_PREFIX = "keel:"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +163,22 @@ def _require_service_account(tenant: TenantContext) -> UUID:
     return tenant.service_account_id
 
 
+def _refuse_a_case_session(existing: Session) -> None:
+    """409 ``key-in-use`` for a key that names a Keel case's session.
+
+    A replay answers with the session the key found: for a case's, that
+    would hand its id to a caller no generic route lets reach it.
+    """
+    if is_case_session(existing):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "key-in-use",
+                "message": "This idempotency key is in use.",
+            },
+        )
+
+
 async def _submit_one(
     body: PromptRequest,
     *,
@@ -175,10 +197,22 @@ async def _submit_one(
     settings = request.app.state.settings
 
     if body.idempotency_key is not None:
+        if body.idempotency_key.startswith(_KEEL_KEY_PREFIX):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "reserved-key",
+                    "message": (
+                        f"Idempotency keys starting {_KEEL_KEY_PREFIX!r} "
+                        "are reserved."
+                    ),
+                },
+            )
         existing = await store.get_session_by_idempotency_key(
             tenant.org_id, body.idempotency_key
         )
         if existing is not None:
+            _refuse_a_case_session(existing)
             return PromptAccepted(
                 session_id=existing.id,
                 event_id=None,
@@ -233,6 +267,7 @@ async def _submit_one(
         if existing is None:
             # Truly exceptional: constraint fired but row not visible.
             raise
+        _refuse_a_case_session(existing)
         return PromptAccepted(
             session_id=existing.id,
             event_id=None,
@@ -250,6 +285,7 @@ async def _submit_one(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session.id,
+        priority=session_queue_priority(session),
     )
 
     return PromptAccepted(session_id=session.id, event_id=event_id)

@@ -1,0 +1,163 @@
+"""A case's sessions are marked by the server alone.
+
+Keel starts an agent's step session with a contract (``config.case_step``), a
+tool and knowledge scope (``config.case_scope``) and the case's ``case:``
+boundaries. A client naming any of them would make itself a step, widen its
+knowledge, or read and write a case's memory and workspace, so only the Keel
+link stamps them. Every session of the case, children included, keeps the
+case's memory, while only the step's root session is the step.
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from fastapi import Response
+
+from surogates.api.routes import sessions as sessions_route
+from surogates.channels.memory_boundary import session_memory_boundary
+from surogates.config import Settings
+from surogates.keel.steps import (
+    CASE_SCOPE_KEY,
+    CASE_STEP_KEY,
+    CaseScope,
+    case_scope_of,
+    is_case_session,
+    is_case_step,
+    step_contract_of,
+)
+from surogates.runtime.memory_protocol import memory_object_key
+from surogates.session.models import Session
+from surogates.session.provisioning import create_agent_session, create_child_session
+from tests.test_eval_session_seeding import _RecordingStore, _route_fixtures
+
+CONTRACT = {
+    "case_id": str(uuid4()),
+    "case_number": "LN-000001",
+    "case_type": "loan",
+    "type_version": 1,
+    "token": "t2",
+    "node": "check",
+    "step": "Check completeness",
+    "mode": "complete",
+    "inputs": {"applicant": "Ioana", "amount": "182000.00"},
+    "form": {
+        "type": "object",
+        "properties": {"docs_complete": {"type": "boolean"}},
+        "additionalProperties": False,
+    },
+    "files": {"offer": "one"},
+    "outcomes": {
+        "complete": {"required": ["docs_complete", "income"]},
+        "missing": {"required": []},
+    },
+    "checks": ["income must be positive"],
+    "tools": None,
+    "mcp_servers": None,
+    "knowledge": ["kb-uuid"],
+}
+SCOPE = {"tools": ["write_file"], "knowledge": ["kb-uuid"]}
+
+
+class _SessionStore(_RecordingStore):
+    """Hands back whole session rows, so a child can be made from one."""
+
+    async def create_session(self, **kwargs):
+        self.created.append(dict(kwargs))
+        now = datetime.now(UTC)
+        session_id = kwargs.pop("session_id") or uuid4()
+        return Session(id=session_id, status="active", created_at=now, updated_at=now, **kwargs)
+
+
+async def _step_session(store, request, case: str):
+    """A step's root session, made as the Keel link makes one."""
+    return await create_agent_session(
+        store=store,
+        storage=request.app.state.storage,
+        settings=request.app.state.settings,
+        org_id=uuid4(),
+        user_id=None,
+        agent_id="support-bot",
+        channel="api",
+        config={"memory_boundary": f"case:{case}", "workspace_boundary": f"case:{case}"},
+        service_account_id=uuid4(),
+        case_step=CONTRACT,
+        case_scope=SCOPE,
+    )
+
+
+async def _create_through(route: str, config: dict):
+    if route == "api":
+        _, request, tenant, agent_runtime = _route_fixtures("/v1/api/sessions", service_account=True)
+        return await sessions_route.create_api_session(
+            sessions_route.CreateSessionRequest(config=config), request, tenant, agent_runtime,
+        )
+    _, request, tenant, agent_runtime = _route_fixtures("/v1/sessions", service_account=False)
+    return await sessions_route.create_session(
+        sessions_route.CreateSessionRequest(config=config), request, Response(), tenant, agent_runtime,
+    )
+
+
+@pytest.mark.parametrize("route", ["api", "web"])
+async def test_a_client_cannot_make_a_case_session(route):
+    session = await _create_through(route, {
+        CASE_STEP_KEY: CONTRACT,
+        CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
+        "memory_boundary": "case:x",
+        "workspace_boundary": "case:x",
+    })
+
+    kept = {CASE_STEP_KEY, CASE_SCOPE_KEY, "memory_boundary", "workspace_boundary"} & set(session.config)
+    assert kept == set()
+    assert not is_case_session(session)
+    assert not is_case_step(session)
+    assert step_contract_of(session) is None
+    assert case_scope_of(session) is None
+
+
+async def test_a_case_sessions_memory_is_per_agent_and_case():
+    _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+    s = await _step_session(_SessionStore(), request, case="C1")
+
+    assert memory_object_key(
+        storage_key_prefix="p/a", user_id=None, boundary=session_memory_boundary(s), target="memory",
+    ) == "p/a/boundaries/case:C1/memory.json"
+
+
+async def test_a_child_inherits_the_case_and_its_scope_but_is_no_step():
+    store = _SessionStore()
+    _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+    step = await _step_session(store, request, case="C1")
+    assert is_case_step(step)
+    assert step_contract_of(step).node == "check"
+
+    child = await create_child_session(
+        store=store,
+        parent=step,
+        channel="delegation",
+        # What the code making the child names is never its scope or a contract.
+        config={
+            CASE_STEP_KEY: CONTRACT,
+            CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
+        },
+    )
+
+    assert child.parent_id == step.id
+    assert is_case_session(child)
+    assert session_memory_boundary(child) == "case:C1"
+    assert case_scope_of(child) == CaseScope(tools=["write_file"], knowledge=["kb-uuid"])
+    assert not is_case_step(child)
+    assert step_contract_of(child) is None
+
+
+def test_the_keys_never_show_in_settings(monkeypatch):
+    monkeypatch.setenv("SUROGATES_KEEL_DOOR_KEY", "door-key-value-1234")
+    monkeypatch.setenv("SUROGATES_KEEL_LINK_KEY", "link-key-value-5678")
+
+    settings = Settings()
+
+    assert (settings.keel.door_key, settings.keel.link_key) == ("door-key-value-1234", "link-key-value-5678")
+    shown = repr(settings)
+    assert "door-key-value-1234" not in shown
+    assert "link-key-value-5678" not in shown

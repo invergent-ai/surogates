@@ -26,6 +26,7 @@ component allowed to interpret them.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -92,6 +93,13 @@ class MediaCreditsExhaustedError(RuntimeError):
 
 
 logger = logging.getLogger(__name__)
+
+
+def _add_grants(params: dict[str, Any], granted_kb_ids: Sequence[str]) -> None:
+    """Name each KB a Keel case grants once, as ``granted_kb_ids``, on a KB route's query."""
+    granted = list(dict.fromkeys(granted_kb_ids))
+    if granted:
+        params["granted_kb_ids"] = granted
 
 
 class PlatformClient:
@@ -799,14 +807,15 @@ class PlatformClient:
 
     async def find_agent_kb_documents(
         self, agent_id: str, *, query: str, kb_ids: list[str] | None = None,
-        limit: int = 20,
+        limit: int = 20, granted_kb_ids: Sequence[str] = (),
     ) -> dict:
-        """Exact document lookup with the same narrowing and auth as KB search."""
+        """Exact document lookup with the same narrowing, grants and auth as KB search."""
         if kb_ids is not None and not kb_ids:
             return {"resolution": "not_found", "documents": [], "truncated": False}
         params: dict[str, Any] = {"q": query, "limit": limit}
         if kb_ids:
             params["kb_ids"] = kb_ids
+        _add_grants(params, granted_kb_ids)
         resp = await self._client.get(
             f"/api/agents/agents/{agent_id}/kb/documents", params=params,
         )
@@ -818,13 +827,15 @@ class PlatformClient:
     async def get_agent_kb_document_links(
         self, agent_id: str, *, file_id: str, kb_ids: list[str] | None = None,
         expected_artifact_sha256: str | None = None, limit: int = 16,
+        granted_kb_ids: Sequence[str] = (),
     ) -> dict:
-        """Read links only inside attached KBs, optionally pinning source evidence."""
+        """Read links only inside attached or granted KBs, optionally pinning source evidence."""
         if kb_ids is not None and not kb_ids:
             return {"status": "unavailable", "links": [], "truncated": False}
         params: dict[str, Any] = {"limit": limit}
         if kb_ids:
             params["kb_ids"] = kb_ids
+        _add_grants(params, granted_kb_ids)
         if expected_artifact_sha256:
             params["expected_artifact_sha256"] = expected_artifact_sha256
         resp = await self._client.get(
@@ -843,6 +854,7 @@ class PlatformClient:
         kb_ids: list[str] | None = None,
         limit: int = 20,
         timeout: float = 25.0,
+        granted_kb_ids: Sequence[str] = (),
     ) -> list[dict]:
         """Hybrid (lexical + vector RRF) search across an agent's
         attached knowledge bases.
@@ -853,6 +865,11 @@ class PlatformClient:
         it, never widen it (see ``search_agent_knowledge_bases`` /
         ``kb_service.search_agent_wiki`` on the ops side). ``None``
         means no narrowing -- every attached KB is searched.
+
+        ``granted_kb_ids`` are the KBs a Keel case grants the session:
+        ops adds each one of the agent's project to the attached set,
+        and ``kb_ids`` then narrows that.  Sent as one ``granted_kb_ids``
+        parameter per id; empty sends none.
 
         ``kb_ids=[]`` (an allowlist pinned to zero KBs, as opposed to
         ``None`` for "no pin at all") is answered locally with ``[]``,
@@ -891,6 +908,7 @@ class PlatformClient:
         params: dict[str, Any] = {"q": query, "limit": limit}
         if kb_ids:
             params["kb_ids"] = kb_ids
+        _add_grants(params, granted_kb_ids)
         resp = await self._client.get(
             f"/api/agents/agents/{agent_id}/kb/search",
             params=params,

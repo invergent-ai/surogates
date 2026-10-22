@@ -49,6 +49,7 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
     from surogates.browser.control import BrowserControlStore
     from surogates.browser.registry import BrowserRegistry
     from surogates.browser.resolver import BrowserResolver
+    from surogates.channels.constants import session_queue_priority
     from surogates.config import enqueue_session
     from surogates.session.events import EventType
 
@@ -100,6 +101,7 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
             org_id=str(session.org_id),
             agent_id=session.agent_id,
             session_id=session_id,
+            priority=session_queue_priority(session),
         )
 
     app.state.browser_registry = browser_registry
@@ -113,6 +115,16 @@ def _install_browser_api_dependencies(app: Any, settings: Any) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown resources."""
+    async with runtime_app_state(app, name="Surogates API"):
+        yield
+
+
+@asynccontextmanager
+async def runtime_app_state(app: FastAPI, *, name: str) -> AsyncIterator[None]:
+    """Open everything a request reads from ``app.state``, and close it after.
+
+    Shared by the API and ``keel-link``, so both read the same state.
+    """
     # -- startup ----------------------------------------------------------
     settings = load_settings()
 
@@ -168,12 +180,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # which reads the caches wired below.
     _install_shared_runtime_plumbing(app, settings)
 
-    logger.info("Surogates API started (workers=%d)", settings.api.workers)
+    logger.info("%s started", name)
 
     yield
 
     # -- shutdown ---------------------------------------------------------
-    logger.info("Surogates API shutting down")
+    logger.info("%s shutting down", name)
     # A Restore or an Undo runs to its end though its request left: each under way ends before the database goes.
     await acts_ended()
     await _shutdown_shared_runtime_plumbing(app)

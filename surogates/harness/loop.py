@@ -22,13 +22,20 @@ import re
 import logging
 import os
 import traceback
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import (
+    ADAPTER_CHANNELS,
+    END_USER_CHANNELS,
+    REALTIME_CHANNELS,
+    STUDIO_CHANNEL,
+    session_queue_priority,
+)
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.history import (
@@ -103,7 +110,21 @@ from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
+from surogates.channels.memory_boundary import is_eval_session
+from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
+from surogates.keel.steps import (
+    CASE_STEP_NUDGE,
+    CASE_STEP_TOOLS,
+    NUDGE_MARKER,
+    STEP_ENDED,
+    STEP_STOPPED,
+    gate_case_tools,
+    is_case_session,
+    is_case_step,
+    is_keels_word,
+    step_contract_of,
+)
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     describe_for_conversation,
@@ -660,6 +681,7 @@ class AgentHarness(
         platform_client: Any | None = None,
         runtime_config_cache: Any | None = None,
         whatsapp_forms: tuple[dict[str, Any], ...] = (),
+        intake: Sequence[dict[str, Any]] = (),
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
     ) -> None:
@@ -723,6 +745,9 @@ class AgentHarness(
         # held on at its wake (``admit_turn``).
         self._runtime_config_cache = runtime_config_cache
         self._whatsapp_forms = tuple(whatsapp_forms or ())
+        # The case types Keel lets this agent start, as the worker asked at
+        # the wake: ``start_case`` is offered only when there is one.
+        self._intake: tuple[dict[str, Any], ...] = tuple(intake or ())
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -917,11 +942,13 @@ class AgentHarness(
         never emits SESSION_RESUME — and a wake on the now-terminal
         session would bail before looking at pending events.
 
-        Only non-synthetic messages count: mission continuations and
-        harness nudges must never revive a terminal session (same rule
-        as the dispatcher's crash-loop ``_has_user_signal_since``).  A
-        project coordinator's follow-up to its thread counts as a message
-        does.  Completion bookkeeping events (turn.summary, session.complete,
+        Only messages for the model count (:meth:`_is_for_the_model`):
+        mission continuations and harness nudges must never revive a
+        terminal session (same rule as the dispatcher's crash-loop
+        ``_has_user_signal_since``).  A project coordinator's follow-up to
+        its thread counts as a message does, and so does Keel's word to a
+        case's step, written as the turn that reported the step ended.
+        Completion bookkeeping events (turn.summary, session.complete,
         inbox.task_complete) always sit past the cursor and are
         excluded by the type filter.
         """
@@ -930,7 +957,7 @@ class AgentHarness(
         # the cursor before a report no turn has read, and one that still
         # waits revives a finished session by its own rule.
         return any(
-            self._is_plain_message(session, event)
+            self._is_for_the_model(session, event)
             for event in await self._store.get_events(session.id, after=cursor, types=list(MESSAGE_TYPES))
         )
 
@@ -954,6 +981,15 @@ class AgentHarness(
             and not (event.data or {}).get("synthetic")
             and not self._answers_itself(_user_event_text(event.data), session)
         )
+
+    def _is_for_the_model(self, session: Session, event: Any) -> bool:
+        """Whether *event* is a message the model is to read, in the turn
+        under way or the next: a plain message (:meth:`_is_plain_message`),
+        or Keel's word to a case's step, its answer to a raised hand or its
+        request to revise a draft, which the step's session reads as it
+        reads a person's.  The harness's own messages, nudges and
+        continuations, are not: the turn that writes one reads it."""
+        return self._is_plain_message(session, event) or is_keels_word(event.data)
 
     def _is_command(self, session: Session, event: Any) -> bool:
         """Whether *event* is a message the user wrote themselves that is a command of the harness's."""
@@ -1214,15 +1250,16 @@ class AgentHarness(
     ) -> tuple[dict | None, int]:
         """Pull user messages that arrived past the steer cursor.
 
-        Reads non-synthetic ``user.message`` events, and a project
-        coordinator's follow-ups to its thread, appended after
-        ``after_event_id``, renders each through the same path replay uses
-        (:func:`build_user_message_dict`), and coalesces them into one user
-        turn so a burst of follow-ups becomes a single steered turn.
+        Reads the messages for the model (:meth:`_is_for_the_model`): the
+        user's own ``user.message`` events, a project coordinator's
+        follow-ups to its thread, and Keel's word to a case's step, appended
+        after ``after_event_id``, renders each through the same path replay
+        uses (:func:`build_user_message_dict`), and coalesces them into one
+        user turn so a burst of follow-ups becomes a single steered turn.
 
         Returns ``(coalesced_message_or_None, new_cursor)``.  The cursor
-        advances to the highest event id seen even when every message was
-        synthetic, so synthetic events (mission continuations, harness
+        advances to the highest event id seen even when no message was for
+        the model, so the harness's own (mission continuations, harness
         nudges) are never re-examined and never steer.
         """
         events = await self._store.get_events(
@@ -1243,16 +1280,20 @@ class AgentHarness(
         rendered = [
             build_user_message_dict(event.data)
             for event in events
-            if self._is_plain_message(session, event)
+            if self._is_for_the_model(session, event)
         ]
         if not rendered:
             return None, new_cursor
+        # Keel's word gives a case's step back to the session: a report the turn makes now reaches Keel.
+        if any(is_keels_word(event.data) for event in events):
+            step_given_back(session.id)
         return coalesce_user_messages(rendered), new_cursor
 
     async def _said_to_the_model(self, session: Session, after_event_id: int) -> bool:
-        """Whether a message the model is to read arrived past the steer cursor *after_event_id*: the turn's next request reads it."""
+        """Whether a message the model is to read (:meth:`_is_for_the_model`) arrived past the steer cursor
+        *after_event_id*: the turn's next request reads it."""
         return any(
-            self._is_plain_message(session, event)
+            self._is_for_the_model(session, event)
             for event in await self._store.get_events(session.id, after=after_event_id, types=list(MESSAGE_TYPES))
         )
 
@@ -2278,6 +2319,7 @@ class AgentHarness(
                         await enqueue_session(
                             self._redis, org_id=str(session.org_id),
                             agent_id=session.agent_id, session_id=session.id,
+                            priority=session_queue_priority(session),
                         )
                     try:
                         if slash_block is not None:
@@ -2324,6 +2366,7 @@ class AgentHarness(
                     await enqueue_session(
                         self._redis, org_id=str(session.org_id),
                         agent_id=session.agent_id, session_id=session.id,
+                        priority=session_queue_priority(session),
                     )
                 if is_new or at_rest:
                     return
@@ -2421,6 +2464,7 @@ class AgentHarness(
                 await enqueue_session(
                     self._redis, org_id=str(session.org_id),
                     agent_id=session.agent_id, session_id=session.id,
+                    priority=session_queue_priority(session),
                 )
 
         except Exception as _harness_exc:
@@ -2446,7 +2490,7 @@ class AgentHarness(
                     session_id,
                 )
             # The parent hears of a crash only when the dispatcher stops
-            # retrying it (``Orchestrator._report_failure_to_parent``).
+            # retrying it (``Orchestrator._report_failure``).
             raise
         except BaseException:  # a cancel: the lease went to another worker, or the worker stops
             cut_off = True
@@ -2756,6 +2800,8 @@ class AgentHarness(
         # marker) because the second-chance turn happens within the
         # same wake -- no re-enqueue, no re-rebuild of events.
         deep_research_delegate_nudge_fired = False
+        # The turn whose end in words a case's step was told to report: once a turn.
+        case_step_nudged_turn: str | None = None
         content_with_tools_cache = ContentWithToolsCache()
         tool_guardrails = ToolGuardrails(
             ToolGuardrailConfig.from_mapping(
@@ -2852,6 +2898,14 @@ class AgentHarness(
             _turn_whiteboard_metadata,
             has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
         )
+        # A sketch turn replaces the catalogue rather than narrowing it, so
+        # a Keel case's session goes through the case gate again: no turn
+        # hands it a tool outside the case's.
+        if is_case_session(session):
+            tool_filter = gate_case_tools(
+                set(self._tools.tool_names) if tool_filter is None else tool_filter,
+                session,
+            )
         # The draw handler rejects a call that leaves the user's slot
         # empty, and it can only know the slots from here.
         from surogates.whiteboard.turn import (
@@ -2922,6 +2976,8 @@ class AgentHarness(
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
+            contract=step_contract_of(session) if is_case_step(session) else None,
+            intake=getattr(self, "_intake", ()),
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
@@ -3864,6 +3920,32 @@ class AgentHarness(
                     )
                     continue
 
+                # A case's step ends only with its report.  A turn of the step
+                # that ends in words is told so once, and goes on; one that
+                # ends in words again completes, and Keel hears it had no
+                # outcome.  Not once a report ended the step for this round,
+                # in this wake or an earlier one: Keel has it.
+                if (
+                    case_step_nudged_turn != turn_id
+                    and is_case_step(session)
+                    and await step_awaiting_report(self._store, session) is not None
+                ):
+                    case_step_nudged_turn = turn_id
+                    try:
+                        await self._store.emit_event(
+                            session.id, EventType.USER_MESSAGE,
+                            {"content": CASE_STEP_NUDGE, "synthetic": NUDGE_MARKER},
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Session %s: the nudge to report its step was not saved (%s); the turn has it all the same",
+                            session.id, type(exc).__name__,
+                        )
+                    messages.append({"role": "user", "content": CASE_STEP_NUDGE})
+                    self._budget.refund()
+                    logger.info("Session %s: its case step's turn ended in words; nudging it to report", session.id)
+                    continue
+
                 # Text-only iteration: kick off the iteration-summary
                 # task before _complete_session so the drain in A8 can
                 # await it.
@@ -4175,6 +4257,23 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="whiteboard_sketch_drawn",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A case's step that its report ended, or that Keel stopped, is over
+            # for this session: the turn ends after its batch, and the session
+            # rests until Keel sends it something.  Not while something said to
+            # the model waits for it, Keel's word included: the turn goes on
+            # with that.  The cursor stays where the batch's results moved it,
+            # before what is said from here on, which the next wake reads.
+            if _case_step_ended(tool_calls_raw, tool_results) and not await self._said_to_the_model(session, steer_cursor):
+                logger.info("Session %s: its case step ended; ending turn", session.id)
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="case_step_ended",
+                    through_event_id=event_id,
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -5230,8 +5329,6 @@ class AgentHarness(
         so a call to that tool parks the turn until the tool's own
         30-minute deadline and the caller reports a stalled agent.
         """
-        from surogates.channels.memory_boundary import is_eval_session
-
         if not is_eval_session(session):
             return tool_filter
         names = (
@@ -5415,7 +5512,7 @@ class AgentHarness(
 
         return result
 
-    def _tool_filter_for_session(self, session: Session) -> set[str] | None:
+    def _tool_filter_for_session(self, session: Session) -> set[str]:
         """Return the tool allow-list for a session.
 
         Session-scoped only.  A whiteboard turn additionally narrows this
@@ -5433,12 +5530,14 @@ class AgentHarness(
         result = self._tool_filter_for_session_impl(session)
         # A stand-in prompt builder (some tests) has no skill catalog at
         # all; treat that as no skills, so it simply gets no skill_step.
+        # This runs after the Keel case gate, and may: the case's tools
+        # include ``skill_step`` too.
         skills = getattr(self._prompt, "skills", None) or ()
         return gate_skill_step(
             result, all_tools=self._tools.tool_names, skills=skills,
         )
 
-    def _tool_filter_for_session_impl(self, session: Session) -> set[str] | None:
+    def _tool_filter_for_session_impl(self, session: Session) -> set[str]:
         config = session.config or {}
         explicit_allowed = bool(config.get("allowed_tools"))
 
@@ -5504,10 +5603,28 @@ class AgentHarness(
         tool_filter = self._apply_entitlement_exclusions(tool_filter)
         tool_filter = self._drop_project_master_mcp_tools(tool_filter, session)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
-        return self._drop_eval_excluded_tools(
+        tool_filter = self._drop_eval_excluded_tools(
             self._ensure_always_available_tools(
                 tool_filter, explicit_allowed=explicit_allowed,
             ),
+            session,
+        )
+        # ``start_case`` goes only to an agent Keel lets start a case of some
+        # type, and only to a conversation's own session, never a helper's nor
+        # an evaluation row's, as in ``worker._filter_effective_tools``.
+        # ``getattr``: some test harnesses skip ``__init__``; absent means no
+        # grants.
+        if not getattr(self, "_intake", ()) or session.parent_id is not None or is_eval_session(session):
+            tool_filter = (
+                set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
+            )
+            tool_filter.discard("start_case")
+        # Last, as in ``worker._filter_effective_tools``: a Keel case's
+        # sessions keep only the case's tools, and only its step's own
+        # session gets the step tools, which every other session loses.
+        # ``None`` (every registered tool) is spelled out so they can go.
+        return gate_case_tools(
+            set(self._tools.tool_names) if tool_filter is None else tool_filter,
             session,
         )
 
@@ -6500,6 +6617,16 @@ def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
     sent = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") == "send_form"}
     return any(
         r.get("tool_call_id") in sent and str(r.get("content") or "").startswith(FORM_SENT)
+        for r in tool_results
+    )
+
+
+def _case_step_ended(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
+    """Whether a step tool of the batch ended its case's step for this session: Keel took its report, the step is
+    no longer the session's, or Keel stopped it."""
+    reports = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") in CASE_STEP_TOOLS}
+    return any(
+        r.get("tool_call_id") in reports and str(r.get("content") or "").startswith((STEP_ENDED, STEP_STOPPED))
         for r in tool_results
     )
 

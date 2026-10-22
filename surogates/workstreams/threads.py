@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from surogates.board.groups import ensure_group_and_inherit
+from surogates.channels.constants import session_queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.devices.store import DeviceRecord
 from surogates.session.events import EventType
@@ -123,6 +124,7 @@ async def begin_thread(
     if redis is not None:
         await enqueue_session(
             redis, org_id=str(thread.org_id), agent_id=thread.agent_id, session_id=thread.id,
+            priority=session_queue_priority(thread),
         )
     return thread
 

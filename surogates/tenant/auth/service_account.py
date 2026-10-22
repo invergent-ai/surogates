@@ -26,7 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import ServiceAccount
@@ -38,6 +39,7 @@ __all__ = [
     "ServiceAccountAuthCache",
     "invalidate_service_account",
     "KIND_API_KEY",
+    "KIND_CASE_TYPE",
     "KIND_SERVICE",
     "TOKEN_PREFIX",
     "IssuedServiceAccount",
@@ -57,6 +59,10 @@ KIND_AGENT_PRINCIPAL = "agent_principal"
 KIND_API_KEY = "api_key"
 #: An ordinary org-scoped account with no agent binding.
 KIND_SERVICE = "service"
+#: The identity a Keel case type's agent-step sessions run under.  One per
+#: case type per org — see the ``uq_service_accounts_case_type`` partial
+#: unique index.  Its token is discarded at creation; nobody signs in as it.
+KIND_CASE_TYPE = "case_type"
 
 TOKEN_PREFIX = "surg_sk_"
 _DISPLAY_PREFIX_LEN = len(TOKEN_PREFIX) + 8
@@ -281,6 +287,51 @@ class ServiceAccountStore:
             kind=row.kind,
         )
 
+    async def case_type_account(self, org_id: UUID, case_type: str) -> UUID:
+        """Return the id of ``org_id``'s account for ``case_type``, creating it.
+
+        The account is named ``case-type:<case_type>`` and is of kind
+        :data:`KIND_CASE_TYPE`.  It exists so a case type's agent-step
+        sessions have an owner; nobody signs in as it.  Its ``token_hash`` is
+        the digest of a fresh token that is neither returned nor stored, so no
+        bearer token resolves to it.
+
+        Two concurrent first calls race on ``uq_service_accounts_case_type``:
+        the loser's insert does nothing and it reads the winner's row.
+        """
+        name = f"case-type:{case_type}"
+        existing = select(ServiceAccount.id).where(
+            ServiceAccount.org_id == org_id,
+            ServiceAccount.name == name,
+            ServiceAccount.kind == KIND_CASE_TYPE,
+        )
+        async with self._sf() as db:
+            found = (await db.execute(existing)).scalar_one_or_none()
+            if found is not None:
+                return found
+            token = generate_token()
+            created = (
+                await db.execute(
+                    pg_insert(ServiceAccount)
+                    .values(
+                        org_id=org_id,
+                        name=name,
+                        token_hash=hash_token(token),
+                        token_prefix=token[:_DISPLAY_PREFIX_LEN],
+                        kind=KIND_CASE_TYPE,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=["org_id", "name"],
+                        index_where=text("kind = 'case_type'"),
+                    )
+                    .returning(ServiceAccount.id)
+                )
+            ).scalar_one_or_none()
+            await db.commit()
+            if created is not None:
+                return created
+            return (await db.execute(existing)).scalar_one()
+
     async def get_by_token(self, token: str) -> ResolvedServiceAccount | None:
         """Resolve a raw bearer token to a :class:`ResolvedServiceAccount`.
 
@@ -458,11 +509,18 @@ class ServiceAccountStore:
         )
 
     async def list_for_org(self, org_id: UUID) -> list[ServiceAccount]:
-        """Return all service accounts belonging to *org_id*, newest first."""
+        """Return *org_id*'s admin-managed service accounts, newest first.
+
+        Leaves out :data:`KIND_CASE_TYPE` accounts: Keel owns them, and an
+        admin who could see one could try to revoke it.
+        """
         async with self._sf() as db:
             result = await db.execute(
                 select(ServiceAccount)
-                .where(ServiceAccount.org_id == org_id)
+                .where(
+                    ServiceAccount.org_id == org_id,
+                    ServiceAccount.kind != KIND_CASE_TYPE,
+                )
                 .order_by(ServiceAccount.created_at.desc())
             )
             return list(result.scalars().all())
@@ -532,7 +590,10 @@ class ServiceAccountStore:
         """Mark a service account as revoked.
 
         Returns True when the row was found and updated, False when it
-        does not exist, belongs to another org, or was already revoked.
+        does not exist, belongs to another org, was already revoked, or is
+        a :data:`KIND_CASE_TYPE` account.  Keel owns those: a revoked one
+        would turn away every callback of its case type's sessions, and
+        :meth:`case_type_account` would keep handing out the dead id.
         Uses the database clock to match the naive-timestamp convention
         of the ``service_accounts`` columns.
 
@@ -546,6 +607,7 @@ class ServiceAccountStore:
                 .where(
                     ServiceAccount.id == service_account_id,
                     ServiceAccount.org_id == org_id,
+                    ServiceAccount.kind != KIND_CASE_TYPE,
                     ServiceAccount.revoked_at.is_(None),
                 )
                 .values(revoked_at=func.now())

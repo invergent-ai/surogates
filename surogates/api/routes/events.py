@@ -16,6 +16,7 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session, load_settings
 from surogates.harness.outcomes import build_defined_outcome_from_event
 from surogates.session.events import EventType
@@ -168,7 +169,7 @@ async def _verify_session_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    await require_session_visible(request, session)
+    await require_session_visible(request, session, tenant=tenant)
 
 
 def _rubric_text_or_422(rubric: DefineOutcomeRubric | None) -> str:
@@ -283,6 +284,7 @@ async def send_session_events(
                 org_id=str(session.org_id),
                 agent_id=session.agent_id,
                 session_id=session_id,
+                priority=session_queue_priority(session),
             )
 
         sent.append(
@@ -341,7 +343,7 @@ async def stream_events(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     if not tenant.owns_session(session_check.org_id, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
-    await require_session_visible(request, session_check)
+    await require_session_visible(request, session_check, tenant=tenant)
 
     # Pre-loop fast-close for terminal sessions used to live here, but it
     # raced with concurrent POST /messages: a message landing between the

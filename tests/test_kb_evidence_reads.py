@@ -299,7 +299,9 @@ async def test_source_reads_preview_links_and_full_read_preserves_condition(evid
         agent_id="agent", platform_client=client)
     assert "resolution=matched" in preview and "context='links'" in preview
     assert "Supporting quote" not in preview
-    assert lookup.call_args.kwargs == dict(file_id="source", kb_ids=["kb"], expected_artifact_sha256=hashlib.sha256(raw).hexdigest())
+    assert lookup.call_args.kwargs == dict(
+        file_id="source", kb_ids=["kb"], expected_artifact_sha256=hashlib.sha256(raw).hexdigest(), granted_kb_ids=[],
+    )
     full = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"},
         agent_id="agent", platform_client=client)
     assert "Supporting quote (source text): " + raw.decode() in full
