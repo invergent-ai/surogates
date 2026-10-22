@@ -26,6 +26,7 @@ import pytest
 
 import surogates.harness.loop as loop_module
 import surogates.keel.intake as intake_module
+from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
@@ -246,6 +247,24 @@ async def test_a_helper_of_an_intake_session_is_not_offered_start_case(monkeypat
         monkeypatch, _StepStore(helper, LocalBackend(str(tmp_path))), [LOAN], [_final_response("Done.")],
     )
     assert "start_case" not in _offered(request)
+    assert "read_file" in _offered(request)
+
+
+@pytest.mark.parametrize(("run", "offered"), [("evaluation", False), ("scheduled", True)])
+async def test_an_evaluation_row_of_an_intake_agent_is_not_offered_start_case(monkeypatch, tmp_path, run, offered):
+    # An evaluation row would start real cases, with their numbers, timers and work, for no one.  A run its
+    # schedule starts is the agent's own automation, and starts cases as a conversation does.
+    front_door = _front_door(user_id=uuid4())
+    if run == "evaluation":
+        session = front_door.model_copy(update={"config": {"memory_boundary": f"{EVAL_BOUNDARY_PREFIX}run-1-a1b2"}})
+    else:
+        session = front_door.model_copy(update={"channel": "scheduled"})
+
+    assert ("start_case" in _prompt_tools(session, [LOAN])) is offered
+    [request] = await _turn(
+        monkeypatch, _StepStore(session, LocalBackend(str(tmp_path))), [LOAN], [_final_response("Done.")],
+    )
+    assert ("start_case" in _offered(request)) is offered
     assert "read_file" in _offered(request)
 
 

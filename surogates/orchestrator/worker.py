@@ -372,9 +372,10 @@ def _filter_effective_tools(
 
     # ``start_case`` goes only to an agent Keel lets start a case of some type,
     # and only to a conversation's own session: a helper it started would
-    # start cases of its own, each session up to Keel's limit.  The same rule
+    # start cases of its own, each session up to Keel's limit.  Never to an
+    # evaluation row, which would start real cases for no one.  The same rule
     # the schemas keep (``AgentHarness._tool_filter_for_session_impl``).
-    if not intake or getattr(session, "parent_id", None) is not None:
+    if not intake or getattr(session, "parent_id", None) is not None or is_eval_session(session):
         result.discard("start_case")
 
     # Last: a Keel case's sessions are offered only the case's tools, and only
@@ -2020,10 +2021,10 @@ async def run_worker(settings: Settings) -> None:
                 if e.toolset == "user_reports"
             )
         # The case types Keel lets this agent start, which ``start_case``
-        # takes.  Never asked for a case's session, nor for a helper's: neither
-        # is offered the tool whatever Keel grants.
+        # takes.  Never asked for a case's session, a helper's, or an
+        # evaluation row's: none is offered the tool whatever Keel grants.
         intake = (
-            [] if is_case_session(session) or session.parent_id is not None
+            [] if is_case_session(session) or session.parent_id is not None or is_eval_session(session)
             else await intake_case_types(session.org_id, session.agent_id)
         )
         # Principal-aware tool-set filtering: ``create_artifact``

@@ -110,6 +110,7 @@ from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
+from surogates.channels.memory_boundary import is_eval_session
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.keel.steps import (
@@ -5328,8 +5329,6 @@ class AgentHarness(
         so a call to that tool parks the turn until the tool's own
         30-minute deadline and the caller reports a stalled agent.
         """
-        from surogates.channels.memory_boundary import is_eval_session
-
         if not is_eval_session(session):
             return tool_filter
         names = (
@@ -5611,10 +5610,11 @@ class AgentHarness(
             session,
         )
         # ``start_case`` goes only to an agent Keel lets start a case of some
-        # type, and only to a conversation's own session, never a helper's, as
-        # in ``worker._filter_effective_tools``.  ``getattr``: some test
-        # harnesses skip ``__init__``; absent means no grants.
-        if not getattr(self, "_intake", ()) or session.parent_id is not None:
+        # type, and only to a conversation's own session, never a helper's nor
+        # an evaluation row's, as in ``worker._filter_effective_tools``.
+        # ``getattr``: some test harnesses skip ``__init__``; absent means no
+        # grants.
+        if not getattr(self, "_intake", ()) or session.parent_id is not None or is_eval_session(session):
             tool_filter = (
                 set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
             )
