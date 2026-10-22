@@ -245,7 +245,7 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     expect(exits).toBe(2);
   });
 
-  it("lets one chat at a time work in a folder, and the next once the first is idle", async () => {
+  it("lets one chat at a time work in a folder, and the next once the first is idle [slow]", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const executor = toolHosts({ idleMs: 500 });
     const busy = new AbortController();
@@ -2257,7 +2257,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect(readFileSync(join(base, "data", "landings", keyOf(folder), "s1", "0"), "utf8")).toBe("the user's own\n");
   };
 
-  it("lands a thread's file in the folder through the landing's host, which holds the folder until the landing is forgotten and holds up no host on a copy", { timeout: 90_000 }, async () => {
+  it("lands a thread's file in the folder through the landing's host, which holds the folder until the landing is forgotten and holds up no host on a copy [slow]", { timeout: 90_000 }, async () => {
     const folder = changed();
     const executor = threads({ landWaitMs: 1_000 });
     const before = lies(folder);
@@ -2587,7 +2587,7 @@ describe("a thread's hosts in their sandbox", { timeout: 60_000 }, () => {
     expect([told.length, spawned.length]).toEqual([2, hosts]);
   });
 
-  it("reads the folder for a thread where a landing's host is on it only once that host holds it and its helper has put back what was cut short: one still waiting for the folder is no word that it has", { timeout: 90_000 }, async () => {
+  it("reads the folder for a thread where a landing's host is on it only once that host holds it and its helper has put back what was cut short: one still waiting for the folder is no word that it has [slow]", { timeout: 90_000 }, async () => {
     const { folder, before } = await killed();
     const { executor, told } = startedAgain({ idleMs: 30_000, landWaitMs: 3_000 });
     // A chat holds the folder, a search of its still running: the start's put-back waits in vain, and so does the landing

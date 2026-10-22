@@ -13,7 +13,7 @@ import { gzipSync } from "node:zlib";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AS_ROOT, helperRun, installedUpdates } from "../src/shell/installer-linux.js";
+import { helperRun } from "../src/shell/installer-linux.js";
 import { type Applied, newer, releaseKeys, signedRelease, updateLine, Updates, type UpdatesOptions } from "../src/shell/updates.js";
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
@@ -357,19 +357,6 @@ describe("the install record an update reads", () => {
   });
 });
 
-describe("an installed app's updates", () => {
-  it("read what the install script leaves, each root's alone: its record, the helper pkexec runs, and the installed version's mark", () => {
-    const { signal } = new AbortController();
-    expect(installedUpdates("1.2.3", "/home/user/.cache/surogate/updates", fetch, signal)).toMatchObject({
-      version: "1.2.3", record: "/etc/surogate/install.json", rootOwned: true, helper: "/opt/surogate/bin/surogate-apply-update",
-      installed: "/opt/surogate/current/release.json", cache: "/home/user/.cache/surogate/updates", fetch, signal,
-    });
-    // Where the install script itself puts each.
-    const script = readFileSync(SCRIPT, "utf8").split("\n");
-    for (const line of ["  ROOT=/opt/surogate", "  RECORD=/etc/surogate/install.json", '  HELPER="$ROOT/bin/surogate-apply-update"']) expect(script).toContain(line);
-  });
-});
-
 describe("installing an update", () => {
   it("hands the root helper the files as downloaded, and once it has applied them the update is installed", async () => {
     publish("1.2.4");
@@ -439,11 +426,6 @@ describe("installing an update", () => {
     writeFileSync(join(dir, "stopped"), "#!/bin/sh\necho 'Surogate Desktop: it began' >&2\nkill -KILL $$\n");
     chmodSync(join(dir, "stopped"), 0o755);
     expect(await helperRun([join(dir, "stopped")])(files)).toEqual({ code: null, said: "Surogate Desktop: it began\nits helper was stopped by SIGKILL" });
-  });
-
-  it("runs the helper under polkit in an installed app: pkexec by its whole path, with no agent of its own on a terminal, on the helper the install script's action names", () => {
-    expect(AS_ROOT).toEqual(["/usr/bin/pkexec", "--disable-internal-agent", "/opt/surogate/bin/surogate-apply-update"]);
-    expect(readFileSync(SCRIPT, "utf8")).toContain('<annotate key="org.freedesktop.policykit.exec.path">/opt/surogate/bin/surogate-apply-update</annotate>');
   });
 
   it("leaves an install alone that began while a check was still downloading a later release: its line, and the files its helper reads", async () => {

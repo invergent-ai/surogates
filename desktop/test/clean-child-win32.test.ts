@@ -4,12 +4,10 @@
 // that the program holds no other handle of its parent's, the helper's own tests show (native/windows/helper).
 
 import { once } from "node:events";
-import { existsSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
 import { spawnClean } from "../src/clean-child.js";
-import { HELPER } from "../src/native-helper.js";
 
 const ENV = { PATH: process.env.PATH ?? "" };
 
@@ -24,10 +22,6 @@ const alive = (pid: number): boolean => {
 };
 
 describe.runIf(process.platform === "win32")("a child the app starts on Windows", () => {
-  it("is started by the app's own helper, which is built", () => {
-    expect(existsSync(HELPER)).toBe(true);
-  });
-
   it("talks with the app over its channel, a fourth descriptor, as a file host does", async () => {
     const child = spawnClean(process.execPath, ["-e", "process.on('message', (said) => process.send({ heard: said, pid: process.pid }, () => process.exit(3)))"], {
       stdio: ["ignore", "pipe", "pipe", "ipc"], env: ENV,

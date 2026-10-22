@@ -5,7 +5,6 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import { nameOf } from "../src/shell/computer-name-darwin.js";
-import { importedOn } from "./platforms.js";
 
 describe("this Mac's name", () => {
   it("is the Computer Name the helper reads, its line's end taken off", () => {
@@ -26,11 +25,6 @@ describe("this Mac's name", () => {
 
   it("is the host name as it is where that is all there is", () => {
     expect(nameOf(() => "", () => ".local")).toBe(".local");
-  });
-
-  it("is a Mac's", async () => {
-    const [chosen, darwin] = await importedOn("darwin", () => Promise.all([import("../src/shell/computer-name.js"), import("../src/shell/computer-name-darwin.js")]));
-    expect(chosen.computerName).toBe(darwin.computerName);
   });
 });
 

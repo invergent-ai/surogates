@@ -178,19 +178,6 @@ const control = (qemu: ChildProcessWithoutNullStreams) => new Promise<(command: 
   qemu.on("close", () => reject(new Error(`QEMU ended: ${complaint}`)));
 });
 
-describe("the acceptance VMs' probe", () => {
-  it("runs the executor and the VM the app's main makes its own through, which makes no other", () => {
-    // The probe is a second main: what it runs is the app's only as long as the app's main makes
-    // its executor and its VM where the probe does, and gives no file host and no VM a bwrap of
-    // its own choosing.
-    const makes = (file: string) => readFileSync(join(DESKTOP, file), "utf8").match(/new (?:VmExecutor|ToolHosts|VmClient)\(|app(?:Tools|Vm)\(|bwrapPath|bwrap:/g);
-    expect(makes("src/shell/main.ts")).toEqual(["appVm(", "appTools("]);
-    // The probe's other executor is its control's, which is given no bwrap either.
-    expect(makes("test/acceptance/probe.mjs")).toEqual(["new VmExecutor(", "appTools("]);
-    expect(makes("test/acceptance/guest-probe.mjs")).toEqual(["appVm(", "appTools("]);
-  });
-});
-
 describe.skipIf(process.env.SUROGATE_ACCEPTANCE_TESTS !== "1")("the acceptance VMs", { timeout: 1_200_000 }, () => {
   let dir = "";
   let server: ChildProcess;

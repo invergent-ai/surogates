@@ -583,7 +583,8 @@ describe("a tool host's own sandbox", { timeout: 30_000 }, () => {
   it("answers a second host for the same folder, however it is spelled, that another chat has it", async () => {
     await ready(host());
     symlinkSync(folder, join(base, "link"));
-    const second = host({ folder: join(base, "link"), tmp: join(base, "data", "tmp", "other") });
+    // Told to wait for the folder a moment alone: how long a host waits is the folder lock's own test.
+    const second = host({ folder: join(base, "link"), tmp: join(base, "data", "tmp", "other"), lockWaitMs: 300 });
     const said = await second.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 20_000);
     expect(said).toEqual({ type: "failed", message: expect.stringMatching(/another chat on this computer is working in this folder/), busy: true });
     expect(await second.exited).toBe(1);
@@ -1418,7 +1419,7 @@ describe("what a landing cut short left, when the next landing's host starts", {
     expect(await harness.op("2", "land", { action: "recover" })).toEqual({ ok: { restored: ["a.txt"], beside: [], lost: [], unread: [] } });
   });
 
-  it("is put back however long that takes the folder's disk, in the step, which no bound of a start cuts: a landing's helper not ready in the time a chat's has is not waited for", async () => {
+  it("is put back however long that takes the folder's disk, in the step, which no bound of a start cuts: a landing's helper not ready in the time a chat's has is not waited for [slow]", async () => {
     const ino = await cut();
     // Both timers start as the helper is started, in the host itself: the helper's first word comes after a chat's bound, whatever the load.
     const late = { HELPER_LATE_MS: String(READY_MS + 2_500) };
@@ -1575,7 +1576,7 @@ describe("the folder's lock, between a thread's hosts and a chat's", { timeout: 
     await ready(onCopy({ lockWaitMs: 0 }));
   });
 
-  it("makes a landing wait for a chat that holds the folder, for as long as it is told, and then says the folder is busy: nothing began, and nothing is left", async () => {
+  it("makes a landing wait for a chat that holds the folder, for as long as it is told, and then says the folder is busy: nothing began, and nothing is left [slow]", async () => {
     const chat = chatOn(reports, "chat");
     await ready(chat);
     const before = seen(base, hostsOwn());

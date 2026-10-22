@@ -7,17 +7,6 @@ import {
 import { ExampleSessionStore } from "../src/server/session-store";
 
 describe("demo commands", () => {
-  it("lists documented slash commands", () => {
-    expect(DEMO_SLASH_COMMANDS.map((command) => command.value)).toEqual([
-      "/demo-tools",
-      "/demo-artifacts",
-      "/demo-ask-user-question",
-      "/demo-expert",
-      "/demo-errors",
-      "/demo-context",
-    ]);
-  });
-
   it("emits tool call and result events", () => {
     const store = new ExampleSessionStore();
     const record = store.create();

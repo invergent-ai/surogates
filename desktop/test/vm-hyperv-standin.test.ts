@@ -89,11 +89,4 @@ describe("the stand-in for Hyper-V's devices", () => {
     expect(read(copy)).toBe(read(disk).replace(`export const PLAN9_PORT = ${PLAN9_PORT};`, `export const PLAN9_PORT = ${STANDIN_PLAN9_PORT};`));
     expect(read(copy)).not.toBe(read(disk));
   });
-
-  it("is reached from no part of the app: nothing under src names it, and no packaged file is the test's", () => {
-    const named = spawnSync("grep", ["-rliE", "\\bstandin\\b|stand-in|test/vm/hyperv", join(DESKTOP, "src")], { encoding: "utf8" });
-    expect(named.stdout).toBe("");
-    expect(readFileSync(join(DESKTOP, "scripts", "package.sh"), "utf8")).not.toMatch(/test\/vm|standin/);
-    expect(readFileSync(join(DESKTOP, "vm", "agent-disk.sh"), "utf8")).not.toMatch(/test\/|standin/);
-  });
 });

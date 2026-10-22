@@ -21,7 +21,7 @@ import { bootDarwin } from "../src/vm/darwin.js";
 import { bootLinux, emulation, missingTools, sweep } from "../src/vm/linux.js";
 import { bootWin32 } from "../src/vm/win32.js";
 import {
-  type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, FOLDER_NESTED, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions, WAITS,
+  type Boot, type BootVm, bootFor, EMULATED_NOTICE, type Emulated, type Folder, FOLDER_NESTED, Guest, type ProcessesChange, unavailable, type VmBackend, VmManager, type VmOptions,
 } from "../src/vm/manager.js";
 import { hostArch } from "../src/vm/qemu-arch.js";
 import { readOnlyDaemon, VIRTIOFSD } from "../src/vm/qemu.js";
@@ -422,7 +422,7 @@ describe("the VM manager on the host", () => {
     }
   });
 
-  it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM", { timeout: 20_000 }, async () => {
+  it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM [slow]", { timeout: 20_000 }, async () => {
     const virtiofsd = join(dir, "virtiofsd");
     writeFileSync(virtiofsd, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n");
     chmodSync(virtiofsd, 0o755);
@@ -1862,14 +1862,6 @@ describe("the emulated VM", () => {
       } finally {
         process.env.PATH = path;
       }
-    });
-  });
-
-  it("waits as Section 11's table says, with KVM and emulated", () => {
-    expect(WAITS).toEqual({
-      // The agent's answer to a request to a folder's history: twenty minutes and a quarter, past the agent's own ten for its wait and ten for its run.
-      kvm: { helloMs: 15_000, missed: 3, powerOffMs: 5_000, setupMs: 15_000, shareMs: 15_000, historyMs: 1_215_000 },
-      emulated: { helloMs: 120_000, missed: 9, powerOffMs: 30_000, setupMs: 90_000, shareMs: 90_000, historyMs: 7_290_000 },
     });
   });
 

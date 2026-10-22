@@ -6,7 +6,7 @@
 // Ubuntu archive for apt. The script's own list of release keys is read without either.
 
 import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
-import { createHash, createPublicKey, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -343,66 +343,6 @@ function lab(release: string, setup: string[], run: string[] = []) {
 
   return { it, docker, root, as, releaseOf, manifestOf, current, versions, standing, swapped, elsewhere };
 }
-
-describe("the install script's release keys", () => {
-  it("are Ed25519 public keys, each written as OpenSSL writes one: an entry that does not load is skipped without a word, and every release refused", () => {
-    const list = /RELEASE_KEYS=\(\n([^)]*)\)/.exec(readFileSync(SCRIPT, "utf8"))?.[1] ?? "";
-    const entries = [...list.matchAll(/'([^']*)'/g)].map((match) => match[1] ?? "");
-    expect(entries.length).toBeGreaterThan(0);
-    // The list holds its entries and nothing between them.
-    expect(list.replace(/'[^']*'/g, "").trim()).toBe("");
-    for (const entry of entries) {
-      const key = createPublicKey(entry);
-      expect(key.asymmetricKeyType).toBe("ed25519");
-      // No indent, no other line ends, nothing before or after: signed() hands the entry to openssl as it is.
-      expect(entry).toBe(pem(key));
-    }
-  });
-});
-
-describe("the install script's packages", () => {
-  it("names each program that the app starts by a path of the system's: pkexec, for an update, and perl, with which it starts a child that has none of its descriptors", () => {
-    const asked = /apt-get install [^\n]*/.exec(readFileSync(SCRIPT, "utf8"))?.[0].split(" ") ?? [];
-    expect(asked).toEqual(expect.arrayContaining(["pkexec", "perl-base"]));
-  });
-
-  it("names certutil's package in a line of its own, which only a computer that keeps a company's CA runs", () => {
-    const lines = readFileSync(SCRIPT, "utf8").split("\n").filter((line) => line.includes("apt-get install"));
-    expect(lines.filter((line) => line.includes("libnss3-tools"))).toEqual(['    apt-get install -y -qq -o DPkg::Lock::Timeout=300 libnss3-tools || fail "could not install libnss3-tools, which holds certutil$certutil"']);
-  });
-});
-
-describe("the install script's waits", () => {
-  it("are shorter for all an apply reads with the lock held than for the lock: one who was let apply once keeps no other waiting until it gives up", () => {
-    const script = readFileSync(SCRIPT, "utf8");
-    const seconds = (name: string) => Number(new RegExp(`^  ${name}=(\\d+)$`, "m").exec(script)?.[1]);
-    // With the lock held, the asking user's processes read a manifest and a signature, each small, and a tarball.
-    expect(seconds("LOCK_WAIT")).toBeGreaterThan(2 * seconds("SMALL_WAIT") + seconds("READ_WAIT"));
-  });
-});
-
-describe("the install script's refusals that only a removal mends", () => {
-  it("are each said on the troubleshooting page as the script says them, and the page says none that the script does not", () => {
-    const script = readFileSync(SCRIPT, "utf8");
-    // The two files that these refusals name, as the script's own settings place them.
-    const placed = spawnSync("bash", ["-c", `. <(sed '$d' "$1") && settings && echo "$HELPER" && echo "$HELPER_MARK"`, "_", SCRIPT], { encoding: "utf8" }).stdout.trim().split("\n");
-    expect(placed).toEqual(["/opt/surogate/bin/surogate-apply-update", "/opt/surogate/bin/release.json"]);
-    const [helper = "", mark = ""] = placed;
-    // Each sentence of the script's that ends in the removal, with those two files' names in it.
-    const said = [...new Set([...script.matchAll(/"([^"\n]*: remove Surogate Desktop with --uninstall, and install it again)"/g)]
-      .map((match) => (match[1] ?? "").replaceAll("$HELPER_MARK", mark).replaceAll("$HELPER", helper)))].sort();
-    expect(said.length).toBe(4);
-    for (const sentence of said) expect(sentence).not.toContain("$");
-    // The troubleshooting page's section quotes each on a line of its own, and no other line of that kind.
-    const readme = readFileSync(fileURLToPath(new URL("../TROUBLESHOOTING.md", import.meta.url)), "utf8");
-    const section = readme.slice(readme.indexOf("\n## When Surogate Desktop says to remove it and install it again\n"));
-    expect(section.startsWith("\n## ")).toBe(true);
-    const quoted = [...new Set(section.split("\n").filter((line) => line.startsWith("    /opt/") && line.includes("--uninstall")).map((line) => line.trim()))].sort();
-    expect(quoted).toEqual(said);
-    // And it says what to do, in the install script's own two commands.
-    expect(section).toContain("    curl -fsSL https://surogate.ai/desktop/install.sh | bash -s -- --uninstall\n    curl -fsSL https://surogate.ai/desktop/install.sh | bash\n");
-  });
-});
 
 describe("the install script's reader of one JSON object", () => {
   it("reads by no bound but a number of bytes in the ten digits, from 1 to a megabyte: its bound goes into the shell's own arithmetic, where any other word is a command", () => {

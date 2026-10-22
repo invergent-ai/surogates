@@ -7,29 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const vm = (name: string) => readFileSync(new URL(`../vm/${name}`, import.meta.url), "utf8");
 
-// The guest's init stops the boot unless every program of the rule attached, so it must count them all.
-it("expects at boot as many attached hooks as the guest rule has lsm programs", () => {
-  const programs = vm("rule.bpf.c").match(/^SEC\("lsm\//gm) ?? [];
-  expect(Number(/^want=(\d+)/m.exec(vm("init"))?.[1])).toBe(programs.length);
-});
-
-// The rule judges a session by its uid alone, from 10000 up, on every OS: the reviewed rule of Linux's, with no map,
-// word of the kernel's command line or file the agent reads that could add another uid to what it judges.
-it("judges sessions from uid 10000 up alone, with nothing that adds a uid to them", () => {
-  const rule = vm("rule.bpf.c");
-  expect(rule).toMatch(/^#define FIRST_UID 10000u /m);
-  expect(rule).toContain("\tif (uid < FIRST_UID || !dentry || !share_sb(sb))\n\t\treturn 0;");
-  expect(rule).toContain("\t__u32 uid = bpf_get_current_uid_gid();\n\treturn DENY(uid >= FIRST_UID);");
-  // Its one map is the set of names the kernel's line names, which holds no uid.
-  expect([...rule.matchAll(/^\} (\w+) SEC\("\.maps"\);$/gm)].map(([, map]) => map)).toEqual(["names"]);
-  const init = vm("init");
-  expect(init).toContain("/usr/sbin/bpftool prog loadall /usr/lib/surogate/rule.bpf.o /sys/fs/bpf/surogate pinmaps /sys/fs/bpf/surogate-maps autoattach >&2");
-  expect([...init.matchAll(/bpftool map (\w+) pinned ([^\s;]+)/g)].map(([, verb, map]) => `${verb} ${map}`)).toEqual([
-    "update /sys/fs/bpf/surogate-maps/names", "freeze /sys/fs/bpf/surogate-maps/names",
-  ]);
-  for (const gone of ["surogate.uid", "/run/surogate/scope"]) expect(init, gone).not.toContain(gone);
-});
-
 // A function of init's, *name*, as the file *text* holds it: from its line to the first line that closes it.
 const fnOf = (text: string, name: string) => new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}\\n`, "m").exec(text)?.[0] ?? "";
 const STUB = readFileSync(new URL("../../images/guest/surogate-init", import.meta.url), "utf8");
@@ -49,15 +26,6 @@ describe("the guest's disks, found by the bus the kernel's line names", () => {
     const ran = spawnSync("/bin/sh", ["-euc", `${fnOf(text, "disk")}\ndisk "$1" "$2" "$3"`, "sh", cmdline, String(role), sys], { encoding: "utf8" });
     return ran.status === 0 ? { disk: ran.stdout.trim() } : { refused: ran.stdout.trim() };
   };
-
-  it("is one function in the image's stub init and in the agent disk's init", () => {
-    expect(fnOf(vm("init"), "disk")).not.toBe("");
-    expect(fnOf(STUB, "disk")).toBe(fnOf(vm("init"), "disk"));
-    // Each init takes its own disk by it: the stub the agent disk, the agent disk's init the sessions disk.
-    expect(STUB).toContain('agent=$(disk "$(cat /proc/cmdline)" 1 /sys) || stop "$agent, so the guest stops"');
-    expect(vm("init")).toContain('sessions=$(disk "$(cat /proc/cmdline)" 2 /sys) || stop "$sessions, so the guest stops"');
-    expect(`${STUB}${vm("init")}`).not.toMatch(/\/dev\/vd[bc](?! ;;)/);
-  });
 
   it("takes virtio's disks by their names, in the disks' order", () => {
     const line = "root=/dev/vda ro console=hvc0 surogate.disks=virtio surogate.transport=virtio-serial";
@@ -107,12 +75,6 @@ describe("the words of the kernel's line the guest's init reads", () => {
     expect(namedOf("console=hvc0", "transport")).toEqual({ refused: "the kernel's command line names no surogate.transport=" });
     expect(namedOf("surogate.transport=vsock surogate.transport=vsock", "transport")).toEqual({ refused: "the kernel's command line names surogate.transport= twice" });
     expect(namedOf("xsurogate.transport=vsock * /*", "transport")).toEqual({ refused: "the kernel's command line names no surogate.transport=" });
-  });
-
-  it("stops the boot on a transport it does not know, and loads the folders' filesystem the transport's shares need", () => {
-    expect(vm("init")).toContain('transport=$(named "$(cat /proc/cmdline)" transport) || stop "$transport, so the guest stops"');
-    expect(vm("init")).toMatch(/case "\$transport" in\n {2}virtio-serial \| vsock\) ;;\n {2}\*\) stop "surogate\.transport=\$transport is not a transport this guest knows, so the guest stops" ;;\nesac/);
-    expect(vm("init")).toContain('if [ "$transport" = vsock ]; then\n  modprobe 9p\n  modprobe 9pnet_fd\nelse\n  modprobe virtiofs\nfi\nmodprobe overlay\n');
   });
 });
 

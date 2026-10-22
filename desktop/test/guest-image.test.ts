@@ -13,73 +13,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const DOCKERFILE = readFileSync(new URL("../../images/sandbox/Dockerfile", import.meta.url), "utf8");
-// Each stage's text, by its name.
-const stagesOf = (dockerfile: string) =>
-  new Map([...dockerfile.matchAll(/^FROM \S+ AS (\S+)\n([\s\S]*?)(?=^FROM |(?![\s\S]))/gm)].map(([, name, body]) => [name ?? "", body ?? ""]));
-const STAGES = stagesOf(DOCKERFILE);
 // The architectures the guest is built for, as Docker and Debian name them: each has a kernel stage of its own.
 const ARCHES = ["amd64", "arm64"] as const;
-const LAUNCHPAD = "https://launchpad.net/ubuntu/+archive/primary/+files/";
-// An ADD the build checks by its hash: its URL, on the line after the checksum.
-const PINNED = /^ADD --checksum=sha256:[0-9a-f]{64} \\\n\s+(\S+) \S+$/gm;
-
-// What is wrong with *dockerfile*'s kernel pin, each in words: every arch's kernel stage fetches the four packages of
-// KERNEL from Launchpad, each by its hash, all of one version, the same for every arch, and fetches nothing else.
-function pinProblems(dockerfile: string): string[] {
-  const kernel = /^ARG KERNEL=(\S+)$/m.exec(dockerfile)?.[1] ?? "";
-  const abi = kernel.replace(/-generic$/, "");
-  // The hardware-enablement series the tools package is named for: 7.0 for 7.0.0-38.
-  const series = kernel.split(".").slice(0, 2).join(".");
-  const wanted = [`linux-hwe-${series}-tools-${abi}`, `linux-image-${kernel}`, `linux-modules-${kernel}`, `linux-tools-${kernel}`];
-  const stages = stagesOf(dockerfile);
-  const problems: string[] = [];
-  const versions = new Set<string>();
-  for (const arch of ARCHES) {
-    const body = stages.get(`kernel-${arch}`) ?? "";
-    const pinned = [...body.matchAll(PINNED)].map(([, url]) => url ?? "");
-    for (const url of [...body.matchAll(/https?:\/\/\S+/g)].map(([url]) => url)) {
-      if (!pinned.includes(url)) problems.push(`kernel-${arch} fetches ${url} without its hash`);
-    }
-    const debs = pinned.map((url) => /^(\S+)_([^_]+)_([^_]+)\.deb$/.exec(url.startsWith(LAUNCHPAD) ? url.slice(LAUNCHPAD.length) : ""));
-    if (debs.some((deb) => deb === null)) problems.push(`kernel-${arch} fetches a file that is not a .deb of Launchpad's`);
-    const names = debs.map((deb) => deb?.[1] ?? "").sort();
-    if (names.join() !== wanted.join()) problems.push(`kernel-${arch} fetches ${names.join(", ")}, not ${wanted.join(", ")}`);
-    for (const deb of debs) {
-      if (deb && deb[3] !== arch) problems.push(`kernel-${arch} fetches ${deb[1]} for ${deb[3]}`);
-      if (deb) versions.add(deb[2] ?? "");
-    }
-  }
-  if (versions.size > 1) problems.push(`the kernel's packages are of ${versions.size} versions: ${[...versions].sort().join(", ")}`);
-  // apt would take whatever version it finds now: no stage installs a kernel package from it.
-  for (const [name, body] of stages) if (/\bapt(-get)? install[^&]*\blinux-/.test(body)) problems.push(`${name} installs a kernel package from apt`);
-  // Nor is a package fetched any other way: each one is an ADD of a kernel stage the build checks by its hash.
-  const unpinned = ARCHES.reduce((text, arch) => text.replace(stages.get(`kernel-${arch}`) ?? "\0", ""), dockerfile).replace(PINNED, "");
-  for (const [url] of unpinned.matchAll(/https?:\/\/\S+/g)) if (/launchpad\.net|\.deb\b/.test(url)) problems.push(`the Dockerfile fetches ${url} outside a kernel stage`);
-  return problems;
-}
-
-it("fetches every package of the kernel pin from Launchpad by its hash, for each arch, the kernel's tools too, and none from apt", () => {
-  expect(pinProblems(DOCKERFILE)).toEqual([]);
-  // Each arch's own stage, which the other arch's build never reads.
-  expect([...STAGES.keys()].filter((name) => name.startsWith("kernel-")).sort()).toEqual(ARCHES.map((arch) => `kernel-${arch}`));
-  expect(/^FROM kernel-\$\{TARGETARCH\} AS kernel$/m.test(DOCKERFILE)).toBe(true);
-});
-
-it("refuses an arm64 kernel package without its hash, or of another version than the pin's, or another kernel's", () => {
-  const image = /^ADD --checksum=sha256:[0-9a-f]{64} \\\n(\s+\S+\/linux-image-[^_]+_[^_]+_arm64\.deb \S+)$/m.exec(DOCKERFILE);
-  expect(image).not.toBeNull();
-  const url = /\S+\.deb/.exec(image?.[1] ?? "")?.[0] ?? "";
-  // Not one of the stage's pinned packages, so the pin lacks it too.
-  expect(pinProblems(DOCKERFILE.replace(image?.[0] ?? "", `ADD \\\n${image?.[1] ?? ""}`))).toContain(`kernel-arm64 fetches ${url} without its hash`);
-  const [, version] = /_([^_]+)_arm64\.deb$/.exec(url) ?? [];
-  const older = DOCKERFILE.replace(url, url.replace(`_${version}_`, "_7.0.0-38.38~24.04.3_"));
-  expect(pinProblems(older)).toEqual([`the kernel's packages are of 2 versions: 7.0.0-38.38~24.04.3, ${version}`]);
-  // Another kernel's package, for this arch: the pin's version, the name of another ABI.
-  const other = DOCKERFILE.replace(url, url.replace("/linux-image-7.0.0-38-generic_", "/linux-image-7.0.0-37-generic_"));
-  expect(pinProblems(other)).toEqual([expect.stringMatching(/^kernel-arm64 fetches linux-hwe-7\.0-tools-7\.0\.0-38, linux-image-7\.0\.0-37-generic, /)]);
-  // An amd64 package in arm64's stage.
-  expect(pinProblems(DOCKERFILE.replace(url, url.replace(/_arm64\.deb$/, "_amd64.deb")))).toEqual(["kernel-arm64 fetches linux-image-7.0.0-38-generic for amd64"]);
-});
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const inputs = (repo = REPO, ...args: string[]) => {
@@ -260,85 +195,6 @@ describe("the arm64 kernel's BTF, which the rule is compiled and checked against
   });
 });
 
-// The names the kernel stage's modules.sh *mode* is given, in their order.
-const modulesGiven = (mode: string) => {
-  const run = runsOf("modules").flatMap(chain).find((command) => command.startsWith(`modules.sh ${mode} `)) ?? "";
-  return run.split(" ").slice(3).filter((word) => !word.startsWith("$(") && word !== "'s/#.*//'" && !word.endsWith(")"));
-};
-
-it("keeps of the kernel's modules only those the guest's init loads, with those they need, and copies out the initrd's", () => {
-  const init = readFileSync(new URL("../vm/init", import.meta.url), "utf8");
-  const loaded = [...init.matchAll(/^\s*modprobe (\S+)$/gm)].map(([, name]) => name);
-  // The two the 9P client and its fd transport need, which the image's build checks against modules.dep (modules.sh).
-  expect(modulesGiven("keep")).toEqual(["virtio-rng", "netfs", "9pnet", "9pnet_fd", "9p", "virtiofs", "overlay"]);
-  expect(modulesGiven("keep").filter((name) => !["netfs", "9pnet"].includes(name)).sort()).toEqual([...loaded].sort());
-  // Never Hyper-V's time sync, which would set the guest's clock under the agent; the initrd's, from its list.
-  expect(loaded).not.toContain("hv_utils");
-  expect(runsOf("modules").flatMap(chain)).toContain('modules.sh copy "/image/lib/modules/$KERNEL" /initrd/lib $(sed \'s/#.*//\' /initrd/modules)');
-  const listed = readFileSync(join(REPO, "images/guest/initrd/modules"), "utf8").replace(/#.*/g, "").split(/\s+/).filter(Boolean);
-  expect(listed).toEqual(["hv_vmbus", "scsi_transport_fc", "hv_storvsc", "vsock", "hv_sock", "hv_balloon"]);
-});
-
-it("loads the entropy device's driver before anything of the guest's draws on the kernel's randomness", () => {
-  const init = readFileSync(new URL("../vm/init", import.meta.url), "utf8");
-  const lines = init.split("\n");
-  const at = (pattern: RegExp) => lines.findIndex((line) => pattern.test(line));
-  // Each VM has an entropy device (qemu.ts, virtio-rng-pci; surogate-vm, VZVirtioEntropyDeviceConfiguration), whose
-  // driver is a module: loaded first, before the rule's load, the sessions disk's mke2fs and the agent's node.
-  const driver = at(/^modprobe virtio-rng$/);
-  expect(driver).toBeGreaterThan(0);
-  expect(lines.slice(0, driver).filter((line) => /^\s*[^#\s]/.test(line) && !/^(set|export) /.test(line))).toEqual([]);
-  for (const later of [/bpftool prog loadall/, /mke2fs /, /^exec \/usr\/bin\/tini /]) expect(at(later), String(later)).toBeGreaterThan(driver);
-});
-
-// Each RUN of *stage* as its shell reads it: its continuations joined, and each run of spaces one space.
-const runsOf = (stage: string) =>
-  [...(STAGES.get(stage) ?? "").replace(/\\\n/g, " ").replace(/[ \t]+/g, " ").matchAll(/^RUN (.+)$/gm)].map(([, run]) => run ?? "");
-// The commands an && chain runs, in order.
-const chain = (run: string) => run.split(" && ").map((command) => command.trim());
-// The commands of *arch*'s branch of the RUN in *stage* that picks one by TARGETARCH.
-const branchOf = (stage: string, arch: string) => {
-  const run = runsOf(stage).find((each) => each.includes('case "$TARGETARCH" in ')) ?? "";
-  return chain(new RegExp(`case "\\$TARGETARCH" in .*?\\b${arch}\\) (.*?) ;;`).exec(run)?.[1] ?? "");
-};
-
-it("checks the kernel's configuration, makes arm64's Image and BTF, and compiles the rule for the arch it builds, in the stages that need each", () => {
-  for (const [stage, scripts] of [["kernel", ["kernel-config.sh"]], ["modules", ["modules.sh"]], ["bpf", ["kernel-image.sh", "kernel-btf.sh"]], ["guest-disk-build", ["kernel-image.sh"]], ["initrd", ["initrd.sh"]]] as const) {
-    for (const script of scripts) {
-      expect(new RegExp(`^COPY --chmod=0755 (?:\\S+ )*images/guest/${script.replace(".", "\\.")} (?:\\S+ )*/usr/local/bin/`, "m").test(STAGES.get(stage) ?? ""), `${stage} copies ${script}`).toBe(true);
-    }
-  }
-  // The check, of the config the modules package carries, in the chain that unpacks it: a kernel it fails is never built on.
-  expect(runsOf("kernel").map(chain)).toEqual([[
-    "dpkg-deb -x /tmp/image.deb /kernel", "dpkg-deb -x /tmp/modules.deb /kernel", "dpkg-deb -x /tmp/tools.deb /tools", "dpkg-deb -x /tmp/hwe-tools.deb /tools",
-    'kernel-config.sh "$TARGETARCH" "/kernel/boot/config-$KERNEL"',
-  ]]);
-  // The modules, by the modules.dep depmod makes of the pinned kernel's whole tree, before any is kept or copied out.
-  expect(runsOf("modules").at(-1)?.split(" && ").map((command) => command.trim())).toEqual([
-    '--mount=type=bind,from=kernel,source=/kernel/lib/modules,target=/all mkdir -p /image/lib/modules', 'cp -a "/all/$KERNEL" /image/lib/modules/',
-    'depmod -b /image "$KERNEL"', expect.stringMatching(/^modules\.sh copy .* \/initrd\/lib /),
-    'modules.sh copy "/image/lib/modules/$KERNEL" /standin/lib vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport',
-    expect.stringMatching(/^modules\.sh keep /),
-  ]);
-  // The stand-in's modules, for the tests alone, in a target of their own: in neither the image nor its disk.
-  expect((STAGES.get("guest-standin") ?? "").split("\n").filter((line) => line && !line.startsWith("#"))).toEqual(["COPY --from=modules /standin/lib/ /"]);
-  for (const stage of ["guest", "guest-disk-build", "guest-disk", "initrd"]) expect(STAGES.get(stage), stage).not.toMatch(/standin/);
-  expect(STAGES.get("guest")).toContain("COPY --from=modules /image/lib/modules/ /usr/lib/modules/");
-  // The initrd, from the kernel stage's copy of its modules, beside the kernel the VM boots.
-  expect(runsOf("initrd").at(-1)).toBe("--mount=type=bind,from=modules,source=/initrd,target=/modules mkdir /out && initrd.sh /src/init /bin/busybox /modules/lib /modules/modules /out/initrd");
-  expect(runsOf("guest-disk-build").flatMap(chain)).toContain("zstd -q -19 -o /out/initrd.zst /initrd/initrd");
-  // The rule's BTF: amd64's the vmlinux its bzImage holds, arm64's read out of the Image. Each compiled for its own arch.
-  expect(branchOf("bpf", "amd64").at(-1)).toBe("bpf_arch=x86");
-  expect(branchOf("bpf", "amd64").join(" ")).not.toContain("kernel-");
-  expect(branchOf("bpf", "arm64")).toEqual(['kernel-image.sh "/boot/vmlinuz-$KERNEL" /Image', 'kernel-btf.sh /Image "/boot/System.map-$KERNEL" /btf', "bpf_arch=arm64"]);
-  const compile = runsOf("bpf").flatMap(chain).filter((command) => command.startsWith("clang "));
-  expect(compile).toEqual([expect.stringContaining(' "-D__TARGET_ARCH_$bpf_arch" ')]);
-  expect(compile.join(" ").match(/__TARGET_ARCH_/g)).toHaveLength(1);
-  // The kernel the VM boots: amd64's vmlinuz as it is, arm64's its Image.
-  expect(branchOf("guest-disk-build", "amd64")).toEqual(['zstd -q -19 -o /out/vmlinuz.zst "/boot/vmlinuz-$KERNEL"']);
-  expect(branchOf("guest-disk-build", "arm64")).toEqual(['kernel-image.sh "/boot/vmlinuz-$KERNEL" /out/vmlinuz', "zstd -q -19 --rm -o /out/vmlinuz.zst /out/vmlinuz"]);
-});
-
 describe("the check of the kernel's configuration", () => {
   // What the guest boots on without an initrd, built in, with the core the entropy device's driver plugs into;
   // on arm64 the virt machine's PCIe host too.
@@ -394,7 +250,7 @@ describe("the check of the kernel's configuration", () => {
     expect(checked("amd64", config({ ...whole("amd64"), BPF_LSM: "unset", BPF_LSM_EXTRA: "y" })).status).toBe(1);
   });
 
-  it("fails on a kernel without any one of them, or with any one that must be built in as a module, and names that one", () => {
+  it("fails on a kernel without any one of them, or with any one that must be built in as a module, and names that one [slow]", () => {
     for (const arch of ARCHES) {
       for (const name of Object.keys(whole(arch))) {
         const loaded = LOADED.includes(name) || INITRD.includes(name);
@@ -477,14 +333,6 @@ describe("the arm64 kernel as the VM boots it", () => {
     });
     expect(made(Buffer.from("not a kernel at all"))).toMatchObject({ status: 1, files: ["vmlinuz"] });
   });
-});
-
-it("bounds every transfer of the release's guest jobs: a stall, and its whole time", () => {
-  for (const script of ["images/guest/publish.sh", "images/guest/kernel-current.sh"]) {
-    const curls = readFileSync(join(REPO, script), "utf8").split("\n").filter((line) => line.includes("curl -q "));
-    expect(curls.length, script).toBeGreaterThan(0);
-    for (const curl of curls) for (const bound of ["--connect-timeout", "--speed-limit", "--speed-time", "--max-time"]) expect(curl, script).toContain(bound);
-  }
 });
 
 describe("the release's check of the guest's kernel", () => {

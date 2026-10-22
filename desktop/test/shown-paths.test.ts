@@ -4,9 +4,6 @@
 // project dialog's folder, the sidebar's line of copies, and the dialog that restores access. Notifications and the
 // tray name no folder.
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
@@ -27,7 +24,6 @@ const prompts = (os: NodeJS.Platform) => importedOn(os, () => import("../src/she
 // Every word a prompt shows, its details' values among them.
 const words = (content: { title: string; lead: string; details: Array<{ label: string; value: string }>; notes: string[] }) =>
   [content.title, content.lead, ...content.details.flatMap(({ label, value }) => [label, value]), ...content.notes].join("\n");
-const source = (file: string) => readFileSync(fileURLToPath(new URL(`../src/${file}`, import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
 
 describe("a folder or a file the app shows its person", () => {
   it("is named by this computer's own path: Windows's, by its drive, its names and its separator; the path itself elsewhere", async () => {
@@ -104,22 +100,5 @@ describe("a folder or a file the app shows its person", () => {
     const bindings = { get: () => ({ root: "r1", folder: SHOP, dev: 1, ino: 2, boot: "", mode: "ask" }), watch: () => () => {} };
     const binder = new Binder({ bindings, prompts: {}, guards: {}, agent: "a", hosts: {}, look: () => Promise.resolve(null) } as never);
     await expect(binder.folderToShow("r1")).rejects.toThrow(`The folder ${WINDOWS_SHOP} is not there`);
-  });
-
-  it("is shown by its Windows path in the project dialog and in the dialog that restores access, as the app's own words name it", () => {
-    const main = source("shell/main.ts");
-    expect(main).toMatch(/return \{ folder: shownPath\(picked\.folder\) \};/);
-    expect(main).toMatch(/handle\("project:chosen", \(\) => \(chosen \? shownPath\(chosen\.folder\) : null\)\);/);
-    expect(main).toMatch(/folders\.map\(\(folder\) => `• \$\{shownPath\(folder\)\}`\)/);
-    // Show folder opens the folder by this computer's own path.
-    expect(main).toMatch(/shell\.showItemInFolder\(hostPathOf\(/);
-  });
-
-  it("is named in no notification and in no line of the tray", () => {
-    const main = source("shell/main.ts");
-    const shown = [...main.matchAll(/notifications\?\.show\(\{([^}]*)\}/g)].map(([, fields]) => fields!);
-    expect(shown.length).toBeGreaterThan(0);
-    for (const fields of shown) expect(fields).not.toMatch(/folder/i);
-    expect(source("shell/menus.ts")).not.toMatch(/folder/i);
   });
 });

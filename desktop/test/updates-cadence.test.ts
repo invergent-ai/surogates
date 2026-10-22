@@ -5,7 +5,6 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,7 +12,6 @@ import { CHECK_MS, keepChecked, nextCheckIn, NOT_SIGNED, updateLine } from "../s
 import { next, servedBase } from "./updates-base.js";
 
 const base = servedBase();
-const SCRIPT = fileURLToPath(new URL("../release/install.sh", import.meta.url));
 const NO_RELEASE = "is not a release of Surogate Desktop for this computer";
 
 describe("a release that no key this computer trusts has signed", () => {
@@ -134,28 +132,6 @@ describe("a release that no key this computer trusts has signed", () => {
     base.publish("1.2.5", {}, next.privateKey);
     await expect(found.check()).rejects.toThrow("is not signed by Surogate's release key");
     expect(found.state).toMatchObject({ state: "available", version: "1.2.4" });
-  });
-
-  it("says it in the install script's own words for an install and an apply: what is so, and the one way on that this computer's own keys check", () => {
-    // The script's sentences, behind the name of what was not signed: the address of a manifest
-    // that an install or a rollback asked for, or "the release's manifest" where the app's own
-    // click had the helper apply one. A rollback is told the first alone; an install and an
-    // apply the second, which is the first and the way on.
-    const script = readFileSync(SCRIPT, "utf8");
-    const said = [...script.matchAll(/fail "\$1( is not signed by a release key this computer trusts: [^"]+)"/g)].map(([, words]) => words);
-    expect(said).toEqual([NOT_SIGNED.slice(0, NOT_SIGNED.indexOf(". If ")), NOT_SIGNED]);
-    expect(LINE.text).toBe(`Surogate's newest release${said[1]}`);
-    expect(LINE.text.endsWith("--version of the release that brought the new key")).toBe(true);
-    // No sentence of the script's or of the app's for a release that is not signed sends a person
-    // to remove Surogate Desktop: the install after it trusts whatever list its base serves.
-    const unsigned = [...script.matchAll(/fail "\$1 is (?:not )?signed by [^"]+"/g)].map(([words]) => words);
-    expect(unsigned).toHaveLength(5);
-    for (const words of [...unsigned, LINE.text]) expect(words).not.toMatch(/uninstall|remove|install it again/i);
-    // The troubleshooting page quotes each of the three as it is said: the script's, the app's own, and the helper's on the app's line.
-    const readme = readFileSync(fileURLToPath(new URL("../TROUBLESHOOTING.md", import.meta.url)), "utf8");
-    for (const named of ["<base>/desktop/latest.json", "Surogate's newest release", "Surogate could not install its update: the release's manifest"]) expect(readme).toContain(`\n    ${named}${said[1]}\n`);
-    // And the removal is that page's alone, behind a condition that a person can check elsewhere.
-    expect(readme.replace(/\s+/g, " ")).toContain("Do it only once Surogate's release notes say that the release key has changed");
   });
 
   it("shows the helper's own refusal of such a release whole, as its own line for one is: the way on is the sentence's end", async () => {

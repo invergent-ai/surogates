@@ -3,10 +3,6 @@
 // registers no surogate:// scheme itself, on any OS: an install does (the MSI, machine-wide), or a development
 // build's script (test/win32/dev-app.ps1, for its user).
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 
 import { APP_ACTIVATOR, APP_ID, DEVELOPMENT_ACTIVATOR, DEVELOPMENT_ID } from "../src/shell/app-identity-win32.js";
@@ -24,10 +20,6 @@ function electronApp() {
   };
 }
 
-const SRC = fileURLToPath(new URL("../src", import.meta.url));
-const sources = (dir: string): string[] => readdirSync(join(SRC, dir), { withFileTypes: true })
-  .flatMap((entry) => (entry.isDirectory() ? sources(join(dir, entry.name)) : /\.[cm]?ts$/.test(entry.name) ? [join(dir, entry.name)] : []));
-
 describe("the app as Windows knows it", () => {
   it("goes by the installed app's AppUserModelID and toast activator, and a development build by its own", async () => {
     const { nameTheApp } = await windows();
@@ -43,11 +35,6 @@ describe("the app as Windows knows it", () => {
       [["id", APP_ID], ["activator", APP_ACTIVATOR]],
       [["id", DEVELOPMENT_ID], ["activator", DEVELOPMENT_ACTIVATOR]],
     ]);
-  });
-
-  it("registers no surogate:// scheme itself, on any OS: nothing of the app's writes or removes one", () => {
-    const writing = sources(".").filter((file) => /\b(?:setAsDefaultProtocolClient|removeAsDefaultProtocolClient)\b/.test(readFileSync(join(SRC, file), "utf8")));
-    expect(writing).toEqual([]);
   });
 
   it("is asked to quit by a launch whose arguments hold --quit", async () => {

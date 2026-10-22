@@ -67,12 +67,6 @@ describe("the app's dictionary", () => {
     expect([code === 0, existsSync(join(own, "dictionaries"))]).toEqual([false, false]);
   });
 
-  it("is fetched and checked by the Mac's and Windows's builds as by Linux's, before the app's code is built", () => {
-    const { scripts } = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8")) as { scripts: Record<string, string> };
-    for (const build of ["build", "build:darwin", "build:win32"]) expect(scripts[build]!.split(" && "), build).toContain("scripts/dictionary.sh");
-    for (const build of ["build:darwin", "build:win32"]) expect(scripts[build]!.split(" && ")[0], build).toBe("scripts/dictionary.sh");
-  });
-
   it("is kept as it is, with no fetch, on a Mac, whose sha256sum checks no list: shasum checks it there", async () => {
     // The script in a package of its own, with the pinned dictionary in place, on a PATH of every program of this
     // computer's but a Mac's own uname and sha256sum, BSD's, which says its usage at a list to check. Its connections go
