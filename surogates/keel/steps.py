@@ -35,12 +35,14 @@ from surogates.channels.memory_boundary import (
 )
 
 __all__ = [
+    "ANSWER_MARKER",
     "CASE_BOUNDARY_PREFIX",
     "CASE_SCOPE_KEY",
     "CASE_STEP_KEY",
     "CaseScope",
     "KICKOFF_MARKER",
     "OutcomeContract",
+    "REVISION_MARKER",
     "StepContract",
     "case_scope_in",
     "case_scope_of",
@@ -48,6 +50,7 @@ __all__ = [
     "is_case_session",
     "is_case_step",
     "render_kickoff",
+    "render_message",
     "step_contract_in",
     "step_contract_of",
 ]
@@ -62,6 +65,10 @@ CASE_STEP_KEY = "case_step"
 CASE_SCOPE_KEY = "case_scope"
 #: The ``synthetic`` marker of the message that starts a step: written once per Keel key.
 KICKOFF_MARKER = "keel_step"
+#: The ``synthetic`` markers of a person's answer to a raised hand, and of a
+#: reviewer's request to revise a draft: each written once per Keel key.
+ANSWER_MARKER = "keel_answer"
+REVISION_MARKER = "keel_revision"
 
 
 class OutcomeContract(BaseModel):
@@ -198,3 +205,14 @@ def render_kickoff(contract: StepContract) -> str:
             "you return, or call raise_hand if you cannot."
         )
     return "\n".join(lines)
+
+
+def render_message(kind: Literal["answer", "revision"], text: str, note: str | None) -> str:
+    """A person's message to a step: an answer to its raised hand, or a draft's revision request."""
+    if kind == "answer":
+        message = f"A person answered your raised hand: {text}"
+    else:
+        message = f"The person reviewing your draft asks for changes: {text}"
+    if note:
+        message += f"\n\nTheir note: {note}"
+    return message

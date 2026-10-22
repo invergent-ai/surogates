@@ -1,12 +1,15 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, cancel it and read its status. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
 | Route | What it does |
 |---|---|
 | `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
+| `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, or a reviewer's request to revise its draft, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. |
+| `POST /v1/keel/step-sessions/{session_id}/cancel` | Pauses the session, interrupts its turn and removes the step's inputs from its config. `200 {"status": "paused"}`, also when it was paused already. |
+| `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
 It has no JWT authentication, no web UI and no OpenAPI schema. Each route checks the link key instead. The public API never serves `/v1/keel/`.
@@ -19,10 +22,12 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
+| 404 | `unknown-session` | No such session, or it is not a step's own session. |
 | 409 | `agent-stopped` | The agent is stopped. |
 | 409 | `key-in-use` | The key, or the session id, names another step's session. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
 | 422 | `invalid-request` | The body does not validate. |
+| 500 | `internal-error` | The database failed. Only the error's class name is logged. |
 | 503 | `unavailable` | The agent's runtime config could not be read, twice. |
 
 ## Keep it internal

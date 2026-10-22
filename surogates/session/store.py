@@ -55,6 +55,7 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
+from surogates.keel.steps import CASE_STEP_KEY
 from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
@@ -215,6 +216,9 @@ _DELIVERABLE_EVENTS = frozenset({
 # user gets a terminal confirmation after the optimistic "Stopping…" ack.
 _STOPPED_CONFIRMATION = "⏹ Stopped."
 
+
+#: The statuses of a session at rest, which a message written to wake it sets active.
+_RESUMABLE_STATUSES = frozenset({"completed", "paused", "failed"})
 
 _INBOX_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
@@ -2372,36 +2376,30 @@ class SessionStore:
             stmt = stmt.where(EventRow.data["keel_key"].as_string() == key)
         return stmt
 
-    async def has_synthetic_message(
-        self, session_id: UUID, synthetic: str, *, key: str | None = None,
-    ) -> bool:
-        """Whether *session_id* holds a synthetic user message of one kind.
-
-        With *key*, only one written for that Keel ``keel_key`` counts: a
-        retried call finds what its first attempt wrote, and writes nothing.
-        """
-        stmt = self._synthetic_message(session_id, synthetic, key)
-        async with self._sf() as db:
-            return bool((await db.execute(select(stmt.exists()))).scalar_one())
-
     async def emit_keyed_synthetic_message(
-        self, session_id: UUID, *, content: str, synthetic: str, key: str,
+        self, session_id: UUID, *, content: str, synthetic: str, key: str, resume: bool = False,
     ) -> int | None:
         """Write a synthetic user message for one Keel key, unless the session has it.
 
         The check and the write are one transaction under the session row's
         lock, so calls racing on one key write it once.  Returns the new
         event's id, or ``None`` when the message was there already.
+
+        With *resume*, a session at rest (completed, paused or failed) is set
+        ``active`` with a ``session.resume`` before the message, in the same
+        transaction: the message wakes the session it is written to, and a
+        retry of one already written wakes nothing.
         """
         message = await self._ready_event(
             session_id,
             EventType.USER_MESSAGE,
             {"content": content, "synthetic": synthetic, "keel_key": key},
         )
+        resumed = await self._ready_event(session_id, EventType.SESSION_RESUME, {}) if resume else None
         async with self._sf() as db:
             locked = (await db.execute(
-                select(SessionRow.id).where(SessionRow.id == session_id).with_for_update()
-            )).scalar_one_or_none()
+                select(SessionRow.status).where(SessionRow.id == session_id).with_for_update()
+            )).one_or_none()
             if locked is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
             written = (await db.execute(
@@ -2410,10 +2408,61 @@ class SessionStore:
             if written:
                 await db.rollback()
                 return None
+            if resumed is not None and locked.status not in _RESUMABLE_STATUSES:
+                resumed = None
+            if resumed is not None:
+                await self._write_event(db, resumed, status="active")
             await self._write_event(db, message)
             await db.commit()
+        if resumed is not None:
+            await self._announce_event(resumed)
         await self._announce_event(message)
         return message.id
+
+    async def pause_unless_paused(self, session_id: UUID, data: dict) -> bool:
+        """Pause *session_id* with a ``session.pause`` whose data is *data*,
+        unless it is paused already; whether this call paused it.
+
+        The status and its event are one transaction, and calls racing on one
+        session pause it once.  An archived session stays as it is.
+        """
+        pause = await self._ready_event(session_id, EventType.SESSION_PAUSE, data)
+        async with self._sf() as db:
+            paused = (await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status.not_in(("paused", "archived")))
+                .values(status="paused", updated_at=func.now())
+            )).rowcount == 1
+            if paused:
+                await self._write_event(db, pause)
+            await db.commit()
+        if paused:
+            await self._announce_event(pause)
+        return paused
+
+    async def redact_case_inputs(self, session_id: UUID) -> None:
+        """Empty the inputs of the step contract in *session_id*'s config, and mark them redacted.
+
+        Once a step ends for its session, the case's inputs leave the
+        session's config; the rest of the contract stays.  A session with no
+        contract, or one redacted already, is left as it is.
+        """
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            contract = config.get(CASE_STEP_KEY)
+            if not isinstance(contract, dict) or (
+                contract.get("inputs") == {} and contract.get("inputs_redacted") is True
+            ):
+                return
+            config[CASE_STEP_KEY] = {**contract, "inputs": {}, "inputs_redacted": True}
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
 
     async def count_recoveries_since_progress(self, session_id: UUID) -> int:
         """Count ``harness.recovered`` events since the session last progressed.

@@ -1,4 +1,4 @@
-"""Keel creates an agent's step session through ``keel-link``.
+"""Keel creates, answers, revises, cancels and reads an agent's step session through ``keel-link``.
 
 ``keel-link`` is Keel's private door into the runtime: its own process,
 with only the Keel routes and ``/health``, checked by the link key.  The
@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from uuid import UUID
 
 import pytest
@@ -22,7 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from surogates.channels.constants import API_CHANNEL
-from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.keel.steps import (
     CaseScope,
     StepContract,
@@ -32,7 +33,7 @@ from surogates.keel.steps import (
 from surogates.orchestrator import dispatcher
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
-from surogates.session.provisioning import create_agent_session
+from surogates.session.provisioning import create_agent_session, create_child_session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.auth.service_account import ServiceAccountStore
@@ -554,3 +555,292 @@ async def test_a_failed_session_insert_answers_500_and_logs_no_inputs(
         assert value not in caplog.text
         assert value not in failed.text
     assert await session_store.get_session_by_idempotency_key(org, KEY) is None
+
+
+# ---------------------------------------------------------------------------
+# Answering, revising, cancelling and reading a step session
+# ---------------------------------------------------------------------------
+
+ANSWER = "Use the May payslip."
+ANSWER_KEY = "keel:c:1:answer:1"
+
+
+def step_route(session_id, action: str = "") -> str:
+    return f"{ROUTE}/{session_id}" + (f"/{action}" if action else "")
+
+
+def link_headers(key: str | None) -> dict:
+    return {} if key is None else {"Authorization": f"Bearer {key}"}
+
+
+def message_of(
+    kind: str = "answer", text: str = ANSWER, note: str | None = None, key: str = ANSWER_KEY,
+) -> dict:
+    return {"kind": kind, "text": text, "note": note, "idempotency_key": key}
+
+
+async def send(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY, **message):
+    return await client.post(
+        step_route(session_id, "messages"), json=message_of(**message), headers=link_headers(auth),
+    )
+
+
+async def cancel(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY):
+    return await client.post(step_route(session_id, "cancel"), headers=link_headers(auth))
+
+
+async def status_of(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY):
+    return await client.get(step_route(session_id), headers=link_headers(auth))
+
+
+async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client):
+    """A step session whose turn has ended, and which is no longer queued."""
+    created = await post(link, body(org))
+    assert created.status_code == 201, created.text
+    session_id = UUID(created.json()["session_id"])
+    await session_store.update_session_status(session_id, "completed")
+    session = await session_store.get_session(session_id)
+    await redis_client.zrem(
+        SHARED_WORK_QUEUE_KEY,
+        encode_queue_member(org_id=str(org), agent_id=session.agent_id, session_id=str(session_id)),
+    )
+    return session
+
+
+async def timeline(session_store, session_id: UUID) -> list[tuple[str, str | None]]:
+    """The session's messages, resumes and pauses, in order, each with its marker."""
+    events = await session_store.get_events(
+        session_id,
+        types=[EventType.USER_MESSAGE, EventType.SESSION_RESUME, EventType.SESSION_PAUSE],
+    )
+    return [(e.type, e.data.get("synthetic")) for e in events]
+
+
+async def interrupt_listener(redis_client):
+    """A listener on the channels the worker takes interrupts from."""
+    listener = redis_client.pubsub()
+    await listener.psubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
+    # The subscription's own confirmation.
+    assert (await listener.get_message(timeout=2.0))["type"] == "psubscribe"
+    return listener
+
+
+async def interrupts_heard(listener, wait: float = 0.5) -> list[tuple[str, dict]]:
+    """Every interrupt *listener* heard, until none came for *wait* seconds."""
+    heard = []
+    while (message := await listener.get_message(ignore_subscribe_messages=True, timeout=wait)) is not None:
+        heard.append((message["channel"].decode(), json.loads(message["data"])))
+    return heard
+
+
+async def test_an_answer_wakes_the_same_session(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    answered = await send(link, step.id, note="It is the newest.")
+
+    assert answered.status_code == 202, answered.text
+    assert answered.json() == {"delivered": True}
+    session = await session_store.get_session(step.id)
+    assert session.status == "active"
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.resume", None),
+        ("user.message", "keel_answer"),
+    ]
+    answer = (await user_messages(session_store, step.id))[-1]
+    assert answer.data["content"].startswith(f"A person answered your raised hand: {ANSWER}")
+    assert "Their note: It is the newest." in answer.data["content"]
+    assert answer.data["keel_key"] == ANSWER_KEY
+    # Behind interactive work, as every wake of a step.
+    assert await queue_score(redis_client, step) == 1.0
+
+
+async def test_the_same_answer_twice_is_delivered_once(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    first = await send(link, step.id)
+    # The answer's turn ran and ended before Keel's retry came.
+    await session_store.update_session_status(step.id, "completed")
+    await redis_client.zrem(
+        SHARED_WORK_QUEUE_KEY,
+        encode_queue_member(org_id=str(org), agent_id=step.agent_id, session_id=str(step.id)),
+    )
+
+    again = await send(link, step.id)
+
+    assert (first.status_code, first.json()) == (202, {"delivered": True})
+    assert (again.status_code, again.json()) == (202, {"delivered": False})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.resume", None),
+        ("user.message", "keel_answer"),
+    ]
+    # The retry neither wakes the session nor queues it again.
+    assert (await session_store.get_session(step.id)).status == "completed"
+    assert await queue_score(redis_client, step) is None
+
+
+async def test_concurrent_answers_with_one_key_are_delivered_once(link, org, session_store, redis_client):
+    # Keel retries an effect once its lease expires, while the first call may still run.
+    step = await completed_step(link, org, session_store, redis_client)
+
+    answers = await asyncio.gather(*(send(link, step.id) for _ in range(6)))
+
+    assert [a.status_code for a in answers] == [202] * 6, [a.text for a in answers]
+    assert sorted(a.json()["delivered"] for a in answers) == [False] * 5 + [True]
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.resume", None),
+        ("user.message", "keel_answer"),
+    ]
+    assert (await session_store.get_session(step.id)).status == "active"
+    assert await queue_score(redis_client, step) == 1.0
+
+
+async def test_a_revision_is_written_as_one(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    revised = await send(link, step.id, kind="revision", text="Lower the offer to 175000.", key="keel:c:1:revise:1")
+
+    assert (revised.status_code, revised.json()) == (202, {"delivered": True})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.resume", None),
+        ("user.message", "keel_revision"),
+    ]
+    revision = (await user_messages(session_store, step.id))[-1]
+    assert revision.data["content"] == (
+        "The person reviewing your draft asks for changes: Lower the offer to 175000."
+    )
+    assert revision.data["keel_key"] == "keel:c:1:revise:1"
+    assert (await session_store.get_session(step.id)).status == "active"
+    assert await queue_score(redis_client, step) == 1.0
+
+
+async def test_cancel_pauses_interrupts_and_redacts_once(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    listener = await interrupt_listener(redis_client)
+    try:
+        first = await cancel(link, step.id)
+        again = await cancel(link, step.id)
+        heard = await interrupts_heard(listener)
+    finally:
+        await listener.aclose()
+
+    for answer in (first, again):
+        assert (answer.status_code, answer.json()) == (200, {"status": "paused"})
+    session = await session_store.get_session(step.id)
+    assert session.status == "paused"
+    pauses = await session_store.get_events(step.id, types=[EventType.SESSION_PAUSE])
+    assert [p.data for p in pauses] == [{"reason": "case_step_cancelled"}]
+    # The worker running the turn hears one interrupt, on the session's channel.
+    assert heard == [(f"{INTERRUPT_CHANNEL_PREFIX}:{step.id}", {"reason": "case_step_cancelled"})]
+    # The case's inputs leave the session's config; the rest of the contract stays.
+    assert session.config["case_step"]["inputs"] == {}
+    assert session.config["case_step"]["inputs_redacted"] is True
+    assert step_contract_of(session).node == "check"
+
+
+async def test_status_reads_the_session(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    resting = await status_of(link, step.id)
+    await cancel(link, step.id)
+    cancelled = await status_of(link, step.id)
+
+    assert resting.status_code == 200, resting.text
+    assert resting.json()["status"] == "completed"
+    assert datetime.fromisoformat(resting.json()["updated_at"]) == step.updated_at
+    assert set(resting.json()) == {"status", "updated_at"}
+    assert cancelled.json()["status"] == "paused"
+    assert datetime.fromisoformat(cancelled.json()["updated_at"]) > step.updated_at
+
+
+async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org, session_store, redis_client):
+    chat = await create_agent_session(
+        store=session_store,
+        storage=link_app.state.storage,
+        settings=link_app.state.settings,
+        org_id=org,
+        user_id=None,
+        agent_id=AGENT,
+        channel=API_CHANNEL,
+    )
+    step = await completed_step(link, org, session_store, redis_client)
+    # A child of the step works on the case, but is not the step.
+    child = await create_child_session(store=session_store, parent=step, channel=API_CHANNEL)
+
+    for session_id in (chat.id, child.id, uuid.uuid4(), "not-a-session-id"):
+        answers = [
+            await send(link, session_id),
+            await cancel(link, session_id),
+            await status_of(link, session_id),
+        ]
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 3, session_id
+
+    for session in (chat, child):
+        assert await timeline(session_store, session.id) == []
+        assert (await session_store.get_session(session.id)).status == session.status
+
+
+async def test_every_step_session_route_needs_the_link_key(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    for key in (None, "not-the-link-key"):
+        answers = [
+            await send(link, step.id, auth=key),
+            await cancel(link, step.id, auth=key),
+            await status_of(link, step.id, auth=key),
+        ]
+        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 3
+
+    assert (await session_store.get_session(step.id)).status == "completed"
+    assert await timeline(session_store, step.id) == [("user.message", "keel_step")]
+
+
+async def test_a_message_that_does_not_validate_is_invalid(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    answers = [
+        await send(link, step.id, kind="comment"),
+        await send(link, step.id, text=""),
+        await send(link, step.id, text="x" * 20001),
+        await send(link, step.id, note="x" * 20001),
+        await send(link, step.id, key=""),
+        await send(link, step.id, key="k" * 201),
+    ]
+
+    assert [(a.status_code, code_of(a)) for a in answers] == [(422, "invalid-request")] * 6
+    assert (await session_store.get_session(step.id)).status == "completed"
+    assert await timeline(session_store, step.id) == [("user.message", "keel_step")]
+
+
+@pytest.mark.parametrize(
+    ("action", "write"),
+    [("answer", "emit_keyed_synthetic_message"), ("cancel", "redact_case_inputs")],
+)
+async def test_a_failed_write_answers_500_and_logs_no_case_data(
+    link, link_app, org, session_store, redis_client, monkeypatch, caplog, action, write,
+):
+    step = await completed_step(link, org, session_store, redis_client)
+    answer = "Ioana Marinescu earns 987654.32 a year."
+
+    # The database's error quotes the statement's parameters: the answer,
+    # or the config holding the case's inputs.
+    async def failed_write(*args, **kwargs):
+        quoted = json.dumps({"content": answer, "case_step": step.config["case_step"]})
+        raise OperationalError(
+            "UPDATE sessions SET config = $1::JSONB", (quoted,),
+            Exception(f"canceling statement due to statement timeout\nCONTEXT:  {quoted}"),
+        )
+
+    monkeypatch.setattr(link_app.state.session_store, write, failed_write)
+    caplog.set_level(logging.INFO)
+
+    failed = await (send(link, step.id, text=answer) if action == "answer" else cancel(link, step.id))
+
+    assert failed.status_code == 500, failed.text
+    assert code_of(failed) == "internal-error"
+    assert "OperationalError" in caplog.text
+    for value in ("Marinescu", "987654.32", "182000.00"):
+        assert value not in caplog.text
+        assert value not in failed.text

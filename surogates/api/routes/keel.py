@@ -1,4 +1,5 @@
-"""Keel's routes: Keel starts an agent's step session through ``keel-link``.
+"""Keel's routes: through ``keel-link``, Keel starts an agent's step session,
+answers it or asks it for a revision, cancels it, and reads its status.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -14,7 +15,8 @@ from __future__ import annotations
 import hmac
 import json
 import logging
-from typing import Any, TypeVar
+from datetime import datetime
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -24,11 +26,15 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
-from surogates.config import enqueue_session
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.keel.steps import (
+    ANSWER_MARKER,
     KICKOFF_MARKER,
+    REVISION_MARKER,
     StepContract,
+    is_case_step,
     render_kickoff,
+    render_message,
     step_contract_of,
 )
 from surogates.session.provisioning import create_agent_session
@@ -43,6 +49,10 @@ _Body = TypeVar("_Body", bound=BaseModel)
 
 #: The prompt-injection screen's name for a step's inputs.
 _SCREEN_SOURCE = "keel_case_step"
+#: The ``synthetic`` marker of each kind of message Keel sends a step.
+_MESSAGE_MARKERS = {"answer": ANSWER_MARKER, "revision": REVISION_MARKER}
+#: Why a cancelled step's session paused: its pause event's and its interrupt's reason.
+_CANCELLED = "case_step_cancelled"
 
 
 class StepSessionRequest(BaseModel):
@@ -73,8 +83,33 @@ class StepSessionCreated(BaseModel):
     created: bool
 
 
+class StepMessage(BaseModel):
+    """A person's message to a step: an answer to its raised hand, or a draft's revision request."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["answer", "revision"]
+    text: str = Field(min_length=1, max_length=20000)
+    note: str | None = Field(default=None, max_length=20000)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class StepSessionStatus(BaseModel):
+    status: str
+    updated_at: datetime
+
+
 def _refused(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code, {"code": code, "message": message})
+
+
+def _database_failed(exc: DBAPIError, *, logged: str, message: str) -> HTTPException:
+    """The generic 500 for a failed database call, logged by the error's class name alone.
+
+    The error's text quotes the statement's parameters, the case's data among them.
+    """
+    logger.warning("keel-link: %s (%s)", logged, type(exc).__name__)
+    return _refused(status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", message)
 
 
 def require_link(request: Request) -> None:
@@ -224,14 +259,10 @@ async def create_step_session(request: Request) -> JSONResponse:
     try:
         return await _create_or_find(request, body, agent_id)
     except DBAPIError as exc:
-        # Its text quotes the statement's parameters, the case's inputs
-        # among them: the class name alone is logged and answered.
-        logger.warning(
-            "keel-link: the step session of case %s could not be written (%s)",
-            contract.case_id, type(exc).__name__,
-        )
-        raise _refused(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", "The step session could not be created.",
+        raise _database_failed(
+            exc,
+            logged=f"the step session of case {contract.case_id} could not be written",
+            message="The step session could not be created.",
         ) from None
 
 
@@ -278,3 +309,93 @@ async def _create_or_find(request: Request, body: StepSessionRequest, agent_id: 
 
     await _start(request, session, contract, body.idempotency_key)
     return _answer(session, created=True)
+
+
+async def _step_session(request: Request, session_id: str) -> Any:
+    """The step session *session_id* names: 404 ``unknown-session`` for any other id."""
+    unknown = _refused(status.HTTP_404_NOT_FOUND, "unknown-session", "No such step session.")
+    try:
+        session_uuid = UUID(session_id)
+    except ValueError:
+        raise unknown from None
+    try:
+        session = await request.app.state.session_store.get_session(session_uuid)
+    except SessionNotFoundError:
+        raise unknown from None
+    # A child of the step works on the case, and a chat on none: neither is the step's.
+    if not is_case_step(session):
+        raise unknown
+    return session
+
+
+@router.post("/keel/step-sessions/{session_id}/messages")
+async def send_step_message(session_id: str, request: Request) -> JSONResponse:
+    """Give a step a person's answer or revision request, once per key, and wake it: 202.
+
+    The message is written, and a session at rest resumed, only when this
+    call is the first with the key; only then is the session queued.
+    """
+    require_link(request)
+    try:
+        session = await _step_session(request, session_id)
+        body = await read_body(request, StepMessage)
+        written = await request.app.state.session_store.emit_keyed_synthetic_message(
+            session.id,
+            content=render_message(body.kind, body.text, body.note),
+            synthetic=_MESSAGE_MARKERS[body.kind],
+            key=body.idempotency_key,
+            resume=True,
+        )
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"the message to step session {session_id} could not be written",
+            message="The message could not be delivered.",
+        ) from None
+    if written is not None:
+        await enqueue_session(
+            request.app.state.redis,
+            org_id=str(session.org_id),
+            agent_id=session.agent_id,
+            session_id=session.id,
+            priority=session_queue_priority(session),
+        )
+    return JSONResponse({"delivered": written is not None}, status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/keel/step-sessions/{session_id}/cancel")
+async def cancel_step_session(session_id: str, request: Request) -> JSONResponse:
+    """Stop a step: pause its session, interrupt its turn and redact its inputs; 200, also when paused already."""
+    require_link(request)
+    store = request.app.state.session_store
+    try:
+        session = await _step_session(request, session_id)
+        if await store.pause_unless_paused(session.id, {"reason": _CANCELLED}):
+            await request.app.state.redis.publish(
+                f"{INTERRUPT_CHANNEL_PREFIX}:{session.id}", json.dumps({"reason": _CANCELLED}),
+            )
+        # On every cancel, so Keel's retry of one cut short after its pause still redacts.
+        await store.redact_case_inputs(session.id)
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"step session {session_id} could not be cancelled",
+            message="The step session could not be cancelled.",
+        ) from None
+    return JSONResponse({"status": "paused"})
+
+
+@router.get("/keel/step-sessions/{session_id}")
+async def read_step_session(session_id: str, request: Request) -> JSONResponse:
+    """A step session's status, and when it last changed."""
+    require_link(request)
+    try:
+        session = await _step_session(request, session_id)
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"step session {session_id} could not be read",
+            message="The step session could not be read.",
+        ) from None
+    answer = StepSessionStatus(status=session.status, updated_at=session.updated_at)
+    return JSONResponse(answer.model_dump(mode="json"))
