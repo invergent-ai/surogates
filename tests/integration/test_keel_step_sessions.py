@@ -732,12 +732,63 @@ async def test_cancel_pauses_interrupts_and_redacts_once(link, org, session_stor
     assert session.status == "paused"
     pauses = await session_store.get_events(step.id, types=[EventType.SESSION_PAUSE])
     assert [p.data for p in pauses] == [{"reason": "case_step_cancelled"}]
-    # The worker running the turn hears one interrupt, on the session's channel.
-    assert heard == [(f"{INTERRUPT_CHANNEL_PREFIX}:{step.id}", {"reason": "case_step_cancelled"})]
+    # The worker running the turn hears each cancel, on the session's channel:
+    # a retry stops a turn its first attempt did not reach.
+    assert heard == [(f"{INTERRUPT_CHANNEL_PREFIX}:{step.id}", {"reason": "case_step_cancelled"})] * 2
     # The case's inputs leave the session's config; the rest of the contract stays.
     assert session.config["case_step"]["inputs"] == {}
     assert session.config["case_step"]["inputs_redacted"] is True
     assert step_contract_of(session).node == "check"
+
+
+async def test_a_cancelled_step_takes_no_more_messages(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    await cancel(link, step.id)
+
+    answered = await send(link, step.id)
+    revised = await send(link, step.id, kind="revision", text="Lower the offer.", key="keel:c:1:revise:1")
+
+    for refused in (answered, revised):
+        assert (refused.status_code, code_of(refused)) == (409, "step-finished")
+    assert (await session_store.get_session(step.id)).status == "paused"
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.pause", None),
+    ]
+    assert await queue_score(redis_client, step) is None
+
+
+async def test_an_answer_mid_turn_is_queued_without_a_resume(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    await session_store.update_session_status(step.id, "active")
+
+    answered = await send(link, step.id)
+
+    assert (answered.status_code, answered.json()) == (202, {"delivered": True})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("user.message", "keel_answer"),
+    ]
+    assert (await session_store.get_session(step.id)).status == "active"
+    assert await queue_score(redis_client, step) == 1.0
+
+
+@pytest.mark.parametrize("resting", ["paused", "failed"])
+async def test_an_answer_resumes_a_paused_or_failed_step(link, org, session_store, redis_client, resting):
+    # Paused by something other than Keel's cancel, or failed: the step is not over.
+    step = await completed_step(link, org, session_store, redis_client)
+    await session_store.update_session_status(step.id, resting)
+
+    answered = await send(link, step.id)
+
+    assert (answered.status_code, answered.json()) == (202, {"delivered": True})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.resume", None),
+        ("user.message", "keel_answer"),
+    ]
+    assert (await session_store.get_session(step.id)).status == "active"
+    assert await queue_score(redis_client, step) == 1.0
 
 
 async def test_status_reads_the_session(link, org, session_store, redis_client):
@@ -816,7 +867,7 @@ async def test_a_message_that_does_not_validate_is_invalid(link, org, session_st
 
 @pytest.mark.parametrize(
     ("action", "write"),
-    [("answer", "emit_keyed_synthetic_message"), ("cancel", "redact_case_inputs")],
+    [("answer", "emit_keyed_synthetic_message"), ("cancel", "cancel_case_step")],
 )
 async def test_a_failed_write_answers_500_and_logs_no_case_data(
     link, link_app, org, session_store, redis_client, monkeypatch, caplog, action, write,
@@ -844,3 +895,23 @@ async def test_a_failed_write_answers_500_and_logs_no_case_data(
     for value in ("Marinescu", "987654.32", "182000.00"):
         assert value not in caplog.text
         assert value not in failed.text
+
+
+@pytest.mark.parametrize(
+    ("action", "write"),
+    [("answer", "emit_keyed_synthetic_message"), ("cancel", "cancel_case_step")],
+)
+async def test_a_session_gone_before_its_write_is_unknown(
+    link, link_app, org, session_store, redis_client, monkeypatch, action, write,
+):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    # The session was deleted between the route's lookup and its write.
+    async def gone(*args, **kwargs):
+        raise SessionNotFoundError(f"session {step.id} not found")
+
+    monkeypatch.setattr(link_app.state.session_store, write, gone)
+
+    answer = await (send(link, step.id) if action == "answer" else cancel(link, step.id))
+
+    assert (answer.status_code, code_of(answer)) == (404, "unknown-session")

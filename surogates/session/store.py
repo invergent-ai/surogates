@@ -84,6 +84,10 @@ class SessionNotFoundError(Exception):
     """Raised when a session lookup finds no matching row."""
 
 
+class StepFinishedError(Exception):
+    """Raised when a message would wake a case step that is over: its inputs are redacted."""
+
+
 @dataclass(slots=True)
 class _EventWrite:
     """An event on its way into a session's log: made ready before its
@@ -219,6 +223,25 @@ _STOPPED_CONFIRMATION = "⏹ Stopped."
 
 #: The statuses of a session at rest, which a message written to wake it sets active.
 _RESUMABLE_STATUSES = frozenset({"completed", "paused", "failed"})
+
+
+def _step_is_over(config: Any) -> bool:
+    """Whether *config* holds a step contract whose inputs were redacted: the step is over."""
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    return isinstance(contract, dict) and contract.get("inputs_redacted") is True
+
+
+def _redacted_case_config(config: Any) -> dict | None:
+    """*config* with its step contract's inputs emptied and marked redacted.
+
+    ``None`` when there is nothing to redact: no contract, or one redacted already.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    if not isinstance(contract, dict) or (
+        contract.get("inputs") == {} and contract.get("inputs_redacted") is True
+    ):
+        return None
+    return {**config, CASE_STEP_KEY: {**contract, "inputs": {}, "inputs_redacted": True}}
 
 _INBOX_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
@@ -2388,7 +2411,10 @@ class SessionStore:
         With *resume*, a session at rest (completed, paused or failed) is set
         ``active`` with a ``session.resume`` before the message, in the same
         transaction: the message wakes the session it is written to, and a
-        retry of one already written wakes nothing.
+        retry of one already written wakes nothing.  A case step that is over
+        takes no new message: it raises :class:`StepFinishedError` and writes
+        nothing.  The check holds the same lock as a cancel's redaction, so a
+        message racing a cancel never revives the step.
         """
         message = await self._ready_event(
             session_id,
@@ -2398,7 +2424,7 @@ class SessionStore:
         resumed = await self._ready_event(session_id, EventType.SESSION_RESUME, {}) if resume else None
         async with self._sf() as db:
             locked = (await db.execute(
-                select(SessionRow.status).where(SessionRow.id == session_id).with_for_update()
+                select(SessionRow.status, SessionRow.config).where(SessionRow.id == session_id).with_for_update()
             )).one_or_none()
             if locked is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
@@ -2408,6 +2434,9 @@ class SessionStore:
             if written:
                 await db.rollback()
                 return None
+            if resumed is not None and _step_is_over(locked.config):
+                await db.rollback()
+                raise StepFinishedError(f"the step of session {session_id} is over")
             if resumed is not None and locked.status not in _RESUMABLE_STATUSES:
                 resumed = None
             if resumed is not None:
@@ -2419,22 +2448,30 @@ class SessionStore:
         await self._announce_event(message)
         return message.id
 
-    async def pause_unless_paused(self, session_id: UUID, data: dict) -> bool:
-        """Pause *session_id* with a ``session.pause`` whose data is *data*,
-        unless it is paused already; whether this call paused it.
+    async def cancel_case_step(self, session_id: UUID, data: dict) -> bool:
+        """End a case step: redact its inputs, and pause its session with a
+        ``session.pause`` whose data is *data* unless it is paused already;
+        whether this call paused it.
 
-        The status and its event are one transaction, and calls racing on one
-        session pause it once.  An archived session stays as it is.
+        Both are one transaction under the session row's lock, so a message
+        racing the cancel finds the step either running or over, and calls
+        racing on one session pause it once.  An archived session stays as
+        it is.
         """
         pause = await self._ready_event(session_id, EventType.SESSION_PAUSE, data)
         async with self._sf() as db:
-            paused = (await db.execute(
-                update(SessionRow)
-                .where(SessionRow.id == session_id, SessionRow.status.not_in(("paused", "archived")))
-                .values(status="paused", updated_at=func.now())
-            )).rowcount == 1
+            row = (await db.execute(
+                select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            redacted = _redacted_case_config(row.config)
+            if redacted is not None:
+                row.config = redacted
+                row.updated_at = func.now()
+            paused = row.status not in ("paused", "archived")
             if paused:
-                await self._write_event(db, pause)
+                await self._write_event(db, pause, status="paused")
             await db.commit()
         if paused:
             await self._announce_event(pause)
@@ -2453,14 +2490,10 @@ class SessionStore:
             )).scalar_one_or_none()
             if row is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
-            config = dict(row.config or {})
-            contract = config.get(CASE_STEP_KEY)
-            if not isinstance(contract, dict) or (
-                contract.get("inputs") == {} and contract.get("inputs_redacted") is True
-            ):
+            redacted = _redacted_case_config(row.config)
+            if redacted is None:
                 return
-            config[CASE_STEP_KEY] = {**contract, "inputs": {}, "inputs_redacted": True}
-            row.config = config
+            row.config = redacted
             row.updated_at = func.now()
             await db.commit()
 

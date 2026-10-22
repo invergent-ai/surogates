@@ -38,7 +38,7 @@ from surogates.keel.steps import (
     step_contract_of,
 )
 from surogates.session.provisioning import create_agent_session
-from surogates.session.store import SessionNotFoundError
+from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.tenant.auth.service_account import ServiceAccountStore
 
 logger = logging.getLogger(__name__)
@@ -311,20 +311,23 @@ async def _create_or_find(request: Request, body: StepSessionRequest, agent_id: 
     return _answer(session, created=True)
 
 
+def _unknown_session() -> HTTPException:
+    return _refused(status.HTTP_404_NOT_FOUND, "unknown-session", "No such step session.")
+
+
 async def _step_session(request: Request, session_id: str) -> Any:
     """The step session *session_id* names: 404 ``unknown-session`` for any other id."""
-    unknown = _refused(status.HTTP_404_NOT_FOUND, "unknown-session", "No such step session.")
     try:
         session_uuid = UUID(session_id)
     except ValueError:
-        raise unknown from None
+        raise _unknown_session() from None
     try:
         session = await request.app.state.session_store.get_session(session_uuid)
     except SessionNotFoundError:
-        raise unknown from None
+        raise _unknown_session() from None
     # A child of the step works on the case, and a chat on none: neither is the step's.
     if not is_case_step(session):
-        raise unknown
+        raise _unknown_session()
     return session
 
 
@@ -333,7 +336,8 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
     """Give a step a person's answer or revision request, once per key, and wake it: 202.
 
     The message is written, and a session at rest resumed, only when this
-    call is the first with the key; only then is the session queued.
+    call is the first with the key; only then is the session queued.  A step
+    that is over, cancelled among others, takes none: 409 ``step-finished``.
     """
     require_link(request)
     try:
@@ -346,6 +350,13 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
             key=body.idempotency_key,
             resume=True,
         )
+    except SessionNotFoundError:
+        # Deleted since the lookup above.
+        raise _unknown_session() from None
+    except StepFinishedError:
+        raise _refused(
+            status.HTTP_409_CONFLICT, "step-finished", "The step is over; it takes no more messages.",
+        ) from None
     except DBAPIError as exc:
         raise _database_failed(
             exc,
@@ -365,23 +376,27 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
 
 @router.post("/keel/step-sessions/{session_id}/cancel")
 async def cancel_step_session(session_id: str, request: Request) -> JSONResponse:
-    """Stop a step: pause its session, interrupt its turn and redact its inputs; 200, also when paused already."""
+    """End a step: redact its inputs, pause its session and interrupt its turn; 200, also when paused already.
+
+    Every cancel interrupts the turn, so a retry stops a turn its first
+    attempt did not reach; only the first pauses the session.
+    """
     require_link(request)
-    store = request.app.state.session_store
     try:
         session = await _step_session(request, session_id)
-        if await store.pause_unless_paused(session.id, {"reason": _CANCELLED}):
-            await request.app.state.redis.publish(
-                f"{INTERRUPT_CHANNEL_PREFIX}:{session.id}", json.dumps({"reason": _CANCELLED}),
-            )
-        # On every cancel, so Keel's retry of one cut short after its pause still redacts.
-        await store.redact_case_inputs(session.id)
+        await request.app.state.session_store.cancel_case_step(session.id, {"reason": _CANCELLED})
+    except SessionNotFoundError:
+        # Deleted since the lookup above.
+        raise _unknown_session() from None
     except DBAPIError as exc:
         raise _database_failed(
             exc,
             logged=f"step session {session_id} could not be cancelled",
             message="The step session could not be cancelled.",
         ) from None
+    await request.app.state.redis.publish(
+        f"{INTERRUPT_CHANNEL_PREFIX}:{session.id}", json.dumps({"reason": _CANCELLED}),
+    )
     return JSONResponse({"status": "paused"})
 
 

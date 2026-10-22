@@ -8,7 +8,7 @@
 |---|---|
 | `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
 | `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, or a reviewer's request to revise its draft, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. |
-| `POST /v1/keel/step-sessions/{session_id}/cancel` | Pauses the session, interrupts its turn and removes the step's inputs from its config. `200 {"status": "paused"}`, also when it was paused already. |
+| `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -25,10 +25,15 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 404 | `unknown-session` | No such session, or it is not a step's own session. |
 | 409 | `agent-stopped` | The agent is stopped. |
 | 409 | `key-in-use` | The key, or the session id, names another step's session. |
+| 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
 | 422 | `invalid-request` | The body does not validate. |
 | 500 | `internal-error` | The database failed. Only the error's class name is logged. |
 | 503 | `unavailable` | The agent's runtime config could not be read, twice. |
+
+## A step's inputs
+
+Once a step is over, cancelled among others, its inputs are removed from the session's config and the contract is marked `inputs_redacted`. A step marked so takes no more messages. The redaction covers the config only: the step's first message, which sets out the inputs, stays in the session's event log, which no generic route serves for a case's sessions.
 
 ## Keep it internal
 
