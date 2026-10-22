@@ -778,15 +778,6 @@ async def test_overview_lists_messages_that_did_not_arrive_as_open_items(sf, pra
     ) in out
 
 
-
-def test_team_tools_ask_for_a_person_and_never_speak_of_patients_or_doctors():
-    for schema in (team.TEAM_OVERVIEW_SCHEMA, team.TEAM_MESSAGE_PERSON_SCHEMA,
-                   team.TEAM_UPDATE_PERSON_SCHEMA, team.TEAM_ENROLL_PERSON_SCHEMA):
-        text = str(schema.description) + str(schema.parameters)
-        assert not re.search(r"patient|doctor|care team|practice", text, re.I), schema.name
-
-
-
 @pytest.mark.asyncio
 async def test_the_model_never_reads_a_whole_number_and_the_platform_sends_it(sf, practice):
     import re

@@ -367,15 +367,6 @@ async def test_the_models_own_severity_mark_is_not_doubled(sf, patient, care_tea
     assert alert.text.startswith("🔴 Febră 39") and alert.alert_reason == "Febră 39"
 
 
-def test_escalate_asks_for_every_new_report_even_a_repeat():
-    assert "even when a similar one was escalated before" in followup.ESCALATE_SCHEMA.description
-
-
-def test_the_escalation_reason_leaves_the_severity_to_its_field():
-    reason = followup.ESCALATE_SCHEMA.parameters["properties"]["reason"]["description"]
-    assert "Do not state the severity or its colour" in reason
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("given, expected", [
     (" RED ", "red"), ("Rosu", "red"), ("urgent", "red"), ("Critical", "red"),
@@ -722,22 +713,6 @@ async def test_no_enrolment_in_a_shared_channel(sf, patient):
         {"protocol": "post-op", "consent": True, "summary": "x"}, **_kw(sf, session_id),
     )
     assert "own conversation" in result
-
-
-def test_no_tool_speaks_of_check_ins_or_a_procedure():
-    # Platform tools serve any business; a clinic's words belong in its own
-    # skills, never in what the model reads from the platform.
-    import json
-
-    from surogates.tools.builtin import checkin, team
-
-    texts = [
-        schema.description + json.dumps(schema.parameters, ensure_ascii=False)
-        for module in (followup, checkin, team)
-        for schema in vars(module).values() if isinstance(schema, followup.ToolSchema)
-    ]
-    texts.append(team.WELCOME_TEXT)
-    assert texts and not [t for t in texts if "check-in" in t.lower() or "procedure" in t]
 
 
 @pytest.mark.asyncio

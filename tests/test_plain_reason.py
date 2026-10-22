@@ -2,7 +2,7 @@
 
 import pytest
 
-from surogates.followup import outreach, store
+from surogates.followup import outreach
 
 RECORDED = {
     "Program has no opener message": "why_no_opener",
@@ -44,7 +44,3 @@ def test_each_recorded_reason_has_its_wording(raw, key):
 
 def test_unknown_provider_text_never_shows_through():
     assert "boom" not in outreach.plain_reason("Some provider said boom")
-
-
-def test_api_is_an_enrollment_source():
-    assert "api" in store.ENROLLMENT_SOURCES

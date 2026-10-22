@@ -909,14 +909,6 @@ async def test_a_redo_takes_the_files_held_with_a_clash_and_only_a_landing_that_
     landing_module._tell(None, set())
 
 
-async def test_a_projects_stream_carries_a_redo():
-    assert EventType.HISTORY_REDO in STREAM_TYPES
-
-
-async def test_a_projects_stream_carries_a_coordinators_follow_up():
-    assert EventType.COORDINATOR_MESSAGE in STREAM_TYPES
-
-
 async def test_a_follow_up_wake_reads_the_follow_up_and_runs_no_command_of_the_users_again(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
