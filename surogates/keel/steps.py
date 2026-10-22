@@ -52,6 +52,7 @@ __all__ = [
     "KICKOFF_MARKER",
     "NUDGE_MARKER",
     "OutcomeContract",
+    "REPORTED_KEY",
     "REVISION_MARKER",
     "STEP_ENDED",
     "STEP_STOPPED",
@@ -76,6 +77,11 @@ _M = TypeVar("_M", bound=BaseModel)
 CASE_STEP_KEY = "case_step"
 #: The case's tool and knowledge narrowing, in the config of every session of the case.
 CASE_SCOPE_KEY = "case_scope"
+#: In the step contract of a session's config: what the report that ended the
+#: step for this round came to (``completed``, ``drafted``, ``hand-raised``,
+#: or ``stopped`` when Keel refused it for good).  Keel's next message to the
+#: step, an answer or a revision, clears it: the step is the session's again.
+REPORTED_KEY = "reported"
 #: The ``synthetic`` marker of the message that starts a step: written once per Keel key.
 KICKOFF_MARKER = "keel_step"
 #: The ``synthetic`` markers of a person's answer to a raised hand, and of a

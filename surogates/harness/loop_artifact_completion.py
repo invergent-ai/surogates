@@ -1452,7 +1452,7 @@ class ArtifactCompletionMixin:
         # A case's step whose turn ended with no report ending it: Keel hears
         # how, once the turn's end is written, and decides what comes of it.
         if reason != "case_step_ended":
-            await report_no_outcome(self._store, session, lease.lease_token, reason=reason)
+            await report_no_outcome(self._store, session, reason=reason)
 
         if prunes is not None:
             from surogates.storage.tenant import boundary_workspace_prefix
@@ -1757,7 +1757,7 @@ class ArtifactCompletionMixin:
 
         # A case's step whose turn failed: Keel hears it by the failure's code
         # alone, once the turn's end is written, and the step's inputs leave the session.
-        await report_step_failed(self._store, session, lease.lease_token, code=reason)
+        await report_step_failed(self._store, session, code=reason)
 
     async def _finalize_dynamic_loop_if_needed(self, session: Session) -> None:
         if not session.config.get("scheduled_dynamic_loop"):

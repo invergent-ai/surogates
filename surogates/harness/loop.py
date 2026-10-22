@@ -109,7 +109,7 @@ from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
-from surogates.tools.builtin.case_step import step_ended_in_wake
+from surogates.tools.builtin.case_step import step_awaiting_report
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.keel.steps import (
     CASE_STEP_NUDGE,
@@ -3899,11 +3899,12 @@ class AgentHarness(
                 # A case's step ends only with its report.  A turn of the step
                 # that ends in words is told so once, and goes on; one that
                 # ends in words again completes, and Keel hears it had no
-                # outcome.  Not once a report of this wake ended the step.
+                # outcome.  Not once a report ended the step for this round,
+                # in this wake or an earlier one: Keel has it.
                 if (
                     case_step_nudged_turn != turn_id
                     and is_case_step(session)
-                    and not step_ended_in_wake(session.id, lease.lease_token)
+                    and await step_awaiting_report(self._store, session) is not None
                 ):
                     case_step_nudged_turn = turn_id
                     try:

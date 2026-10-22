@@ -135,9 +135,16 @@ class _StepStore(FakeStore):
         if redacted is not None:
             self.row.config = redacted
 
+    async def mark_case_step_reported(self, session_id, result) -> None:
+        self.row.config = {**self.row.config, "case_step": {**self.row.config["case_step"], "reported": result}}
+
     def redacted(self) -> bool:
         step = self.row.config["case_step"]
         return step["inputs"] == {} and step.get("inputs_redacted") is True
+
+    def reported(self) -> str | None:
+        """What the report that ended the step for this round came to, as the session's row holds it."""
+        return self.row.config["case_step"].get("reported")
 
     def result(self, call_id: str) -> str:
         """What the tool call *call_id* answered the model."""
@@ -299,6 +306,7 @@ SHOWN_REJECTION = (
 
 @pytest.mark.parametrize(("door", "ends"), [
     ((200, ACCEPTED), "ended"),
+    ((200, {"result": "drafted", "message": "A person reviews the draft."}), "ended"),
     ((409, {"code": "not-running", "message": "The step has moved on."}), "ended"),
     ((409, REJECTION), "rejected"),
     ((409, {"code": "invalid-value", "message": "income must be positive"}), "rejected"),
@@ -309,7 +317,7 @@ SHOWN_REJECTION = (
     ((500, {}), "retry"),
     ((429, {"code": "slow-down", "message": "Too many."}), "retry"),
     (None, "retry"),
-], ids=["accepted", "not-running", "rejected", "rejected-uncounted", "401", "broken-definition", "harness-off", "503", "500", "429", "unreachable"])
+], ids=["accepted", "drafted", "not-running", "rejected", "rejected-uncounted", "401", "broken-definition", "harness-off", "503", "500", "429", "unreachable"])
 async def test_the_door_answers_map_to_a_turn_end_or_a_retry(fake_keel, store, door, ends):
     if door is None:
         fake_keel.unreachable()
@@ -319,9 +327,13 @@ async def test_the_door_answers_map_to_a_turn_end_or_a_retry(fake_keel, store, d
     result = await _call("complete_step", COMPLETION, store)
 
     ended = fake_keel.bodies("/ended")
+    # A report that ended the step for this round is marked on the session's row with what it came to.
+    assert store.reported() == {"ended": door and door[1].get("result"), "stopped": "stopped"}.get(ends)
     if ends == "ended":
         assert result.startswith("Step ended:")
         assert ended == []
+        # Only a completion takes the inputs out: a draft resumes here if its reviewer asks for changes.
+        assert store.redacted() is (door[1].get("result") == "completed")
     elif ends == "rejected":
         shown = SHOWN_REJECTION if "attempts_left" in door[1] else door[1]["message"]
         assert json.loads(result) == {"error": shown, "code": door[1]["code"]}
@@ -352,6 +364,7 @@ async def test_a_runtime_without_keel_stops_the_step(store):
 
     assert result.startswith("Step stopped:")
     assert store.redacted()
+    assert store.reported() == "stopped"
 
 
 async def test_an_outcome_outside_the_contract_never_reaches_keel(fake_keel, store):
@@ -397,6 +410,7 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     }
     # The step resumes in this session once a person answers: its inputs stay.
     assert not store.redacted()
+    assert store.reported() == "hand-raised"
 
     for bad in (
         {"question": ""},
@@ -440,10 +454,15 @@ def _sandbox(answers: dict[str, str]) -> MagicMock:
 
 async def _wake(
     monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[str, str] | None = None, streaming: bool = False,
+    opening: tuple[EventType, dict, str] | None = None,
 ) -> list[dict]:
     """One wake of the step, the model answering with *replies* in turn: the requests it was sent.
 
-    A reply that is an exception is the model's call raising it.  *streaming* runs the tool calls as a streamed answer's are, each started as it arrives.
+    A reply that is an exception is the model's call raising it.  *streaming*
+    runs the tool calls as a streamed answer's are, each started as it
+    arrives.  *opening* is what woke the session: the event written to its
+    log, and the message the model reads of it; by default Keel's kickoff for
+    a step, and a person's message for any other session.
     """
     sent: list[dict] = []
     script = iter(replies)
@@ -481,9 +500,11 @@ async def _wake(
     harness._promote_fenced_artifacts = AsyncMock(return_value=None)
     harness._end_turn = AsyncMock(return_value=None)
 
-    # A step starts with Keel's kickoff; any other session with a person's message.
     contract = step_contract_in(store.row.config)
-    if contract is not None:
+    if opening is not None:
+        kind, data, kickoff = opening
+        store.write(kind, data)
+    elif contract is not None:
         kickoff = render_kickoff(contract)
         store.write(EventType.USER_MESSAGE, {"content": kickoff, "synthetic": "keel_step"})
     else:

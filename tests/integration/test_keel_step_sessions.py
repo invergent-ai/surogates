@@ -791,6 +791,37 @@ async def test_an_answer_resumes_a_paused_or_failed_step(link, org, session_stor
     assert await queue_score(redis_client, step) == 1.0
 
 
+@pytest.mark.parametrize(("reported", "kind"), [("drafted", "revision"), ("hand-raised", "answer")])
+@pytest.mark.parametrize("resting", ["failed", "active"])
+async def test_keels_message_makes_a_reported_step_the_sessions_again(
+    link, org, session_store, redis_client, reported, kind, resting,
+):
+    # A report ended the step for this round; then its wakes crashed until the session
+    # failed, or its turn still runs.  Neither took the step's inputs.
+    step = await completed_step(link, org, session_store, redis_client)
+    await session_store.mark_case_step_reported(step.id, reported)
+    await session_store.update_session_status(step.id, resting)
+    marked = await session_store.get_session(step.id)
+    assert marked.config["case_step"]["reported"] == reported
+    key = f"keel:c:1:{kind}:1"
+
+    sent = await send(link, step.id, kind=kind, text="Lower the offer to 175000.", key=key)
+
+    assert (sent.status_code, sent.json()) == (202, {"delivered": True})
+    session = await session_store.get_session(step.id)
+    assert session.status == "active"
+    assert "reported" not in session.config["case_step"]
+    assert session.config["case_step"]["inputs"] == marked.config["case_step"]["inputs"] != {}
+    assert await queue_score(redis_client, step) == 1.0
+
+    # The step reports again; Keel's retry of the same message clears no later report's mark.
+    await session_store.mark_case_step_reported(step.id, reported)
+    again = await send(link, step.id, kind=kind, text="Lower the offer to 175000.", key=key)
+
+    assert (again.status_code, again.json()) == (202, {"delivered": False})
+    assert (await session_store.get_session(step.id)).config["case_step"]["reported"] == reported
+
+
 async def test_status_reads_the_session(link, org, session_store, redis_client):
     step = await completed_step(link, org, session_store, redis_client)
 

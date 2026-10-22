@@ -55,7 +55,7 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
-from surogates.keel.steps import CASE_STEP_KEY
+from surogates.keel.steps import CASE_STEP_KEY, REPORTED_KEY
 from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
@@ -242,6 +242,25 @@ def _redacted_case_config(config: Any) -> dict | None:
     ):
         return None
     return {**config, CASE_STEP_KEY: {**contract, "inputs": {}, "inputs_redacted": True}}
+
+
+def _reported_case_config(config: Any, result: str) -> dict | None:
+    """*config* with its step contract marked as reported, with *result*.
+
+    ``None`` when there is nothing to mark: no contract, or one marked so already.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    if not isinstance(contract, dict) or contract.get(REPORTED_KEY) == result:
+        return None
+    return {**config, CASE_STEP_KEY: {**contract, REPORTED_KEY: result}}
+
+
+def _unreported_case_config(config: Any) -> dict | None:
+    """*config* with its step contract's report mark cleared; ``None`` when it has none."""
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
+    if not isinstance(contract, dict) or REPORTED_KEY not in contract:
+        return None
+    return {**config, CASE_STEP_KEY: {k: v for k, v in contract.items() if k != REPORTED_KEY}}
 
 _INBOX_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
@@ -2414,7 +2433,10 @@ class SessionStore:
         retry of one already written wakes nothing.  A case step that is over
         takes no new message: it raises :class:`StepFinishedError` and writes
         nothing.  The check holds the same lock as a cancel's redaction, so a
-        message racing a cancel never revives the step.
+        message racing a cancel never revives the step.  A message written
+        with *resume* also clears the step's report mark in the same
+        transaction, whatever the session's status: the step is the
+        session's to work on again.
         """
         message = await self._ready_event(
             session_id,
@@ -2437,6 +2459,10 @@ class SessionStore:
             if resumed is not None and _step_is_over(locked.config):
                 await db.rollback()
                 raise StepFinishedError(f"the step of session {session_id} is over")
+            if resume and (unreported := _unreported_case_config(locked.config)) is not None:
+                await db.execute(
+                    update(SessionRow).where(SessionRow.id == session_id).values(config=unreported, updated_at=func.now())
+                )
             if resumed is not None and locked.status not in _RESUMABLE_STATUSES:
                 resumed = None
             if resumed is not None:
@@ -2476,6 +2502,28 @@ class SessionStore:
         if paused:
             await self._announce_event(pause)
         return paused
+
+    async def mark_case_step_reported(self, session_id: UUID, result: str) -> None:
+        """Mark the step contract in *session_id*'s config as reported, with Keel's *result*.
+
+        A report ended the step for this round: until Keel writes to the step
+        again (:meth:`emit_keyed_synthetic_message` with *resume*), no turn of
+        the session is nudged to report, and no end of one is told to Keel.
+        Under the session row's lock, as a redaction.  A session with no
+        contract is left as it is.
+        """
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            marked = _reported_case_config(row.config, result)
+            if marked is None:
+                return
+            row.config = marked
+            row.updated_at = func.now()
+            await db.commit()
 
     async def redact_case_inputs(self, session_id: UUID) -> None:
         """Empty the inputs of the step contract in *session_id*'s config, and mark them redacted.

@@ -23,9 +23,14 @@ A report larger than Keel takes is never sent: the model is asked to shorten
 it.  Once a report ended the step, a later report in the same wake is
 answered here, without Keel: the step is no longer the session's.
 
-A turn of the step that ends with no report ending the step is told to Keel
-through :func:`report_no_outcome`; a session of the step that fails, at its
-turn's end or in the dispatcher, through :func:`report_step_failed`.
+A report that ended the step for this round also marks the session's row
+with what it came to (``REPORTED_KEY``), until Keel writes to the step
+again.  A turn of the step that ends with no report ending the step is told
+to Keel through :func:`report_no_outcome`; a session of the step that
+fails, at its turn's end or in the dispatcher, through
+:func:`report_step_failed`.  Neither tells Keel of a marked step, nor of
+one that is over: a draft under review or a raised hand is never failed by
+a crash, and its inputs stay for the person's word.
 
 The harness checks only what Keel cannot: the outcome is one of the
 contract's, the output and sources are objects, and each file named is in
@@ -47,6 +52,7 @@ from surogates.keel.client import BodyTooLarge, KeelAnswer, KeelClient, keel_cli
 from surogates.keel.files import case_file_value
 from surogates.keel.steps import (
     CASE_STEP_KEY,
+    REPORTED_KEY,
     STEP_ENDED,
     STEP_STOPPED,
     StepContract,
@@ -68,12 +74,16 @@ CHOICE_CHARS = 200
 MAX_EVIDENCE = 50
 
 _NOT_A_STEP = "This session works no step of a case: there is no step to report."
+#: What a report Keel took came to, as the step's mark; and the mark of a report Keel refused for good.
+_RESULTS = frozenset({"completed", "drafted", "hand-raised"})
+_STOPPED = "stopped"
 _NO_LONGER = f"{STEP_ENDED} the step is no longer this session's."
 
 #: The steps a report ended in a wake of this worker: each step session's id,
 #: and the lease of the wake.  A later report in that wake is answered here, so
 #: Keel never gets a second end, the inputs no second redaction, and the step
 #: no attempt Keel counts.  A later wake holds a new lease, and reports again.
+#: Only this local answer reads it: the row's report mark outlives the wake.
 _ENDED_IN_WAKE: OrderedDict[str, str] = OrderedDict()
 #: How many such steps a worker keeps, the oldest dropped first.
 _ENDED_KEPT = 1024
@@ -223,6 +233,14 @@ async def _redact(store: Any, session_id: UUID) -> None:
         logger.warning("Session %s: the step's inputs were not redacted (%s)", session_id, type(exc).__name__)
 
 
+async def _mark(store: Any, session_id: UUID, result: str) -> None:
+    """A report ended the step for this round, with *result*: the session's row says so until Keel writes to it."""
+    try:
+        await store.mark_case_step_reported(session_id, result)
+    except Exception as exc:
+        logger.warning("Session %s: the step's report was not marked (%s)", session_id, type(exc).__name__)
+
+
 def _transient(answer: KeelAnswer) -> bool:
     """Whether Keel may take the same report later: it was not reached, or was busy or failing."""
     status = answer.status
@@ -244,6 +262,7 @@ async def _stopped(
         await client.ended(session_id, reason="failed", detail=f"keel-{status}", usage=usage)
         text = f"{STEP_STOPPED} Keel refused this step's report ({status}); people take the step."
     await _redact(store, session_id)
+    await _mark(store, session_id, _STOPPED)
     return text
 
 
@@ -264,8 +283,13 @@ async def _answered(
 ) -> str:
     """What the model is told of Keel's *answer* to a step tool's report."""
     if answer.status == 200:
-        if isinstance(answer.data, dict) and answer.data.get("result") == "completed":
+        result = answer.data.get("result") if isinstance(answer.data, dict) else None
+        if result == "completed":
             await _redact(store, session_id)
+        if result not in _RESULTS:
+            # Keel took it without saying how: as the tool's own report would end the step.
+            result = "completed" if tool == "complete_step" else "hand-raised"
+        await _mark(store, session_id, result)
         return f"{STEP_ENDED} {answer.message or 'Keel took the report.'}"
     if answer.status == 409 and answer.code == "not-running":
         return _NO_LONGER
@@ -276,13 +300,9 @@ async def _answered(
     return await _stopped(client, store, session_id, usage, status=answer.status)
 
 
-def step_ended_in_wake(session_id: object, lease_token: object) -> bool:
-    """Whether a report ended the step of session *session_id* in the wake holding *lease_token*."""
-    return lease_token is not None and _ENDED_IN_WAKE.get(str(session_id)) == str(lease_token)
-
-
 def _ended_in_this_wake(kwargs: dict[str, Any]) -> bool:
-    return step_ended_in_wake(kwargs.get("session_id"), kwargs.get("lease_token"))
+    lease = kwargs.get("lease_token")
+    return lease is not None and _ENDED_IN_WAKE.get(str(kwargs.get("session_id"))) == str(lease)
 
 
 def _remember_the_end(kwargs: dict[str, Any]) -> None:
@@ -323,14 +343,29 @@ async def _send_report(
     return result
 
 
-def _known_to_keel(session: Any, lease_token: object) -> bool:
-    """Whether Keel needs no word of how *session* ended: it is no step's own
-    session, a report of the wake holding *lease_token* ended its step, or its
-    step's inputs already left it, which only the step's end does."""
-    if not is_case_step(session) or step_ended_in_wake(session.id, lease_token):
-        return True
-    step = session.config.get(CASE_STEP_KEY)
-    return isinstance(step, dict) and step.get("inputs_redacted") is True
+async def step_awaiting_report(store: Any, session: Any) -> Any | None:
+    """*session*'s row as it is now, when it is a step's own session whose step awaits its report.
+
+    ``None`` for any other session, and when Keel knows how the step stands:
+    a report ended it for this round (the contract's ``REPORTED_KEY`` mark,
+    which Keel's next message to the step clears), or it is over (its inputs
+    were redacted).  ``None`` too when the row cannot be read, which is
+    logged by session id.  Read afresh, not from the wake's copy: a report
+    of this wake, or of an earlier one, marked it after the wake began.
+    """
+    if not is_case_step(session):
+        return None
+    try:
+        row = await store.get_session(session.id)
+    except Exception as exc:
+        logger.warning("Session %s: its step was not read (%s)", session.id, type(exc).__name__)
+        return None
+    if not is_case_step(row):
+        return None
+    step = row.config[CASE_STEP_KEY]
+    if step.get(REPORTED_KEY) or step.get("inputs_redacted") is True:
+        return None
+    return row
 
 
 async def _tell_keel(session_id: Any, **end: Any) -> None:
@@ -345,38 +380,33 @@ async def _tell_keel(session_id: Any, **end: Any) -> None:
         logger.warning("Session %s: Keel was not told how its step ended (%s)", session_id, type(exc).__name__)
 
 
-async def report_no_outcome(store: Any, session: Any, lease_token: object, *, reason: str) -> None:
+async def report_no_outcome(store: Any, session: Any, *, reason: str) -> None:
     """Tell Keel that a turn of a step's session ended with no report ending the step.
 
     Keel gets ``no-outcome``, with *reason*, the turn end's own code, and the
     step's usage, and decides what comes of the step; the inputs stay.
-    Nothing is sent for a session that is no step's own, nor when Keel knows
-    of the step's end already: a report of the wake holding *lease_token*
-    ended it, or its inputs left the session.  Never raises: the turn ends
-    whatever Keel answers.
+    Nothing is sent unless the step awaits its report
+    (:func:`step_awaiting_report`).  Never raises: the turn ends whatever
+    Keel answers.
     """
-    if _known_to_keel(session, lease_token):
+    row = await step_awaiting_report(store, session)
+    if row is None:
         return
-    usage = None
-    try:
-        usage = _usage(await store.get_session(session.id))
-    except Exception as exc:
-        logger.warning("Session %s: its step's usage was not read (%s)", session.id, type(exc).__name__)
-    await _tell_keel(session.id, reason="no-outcome", detail=reason, usage=usage)
+    await _tell_keel(session.id, reason="no-outcome", detail=reason, usage=_usage(row))
 
 
-async def report_step_failed(store: Any, session: Any, lease_token: object, *, code: str) -> None:
+async def report_step_failed(store: Any, session: Any, *, code: str) -> None:
     """Tell Keel that a step's session failed, and take the step's inputs out of it.
 
     Keel gets ``failed`` with *code*, the failure's own short code, never its
     text.  The step is over for the session whether or not Keel heard.  Both
     the end of a turn and the dispatcher, which fails a session whose wakes
-    kept crashing, report through here.  Nothing is sent for a session that
-    is no step's own, nor when a report of the wake holding *lease_token*
-    ended the step, nor when its inputs already left it: Keel knows of that
-    end already.  *lease_token* is ``None`` outside a wake.  Never raises.
+    kept crashing, report through here.  Nothing is sent, and nothing
+    redacted, unless the step awaits its report (:func:`step_awaiting_report`):
+    a draft under review or a raised hand keeps its inputs for the person's
+    word.  Never raises.
     """
-    if _known_to_keel(session, lease_token):
+    if await step_awaiting_report(store, session) is None:
         return
     await _tell_keel(session.id, reason="failed", detail=code)
     await _redact(store, session.id)

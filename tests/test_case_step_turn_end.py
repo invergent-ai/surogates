@@ -9,12 +9,18 @@ out of the session.  A turn whose report ended the step tells Keel nothing
 more, and Keel being away never keeps a turn from ending.  A session the
 dispatcher fails, its wakes crashing or never recovering, is told to Keel as
 a failed turn is.
+
+A report that ended the step for this round marks the session's row until
+Keel writes to the step again: a marked step is never nudged, and a crash
+or a failure never reports it or takes its inputs, so a draft under review
+or a raised hand can still take the person's word.
 """
 from __future__ import annotations
 
 import json
 import logging
 from copy import deepcopy
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -284,3 +290,121 @@ async def test_a_step_the_sweeper_gives_up_is_reported_as_failed(fake_keel, tmp_
     assert _failed_with(store) == "recovery_loop"
     assert fake_keel.bodies("/ended") == [{"reason": "failed", "detail": "recovery_loop"}]
     assert store.redacted()
+
+
+DRAFTED = {"result": "drafted", "message": "A person reviews the draft."}
+HAND_RAISED = {"result": "hand-raised", "message": "A person will answer."}
+QUESTION = {"question": "Which income counts?"}
+FOLLOW_UP = "Did you check the co-applicant?"
+REPORTS = {
+    "drafted": (DRAFTED, "complete_step", COMPLETION),
+    "hand-raised": (HAND_RAISED, "raise_hand", QUESTION),
+    "completed": (ACCEPTED, "complete_step", COMPLETION),
+}
+
+
+def _a_person_writes_during_the_report(fake_keel, store) -> None:
+    """A person's message lands while Keel takes the report: the turn goes on past it."""
+
+    def write() -> None:
+        if len(fake_keel.requests) == 1:
+            store.write(EventType.USER_MESSAGE, {"content": FOLLOW_UP})
+
+    fake_keel.during = write
+
+
+@pytest.mark.parametrize("result", ["drafted", "hand-raised", "completed"])
+async def test_a_reported_step_whose_wake_then_crashes_is_not_failed_by_the_dispatcher(
+    fake_keel, monkeypatch, store, result,
+):
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._BASE_RETRY_DELAY", 0)
+    answer, tool, arguments = REPORTS[result]
+    fake_keel.answer(200, answer)
+    _a_person_writes_during_the_report(fake_keel, store)
+    wakes = [
+        [_calls(tool, arguments), _ProviderRefused("rejected: Ioana declared 182000.00")],
+        [_ProviderRefused("rejected: Ioana declared 182000.00")],
+        [_ProviderRefused("rejected: Ioana declared 182000.00")],
+    ]
+
+    class Worker:
+        async def wake(self, _session_id):
+            replies = wakes.pop(0)
+            # The first wake reports, then crashes on the person's message; its retries crash on it again.
+            opening = None if len(replies) == 2 else (EventType.USER_MESSAGE, {"content": FOLLOW_UP}, FOLLOW_UP)
+            await _wake(monkeypatch, store, replies, opening=opening)
+
+    await _orchestrator(store, Worker())._process(store.row.id)
+
+    assert wakes == []
+    assert _failed_with(store) == "crash_loop_detected"
+    assert fake_keel.bodies("/ended") == []
+    assert store.reported() == result
+    # A draft or a raised hand keeps its inputs: the reviewer's changes or the person's answer resume it here.
+    assert store.redacted() is (result == "completed")
+    assert store.redactions == (1 if result == "completed" else 0)
+
+
+@pytest.mark.parametrize("result", ["drafted", "hand-raised"])
+async def test_a_failure_in_the_wake_of_a_draft_or_a_raised_hand_reports_nothing(fake_keel, monkeypatch, store, result):
+    answer, tool, arguments = REPORTS[result]
+    fake_keel.answer(200, answer)
+    _a_person_writes_during_the_report(fake_keel, store)
+
+    await _wake(monkeypatch, store, [_calls(tool, arguments), _cut_off(), _cut_off(), _cut_off()])
+
+    assert _failed_with(store) == "provider_error"
+    assert fake_keel.bodies("/ended") == []
+    assert store.reported() == result
+    assert not store.redacted()
+    assert store.redactions == 0
+
+
+async def test_a_hand_raised_step_woken_by_a_helper_is_neither_nudged_nor_reported(fake_keel, monkeypatch, store):
+    await store.mark_case_step_reported(store.row.id, "hand-raised")
+    helper_done = "A helper you started finished: the payslips are summarized."
+
+    sent = await _wake(
+        monkeypatch, store, [_says("Noted: the payslips are summarized."), _says("Still waiting on the answer.")],
+        opening=(EventType.WORKER_COMPLETE, {"worker_session_id": str(uuid4()), "result": helper_done}, helper_done),
+    )
+
+    assert len(sent) == 1
+    assert NUDGE not in json.dumps(sent)
+    assert _ended_with(store) == "completed"
+    assert fake_keel.requests == []
+    assert store.reported() == "hand-raised"
+    assert not store.redacted()
+
+
+async def test_a_tool_call_between_two_answers_does_not_rearm_the_nudge(fake_keel, monkeypatch, store):
+    sent = await _wake(monkeypatch, store, [
+        _says("I read the checklist."),
+        _calls("read_file", {"path": "in/checklist.pdf"}, "c1"),
+        _says("The checklist is complete."),
+    ], sandbox={"read_file": "Checklist: all documents present."})
+
+    assert len(sent) == 3
+    assert json.dumps(sent[2]["messages"]).count("Finish it now") == 1
+    assert _ended_with(store) == "completed"
+    assert fake_keel.bodies("/ended") == [{"reason": "no-outcome", "detail": "completed", "usage": USAGE}]
+
+
+async def test_a_child_of_a_step_is_never_nudged_or_reported(fake_keel, monkeypatch, tmp_path):
+    # Even one whose config carried the step's contract over: only the step's own session is the step.
+    child = _step(deepcopy(CONTRACT))
+    child.parent_id = uuid4()
+    store = _StepStore(child, LocalBackend(str(tmp_path)))
+    task = "Summarize the payslips in /workspace/in."
+
+    sent = await _wake(
+        monkeypatch, store, [_says("The payslips show 5200 a month."), _says("Done.")],
+        opening=(EventType.USER_MESSAGE, {"content": task}, task),
+    )
+
+    assert len(sent) == 1
+    assert NUDGE not in json.dumps(sent)
+    # Its own end; its parent hears of it after.
+    assert [d["reason"] for sid, kind, d in store.events if sid == child.id and kind is EventType.SESSION_COMPLETE] == ["completed"]
+    assert fake_keel.requests == []
+    assert not store.redacted()

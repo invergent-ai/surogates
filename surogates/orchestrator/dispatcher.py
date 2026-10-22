@@ -918,9 +918,7 @@ class Orchestrator:
         except Exception:
             logger.warning("Could not read session %s to report its failure", session_id, exc_info=True)
             return
-        # No wake holds the session here, so no lease: a step a report ended
-        # is known by its inputs, which already left it.
-        await report_step_failed(self.session_store, session, None, code=code)
+        await report_step_failed(self.session_store, session, code=code)
         await self._report_failure_to_parent(session, error)
 
     async def _report_failure_to_parent(self, session: Any, error: str) -> None:
