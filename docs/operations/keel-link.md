@@ -44,7 +44,7 @@ keel-link reads the same state as the API (database, Redis, storage, the platfor
 | Setting | Held by | What it is |
 |---|---|---|
 | `SUROGATES_KEEL_LINK_KEY` | keel-link alone | The bearer Keel shows keel-link. |
-| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended. |
+| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, and where an intake agent starts cases. |
 | `SUROGATES_KEEL_DOOR_KEY` | the worker alone | The bearer the worker shows Keel's door. |
 
 keel-link listens on `SUROGATES_API_HOST`, port `SUROGATES_KEEL_LINK_PORT` (8090 by default). Give each process only its own key. Neither key is logged or shown in a settings repr. With the settings empty the integration is off: keel-link answers every call `401 bad-link-key`.
@@ -65,6 +65,21 @@ A report Keel would refuse whole is never sent, and the model is told what to fi
 A turn of the step that ends in words, with no report, is told once to report, and goes on. When it still ends without a report ending the step, the worker tells Keel `no-outcome`, with the code of how the turn ended and the step's usage, and the inputs stay. A turn that fails, and a session the worker gives up on because its wakes kept crashing or never recovered, is told to Keel as `failed`, with the failure's code and never its text, and the inputs are removed. A report that ended the step for this round (`completed`, `drafted`, `hand-raised`, or `stopped` when Keel refused it for good) is marked on the session until Keel's next answer or revision to the step clears it. So is a turn with no outcome that Keel takes as a raised hand. A mark is never written over an answer or a revision that reached the step after its report began. A marked step is never nudged, and no later end of its turns is told to Keel: a crash never fails a draft under review or a raised hand, nor removes the inputs they resume with. The same holds for a step whose inputs were already removed. Keel being unreachable never keeps a turn from ending: the worker logs it by session id.
 
 A worker without both settings has no link to Keel: every report removes the step's inputs and ends the turn, and Keel learns of it only from the session's status.
+
+## An intake agent starts cases
+
+A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a session that works on no case, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case is offered it. A worker without both settings, or one that cannot reach Keel, offers no `start_case` until it next asks.
+
+Each call asks Keel to start one case, keyed `intake:<session id>:<tool call id>`, so the same call sent again finds the case it started. Keel also finds the case a session already started with the same data, and refuses a session more cases than it allows.
+
+| Keel's answer | The model reads |
+|---|---|
+| `201` or `200` | `Case <number> started (<case type>).` |
+| `403`, `409` or `422` | Keel's message and code, as an error to act on. |
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | Keel could not be reached: call `start_case` again. |
+| Anything else | Keel refused the request, with its status. |
+
+A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, one holding NaN or an infinity, or a tool call id too long for the 200-character key. An intake session is no step: Keel is never told how its turns end.
 
 ## Step sessions wait behind people
 

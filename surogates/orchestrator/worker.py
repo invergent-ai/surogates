@@ -25,6 +25,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import has_file_pane
+from surogates.keel.intake import intake_case_types
 from surogates.keel.steps import case_scope_of, gate_case_tools, is_case_session
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
@@ -230,6 +231,8 @@ def _filter_effective_tools(
     # Same safe default: an agent not known to run Programs gets none of the
     # follow-up tools.
     programs_enabled: bool = False,
+    # The case types Keel lets this agent start: none, no ``start_case``.
+    intake: Sequence[dict] = (),
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
@@ -257,7 +260,8 @@ def _filter_effective_tools(
 
     Execution-context self-tools and other per-session groups follow, and
     the Keel case gate runs last: a case's sessions keep only the case's
-    tools (:func:`surogates.keel.steps.gate_case_tools`).
+    tools (:func:`surogates.keel.steps.gate_case_tools`), so none starts a
+    case even when Keel lets its agent start one (*intake*).
     """
     result = set(tools)
 
@@ -364,6 +368,11 @@ def _filter_effective_tools(
     # The office tools edit a document that opens beside the chat: the same rule the schemas keep.
     if not has_file_pane(session):
         result -= {"office_read", "office_edit"}
+
+    # ``start_case`` goes only to an agent Keel lets start a case of some type:
+    # the same rule the schemas keep (``AgentHarness._tool_filter_for_session_impl``).
+    if not intake:
+        result.discard("start_case")
 
     # Last: a Keel case's sessions are offered only the case's tools, and only
     # its step's own session the step tools.  The schemas apply the same gate
@@ -2007,6 +2016,13 @@ async def run_worker(settings: Settings) -> None:
                 for e in tool_registry.get_all()
                 if e.toolset == "user_reports"
             )
+        # The case types Keel lets this agent start, which ``start_case``
+        # takes.  Never asked for a case's session: the case gate takes the
+        # tool from it whatever Keel grants.
+        intake = (
+            [] if is_case_session(session)
+            else await intake_case_types(session.org_id, session.agent_id)
+        )
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
@@ -2021,6 +2037,7 @@ async def run_worker(settings: Settings) -> None:
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
             whiteboard_enabled=ctx.whiteboard_enabled,
             programs_enabled=ctx.programs_enabled,
+            intake=intake,
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding
@@ -2243,6 +2260,7 @@ async def run_worker(settings: Settings) -> None:
             # this config names.
             runtime_config_cache=runtime_config_cache,
             whatsapp_forms=ctx.whatsapp_forms,
+            intake=intake,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

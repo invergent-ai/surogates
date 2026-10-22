@@ -19,6 +19,7 @@ from surogates.keel.steps import StepContract
 from surogates.tools.builtin.ask_user_question import widen_for_channel
 from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
 from surogates.tools.builtin.case_step import describe_completion
+from surogates.tools.builtin.intake import describe_intake
 from surogates.tools.builtin.send_form import describe_forms
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
 
@@ -194,8 +195,9 @@ def describe_for_conversation(
     """Return *schemas* with ``send_form`` limited to the agent's *forms*,
     ``ask_user_question`` taking as many choices as *channel* does, and
     ``complete_step`` taking the outcomes, form and file fields of a case
-    step's *contract*.  *intake*, the case types an intake agent may start,
-    is not read yet.  Input is never mutated."""
+    step's *contract*, and ``start_case`` taking only the case types of
+    *intake*, those an intake agent may start, each named with the fields it
+    requires.  Input is never mutated."""
     described: list[dict[str, Any]] = []
     for schema in schemas:
         name = schema["function"]["name"]
@@ -205,5 +207,7 @@ def describe_for_conversation(
             schema = widen_for_channel(schema, channel)
         elif name == "complete_step" and contract is not None:
             schema = describe_completion(schema, contract)
+        elif name == "start_case" and intake:
+            schema = describe_intake(schema, intake)
         described.append(schema)
     return described

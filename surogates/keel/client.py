@@ -73,6 +73,16 @@ class KeelAnswer:
         message = self.data.get("message") if isinstance(self.data, dict) else None
         return message if isinstance(message, str) else None
 
+    @property
+    def transient(self) -> bool:
+        """Whether Keel may take the same request later: it was not reached, or was busy or failing.
+
+        A 503 ``harness-off`` is not: Keel has turned its harness door off.
+        """
+        if self.status is None or self.status in (408, 429):
+            return True
+        return self.status >= 500 and not (self.status == 503 and self.code == "harness-off")
+
 
 def _segment(value: object) -> str:
     return quote(str(value), safe="")

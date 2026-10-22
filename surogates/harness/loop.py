@@ -22,6 +22,7 @@ import re
 import logging
 import os
 import traceback
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -676,6 +677,7 @@ class AgentHarness(
         platform_client: Any | None = None,
         runtime_config_cache: Any | None = None,
         whatsapp_forms: tuple[dict[str, Any], ...] = (),
+        intake: Sequence[dict[str, Any]] = (),
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
     ) -> None:
@@ -739,6 +741,9 @@ class AgentHarness(
         # held on at its wake (``admit_turn``).
         self._runtime_config_cache = runtime_config_cache
         self._whatsapp_forms = tuple(whatsapp_forms or ())
+        # The case types Keel lets this agent start, as the worker asked at
+        # the wake: ``start_case`` is offered only when there is one.
+        self._intake: tuple[dict[str, Any], ...] = tuple(intake or ())
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -2954,6 +2959,7 @@ class AgentHarness(
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
             contract=step_contract_of(session) if is_case_step(session) else None,
+            intake=getattr(self, "_intake", ()),
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
@@ -5584,6 +5590,14 @@ class AgentHarness(
             ),
             session,
         )
+        # ``start_case`` goes only to an agent Keel lets start a case of some
+        # type, as in ``worker._filter_effective_tools``.  ``getattr``: some
+        # test harnesses skip ``__init__``; absent means no grants.
+        if not getattr(self, "_intake", ()):
+            tool_filter = (
+                set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
+            )
+            tool_filter.discard("start_case")
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.

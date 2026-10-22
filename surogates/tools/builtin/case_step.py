@@ -267,14 +267,6 @@ async def _began(store: Any, session_id: UUID) -> int | None:
         return None
 
 
-def _transient(answer: KeelAnswer) -> bool:
-    """Whether Keel may take the same report later: it was not reached, or was busy or failing."""
-    status = answer.status
-    if status is None or status in (408, 429):
-        return True
-    return status >= 500 and not (status == 503 and answer.code == "harness-off")
-
-
 async def _stopped(
     client: KeelClient | None, store: Any, session_id: UUID, usage: dict[str, Any], *,
     status: int | None = None, since: int | None = None,
@@ -323,7 +315,7 @@ async def _answered(
         return _NO_LONGER
     if answer.status == 409 and answer.code != "broken-definition":
         return _rejection(answer, tool)
-    if _transient(answer):
+    if answer.transient:
         return _error(f"Keel could not be reached; call {tool} again.")
     return await _stopped(client, store, session_id, usage, status=answer.status, since=since)
 

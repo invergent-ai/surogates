@@ -166,6 +166,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # workspace storage; none of that exists in a sandbox pod.
     "complete_step": ToolLocation.HARNESS,
     "raise_hand": ToolLocation.HARNESS,
+    # An intake agent starts a case through Keel's door: the worker's door key.
+    "start_case": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,
