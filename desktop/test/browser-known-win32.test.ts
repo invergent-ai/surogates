@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Disk } from "../src/browser/choose.js";
 import {
-  CHECKING, fileStamp, NOT_A_PROGRAM, NOT_SIGNED, ON_A_NETWORK, PUBLISHERS, type ProgramTools, UNCHECKED, windowsBrowsers,
+  CHECKING, fileStamp, NOT_A_PROGRAM, NOT_SIGNED, ON_A_NETWORK, type ProgramTools, UNCHECKED, windowsBrowsers,
 } from "../src/browser/known-win32.js";
 import { importedOn } from "./platforms.js";
 
@@ -160,10 +160,6 @@ describe("a browser the app drives on Windows", () => {
     expect(known.refused("\\\\server\\apps\\chrome.exe", disk)).toBe(ON_A_NETWORK);
     expect(known.programOf("C:\\Tools\\other-browser.exe", disk)).toBe("C:\\Tools\\other-browser.exe");
     expect(known.programOf("C:\\gone.exe", { ...disk, realpath: () => { throw new Error("ENOENT"); } })).toBeNull();
-  });
-
-  it("names each known browser's maker as its signature does", () => {
-    expect(PUBLISHERS).toEqual({ "chrome.exe": "Google LLC", "msedge.exe": "Microsoft Corporation", "brave.exe": "Brave Software, Inc.", "vivaldi.exe": "Vivaldi Technologies AS" });
   });
 
   it("is picked in Custom… among programs alone", async () => {

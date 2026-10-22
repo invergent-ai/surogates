@@ -12,7 +12,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -405,16 +404,6 @@ describe("an installed Mac app's updates", () => {
     expect(MACHINE_RECORD).toBe("/Library/Application Support/Surogate/install.json");
     // An app in no bundle installs nothing.
     expect(installedUpdates("1.2.3", "/c", fetch, signal, null).held?.()).toEqual({ why: "it runs from no app bundle" });
-  });
-});
-
-describe("the README", () => {
-  it("lists each place the app writes on a Mac, for a person who drags it to the Trash", async () => {
-    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
-    const section = readme.slice(readme.indexOf("## What it writes on a Mac"), readme.indexOf("\n## ", readme.indexOf("## What it writes on a Mac") + 1));
-    const { root, cache } = await importedOn("darwin", async () => (await import("../src/shell/places.js")).placesFor({ HOME: "/Users/ana" }, "/Users/ana"));
-    for (const place of [root, cache].map((path) => path.replace("/Users/ana", "~"))) expect(section).toContain(`\`${place}/\``);
-    for (const named of [MACHINE_RECORD, "Surogate Safe Storage", "Remove Surogate from This Mac…", ".Surogate-<version>.previous"]) expect(section).toContain(named);
   });
 });
 

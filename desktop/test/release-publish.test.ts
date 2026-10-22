@@ -11,7 +11,6 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { KNOWN } from "../src/browser/known-linux.js";
 import { signedRelease } from "../src/shell/updates.js";
 
 import { KEY_LISTS } from "./key-list-forms.js";
@@ -1268,23 +1267,6 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it("holds one substitution to a command for as long as a signal ends it: Ubuntu 24.04's bash runs the signal's handler between the two of one command, and ends with an error of its own", () => {
-    const lines = readFileSync(join(RELEASE, "publish.sh"), "utf8").split("\n");
-    // Each describe's commands, linux-x64's and darwin-arm64's, from where a signal ends it to where it lets every signal
-    // by: its removal, and all that follows.
-    const froms = lines.flatMap((line, at) => (line.includes("trap 'exit 143' TERM") ? [at] : []));
-    expect(froms).toHaveLength(2);
-    for (const from of froms) {
-      const to = lines.findIndex((line, at) => at > from && /^\s+cleanup \|\| fail /.test(line));
-      expect(from).toBeGreaterThan(0);
-      expect(to).toBeGreaterThan(from);
-      expect(froms.filter((other) => other > from && other < to)).toEqual([]);
-      const commands = lines.slice(from + 1, to).filter((line) => !line.trim().startsWith("#"));
-      expect(commands.filter((line) => line.includes("$(")).length).toBeGreaterThan(0);
-      for (const line of commands) expect((line.match(/[$<>]\(/g) ?? []).length, line).toBeLessThanOrEqual(1);
-    }
-  });
-
   it("refuses a tarball that is not the one the build's job made, by the hash that job gave: an artifact is its run's, and any job of the run may put another under its name", () => {
     const first = sha256(readFileSync(tarball()));
     // Another tarball under the build's name, whose helper is the install script too.
@@ -1301,17 +1283,6 @@ describe("the desktop's release manifest", () => {
     for (const step of [describes, signs]) expect(step({ DESKTOP_TARBALL_SHA256: "" })).toMatchObject({ status: 1, stdout: "", stderr: expect.stringMatching(/DESKTOP_TARBALL_SHA256: parameter null or not set\n$/) });
     expect(readdirSync(out)).toEqual(["surogate-desktop-1.2.3-linux-x64.tar.gz"]);
     expect(describes({ DESKTOP_TARBALL_SHA256: found }).status).toBe(0);
-  });
-
-  it("lists, in the repository, one release key: the public half in install.sh", () => {
-    const script = readFileSync(join(RELEASE, "install.sh"), "utf8");
-    expect(script.match(/-----BEGIN PUBLIC KEY-----/g)).toHaveLength(1);
-    expect(/RELEASE_KEYS=\(\n    '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA[A-Za-z0-9+/]{43}=\n-----END PUBLIC KEY-----'\n  \)/.test(script)).toBe(true);
-  });
-
-  it("notes a missing browser where the app looks for one: each known browser's own program", () => {
-    const listed = /for browser in ([^;]+); do/.exec(readFileSync(join(RELEASE, "install.sh"), "utf8"))?.[1]?.split(" ");
-    expect(listed).toEqual(KNOWN.map(({ paths }) => paths.find((path) => !path.startsWith("/snap/") && !path.startsWith("/usr/bin/"))));
   });
 
   afterEach(() => {

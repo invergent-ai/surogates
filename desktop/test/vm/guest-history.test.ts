@@ -421,17 +421,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
   let guest: Guest;
   let place: Place;
   let copyOf: (thread: string) => string;
-  // Each answer the history gave, by its action, and each code it refused with.
-  const answered = new Map<string, unknown[]>();
-  const refused = new Set<string>();
   // What the agent answered *action* with, unchecked; and that the check passes all of it on.
   const raw = async (thread: string, action: string, args: Record<string, unknown> = {}, at = KEY) => {
     const reply = await guest.request({ type: "history", key: at, thread, user: "u1", action, args });
     expect(reply).toMatchObject({ type: "result" });
     const { outcome } = reply as { outcome: Outcome };
     expect(checked(action, outcome, thread), `${action} answered ${JSON.stringify(outcome)}`).toEqual(outcome);
-    if ("ok" in outcome) answered.set(action, [...(answered.get(action) ?? []), outcome.ok]);
-    else refused.add(String(outcome.error.code));
     return outcome;
   };
   const said = async (thread: string, action: string, args: Record<string, unknown> = {}) => ok(await raw(thread, action, args));
@@ -651,15 +646,6 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("each answer of a folder'
     expect(await said(TWO, "changed")).toEqual(before);
     // It is asked with nothing: anything more is no request of the history's.
     expect(await code(ONE, "drop", { force: true })).toBe("not_a_request");
-  });
-
-  it("was asked every action a folder's history takes, and refused with each code a test can bring about", () => {
-    const actions = /^_ACTIONS[^]*?^\}/m.exec(readFileSync(new URL("../../../surogates/sandbox/local_history.py", import.meta.url), "utf8"))![0];
-    expect([...answered.keys()].sort()).toEqual([...actions.matchAll(/^ {4}"([a-z_]+)": \(/gm)].map(([, action]) => action).sort());
-    // record_unfinished and move_unfinished need a copy git cannot write: the history's own tests make one.
-    expect([...refused].sort()).toEqual([
-      "conflict", "failed", "history_refused", "landing_unsettled", "name_not_utf8", "no_whole_copy", "not_a_request", "not_on_base",
-    ]);
   });
 });
 

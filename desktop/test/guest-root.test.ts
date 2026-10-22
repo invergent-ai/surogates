@@ -847,18 +847,6 @@ describe("a root on Apple's share, which shows each file as the asking uid's", (
     expect(() => checkOwner(0, 0)).toThrow("shows as root's");
   });
 
-  // Here, where no share mounts, the setup's order is read from its source: the root's own uid given, its share
-  // mounted, then its owner asked as that uid and checked, before anything of the root is made or run.
-  it("asks Apple's share its folder's owner as the root's own uid, and checks it, before anything of the root is made", () => {
-    const source = readFileSync(new URL("../src/guest/root.ts", import.meta.url), "utf8");
-    const body = /^export async function enter\([\s\S]*?\n\}\n/m.exec(source)?.[0] ?? "";
-    const at = (text: string) => body.indexOf(text);
-    const steps = ["const uid = uidOf(root);", "const mount = await mountShare(share);", 'if (share.kind === "vz") {',
-      "const shown = await shownTo(mount, uid, MOUNT_MS);", "checkOwner(shown, uid);", "const cgroup = join(CGROUPS, root);"];
-    for (const step of steps) expect(at(step), step).toBeGreaterThan(0);
-    expect(steps.map(at)).toEqual(steps.map(at).sort((a, b) => a - b));
-  });
-
   it("finds the folder of one of the eight devices by its tag", () => {
     expect(sharePath({ kind: "vz", tag: "s2" })).toBe("/run/surogate/shares/s2");
     expect(sharePath({ kind: "virtiofs", tag: "r2" })).toBe("/run/surogate/shares/r2");

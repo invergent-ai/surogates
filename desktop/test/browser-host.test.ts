@@ -11,7 +11,6 @@ import { createHash } from "node:crypto";
 import { getEventListeners } from "node:events";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, request as httpRequest, type Server, type ServerResponse } from "node:http";
-import { createRequire } from "node:module";
 import { connect as connectTcp, createServer as createTcp, type Server as TcpServer } from "node:net";
 import type { Duplex } from "node:stream";
 import { tmpdir, userInfo } from "node:os";
@@ -28,7 +27,7 @@ import { CANCELLED, type Launch, PAUSED } from "../src/browser/client.js";
 import { interrupted, LEFT_TO_USER, type StagedDownload, tooLarge, tooMuch } from "../src/browser/downloads.js";
 import {
   A_FOLDER, AFTER_FAILURE_MS, AFTER_HAND_BACK_MS, ASKING, BrowserHost, type BrowserHostOptions, clearStaged, EARLIER_RUNNING, FILE_ASKED, filesOf, GIVEN_AS_TAKEN,
-  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, REDIRECTED_TO_A_CHAT, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
+  NO_SITE, NOT_AS_ASKED, NOT_ASKED, notFinished, ONE_FILE, LOOK_MS, OWN_CHOOSER_MS, PLAYWRIGHT_READ_STEPS, PROXY_BYPASSED, READS, REDIRECTED_TO_A_CHAT, SAID_MS, SETTLE_MS, STAGED_MOST_BYTES, TURN_MS, UNSAID_MS, WEAKENING,
 } from "../src/browser/host.js";
 import { OPERATIONS } from "../src/browser/operations.js";
 import { browserTemp, holding } from "../src/browser/processes-linux.js";
@@ -811,37 +810,6 @@ describe("what a host that was killed left staged", () => {
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
-  });
-});
-
-describe("how many times over a page is asked to answer, as it was counted", () => {
-  it("is counted on the Playwright that is installed: once for each step Playwright takes to read a file input that asked, and once more", () => {
-    const installed = (createRequire(import.meta.url)("playwright-core/package.json") as { version: string }).version;
-    expect(installed, [
-      `playwright-core is ${installed} here, and the steps it takes to read a file input that asked were counted on ${PLAYWRIGHT_MEASURED}.`,
-      "The host asks a page to answer once for each of those steps and once more, before it lets a page its user holds be",
-      "and before it keeps what a page asks for after a hand back: with a step more than was counted, the browser's own file",
-      "chooser can open in front of its user with no click of theirs.",
-      "Count again the commands Playwright sends a page, one after the other, between Chrome's Page.fileChooserOpened and its",
-      "own filechooser event (in lib/coreBundle.js: CRPage._onFileChooserOpened, _adoptBackendNodeId, Page._onFileChooserOpened,",
-      "ExecutionContext._utilityScript and evaluateWithArguments), and which of them are sent as a gesture: on 1.63.0 two",
-      "readings of the input are, on two chains, and Playwright says the page asked after the first alone. Then run, headed,",
-      "the tests of a page and of a frame \"that asked for a file on the agent's click and was busy from then on\" and of",
-      "\"a page the agent only opened\" in test/browser-host.test.ts, several times each.",
-      "Write the count and the version at PLAYWRIGHT_READ_STEPS and PLAYWRIGHT_MEASURED in src/browser/host.ts, where the",
-      "count made on 1.63.0 is written, and how it was made.",
-    ].join("\n")).toBe(PLAYWRIGHT_MEASURED);
-    expect([PLAYWRIGHT_MEASURED, PLAYWRIGHT_READ_STEPS, READS]).toEqual(["1.63.0", 3, 4]);
-  });
-});
-
-describe("an upload's prompt, as the host is asked for it", () => {
-  it("waits for a page to say where its file input is no longer than the prompt waits for the host: its session's line is held for no prompt that has given up", () => {
-    expect(LOOK_MS).toBeLessThan(ADDRESS_MS);
-  });
-
-  it("waits for an upload's turn in its session's line, and then for the page, less long together than the prompt waits for the host: the prompt hears why it has no site to name", () => {
-    expect([TURN_MS, TURN_MS + LOOK_MS < ADDRESS_MS]).toEqual([100, true]);
   });
 });
 

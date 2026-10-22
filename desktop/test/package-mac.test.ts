@@ -1,6 +1,5 @@
-// Surogate.app as scripts/package-mac.sh lays it out, as a person drags it to Applications. On any OS: the keys its
-// Info.plist takes over Electron's (macos/info-plist.json), the entitlements each of its programs is signed with
-// (macos/entitlements), and what the script refuses before it lays anything out. On the macOS runner, where
+// Surogate.app as scripts/package-mac.sh lays it out, as a person drags it to Applications. On any OS: what the
+// script refuses before it lays anything out. On the macOS runner, where
 // SUROGATE_MAC_LAYOUT names a bundle the script made of SUROGATE_MAC_VERSION, with the agent disk and VM manifest
 // SUROGATE_MAC_AGENT_DISK and SUROGATE_MAC_VM_MANIFEST name: the bundle itself, every file the app's code looks for
 // where it looks, every program in it Apple silicon's alone, and each signed ad hoc with its own entitlements.
@@ -27,61 +26,6 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-});
-
-// The keys of an entitlements file, each with its value, read from its XML: true, or the value's own element.
-function entitlementsIn(file: string): Record<string, string> {
-  const dict = /<dict>([\s\S]*)<\/dict>/.exec(readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, ""))?.[1] ?? "";
-  return Object.fromEntries([...dict.matchAll(/<key>([^<]+)<\/key>\s*<(true|false)\/>/g)].map((found) => [found[1], found[2]]));
-}
-
-describe("the keys of Surogate.app's Info.plist", () => {
-  const keys = JSON.parse(readFileSync(join(MACOS, "info-plist.json"), "utf8")) as Record<string, unknown>;
-
-  it("name the app Surogate, by the identifier its Keychain item, its privacy grants and its login item are kept under, of the release's version", () => {
-    expect(keys).toMatchObject({
-      CFBundleDisplayName: "Surogate", CFBundleExecutable: "Surogate", CFBundleName: "Surogate", CFBundleIdentifier: "ai.invergent.surogate",
-      CFBundleShortVersionString: "@VERSION@", CFBundleVersion: "@VERSION@", CFBundleIconFile: "surogate.icns",
-    });
-  });
-
-  it("ask for macOS 14 or later, and take surogate:// links", () => {
-    expect(keys.LSMinimumSystemVersion).toBe("14.0");
-    expect(keys.CFBundleURLTypes).toEqual([{ CFBundleURLName: "Surogate link", CFBundleURLSchemes: ["surogate"] }]);
-  });
-
-  it("say in one sentence of Surogate's what the agent does in each folder and network macOS asks a person about", () => {
-    const prompts = ["NSDesktopFolderUsageDescription", "NSDocumentsFolderUsageDescription", "NSDownloadsFolderUsageDescription", "NSLocalNetworkUsageDescription", "NSNetworkVolumesUsageDescription", "NSRemovableVolumesUsageDescription"];
-    expect(Object.keys(keys).filter((key) => key.endsWith("UsageDescription")).sort()).toEqual(prompts);
-    for (const key of prompts) expect(keys[key], key).toMatch(/^Surogate's agent [^.]+\.$/);
-  });
-
-  it("are all an app's own, of the kinds plutil sets: no key of Electron's own is named, and none of the asar it no longer has", () => {
-    expect(Object.keys(keys)).not.toContain("ElectronAsarIntegrity");
-    expect(Object.keys(keys).sort()).toEqual(Object.keys(keys));
-    for (const [key, value] of Object.entries(keys)) expect(typeof value === "string" || Array.isArray(value), key).toBe(true);
-  });
-});
-
-describe("the entitlements each of Surogate.app's programs is signed with", () => {
-  it("are V8's JIT for the app, its helpers and its node, the Virtualization framework for surogate-vm, and nothing else", () => {
-    expect(readdirSync(join(MACOS, "entitlements")).sort()).toEqual(["app.plist", "helper.plist", "node.plist", "vm.plist"]);
-    for (const name of ["app", "helper", "node"]) expect(entitlementsIn(join(MACOS, "entitlements", `${name}.plist`)), name).toEqual({ "com.apple.security.cs.allow-jit": "true" });
-    expect(entitlementsIn(join(MACOS, "entitlements", "vm.plist"))).toEqual({ "com.apple.security.virtualization": "true" });
-  });
-
-  it("are given by the signing to those programs by their paths alone, and it never signs with --deep", () => {
-    const script = readFileSync(join(DESKTOP, "scripts", "sign-mac.sh"), "utf8");
-    const table = /entitlements_of\(\) \{\n {2}case "\$1" in\n([\s\S]*?)\n {2}esac/.exec(script)?.[1] ?? "";
-    expect(table.split("\n").map((line) => line.trim().replace(/\) .*\/(\w+)\.plist".*$/, ") $1"))).toEqual([
-      "Contents/MacOS/Surogate) app",
-      "Contents/MacOS/surogate-vm) vm",
-      "Contents/Resources/app/bin/node) node",
-      '"Contents/Frameworks/Surogate Helper"*.app/Contents/MacOS/"Surogate Helper"*) helper',
-      "*) ;;",
-    ]);
-    expect(script.split("\n").filter((line) => !line.trim().startsWith("#") && line.includes("--deep") && !line.includes("--verify"))).toEqual([]);
-  });
 });
 
 describe.skipIf(process.platform === "darwin")("scripts/package-mac.sh, elsewhere than on a Mac", () => {

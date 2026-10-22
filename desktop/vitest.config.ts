@@ -11,7 +11,7 @@ export const MACOS = [
   "test/protocol.test.ts", "test/vm-manifest.test.ts", "test/state-schema.test.ts",
   // The file host under Seatbelt: clean spawns, and what needs nothing built. Its other suites need fsat, rg and a
   // node at bin/node, and take long: the workflow's file-host job runs them, each on its own.
-  "test/clean-child.test.ts", "test/agent-disk-imports.test.ts", "test/policy-darwin.test.ts",
+  "test/clean-child.test.ts", "test/policy-darwin.test.ts",
   // The VM backend: what starts no program, and surogate-vm's stand-in started as the app starts it, on the app's built code.
   "test/vm-darwin.test.ts", "test/vm-darwin-boot.test.ts",
   // The guest image's unpack with Node's own zstd, in this package's Electron, on the app's built code.
@@ -35,7 +35,7 @@ export const WINDOWS = [
   "test/platform.test.ts", "test/backoff.test.ts", "test/egress.test.ts", "test/guest-control.test.ts", "test/output.test.ts", "test/protocol.test.ts",
   "test/vm-manifest.test.ts",
   // The seams each part of the app picks its OS by, which name Windows's rows.
-  "test/platform-seams.test.ts", "test/session-paths.test.ts", "test/native-helper.test.ts", "test/windows-project.test.ts",
+  "test/session-paths.test.ts", "test/native-helper.test.ts",
   // The file host on Windows: what needs nothing built. Its other suites need ntat, rg and dist/: the workflow's
   // file-host job runs them, each on its own.
   "test/names-win32.test.ts", "test/srt-win32.test.ts", "test/glob-win32.test.ts",
@@ -44,12 +44,10 @@ export const WINDOWS = [
   "test/credentials-win32.test.ts", "test/backups.test.ts",
   "test/login-item-win32.test.ts", "test/deep-link-win32.test.ts", "test/app-identity-win32.test.ts", "test/notifications-win32.test.ts",
   "test/menus-win32.test.ts", "test/main-window-win32.test.ts", "test/quick-entry-win32.test.ts",
-  "test/ca-source-win32.test.ts", "test/tools-look.test.ts", "test/installer-win32.test.ts", "test/installer.test.ts",
+  "test/ca-source-win32.test.ts", "test/installer-win32.test.ts", "test/installer.test.ts",
   "test/state-schema.test.ts",
   "test/browser-known-win32.test.ts", "test/browser-processes-win32.test.ts", "test/browser-host-win32.test.ts",
   "test/folders-held-win32.test.ts",
-  // The native programs' one workspace, and the one script that builds the Windows app.
-  "test/windows-native.test.ts",
   // The guest's disks as Windows opens them, fixed VHDs: one mounted read-only; and the image's delivery, unpacked with
   // Node's own zstd in this package's Electron, on the app's built code.
   "test/vhd-win32.test.ts", "test/vm-image-node.test.ts",

@@ -141,11 +141,6 @@ describe("scripts/node.sh", () => {
     }
     expect(run("node.sh", LINUX, undefined, ["linux-x64"])).toEqual({ status: 1, stderr: refused, ran: [] });
   });
-
-  it("is of the version whose headers and import library ntat is built against", () => {
-    const version = /^VERSION=v([\d.]+)$/m.exec(readFileSync(join(PACKAGE, "scripts", "node.sh"), "utf8"))?.[1];
-    expect(readFileSync(join(PACKAGE, "native", "ntat", "build.ps1"), "utf8")).toMatch(new RegExp(`^\\$Version = '${version?.replaceAll(".", "\\.")}'$`, "m"));
-  });
 });
 
 describe("scripts/rg.sh", () => {

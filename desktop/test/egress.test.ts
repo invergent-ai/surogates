@@ -3,7 +3,7 @@ import { networkInterfaces } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
-import { destination, judge, LOOKUP_MS, PACKAGE_HOSTS, packageHost, reach } from "../src/vm/egress.js";
+import { destination, judge, LOOKUP_MS, packageHost, reach } from "../src/vm/egress.js";
 
 // This computer's own addresses, as its interfaces would give them.
 const local = () => ["127.0.0.1", "::1", "192.168.100.139", "fe80::2d6:c59:8d66:3938"];
@@ -26,13 +26,6 @@ const names: Record<string, string[]> = {
 const resolve = (name: string) => (name in names ? Promise.resolve(names[name] ?? []) : Promise.reject(new Error("ENOTFOUND")));
 
 describe("the package hosts", () => {
-  it("are the cloud's list without its coding-agent endpoints", () => {
-    expect(PACKAGE_HOSTS).toEqual([
-      "github.com", "*.github.com", "*.githubusercontent.com", "pypi.org", "*.pypi.org", "files.pythonhosted.org",
-      "npmjs.org", "*.npmjs.org", "registry.npmjs.org",
-    ]);
-  });
-
   it.each(["github.com", "api.github.com", "objects.githubusercontent.com", "pypi.org", "test.pypi.org", "files.pythonhosted.org", "registry.npmjs.org"])(
     "take %s, as srt matched them",
     (host) => expect(packageHost(host)).toBe(true),

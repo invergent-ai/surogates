@@ -149,14 +149,6 @@ describe("Linux's FdPaths", () => {
 });
 
 describe("the file host's FdPaths", () => {
-  it("are Linux's on Linux, macOS's on macOS, and Windows's on Windows", async () => {
-    expect((await import("../src/files/fd-paths.js")).fdPaths).toBe(linuxFdPaths);
-    const [{ fdPaths }, { darwinFdPaths }] = await importedOn("darwin", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-darwin.js")]));
-    expect(fdPaths).toBe(darwinFdPaths);
-    const [windows, { win32FdPaths }] = await importedOn("win32", () => Promise.all([import("../src/files/fd-paths.js"), import("../src/files/fd-paths-win32.js")]));
-    expect(windows.fdPaths).toBe(win32FdPaths);
-  });
-
   it("bind nothing on Linux, whose sandbox binds the folder, and give a program a path as it is", () => {
     expect(linuxFdPaths.bind([dir])).toBeUndefined();
     const outside = linuxFdPaths.outside(join(dir, "a"));

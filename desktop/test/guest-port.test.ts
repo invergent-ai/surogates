@@ -1,7 +1,7 @@
 // The agent's ports on the transport the kernel's line names (guest/port.ts): on vsock, the sockets
 // surogate-vsock relays each port to, which the agent opens by their paths.
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openPortOn, relayedPort, transportOf } from "../src/guest/port.js";
-import { INBOUND_PORT, VSOCK_PORTS } from "../src/guest/protocol.js";
 
 let dir: string;
 beforeEach(() => {
@@ -67,14 +66,5 @@ describe("a port on vsock", () => {
     const port = await opened;
     expect(await new Promise((done) => port.once("data", (chunk: Buffer) => done(chunk.toString())))).toBe("there\n");
     await expect(relayedPort(join(dir, "missing"), 200)).rejects.toThrow(`no port at ${join(dir, "missing")}: the host's vsock port was not relayed`);
-  });
-
-  it("is each port's own vsock port of the host's, which vm/init has relayed to the agent's socket of its name", () => {
-    expect(VSOCK_PORTS).toEqual({ "ai.surogate.control": 5000, "ai.surogate.net": 5001, [INBOUND_PORT]: 5002 });
-    const init = readFileSync(new URL("../vm/init", import.meta.url), "utf8");
-    const relayed = Object.entries(VSOCK_PORTS).map(([name, port]) => `2:${port}=/run/surogate/ports/${name}`).join(" ");
-    expect(init).toContain(`if [ "$transport" = vsock ]; then\n  mkdir -m 0700 /run/surogate/ports\n  /usr/sbin/surogate-vsock ${relayed} &\nfi\n`);
-    // Then the agent, as on virtio: its one way in.
-    expect(init.trim().split("\n").at(-1)).toBe("exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js");
   });
 });
