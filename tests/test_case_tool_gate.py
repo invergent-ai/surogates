@@ -12,9 +12,13 @@ places, the worker and the harness, and they must agree.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import pytest
+
+import surogates.harness.loop as loop_module
 from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
@@ -22,6 +26,8 @@ from surogates.harness.prompt import PromptBuilder
 from surogates.orchestrator.worker import _filter_effective_tools
 from surogates.runtime.governance import build_governance_gate, governance_profile
 from surogates.sandbox.pool import SandboxPool
+from surogates.session.acting_principal import ActingPrincipal
+from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session, create_child_session
 from surogates.tenant.context import TenantContext
@@ -29,9 +35,11 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.runtime import ToolRuntime
 from tests.test_case_step_isolation import CONTRACT, _SessionStore
 from tests.test_eval_session_seeding import _route_fixtures
+from tests.test_steer_loop import _final_response, _make_loop_harness
 
 MCP_TOOL = "mcp__crm__lookup"
 STEP_TOOLS = {"complete_step", "raise_hand"}
+KB_TOOLS = {"kb_list_pages", "kb_read_page", "kb_search_pages"}
 # Chat, scheduling, starting other work and editing the agent: none is a case's.
 NEVER_IN_A_CASE = {
     "session_search", "ask_user_question", "cron_create", "start_case",
@@ -83,12 +91,41 @@ def _schema_tools(session, registry: ToolRegistry) -> set[str]:
         sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
         mcp_tool_names=frozenset({MCP_TOOL}),
     )
-    offered = harness._tool_filter_for_session(session)
-    return set(registry.tool_names) if offered is None else offered
+    return harness._tool_filter_for_session(session)
 
 
-async def _step(store, *, tools: list[str] | None = None):
-    """A step's own session, made as the Keel link makes one."""
+async def _sent_on_a_turn(monkeypatch, session, registry: ToolRegistry, *, prompt, metadata=None) -> set[str]:
+    """The tools the model is sent on one turn of *session*, whose message carries *metadata*."""
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    store.get_events = AsyncMock(return_value=[])
+    store.resolve_acting_principal = AsyncMock(
+        return_value=ActingPrincipal(user_id=session.user_id, service_account_id=session.service_account_id),
+    )
+    harness = _make_loop_harness(session_store=store)
+    harness._tools = registry
+    harness._mcp_tool_names = frozenset({MCP_TOOL})
+    harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")
+    harness._prompt = prompt
+    sent: list[set[str]] = []
+
+    async def llm(**kwargs):
+        sent.append({schema["function"]["name"] for schema in kwargs["create_kwargs"].get("tools", [])})
+        return _final_response("Done.")
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
+    message = SimpleNamespace(
+        id=1, type=EventType.USER_MESSAGE.value, data={"content": "What is this?", "metadata": metadata},
+    )
+    await harness._run_loop(
+        session, [{"role": "user", "content": "What is this?"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[message],
+    )
+    return sent[0]
+
+
+async def _step(store, *, tools: list[str] | None = None, scoped: bool = True):
+    """A step's own session, made as the Keel link makes one, with a scope naming *tools* when *scoped*."""
     _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
     return await create_agent_session(
         store=store,
@@ -101,7 +138,7 @@ async def _step(store, *, tools: list[str] | None = None):
         config={"memory_boundary": "case:C1", "workspace_boundary": "case:C1"},
         service_account_id=uuid4(),
         case_step={**CONTRACT, "tools": tools},
-        case_scope={"tools": tools, "knowledge": ["kb-uuid"]},
+        case_scope={"tools": tools, "knowledge": ["kb-uuid"]} if scoped else None,
     )
 
 
@@ -171,3 +208,44 @@ def test_an_agent_allow_list_never_takes_the_step_tools():
     for policy in ({"allowed_tools": ["read_file"]}, {"denied_tools": sorted(STEP_TOOLS)}):
         gate = build_governance_gate(policy)
         assert all(gate.offers(name) and gate.check(name, {}).allowed for name in STEP_TOOLS), policy
+
+
+@pytest.mark.parametrize("scoped", [True, False], ids=["scope-names-no-tools", "no-scope"])
+async def test_a_step_without_narrowed_tools_keeps_its_agents_work_tools(scoped):
+    registry = _registry()
+    step = await _step(_SessionStore(), scoped=scoped)
+
+    assert {"delegate_task", "spawn_worker", "terminal"} <= _prompt_tools(step, registry)
+    # A session that coordinates no one is sent no worker tools, a case's or not.
+    assert {"delegate_task", "terminal"} <= _schema_tools(step, registry)
+
+
+async def test_a_knowledge_tool_dropped_for_an_agent_without_knowledge_stays_dropped(monkeypatch):
+    registry = _registry()
+    # Its scope keeps the knowledge tools, were there any knowledge to read.
+    step = await _step(_SessionStore(), tools=["write_file"])
+
+    # The worker drops them first when the agent has no knowledge base.
+    prompt = _filter_effective_tools(
+        tools=set(registry.tool_names) - KB_TOOLS, tenant=_tenant(step), session=step,
+        use_api_for_harness_tools=True,
+    )
+    sent = await _sent_on_a_turn(monkeypatch, step, registry, prompt=SimpleNamespace(has_agents=False, has_kbs=False))
+
+    for offered in (prompt, sent):
+        assert {"read_file", "write_file"} <= offered
+        assert offered.isdisjoint(KB_TOOLS)
+
+
+async def test_a_board_turn_never_hands_a_case_the_board(monkeypatch):
+    registry = _registry()
+    board = SimpleNamespace(has_agents=False, has_whiteboard=True)
+    drawn = {"whiteboard": {"mode": "sketch"}}
+    step = await _step(_SessionStore())
+
+    sent = await _sent_on_a_turn(monkeypatch, step, registry, prompt=board, metadata=drawn)
+
+    assert "whiteboard_draw" not in sent
+    assert sent <= _schema_tools(step, registry)
+    # An ordinary chat's board turn is still narrowed to drawing.
+    assert await _sent_on_a_turn(monkeypatch, _chat({}), registry, prompt=board, metadata=drawn) == {"whiteboard_draw"}

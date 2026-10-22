@@ -2861,6 +2861,16 @@ class AgentHarness(
             _turn_whiteboard_metadata,
             has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
         )
+        # A sketch turn replaces the catalogue rather than narrowing it, so
+        # a Keel case's session goes through the case gate again: no turn
+        # hands it a tool outside the case's.
+        from surogates.keel.steps import gate_case_tools, is_case_session
+
+        if is_case_session(session):
+            tool_filter = gate_case_tools(
+                set(self._tools.tool_names) if tool_filter is None else tool_filter,
+                session,
+            )
         # The draw handler rejects a call that leaves the user's slot
         # empty, and it can only know the slots from here.
         from surogates.whiteboard.turn import (
