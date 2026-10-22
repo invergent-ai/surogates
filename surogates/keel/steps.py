@@ -49,6 +49,7 @@ __all__ = [
     "CASE_STEP_NUDGE",
     "CASE_STEP_TOOLS",
     "CaseScope",
+    "KEELS_WORD",
     "KICKOFF_MARKER",
     "NUDGE_MARKER",
     "OutcomeContract",
@@ -63,6 +64,7 @@ __all__ = [
     "is_case_config",
     "is_case_session",
     "is_case_step",
+    "is_keels_word",
     "render_kickoff",
     "render_message",
     "step_contract_in",
@@ -88,6 +90,9 @@ KICKOFF_MARKER = "keel_step"
 #: reviewer's request to revise a draft: each written once per Keel key.
 ANSWER_MARKER = "keel_answer"
 REVISION_MARKER = "keel_revision"
+#: Keel's word to a step's session: the markers of the messages it reads as it
+#: reads a person's, whenever they land, in a turn under way or after its end.
+KEELS_WORD: frozenset[str] = frozenset({ANSWER_MARKER, REVISION_MARKER})
 #: A step tool's result starts with one of these exactly when the step is over
 #: for this session, and the harness ends the turn on it: Keel took the report,
 #: or the step is no longer the session's (``STEP_ENDED``); or Keel refused the
@@ -125,6 +130,12 @@ ALWAYS_KEPT: frozenset[str] = frozenset({
     "kb_list_pages", "kb_read_page", "kb_search_pages", "skills_list", "skill_view",
     "memory", "read_file", "list_files", "search_files", "todo",
 })
+
+
+def is_keels_word(data: object) -> bool:
+    """Whether *data*, a message event's payload, is Keel's word to a step: its
+    answer to a raised hand, or its request to revise a draft (:data:`KEELS_WORD`)."""
+    return isinstance(data, Mapping) and data.get("synthetic") in KEELS_WORD
 
 
 class OutcomeContract(BaseModel):

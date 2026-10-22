@@ -22,7 +22,8 @@ Keel's answer decides what the session does next:
 A report Keel could not read is never sent, and the model is told what to
 fix: one larger than Keel takes, one holding NaN or an infinity, sources
 that are not lists of objects, or a tool call id longer than Keel keeps.  Once a report ended the step, a later report in the same wake is
-answered here, without Keel: the step is no longer the session's.
+answered here, without Keel: the step is no longer the session's.  Not
+once the wake's turn has read Keel's word to the step, which gives it back.
 
 A report that ended the step for this round also marks the session's row
 with what it came to (``REPORTED_KEY``), until Keel writes to the step
@@ -92,7 +93,8 @@ _NO_LONGER = f"{STEP_ENDED} the step is no longer this session's."
 #: The steps a report ended in a wake of this worker: each step session's id,
 #: and the lease of the wake.  A later report in that wake is answered here, so
 #: Keel never gets a second end, the inputs no second redaction, and the step
-#: no attempt Keel counts.  A later wake holds a new lease, and reports again.
+#: no attempt Keel counts.  A later wake holds a new lease, and reports again;
+#: so does the wake whose turn reads Keel's word to the step (:func:`step_given_back`).
 #: Only this local answer reads it: the row's report mark outlives the wake.
 _ENDED_IN_WAKE: OrderedDict[str, str] = OrderedDict()
 #: How many such steps a worker keeps, the oldest dropped first.
@@ -329,6 +331,12 @@ async def _answered(
 def _ended_in_this_wake(kwargs: dict[str, Any]) -> bool:
     lease = kwargs.get("lease_token")
     return lease is not None and _ENDED_IN_WAKE.get(str(kwargs.get("session_id"))) == str(lease)
+
+
+def step_given_back(session_id: object) -> None:
+    """Keel's word, an answer or a revision, gave the step back to session *session_id*, and the turn
+    under way reads it: a report the turn makes from here on reaches Keel."""
+    _ENDED_IN_WAKE.pop(str(session_id), None)
 
 
 def _remember_the_end(kwargs: dict[str, Any]) -> None:

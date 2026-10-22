@@ -13,7 +13,9 @@ a failed turn is.
 A report that ended the step for this round marks the session's row until
 Keel writes to the step again: a marked step is never nudged, and a crash
 or a failure never reports it or takes its inputs, so a draft under review
-or a raised hand can still take the person's word.
+or a raised hand can still take the person's word.  Keel's word written as
+the reporting turn ends lies past that turn's cursor: the wake it queued
+runs, and the model reads it.
 """
 from __future__ import annotations
 
@@ -33,10 +35,16 @@ from tests.test_case_step_isolation import CONTRACT
 from tests.test_case_step_tools import (
     ACCEPTED,
     COMPLETION,
+    DRAFTED,
+    GIVEN_BACK,
+    HAND_RAISED,
     _batch,
     _calls,
     _ended_with,
     _FakeKeel,
+    _queued_wake,
+    _QueuedStore,
+    _started,
     _step,
     _StepStore,
     _wake,
@@ -292,8 +300,6 @@ async def test_a_step_the_sweeper_gives_up_is_reported_as_failed(fake_keel, tmp_
     assert store.redacted()
 
 
-DRAFTED = {"result": "drafted", "message": "A person reviews the draft."}
-HAND_RAISED = {"result": "hand-raised", "message": "A person will answer."}
 QUESTION = {"question": "Which income counts?"}
 FOLLOW_UP = "Did you check the co-applicant?"
 REPORTS = {
@@ -410,48 +416,51 @@ async def test_a_child_of_a_step_is_never_nudged_or_reported(fake_keel, monkeypa
     assert not store.redacted()
 
 
-REVISION = "The person reviewing your draft asks for changes: lower the offer to 175000."
-ANSWER = "A person answered your raised hand: count the current employer only."
-
-
-@pytest.mark.parametrize("report", ["drafted", "ended-hand-raised"])
-async def test_keels_message_racing_the_reports_mark_leaves_the_step_live(fake_keel, monkeypatch, store, report):
-    if report == "drafted":
-        fake_keel.answer(200, DRAFTED)
-        first = [_calls("complete_step", COMPLETION)]
-        kind, content = "revision", REVISION
-    else:
-        # Keel takes a turn with no outcome as a raised hand: a person answers in the session.
-        fake_keel.answer(200, HAND_RAISED)
+@pytest.mark.parametrize("report", ["drafted", "hand-raised", "no-outcome"])
+async def test_keels_message_written_as_the_reporting_turn_ends_wakes_the_step(fake_keel, monkeypatch, tmp_path, report):
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    _started(store)
+    if report == "no-outcome":
+        # Keel takes a turn with no outcome as a raised hand, and a person answers between Keel's 200 and the mark.
+        answer, tool, arguments, kind, content = GIVEN_BACK["hand-raised"]
         first = [_says("I read the checklist."), _says("It looks complete.")]
-        kind, content = "answer", ANSWER
-    marking = store.mark_case_step_reported
+        marking = store.mark_case_step_reported
 
-    async def keel_answers_first(session_id, result, **guard):
-        # Between Keel's 200 and the mark: Keel's message reaches the step through the link.
-        store.mark_case_step_reported = marking
-        store.keel_writes(kind, content)
-        await marking(session_id, result, **guard)
+        async def keel_answers_first(session_id, result, **guard):
+            store.mark_case_step_reported = marking
+            store.keel_writes(kind, content)
+            await marking(session_id, result, **guard)
 
-    store.mark_case_step_reported = keel_answers_first
-    await _wake(monkeypatch, store, first)
+        store.mark_case_step_reported = keel_answers_first
+        ending = None
+    else:
+        # The model's report ends the step; Keel's message lands as the turn's end detaches the sandbox.
+        answer, tool, arguments, kind, content = GIVEN_BACK[report]
+        first = [_calls(tool, arguments)]
 
-    assert store.mark_case_step_reported is marking
+        def ending() -> None:
+            store.keel_writes(kind, content)
+
+    fake_keel.answer(200, answer)
+
+    await _queued_wake(monkeypatch, store, first, ending=ending)
+
+    # At rest when the message landed, the step was resumed by it; still at work, it was not.
+    assert store.row.status == ("active" if report == "no-outcome" else "completed")
     assert store.reported() is None
-    ended = len(fake_keel.bodies("/ended"))
+    assert store.cursor < store.message_of_keel(content).id
 
-    # Keel's message wakes the step, which is its own again: nudged, and its end told to Keel.
-    sent = await _wake(
-        monkeypatch, store, [_says("Noted."), _says("The offer stands at 175000 now.")],
-        opening=(EventType.USER_MESSAGE, None, content),
-    )
+    # The wake Keel's message queued runs, and the model reads the message: the step is the session's again.
+    sent = await _queued_wake(monkeypatch, store, [_calls(tool, arguments, "again")])
 
-    assert len(sent) == 2
+    assert len(sent) == 1
+    resumes = [data["source"] for _, kind, data in store.events if kind is EventType.SESSION_RESUME]
+    # Found at rest by its wake, the step is woken by the message all the same.
+    assert resumes == ([] if report == "no-outcome" else ["stranded_user_message"])
     assert content in json.dumps(sent[0]["messages"])
-    assert _last_user_message(sent[1]) == NUDGE
-    assert _ended_with(store) == "completed"
-    assert len(fake_keel.bodies("/ended")) == ended + 1
-    assert fake_keel.bodies("/ended")[-1]["reason"] == "no-outcome"
+    assert json.loads(fake_keel.requests[-1].content)["call_id"] == "again"
+    assert _ended_with(store) == "case_step_ended"
+    assert store.reported() == answer["result"]
 
 
 async def test_a_turn_keel_takes_as_a_raised_hand_is_left_to_the_person(fake_keel, monkeypatch, store):

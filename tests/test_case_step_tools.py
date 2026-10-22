@@ -9,9 +9,14 @@ answer decides what the session does next:
 - a refusal of the report itself stops the step, Keel is told it failed, and
   people take the step;
 - an unreachable Keel is called again.
+
+Keel's word to the step, an answer or a revision, that lands while the step
+reports keeps the turn going: the model reads it, and the step is the
+session's again.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -150,8 +155,12 @@ class _StepStore(FakeStore):
         self.row.config = {**self.row.config, "case_step": {**self.row.config["case_step"], "reported": result}}
 
     def keel_writes(self, kind: str, content: str) -> None:
-        """Keel's answer or revision reaching the step through the link: written, the report's mark cleared."""
-        self.write(EventType.USER_MESSAGE, {"content": content, "synthetic": f"keel_{kind}", "keel_key": f"keel:{kind}:1"})
+        """Keel's answer or revision reaching the step through the link: a session at rest set active with a
+        ``session.resume`` first, the message written, the report's mark cleared."""
+        if self.row.status in ("completed", "paused", "failed"):
+            self.write(EventType.SESSION_RESUME, {})
+            self.row.status = "active"
+        self.write(EventType.USER_MESSAGE, {"content": content, "synthetic": f"keel_{kind}", "keel_key": f"keel:{kind}:{content}"})
         self.row.config = {
             **self.row.config, "case_step": {k: v for k, v in self.row.config["case_step"].items() if k != "reported"},
         }
@@ -168,6 +177,43 @@ class _StepStore(FakeStore):
         """What the tool call *call_id* answered the model."""
         [data] = [d for _, kind, d in self.events if kind is EventType.TOOL_RESULT and d["tool_call_id"] == call_id]
         return data["content"]
+
+
+class _QueuedStore(_StepStore):
+    """The step's store as a worker's wake reads it: the session's status, the harness's cursor, and the lease.
+
+    The cursor never moves back, as the store's does not.
+    """
+
+    def __init__(self, session: Session, storage: LocalBackend) -> None:
+        super().__init__(session, storage)
+        self.cursor = 0
+
+    async def get_harness_cursor(self, session_id) -> int:
+        assert session_id == self.row.id
+        return self.cursor
+
+    async def advance_harness_cursor(self, session_id, through_event_id, lease_token, *, rests_with=None) -> bool:
+        await super().advance_harness_cursor(session_id, through_event_id, lease_token)
+        self.cursor = max(self.cursor, through_event_id)
+        if rests_with is None or self.row.status != "active":
+            return False
+        self.row.status = "completed"
+        await self.emit_event(session_id, EventType.SESSION_COMPLETE, rests_with)
+        return True
+
+    async def try_acquire_lease(self, session_id, worker_id, ttl_seconds=None) -> SimpleNamespace:
+        return SimpleNamespace(lease_token=uuid4())
+
+    async def renew_lease(self, session_id, lease_token, ttl_seconds=None) -> bool:
+        return True
+
+    async def release_lease(self, session_id, lease_token) -> None:
+        return None
+
+    def message_of_keel(self, content: str) -> SimpleNamespace:
+        [message] = [e for e in self.log if e.type == EventType.USER_MESSAGE.value and e.data["content"] == content]
+        return message
 
 
 def _step(contract: dict) -> Session:
@@ -543,20 +589,11 @@ def _sandbox(answers: dict[str, str]) -> MagicMock:
     return pool
 
 
-async def _wake(
-    monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[str, str] | None = None, streaming: bool = False,
-    opening: tuple[EventType, dict, str] | None = None,
-) -> list[dict]:
-    """One wake of the step, the model answering with *replies* in turn: the requests it was sent.
-
-    A reply that is an exception is the model's call raising it.  *streaming*
-    runs the tool calls as a streamed answer's are, each started as it
-    arrives.  *opening* is what woke the session: the event written to its
-    log (``None`` when it is there already), and the message the model reads
-    of it; by default Keel's kickoff for a step, and a person's message for
-    any other session.
-    """
-    sent: list[dict] = []
+def _step_harness(
+    monkeypatch, store: _StepStore, replies: list, sent: list[dict], *,
+    sandbox: dict[str, str] | None = None, streaming: bool = False,
+):
+    """A worker's harness for the step's session, the model answering with *replies* in turn; *sent* gets each request."""
     script = iter(replies)
 
     async def llm(**call):
@@ -591,6 +628,24 @@ async def _wake(
     harness._maybe_generate_title = MagicMock(return_value=None)
     harness._promote_fenced_artifacts = AsyncMock(return_value=None)
     harness._end_turn = AsyncMock(return_value=None)
+    return harness
+
+
+async def _wake(
+    monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[str, str] | None = None, streaming: bool = False,
+    opening: tuple[EventType, dict, str] | None = None,
+) -> list[dict]:
+    """One wake of the step, the model answering with *replies* in turn: the requests it was sent.
+
+    A reply that is an exception is the model's call raising it.  *streaming*
+    runs the tool calls as a streamed answer's are, each started as it
+    arrives.  *opening* is what woke the session: the event written to its
+    log (``None`` when it is there already), and the message the model reads
+    of it; by default Keel's kickoff for a step, and a person's message for
+    any other session.
+    """
+    sent: list[dict] = []
+    harness = _step_harness(monkeypatch, store, replies, sent, sandbox=sandbox, streaming=streaming)
 
     contract = step_contract_in(store.row.config)
     if opening is not None:
@@ -608,6 +663,44 @@ async def _wake(
         SimpleNamespace(lease_token=uuid4()), all_events=list(store.log),
     )
     return sent
+
+
+async def _queued_wake(
+    monkeypatch, store: _QueuedStore, replies: list, *, sandbox: dict[str, str] | None = None, ending=None,
+) -> list[dict]:
+    """A worker's wake of the step's session, taken from the queue, the model answering with *replies* in turn:
+    the requests it was sent.
+
+    The wake reads the session's status, its cursor and its log as a worker
+    does.  *ending* is what else happens as a turn of the wake ends, while
+    the turn's end detaches the sandbox: after the turn's last look for
+    messages, before its end is written.
+    """
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    sent: list[dict] = []
+    harness = _step_harness(monkeypatch, store, replies, sent, sandbox=sandbox)
+    # The prompt and the context are another worker's concern: the wake's own checks run as they are.
+    harness._prompt.set_agent_def = lambda _agent_def: None
+    harness._compressor.prune_stale_browser_states = lambda messages: messages
+    harness._build_system_prompt = AsyncMock(return_value="system")
+
+    async def as_replayed(_session, _events, messages):
+        return messages
+
+    harness._engineer_context = as_replayed
+    if ending is not None:
+
+        async def detach(_session_id):
+            ending()
+
+        harness._sandbox_pool.release_for_session = AsyncMock(side_effect=detach)
+    await asyncio.wait_for(harness.wake(store.row.id), 10)
+    return sent
+
+
+def _started(store: _StepStore) -> None:
+    """Keel starts the step: its kickoff, in the session's log."""
+    store.write(EventType.USER_MESSAGE, {"content": render_kickoff(step_contract_in(store.row.config)), "synthetic": "keel_step"})
 
 
 def _ended_with(store: _StepStore) -> str:
@@ -698,22 +791,61 @@ async def test_a_second_report_in_the_batch_never_reaches_keel(fake_keel, monkey
     assert _ended_with(store) == "case_step_ended"
 
 
-async def test_a_message_that_arrived_meanwhile_keeps_the_turn_going(fake_keel, monkeypatch, store):
+DRAFTED = {"result": "drafted", "message": "A person reviews the draft."}
+HAND_RAISED = {"result": "hand-raised", "message": "A person will answer."}
+REVISION = "The person reviewing your draft asks for changes: lower the offer to 175000."
+ANSWER = "A person answered your raised hand: count the current employer only."
+#: A report Keel answers, and the message of Keel's that gives the step back to the session.
+GIVEN_BACK = {
+    "drafted": (DRAFTED, "complete_step", COMPLETION, "revision", REVISION),
+    "hand-raised": (HAND_RAISED, "raise_hand", {"question": "Which income counts?"}, "answer", ANSWER),
+}
 
-    def a_person_writes_during_the_first_report() -> None:
+
+def _in_call_order(messages: list[dict]) -> bool:
+    """Whether every call the model made is followed at once by its results, as a provider takes a conversation."""
+    for at, message in enumerate(messages):
+        calls = [call["id"] for call in message.get("tool_calls") or []]
+        if calls and [m.get("tool_call_id") for m in messages[at + 1:at + 1 + len(calls)]] != calls:
+            return False
+    return True
+
+
+@pytest.mark.parametrize("report", ["drafted", "hand-raised"])
+async def test_keels_message_written_while_keel_takes_the_report_keeps_the_turn_going(
+    fake_keel, monkeypatch, tmp_path, report,
+):
+    answer, tool, arguments, kind, content = GIVEN_BACK[report]
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, answer)
+
+    def keel_writes_during_the_first_report() -> None:
         if len(fake_keel.requests) == 1:
-            store.write(EventType.USER_MESSAGE, {"content": "Also check the co-applicant's payslips."})
+            store.keel_writes(kind, content)
 
-    fake_keel.during = a_person_writes_during_the_first_report
+    fake_keel.during = keel_writes_during_the_first_report
+    _started(store)
 
-    sent = await _wake(monkeypatch, store, [
-        _calls("complete_step", COMPLETION, "c1"),
-        _calls("complete_step", COMPLETION, "c2"),
-    ])
+    sent = await _queued_wake(monkeypatch, store, [_calls(tool, arguments, "c1"), _calls(tool, arguments, "c2")])
 
+    # The turn goes on with Keel's message, and the step is the session's again: it reports anew.
     assert len(sent) == 2
-    assert "co-applicant" in json.dumps(sent[1]["messages"])
+    assert content not in json.dumps(sent[0]["messages"])
+    assert content in json.dumps(sent[1]["messages"])
+    assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
     assert _ended_with(store) == "case_step_ended"
+    assert store.row.status == "completed"
+    assert store.reported() == report
+    # Read in this wake: the wake Keel's message queued finds nothing more.
+    assert await _queued_wake(monkeypatch, store, []) == []
+
+    # Keel writes again: the next wake reads the log in the order the turn did.
+    fake_keel.during = None
+    store.keel_writes(kind, "And once more, please.")
+    [request] = await _queued_wake(monkeypatch, store, [_calls(tool, arguments, "c3")])
+    assert _in_call_order(request["messages"])
+    assert content in json.dumps(request["messages"])
+    assert len(fake_keel.requests) == 3
 
 
 async def test_a_refused_completion_keeps_the_turn_going(fake_keel, monkeypatch, store):
