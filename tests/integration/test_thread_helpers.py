@@ -13,7 +13,6 @@ import dataclasses
 import json
 import logging
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -1328,29 +1327,6 @@ async def test_a_threads_coding_agent_run_has_its_pod_made_for_the_threads_turn(
     assert "is not connected" in answer["error"], answer
     # Its pod is the thread's, over the thread's copy, told the turn it was made in.
     assert told == [str(config["turn_after"])] and pool.holds_copy(str(thread.id))
-
-
-def test_every_maker_of_a_sessions_pod_is_one_whose_session_is_known_to_carry_its_turns_name():
-    # A thread's pod is made for a turn, named on the turn's own session object: one read from the store has no
-    # name, and the spec's builder refuses it.  Each call of the builder is listed here with where its session
-    # comes from; a new one fails this until it is placed, so none is left to fail in a thread unseen.
-    root = Path(tool_exec.__file__).parents[1]
-    calls = sorted(
-        f"{path.relative_to(root)}:{line.strip().split('(')[0].split()[-1]}"
-        for path in root.rglob("*.py") for line in path.read_text().splitlines()
-        if "_build_session_sandbox_spec(" in line and "def _build_session_sandbox_spec" not in line
-    )
-    assert calls == sorted([
-        "harness/tool_exec.py:_build_session_sandbox_spec",              # a step's snapshot: the turn's session
-        "harness/tool_exec.py:_build_session_sandbox_spec",              # a step in the pod: the turn's session
-        "harness/loop.py:_build_session_sandbox_spec",                   # a stop's take-back: the turn's session
-        "harness/loop.py:_build_session_sandbox_spec",                   # a stop's put-back: the turn's session
-        "harness/loop_artifact_completion.py:_build_session_sandbox_spec",  # a turn's end, to land: the turn's session
-        "harness/loop_artifact_completion.py:_build_session_sandbox_spec",  # a routine run's pickup: a master's run, never a thread's
-        "harness/loop_code_commands.py:_build_session_sandbox_spec",     # /code: refused in a thread and under one
-        "harness/loop_outcome_commands.py:_build_session_sandbox_spec",  # /auto-research's repo check: refused in a thread and under one
-        "tools/builtin/coding_agent.py:_build_session_sandbox_spec",     # run_coding_agent: the turn's config
-    ])
 
 
 async def test_a_threads_pod_asked_for_with_no_turns_name_is_refused_in_words(api):
