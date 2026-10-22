@@ -1683,6 +1683,10 @@ class ServiceAccount(Base):
       channel.  Many per agent, minted and revoked by the agent's operator.
     * ``service`` — an ordinary org-scoped account with no agent binding
       (synthetic-data pipelines, ops-chat, evaluation identities).
+    * ``case_type`` — the identity a Keel case type's agent-step sessions run
+      under.  One per case type per org, named ``case-type:<case_type>``,
+      enforced by ``uq_service_accounts_case_type``.  Its token is discarded
+      at creation, so nobody signs in as it.
 
     Without this split the partial unique index below caps an agent at one
     token, which makes "create a second API key" impossible.
@@ -1710,6 +1714,14 @@ class ServiceAccount(Base):
             "agent_id",
             postgresql_where=text("agent_id IS NOT NULL"),
         ),
+        # One account per case type per org; the name carries the case type.
+        Index(
+            "uq_service_accounts_case_type",
+            "org_id",
+            "name",
+            unique=True,
+            postgresql_where=text("kind = 'case_type'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1735,7 +1747,8 @@ class ServiceAccount(Base):
     # ``kind`` decides which, and the partial unique index above keeps the
     # *principal* one-per-agent while leaving API keys unbounded.
     agent_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # See the class docstring: ``agent_principal`` | ``api_key`` | ``service``.
+    # See the class docstring: ``agent_principal`` | ``api_key`` | ``service``
+    # | ``case_type``.
     # Plain text rather than an enum so adding a population needs no DDL —
     # this table has no Alembic, only the retrofits in ``observability.sql``.
     kind: Mapped[str] = mapped_column(

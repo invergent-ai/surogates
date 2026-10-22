@@ -251,6 +251,14 @@ CREATE INDEX IF NOT EXISTS idx_service_accounts_agent
     ON service_accounts (agent_id)
     WHERE agent_id IS NOT NULL;
 
+-- One ``case_type`` account per case type per org: the identity a Keel case
+-- type's agent-step sessions run under.  Two concurrent first steps of the same
+-- case type race to create it; this index lets exactly one win.  Retrofit for
+-- existing databases; ``create_all`` covers fresh ones.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_case_type
+    ON service_accounts (org_id, name)
+    WHERE kind = 'case_type';
+
 -- Surfaces an agent whose principal never got promoted: it has an agent_id,
 -- no principal, and therefore no identity the runtime can resolve. Expected
 -- to return nothing; a row here means a pre-``kind`` writer landed after the
