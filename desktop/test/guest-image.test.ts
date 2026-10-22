@@ -250,7 +250,7 @@ describe("the check of the kernel's configuration", () => {
     expect(checked("amd64", config({ ...whole("amd64"), BPF_LSM: "unset", BPF_LSM_EXTRA: "y" })).status).toBe(1);
   });
 
-  it("fails on a kernel without any one of them, or with any one that must be built in as a module, and names that one", () => {
+  it("fails on a kernel without any one of them, or with any one that must be built in as a module, and names that one [slow]", () => {
     for (const arch of ARCHES) {
       for (const name of Object.keys(whole(arch))) {
         const loaded = LOADED.includes(name) || INITRD.includes(name);

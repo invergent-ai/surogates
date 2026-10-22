@@ -764,7 +764,7 @@ describe("the desktop's release manifest", () => {
     expect(readdirSync(tmp)).toEqual([]);
   });
 
-  it("writes, signs and takes a release's manifest by one rule, on every form that its readers are asked about: the first step writes none that an apply refuses, the second signs none, and what the second refuses for its form is what an apply's own reader refuses", { timeout: 180_000 }, async () => {
+  it("writes, signs and takes a release's manifest by one rule, on every form that its readers are asked about: the first step writes none that an apply refuses, the second signs none, and what the second refuses for its form is what an apply's own reader refuses [slow]", { timeout: 180_000 }, async () => {
     const install = join(dir, "release", "install.sh");
     const signature = join(out, "manifest.json.sig");
     // What an apply's own reader says of a manifest: the release it takes it for, as

@@ -118,7 +118,7 @@ describe("the file tools, against a process of this computer's racing them", { t
     return { reached: reached + (kept === null ? 1 : 0), wrote, wroteOutside: left.filter((name) => name !== "only-outside").length, kept };
   }
 
-  it("reach nothing beside the folder through its file host on the app's own node, where the same operations outside any sandbox do", async () => {
+  it("reach nothing beside the folder through its file host on the app's own node, where the same operations outside any sandbox do [slow]", async () => {
     const folder = folders[ROOT_A]!;
     const outside = join(base, "outside");
     // The probe can race: the helper's own checks alone, outside srt, are beaten on Linux. On macOS the helper's opens

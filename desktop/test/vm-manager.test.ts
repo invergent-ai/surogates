@@ -422,7 +422,7 @@ describe("the VM manager on the host", () => {
     }
   });
 
-  it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM", { timeout: 20_000 }, async () => {
+  it("gives up on a tool whose --version has not ended in 5 s, though it ignores the timeout's SIGTERM [slow]", { timeout: 20_000 }, async () => {
     const virtiofsd = join(dir, "virtiofsd");
     writeFileSync(virtiofsd, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n");
     chmodSync(virtiofsd, 0o755);

@@ -189,7 +189,7 @@ describe("the guest rule mirrors protect.ts", { timeout: VERDICTS_MS }, () => {
     return bin;
   }
 
-  it("agrees on every path but git's transient state", () => {
+  it("agrees on every path but git's transient state [slow]", () => {
     const paths = [...CORPUS, ...probes, ...GIT_STATE_ONLY];
     const kernel = verdicts(harness(), paths);
     const bad: string[] = [];
@@ -293,7 +293,7 @@ describe("the guest rule mirrors protect.ts", { timeout: VERDICTS_MS }, () => {
     expect(verdicts(harness(), [`.git/${"x".repeat(40)}`, `.git/hooKs`, `.git/hooks${"\u200c".repeat(1000)}/x`, `.vscode${".".repeat(2000)}`])).toEqual([false, true, true, true]);
   });
 
-  it("refuses the names Windows's Explorer acts on where the kernel's line names that set, and with posix's decides as it does without one", () => {
+  it("refuses the names Windows's Explorer acts on where the kernel's line names that set, and with posix's decides as it does without one [slow]", () => {
     const paths = [...CORPUS, ...probes, ...GIT_STATE_ONLY, ...ALIASES, ...NOT_ALIASES, ...EXPLORER_CORPUS];
     const windows = verdicts(harness(), paths, ["windows"]);
     const bad = paths.flatMap((p, i) => {
@@ -351,7 +351,7 @@ describe("the guest rule mirrors protect.ts", { timeout: VERDICTS_MS }, () => {
     }));
   });
 
-  it("refuses moving a directory to or from a key folder's place", () => {
+  it("refuses moving a directory to or from a key folder's place [slow]", () => {
     const paths = [...CORPUS, ...MOVED_REFUSED, ...MOVED_ALLOWED];
     const moved = verdicts(harness(), paths, ["dir"]);
     const bad = paths.flatMap((p, i) => (moved[i] === movedRefuses(p) ? [] : [`${p}: rule=${moved[i]} expected=${movedRefuses(p)}`]));

@@ -162,7 +162,7 @@ describe.skipIf(process.platform === "darwin")("the guest image's delivery on Wi
     }
   });
 
-  it("stops its unpack at its signal, as at the app's quit, and leaves the download alone of it", async () => {
+  it("stops its unpack at its signal, as at the app's quit, and leaves the download alone of it [slow]", async () => {
     await quits("win32");
   });
 });
@@ -176,7 +176,7 @@ describe.skipIf(process.platform === "win32")("the guest image's delivery on a M
     if (HOLES) expect(statSync(join(folder, "rootfs.img")).blocks * 512).toBeLessThan(rootfs.length / 2);
   });
 
-  it("stops its unpack at its signal, as at the app's quit, and leaves the download alone of it", async () => {
+  it("stops its unpack at its signal, as at the app's quit, and leaves the download alone of it [slow]", async () => {
     await quits("darwin");
   });
 });

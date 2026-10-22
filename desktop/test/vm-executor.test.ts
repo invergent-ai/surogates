@@ -159,7 +159,7 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).toBe(0);
   });
 
-  it("quits within its bound when the guest does not answer a root's teardown, and the VM stops all the same", async () => {
+  it("quits within its bound when the guest does not answer a root's teardown, and the VM stops all the same [slow]", async () => {
     vmExecutor();
     expect(await run()).toEqual(ran("ran\n"));
     // A manager that is wedged, or a guest waiting on a folder whose mount does not answer.
@@ -173,7 +173,7 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     expect([torn.map(([root]) => root), stopped, exits]).toEqual([[ROOT], ["vm"], 1]);
   });
 
-  it("keeps looking after a command for the hooks what it left running in the guest writes later", async () => {
+  it("keeps looking after a command for the hooks what it left running in the guest writes later [slow]", async () => {
     vmExecutor();
     const hook = join(folder, ".git", "hooks", "pre-commit");
     // A leftover of the command's, still running in the guest once the command has answered.
@@ -273,7 +273,7 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     expect(torn).toEqual([[ROOT, 0]]);
   });
 
-  it("looks for the hooks a background process leaves every 5 s while it lives, not just after its start", async () => {
+  it("looks for the hooks a background process leaves every 5 s while it lives, not just after its start [slow]", async () => {
     vmExecutor();
     const hook = join(folder, ".git", "hooks", "pre-commit");
     const started = { ok: { session_id: "proc_000000000001", pid: 7 } };
