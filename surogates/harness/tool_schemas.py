@@ -10,12 +10,15 @@ it is removed from the exported schema.
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from typing import Any
 
 from surogates.channels.constants import ADAPTER_CHANNELS, STUDIO_CHANNEL, VOICE_TOOLS
 from surogates.devices.binding import device_of
+from surogates.keel.steps import StepContract
 from surogates.tools.builtin.ask_user_question import widen_for_channel
 from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
+from surogates.tools.builtin.case_step import describe_completion
 from surogates.tools.builtin.send_form import describe_forms
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
 
@@ -185,10 +188,14 @@ def describe_for_conversation(
     *,
     channel: str | None,
     forms: Any,
+    contract: StepContract | None = None,
+    intake: Sequence[dict] = (),
 ) -> list[dict[str, Any]]:
-    """Return *schemas* with ``send_form`` limited to the agent's *forms* and
-    ``ask_user_question`` taking as many choices as *channel* does.  Input is
-    never mutated."""
+    """Return *schemas* with ``send_form`` limited to the agent's *forms*,
+    ``ask_user_question`` taking as many choices as *channel* does, and
+    ``complete_step`` taking the outcomes, form and file fields of a case
+    step's *contract*.  *intake*, the case types an intake agent may start,
+    is not read yet.  Input is never mutated."""
     described: list[dict[str, Any]] = []
     for schema in schemas:
         name = schema["function"]["name"]
@@ -196,5 +203,7 @@ def describe_for_conversation(
             schema = describe_forms(schema, forms)
         elif name == "ask_user_question":
             schema = widen_for_channel(schema, channel)
+        elif name == "complete_step" and contract is not None:
+            schema = describe_completion(schema, contract)
         described.append(schema)
     return described

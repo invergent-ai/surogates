@@ -110,6 +110,7 @@ from surogates.workstreams import is_project_master, is_project_thread, master_r
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
+from surogates.keel.steps import CASE_STEP_TOOLS, STEP_ENDED, STEP_STOPPED, is_case_step, step_contract_of
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     describe_for_conversation,
@@ -2941,6 +2942,7 @@ class AgentHarness(
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
+            contract=step_contract_of(session) if is_case_step(session) else None,
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
@@ -4194,6 +4196,20 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="whiteboard_sketch_drawn",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A case's step that its report ended, or that Keel stopped, is over
+            # for this session: the turn ends after its batch, and the session
+            # rests until Keel sends it something.  Not while something said to
+            # the model waits for it: the turn goes on with that.
+            if _case_step_ended(tool_calls_raw, tool_results) and not await self._said_to_the_model(session, steer_cursor):
+                logger.info("Session %s: its case step ended; ending turn", session.id)
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="case_step_ended",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -6531,6 +6547,16 @@ def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
     sent = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") == "send_form"}
     return any(
         r.get("tool_call_id") in sent and str(r.get("content") or "").startswith(FORM_SENT)
+        for r in tool_results
+    )
+
+
+def _case_step_ended(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
+    """Whether a step tool of the batch ended its case's step for this session: Keel took its report, the step is
+    no longer the session's, or Keel stopped it."""
+    reports = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") in CASE_STEP_TOOLS}
+    return any(
+        r.get("tool_call_id") in reports and str(r.get("content") or "").startswith((STEP_ENDED, STEP_STOPPED))
         for r in tool_results
     )
 

@@ -53,11 +53,10 @@ KEPT_UNDER_ANY_SCOPE = {
 
 
 def _registry() -> ToolRegistry:
-    """Every built-in tool, one MCP tool of the agent's, and the step tools."""
+    """Every built-in tool, the step tools among them, and one MCP tool of the agent's."""
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
-    for name in {MCP_TOOL} | (STEP_TOOLS - registry.tool_names):
-        registry.register(name, ToolSchema(name=name, description="d", parameters={}), AsyncMock())
+    registry.register(MCP_TOOL, ToolSchema(name=MCP_TOOL, description="d", parameters={}), AsyncMock())
     return registry
 
 

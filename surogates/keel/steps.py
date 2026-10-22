@@ -51,6 +51,8 @@ __all__ = [
     "KICKOFF_MARKER",
     "OutcomeContract",
     "REVISION_MARKER",
+    "STEP_ENDED",
+    "STEP_STOPPED",
     "StepContract",
     "case_scope_in",
     "case_scope_of",
@@ -78,6 +80,12 @@ KICKOFF_MARKER = "keel_step"
 #: reviewer's request to revise a draft: each written once per Keel key.
 ANSWER_MARKER = "keel_answer"
 REVISION_MARKER = "keel_revision"
+#: A step tool's result starts with one of these exactly when the step is over
+#: for this session, and the harness ends the turn on it: Keel took the report,
+#: or the step is no longer the session's (``STEP_ENDED``); or Keel refused the
+#: report for good, and people take the step (``STEP_STOPPED``).
+STEP_ENDED = "Step ended:"
+STEP_STOPPED = "Step stopped:"
 
 #: The built-in tools a session of a case may be offered: work on files, the
 #: terminal, the browser, the web, the agent's memory and knowledge, its

@@ -49,6 +49,19 @@ keel-link reads the same state as the API (database, Redis, storage, the platfor
 
 keel-link listens on `SUROGATES_API_HOST`, port `SUROGATES_KEEL_LINK_PORT` (8090 by default). Give each process only its own key. Neither key is logged or shown in a settings repr. With the settings empty the integration is off: keel-link answers every call `401 bad-link-key`.
 
+## How a step reports back
+
+Only a step's own session is offered `complete_step` and `raise_hand`. The worker sends each to Keel's door at `SUROGATES_KEEL_URL`, with `SUROGATES_KEEL_DOOR_KEY`, and Keel's answer decides what the session does:
+
+| Keel's answer | The session |
+|---|---|
+| `200`, or `409 not-running` | Its turn ends, and the session rests until Keel sends it something. A completed step's inputs are removed from its config. |
+| Another `409` | A rejection: the model reads Keel's code and message, fixes its report and calls again. |
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | The model calls again. A repeated call gets Keel's first answer. |
+| Anything else | Keel refused the report for good: the worker tells Keel the step failed, removes the inputs, and ends the turn. People take the step. |
+
+A worker without both settings has no link to Keel: every report removes the step's inputs and ends the turn, and Keel learns of it only from the session's status.
+
 ## Step sessions wait behind people
 
 Every wake of a step session, and of each session a step starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent.
