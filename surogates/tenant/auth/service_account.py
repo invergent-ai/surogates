@@ -509,11 +509,18 @@ class ServiceAccountStore:
         )
 
     async def list_for_org(self, org_id: UUID) -> list[ServiceAccount]:
-        """Return all service accounts belonging to *org_id*, newest first."""
+        """Return *org_id*'s admin-managed service accounts, newest first.
+
+        Leaves out :data:`KIND_CASE_TYPE` accounts: Keel owns them, and an
+        admin who could see one could try to revoke it.
+        """
         async with self._sf() as db:
             result = await db.execute(
                 select(ServiceAccount)
-                .where(ServiceAccount.org_id == org_id)
+                .where(
+                    ServiceAccount.org_id == org_id,
+                    ServiceAccount.kind != KIND_CASE_TYPE,
+                )
                 .order_by(ServiceAccount.created_at.desc())
             )
             return list(result.scalars().all())
@@ -583,7 +590,10 @@ class ServiceAccountStore:
         """Mark a service account as revoked.
 
         Returns True when the row was found and updated, False when it
-        does not exist, belongs to another org, or was already revoked.
+        does not exist, belongs to another org, was already revoked, or is
+        a :data:`KIND_CASE_TYPE` account.  Keel owns those: a revoked one
+        would turn away every callback of its case type's sessions, and
+        :meth:`case_type_account` would keep handing out the dead id.
         Uses the database clock to match the naive-timestamp convention
         of the ``service_accounts`` columns.
 
@@ -597,6 +607,7 @@ class ServiceAccountStore:
                 .where(
                     ServiceAccount.id == service_account_id,
                     ServiceAccount.org_id == org_id,
+                    ServiceAccount.kind != KIND_CASE_TYPE,
                     ServiceAccount.revoked_at.is_(None),
                 )
                 .values(revoked_at=func.now())
