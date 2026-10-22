@@ -1335,6 +1335,20 @@ class TestACloudBrowserIsItsOwnUsers:
         assert cloud.untouched()
         assert await cloud.answers(prefix="/v1/api", user_id=None, session_scope_id=cloud.sid) == WORKS
 
+    async def test_a_keel_cases_browser_is_its_own_sessions_alone(self, cloud, app_factory) -> None:
+        build, _resolver, _control = app_factory
+        # The chat is a step of a Keel case: no user's, and a case-type account's.
+        build().state.session_store.sessions[cloud.sid] = SimpleNamespace(
+            org_id=ORG_1, user_id=None, agent_id="agent", config={"memory_boundary": "case:c1"},
+        )
+        service = {"user_id": None, "service_account_id": SERVICE}
+
+        # Not the org's own service, which reaches every other browser of the org, nor a key bound to its agent.
+        assert await cloud.answers(prefix="/v1/api", **service) == NOT_THEIRS
+        assert await cloud.answers(prefix="/v1/api", **service, agent_id="agent") == NOT_THEIRS
+        assert cloud.untouched()
+        assert await cloud.answers(prefix="/v1/api", user_id=None, session_scope_id=cloud.sid) == WORKS
+
 
 def _event_recorder(events: list[tuple[str, str, dict]]):
     async def emit(session_id: str, event_type, data: dict) -> None:

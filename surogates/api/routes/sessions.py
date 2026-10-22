@@ -580,7 +580,7 @@ async def _get_session_for_tenant(
         )
 
     await require_session_visible(
-        request, session, multi_session=agent_runtime.multi_session,
+        request, session, multi_session=agent_runtime.multi_session, tenant=tenant,
     )
 
     return session

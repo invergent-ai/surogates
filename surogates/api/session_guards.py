@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 
+from surogates.channels.memory_boundary import is_case_session
 from surogates.devices.binding import binding_of, device_of
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.files import DeviceAccess
@@ -42,11 +43,34 @@ def is_multi_era_web_session(session: Session) -> bool:
     )
 
 
+def require_not_case_session(
+    session: Session, tenant: TenantContext, *, detail: str | None = None,
+) -> None:
+    """404 a Keel case's session to every caller but the session's own token.
+
+    A case session holds a client's case data: no agent API key, user of the
+    org or service of the platform reaches it through a generic route, on
+    ``/v1/api/*`` or ``/v1/*`` alike.  Keel's link loads its sessions
+    directly.  The one token let through is the one the worker mints for
+    the session itself, scoped to it, so the harness's API client keeps
+    working.
+
+    404, as for a session that does not exist.  *detail* lets a route keep
+    its own wording of that answer.
+    """
+    if is_case_session(session) and tenant.session_scope_id != session.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=detail or f"Session {session.id} not found.",
+        )
+
+
 async def require_session_visible(
     request: Request,
     session: Session,
     *,
     multi_session: bool | None = None,
+    tenant: TenantContext | None = None,
 ) -> None:
     """404 hidden multi-era web sessions while "multi session" is off.
 
@@ -60,7 +84,19 @@ async def require_session_visible(
     runtime-config cache, so the check cannot be steered by request
     parameters.  An unresolvable config fails open — the primary gate
     in the sessions routes still applies.
+
+    First, a case's session 404s to all but its own token
+    (:func:`require_not_case_session`), checked against *tenant* or else
+    the request's own.  Without a request tenant, as when a route is called
+    directly, there is no caller to check.
     """
+    if tenant is None:
+        try:
+            tenant = get_tenant()
+        except LookupError:
+            tenant = None
+    if tenant is not None:
+        require_not_case_session(session, tenant)
     _require_token_binds_session_agent(session)
     if not is_multi_era_web_session(session):
         return

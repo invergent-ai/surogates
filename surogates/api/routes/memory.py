@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from surogates.api.routes._shared import require_not_channel_principal
+from surogates.api.session_guards import require_not_case_session
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.memory.r2_store import (
     MEMORY_TARGETS, R2MemoryStore,
@@ -145,6 +146,8 @@ async def _session_boundary(
         raise HTTPException(
             status_code=404, detail=f"Session {session_id} not found.",
         )
+    # A case's memory is its own session's alone.
+    require_not_case_session(session, tenant)
     return session_memory_boundary(session)
 
 

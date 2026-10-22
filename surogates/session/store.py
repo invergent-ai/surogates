@@ -32,6 +32,7 @@ from surogates.channels.constants import (
     INTERACTIVE_PROMPT_CHANNELS,
     outbound_dm,
 )
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
     SOURCE_SESSION,
@@ -358,6 +359,14 @@ _SINGLE_SESSION_MARKER = or_(
     # (surogates.channels.outbound) is the one a step waits in for their
     # next visit, so it counts as their dedicated conversation too.
     SessionRow.config["channel_session_key"].astext.startswith("agent:web:dm:"),
+)
+
+# Not a Keel case's session, as a SQL predicate (``is_case_session``): a
+# session with no boundary is none.
+_NOT_A_CASE_SESSION = not_(
+    func.coalesce(SessionRow.config["memory_boundary"].astext, "").startswith(
+        CASE_BOUNDARY_PREFIX, autoescape=True,
+    )
 )
 
 # Delivery-destination field per adapter channel and the session-config
@@ -1336,6 +1345,10 @@ class SessionStore:
         ops owner-console scope of ``session_search`` (see
         ``_is_owner_scoped`` there), which requires a service-account
         principal plus the ops-stamped session config.
+
+        A Keel case's sessions are never listed, whatever the scope: no
+        listing reaches a case's session (see ``require_not_case_session``),
+        and Keel's link loads its sessions directly.
         """
         if any_principal:
             principal_filter = true()
@@ -1364,6 +1377,7 @@ class SessionStore:
                     SessionRow.parent_id.is_(None),
                     marker_filter,
                     master_filter,
+                    _NOT_A_CASE_SESSION,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(limit)
