@@ -9,6 +9,7 @@ session listing answer as for a session that does not exist.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import uuid
@@ -18,17 +19,20 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from surogates.api.routes.events import poll_events
 from surogates.channels.constants import API_CHANNEL
 from surogates.session.events import EventType
-from surogates.session.provisioning import create_agent_session
+from surogates.session.provisioning import create_agent_session, create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import (
     create_access_token,
     create_service_account_session_token,
 )
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
+from surogates.tenant.context import TenantContext
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.builtin.session_search import _session_search_handler
 
@@ -187,6 +191,13 @@ _ROUTES = (
     ("GET", "/sessions/{sid}/workspace/tree", None),
     ("DELETE", "/sessions/{sid}", None),
 )
+# Routes on /v1 alone: a key is refused there before any session is read.
+_USER_ROUTES = (
+    ("GET", "/sessions/{sid}/tree", None),
+    ("GET", "/sessions/{sid}/children", None),
+    ("GET", "/sessions/{sid}/events/poll", None),
+    ("GET", "/memory?session_id={sid}", None),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -194,22 +205,59 @@ _ROUTES = (
 # ---------------------------------------------------------------------------
 
 
-async def test_generic_routes_never_reach_a_case_session(client, case, session_store):
-    sid = case.session.id
-    answers: dict[str, int | str] = {}
-    for prefix, headers in (("/v1/api", case.api_key), ("/v1", case.user)):
-        for method, path, body in _ROUTES:
-            url = prefix + path.format(sid=sid)
-            answers[f"{method} {url}"] = await _answer(client, method, url, headers, body)
-    # Memory has no /v1/api alias: a key is refused there before any session is read.
-    memory = f"/v1/memory?session_id={sid}"
-    answers[f"GET {memory}"] = await _answer(client, "GET", memory, case.user, None)
+@pytest.mark.parametrize("target", ["step", "child"])
+async def test_generic_routes_never_reach_a_case_session(client, case, session_store, target):
+    # A child the step makes, as delegation makes one, inherits the case.
+    session = case.session
+    if target == "child":
+        session = await create_child_session(
+            store=session_store, parent=case.session, channel="delegation",
+        )
+    sid = session.id
+
+    listed = await client.get("/v1/sessions?include_descendants=true", headers=case.user)
+    assert listed.status_code == 200, listed.text
+    assert {s["id"] for s in listed.json()["sessions"]} & {str(case.session.id), str(sid)} == set()
+
+    calls = [
+        (method, prefix + path.format(sid=sid), headers, body)
+        for prefix, headers, routes in (
+            ("/v1/api", case.api_key, _ROUTES),
+            ("/v1", case.user, _USER_ROUTES + _ROUTES),
+        )
+        for method, path, body in routes
+    ]
+    # The destructive ones last, so a refusal that fails cannot hide the others.
+    calls.sort(key=lambda call: call[0] == "DELETE")
+    answers = {
+        f"{method} {url}": await _answer(client, method, url, headers, body)
+        for method, url, headers, body in calls
+    }
 
     assert answers == {route: 404 for route in answers}
     # Nothing reached it: no message, no outcome, still live.
-    after = await session_store.get_session(sid)
-    assert after.status == "active"
-    assert await session_store.get_events(sid) == []
+    for untouched in {case.session.id, sid}:
+        after = await session_store.get_session(untouched)
+        assert after.status == "active"
+        assert await session_store.get_events(untouched) == []
+
+
+async def test_a_route_called_without_a_request_still_refuses_a_case_session(app, case):
+    """A route handed its tenant by an in-process caller, with no request's tenant set, refuses all the same."""
+    user = TenantContext(
+        org_id=case.org_id,
+        user_id=uuid.uuid4(),
+        org_config={},
+        user_preferences={},
+        permissions=frozenset({"sessions:read"}),
+        asset_root="",
+    )
+    poll = poll_events(case.session.id, SimpleNamespace(app=app), user, after=0, limit=50)
+
+    with pytest.raises(HTTPException) as refused:
+        # A fresh context: no request has set a tenant in it.
+        await asyncio.create_task(poll, context=contextvars.Context())
+    assert refused.value.status_code == 404
 
 
 async def test_the_sessions_own_token_still_works(client, case):

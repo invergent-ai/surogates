@@ -76,7 +76,7 @@ async def get_session_board(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    await require_session_visible(request, session)
+    await require_session_visible(request, session, tenant=tenant)
     raw_group = (session.config or {}).get("context_group_id")
     if not raw_group:
         raise HTTPException(

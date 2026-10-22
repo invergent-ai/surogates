@@ -320,7 +320,7 @@ async def _get_workspace_session_bucket_and_root(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    await require_session_visible(request, session)
+    await require_session_visible(request, session, tenant=tenant)
     if path is not None:
         _refuse_reserved(path, session)
         if change:

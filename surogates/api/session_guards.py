@@ -12,7 +12,7 @@ from surogates.devices.binding import binding_of, device_of
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.files import DeviceAccess
 from surogates.session.models import Session
-from surogates.tenant.context import TenantContext, get_tenant
+from surogates.tenant.context import TenantContext
 
 
 SCHEDULED_RUN_READ_ONLY_DETAIL = "Scheduled run sessions are read-only."
@@ -69,8 +69,8 @@ async def require_session_visible(
     request: Request,
     session: Session,
     *,
+    tenant: TenantContext,
     multi_session: bool | None = None,
-    tenant: TenantContext | None = None,
 ) -> None:
     """404 hidden multi-era web sessions while "multi session" is off.
 
@@ -86,18 +86,12 @@ async def require_session_visible(
     in the sessions routes still applies.
 
     First, a case's session 404s to all but its own token
-    (:func:`require_not_case_session`), checked against *tenant* or else
-    the request's own.  Without a request tenant, as when a route is called
-    directly, there is no caller to check.
+    (:func:`require_not_case_session`).  Every check is made against the
+    caller's *tenant*, which every caller holds: none depends on a request
+    having set one, so none is skipped when a route is called directly.
     """
-    if tenant is None:
-        try:
-            tenant = get_tenant()
-        except LookupError:
-            tenant = None
-    if tenant is not None:
-        require_not_case_session(session, tenant)
-    _require_token_binds_session_agent(session)
+    require_not_case_session(session, tenant)
+    _require_token_binds_session_agent(session, tenant)
     if not is_multi_era_web_session(session):
         return
     if multi_session is None:
@@ -110,7 +104,7 @@ async def require_session_visible(
     )
 
 
-def _require_token_binds_session_agent(session: Session) -> None:
+def _require_token_binds_session_agent(session: Session, tenant: TenantContext) -> None:
     """404 a session belonging to an agent this token is not bound to.
 
     An agent-bound API key is handed to a third party. Session-scoped routes
@@ -125,10 +119,6 @@ def _require_token_binds_session_agent(session: Session) -> None:
     address. 404, not 403, matching the module's convention that a stranger
     cannot tell "exists but not yours" from "does not exist".
     """
-    try:
-        tenant = get_tenant()
-    except LookupError:
-        return
     bound = getattr(tenant, "service_account_agent_id", None)
     if bound is not None and session.agent_id and bound != session.agent_id:
         raise HTTPException(

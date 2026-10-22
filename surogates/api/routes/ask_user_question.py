@@ -132,7 +132,7 @@ async def respond_to_ask_user_question(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    await require_session_visible(request, session)
+    await require_session_visible(request, session, tenant=tenant)
     require_user_writable_session(session)
     # The answer wakes the agent, on a local-folder chat in its user's folder: the chat's own user's to give.
     await require_device_access(request, session, tenant)

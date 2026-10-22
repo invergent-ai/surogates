@@ -168,7 +168,7 @@ async def _verify_session_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
-    await require_session_visible(request, session)
+    await require_session_visible(request, session, tenant=tenant)
 
 
 def _rubric_text_or_422(rubric: DefineOutcomeRubric | None) -> str:
@@ -341,7 +341,7 @@ async def stream_events(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     if not tenant.owns_session(session_check.org_id, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
-    await require_session_visible(request, session_check)
+    await require_session_visible(request, session_check, tenant=tenant)
 
     # Pre-loop fast-close for terminal sessions used to live here, but it
     # raced with concurrent POST /messages: a message landing between the
