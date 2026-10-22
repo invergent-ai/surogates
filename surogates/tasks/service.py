@@ -17,6 +17,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, update
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.db.models import Task, TaskLink
 
@@ -221,6 +222,7 @@ async def create_task_and_spawn(
         org_id=str(child.org_id),
         agent_id=child.agent_id,
         session_id=child.id,
+        priority=session_queue_priority(child),
     )
     return {
         "task_id": str(task_id),

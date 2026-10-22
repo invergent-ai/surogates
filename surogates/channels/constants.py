@@ -12,10 +12,12 @@ of literals scattered per file.
 from __future__ import annotations
 
 from surogates.channels.capabilities import BUILTIN
+from surogates.channels.memory_boundary import is_case_session
 
 __all__ = [
     "ADAPTER_CHANNELS",
     "API_CHANNEL",
+    "CASE_STEP_PRIORITY",
     "DIRECT_UI_CHANNELS",
     "END_USER_CHANNELS",
     "INBOX_NOTIFY_CHANNELS",
@@ -25,6 +27,7 @@ __all__ = [
     "STUDIO_CHANNEL",
     "multi_session_disabled",
     "outbound_dm",
+    "session_queue_priority",
 ]
 
 #: A programmatic client driving the agent with a service-account token.
@@ -63,6 +66,23 @@ VOICE_TOOLS = frozenset({"end_call"})
 def queue_priority(channel: str | None) -> float:
     """A session's work-queue score: real-time channels jump the queue."""
     return REALTIME_PRIORITY if channel in REALTIME_CHANNELS else 0.0
+
+
+#: Every wake of a Keel case's session, its step's own or a child's: behind
+#: interactive work, which is queued at 0.  A case waits; a person does not.
+CASE_STEP_PRIORITY = 1.0
+
+
+def session_queue_priority(session: object) -> float:
+    """The work-queue score of one of *session*'s wakes.
+
+    A case's sessions wait behind interactive work; otherwise the channel
+    decides (:func:`queue_priority`).  A row read without its channel or
+    config scores as ordinary work.
+    """
+    if is_case_session(session):
+        return CASE_STEP_PRIORITY
+    return queue_priority(getattr(session, "channel", None))
 
 
 #: Channels with a registered outbound delivery adapter (a delivery loop

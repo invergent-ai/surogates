@@ -542,7 +542,7 @@ async def _mentioning(client, app, session_factory, monkeypatch):
     app.state.runtime_config_cache = _AgentNames()
     woken: list = []
 
-    async def enqueue(redis, *, org_id, agent_id, session_id):
+    async def enqueue(redis, *, org_id, agent_id, session_id, priority=0):
         woken.append(session_id)
 
     monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
@@ -651,7 +651,7 @@ async def test_a_chat_whose_agent_has_no_office_tools_offers_it_to_nobody_and_re
     app.state.runtime_config_cache = _AgentNames()
     woken: list = []
 
-    async def enqueue(redis, *, org_id, agent_id, session_id):
+    async def enqueue(redis, *, org_id, agent_id, session_id, priority=0):
         woken.append(session_id)
 
     monkeypatch.setattr(session_routes, "enqueue_session", enqueue)

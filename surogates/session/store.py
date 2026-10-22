@@ -2360,6 +2360,24 @@ class SessionStore:
         async with self._sf() as db:
             return int((await db.execute(stmt)).scalar_one())
 
+    async def has_synthetic_message(
+        self, session_id: UUID, synthetic: str, *, key: str | None = None,
+    ) -> bool:
+        """Whether *session_id* holds a synthetic user message of one kind.
+
+        With *key*, only one written for that Keel ``keel_key`` counts: a
+        retried call finds what its first attempt wrote, and writes nothing.
+        """
+        stmt = select(EventRow.id).where(
+            EventRow.session_id == session_id,
+            EventRow.type == EventType.USER_MESSAGE.value,
+            EventRow.data["synthetic"].as_string() == synthetic,
+        )
+        if key is not None:
+            stmt = stmt.where(EventRow.data["keel_key"].as_string() == key)
+        async with self._sf() as db:
+            return bool((await db.execute(select(stmt.exists()))).scalar_one())
+
     async def count_recoveries_since_progress(self, session_id: UUID) -> int:
         """Count ``harness.recovered`` events since the session last progressed.
 

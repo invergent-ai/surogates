@@ -121,7 +121,7 @@ async def _start_turn(orchestrator, monkeypatch, process) -> tuple[asyncio.Task,
 def _recording_enqueue(monkeypatch) -> list[UUID]:
     enqueued: list[UUID] = []
 
-    async def enqueue(redis, *, org_id, agent_id, session_id):
+    async def enqueue(redis, *, org_id, agent_id, session_id, priority=0):
         enqueued.append(session_id)
 
     monkeypatch.setattr("surogates.orchestrator.dispatcher.enqueue_session", enqueue)

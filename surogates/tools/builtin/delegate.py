@@ -35,6 +35,7 @@ import time
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
@@ -538,6 +539,7 @@ async def _run_single_delegation(
                 org_id=str(tenant.org_id),
                 agent_id=agent_id,
                 session_id=child_id,
+                priority=session_queue_priority(child_session),
             )
 
         outcome = await _poll_child_completion(

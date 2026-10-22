@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
-from surogates.channels.constants import API_CHANNEL
+from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import is_case_session
 from surogates.config import enqueue_session
 from surogates.runtime import (
@@ -285,6 +285,7 @@ async def _submit_one(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session.id,
+        priority=session_queue_priority(session),
     )
 
     return PromptAccepted(session_id=session.id, event_id=event_id)

@@ -28,7 +28,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
-from surogates.channels.constants import ADAPTER_CHANNELS, END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import (
+    ADAPTER_CHANNELS,
+    END_USER_CHANNELS,
+    REALTIME_CHANNELS,
+    STUDIO_CHANNEL,
+    session_queue_priority,
+)
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.history import (
@@ -2278,6 +2284,7 @@ class AgentHarness(
                         await enqueue_session(
                             self._redis, org_id=str(session.org_id),
                             agent_id=session.agent_id, session_id=session.id,
+                            priority=session_queue_priority(session),
                         )
                     try:
                         if slash_block is not None:
@@ -2324,6 +2331,7 @@ class AgentHarness(
                     await enqueue_session(
                         self._redis, org_id=str(session.org_id),
                         agent_id=session.agent_id, session_id=session.id,
+                        priority=session_queue_priority(session),
                     )
                 if is_new or at_rest:
                     return
@@ -2421,6 +2429,7 @@ class AgentHarness(
                 await enqueue_session(
                     self._redis, org_id=str(session.org_id),
                     agent_id=session.agent_id, session_id=session.id,
+                    priority=session_queue_priority(session),
                 )
 
         except Exception as _harness_exc:

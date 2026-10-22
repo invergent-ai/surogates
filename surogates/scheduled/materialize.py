@@ -30,6 +30,7 @@ from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
 from surogates.session.events import EventType
@@ -128,6 +129,7 @@ async def materialize_scheduled_run(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session.id,
+        priority=session_queue_priority(session),
     )
     await scheduled_store.mark_run_created(schedule, session_id=session.id)
     return session.id

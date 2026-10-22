@@ -44,6 +44,7 @@ from surogates.channels.constants import (
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
     outbound_dm,
+    session_queue_priority,
 )
 from surogates.channels.memory_boundary import BUYER_BOUNDARY_PREFIX, EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
@@ -1501,6 +1502,7 @@ async def deliver_message(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
     return SendMessageResponse(event_id=event_id)
@@ -1856,6 +1858,7 @@ async def resume_session(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
     return await store.get_session(session_id)
@@ -1897,6 +1900,7 @@ async def retry_session(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
 
     return await store.get_session(session_id)

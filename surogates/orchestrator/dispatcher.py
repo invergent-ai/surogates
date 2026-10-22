@@ -23,7 +23,7 @@ from uuid import UUID, uuid4
 
 from dataclasses import dataclass
 
-from surogates.channels.constants import queue_priority
+from surogates.channels.constants import session_queue_priority
 from surogates.config import (
     INTERRUPT_CHANNEL_PREFIX,
     SHARED_WORK_QUEUE_KEY,
@@ -506,6 +506,8 @@ class Orchestrator:
                 org_id=dequeued.org_id,
                 agent_id=dequeued.agent_id,
                 session_id=UUID(dequeued.session_id),
+                # Back where it was: a phone call's at the front, a case's behind chats.
+                priority=dequeued.priority,
             )
         except Exception:
             # The orphan sweep finds it once its lease has expired.
@@ -563,8 +565,9 @@ class Orchestrator:
             org_id=str(session.org_id),
             agent_id=session.agent_id,
             session_id=session_id,
-            # a phone call's turn goes back where it was: at the front
-            priority=queue_priority(getattr(session, "channel", None)),
+            # a phone call's turn goes back where it was: at the front,
+            # and a case's behind interactive work
+            priority=session_queue_priority(session),
         )
 
     # ── Crash-loop breaker state (Redis, shared across replicas) ──────
@@ -764,6 +767,7 @@ class Orchestrator:
                     org_id=str(rewake_session.org_id),
                     agent_id=rewake_session.agent_id,
                     session_id=session_id,
+                    priority=session_queue_priority(rewake_session),
                 )
         except SessionNotFoundError:
             # Deleted mid-flight (a user stopping and deleting a session
@@ -1046,6 +1050,7 @@ class Orchestrator:
                     org_id=str(session.org_id),
                     agent_id=session.agent_id,
                     session_id=session.id,
+                    priority=session_queue_priority(session),
                 )
                 recovered += 1
                 logger.warning(

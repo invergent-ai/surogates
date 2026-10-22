@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.session.events import EventType
 
@@ -51,6 +52,22 @@ async def _thread_title(session_factory: Any | None, worker_session_id: UUID) ->
         )
         return None
     return row.title if row is not None else None
+
+
+async def _parent_priority(session_store: SessionStore, parent_session_id: UUID) -> float:
+    """The parent's place on the work queue: a case's parent stays behind interactive work.
+
+    A parent whose row cannot be read is woken as ordinary work: its wake
+    matters more than its place.
+    """
+    try:
+        return session_queue_priority(await session_store.get_session(parent_session_id))
+    except Exception:
+        logger.warning(
+            "Could not read parent session %s; waking it as ordinary work",
+            parent_session_id, exc_info=True,
+        )
+        return 0.0
 
 
 async def notify_parent_of_task_event(
@@ -94,6 +111,7 @@ async def notify_parent_of_task_event(
             org_id=str(parent.org_id),
             agent_id=parent.agent_id,
             session_id=parent_session_id,
+            priority=session_queue_priority(parent),
         )
     except Exception:
         logger.exception(
@@ -241,6 +259,7 @@ async def notify_parent_on_completion(
                 org_id=str(org_id),
                 agent_id=agent_id,
                 session_id=parent_session_id,
+                priority=await _parent_priority(session_store, parent_session_id),
             )
 
     except Exception:
@@ -308,6 +327,7 @@ async def notify_parent_on_failure(
                 org_id=str(org_id),
                 agent_id=agent_id,
                 session_id=parent_session_id,
+                priority=await _parent_priority(session_store, parent_session_id),
             )
 
     except Exception:

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from surogates.channels.constants import session_queue_priority
 from surogates.harness.loop_mission_evaluator import (
     _build_mission_judge,
     _maybe_run_mission_evaluator,
@@ -148,6 +149,7 @@ class OutcomeCommandMixin:
 
         await enqueue_session(
             self._redis, org_id=str(session.org_id), agent_id=session.agent_id, session_id=session.id,
+            priority=session_queue_priority(session),
         )
 
     async def _handle_mission_command(
@@ -393,6 +395,7 @@ class OutcomeCommandMixin:
                         org_id=str(session.org_id),
                         agent_id=session.agent_id,
                         session_id=session.id,
+                        priority=session_queue_priority(session),
                     )
                 except Exception:
                     logger.debug(
@@ -650,6 +653,7 @@ class OutcomeCommandMixin:
                         org_id=str(session.org_id),
                         agent_id=session.agent_id,
                         session_id=session.id,
+                        priority=session_queue_priority(session),
                     )
                 except Exception:
                     logger.debug(
@@ -746,6 +750,7 @@ class OutcomeCommandMixin:
                         org_id=str(session.org_id),
                         agent_id=session.agent_id,
                         session_id=session.id,
+                        priority=session_queue_priority(session),
                     )
                 except Exception:
                     logger.debug("Failed to enqueue outcome kickoff", exc_info=True)
@@ -1058,6 +1063,7 @@ class OutcomeCommandMixin:
                     org_id=str(session.org_id),
                     agent_id=session.agent_id,
                     session_id=session.id,
+                    priority=session_queue_priority(session),
                 )
             except Exception:
                 logger.debug("Failed to enqueue outcome continuation", exc_info=True)

@@ -77,7 +77,7 @@ from surogates.runtime.platform_client import (
     PlatformAuthError,
 )
 from surogates.runtime.resolver import resolve_agent_id_soft
-from surogates.channels.constants import multi_session_disabled
+from surogates.channels.constants import multi_session_disabled, session_queue_priority
 from surogates.session.events import EventType
 from surogates.session.models import REUSABLE_SESSION_STATUSES
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -920,6 +920,7 @@ async def send_website_message(
         org_id=str(session.org_id),
         agent_id=session.agent_id,
         session_id=session_id,
+        priority=session_queue_priority(session),
     )
     return SendMessageResponse(event_id=event_id)
 

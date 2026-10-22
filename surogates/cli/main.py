@@ -88,6 +88,25 @@ def cmd_api(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_keel_link(args: argparse.Namespace) -> None:
+    """Start keel-link, Keel's internal link to the runtime."""
+    import uvicorn
+
+    from surogates.config import load_settings
+
+    settings = load_settings()
+    _configure_logging(settings.log_level)
+
+    uvicorn.run(
+        "surogates.api.keel_link:create_keel_link_app",
+        factory=True,
+        host=settings.api.host,
+        port=settings.keel.link_port,
+        # See cmd_api: uvicorn's own dictConfig would override the clamps.
+        log_config=None,
+    )
+
+
 def cmd_worker(args: argparse.Namespace) -> None:
     """Start a harness worker that consumes from the Redis work queue."""
     from surogates.config import load_settings
@@ -230,6 +249,9 @@ def build_parser() -> argparse.ArgumentParser:
     # surogate worker
     sub.add_parser("worker", help="Start a harness worker")
 
+    # surogate keel-link
+    sub.add_parser("keel-link", help="Start Keel's internal link to the runtime")
+
     # surogate mcp-proxy
     sub.add_parser("mcp-proxy", help="Start the MCP proxy service")
 
@@ -262,6 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "api": cmd_api,
     "worker": cmd_worker,
+    "keel-link": cmd_keel_link,
     "mcp-proxy": cmd_mcp_proxy,
     "migrate": cmd_migrate,
     "doctor": cmd_doctor,

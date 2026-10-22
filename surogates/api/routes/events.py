@@ -16,6 +16,7 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session, load_settings
 from surogates.harness.outcomes import build_defined_outcome_from_event
 from surogates.session.events import EventType
@@ -283,6 +284,7 @@ async def send_session_events(
                 org_id=str(session.org_id),
                 agent_id=session.agent_id,
                 session_id=session_id,
+                priority=session_queue_priority(session),
             )
 
         sent.append(
