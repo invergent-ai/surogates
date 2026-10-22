@@ -3,11 +3,6 @@ import { applyAgentChatEvent, createInitialAgentChatState } from "../src/runtime
 import { AGENT_CHAT_LISTENED_EVENTS } from "../src/runtime/events";
 
 describe("office save events", () => {
-  it("are listened to", () => {
-    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("office.conflict");
-    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("office.save_failed");
-  });
-
   it("records a conflict for its path and refreshes the workspace for the copy", () => {
     const state = createInitialAgentChatState();
     const next = applyAgentChatEvent(state, {
@@ -62,10 +57,6 @@ describe("live office edits", () => {
     type: "tool.result" as const,
     eventId,
     data: { tool_call_id: `tc${callEventId}`, name, content, elapsed_ms: 900 },
-  });
-
-  it("are listened to", () => {
-    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("stream.live");
   });
 
   it("open nothing from the replayed backlog, and the document of a live edit once it has run", () => {

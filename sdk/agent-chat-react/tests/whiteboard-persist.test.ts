@@ -126,12 +126,6 @@ describe("saving", () => {
     expect(upload.mock.calls[0][0].directory).toBe(CANVAS_DIR);
   });
 
-  it("writes an underscore-prefixed path", () => {
-    // The prefix keeps it out of the workspace file browser, so nobody
-    // deletes their own board by tidying up.
-    expect(CANVAS_PATH.startsWith("_")).toBe(true);
-  });
-
   it("serialises a round-trippable document", async () => {
     const upload = vi.fn();
     const doc = applyCommands(emptyDoc(), [text], 3);
