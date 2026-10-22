@@ -20,7 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
@@ -221,6 +221,23 @@ async def create_step_session(request: Request) -> JSONResponse:
     contract = body.contract
     _screen_inputs(contract)
 
+    try:
+        return await _create_or_find(request, body, agent_id)
+    except DBAPIError as exc:
+        # Its text quotes the statement's parameters, the case's inputs
+        # among them: the class name alone is logged and answered.
+        logger.warning(
+            "keel-link: the step session of case %s could not be written (%s)",
+            contract.case_id, type(exc).__name__,
+        )
+        raise _refused(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", "The step session could not be created.",
+        ) from None
+
+
+async def _create_or_find(request: Request, body: StepSessionRequest, agent_id: str) -> JSONResponse:
+    """Find the session the key holds, or create it; either way, give it its kickoff."""
+    contract = body.contract
     store = request.app.state.session_store
     existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
     if existing is not None:
@@ -249,22 +266,15 @@ async def create_step_session(request: Request) -> JSONResponse:
             case_step=contract.model_dump(mode="json"),
             case_scope={"tools": contract.tools, "knowledge": contract.knowledge},
         )
-    except IntegrityError as exc:
+    except IntegrityError:
         # A concurrent call with the key made it first, or the id is taken.
         existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
         if existing is not None:
             return await _found(request, existing, body, agent_id)
         if await _exists(store, body.session_id):
             raise _key_in_use() from None
-        # Another constraint broke.  Its text quotes the row, the case's
-        # inputs among it: the class name alone is logged and answered.
-        logger.warning(
-            "keel-link: the step session of case %s could not be created (%s)",
-            contract.case_id, type(exc).__name__,
-        )
-        raise _refused(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", "The step session could not be created.",
-        ) from None
+        # Another constraint broke: the route answers it as any database failure.
+        raise
 
     await _start(request, session, contract, body.idempotency_key)
     return _answer(session, created=True)

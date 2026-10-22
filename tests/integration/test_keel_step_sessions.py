@@ -19,7 +19,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from surogates.channels.constants import API_CHANNEL
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
@@ -518,21 +518,30 @@ async def test_the_same_key_for_another_agent_is_in_use(link, org, session_store
     assert [m.data.get("synthetic") for m in messages] == ["keel_step"]
 
 
-async def test_an_unrelated_integrity_failure_answers_500_and_logs_no_inputs(
-    link, link_app, org, session_store, monkeypatch, caplog,
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    [
+        # A constraint other than the key or the id.
+        (IntegrityError, "new row violates a check constraint\nDETAIL:  Failing row contains ({config})."),
+        # The database gave up on the statement.
+        (OperationalError, "canceling statement due to statement timeout\nCONTEXT:  row ({config})"),
+    ],
+    ids=["integrity", "operational"],
+)
+async def test_a_failed_session_insert_answers_500_and_logs_no_inputs(
+    link, link_app, org, session_store, monkeypatch, caplog, error, detail,
 ):
-    # An insert that breaks a constraint other than the key or the id.  The
-    # database's error quotes the row it could not write, the case step's
-    # inputs among it, and SQLAlchemy's text adds the bound parameters.
-    async def refused_insert(**row):
+    # The database's error quotes the row it could not write, the case
+    # step's inputs among it, and SQLAlchemy's text adds the bound parameters.
+    async def failed_insert(**row):
         config = json.dumps(row["config"])
-        raise IntegrityError(
+        raise error(
             "INSERT INTO sessions (config) VALUES ($1::JSONB)",
             (config,),
-            Exception(f"new row violates a check constraint\nDETAIL:  Failing row contains ({config})."),
+            Exception(detail.format(config=config)),
         )
 
-    monkeypatch.setattr(link_app.state.session_store, "create_session", refused_insert)
+    monkeypatch.setattr(link_app.state.session_store, "create_session", failed_insert)
     request = body(org, inputs={"applicant": "Ioana Marinescu", "amount": "987654.32"})
     caplog.set_level(logging.INFO)
 
@@ -540,7 +549,7 @@ async def test_an_unrelated_integrity_failure_answers_500_and_logs_no_inputs(
 
     assert failed.status_code == 500, failed.text
     assert code_of(failed) == "internal-error"
-    assert "IntegrityError" in caplog.text
+    assert error.__name__ in caplog.text
     for value in ("Marinescu", "987654.32"):
         assert value not in caplog.text
         assert value not in failed.text
