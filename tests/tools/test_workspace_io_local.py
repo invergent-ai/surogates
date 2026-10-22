@@ -198,7 +198,7 @@ async def test_run_reports_output_and_exit_code(wio, root):
 
 
 async def test_run_times_out(wio):
-    result = await wio.run("sleep 5", workdir=None, timeout=1)
+    result = await wio.run("sleep 2", workdir=None, timeout=1)
     assert result.timed_out
     assert result.returncode == 124
     assert result.output == "Command timed out after 1 seconds"
