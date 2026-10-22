@@ -607,6 +607,8 @@ def _step_harness(
         if call.get("on_tool_call_complete") is not None:
             for tool_call in reply[0].get("tool_calls") or []:
                 call["on_tool_call_complete"](tool_call)
+            # The rest of the stream, the call's usage last: a call started as it arrived runs meanwhile.
+            await asyncio.sleep(0.05)
         return reply
 
     monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
@@ -862,3 +864,97 @@ async def test_a_refused_completion_keeps_the_turn_going(fake_keel, monkeypatch,
     assert [body["call_id"] for body in fake_keel.bodies("/complete")] == ["c1", "c2"]
     assert _ended_with(store) == "case_step_ended"
     assert store.row.status == "completed"
+
+
+#: A model with a price, so each call of a test of what a step used costs something.
+PRICED = "openai/gpt-5.6-terra"
+
+
+class _CountingStore(_StepStore):
+    """The store of a new step session whose row counts each call of the model as its response is written,
+    as the session's row in the database does."""
+
+    def __init__(self, tmp_path) -> None:
+        row = _step(deepcopy(CONTRACT)).model_copy(
+            update={"input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": Decimal(0)},
+        )
+        super().__init__(row, LocalBackend(str(tmp_path)))
+
+    async def emit_event(self, session_id, event_type, data, *, lease_token=None) -> int:
+        if event_type is EventType.LLM_RESPONSE:
+            self.row.input_tokens += int(data.get("input_tokens", 0))
+            self.row.output_tokens += int(data.get("output_tokens", 0))
+            self.row.estimated_cost_usd += Decimal(str(data.get("cost_usd", 0)))
+        return await super().emit_event(session_id, event_type, data, lease_token=lease_token)
+
+    def used(self, calls: int | None = None) -> dict:
+        """What the model's calls used, by their responses in the log: every call, or the first *calls*."""
+        responses = [e.data for e in self.log if e.type == EventType.LLM_RESPONSE.value][:calls]
+        cost = sum((Decimal(str(r.get("cost_usd", 0))) for r in responses), Decimal(0))
+        return {
+            "input_tokens": sum(r["input_tokens"] for r in responses),
+            "output_tokens": sum(r["output_tokens"] for r in responses),
+            "estimated_cost_usd": format(cost, "f"),
+        }
+
+
+def _using(reply, input_tokens: int, output_tokens: int):
+    """*reply*, its call having used *input_tokens* and *output_tokens* of a priced model."""
+    message, usage = reply
+    return message, {**usage, "model": PRICED, "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+#: How a report reaches Keel: Keel's answer, the tool and its arguments, and the routes the report takes.
+REPORTS = {
+    "completed": ((200, ACCEPTED), "complete_step", COMPLETION, ["/complete"]),
+    "hand-raised": ((200, HAND_RAISED), "raise_hand", {"question": "Which income counts?"}, ["/raise-hand"]),
+    "refused": (
+        (403, {"code": "forbidden", "message": "Not this agent's step."}), "complete_step", COMPLETION,
+        ["/complete", "/ended"],
+    ),
+}
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+@pytest.mark.parametrize("report", list(REPORTS))
+async def test_a_report_carries_what_every_call_of_its_turn_used_its_own_included(
+    fake_keel, monkeypatch, tmp_path, report, streaming,
+):
+    door, tool, arguments, routes = REPORTS[report]
+    fake_keel.answer(*door)
+    store = _CountingStore(tmp_path)
+
+    await _wake(monkeypatch, store, [
+        _using(_calls("read_file", {"path": "in/checklist.pdf"}, "c1"), 1_000, 120),
+        _using(_calls(tool, arguments, "c2"), 33_912, 1_787),
+    ], sandbox={"read_file": "Checklist: payslips, ID."}, streaming=streaming)
+
+    assert _ended_with(store) == "case_step_ended"
+    used = store.used()
+    assert used["input_tokens"] == 34_912 and Decimal(used["estimated_cost_usd"]) > 0
+    assert [body["usage"] for route in routes for body in fake_keel.bodies(route)] == [used] * len(routes)
+
+
+async def test_each_report_of_a_wake_carries_what_its_turn_used_through_its_own_call(fake_keel, monkeypatch, tmp_path):
+    fake_keel.answer(409, REJECTION)
+    fake_keel.answer(200, ACCEPTED)
+    store = _CountingStore(tmp_path)
+
+    await _wake(monkeypatch, store, [
+        _using(_calls("complete_step", {**COMPLETION, "sources": {}}, "c1"), 30_000, 900),
+        _using(_calls("complete_step", COMPLETION, "c2"), 33_912, 1_787),
+    ], streaming=True)
+
+    assert [body["usage"] for body in fake_keel.bodies("/complete")] == [store.used(1), store.used(2)]
+
+
+async def test_a_turn_ending_without_a_report_tells_keel_what_every_call_used(fake_keel, monkeypatch, tmp_path):
+    store = _CountingStore(tmp_path)
+
+    await _wake(monkeypatch, store, [
+        _using(_calls("read_file", {"path": "in/checklist.pdf"}, "c1"), 1_000, 120),
+        _using(({"role": "assistant", "content": "The payslips are there."}, {"finish_reason": "stop"}), 2_000, 80),
+        _using(({"role": "assistant", "content": "The documents look complete."}, {"finish_reason": "stop"}), 2_500, 60),
+    ], sandbox={"read_file": "Checklist: payslips, ID."}, streaming=True)
+
+    assert [body["usage"] for body in fake_keel.bodies("/ended")] == [store.used()]

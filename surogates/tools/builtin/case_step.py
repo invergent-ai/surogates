@@ -215,7 +215,12 @@ def _error(message: str, **extra: Any) -> str:
 
 
 def _usage(session: Any) -> dict[str, Any]:
-    """What the step's session has used so far, as Keel takes it."""
+    """What the step's session has used so far, as Keel takes it.
+
+    Read from the session's row, which counts a call of the model once its
+    response is saved: a step tool runs only after the response that calls
+    it is saved, so a report counts the call that makes it.
+    """
     return {
         "input_tokens": int(session.input_tokens or 0),
         "output_tokens": int(session.output_tokens or 0),

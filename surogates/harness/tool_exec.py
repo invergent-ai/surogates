@@ -36,7 +36,7 @@ from surogates.harness.tool_guardrails import (
     toolguard_synthetic_result,
 )
 from surogates.tools.coerce import coerce_tool_args
-from surogates.runtime.governance import floor_gate
+from surogates.runtime.governance import CASE_STEP_TOOLS, floor_gate
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.storage.tenant import boundary_workspace_prefix
@@ -629,8 +629,12 @@ TELLS_OTHERS_TOOLS: frozenset[str] = frozenset({
     "escalate", "followup_enroll", "followup_update", "followup_withdraw_consent",
     "team_message_person", "team_update_person", "team_enroll_person", "team_escalation",
 })
+# A case step's report to Keel carries what its session has used, the call of
+# the model that makes the report included: that call's usage arrives last in
+# its stream, and the session counts it only once the response is saved.  Held,
+# a report of a response dropped mid-stream is never sent either.
 HELD_UNTIL_SAVED_TOOLS: frozenset[str] = (
-    SESSION_STARTING_TOOLS | AFTER_THE_RESPONSE_TOOLS | TELLS_OTHERS_TOOLS
+    SESSION_STARTING_TOOLS | AFTER_THE_RESPONSE_TOOLS | TELLS_OTHERS_TOOLS | CASE_STEP_TOOLS
     | frozenset({"ask_user_question", "send_form"})
 )
 
