@@ -19,14 +19,17 @@ runs, and the model reads it.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from copy import deepcopy
 from uuid import uuid4
 
 import httpx
 import pytest
 
+import surogates.keel.client as keel_client_module
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
@@ -217,6 +220,48 @@ async def test_keel_down_does_not_stop_the_turn_ending(fake_keel, monkeypatch, s
     told = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "Keel" in r.getMessage()]
     assert any(str(store.row.id) in line for line in told)
     assert not any("Ioana" in line or "182000" in line for line in told)
+
+
+@pytest.mark.parametrize("end", ["no-outcome", "failed", "given-up"])
+async def test_a_keel_that_never_answers_holds_a_steps_end_briefly(monkeypatch, tmp_path, caplog, end):
+    # Keel's door takes the request and never answers: the turn's end, its lease and its worker slot wait
+    # for Keel no longer than telling it how the step ended may take.
+    monkeypatch.setattr(keel_client_module, "ENDED_TIMEOUT_SECONDS", 0.1)
+    told: list[httpx.Request] = []
+
+    async def silent(request: httpx.Request) -> httpx.Response:
+        told.append(request)
+        await asyncio.Event().wait()
+        raise AssertionError("a silent door never answers")
+
+    previous = keel_client()
+    use_keel_client(KeelClient("http://keel-door.test", "door-key", transport=httpx.MockTransport(silent)))
+    store = _SweptStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    started = time.monotonic()
+    try:
+        with caplog.at_level(logging.WARNING):
+            # Bounded here too, so an end held without end fails rather than hangs.
+            if end == "no-outcome":
+                await asyncio.wait_for(_wake(monkeypatch, store, [_says("I read it."), _says("It looks complete.")]), 5)
+            elif end == "failed":
+                await asyncio.wait_for(_wake(monkeypatch, store, [_cut_off()] * 3), 5)
+            else:
+                await asyncio.wait_for(
+                    _orchestrator(store, None)._abandon_unrecoverable_session(store.row, attempts=3, reason="no progress"), 5,
+                )
+    finally:
+        use_keel_client(previous)
+
+    assert time.monotonic() - started < 2
+    assert [json.loads(r.content)["reason"] for r in told] == ["no-outcome" if end == "no-outcome" else "failed"]
+    if end == "no-outcome":
+        assert _ended_with(store) == "completed"
+        assert not store.redacted()
+    else:
+        # The step is over for the session whether or not Keel heard.
+        assert store.row.status == "failed"
+        assert store.redacted()
+    assert any(str(store.row.id) in r.getMessage() for r in caplog.records if "Keel" in r.getMessage())
 
 
 class _ProviderRefused(Exception):

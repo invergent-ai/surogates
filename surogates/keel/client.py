@@ -14,6 +14,7 @@ case data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 #: How long one request to the door may take.
 TIMEOUT_SECONDS = 30.0
+#: How long telling Keel how a step session's turn ended may take, all told:
+#: the turn's end, its lease and its worker slot wait for Keel no longer.
+#: Keel's own sweep of stale steps hears of an end it was not told.
+ENDED_TIMEOUT_SECONDS = 5.0
 #: The longest ``detail`` the door takes.
 DETAIL_CHARS = 2000
 #: The largest body the door takes, in bytes of JSON as sent.
@@ -163,14 +168,23 @@ class KeelClient:
     ) -> KeelAnswer:
         """Tell Keel a step session's turn ended without a report (``no-outcome``) or failed (``failed``).
 
-        Logs, by session id, an end Keel did not take, and never raises: the
-        turn ends whatever Keel answers.
+        Waits for Keel at most :data:`ENDED_TIMEOUT_SECONDS`.  Logs, by
+        session id, an end Keel did not take, and never raises: the turn ends
+        whatever Keel answers.
         """
         body: dict[str, Any] = {"reason": reason, "detail": detail[:DETAIL_CHARS]}
         if usage is not None:
             body["usage"] = usage
         try:
-            answer = await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/ended", body=body)
+            answer = await asyncio.wait_for(
+                self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/ended", body=body),
+                ENDED_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Keel did not answer within %s s how session %s ended", ENDED_TIMEOUT_SECONDS, session_id,
+            )
+            return KeelAnswer(None)
         except Exception as exc:
             logger.warning("Keel was not told how session %s ended (%s)", session_id, type(exc).__name__)
             return KeelAnswer(None)
