@@ -23,8 +23,9 @@ A report larger than Keel takes is never sent: the model is asked to shorten
 it.  Once a report ended the step, a later report in the same wake is
 answered here, without Keel: the step is no longer the session's.
 
-A turn of the step that ends with no report ending the step, or fails, is
-told to Keel by the harness through :func:`report_turn_end`.
+A turn of the step that ends with no report ending the step is told to Keel
+through :func:`report_no_outcome`; a session of the step that fails, at its
+turn's end or in the dispatcher, through :func:`report_step_failed`.
 
 The harness checks only what Keel cannot: the outcome is one of the
 contract's, the output and sources are objects, and each file named is in
@@ -44,7 +45,14 @@ from uuid import UUID
 
 from surogates.keel.client import BodyTooLarge, KeelAnswer, KeelClient, keel_client
 from surogates.keel.files import case_file_value
-from surogates.keel.steps import STEP_ENDED, STEP_STOPPED, StepContract, is_case_step, step_contract_in
+from surogates.keel.steps import (
+    CASE_STEP_KEY,
+    STEP_ENDED,
+    STEP_STOPPED,
+    StepContract,
+    is_case_step,
+    step_contract_in,
+)
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolSchema
@@ -315,36 +323,63 @@ async def _send_report(
     return result
 
 
-async def report_turn_end(store: Any, session: Any, lease_token: object, *, reason: str, failed: bool) -> None:
-    """Tell Keel that a turn of a step's session ended with no report ending the step, or failed.
-
-    *reason* is the turn end's own code, never an error's text.  Keel gets
-    ``no-outcome`` with the step's usage, and decides what comes of the step;
-    or ``failed``, and the step is over for the session: its inputs leave it.
-    Nothing is sent for a session that is not a step's own, nor when a report
-    of the wake holding *lease_token* ended the step: Keel knows already.
-    Never raises, and logs by session id what Keel was not told: the turn
-    ends whatever Keel answers.
-    """
+def _known_to_keel(session: Any, lease_token: object) -> bool:
+    """Whether Keel needs no word of how *session* ended: it is no step's own
+    session, a report of the wake holding *lease_token* ended its step, or its
+    step's inputs already left it, which only the step's end does."""
     if not is_case_step(session) or step_ended_in_wake(session.id, lease_token):
-        return
+        return True
+    step = session.config.get(CASE_STEP_KEY)
+    return isinstance(step, dict) and step.get("inputs_redacted") is True
+
+
+async def _tell_keel(session_id: Any, **end: Any) -> None:
+    """Send Keel one ``ended`` for *session_id*; log by session id what was not sent.  Never raises."""
     try:
         client = keel_client()
         if client is None:
-            logger.warning("Session %s: no link to Keel; Keel is not told how its step's turn ended", session.id)
-        elif failed:
-            await client.ended(session.id, reason="failed", detail=reason)
-        else:
-            usage = None
-            try:
-                usage = _usage(await store.get_session(session.id))
-            except Exception as exc:
-                logger.warning("Session %s: its step's usage was not read (%s)", session.id, type(exc).__name__)
-            await client.ended(session.id, reason="no-outcome", detail=reason, usage=usage)
+            logger.warning("Session %s: no link to Keel; Keel is not told how its step ended", session_id)
+            return
+        await client.ended(session_id, **end)
     except Exception as exc:
-        logger.warning("Session %s: Keel was not told how its step's turn ended (%s)", session.id, type(exc).__name__)
-    if failed:
-        await _redact(store, session.id)
+        logger.warning("Session %s: Keel was not told how its step ended (%s)", session_id, type(exc).__name__)
+
+
+async def report_no_outcome(store: Any, session: Any, lease_token: object, *, reason: str) -> None:
+    """Tell Keel that a turn of a step's session ended with no report ending the step.
+
+    Keel gets ``no-outcome``, with *reason*, the turn end's own code, and the
+    step's usage, and decides what comes of the step; the inputs stay.
+    Nothing is sent for a session that is no step's own, nor when Keel knows
+    of the step's end already: a report of the wake holding *lease_token*
+    ended it, or its inputs left the session.  Never raises: the turn ends
+    whatever Keel answers.
+    """
+    if _known_to_keel(session, lease_token):
+        return
+    usage = None
+    try:
+        usage = _usage(await store.get_session(session.id))
+    except Exception as exc:
+        logger.warning("Session %s: its step's usage was not read (%s)", session.id, type(exc).__name__)
+    await _tell_keel(session.id, reason="no-outcome", detail=reason, usage=usage)
+
+
+async def report_step_failed(store: Any, session: Any, lease_token: object, *, code: str) -> None:
+    """Tell Keel that a step's session failed, and take the step's inputs out of it.
+
+    Keel gets ``failed`` with *code*, the failure's own short code, never its
+    text.  The step is over for the session whether or not Keel heard.  Both
+    the end of a turn and the dispatcher, which fails a session whose wakes
+    kept crashing, report through here.  Nothing is sent for a session that
+    is no step's own, nor when a report of the wake holding *lease_token*
+    ended the step, nor when its inputs already left it: Keel knows of that
+    end already.  *lease_token* is ``None`` outside a wake.  Never raises.
+    """
+    if _known_to_keel(session, lease_token):
+        return
+    await _tell_keel(session.id, reason="failed", detail=code)
+    await _redact(store, session.id)
 
 
 async def _step_session(kwargs: dict[str, Any]) -> tuple[Any, UUID, Any]:

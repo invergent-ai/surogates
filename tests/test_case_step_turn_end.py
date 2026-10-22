@@ -6,7 +6,9 @@ ends without it, or fails, is told to Keel through its door: ``no-outcome``
 with the turn end's code and the step's usage, or ``failed`` with the
 failure's own code, never its text.  A failed turn takes the step's inputs
 out of the session.  A turn whose report ended the step tells Keel nothing
-more, and Keel being away never keeps a turn from ending.
+more, and Keel being away never keeps a turn from ending.  A session the
+dispatcher fails, its wakes crashing or never recovering, is told to Keel as
+a failed turn is.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import httpx
 import pytest
 
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
+from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
 from surogates.storage.backend import LocalBackend
 from tests.test_case_step_isolation import CONTRACT
@@ -32,6 +35,7 @@ from tests.test_case_step_tools import (
     _StepStore,
     _wake,
 )
+from tests.test_orchestrator_crash_loop import FakeRedis
 
 NUDGE = (
     "This session works one step of a case. Finish it now: call complete_step "
@@ -199,3 +203,84 @@ async def test_keel_down_does_not_stop_the_turn_ending(fake_keel, monkeypatch, s
     told = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "Keel" in r.getMessage()]
     assert any(str(store.row.id) in line for line in told)
     assert not any("Ioana" in line or "182000" in line for line in told)
+
+
+class _ProviderRefused(Exception):
+    """A model provider refusing the request, quoting it."""
+
+
+def _orchestrator(store: _StepStore, harness) -> Orchestrator:
+    return Orchestrator(
+        redis_client=FakeRedis(), session_store=store, harness_factory=lambda _sid: harness,
+        agent_id=store.row.agent_id, queue_key="work", max_concurrent=1,
+    )
+
+
+def _ordinary(tmp_path) -> _StepStore:
+    ordinary = _step({})
+    ordinary.config = {}
+    return _StepStore(ordinary, LocalBackend(str(tmp_path)))
+
+
+@pytest.mark.parametrize(("session", "crashes", "code"), [
+    ("step", "same", "crash_loop_detected"),
+    ("step", "varied", "max_retries_exhausted"),
+    ("completed-step", "same", None),
+    ("ordinary", "same", None),
+], ids=["crash-loop", "retries-exhausted", "step-already-over", "ordinary"])
+async def test_a_session_the_dispatcher_fails_is_reported_as_failed(
+    fake_keel, monkeypatch, tmp_path, session, crashes, code,
+):
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._BASE_RETRY_DELAY", 0)
+    store = _ordinary(tmp_path) if session == "ordinary" else _StepStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    if session == "completed-step":
+        # Keel took the step's report in an earlier wake, which removed its inputs.
+        await store.redact_case_inputs(store.row.id)
+    if crashes == "same":
+        refusals = [_ProviderRefused("rejected: Ioana declared 182000.00") for _ in range(3)]
+    else:
+        refusals = [
+            kind(f"rejected: Ioana declared 182000.00 ({n})")
+            for n, kind in enumerate((_ProviderRefused, TimeoutError, RuntimeError))
+        ]
+
+    class Worker:
+        async def wake(self, _session_id):
+            # The model's call raises, and the turn crashes: no turn end of its own.
+            await _wake(monkeypatch, store, [refusals.pop(0)])
+
+    await _orchestrator(store, Worker())._process(store.row.id)
+
+    assert refusals == []
+    assert _failed_with(store) == (code or "crash_loop_detected")
+    if code is None:
+        assert fake_keel.requests == []
+        assert store.redactions == (1 if session == "completed-step" else 0)
+        return
+    assert fake_keel.bodies("/ended") == [{"reason": "failed", "detail": code}]
+    for request in fake_keel.requests:
+        for fragment in ("Ioana", "182000", "rejected", "Refused"):
+            assert fragment not in request.content.decode()
+    assert store.redacted()
+    assert store.redactions == 1
+
+
+class _SweptStore(_StepStore):
+    """The step's store as the orphan sweeper uses it."""
+
+    async def release_stale_lease(self, session_id) -> None:
+        pass
+
+    async def fail_if_active(self, session_id) -> bool:
+        self.row.status = "failed"
+        return True
+
+
+async def test_a_step_the_sweeper_gives_up_is_reported_as_failed(fake_keel, tmp_path):
+    store = _SweptStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+
+    await _orchestrator(store, None)._abandon_unrecoverable_session(store.row, attempts=3, reason="no progress")
+
+    assert _failed_with(store) == "recovery_loop"
+    assert fake_keel.bodies("/ended") == [{"reason": "failed", "detail": "recovery_loop"}]
+    assert store.redacted()

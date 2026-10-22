@@ -443,7 +443,7 @@ async def _wake(
 ) -> list[dict]:
     """One wake of the step, the model answering with *replies* in turn: the requests it was sent.
 
-    *streaming* runs the tool calls as a streamed answer's are, each started as it arrives.
+    A reply that is an exception is the model's call raising it.  *streaming* runs the tool calls as a streamed answer's are, each started as it arrives.
     """
     sent: list[dict] = []
     script = iter(replies)
@@ -454,6 +454,8 @@ async def _wake(
             reply = next(script)
         except StopIteration:
             raise AssertionError("the model was called more often than scripted") from None
+        if isinstance(reply, Exception):
+            raise reply
         if call.get("on_tool_call_complete") is not None:
             for tool_call in reply[0].get("tool_calls") or []:
                 call["on_tool_call_complete"](tool_call)

@@ -62,7 +62,7 @@ Only a step's own session is offered `complete_step` and `raise_hand`. The worke
 
 A report over 256,000 bytes of JSON is never sent: the model is asked to shorten it. Once a report has ended the step, a later report in the same wake is answered by the worker, without Keel.
 
-A turn of the step that ends in words, with no report, is told once to report, and goes on. When it still ends without a report ending the step, the worker tells Keel `no-outcome`, with the code of how the turn ended and the step's usage, and the inputs stay. A turn that fails is told to Keel as `failed`, with the failure's code and never its text, and the inputs are removed. Keel is not told again about a step a report of the same wake already ended. Keel being unreachable never keeps a turn from ending: the worker logs it by session id.
+A turn of the step that ends in words, with no report, is told once to report, and goes on. When it still ends without a report ending the step, the worker tells Keel `no-outcome`, with the code of how the turn ended and the step's usage, and the inputs stay. A turn that fails, and a session the worker gives up on because its wakes kept crashing or never recovered, is told to Keel as `failed`, with the failure's code and never its text, and the inputs are removed. Keel is not told again about a step a report of the same wake already ended, nor about one whose inputs were already removed. Keel being unreachable never keeps a turn from ending: the worker logs it by session id.
 
 A worker without both settings has no link to Keel: every report removes the step's inputs and ends the turn, and Keel learns of it only from the session's status.
 

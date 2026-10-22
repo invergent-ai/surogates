@@ -2465,7 +2465,7 @@ class AgentHarness(
                     session_id,
                 )
             # The parent hears of a crash only when the dispatcher stops
-            # retrying it (``Orchestrator._report_failure_to_parent``).
+            # retrying it (``Orchestrator._report_failure``).
             raise
         except BaseException:  # a cancel: the lease went to another worker, or the worker stops
             cut_off = True

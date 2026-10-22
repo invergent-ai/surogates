@@ -849,7 +849,10 @@ class Orchestrator:
                     "tripped": True,
                     "tripped_event_id": fail_event_id,
                 })
-                await self._report_failure_to_parent(session_id, f"crash_loop_detected: {str(exc) or type(exc).__name__}")
+                await self._report_failure(
+                    session_id, code="crash_loop_detected",
+                    error=f"crash_loop_detected: {str(exc) or type(exc).__name__}",
+                )
                 return
 
             if attempt + 1 < _MAX_RETRIES:
@@ -894,25 +897,43 @@ class Orchestrator:
                         "Failed to emit SESSION_FAIL for session %s",
                         session_id,
                     )
-                await self._report_failure_to_parent(session_id, f"max_retries_exhausted: {str(exc) or type(exc).__name__}")
+                await self._report_failure(
+                    session_id, code="max_retries_exhausted",
+                    error=f"max_retries_exhausted: {str(exc) or type(exc).__name__}",
+                )
 
-    async def _report_failure_to_parent(self, session_id: UUID, error: str) -> None:
-        """Tell the session that started *session_id* that it failed for good.
+    async def _report_failure(self, session_id: UUID, *, code: str, error: str) -> None:
+        """Say that *session_id* failed for good, where the dispatcher fails it.
 
-        Once, where the dispatcher stops retrying: a crash it retries is not
-        the worker's end, and its parent would hear of every attempt.  A
-        scheduled run is not a worker: it says so where its result goes, as
-        its turn's own failure does.
+        Once, where the dispatcher stops retrying or gives the session up: a
+        crash it retries is not the session's end, and those told would hear
+        of every attempt.  A case's step tells Keel by *code* alone, never
+        *error*, and its inputs leave it, as at a failed turn's end; the
+        session that started it hears *error*.
         """
-        from surogates.harness.loop_artifact_completion import announce_failure
-        from surogates.harness.loop_messages import _is_scheduled_run, _should_notify_parent_on_completion
-        from surogates.harness.worker_notify import notify_parent_on_failure
+        from surogates.tools.builtin.case_step import report_step_failed
 
         try:
             session = await self.session_store.get_session(session_id)
         except Exception:
             logger.warning("Could not read session %s to report its failure", session_id, exc_info=True)
             return
+        # No wake holds the session here, so no lease: a step a report ended
+        # is known by its inputs, which already left it.
+        await report_step_failed(self.session_store, session, None, code=code)
+        await self._report_failure_to_parent(session, error)
+
+    async def _report_failure_to_parent(self, session: Any, error: str) -> None:
+        """Tell the session that started *session* that it failed for good.
+
+        A scheduled run is not a worker: it says so where its result goes, as
+        its turn's own failure does.
+        """
+        from surogates.harness.loop_artifact_completion import announce_failure
+        from surogates.harness.loop_messages import _is_scheduled_run, _should_notify_parent_on_completion
+        from surogates.harness.worker_notify import notify_parent_on_failure
+
+        session_id = session.id
         if _is_scheduled_run(session):
             try:
                 await announce_failure(self.session_store, session, error=error)
@@ -1147,7 +1168,7 @@ class Orchestrator:
                 **await self._command_it_could_not_run(session.id),
             },
         )
-        await self._report_failure_to_parent(session.id, "recovery_loop")
+        await self._report_failure(session.id, code="recovery_loop", error="recovery_loop")
         # Nothing will resume it: what it left waiting on a computer must not run later.
         if self._session_factory is not None:
             from surogates.devices.operations import DeviceOperations

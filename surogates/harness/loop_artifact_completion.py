@@ -39,7 +39,7 @@ from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 from surogates.devices.workspace import WALK_MARGIN_NS
-from surogates.tools.builtin.case_step import report_turn_end
+from surogates.tools.builtin.case_step import report_no_outcome, report_step_failed
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
 from surogates.session.inbox_payload import raises_completion_inbox_item
 from surogates.harness.landing import (
@@ -1452,7 +1452,7 @@ class ArtifactCompletionMixin:
         # A case's step whose turn ended with no report ending it: Keel hears
         # how, once the turn's end is written, and decides what comes of it.
         if reason != "case_step_ended":
-            await report_turn_end(self._store, session, lease.lease_token, reason=reason, failed=False)
+            await report_no_outcome(self._store, session, lease.lease_token, reason=reason)
 
         if prunes is not None:
             from surogates.storage.tenant import boundary_workspace_prefix
@@ -1757,7 +1757,7 @@ class ArtifactCompletionMixin:
 
         # A case's step whose turn failed: Keel hears it by the failure's code
         # alone, once the turn's end is written, and the step's inputs leave the session.
-        await report_turn_end(self._store, session, lease.lease_token, reason=reason, failed=True)
+        await report_step_failed(self._store, session, lease.lease_token, code=reason)
 
     async def _finalize_dynamic_loop_if_needed(self, session: Session) -> None:
         if not session.config.get("scheduled_dynamic_loop"):
