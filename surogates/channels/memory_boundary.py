@@ -9,12 +9,17 @@ gets an isolated token.  Fail closed: when in doubt, isolate.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 __all__ = [
     "MANAGED_CHANNELS",
     "BUYER_BOUNDARY_PREFIX",
+    "CASE_BOUNDARY_PREFIX",
     "EVAL_BOUNDARY_PREFIX",
     "PROJECT_BOUNDARY_PREFIX",
     "boundary_token",
+    "is_case_config",
+    "is_case_session",
     "is_eval_session",
     "session_memory_boundary",
 ]
@@ -40,6 +45,13 @@ PROJECT_BOUNDARY_PREFIX = "workstream:"
 # so without their own partition every buyer would share one memory. The
 # session route stamps ``buyer:<buyer id>`` only for that principal.
 BUYER_BOUNDARY_PREFIX = "buyer:"
+
+# Every session of a Keel case, the step's own and each child it makes,
+# carries ``case:<case id>``: its memory is per agent and case, and the case's
+# workspace is shared by every agent working on it.  Only the Keel link stamps
+# it; the session create routes strip a client's, and a child copies its
+# parent's.
+CASE_BOUNDARY_PREFIX = "case:"
 
 
 def boundary_token(
@@ -107,6 +119,27 @@ def is_eval_session(session: object) -> bool:
     return boundary.startswith(EVAL_BOUNDARY_PREFIX)
 
 
+def is_case_config(config: Mapping | None) -> bool:
+    """True when a session's config carries a case's ``case:`` memory boundary.
+
+    Tools hold only the session's config; anything that is not a mapping
+    is no case.
+    """
+    if not isinstance(config, Mapping):
+        return False
+    boundary = str(config.get("memory_boundary") or "").strip()
+    return boundary.startswith(CASE_BOUNDARY_PREFIX)
+
+
+def is_case_session(session: object) -> bool:
+    """True when this session works on a Keel case: a step's own session, or a child of one.
+
+    Keyed on the server-stamped boundary, as :func:`is_eval_session` is, so
+    the children a step makes are case sessions too.
+    """
+    return is_case_config(getattr(session, "config", None))
+
+
 def _legacy_boundary_fallback_id(session: object, cfg: dict) -> str:
     return str(cfg.get("channel_session_key") or getattr(session, "id", ""))
 
@@ -122,15 +155,16 @@ def session_memory_boundary(session: object) -> str | None:
     returns ``None`` so the caller keeps today's per-user / shared memory,
     except an evaluation session, which carries an ``eval:`` boundary stamped
     by the session route, a project's session, which carries its
-    project's ``workstream:`` boundary, and a buyer's session, which carries
-    its ``buyer:`` boundary.
+    project's ``workstream:`` boundary, a buyer's session, which carries
+    its ``buyer:`` boundary, and a case's session, which carries its case's
+    ``case:`` boundary.
     """
     channel = getattr(session, "channel", None)
     cfg = getattr(session, "config", None) or {}
     persisted = str(cfg.get("memory_boundary") or "").strip()
     if channel not in MANAGED_CHANNELS:
         if is_eval_session(session) or persisted.startswith(
-            (PROJECT_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX)
+            (PROJECT_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX, CASE_BOUNDARY_PREFIX)
         ):
             return persisted
         return None
