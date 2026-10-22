@@ -298,14 +298,17 @@ async def test_a_conversation_with_no_person_starts_a_case_for_no_user(fake_keel
     assert json.loads(request.content)["user_id"] is None
 
 
-async def _start(session: Session, arguments: dict, call_id: str = "call-1") -> str:
+_ITS_OWN = object()
+
+
+async def _start(session: Session, arguments: dict, call_id: str = "call-1", *, channel=_ITS_OWN) -> str:
     """``start_case`` run as the harness runs it for *session*, whose sender is its own principal."""
     person = ActingPrincipal(user_id=session.user_id, service_account_id=session.service_account_id)
     return await _registry().dispatch(
         "start_case", arguments,
         session_id=str(session.id), agent_id=session.agent_id, tenant=_tenant(session),
-        session_store=_Conversation(session, person), channel=session.channel, tool_call_id=call_id,
-        session_config=session.config,
+        session_store=_Conversation(session, person), tool_call_id=call_id, session_config=session.config,
+        channel=session.channel if channel is _ITS_OWN else channel,
     )
 
 
@@ -358,6 +361,15 @@ async def test_a_start_keel_could_not_take_is_never_sent(fake_keel, arguments, c
     result = json.loads(await _start(_front_door(user_id=uuid4()), arguments, call_id))
 
     assert error in result["error"]
+    assert fake_keel.starts() == []
+
+
+@pytest.mark.parametrize("channel", [None, ""], ids=["none", "empty"])
+async def test_a_session_with_no_channel_starts_no_case(fake_keel, channel):
+    result = json.loads(await _start(_front_door(user_id=uuid4()), {"case_type": "loan", "data": DATA}, channel=channel))
+
+    assert "channel" in result["error"]
+    assert "again" not in result["error"]
     assert fake_keel.starts() == []
 
 
@@ -446,10 +458,35 @@ async def test_wakes_at_the_minute_share_one_ask(door, clock):
     assert len(asked) == 2
 
 
-async def test_a_runtime_without_keel_grants_nothing():
+async def test_an_ask_cancelled_before_it_runs_never_blocks_the_next(fake_keel):
+    waiting = asyncio.create_task(intake_case_types(ORG, AGENT))
+    # The first wake starts the ask; it is cancelled before it ever runs.
+    await asyncio.sleep(0)
+    [ask] = intake_module._asking.values()
+    ask.cancel()
+
+    # The wake waiting on it grants nothing, and does not raise.
+    assert await waiting == []
+    # The next wake asks afresh.
+    assert await asyncio.wait_for(intake_case_types(ORG, AGENT), 5) == [LOAN]
+    assert len(fake_keel.asks()) == 1
+
+
+async def test_a_runtime_without_keel_grants_nothing(monkeypatch):
+    asked: list[tuple] = []
+
+    async def ask(*args):
+        asked.append(args)
+        return []
+
+    monkeypatch.setattr(intake_module, "_refresh", ask)
     previous = keel_client()
     use_keel_client(None)
     try:
         assert await intake_case_types(ORG, AGENT) == []
     finally:
         use_keel_client(previous)
+    # There is no Keel to ask: no ask is started, and nothing is kept.
+    assert asked == []
+    assert intake_module._asking == {}
+    assert dict(intake_module._cache) == {}

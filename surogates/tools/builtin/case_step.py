@@ -70,6 +70,9 @@ logger = logging.getLogger(__name__)
 
 #: The most pages read one report carries.
 MAX_PAGES_READ = 500
+#: The longest knowledge base id and page path of a page read Keel takes.
+KB_ID_CHARS = 200
+PAGE_PATH_CHARS = 2000
 #: The longest tool call id Keel keeps.
 CALL_ID_CHARS = 200
 #: The bounds of a raised hand.
@@ -221,7 +224,8 @@ def _usage(session: Any) -> dict[str, Any]:
 async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
     """The pages the case's sessions read, from the case root's log: each once, in order, at most :data:`MAX_PAGES_READ`.
 
-    A page whose digest is not a SHA-256 hex digest is left out: Keel refuses
+    A page whose digest is not a SHA-256 hex digest, or whose knowledge base
+    id or path is empty or longer than Keel takes, is left out: Keel refuses
     the whole report for one.
     """
     events = await store.get_events(UUID(workspace_root_id(session)), types=[EventType.KB_PAGE_READ])
@@ -231,6 +235,8 @@ async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
         if isinstance(data, dict)
         and all(isinstance(data.get(key), str) for key in ("kb_id", "path", "sha256"))
         and _SHA256.fullmatch(data["sha256"])
+        and 0 < len(data["kb_id"]) <= KB_ID_CHARS
+        and 0 < len(data["path"]) <= PAGE_PATH_CHARS
     }
     return [
         {"kb_id": kb_id, "path": path, "sha256": sha256}

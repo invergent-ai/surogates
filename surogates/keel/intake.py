@@ -4,8 +4,9 @@ An intake agent is one that case types name as their front door: it talks
 with people, and starts their cases with ``start_case``.  The worker asks at
 each wake, and offers ``start_case`` only when the list is not empty.  Each
 list is kept :data:`INTAKE_CACHE_SECONDS` per project and agent, an empty
-one too: a runtime with no link to Keel, or a Keel that could not be
-reached, offers no ``start_case`` until the next ask.
+one too: a Keel that could not be reached offers no ``start_case`` until
+the next ask.  A runtime with no link to Keel asks nothing, and keeps
+nothing.
 
 The ask is on the wake's path, so it is bounded: a Keel that has not
 answered in :data:`INTAKE_ASK_SECONDS` grants nothing until the next ask.
@@ -16,12 +17,13 @@ one ask, and never ask again themselves.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from collections import OrderedDict
 from typing import Any
 
-from surogates.keel.client import keel_client
+from surogates.keel.client import KeelClient, keel_client
 
 __all__ = ["INTAKE_CACHE_SECONDS", "intake_case_types"]
 
@@ -64,11 +66,8 @@ def _granted(listed: list[Any]) -> list[dict]:
     return types
 
 
-async def _ask(org_id: object, agent_id: str) -> list[dict]:
+async def _ask(client: KeelClient, org_id: object, agent_id: str) -> list[dict]:
     """Keel's list for *agent_id* in project *org_id*; ``[]`` when there is none to have.  Never raises."""
-    client = keel_client()
-    if client is None:
-        return []
     try:
         answer = await asyncio.wait_for(client.intake(org_id, agent_id), INTAKE_ASK_SECONDS)
     except TimeoutError:
@@ -89,17 +88,20 @@ async def _ask(org_id: object, agent_id: str) -> list[dict]:
     return _granted(answer.data)
 
 
-async def _refresh(key: tuple[str, str], org_id: object, agent_id: str) -> list[dict]:
-    """Ask Keel for *key*'s list and keep it for the minute; the ask under way for *key* ends with it."""
-    try:
-        types = await _ask(org_id, agent_id)
-        _cache[key] = (_now() + INTAKE_CACHE_SECONDS, types)
-        _cache.move_to_end(key)
-        while len(_cache) > _KEPT:
-            _cache.popitem(last=False)
-        return types
-    finally:
-        _asking.pop(key, None)
+async def _refresh(client: KeelClient, key: tuple[str, str], org_id: object, agent_id: str) -> list[dict]:
+    """Ask Keel for *key*'s list, and keep it for the minute."""
+    types = await _ask(client, org_id, agent_id)
+    _cache[key] = (_now() + INTAKE_CACHE_SECONDS, types)
+    _cache.move_to_end(key)
+    while len(_cache) > _KEPT:
+        _cache.popitem(last=False)
+    return types
+
+
+def _ended(key: tuple[str, str], ask: asyncio.Future[list[dict]]) -> None:
+    """*key*'s ask is no longer under way, however it ended: cancelled before it ran, too."""
+    if _asking.get(key) is ask:
+        del _asking[key]
 
 
 async def intake_case_types(org_id: object, agent_id: str) -> list[dict]:
@@ -109,14 +111,25 @@ async def intake_case_types(org_id: object, agent_id: str) -> list[dict]:
     agent, by one ask that every wake needing the list meanwhile waits on,
     and that waits at most :data:`INTAKE_ASK_SECONDS`.  ``[]`` when the agent
     may start none, when this runtime has no link to Keel, and when Keel
-    could not be reached or did not answer in time.  Never raises.
+    could not be reached or did not answer in time.  Never raises: a wake
+    whose ask was cancelled under it, not the wake itself, also gets ``[]``.
     """
+    client = keel_client()
+    if client is None:
+        return []
     key = (str(org_id), str(agent_id))
     held = _cache.get(key)
     if held is not None and _now() < held[0]:
         return list(held[1])
     asking = _asking.get(key)
     if asking is None:
-        asking = _asking[key] = asyncio.ensure_future(_refresh(key, org_id, agent_id))
+        asking = _asking[key] = asyncio.ensure_future(_refresh(client, key, org_id, agent_id))
+        asking.add_done_callback(functools.partial(_ended, key))
     # Shielded: a wake cancelled while it waits leaves the ask to the others.
-    return list(await asyncio.shield(asking))
+    try:
+        return list(await asyncio.shield(asking))
+    except asyncio.CancelledError:
+        wake = asyncio.current_task()
+        if asking.cancelled() and wake is not None and not wake.cancelling():
+            return []
+        raise

@@ -68,7 +68,7 @@ A worker without both settings has no link to Keel: every report removes the ste
 
 ## An intake agent starts cases
 
-A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a conversation's own session, one that works on no case and was not started by another session, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. The wakes that need an agent's list while it is being asked share that one ask, and a Keel that has not answered in 2 seconds grants nothing for the minute: the ask never holds a wake longer. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case, and no helper a conversation started, is offered it. A worker without both settings, or one that cannot reach Keel, offers no `start_case` until it next asks.
+A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a conversation's own session, one that works on no case and was not started by another session, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. The wakes that need an agent's list while it is being asked share that one ask, and a Keel that has not answered in 2 seconds grants nothing for the minute: the ask never holds a wake longer. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case, and no helper a conversation started, is offered it. A worker without both settings asks nothing and never offers `start_case`; one that cannot reach Keel offers none until it next asks.
 
 Each call asks Keel to start one case for the person the conversation is with, the sender of its latest message, or for no user when that is a service account. It is keyed `intake:<session id>:<tool call id>`, so the same call sent again finds the case it started. Keel also finds the case a session already started with the same data, and refuses a session more cases than it allows.
 
@@ -79,7 +79,7 @@ Each call asks Keel to start one case for the person the conversation is with, t
 | No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | Keel could not be reached: call `start_case` again. |
 | Anything else | Keel refused the request, with its status. |
 
-A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, one holding NaN or an infinity, or a tool call id too long for the 200-character key. An intake session is no step: Keel is never told how its turns end.
+A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, one holding NaN or an infinity, a tool call id too long for the 200-character key, or one from a session with no channel. An intake session is no step: Keel is never told how its turns end.
 
 ## Step sessions wait behind people
 

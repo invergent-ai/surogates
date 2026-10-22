@@ -24,8 +24,8 @@ it allows.  Keel's answer is the tool's result:
 - any other answer: an error naming the status, which no call again changes.
 
 A start Keel could not take is never sent, and the model is told what to fix:
-one larger than Keel takes, one holding NaN or an infinity, or a tool call id
-too long for Keel's key.  An intake session is no step of a case: Keel is
+one larger than Keel takes, one holding NaN or an infinity, a tool call id
+too long for Keel's key, or one from a session with no channel.  An intake session is no step of a case: Keel is
 never told how its turn ended.  No log line here carries the case's data.
 """
 
@@ -97,6 +97,9 @@ async def handle_start_case(arguments: dict, **kwargs: Any) -> str:
     key = f"intake:{session_id}:{call_id}"
     if len(key) > KEY_CHARS:
         return _error("This tool call's id is longer than Keel takes, so no case was started.")
+    channel = kwargs.get("channel")
+    if not isinstance(channel, str) or not channel:
+        return _error("This session has no channel, which Keel needs to start a case, so no case was started.")
 
     client = keel_client()
     if client is None:
@@ -112,7 +115,7 @@ async def handle_start_case(arguments: dict, **kwargs: Any) -> str:
         "agent_id": str(kwargs["agent_id"]),
         "session_id": session_id,
         "user_id": str(person.user_id) if person.user_id is not None else None,
-        "channel": kwargs.get("channel"),
+        "channel": channel,
         "case_type": case_type,
         "data": data,
     }

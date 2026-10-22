@@ -260,6 +260,26 @@ async def test_a_page_read_without_a_sha256_digest_is_left_out_of_the_report(fak
     assert json.loads(request.content)["pages_read"] == [PAGE]
 
 
+async def test_a_page_read_beyond_keels_bounds_is_left_out_of_the_report(fake_keel, store):
+    # Keel refuses a whole report whose page names a knowledge base or a path it cannot take.
+    for page in (
+        {**OTHER_PAGE, "path": "policies/" + "x" * 1992},
+        {**OTHER_PAGE, "kb_id": "k" * 201},
+        {**OTHER_PAGE, "path": ""},
+        {**OTHER_PAGE, "kb_id": ""},
+    ):
+        store.write(EventType.KB_PAGE_READ, page)
+    store.write(EventType.KB_PAGE_READ, PAGE)
+    at_the_bounds = {"kb_id": "k" * 200, "path": "p" * 2000, "sha256": "c" * 64}
+    store.write(EventType.KB_PAGE_READ, at_the_bounds)
+
+    result = await _call("complete_step", COMPLETION, store)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert json.loads(request.content)["pages_read"] == [PAGE, at_the_bounds]
+
+
 async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
     store = _store_for(tmp_path, files={"offer": "one", "payslips": "list"})
     offer, march, april = b"%PDF-1.7 offer", b"%PDF-1.7 march", b"%PDF-1.7 april"
