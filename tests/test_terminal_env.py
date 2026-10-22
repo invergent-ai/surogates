@@ -18,17 +18,6 @@ class TestAlwaysInherit:
     """The allowlist must include the variables the agent's typical
     ``pip install X && python -c 'import X'`` flow depends on."""
 
-    def test_pythonuserbase_is_propagated(self):
-        # Pip-installed packages live under PYTHONUSERBASE (off s3fs in
-        # the sandbox image) — without propagation, the child python's
-        # site module looks at $HOME/.local and misses them.
-        assert "PYTHONUSERBASE" in term._ALWAYS_INHERIT
-
-    def test_path_is_propagated(self):
-        # PATH carries .../home/sandbox/.local/bin entries for
-        # console_scripts entry points installed by pip.
-        assert "PATH" in term._ALWAYS_INHERIT
-
     def test_node_module_paths_are_propagated(self):
         # The image's global npm packages (docx, pptxgenjs, ...) resolve
         # through NODE_PATH; stripped, the document skills' require('docx')

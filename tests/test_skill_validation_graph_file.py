@@ -5,10 +5,6 @@ from surogates.tools.builtin.skill_validation import (
 )
 
 
-def test_graph_file_constant():
-    assert GRAPH_FILE == "SKILL.graph.json"
-
-
 def test_graph_file_rejected_at_root_like_any_other_file():
     # Nothing in the harness writes the graph file -- ops writes it through
     # the Hub client -- so an agent authoring one via write_file must be

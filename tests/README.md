@@ -10,11 +10,20 @@ Do not add isolated helper or model unit tests, default-value checks,
 registration inventories, import or attribute existence checks, source-text
 assertions, or tests that only repeat their own fixtures.
 
-Run the default suite from the repository root:
+Run the default suite from the repository root, on 16 workers:
 
 ```sh
-uv run pytest tests
+just test
 ```
+
+Tests that take more than about 5 s are marked `@pytest.mark.slow` and left
+out of the default suite. Run them before every release:
+
+```sh
+just test-slow
+```
+
+Extra arguments go to pytest, e.g. `just test tests/test_saga.py -n0`.
 
 Tests under `integration/` use PostgreSQL and Redis through testcontainers
 and require Docker. Live LLM and browser tests remain opt-in via the `live`,

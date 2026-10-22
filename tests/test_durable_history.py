@@ -997,6 +997,7 @@ def in_history(durable: Path, commit: str) -> bool:
     return subprocess.run(["git", f"--git-dir={durable}", "cat-file", "-e", commit]).returncode == 0
 
 
+@pytest.mark.slow
 def test_pruning_keeps_the_window_and_cuts_at_the_size_rule_and_kept_ids_still_open(tmp_path, project):
     live, gone = a_pod(tmp_path, project, "live"), a_pod(tmp_path, project, "gone")
     for thread in (live, gone):
@@ -1032,6 +1033,7 @@ def test_pruning_keeps_the_window_and_cuts_at_the_size_rule_and_kept_ids_still_o
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+@pytest.mark.slow
 def test_pruning_keeps_ninety_days_when_they_are_small(tmp_path, project):
     (project / "Annual report.pdf").write_bytes(os.urandom(2_000_000))  # the project is large, its edits small
     for n in range(25):
@@ -1100,6 +1102,7 @@ def test_a_push_stores_a_large_file_whole_and_a_small_ones_versions_as_changes(t
     assert sorted(len(packed[blob]) for blob in versions["notes.txt"]) == [5, 7]
 
 
+@pytest.mark.slow
 def test_a_pod_open_across_a_pruning_lands_and_the_history_stays_whole(tmp_path, project):
     durable = project / "_history"
     first = a_pod(tmp_path, project, "early")
@@ -1811,6 +1814,7 @@ def test_a_helpers_version_the_thread_did_not_take_stays_in_the_history_with_the
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+@pytest.mark.slow
 def test_a_pushed_copy_names_eight_parents_at_most_the_older_hand_offs_folded_behind_one(tmp_path, project):
     durable = project / "_history"
     other = a_pod(tmp_path, project, "t0")
@@ -2153,6 +2157,7 @@ def test_the_versions_a_thread_left_out_go_with_its_next_landing_and_their_ref_w
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+@pytest.mark.slow
 def test_the_ref_of_versions_left_out_names_eight_hand_offs_at_most(tmp_path, project):
     durable, untaken = project / "_history", "refs/helpers/t1/not-taken"
     first = a_pod(tmp_path, project)
@@ -2322,6 +2327,7 @@ def test_a_stop_follows_a_bounded_number_of_commits_whatever_the_hand_offs_say(t
     assert names_in(a_pod(tmp_path, project, turn="turn-3")) == ["Report.docx", "h0.md", "h1.md", "h2.md", "h3.md", "notes.txt"]
 
 
+@pytest.mark.slow
 def test_a_threads_failed_helpers_copies_kept_apart_are_bounded_in_number_the_oldest_let_go(tmp_path, project, monkeypatch):
     monkeypatch.setattr(history_module, "_APART", 3)
     durable = project / "_history"
@@ -2475,6 +2481,7 @@ def test_a_pickup_looks_again_at_each_folder_main_has_before_it_reads_the_real_f
     assert {str(project), str(project / "threads"), str(project / "threads" / "Draft A")} <= folders
 
 
+@pytest.mark.slow
 def test_a_save_in_the_second_a_pickup_read_the_file_reaches_history(tmp_path, project, monkeypatch):
     first = a_pod(tmp_path, project)
     (first.copy / "A.md").write_text("by A")
@@ -2790,6 +2797,7 @@ def test_a_pushed_pickup_keeps_the_index_and_the_next_pod_reads_no_file_again(tm
     assert (pod.copy / "notes.txt").read_text() == "checked by the routine\n"
 
 
+@pytest.mark.slow
 def test_across_a_prunings_cut_a_file_no_commit_left_explains_is_by_no_one(tmp_path, project):
     a_history(tmp_path, project)
     kept = a_pod(tmp_path, project, "t1")
@@ -2816,6 +2824,7 @@ def test_across_a_prunings_cut_a_file_no_commit_left_explains_is_by_no_one(tmp_p
     assert held(turn) == {"Budget.xlsx": {"kind": "thread", "id": "t2", "title": "Draft B"}, "a.md": None, "notes.txt": None}
 
 
+@pytest.mark.slow
 def test_a_routines_pickups_are_none_of_the_twenty_a_pruning_keeps(tmp_path, project):
     landings = []
     for n in range(25):
@@ -2894,6 +2903,7 @@ def a_routine_rewrites(tmp_path: Path, project: Path, times: int, author=ROUTINE
         master.pickup(author=author, trailers=[["Surogate-Saga", f"saga:r{n}"], ["Surogate-Kind", "pickup"]], push=True)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("author", [ROUTINE, FORGED], ids=["a routine", "a forged address"])
 def test_a_history_over_its_bound_is_cut_below_the_twenty_that_are_no_routines_to_the_bound_exactly(tmp_path, project, monkeypatch, author):
     monkeypatch.setattr(history_module, "PRUNE_MOST", 3_000_000)
@@ -2908,6 +2918,7 @@ def test_a_history_over_its_bound_is_cut_below_the_twenty_that_are_no_routines_t
     assert git(durable, "fsck", "--no-dangling") == ""
 
 
+@pytest.mark.slow
 def test_a_history_over_its_bound_is_never_cut_below_the_last_twenty_commits(tmp_path, project, monkeypatch):
     monkeypatch.setattr(history_module, "PRUNE_MOST", 500_000)
     a_routine_rewrites(tmp_path, project, 60)
@@ -2915,6 +2926,7 @@ def test_a_history_over_its_bound_is_never_cut_below_the_last_twenty_commits(tmp
     assert (out["pruned"], out["commits"]) == (True, 20) and out["size"] > 500_000
 
 
+@pytest.mark.slow
 def test_a_history_over_its_bound_but_not_twice_its_files_keeps_the_twenty_that_are_no_routines(tmp_path, project, monkeypatch):
     monkeypatch.setattr(history_module, "PRUNE_MOST", 3_000_000)
     (project / "Annual report.pdf").write_bytes(os.urandom(8_000_000))  # the project itself is large

@@ -48,10 +48,6 @@ def test_ssh_state_changes_settings_hash(tmp_path, monkeypatch):
     assert off != on  # distinct settings files → no stale allowlist reuse
 
 
-def test_ssh_auth_sock_inherited():
-    assert "SSH_AUTH_SOCK" in local._ALWAYS_INHERIT
-
-
 def test_setup_ssh_home_writes_config(tmp_path, monkeypatch):
     import os
     import shutil

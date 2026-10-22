@@ -20,7 +20,6 @@ from uuid import uuid4
 
 import pytest
 
-from surogates.devices.binding import THREAD_ACTIONS
 from tests.fake_places import (
     ACTIONS,
     BUSY,
@@ -37,10 +36,6 @@ from tests.fake_places import (
 DESKTOP = Path(__file__).resolve().parents[1] / "desktop"
 HELPER = DESKTOP / "dist" / "files" / "helper.js"
 THREAD, HELPER_SESSION = str(uuid4()), str(uuid4())
-
-
-def test_the_tests_computer_takes_the_actions_the_journal_asks_and_no_other():
-    assert {kind: frozenset(actions) for kind, actions in ACTIONS.items()} == THREAD_ACTIONS
 
 
 def frame(kind: str, action: Any, invocation: str, *, calling: str = THREAD, root: str = THREAD) -> dict[str, Any]:

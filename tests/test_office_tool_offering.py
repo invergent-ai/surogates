@@ -4,9 +4,7 @@ from types import SimpleNamespace
 
 from surogates.harness.tool_schemas import drop_unusable_tools
 from surogates.tools.builtin import office as office_tools
-from surogates.tools.builtin.coordinator import COORDINATOR_IMPLEMENTATION_TOOLS
 from surogates.tools.registry import ToolRegistry
-from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
 
 def _schema(name):
@@ -34,12 +32,6 @@ def test_a_file_pane_is_a_web_chat_or_a_projects_thread():
     assert has_file_pane(SimpleNamespace(channel="website", config={})) is False
     # Surogate Desktop shows the pane beside a chat on a folder of the computer too.
     assert has_file_pane(SimpleNamespace(channel="web", config=device)) is True
-
-
-def test_strict_coordinators_do_not_get_them_and_they_run_in_the_worker():
-    assert {"office_read", "office_edit"} <= COORDINATOR_IMPLEMENTATION_TOOLS
-    assert TOOL_LOCATIONS["office_read"] is ToolLocation.HARNESS
-    assert TOOL_LOCATIONS["office_edit"] is ToolLocation.HARNESS
 
 
 def test_registered_only_where_the_agent_edits_live(monkeypatch):

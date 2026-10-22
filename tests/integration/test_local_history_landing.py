@@ -294,6 +294,7 @@ async def test_a_file_you_save_after_the_landings_look_is_picked_up_as_yours_and
     assert kept(here) == {} and here.app.places.holder is None
 
 
+@pytest.mark.slow
 async def test_a_file_you_save_after_the_turn_was_committed_is_refused_at_its_apply_and_the_landing_lands_again_around_it(api, here, monkeypatch):
     _, master, thread = await begun_with_copy(api, here)
     report = here.folder / "Report.docx"
@@ -552,6 +553,7 @@ async def test_a_landing_the_journal_refuses_a_step_of_is_left_unsettled_with_no
     assert kept(here) == {} and here.app.places.holder is None
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("refusal", [
     {"type": "interrupted", "message": "This computer's app stopped while it ran"},
     {"type": "cancelled", "message": "Cancelled"},
@@ -618,6 +620,7 @@ async def test_a_commit_naming_a_file_the_landings_look_did_not_see_is_put_back_
     assert (computer.folder / "Late.md").read_text() == "late\n" and (computer.folder / "Budget.xlsx").read_text() == "Total,42\n"
 
 
+@pytest.mark.slow
 async def test_a_landing_that_raises_says_its_work_is_in_its_copy_and_its_next_turn_lands_it(api, computer, monkeypatch):
     _, master, thread = await begun_with_copy(api, computer)
     folder = seen(computer.folder)
@@ -657,6 +660,7 @@ async def test_a_landing_that_never_asked_what_its_copy_changed_names_none_of_th
 # -- what it leaves out --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_a_landing_writes_no_name_that_runs_code_and_replaces_no_file_with_a_second_name(api, here, monkeypatch):
     (here.folder / "Twin.txt").write_text("one\n")
     os.link(here.folder / "Twin.txt", here.folder.parent / "its-other-name.txt")

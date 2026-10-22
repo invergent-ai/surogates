@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from surogates.office.scripted import SCRIPTED_NOTE, SCRIPTED_PDF_NOTE, named_documents, scripted_documents
+from surogates.office.scripted import named_documents, scripted_documents
 
 
 def pool_saying(output: str, *, holds_copy: bool = False) -> SimpleNamespace:
@@ -109,22 +109,6 @@ async def test_a_session_on_the_users_computer_is_never_looked_at():
     session = cloud_session(execution={"kind": "device", "device_id": str(uuid4())}, workspace_path="/home/me/notes")
     assert await scripted_documents(session, 1_000.0, sandbox_pool=pool) == []
     pool.execute.assert_not_called()
-
-
-def test_the_note_names_the_documents():
-    assert SCRIPTED_NOTE.format(paths="deck.pptx") == (
-        "deck.pptx changed by a script: the user can neither watch nor co-edit a document made that way. "
-        "Make and change documents with office_edit (read them with office_read)."
-    )
-
-
-def test_a_pdfs_note_leaves_to_the_pdf_skill_what_office_edit_cannot_do():
-    # office_edit cannot make a PDF with content, merge, split or encrypt: a script doing those did the right thing.
-    assert SCRIPTED_PDF_NOTE.format(paths="out/a.pdf") == (
-        "out/a.pdf changed by a script: the user can neither watch nor co-edit a document a script changed. "
-        "Filling, annotating and redacting a PDF, and adding, removing or rotating its pages, go through office_edit; "
-        "a new PDF with content, merging, splitting or encrypting PDFs are the pdf skill's work."
-    )
 
 
 @pytest.mark.parametrize(("command", "named"), [

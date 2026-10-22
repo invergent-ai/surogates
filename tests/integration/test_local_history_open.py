@@ -394,6 +394,7 @@ async def test_a_call_a_worker_left_unanswered_is_resumed_only_after_the_turns_o
     assert seen == [[("open:0", "ok")]]
 
 
+@pytest.mark.slow
 async def test_a_helper_a_thread_delegates_to_works_only_after_the_threads_open_and_opens_none(api, computer, monkeypatch):
     _, _, thread = await begun_with_copy(api, computer)
     store = api.app.state.session_store
@@ -604,6 +605,7 @@ async def test_a_computer_whose_access_was_revoked_has_its_threads_turn_fail_say
 # -- only a thread's own turn opens -------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_only_a_threads_own_turn_opens_its_copy_and_no_other_sessions_turn_waits_for_it(api, computer, monkeypatch):
     _, _, thread = await begun_with_copy(api, computer)
     held, let_go = holding_opens(computer, thread)

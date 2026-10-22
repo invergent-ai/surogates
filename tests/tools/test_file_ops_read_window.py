@@ -55,6 +55,7 @@ def whole_file_read(data: bytes, offset: int, limit: int) -> dict:
     return {"content": content, "total_lines": len(lines), "lines_shown": shown, "next_offset": next_offset}
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_a_page_reads_as_the_whole_file_did(tmp_path: Path, monkeypatch) -> None:
     # The cloud's read_file is byte for byte what it was: every codec, CR LFs, invalid bytes, small budgets.

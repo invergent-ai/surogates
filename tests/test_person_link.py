@@ -151,10 +151,6 @@ async def test_no_links_nothing_and_tells_the_team(sf):
     assert notice.user_id == doctor and "said they are not Ana Pop" in notice.text
 
 
-def test_a_link_lives_two_days():
-    assert person_link.LINK_TTL_SECONDS == 48 * 3600
-
-
 @pytest.mark.asyncio
 async def test_a_code_for_another_org_is_ignored_and_kept(sf):
     ana = await _user(sf, "ana")

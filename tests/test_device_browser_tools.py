@@ -401,14 +401,6 @@ async def test_a_page_that_asked_for_no_file_is_said_so(computer) -> None:
     assert body == {"error": "upload_failed", "detail": said}
 
 
-def test_the_upload_runs_in_the_harness_as_every_browser_tool_and_a_strict_coordinator_is_not_given_it() -> None:
-    from surogates.tools.builtin.coordinator import COORDINATOR_IMPLEMENTATION_TOOLS
-    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-
-    assert TOOL_LOCATIONS["browser_upload_file"] is ToolLocation.HARNESS
-    assert "browser_upload_file" in COORDINATOR_IMPLEMENTATION_TOOLS
-
-
 async def test_a_chat_in_the_cloud_has_no_upload() -> None:
     body = json.loads(await browser._browser_upload_file_handler({"paths": ["a.txt"]}, session_id=uuid4(), browser_pool=NoPool()))
 

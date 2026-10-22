@@ -126,6 +126,7 @@ async def test_six_results_of_40_kb_changed_in_one_flush_end_when_stopped_at_any
         assert set((await db.execute(select(Task.result).where(Task.id.in_(ids)))).scalars()) == {RESULT}
 
 
+@pytest.mark.slow
 async def test_the_same_flush_never_ends_when_stopped_without_the_guard(stopping, session_factory, unguarded):
     """The driver's own fault, kept in sight: the day this fails, asyncpg ends such a call and the guard may go."""
     _, _, ids = await seed(session_factory, 6)
@@ -136,7 +137,7 @@ async def test_the_same_flush_never_ends_when_stopped_without_the_guard(stopping
                 break
 
 
-@pytest.mark.parametrize("parents", [5, 2_600])
+@pytest.mark.parametrize("parents", [5, pytest.param(2_600, marks=pytest.mark.slow)])
 async def test_a_task_with_many_parents_has_every_link_or_none_when_stopped_at_any_wait(stopping, session_factory, parents):
     org_id, session_id, ids = await seed(session_factory, parents)
     for at in range(400):

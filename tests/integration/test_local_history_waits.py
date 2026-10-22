@@ -115,6 +115,7 @@ async def delete(api, thread, worker) -> None:
 # -- a computer that is away ---------------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_a_landing_waits_for_a_computer_that_goes_away_and_holds_nothing_of_the_servers_meanwhile(api, here, monkeypatch):
     project, master, thread = await begun_with_copy(api, here)
     before = seen(here.folder)
@@ -169,6 +170,7 @@ async def test_a_step_its_computer_does_not_answer_within_its_bound_ends_a_landi
     assert seen(here.folder) == before
 
 
+@pytest.mark.slow
 async def test_a_landing_that_landed_whose_forgetting_its_computer_does_not_answer_ends_its_turn_and_is_forgotten_by_the_next(
     api, here, monkeypatch,
 ):
@@ -196,6 +198,7 @@ async def test_a_landing_that_landed_whose_forgetting_its_computer_does_not_answ
 # -- a computer revoked --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_a_computer_revoked_mid_landing_leaves_the_thread_waiting_on_you_over_a_half_landing(api, here, monkeypatch):
     project, master, thread = await begun_with_copy(api, here)
     edits = calling(("terminal", {"command": "printf 'more\\n' >> Plans/Q3.md && printf ' edited' >> Report.docx"}))
@@ -379,6 +382,7 @@ async def test_a_stop_heard_once_its_landing_wrote_is_told_as_such_however_the_l
     assert await status_of(api, thread) == "paused"
 
 
+@pytest.mark.slow
 async def test_a_stop_heard_while_a_resumed_turn_settles_its_first_landing_lands_nothing_more_of_what_it_did_since(api, here, monkeypatch):
     heard_soon(monkeypatch)
     _, master, thread = await begun_with_copy(api, here)
@@ -407,6 +411,7 @@ async def test_a_stop_heard_while_a_resumed_turn_settles_its_first_landing_lands
     assert await status_of(api, thread) == "paused"
 
 
+@pytest.mark.slow
 async def test_a_stop_while_a_landing_settles_another_left_in_its_folder_ends_the_settle_where_it_stands(api, here, monkeypatch):
     heard_soon(monkeypatch)
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
@@ -533,6 +538,7 @@ async def test_a_thread_deleted_between_two_applies_whose_interrupt_comes_after_
     assert (report.data["landing"], report.data["landing_reason"]) == ("compensated", "deleted")
 
 
+@pytest.mark.slow
 async def test_a_thread_deleted_whose_interrupt_never_reaches_its_worker_has_its_landings_put_back_bounded_all_the_same(
     api, here, monkeypatch,
 ):
@@ -565,6 +571,7 @@ async def test_a_thread_deleted_whose_interrupt_never_reaches_its_worker_has_its
     assert settled.saga_state == "compensated" and not (here.folder / "Budget.xlsx").exists() and kept(here) == {}
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("at", ["its put-back", "its look at its record"])
 async def test_a_thread_deleted_while_its_landing_puts_itself_back_has_that_put_back_bounded_too(api, here, monkeypatch, at):
     heard_soon(monkeypatch)
@@ -612,6 +619,7 @@ async def test_a_thread_deleted_while_its_landing_puts_itself_back_has_that_put_
         assert report_file.read_bytes() == b"PK report v2, by you" and not (here.folder / "Budget.xlsx").exists()
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("at", ["the step in flight", "its put-back", "its forgetting"])
 async def test_a_deleted_threads_landing_its_computer_does_not_end_in_time_is_left_for_the_next_landing_in_its_folder(
     api, here, monkeypatch, at,

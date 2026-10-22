@@ -57,6 +57,7 @@ def refs_of(*threads) -> list[str]:
     return sorted(f"refs/{kind}/{thread.id}" for thread in threads for kind in ("heads/threads", "bases"))
 
 
+@pytest.mark.slow
 async def test_a_folders_history_is_pruned_after_a_landing_keeping_every_thread_that_works_in_it(api, computer, monkeypatch):
     _, master, thread = await begun_with_copy(api, computer)
     _, _, other = await begun_with_copy(api, computer, nonce=SECOND)

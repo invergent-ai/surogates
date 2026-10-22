@@ -180,6 +180,7 @@ async def reports(api, master) -> list:
     return await api.app.state.session_store.get_events(master.id, types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED])
 
 
+@pytest.mark.slow
 async def test_a_copy_its_computer_set_aside_and_one_that_went_at_its_bound_each_reach_the_threads_report_once_and_stand_on_its_row(
     api, computer, monkeypatch,
 ):

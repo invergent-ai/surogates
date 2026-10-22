@@ -806,6 +806,7 @@ def test_a_name_that_is_not_utf8_inside_a_folder_history_leaves_out_is_left_out_
     assert ([(o["path"], o["reason"]) for o in third["overlapped"]], third["excluded"]) == ([("Report.docx", "with")], ["node_modules/"])
 
 
+@pytest.mark.slow
 def test_what_history_leaves_out_is_told_from_what_its_copy_held_at_its_base_in_the_time_it_takes_to_look_at_it(tmp_path):
     folder = tmp_path / "Documents"
     for n in range(1000):
@@ -1783,6 +1784,7 @@ def an_open_killed_in_its_checkout(place: Path, folder: Path, thread: str = "t1"
     assert ".git" in os.listdir(copy) and not index.is_file(), "the open was not killed inside its checkout"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("which", ["a first open", "a making again"])
 def test_an_open_killed_inside_its_checkout_however_often_leaves_nothing_set_aside_and_nothing_told(tmp_path, which):
     folder, place = a_folder_of_thousands(tmp_path), tmp_path / "store"
@@ -1811,6 +1813,7 @@ def test_an_open_killed_inside_its_checkout_however_often_leaves_nothing_set_asi
     assert [c["path"] for c in land(again, "saga:1")["changes"]] == ["after.md", "work.md"][:1 + (which == "a making again")]
 
 
+@pytest.mark.slow
 def test_opens_killed_inside_their_checkout_never_let_a_threads_set_aside_work_go_nor_pass_what_it_keeps(tmp_path):
     folder, place = a_folder_of_thousands(tmp_path), tmp_path / "store"
     one = a_copy(tmp_path, folder)
@@ -2741,6 +2744,7 @@ def refs_of(store: Path) -> list[str]:
     return sorted(git(store, "for-each-ref", "--format=%(refname)").split())
 
 
+@pytest.mark.slow
 def test_a_pruning_keeps_what_every_threads_repository_on_the_folder_names(tmp_path, folder):
     a_copy(tmp_path, folder, "t1")  # the idle thread's: opened on the folder's first commit, it lands nothing for a long while
     busy = a_copy(tmp_path, folder, "t2")
@@ -2787,6 +2791,7 @@ def put_back(history: LocalHistory, base: str) -> str:
     return taken
 
 
+@pytest.mark.slow
 def test_a_pruning_leaves_each_repository_in_the_place_whole_by_what_it_names_and_not_by_the_historys_refs(tmp_path, folder):
     place, store = tmp_path / "store", tmp_path / "store" / "history.git"
     main = lambda: git(store, "rev-parse", "refs/heads/main")  # noqa: E731
@@ -2859,6 +2864,7 @@ def test_a_pruning_leaves_each_repository_in_the_place_whole_by_what_it_names_an
     connected(place)
 
 
+@pytest.mark.slow
 def test_a_pruning_leaves_a_threads_copy_whole_by_what_its_index_names_where_no_kept_commit_holds_it(tmp_path, folder, monkeypatch):
     place, store = tmp_path / "store", tmp_path / "store" / "history.git"
     one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
@@ -2887,6 +2893,7 @@ def test_a_pruning_leaves_a_threads_copy_whole_by_what_its_index_names_where_no_
     connected(place)
 
 
+@pytest.mark.slow
 def test_a_pruning_writes_nothing_through_a_link_an_earlier_guest_left_in_a_repository_and_keeps_what_its_refs_name(tmp_path, folder):
     one, busy = a_copy(tmp_path, folder, "t1"), a_copy(tmp_path, folder, "t2")
     lands_often(busy, "notes.txt", 22)
@@ -2951,6 +2958,7 @@ def test_what_a_pruning_cut_part_way_left_beside_the_history_is_gone_with_the_ne
     assert not os.path.lexists(work) and (elsewhere / "theirs.txt").read_text() == "another folder's file\n"
 
 
+@pytest.mark.slow
 def test_a_pruning_keeps_the_refs_of_every_thread_with_a_repository_on_the_folder_whatever_it_is_told(tmp_path, folder):
     one = a_copy(tmp_path, folder, "t1")
     (one.copy / "notes.txt").write_text("t1's notes\n")
@@ -4362,6 +4370,7 @@ def each_cut(tmp_path: Path, thread: str, action: str, args: dict, removals: boo
         yield at, root
 
 
+@pytest.mark.slow
 def test_a_first_open_killed_at_any_step_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path):
     _, kept = a_folder_two_threads_work_on(tmp_path / "whole")
     for _at, root in each_cut(tmp_path, NEW, "open", {}):
@@ -4372,6 +4381,7 @@ def test_a_first_open_killed_at_any_step_leaves_the_folder_as_it_was_and_the_his
         the_next_turn_lands_whole(root, kept, landed=False, new=THREAD.replace("0b6c", "3b6c"))
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("action", ["open", "changed", "pickup", "picked", "commit", "keep"])
 def test_a_request_killed_at_any_step_before_a_landing_applies_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path, action):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
@@ -4385,6 +4395,7 @@ def test_a_request_killed_at_any_step_before_a_landing_applies_leaves_the_folder
         the_next_turn_lands_whole(root, kept, landed=False)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("action", ["snapshot", "commit", "pickup"])
 def test_what_a_gitignore_takes_back_of_what_history_leaves_out_is_recorded_and_lands_nowhere_whatever_step_is_cut(tmp_path, action):
     folder = tmp_path / "whole" / "Documents"
@@ -4413,6 +4424,7 @@ def test_what_a_gitignore_takes_back_of_what_history_leaves_out_is_recorded_and_
         assert not (root / "Documents" / ".env").exists() and (root / "Documents" / "notes.txt").read_text() == "our notes\n", at
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0, 0.003, 0.012])
 def test_a_folders_first_copy_killed_at_any_step_or_inside_any_git_is_made_again_whole_and_its_history_holds_it(tmp_path, inside):
     folder = tmp_path / "whole" / "Documents"
@@ -4438,6 +4450,7 @@ def test_a_folders_first_copy_killed_at_any_step_or_inside_any_git_is_made_again
         connected(place)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0.003, 0.012])
 @pytest.mark.parametrize("action", ["commit", "keep"])
 def test_a_push_killed_inside_any_of_its_gits_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path, action, inside):
@@ -4449,6 +4462,7 @@ def test_a_push_killed_inside_any_of_its_gits_leaves_the_folder_as_it_was_and_th
         the_next_turn_lands_whole(root, kept, landed=False)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0, 0.003, 0.012])
 def test_an_open_that_packs_its_repository_again_killed_at_any_step_or_inside_any_git_leaves_it_whole(tmp_path, inside):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
@@ -4462,6 +4476,7 @@ def test_an_open_that_packs_its_repository_again_killed_at_any_step_or_inside_an
         the_next_turn_lands_whole(root, kept, landed=False)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0, 0.003, 0.012])
 def test_a_fetch_killed_at_any_step_or_inside_any_git_leaves_the_folder_as_it_was_and_the_history_whole(tmp_path, inside):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
@@ -4495,6 +4510,7 @@ def test_a_landing_stopped_after_any_of_its_applies_deletes_and_overwrites_nothi
         the_next_turn_lands_whole(root, kept, landed=False)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("asked_again", [False, True])
 def test_a_record_killed_at_any_step_is_finished_or_never_was_and_the_next_landing_takes_nothing_of_anyone_elses(tmp_path, asked_again):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
@@ -4535,6 +4551,7 @@ def test_a_record_killed_at_any_step_is_finished_or_never_was_and_the_next_landi
     assert 0 < pushed < at
 
 
+@pytest.mark.slow
 def test_a_forget_killed_at_any_step_changes_nothing_and_answers_the_same_when_asked_again(tmp_path):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
     landed = land(ours, "saga:ours", B)
@@ -4591,6 +4608,7 @@ def the_folder_goes_back_and_the_thread_lands_its_own_file_alone(root: Path, at:
     assert files_of(folder) == sorted([*yours, ("A2.md", b"our own work this turn\n")]), at
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("after", ["a landing", "a record cut after its push"])
 def test_an_open_that_moves_a_clean_copy_killed_at_any_step_leaves_the_copy_and_its_base_agreeing(tmp_path, after):
     a_clean_copy_whose_main_moved(tmp_path / "whole", after == "a record cut after its push")
@@ -4702,6 +4720,7 @@ def held_in(top: Path) -> list[tuple[str, int, bytes]]:
     ]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("broken", list(BROKEN))
 def test_an_open_that_sets_a_copy_aside_killed_at_any_step_leaves_it_whole_under_one_name_and_the_next_makes_a_whole_copy(tmp_path, broken):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
@@ -4748,6 +4767,7 @@ def test_an_open_that_sets_a_copy_aside_killed_at_any_step_leaves_it_whole_under
         connected(place)
 
 
+@pytest.mark.slow
 def test_an_open_that_lets_the_oldest_set_aside_go_killed_at_any_step_keeps_the_rest_whole_and_none_half_gone(tmp_path):
     ours, kept = a_folder_two_threads_work_on(tmp_path / "whole")
     # The thread's copy was set aside whole four times, as many as a thread keeps, and is about to be once more.
@@ -4825,6 +4845,7 @@ def test_a_first_open_cut_before_its_end_leaves_no_copy_of_the_threads_own_whate
     assert files_of(again.copy) == files_of(folder) == [("notes.txt", b"saved by you since\n")]
 
 
+@pytest.mark.slow
 def test_an_open_that_removes_what_holds_nothing_of_the_threads_own_killed_at_any_step_leaves_nothing_the_next_sets_aside(tmp_path):
     root = tmp_path / "whole"
     folder = root / "Documents"
@@ -4848,6 +4869,7 @@ def test_an_open_that_removes_what_holds_nothing_of_the_threads_own_killed_at_an
         assert sorted(p.name for p in (place / "threads").iterdir()) == [OURS] == sorted(p.name for p in (place / "clones").iterdir()), at
 
 
+@pytest.mark.slow
 def test_a_threads_dropping_killed_at_any_step_leaves_each_of_its_folders_whole_or_going_and_the_places_next_request_removes_what_goes(tmp_path):
     root = tmp_path / "whole"
     folder = root / "Documents"
@@ -4962,6 +4984,7 @@ def never_recorded(root: Path, step: dict, kept: dict, at: object) -> None:
     }, at
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("asked_again", [False, True])
 def test_a_record_that_leaves_files_out_killed_at_any_step_leaves_them_as_the_thread_has_them_once_it_is_finished(tmp_path, asked_again):
     _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole")
@@ -4982,6 +5005,7 @@ def test_a_record_that_leaves_files_out_killed_at_any_step_leaves_them_as_the_th
     assert 0 < pushed < at
 
 
+@pytest.mark.slow
 def test_an_open_after_a_record_that_left_files_out_was_cut_after_its_push_killed_at_any_step_leaves_them_as_the_thread_has_them(tmp_path):
     _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole")
     stepped(tmp_path / "whole", OURS, "record", step, before="update-ref refs/heads/main")
@@ -4989,6 +5013,7 @@ def test_an_open_after_a_record_that_left_files_out_was_cut_after_its_push_kille
         left_as_the_thread_has_them(root, kept, at)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0.003, 0.012])
 @pytest.mark.parametrize("asked_again", [False, True])
 def test_a_record_that_leaves_files_out_killed_inside_any_of_its_gits_leaves_them_as_the_thread_has_them_once_it_is_finished(tmp_path, asked_again, inside):
@@ -5004,6 +5029,7 @@ def test_a_record_that_leaves_files_out_killed_inside_any_of_its_gits_leaves_the
             never_recorded(root, step, kept, at)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0.003, 0.012])
 def test_an_open_after_a_record_that_left_files_out_was_cut_after_its_push_killed_inside_any_of_its_gits_leaves_them_as_the_thread_has_them(tmp_path, inside):
     _, step, kept = a_landing_that_leaves_files_out(tmp_path / "whole", many=300)
@@ -5034,6 +5060,7 @@ def made_whole_again(root: Path, kept: dict, files: list[tuple[str, bytes]], at:
     the_next_turn_lands_whole(root, kept, landed=False)
 
 
+@pytest.mark.slow
 def test_a_letting_go_killed_at_any_step_leaves_the_whole_copy_at_its_name_or_nothing_and_its_next_open_makes_it_whole(tmp_path):
     kept, files, platform = a_copy_to_let_go(tmp_path / "whole")
     # Every name of the copy but the platform's folders, and the copy's own folder, whose time their leaving changes.
@@ -5047,6 +5074,7 @@ def test_a_letting_go_killed_at_any_step_leaves_the_whole_copy_at_its_name_or_no
         made_whole_again(root, kept, files, at)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("repository", ["whole", "made again"])
 def test_an_open_after_a_letting_go_killed_at_any_step_loses_nothing_that_waited_beside_the_copies(tmp_path, repository):
     kept, files, platform = a_copy_to_let_go(tmp_path / "whole")
@@ -5140,6 +5168,7 @@ def pruned_whole(root: Path, at: object) -> None:
     connected(place)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("inside", [0, 0.012])
 def test_a_pruning_killed_at_any_step_leaves_every_repository_whole_and_the_next_pruning_finishes_it(tmp_path, inside):
     a_folder_to_prune(tmp_path / "whole")

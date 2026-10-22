@@ -235,6 +235,7 @@ async def recorded(session_factory, request):
         )).one_or_none()
 
 
+@pytest.mark.slow
 async def test_a_write_stopped_twice_around_its_commit_is_never_left_open_for_its_computer(
     laptop_rig, stopping, session_factory, redis_client,
 ):
@@ -479,6 +480,7 @@ async def test_a_write_too_large_for_a_frame_lands_only_on_the_revision_it_expec
     assert (rig.folder / "big.bin").read_bytes() == BIG
 
 
+@pytest.mark.slow
 async def test_a_large_read_and_large_writes_go_at_once_on_one_connection(laptop_rig):
     rig = laptop_rig
     up, most = os.urandom(CHUNK_BYTES * 3 + 11), os.urandom(CHUNK_BYTES * 20)

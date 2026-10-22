@@ -614,6 +614,7 @@ class StoppingStore(SessionStore):
         return await super().emit_event(session_id, kind, data, **kwargs)
 
 
+@pytest.mark.slow
 async def test_a_worker_stopped_after_the_computer_sent_a_30_mib_pdf_resumes_with_the_same_bytes(
     laptop_rig, session_factory, redis_client,
 ):

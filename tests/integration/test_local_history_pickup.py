@@ -108,6 +108,7 @@ async def history_of(api, project, here, path: str) -> list[tuple]:
 # -- a folder where you added thousands of files lands again --------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_a_turn_lands_in_a_folder_where_you_added_twenty_thousand_files_and_the_history_lists_each_as_yours(api, computer, monkeypatch):
     project, master, thread = await begun_with_copy(api, computer)
     yours: dict = {}
@@ -140,6 +141,7 @@ async def test_a_turn_lands_in_a_folder_where_you_added_twenty_thousand_files_an
     assert (second.saga_state, second.picked_up) == ("completed", [])
 
 
+@pytest.mark.slow
 async def test_more_of_your_changes_than_the_folders_history_keeps_are_refused_in_their_own_words_and_leave_nothing_of_the_landing(
     api, computer, monkeypatch,
 ):
@@ -161,6 +163,7 @@ async def test_more_of_your_changes_than_the_folders_history_keeps_are_refused_i
     assert end.data["saved"] is False
 
 
+@pytest.mark.slow
 async def test_a_folder_of_more_files_than_half_the_cap_that_you_renamed_lands_and_its_history_lists_the_move_as_yours(api, computer, monkeypatch):
     project, master, thread = await begun_with_copy(api, computer)
     many = HISTORY_CAP // 2 + 1
@@ -184,6 +187,7 @@ async def test_a_folder_of_more_files_than_half_the_cap_that_you_renamed_lands_a
     assert files_of(report) == [("Notes.md", "landed", None)] and "landing" not in report.data
 
 
+@pytest.mark.slow
 async def test_a_folder_of_thirty_thousand_files_you_deleted_and_another_you_added_land_as_yours(api, computer, monkeypatch):
     project, master, thread = await begun_with_copy(api, computer)
     await woken(api, monkeypatch, thread, [BUDGET, ADD, _final_response("Done.")], during=adding(computer.folder, 30_000, {}))
@@ -202,6 +206,7 @@ async def test_a_folder_of_thirty_thousand_files_you_deleted_and_another_you_add
     assert await history_of(api, project, computer, "Scans/IMG_000000.jpg") == [("added", {"kind": "you"})]
 
 
+@pytest.mark.slow
 async def test_your_edits_in_more_parts_than_one_landing_asks_are_refused_in_their_own_words_and_nothing_of_them_is_recorded(api, computer, monkeypatch):
     # One file a part: names longer than a part holds.
     monkeypatch.setattr(local_history, "_PICKED_CHARS", 10)
@@ -243,6 +248,7 @@ async def test_a_part_its_computer_answers_too_large_is_told_as_yours_and_leaves
 # -- a landing cut at any part of its pickup --------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cut", ["after its pickup", "after its first part", "after its last part", "while a part waits"])
 async def test_a_landing_lost_at_any_part_of_its_pickup_is_finished_by_the_next_landing_and_your_edits_are_recorded_once_as_yours(
     api, computer, monkeypatch, cut,
@@ -298,6 +304,7 @@ async def test_a_landing_taken_up_again_after_a_part_of_its_pickup_hears_the_par
     assert kept(computer) == {} and computer.app.places.holder is None
 
 
+@pytest.mark.slow
 async def test_a_landing_that_recorded_and_whose_row_was_written_short_of_its_parts_is_completed_with_every_part_as_yours(
     api, computer, monkeypatch,
 ):

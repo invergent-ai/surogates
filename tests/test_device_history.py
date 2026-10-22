@@ -44,7 +44,6 @@ from surogates.devices.history import (
 )
 from surogates.devices.operations import DeviceOperations, OperationConflict, _in_folder, _named_by, as_named
 from surogates.devices.workspace import RESULT_TRANSFERS, DeviceOperationError
-from surogates.sandbox import history as sandbox_history
 from surogates.sandbox import local_history
 from surogates.sandbox.history import HistoryError
 
@@ -864,24 +863,6 @@ def test_the_bounds_of_an_answer_are_the_ones_said():
     assert checked("history", "commit", held) == held
 
 
-def history_codes() -> set[str]:
-    """Every code the folder's history refuses with, as its two modules spell them."""
-    return {
-        value for module in (sandbox_history, local_history) for name, value in vars(module).items()
-        if name.isupper() and isinstance(value, str) and value == name.lower()
-    }
-
-
-def test_every_code_the_folders_history_has_and_every_action_it_takes_is_one_this_module_knows():
-    # Its ten, and none it says to a person alone: the guest's and the app's own are beside them.
-    assert history_codes() == HISTORY_CODES - {"no_answer", "not_an_answer"}
-    # A thread's history steps and its snapshots, as the app passes them on: none is asked that the history
-    # does not take, and the history takes none that is not asked and checked here but a copy's letting go and
-    # a deleted thread's dropping, which the app alone asks, and its gate refuses from the server
-    # (desktop/src/history/kinds.ts).
-    assert set(local_history._ACTIONS) == ACTIONS["history"] | {"snapshot", "restore", "close", "drop"}
-
-
 class Folder:
     """A folder of the user's and its place, the history in it run as the guest runs it, each answer taken as the server takes it."""
 
@@ -1242,4 +1223,3 @@ def test_a_write_names_its_file_only_where_its_computer_wrote_the_file_its_path_
     ):
         assert _named_by([("Budget.xlsx", f"{folder}/Budget.xlsx"), (path, key)], folder) is None, (path, key)
     assert _named_by([], folder) == frozenset()
-

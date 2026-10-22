@@ -116,6 +116,7 @@ async def test_a_copy_whose_files_are_cut_short_lands_none_of_them_over_yours(ap
     assert [(f["path"], f["merged"]) for f in row.files] == [("Budget.xlsx", True)]
 
 
+@pytest.mark.slow
 async def test_a_file_nothing_the_thread_did_names_is_none_of_its_own_though_the_folder_has_a_second_name_for_it(api, here, monkeypatch):
     (here.folder / "Twin.txt").write_text("one\n")
     other_name = here.folder.parent / "its-other-name.txt"
@@ -201,6 +202,7 @@ async def test_a_link_a_guest_makes_in_the_copy_has_the_landing_land_what_the_co
 # -- what names a file, and what names none ------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_every_file_a_threads_file_tools_named_lands_and_a_command_lands_whatever_its_copy_holds(api, here, monkeypatch):
     (here.folder / "old.md").write_text("old.md v1\n")
     _, master, thread = await begun_with_copy(api, here)
@@ -254,6 +256,7 @@ async def test_a_thread_that_really_deletes_a_folder_lands_its_deletions(api, he
     assert await ops.named(thread.id, FOLDER) is None
 
 
+@pytest.mark.slow
 async def test_a_later_turns_deletion_lands_though_its_copy_holds_what_an_earlier_turn_left_out(api, here, monkeypatch):
     (here.folder / "old.md").write_text("old.md v1\n")
     _, master, thread = await begun_with_copy(api, here)
@@ -273,6 +276,7 @@ async def test_a_later_turns_deletion_lands_though_its_copy_holds_what_an_earlie
     assert first.data["excluded"] == ["__pycache__/"] and "excluded" not in second.data
 
 
+@pytest.mark.slow
 async def test_a_file_an_earlier_landing_left_in_the_copy_is_still_its_threads_own_and_lands_once_it_can(api, here, monkeypatch):
     (here.folder / "Twin.txt").write_text("one\n")
     other_name = here.folder.parent / "its-other-name.txt"

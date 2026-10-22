@@ -110,9 +110,14 @@ cache-keys = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-m 'not browser_e2e and not browser_e2e_k8s and not live and not desktop'"
+# 16 workers; slow tests run only with `just test-slow` (before every release).
+# worksteal: idle workers take queued tests from busy ones, so a run of
+# heavy tests handed to one worker does not leave the rest waiting.
+addopts = "-n 16 --dist worksteal -m 'not browser_e2e and not browser_e2e_k8s and not live and not desktop and not slow'"
 markers = [
+    "slow: takes more than about 5 s; skipped by default, run with `just test-slow` before every release",
     "browser_e2e: end-to-end agent browser tests requiring Docker and the kernel-images image (opt-in)",
     "browser_e2e_k8s: end-to-end agent browser tests requiring kind/minikube and a K8s cluster (opt-in)",
     "live: tests that hit a live LLM endpoint configured in config.dev.yaml (opt-in; small OpenRouter credit cost per run)",
@@ -125,6 +130,9 @@ dev = [
     "surogates[voice]",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0a0",
+    "pytest-xdist>=3.8",
+    # `just test` and `just test-slow` (the justfile at the repository root).
+    "rust-just>=1.40",
     "testcontainers[postgres,redis]>=4.0,<5.0",
     "httpx>=0.27,<1.0",
     "moto[s3]>=5.0,<6.0",

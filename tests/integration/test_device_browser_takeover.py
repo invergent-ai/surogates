@@ -833,13 +833,15 @@ async def hold_from_outside(db, held: str, store: SessionStore, chat: UUID) -> N
 @pytest.mark.parametrize("held", HELD_FROM_OUTSIDE)
 @pytest.mark.parametrize("posted", ["acquire", "release"])
 async def test_posts_kept_waiting_for_one_chats_lock_are_answered_busy_and_leave_the_pool_its_connections(
-    pg_url, session_factory, redis_client, posted, held,
+    pg_url, session_factory, redis_client, posted, held, monkeypatch,
 ):
+    # Two seconds; here it is half of one.
+    monkeypatch.setattr("surogates.session.store.CONTROL_LOCK_WAIT_MS", 500)
     async with pooled(pg_url, session_factory, redis_client, 2) as narrow:
         chat, other = await (narrow.idle() if posted == "acquire" else narrow.told_taken_over()), await narrow.idle()
         before = await narrow.log(chat)
         said = {"handed_back": True} if posted == "release" else {}
-        wait_s = CONTROL_LOCK_WAIT_MS / 1000
+        wait_s = 0.5
         # A post waits its time for the lock, and the one that got the lock for the row.
         longest = wait_s * (2 if held == "its row" else 1)
         taken = asyncio.Event()

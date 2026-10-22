@@ -65,14 +65,14 @@ class TestOrchestratorExecuteStep:
 
     @pytest.mark.asyncio
     async def test_timeout(self):
-        orch = SagaOrchestrator()
+        orch = SagaOrchestrator(retry_delay=0.01)
         saga = orch.create_saga(uuid4())
         step = orch.add_step(
             saga.saga_id,
             tool_name="terminal",
             tool_call_id="tc1",
             arguments={},
-            timeout_seconds=1,
+            timeout_seconds=0.1,
         )
 
         async def slow_executor():

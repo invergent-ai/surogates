@@ -162,6 +162,7 @@ async def test_a_landings_row_is_its_saga_written_as_it_runs(api, monkeypatch, p
     assert git(pods.project / "_history", "log", "-1", "--format=%(trailers:key=Surogate-Saga,valueonly)", row.commit) == row.saga_id
 
 
+@pytest.mark.slow
 async def test_a_landing_of_a_few_hundred_files_writes_its_steps_a_handful_of_times(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
@@ -399,6 +400,7 @@ async def test_a_worker_killed_after_two_applies_is_put_back_by_the_next_landing
     ]
 
 
+@pytest.mark.slow
 async def test_a_worker_killed_right_after_its_commit_step_leaves_the_turn_on_its_branch_to_land_next(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -513,6 +515,7 @@ async def test_a_worker_killed_right_after_its_push_is_completed_and_its_thread_
     assert sorted((f["ref"], f["landing"]) for f in report["files"]) == [("a.md", "landed"), ("more.md", "landed")]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("row_is", ROWS)
 async def test_a_worker_killed_while_putting_back_is_put_back_again_by_the_next_landing(api, monkeypatch, pods, row_is):
     rows_stand(monkeypatch, row_is)
@@ -595,6 +598,7 @@ async def lose_the_lock(api, thread) -> None:
         await db.commit()
 
 
+@pytest.mark.slow
 async def test_a_landing_that_lost_its_lock_while_a_step_retried_is_waited_for_and_stops(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -630,6 +634,7 @@ async def test_a_landing_that_lost_its_lock_while_a_step_retried_is_waited_for_a
     assert (b_row.saga_state, pods.real_names()) == ("completed", ["B.md", "Report.docx", "notes.txt"])
 
 
+@pytest.mark.slow
 async def test_a_landing_that_lost_its_lock_never_writes_over_the_next_landing(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -684,6 +689,7 @@ async def test_a_landing_that_lost_its_lock_after_its_last_apply_records_nothing
     assert pods.real_names() == ["Report.docx", "notes.txt"]
 
 
+@pytest.mark.slow
 async def test_a_recovery_puts_back_your_upload_that_the_dead_landing_wrote_over(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -1185,6 +1191,7 @@ async def test_a_put_back_that_failed_before_its_worker_died_is_tried_again_by_t
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("row_is", ROWS)
 async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_it(api, monkeypatch, pods, row_is):
     rows_stand(monkeypatch, row_is)
@@ -1222,6 +1229,7 @@ async def test_a_recovery_that_lost_its_lock_stops_and_the_next_holder_finishes_
 
 
 
+@pytest.mark.slow
 async def test_a_recovery_that_loses_its_lock_among_committed_put_backs_stops(api, monkeypatch, pods):
     rows_stand(monkeypatch, "exact")  # a row that shows the applies done
     master = await master_of(api, await create(api))
@@ -1268,6 +1276,7 @@ async def turn_ends(api, thread) -> list[dict]:
     return [e.data for e in await api.app.state.session_store.get_events(thread.id, types=[EventType.SESSION_COMPLETE])]
 
 
+@pytest.mark.slow
 async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands_with_its_next_turn(api, monkeypatch, tmp_path):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -1374,6 +1383,7 @@ async def test_a_look_of_the_settle_the_pod_did_not_answer_is_tried_again_as_a_s
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
 
 
+@pytest.mark.slow
 async def test_a_landing_settled_whose_row_cannot_be_written_is_left_to_the_next_holder_and_not_settled_again(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
@@ -1420,6 +1430,7 @@ def looks_for_commits(monkeypatch, *, unseen: int = 0) -> list[list[str]]:
     return looks
 
 
+@pytest.mark.slow
 async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up_and_others_land(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
@@ -1457,6 +1468,7 @@ async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up
     assert pods.real_names() == ["B.md", "C.md", "Report.docx", "a.md", "notes.txt"]
 
 
+@pytest.mark.slow
 async def test_a_landing_left_escalated_whose_row_cannot_be_written_is_told_to_the_master_once(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second, third = [await a_thread(api, name, master) for name in ("Draft A", "Draft B", "Draft C")]
@@ -1839,6 +1851,7 @@ async def test_the_days_pruning_waits_out_and_settles_a_landing_left_running_as_
     assert (pods.project / "_history" / "pruned").exists()
 
 
+@pytest.mark.slow
 async def test_a_landing_whose_row_stays_running_holds_no_pruning_back(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     first, second = await a_thread(api, "Draft A", master), await a_thread(api, "Draft B", master)
@@ -1868,6 +1881,7 @@ async def test_a_landing_whose_row_stays_running_holds_no_pruning_back(api, monk
     assert pods.real_names() == ["B.md", "Report.docx", "notes.txt"]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("unreadable", ["once", "for a while", "at every try"])
 @pytest.mark.parametrize("failed", [False, True], ids=["a turn whose landing could not start", "a failed turn"])
 async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(api, monkeypatch, pods, failed, unreadable):
@@ -1910,6 +1924,7 @@ async def test_a_keep_whose_settle_failed_waits_out_the_fence_before_it_writes(a
     assert end["saved"] is True
 
 
+@pytest.mark.slow
 async def test_a_keep_that_cannot_read_the_rows_waits_out_a_landing_in_a_late_try_of_its_push(api, monkeypatch, pods):
     # A try of a second, three tries, pauses of 0.2 s and 0.4 s: a fence of 2.4 s, a push alive for 3.6 s.
     tried = SimpleNamespace(default_step_timeout=1, default_max_retries=2, retry_delay=0.2)

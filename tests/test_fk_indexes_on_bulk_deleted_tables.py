@@ -35,18 +35,3 @@ def test_foreign_keys_into_bulk_deleted_tables_are_indexed():
         and fk.column_keys[0] not in _leading_columns(table)
     ]
     assert unindexed == []
-
-
-def test_existing_databases_get_the_same_indexes():
-    # create_all never adds an index to a table that already exists, so each
-    # model index on these columns is retrofitted by observability.sql.
-    from surogates.db.engine import OBSERVABILITY_SQL_PATH
-
-    ddl = OBSERVABILITY_SQL_PATH.read_text()
-    for name in (
-        "idx_delivery_outbox_event",
-        "idx_delivery_outbox_session",
-        "idx_board_notes_writer_session",
-        "idx_workstream_history_thread",
-    ):
-        assert f"CREATE INDEX IF NOT EXISTS {name}" in ddl, name
