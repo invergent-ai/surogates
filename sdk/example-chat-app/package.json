@@ -12,7 +12,8 @@
     "dev:server": "tsx watch src/server/index.ts",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "vitest run",
+    "test": "vitest run -t '^(?!.*\\[slow\\])'",
+    "test:slow": "vitest run -t '\\[slow\\]'",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
