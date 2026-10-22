@@ -19,7 +19,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
@@ -56,6 +56,13 @@ class StepSessionRequest(BaseModel):
     # Keel's id for the session: the runtime creates it with exactly this one.
     session_id: UUID
     contract: StepContract
+
+    @model_validator(mode="after")
+    def _one_case_type(self) -> StepSessionRequest:
+        # The session's owning account is this case type's: it must be the contract's.
+        if self.case_type != self.contract.case_type:
+            raise ValueError("case_type differs from the contract's")
+        return self
 
 
 class StepSessionCreated(BaseModel):
@@ -145,16 +152,15 @@ def _key_in_use() -> HTTPException:
 
 
 async def _start(request: Request, session: Any, contract: StepContract, key: str) -> None:
-    """Write the step's kickoff unless the session has it, and queue the session when this call wrote it."""
-    store = request.app.state.session_store
-    if await store.has_synthetic_message(session.id, KICKOFF_MARKER, key=key):
-        return
-    await store.emit_synthetic_user_message(
-        session.id,
-        content=render_kickoff(contract),
-        synthetic=KICKOFF_MARKER,
-        metadata={"keel_key": key},
+    """Write the step's kickoff unless the session has it, and queue the session when this call wrote it.
+
+    Calls racing on one key, as a retry of a call still running, write it once.
+    """
+    written = await request.app.state.session_store.emit_keyed_synthetic_message(
+        session.id, content=render_kickoff(contract), synthetic=KICKOFF_MARKER, key=key,
     )
+    if written is None:
+        return
     await enqueue_session(
         request.app.state.redis,
         org_id=str(session.org_id),

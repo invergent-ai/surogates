@@ -7,6 +7,7 @@ public API never serves those routes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from uuid import UUID
@@ -261,6 +262,20 @@ async def test_a_retry_makes_one_session_and_one_kickoff(link, org, session_stor
     assert [m.data.get("synthetic") for m in messages] == ["keel_step"]
 
 
+async def test_concurrent_creates_make_one_session_and_one_kickoff(link, org, session_store, redis_client):
+    # Keel retries an effect once its lease expires, while the first call may still run.
+    request = body(org)
+
+    answers = await asyncio.gather(*(post(link, request) for _ in range(6)))
+
+    assert sorted(a.status_code for a in answers) == [200] * 5 + [201], [a.text for a in answers]
+    assert {a.json()["session_id"] for a in answers} == {request["session_id"]}
+    session = await session_store.get_session(UUID(request["session_id"]))
+    messages = await user_messages(session_store, session.id)
+    assert [m.data.get("synthetic") for m in messages] == ["keel_step"]
+    assert await queue_score(redis_client, session) == 1.0
+
+
 async def test_every_wake_of_a_step_session_stays_behind_chats(
     link, link_app, org, session_store, redis_client, monkeypatch,
 ):
@@ -406,21 +421,25 @@ async def test_ops_unreachable_twice_is_unavailable(link, org, session_store):
     assert flaky.status_code == 201, flaky.text
 
 
-async def test_a_body_that_does_not_validate_is_invalid(link, org):
+async def test_a_body_that_does_not_validate_is_invalid(link, link_app, org):
     no_contract = body(org)
     del no_contract["contract"]
     long_key = body(org, "k" * 201)
+    # The owning account is the body's case type's: it must be the contract's.
+    other_case_type = {**body(org), "case_type": "mortgage"}
 
     answers = [
         await post(link, no_contract),
         await post(link, long_key),
+        await post(link, other_case_type),
         await link.post(
             ROUTE, params={"agent_id": AGENT}, content=b"{not json",
             headers={"Authorization": f"Bearer {LINK_KEY}", "Content-Type": "application/json"},
         ),
     ]
 
-    assert [(a.status_code, code_of(a)) for a in answers] == [(422, "invalid-request")] * 3
+    assert [(a.status_code, code_of(a)) for a in answers] == [(422, "invalid-request")] * 4
+    assert await link_app.state.session_store.get_session_by_idempotency_key(org, KEY) is None
 
 
 async def test_injected_inputs_are_blocked_before_anything_is_made(link, org, session_store, session_factory):

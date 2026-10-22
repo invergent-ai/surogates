@@ -2360,6 +2360,18 @@ class SessionStore:
         async with self._sf() as db:
             return int((await db.execute(stmt)).scalar_one())
 
+    @staticmethod
+    def _synthetic_message(session_id: UUID, synthetic: str, key: str | None) -> Any:
+        """The ids of *session_id*'s synthetic user messages of one kind, for one Keel key when given."""
+        stmt = select(EventRow.id).where(
+            EventRow.session_id == session_id,
+            EventRow.type == EventType.USER_MESSAGE.value,
+            EventRow.data["synthetic"].as_string() == synthetic,
+        )
+        if key is not None:
+            stmt = stmt.where(EventRow.data["keel_key"].as_string() == key)
+        return stmt
+
     async def has_synthetic_message(
         self, session_id: UUID, synthetic: str, *, key: str | None = None,
     ) -> bool:
@@ -2368,15 +2380,40 @@ class SessionStore:
         With *key*, only one written for that Keel ``keel_key`` counts: a
         retried call finds what its first attempt wrote, and writes nothing.
         """
-        stmt = select(EventRow.id).where(
-            EventRow.session_id == session_id,
-            EventRow.type == EventType.USER_MESSAGE.value,
-            EventRow.data["synthetic"].as_string() == synthetic,
-        )
-        if key is not None:
-            stmt = stmt.where(EventRow.data["keel_key"].as_string() == key)
+        stmt = self._synthetic_message(session_id, synthetic, key)
         async with self._sf() as db:
             return bool((await db.execute(select(stmt.exists()))).scalar_one())
+
+    async def emit_keyed_synthetic_message(
+        self, session_id: UUID, *, content: str, synthetic: str, key: str,
+    ) -> int | None:
+        """Write a synthetic user message for one Keel key, unless the session has it.
+
+        The check and the write are one transaction under the session row's
+        lock, so calls racing on one key write it once.  Returns the new
+        event's id, or ``None`` when the message was there already.
+        """
+        message = await self._ready_event(
+            session_id,
+            EventType.USER_MESSAGE,
+            {"content": content, "synthetic": synthetic, "keel_key": key},
+        )
+        async with self._sf() as db:
+            locked = (await db.execute(
+                select(SessionRow.id).where(SessionRow.id == session_id).with_for_update()
+            )).scalar_one_or_none()
+            if locked is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            written = (await db.execute(
+                select(self._synthetic_message(session_id, synthetic, key).exists())
+            )).scalar_one()
+            if written:
+                await db.rollback()
+                return None
+            await self._write_event(db, message)
+            await db.commit()
+        await self._announce_event(message)
+        return message.id
 
     async def count_recoveries_since_progress(self, session_id: UUID) -> int:
         """Count ``harness.recovered`` events since the session last progressed.
