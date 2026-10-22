@@ -7,8 +7,8 @@ tells an intake agent which case types it may start, and starts them.
 Every request carries the door key as a bearer.  An answer is a
 :class:`KeelAnswer`: the status Keel gave, and its decoded JSON body.  A
 request that never got an answer has no status, and is never raised.  A body
-larger than the door takes is never sent: :class:`BodyTooLarge` is raised
-instead.  Nothing here logs a body: what goes to Keel and what comes back is
+larger than the door takes, or one JSON cannot carry, is never sent:
+:class:`BodyTooLarge` or :class:`BodyNotJSON` is raised instead.  Nothing here logs a body: what goes to Keel and what comes back is
 case data.
 """
 
@@ -24,7 +24,7 @@ import httpx
 
 from surogates.config import Settings
 
-__all__ = ["BodyTooLarge", "KeelAnswer", "KeelClient", "keel_client", "use_keel_client"]
+__all__ = ["BodyNotJSON", "BodyTooLarge", "KeelAnswer", "KeelClient", "keel_client", "use_keel_client"]
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,10 @@ class BodyTooLarge(ValueError):
         super().__init__(f"the body is {size} bytes, over the {limit} the door takes")
         self.size = size
         self.limit = limit
+
+
+class BodyNotJSON(ValueError):
+    """A body holding a number JSON cannot carry, NaN or an infinity: it was not sent."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +104,12 @@ class KeelClient:
         content = None
         if body is not None:
             # Encoded as httpx encodes JSON, and measured as sent.
-            content = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            try:
+                encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            except ValueError:
+                # Its message quotes the value: the class says enough.
+                raise BodyNotJSON("the body holds NaN or an infinity") from None
+            content = encoded.encode("utf-8")
             if len(content) > MAX_BODY_BYTES:
                 raise BodyTooLarge(len(content), MAX_BODY_BYTES)
             sent["Content-Type"] = "application/json"
@@ -121,14 +130,16 @@ class KeelClient:
     async def complete(self, session_id: object, body: dict) -> KeelAnswer:
         """Report a step session's result: ``{"call_id", "outcome", "output", "sources", "pages_read", "usage"}``.
 
-        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`.
+        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
+        :class:`BodyNotJSON` for one holding NaN or an infinity.
         """
         return await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/complete", body=body)
 
     async def raise_hand(self, session_id: object, body: dict) -> KeelAnswer:
         """Raise a hand on a step session's step: ``{"call_id", "question", "choices", "evidence", "pages_read", "usage"}``.
 
-        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`.
+        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
+        :class:`BodyNotJSON` for one holding NaN or an infinity.
         """
         return await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/raise-hand", body=body)
 
@@ -168,7 +179,8 @@ class KeelClient:
     async def start_case(self, org_id: object, body: dict, *, idempotency_key: str) -> KeelAnswer:
         """Start a case in project *org_id*: ``{"agent_id", "session_id", "user_id", "channel", "case_type", "data"}``.
 
-        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`.
+        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
+        :class:`BodyNotJSON` for one holding NaN or an infinity.
         """
         return await self._send(
             "POST", f"/api/harness/projects/{_segment(org_id)}/cases",

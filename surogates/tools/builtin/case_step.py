@@ -19,8 +19,9 @@ Keel's answer decides what the session does next:
 - Keel could not be reached (no answer, a 408, a 429 or another 5xx): the
   model calls again.  A repeated call id gets Keel's first answer.
 
-A report larger than Keel takes is never sent: the model is asked to shorten
-it.  Once a report ended the step, a later report in the same wake is
+A report Keel could not read is never sent, and the model is told what to
+fix: one larger than Keel takes, one holding NaN or an infinity, sources
+that are not lists of objects, or a tool call id longer than Keel keeps.  Once a report ended the step, a later report in the same wake is
 answered here, without Keel: the step is no longer the session's.
 
 A report that ended the step for this round also marks the session's row
@@ -32,9 +33,10 @@ fails, at its turn's end or in the dispatcher, through
 one that is over: a draft under review or a raised hand is never failed by
 a crash, and its inputs stay for the person's word.
 
-The harness checks only what Keel cannot: the outcome is one of the
-contract's, the output and sources are objects, and each file named is in
-the case's workspace.  Keel validates the rest.  No log line here carries
+The harness checks only what Keel cannot, and what would make Keel refuse
+the whole report: the outcome is one of the contract's, the output is an
+object, the sources map fields to lists of objects, each file named is in
+the case's workspace, and the report is JSON within Keel's bounds.  Keel validates the rest.  No log line here carries
 the case's data, and an error repeats at most a path the model gave.
 """
 
@@ -48,7 +50,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from surogates.keel.client import BodyTooLarge, KeelAnswer, KeelClient, keel_client
+from surogates.keel.client import BodyNotJSON, BodyTooLarge, KeelAnswer, KeelClient, keel_client
 from surogates.keel.files import case_file_value
 from surogates.keel.steps import (
     CASE_STEP_KEY,
@@ -67,6 +69,8 @@ logger = logging.getLogger(__name__)
 
 #: The most pages read one report carries.
 MAX_PAGES_READ = 500
+#: The longest tool call id Keel keeps.
+CALL_ID_CHARS = 200
 #: The bounds of a raised hand.
 QUESTION_CHARS = 2000
 MAX_CHOICES = 20
@@ -353,6 +357,11 @@ async def _send_report(
                 f"The report is {exc.size:,} bytes, over the {exc.limit:,} bytes Keel takes. "
                 f"Shorten {shorten} and call {tool} again.",
             )
+        except BodyNotJSON:
+            return _error(
+                "The report holds a number JSON cannot carry (NaN or Infinity). Give a real "
+                f"number, or leave the value out, and call {tool} again.",
+            )
         result = await _answered(
             answer, tool=tool, client=client, store=store, session_id=session_id, usage=usage, since=since,
         )
@@ -440,6 +449,29 @@ async def report_step_failed(store: Any, session: Any, *, code: str) -> None:
     await _redact(store, session.id)
 
 
+def _call_id_refused(kwargs: dict[str, Any], tool: str) -> str | None:
+    """What is wrong with the tool call's id as Keel keeps it, or ``None``."""
+    call_id = kwargs.get("tool_call_id")
+    if not call_id:
+        return f"{tool} needs its tool call's id."
+    if len(str(call_id)) > CALL_ID_CHARS:
+        return (
+            f"This tool call's id is longer than the {CALL_ID_CHARS} characters Keel takes, "
+            "so the report was not sent."
+        )
+    return None
+
+
+def _sources_refused(sources: Any) -> str | None:
+    """What is wrong with *sources*, or ``None``: each field's sources must be a list of objects."""
+    if not isinstance(sources, dict):
+        return "sources must be an object of field to a list of sources."
+    for name, given in sources.items():
+        if not isinstance(given, list) or not all(isinstance(source, dict) for source in given):
+            return f"sources.{name} must be a list of objects, each one place its value comes from."
+    return None
+
+
 async def _step_session(kwargs: dict[str, Any]) -> tuple[Any, UUID, Any]:
     """The step session's store, id and row."""
     store = kwargs["session_store"]
@@ -489,11 +521,10 @@ async def handle_complete_step(arguments: dict, **kwargs: Any) -> str:
     if not isinstance(output, dict):
         return _error("output must be an object of field to value.")
     sources = arguments.get("sources", {})
-    if not isinstance(sources, dict):
-        return _error("sources must be an object of field to a list of sources.")
-    call_id = kwargs.get("tool_call_id")
-    if not call_id:
-        return _error("complete_step needs its tool call's id.")
+    if (refused := _sources_refused(sources)) is not None:
+        return _error(refused)
+    if (refused := _call_id_refused(kwargs, "complete_step")) is not None:
+        return _error(refused)
 
     store, session_id, session = await _step_session(kwargs)
     filled = await _files(output, contract, storage=kwargs.get("storage"), session=session)
@@ -532,9 +563,8 @@ async def handle_raise_hand(arguments: dict, **kwargs: Any) -> str:
     if isinstance(hand, str):
         return _error(hand)
     question, choices, evidence = hand
-    call_id = kwargs.get("tool_call_id")
-    if not call_id:
-        return _error("raise_hand needs its tool call's id.")
+    if (refused := _call_id_refused(kwargs, "raise_hand")) is not None:
+        return _error(refused)
 
     store, session_id, session = await _step_session(kwargs)
     return await _send_report(

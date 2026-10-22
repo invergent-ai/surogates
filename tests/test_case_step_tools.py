@@ -399,6 +399,46 @@ async def test_an_outcome_outside_the_contract_never_reaches_keel(fake_keel, sto
     assert not store.redacted()
 
 
+def _with_nan(arguments: dict, path: tuple[str, ...]) -> str:
+    """*arguments* as the model's JSON, with a NaN at *path*: Python's JSON reader takes it."""
+    arguments = deepcopy(arguments)
+    target = arguments
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = float("nan")
+    return json.dumps(arguments)
+
+
+UNREAD = "payslip-of-march.pdf"
+LONG_ID = "c" * 201
+NOT_JSON = "The report holds a number JSON cannot carry (NaN or Infinity)"
+LONG_ID_ERROR = "This tool call's id is longer than the 200 characters Keel takes"
+
+
+@pytest.mark.parametrize(("name", "arguments", "call_id", "error"), [
+    ("complete_step", {**COMPLETION, "sources": {**COMPLETION["sources"], "income": UNREAD}}, "c1",
+     "sources.income must be a list of objects"),
+    ("complete_step", {**COMPLETION, "sources": {**COMPLETION["sources"], "income": [UNREAD]}}, "c1",
+     "sources.income must be a list of objects"),
+    ("complete_step", _with_nan(COMPLETION, ("output", "income")), "c1", NOT_JSON),
+    ("complete_step", _with_nan(COMPLETION, ("sources", "income", 0, "page")), "c1", NOT_JSON),
+    ("raise_hand", _with_nan({"question": "Which?", "evidence": [{"ratio": 1}]}, ("evidence", 0, "ratio")), "c1", NOT_JSON),
+    ("complete_step", COMPLETION, LONG_ID, LONG_ID_ERROR),
+    ("raise_hand", {"question": "Which?"}, LONG_ID, LONG_ID_ERROR),
+], ids=[
+    "sources-not-a-list", "sources-not-objects", "nan-in-output", "nan-in-sources", "nan-in-evidence",
+    "long-call-id", "long-call-id-hand",
+])
+async def test_a_report_keel_could_not_read_is_never_sent(fake_keel, store, name, arguments, call_id, error):
+    result = json.loads(await _call(name, arguments, store, tool_call_id=call_id))["error"]
+
+    assert result.startswith(error)
+    assert UNREAD not in result and LONG_ID not in result
+    assert fake_keel.requests == []
+    assert store.redactions == 0
+    assert store.reported() is None
+
+
 async def test_only_the_steps_own_session_can_report_it(fake_keel, store):
     child_config = {k: v for k, v in store.row.config.items() if k != "case_step"}
     for name, arguments in (("complete_step", COMPLETION), ("raise_hand", {"question": "Which address?"})):
