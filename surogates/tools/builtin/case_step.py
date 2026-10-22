@@ -224,7 +224,8 @@ def _usage(session: Any) -> dict[str, Any]:
 
 
 async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
-    """The pages the case's sessions read, from the case root's log: each once, in order, at most :data:`MAX_PAGES_READ`.
+    """The pages the case's sessions read, from the case root's log: each once, sorted by knowledge base id,
+    path and digest, the first :data:`MAX_PAGES_READ` of them.
 
     A page whose digest is not a SHA-256 hex digest, or whose knowledge base
     id or path is empty or longer than Keel takes, is left out: Keel refuses

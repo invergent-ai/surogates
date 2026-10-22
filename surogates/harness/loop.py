@@ -119,6 +119,8 @@ from surogates.keel.steps import (
     NUDGE_MARKER,
     STEP_ENDED,
     STEP_STOPPED,
+    gate_case_tools,
+    is_case_session,
     is_case_step,
     is_keels_word,
     step_contract_of,
@@ -2899,8 +2901,6 @@ class AgentHarness(
         # A sketch turn replaces the catalogue rather than narrowing it, so
         # a Keel case's session goes through the case gate again: no turn
         # hands it a tool outside the case's.
-        from surogates.keel.steps import gate_case_tools, is_case_session
-
         if is_case_session(session):
             tool_filter = gate_case_tools(
                 set(self._tools.tool_names) if tool_filter is None else tool_filter,
@@ -5512,7 +5512,7 @@ class AgentHarness(
 
         return result
 
-    def _tool_filter_for_session(self, session: Session) -> set[str] | None:
+    def _tool_filter_for_session(self, session: Session) -> set[str]:
         """Return the tool allow-list for a session.
 
         Session-scoped only.  A whiteboard turn additionally narrows this
@@ -5623,8 +5623,6 @@ class AgentHarness(
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
         # ``None`` (every registered tool) is spelled out so they can go.
-        from surogates.keel.steps import gate_case_tools
-
         return gate_case_tools(
             set(self._tools.tool_names) if tool_filter is None else tool_filter,
             session,
