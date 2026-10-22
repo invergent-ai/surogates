@@ -56,9 +56,11 @@ Only a step's own session is offered `complete_step` and `raise_hand`. The worke
 | Keel's answer | The session |
 |---|---|
 | `200`, or `409 not-running` | Its turn ends, and the session rests until Keel sends it something. A completed step's inputs are removed from its config. |
-| Another `409` | A rejection: the model reads Keel's code and message, fixes its report and calls again. |
+| Another `409` | A rejection: the model reads Keel's code, message and the attempts left, then fixes its report and calls again, or raises a hand. |
 | No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | The model calls again. A repeated call gets Keel's first answer. |
 | Anything else | Keel refused the report for good: the worker tells Keel the step failed, removes the inputs, and ends the turn. People take the step. |
+
+A report over 256,000 bytes of JSON is never sent: the model is asked to shorten it. Once a report has ended the step, a later report in the same wake is answered by the worker, without Keel.
 
 A worker without both settings has no link to Keel: every report removes the step's inputs and ends the turn, and Keel learns of it only from the session's status.
 

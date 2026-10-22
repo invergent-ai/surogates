@@ -9,7 +9,8 @@ Keel's answer decides what the session does next:
 - Keel took the report, or the step is no longer this session's: the result
   starts with :data:`STEP_ENDED`, and the harness ends the turn.
 - Keel rejected the report (a 409 with its own code): the result is the
-  rejection, and the model fixes its report and calls again.
+  rejection, with the attempts Keel has left for it, and the model fixes its
+  report and calls again, or raises a hand.
 - Keel refused the report for good (401, 403, 404, 422, 409
   ``broken-definition``, 503 ``harness-off``, or any answer not named here),
   or this runtime has no link to Keel: Keel is told the step failed, the
@@ -17,6 +18,10 @@ Keel's answer decides what the session does next:
   :data:`STEP_STOPPED`; the harness ends the turn, and people take the step.
 - Keel could not be reached (no answer, a 408, a 429 or another 5xx): the
   model calls again.  A repeated call id gets Keel's first answer.
+
+A report larger than Keel takes is never sent: the model is asked to shorten
+it.  Once a report ended the step, a later report in the same wake is
+answered here, without Keel: the step is no longer the session's.
 
 The harness checks only what Keel cannot: the outcome is one of the
 contract's, the output and sources are objects, and each file named is in
@@ -29,11 +34,12 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections import OrderedDict
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from surogates.keel.client import KeelAnswer, KeelClient, keel_client
+from surogates.keel.client import BodyTooLarge, KeelAnswer, KeelClient, keel_client
 from surogates.keel.files import case_file_value
 from surogates.keel.steps import STEP_ENDED, STEP_STOPPED, StepContract, step_contract_in
 from surogates.session.attachment_ingest import workspace_root_id
@@ -51,6 +57,15 @@ CHOICE_CHARS = 200
 MAX_EVIDENCE = 50
 
 _NOT_A_STEP = "This session works no step of a case: there is no step to report."
+_NO_LONGER = f"{STEP_ENDED} the step is no longer this session's."
+
+#: The steps a report ended in a wake of this worker: each step session's id,
+#: and the lease of the wake.  A later report in that wake is answered here, so
+#: Keel never gets a second end, the inputs no second redaction, and the step
+#: no attempt Keel counts.  A later wake holds a new lease, and reports again.
+_ENDED_IN_WAKE: OrderedDict[str, object] = OrderedDict()
+#: How many such steps a worker keeps, the oldest dropped first.
+_ENDED_KEPT = 1024
 
 # A non-empty list of where one output's value comes from.
 _SOURCES = {"type": "array", "minItems": 1, "items": {"type": "object"}}
@@ -221,6 +236,18 @@ async def _stopped(
     return text
 
 
+def _rejection(answer: KeelAnswer, tool: str) -> str:
+    """Keel's rejection of a report, with the attempts it has left for the step when it says."""
+    message = answer.message or "Keel rejected the report."
+    left = answer.data.get("attempts_left") if isinstance(answer.data, dict) else None
+    if isinstance(left, int) and not isinstance(left, bool) and left >= 0:
+        attempts = f"{left} attempt{'' if left == 1 else 's'} left"
+        if tool == "complete_step":
+            attempts += "; fix the report and call complete_step again, or call raise_hand"
+        message += f" ({attempts})"
+    return _error(message, code=answer.code)
+
+
 async def _answered(
     answer: KeelAnswer, *, tool: str, client: KeelClient, store: Any, session_id: UUID, usage: dict[str, Any],
 ) -> str:
@@ -230,12 +257,55 @@ async def _answered(
             await _redact(store, session_id)
         return f"{STEP_ENDED} {answer.message or 'Keel took the report.'}"
     if answer.status == 409 and answer.code == "not-running":
-        return f"{STEP_ENDED} the step is no longer this session's."
+        return _NO_LONGER
     if answer.status == 409 and answer.code != "broken-definition":
-        return _error(answer.message or "Keel rejected the report.", code=answer.code)
+        return _rejection(answer, tool)
     if _transient(answer):
         return _error(f"Keel could not be reached; call {tool} again.")
     return await _stopped(client, store, session_id, usage, status=answer.status)
+
+
+def _ended_in_this_wake(kwargs: dict[str, Any]) -> bool:
+    lease = kwargs.get("lease_token")
+    return lease is not None and _ENDED_IN_WAKE.get(str(kwargs.get("session_id"))) == lease
+
+
+def _remember_the_end(kwargs: dict[str, Any]) -> None:
+    lease = kwargs.get("lease_token")
+    if lease is None:
+        return
+    session_id = str(kwargs.get("session_id"))
+    _ENDED_IN_WAKE[session_id] = lease
+    _ENDED_IN_WAKE.move_to_end(session_id)
+    while len(_ENDED_IN_WAKE) > _ENDED_KEPT:
+        _ENDED_IN_WAKE.popitem(last=False)
+
+
+async def _send_report(
+    tool: str, kwargs: dict[str, Any], fields: dict[str, Any], *, store: Any, session_id: UUID, session: Any, shorten: str,
+) -> str:
+    """Send the step's report, *fields* with its call id, pages read and usage, and tell the model what came of it."""
+    usage = _usage(session)
+    client = keel_client()
+    if client is None:
+        result = await _stopped(None, store, session_id, usage)
+    else:
+        send = client.complete if tool == "complete_step" else client.raise_hand
+        body = {
+            "call_id": kwargs["tool_call_id"], **fields,
+            "pages_read": await _pages_read(store, session), "usage": usage,
+        }
+        try:
+            answer = await send(session_id, body)
+        except BodyTooLarge as exc:
+            return _error(
+                f"The report is {exc.size:,} bytes, over the {exc.limit:,} bytes Keel takes. "
+                f"Shorten {shorten} and call {tool} again.",
+            )
+        result = await _answered(answer, tool=tool, client=client, store=store, session_id=session_id, usage=usage)
+    if result.startswith((STEP_ENDED, STEP_STOPPED)):
+        _remember_the_end(kwargs)
+    return result
 
 
 async def _step_session(kwargs: dict[str, Any]) -> tuple[Any, UUID, Any]:
@@ -278,6 +348,8 @@ async def handle_complete_step(arguments: dict, **kwargs: Any) -> str:
     contract = step_contract_in(kwargs.get("session_config"), session_id=kwargs.get("session_id"))
     if contract is None:
         return _error(_NOT_A_STEP)
+    if _ended_in_this_wake(kwargs):
+        return _NO_LONGER
     outcome = arguments.get("outcome")
     if not isinstance(outcome, str) or outcome not in contract.outcomes:
         return _error(f"outcome must be one of: {', '.join(contract.outcomes)}.")
@@ -295,20 +367,9 @@ async def handle_complete_step(arguments: dict, **kwargs: Any) -> str:
     filled = await _files(output, contract, storage=kwargs.get("storage"), session=session)
     if isinstance(filled, str):
         return _error(filled)
-    usage = _usage(session)
-    client = keel_client()
-    if client is None:
-        return await _stopped(None, store, session_id, usage)
-    answer = await client.complete(session_id, {
-        "call_id": call_id,
-        "outcome": outcome,
-        "output": filled,
-        "sources": sources,
-        "pages_read": await _pages_read(store, session),
-        "usage": usage,
-    })
-    return await _answered(
-        answer, tool="complete_step", client=client, store=store, session_id=session_id, usage=usage,
+    return await _send_report(
+        "complete_step", kwargs, {"outcome": outcome, "output": filled, "sources": sources},
+        store=store, session_id=session_id, session=session, shorten="the output and its sources",
     )
 
 
@@ -333,6 +394,8 @@ async def handle_raise_hand(arguments: dict, **kwargs: Any) -> str:
     contract = step_contract_in(kwargs.get("session_config"), session_id=kwargs.get("session_id"))
     if contract is None:
         return _error(_NOT_A_STEP)
+    if _ended_in_this_wake(kwargs):
+        return _NO_LONGER
     hand = _hand(arguments)
     if isinstance(hand, str):
         return _error(hand)
@@ -342,20 +405,9 @@ async def handle_raise_hand(arguments: dict, **kwargs: Any) -> str:
         return _error("raise_hand needs its tool call's id.")
 
     store, session_id, session = await _step_session(kwargs)
-    usage = _usage(session)
-    client = keel_client()
-    if client is None:
-        return await _stopped(None, store, session_id, usage)
-    answer = await client.raise_hand(session_id, {
-        "call_id": call_id,
-        "question": question,
-        "choices": choices,
-        "evidence": evidence,
-        "pages_read": await _pages_read(store, session),
-        "usage": usage,
-    })
-    return await _answered(
-        answer, tool="raise_hand", client=client, store=store, session_id=session_id, usage=usage,
+    return await _send_report(
+        "raise_hand", kwargs, {"question": question, "choices": choices, "evidence": evidence},
+        store=store, session_id=session_id, session=session, shorten="the question and its evidence",
     )
 
 

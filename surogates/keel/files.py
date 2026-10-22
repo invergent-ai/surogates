@@ -49,8 +49,7 @@ async def case_file_value(storage: Any, session: Any, case_id: object, path: str
         data = await storage.read(bucket, key)
     except KeyError:
         raise FileNotFoundError(relative) from None
-    if not data:
-        raise FileNotFoundError(relative)
+    # An empty file is a file: its digest is the empty bytes'.
     return {
         "name": PurePosixPath(relative).name,
         "uri": f"case-file://{case_id}/{relative}",

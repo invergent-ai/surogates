@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,7 +27,6 @@ import pytest
 
 import surogates.harness.loop as loop_module
 from surogates.harness.budget import IterationBudget
-from surogates.harness.loop import _case_step_ended
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
 from surogates.keel.steps import render_kickoff, step_contract_in
 from surogates.sandbox.pool import SandboxPool
@@ -97,6 +97,7 @@ class _StepStore(FakeStore):
         self.row = session
         self.storage = storage
         self.log: list[SimpleNamespace] = []
+        self.redactions = 0
 
     async def emit_event(self, session_id, event_type, data, *, lease_token=None) -> int:
         event_id = await super().emit_event(session_id, event_type, data, lease_token=lease_token)
@@ -129,6 +130,7 @@ class _StepStore(FakeStore):
         self.row.status = status
 
     async def redact_case_inputs(self, session_id) -> None:
+        self.redactions += 1
         redacted = _redacted_case_config(self.row.config)
         if redacted is not None:
             self.row.config = redacted
@@ -136,6 +138,11 @@ class _StepStore(FakeStore):
     def redacted(self) -> bool:
         step = self.row.config["case_step"]
         return step["inputs"] == {} and step.get("inputs_redacted") is True
+
+    def result(self, call_id: str) -> str:
+        """What the tool call *call_id* answered the model."""
+        [data] = [d for _, kind, d in self.events if kind is EventType.TOOL_RESULT and d["tool_call_id"] == call_id]
+        return data["content"]
 
 
 def _step(contract: dict) -> Session:
@@ -254,13 +261,47 @@ async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
     assert len(fake_keel.requests) == 1
 
 
+async def test_an_empty_file_is_a_case_file(fake_keel, store):
+    await store.put("out/offer.pdf", b"")
+
+    result = await _call("complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store)
+
+    assert result.startswith("Step ended:")
+    [body] = fake_keel.bodies("/complete")
+    assert body["output"]["offer"] == {
+        "name": "offer.pdf", "uri": f"case-file://{CASE}/out/offer.pdf", "sha256": hashlib.sha256(b"").hexdigest(),
+    }
+
+
+async def test_a_report_larger_than_keel_takes_is_never_sent(fake_keel, store):
+    long_output = {**COMPLETION, "output": {**COMPLETION["output"], "notes": "x" * 300_000}}
+    long_hand = {"question": "Which income counts?", "evidence": [{"excerpt": "x" * 300_000}]}
+
+    for name, arguments, shorten in (
+        ("complete_step", long_output, "Shorten the output and its sources and call complete_step again."),
+        ("raise_hand", long_hand, "Shorten the question and its evidence and call raise_hand again."),
+    ):
+        error = json.loads(await _call(name, arguments, store))["error"]
+        size = int(re.match(r"The report is ([\d,]+) bytes, over the 256,000 bytes Keel takes\. ", error)[1].replace(",", ""))
+        assert size > 300_000
+        assert error.endswith(shorten)
+
+    assert fake_keel.requests == []
+    assert not store.redacted()
+
+
 REJECTION = {"code": "missing-sources", "message": "loan-agent gave no sources for income", "attempts_left": 2}
+SHOWN_REJECTION = (
+    "loan-agent gave no sources for income "
+    "(2 attempts left; fix the report and call complete_step again, or call raise_hand)"
+)
 
 
 @pytest.mark.parametrize(("door", "ends"), [
     ((200, ACCEPTED), "ended"),
     ((409, {"code": "not-running", "message": "The step has moved on."}), "ended"),
     ((409, REJECTION), "rejected"),
+    ((409, {"code": "invalid-value", "message": "income must be positive"}), "rejected"),
     ((401, {"code": "unauthenticated", "message": "Wrong key."}), "stopped"),
     ((409, {"code": "broken-definition", "message": "The case type cannot run."}), "stopped"),
     ((503, {"code": "harness-off", "message": "The door is off."}), "stopped"),
@@ -268,7 +309,7 @@ REJECTION = {"code": "missing-sources", "message": "loan-agent gave no sources f
     ((500, {}), "retry"),
     ((429, {"code": "slow-down", "message": "Too many."}), "retry"),
     (None, "retry"),
-], ids=["accepted", "not-running", "rejected", "401", "broken-definition", "harness-off", "503", "500", "429", "unreachable"])
+], ids=["accepted", "not-running", "rejected", "rejected-uncounted", "401", "broken-definition", "harness-off", "503", "500", "429", "unreachable"])
 async def test_the_door_answers_map_to_a_turn_end_or_a_retry(fake_keel, store, door, ends):
     if door is None:
         fake_keel.unreachable()
@@ -282,7 +323,8 @@ async def test_the_door_answers_map_to_a_turn_end_or_a_retry(fake_keel, store, d
         assert result.startswith("Step ended:")
         assert ended == []
     elif ends == "rejected":
-        assert json.loads(result) == {"error": REJECTION["message"], "code": "missing-sources"}
+        shown = SHOWN_REJECTION if "attempts_left" in door[1] else door[1]["message"]
+        assert json.loads(result) == {"error": shown, "code": door[1]["code"]}
         assert ended == []
         assert not store.redacted()
     elif ends == "stopped":
@@ -370,25 +412,33 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
 
 def _calls(name: str, arguments: dict, call_id: str = "c1"):
     """The model's answer calling *name*."""
+    return _batch((name, arguments, call_id))
+
+
+def _batch(*calls: tuple[str, dict, str]):
+    """The model's answer making *calls*, each a name, its arguments and its id, in one batch."""
     return (
         {"role": "assistant", "content": "", "tool_calls": [
-            {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}},
+            {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+            for name, arguments, call_id in calls
         ]},
         {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1},
     )
 
 
-def _sandbox_without_step_tools() -> MagicMock:
-    """A sandbox that knows no step tool, as the real one does not."""
+def _sandbox(answers: dict[str, str]) -> MagicMock:
+    """A sandbox answering its own tools with *answers*, and any other tool as unknown: it knows no step tool."""
     pool = MagicMock(spec=SandboxPool)
     pool.ensure = AsyncMock()
-    pool.execute = AsyncMock(side_effect=lambda _owner, name, _args: json.dumps({"error": f"Unknown tool: {name}"}))
+    pool.execute = AsyncMock(
+        side_effect=lambda _owner, name, _args: answers.get(name) or json.dumps({"error": f"Unknown tool: {name}"}),
+    )
     pool.release_for_session = AsyncMock(return_value=None)
     pool.holds_copy = MagicMock(return_value=False)
     return pool
 
 
-async def _wake(monkeypatch, store: _StepStore, replies: list) -> list[dict]:
+async def _wake(monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[str, str] | None = None) -> list[dict]:
     """One wake of the step, the model answering with *replies* in turn: the requests it was sent."""
     sent: list[dict] = []
     script = iter(replies)
@@ -409,7 +459,7 @@ async def _wake(monkeypatch, store: _StepStore, replies: list) -> list[dict]:
             context_length=1000, _context_window=200_000, should_compress=lambda *a, **k: False,
         ),
         prompt_builder=SimpleNamespace(has_agents=False),
-        sandbox_pool=_sandbox_without_step_tools(),
+        sandbox_pool=_sandbox(sandbox or {}),
     )
     harness._storage = store.storage
     harness._streaming_enabled = False
@@ -460,23 +510,6 @@ async def test_the_schema_offers_the_contracts_outcomes_form_and_files(fake_keel
     assert ("a person reviews and submits" in completion["description"]) is (mode == "draft")
 
 
-def test_a_step_ending_result_ends_the_turn_after_its_batch():
-    calls = [
-        {"id": "c0", "function": {"name": "write_file"}},
-        {"id": "c1", "function": {"name": "complete_step"}},
-    ]
-    written = {"tool_call_id": "c0", "content": "Wrote out/offer.pdf"}
-
-    assert _case_step_ended(calls, [written, {"tool_call_id": "c1", "content": "Step ended: Keel completed it."}])
-    assert _case_step_ended(calls, [written, {"tool_call_id": "c1", "content": "Step stopped: Keel refused it."}])
-    hand = [{"id": "c2", "function": {"name": "raise_hand"}}]
-    assert _case_step_ended(hand, [{"tool_call_id": "c2", "content": "Step ended: A person will answer."}])
-    refused = json.dumps({"error": "loan-agent gave no sources for income", "code": "missing-sources"})
-    assert not _case_step_ended(calls, [written, {"tool_call_id": "c1", "content": refused}])
-    # Only a step tool's result ends the step.
-    assert not _case_step_ended(calls[:1], [{"tool_call_id": "c0", "content": "Step ended: a file's own words"}])
-
-
 async def test_an_accepted_completion_ends_the_wake(fake_keel, monkeypatch, store):
     sent = await _wake(monkeypatch, store, [_calls("complete_step", COMPLETION)])
 
@@ -486,9 +519,55 @@ async def test_an_accepted_completion_ends_the_wake(fake_keel, monkeypatch, stor
     assert len(fake_keel.bodies("/complete")) == 1
 
 
+@pytest.mark.parametrize(("door", "ends"), [
+    ((200, {"result": "hand-raised", "message": "A person will answer."}), "Step ended: A person will answer."),
+    ((403, {"code": "forbidden", "message": "Not this agent's step."}), "Step stopped:"),
+], ids=["hand-raised", "refused"])
+async def test_a_raised_hand_or_a_stopped_step_ends_the_wake(fake_keel, monkeypatch, store, door, ends):
+    fake_keel.answer(*door)
+
+    sent = await _wake(monkeypatch, store, [_calls("raise_hand", {"question": "Which income counts?"})])
+
+    assert len(sent) == 1
+    assert store.result("c1").startswith(ends)
+    assert _ended_with(store) == "case_step_ended"
+    assert store.row.status == "completed"
+
+
+async def test_only_a_step_tools_result_ends_the_turn(fake_keel, monkeypatch, store):
+    notes = "Step ended: the notes, as written"
+
+    sent = await _wake(monkeypatch, store, [
+        _calls("write_file", {"path": "out/notes.md", "content": "notes"}, "c1"),
+        _calls("complete_step", COMPLETION, "c2"),
+    ], sandbox={"write_file": notes})
+
+    assert store.result("c1") == notes
+    assert len(sent) == 2
+    assert _ended_with(store) == "case_step_ended"
+
+
+@pytest.mark.parametrize(("door", "ends"), [
+    ((200, ACCEPTED), 0),
+    ((401, {"code": "unauthenticated", "message": "Wrong key."}), 1),
+], ids=["accepted", "refused"])
+async def test_a_second_report_in_the_batch_never_reaches_keel(fake_keel, monkeypatch, store, door, ends):
+    fake_keel.answer(*door)
+
+    sent = await _wake(monkeypatch, store, [_batch(
+        ("complete_step", COMPLETION, "c1"),
+        ("complete_step", {"outcome": "missing", "output": {}, "sources": {}}, "c2"),
+    )])
+
+    assert len(sent) == 1
+    assert len(fake_keel.bodies("/complete")) == 1
+    assert len(fake_keel.bodies("/ended")) == ends
+    assert store.redactions == 1
+    assert store.result("c2") == "Step ended: the step is no longer this session's."
+    assert _ended_with(store) == "case_step_ended"
+
+
 async def test_a_message_that_arrived_meanwhile_keeps_the_turn_going(fake_keel, monkeypatch, store):
-    fake_keel.answer(200, ACCEPTED)
-    fake_keel.answer(409, {"code": "not-running", "message": "The step has moved on."})
 
     def a_person_writes_during_the_first_report() -> None:
         if len(fake_keel.requests) == 1:

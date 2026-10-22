@@ -6,12 +6,15 @@ tells an intake agent which case types it may start, and starts them.
 
 Every request carries the door key as a bearer.  An answer is a
 :class:`KeelAnswer`: the status Keel gave, and its decoded JSON body.  A
-request that never got an answer has no status, and is never raised.  Nothing
-here logs a body: what goes to Keel and what comes back is case data.
+request that never got an answer has no status, and is never raised.  A body
+larger than the door takes is never sent: :class:`BodyTooLarge` is raised
+instead.  Nothing here logs a body: what goes to Keel and what comes back is
+case data.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,7 +24,7 @@ import httpx
 
 from surogates.config import Settings
 
-__all__ = ["KeelAnswer", "KeelClient", "keel_client", "use_keel_client"]
+__all__ = ["BodyTooLarge", "KeelAnswer", "KeelClient", "keel_client", "use_keel_client"]
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,17 @@ logger = logging.getLogger(__name__)
 TIMEOUT_SECONDS = 30.0
 #: The longest ``detail`` the door takes.
 DETAIL_CHARS = 2000
+#: The largest body the door takes, in bytes of JSON as sent.
+MAX_BODY_BYTES = 256_000
+
+
+class BodyTooLarge(ValueError):
+    """A body larger than the door takes: it was not sent."""
+
+    def __init__(self, size: int, limit: int) -> None:
+        super().__init__(f"the body is {size} bytes, over the {limit} the door takes")
+        self.size = size
+        self.limit = limit
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +55,7 @@ class KeelAnswer:
     """
 
     status: int | None
-    data: dict | list = field(default_factory=dict)
+    data: dict | list = field(default_factory=dict, repr=False)
 
     @property
     def code(self) -> str | None:
@@ -82,14 +96,19 @@ class KeelClient:
         body: dict | None = None,
         headers: dict[str, str] | None = None,
     ) -> KeelAnswer:
+        sent = {"Authorization": f"Bearer {self._key}", **(headers or {})}
+        content = None
+        if body is not None:
+            # Encoded as httpx encodes JSON, and measured as sent.
+            content = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            if len(content) > MAX_BODY_BYTES:
+                raise BodyTooLarge(len(content), MAX_BODY_BYTES)
+            sent["Content-Type"] = "application/json"
         try:
             async with httpx.AsyncClient(
                 base_url=self._url, timeout=TIMEOUT_SECONDS, transport=self._transport,
             ) as client:
-                response = await client.request(
-                    method, path, json=body,
-                    headers={"Authorization": f"Bearer {self._key}", **(headers or {})},
-                )
+                response = await client.request(method, path, content=content, headers=sent)
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
             logger.warning("Keel's door could not be reached for %s %s (%s)", method, path, type(exc).__name__)
             return KeelAnswer(None)
@@ -100,11 +119,17 @@ class KeelClient:
         return KeelAnswer(response.status_code, data if isinstance(data, (dict, list)) else {})
 
     async def complete(self, session_id: object, body: dict) -> KeelAnswer:
-        """Report a step session's result: ``{"call_id", "outcome", "output", "sources", "pages_read", "usage"}``."""
+        """Report a step session's result: ``{"call_id", "outcome", "output", "sources", "pages_read", "usage"}``.
+
+        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`.
+        """
         return await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/complete", body=body)
 
     async def raise_hand(self, session_id: object, body: dict) -> KeelAnswer:
-        """Raise a hand on a step session's step: ``{"call_id", "question", "choices", "evidence", "pages_read", "usage"}``."""
+        """Raise a hand on a step session's step: ``{"call_id", "question", "choices", "evidence", "pages_read", "usage"}``.
+
+        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`.
+        """
         return await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/raise-hand", body=body)
 
     async def ended(
@@ -141,7 +166,10 @@ class KeelClient:
         )
 
     async def start_case(self, org_id: object, body: dict, *, idempotency_key: str) -> KeelAnswer:
-        """Start a case in project *org_id*: ``{"agent_id", "session_id", "user_id", "channel", "case_type", "data"}``."""
+        """Start a case in project *org_id*: ``{"agent_id", "session_id", "user_id", "channel", "case_type", "data"}``.
+
+        Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`.
+        """
         return await self._send(
             "POST", f"/api/harness/projects/{_segment(org_id)}/cases",
             body=body, headers={"Idempotency-Key": idempotency_key},
