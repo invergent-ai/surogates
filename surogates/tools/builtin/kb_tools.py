@@ -50,10 +50,10 @@ harness-side either way is the sender's pinned plan entitlement
 A Keel case's sessions also read the KBs their case's scope grants, of
 the session's project only, though their agent has them not attached:
 the attachment check takes the grant, and every call to ops's KB routes
-names it (``granted_kb_ids``) for ops to apply the same rule. Each page
-a case's session reads is written to the case root's log as a
-``kb.page_read`` event, with the SHA-256 of the content read, so the
-step's report to Keel carries it.
+names the granted KBs of that project (``granted_kb_ids``) for ops to
+apply the same rule. Each page whose content a case's session reads is
+written to the case root's log as a ``kb.page_read`` event, with the
+SHA-256 of the content read, so the step's report to Keel carries it.
 """
 
 from __future__ import annotations
@@ -182,6 +182,44 @@ async def _is_kb_attached(
         )
     )
     return result.first() is not None
+
+
+async def _project_grant(session: Any, *, granted: Collection[str], org_id: str | None) -> list[str]:
+    """The ids of *granted* that are KBs of the session's project (*org_id*), sorted.
+
+    What a call sends ops as ``granted_kb_ids``: the rule of
+    :func:`_is_kb_attached`, so a grant naming another project's KB never
+    leaves the runtime.  One query, made only for a grant.
+    """
+    if not granted or not org_id:
+        return []
+    result = await session.execute(
+        sa.select(OpsKnowledgeBase.id).where(
+            OpsKnowledgeBase.id.in_(sorted(granted)),
+            OpsKnowledgeBase.project_id == org_id,
+        )
+    )
+    return sorted(str(row[0]) for row in result.all())
+
+
+async def _sendable_grant(kwargs: dict[str, Any]) -> list[str]:
+    """The session's case grant, bounded to its project, for a call to ops that holds no DB session.
+
+    Nothing is granted when the ops DB is not wired or cannot be read: the
+    call then covers the agent's own KBs only.
+    """
+    granted, org_id = _case_grant(kwargs)
+    if not granted:
+        return []
+    factory = ensure_ops_session_factory()
+    if factory is None:
+        return []
+    try:
+        async with factory() as session:
+            return await _project_grant(session, granted=granted, org_id=org_id)
+    except Exception:
+        logger.warning("Could not bound a case's KB grant to its project; none is sent", exc_info=True)
+        return []
 
 
 async def _record_page_read(kwargs: dict[str, Any], *, kb_id: str, path: str, raw: bytes) -> None:
@@ -649,6 +687,8 @@ async def _kb_read_page_handler(
         )
 
     async with factory() as session:
+        # Once for the call: what the links lookup sends ops, too.
+        granted = await _project_grant(session, granted=granted, org_id=org_id)
         if not await _is_kb_attached(
             session, agent_id=agent_id, kb_id=kb_id,
             granted=granted, org_id=org_id,
@@ -704,7 +744,7 @@ async def _kb_read_page_handler(
             result = await platform_client.get_agent_kb_document_links(
                 agent_id, file_id=page.source_file_id, kb_ids=[kb_id],
                 expected_artifact_sha256=page.content_sha256,
-                granted_kb_ids=sorted(granted),
+                granted_kb_ids=granted,
             )
             if result.get("status") in ("extracted", "partial") and result.get("artifact_sha256") != page.content_sha256:
                 result = {"status": "stale"}
@@ -727,8 +767,13 @@ async def _kb_read_page_handler(
         page_range=page_range, offset=offset, limit=limit,
         link_text=link_text, conflict_text=conflict_text,
     )
-    # A page a session of a Keel case read is recorded for the step's report.
-    if is_case_config(kwargs.get("session_config")) and not text.startswith("Error:"):
+    # A page a session of a Keel case read is recorded for the step's report:
+    # its content, not its links or statement conflicts.
+    if (
+        is_case_config(kwargs.get("session_config"))
+        and context not in ("links", "conflicts")
+        and not text.startswith("Error:")
+    ):
         await _record_page_read(kwargs, kb_id=kb_id, path=path, raw=raw)
     return text
 
@@ -855,9 +900,6 @@ async def _kb_search_pages_handler(
     limit = _clamp_limit(arguments.get("limit"))
 
     agent_id = _agent_id_from_kwargs(kwargs)
-    # A Keel case's grants go to ops, which adds each one of the agent's
-    # project to the attached set.
-    granted = sorted(_case_grant(kwargs)[0])
 
     platform_client = kwargs.get("platform_client")
     if platform_client is None:
@@ -906,6 +948,9 @@ async def _kb_search_pages_handler(
             return "Error: no knowledge bases are available to this session."
         kb_ids = sorted(allowed) if allowed is not None else None
 
+    # A Keel case's grant, of its project only, goes to ops, which adds
+    # each one to the agent's attached set.
+    granted = await _sendable_grant(kwargs)
     try:
         if mode == "documents":
             result = await platform_client.find_agent_kb_documents(

@@ -143,12 +143,15 @@ def _chat() -> Session:
     )
 
 
-async def _call(name: str, arguments: dict, session: Session, log: _Log, platform_client=None) -> str:
-    """Run a tool of *session* as the harness runs it."""
+async def _call(
+    name: str, arguments: dict, session: Session, log: _Log, platform_client=None, *, tenant: bool = True,
+) -> str:
+    """Run a tool of *session* as the harness runs it; without its tenant when *tenant* is false."""
+    context = {"tenant": _tenant(session)} if tenant else {}
     return await _registry().dispatch(
         name, arguments,
-        session_id=str(session.id), agent_id=session.agent_id, tenant=_tenant(session),
-        session_store=log, session_config=session.config, platform_client=platform_client,
+        session_id=str(session.id), agent_id=session.agent_id, session_store=log,
+        session_config=session.config, platform_client=platform_client, **context,
     )
 
 
@@ -255,7 +258,8 @@ async def test_an_ordinary_session_records_no_pages(ops, hub):
 async def test_search_sends_the_grants_to_ops(ops, hub):
     fake = _Ops()
     client = PlatformClient(base_url="http://ops.test", token="runtime", transport=httpx.MockTransport(fake.handle))
-    step = await _step(_SessionStore(), knowledge=["kb2"])
+    # A grant of another project's knowledge base is never sent.
+    step = await _step(_SessionStore(), knowledge=["kb3", "kb2"])
     try:
         await _call("kb_search_pages", {"query": "net pay"}, step, _Log(), client)
         await _call("kb_search_pages", {"query": "HB-1", "mode": "documents"}, step, _Log(), client)
@@ -274,3 +278,47 @@ async def test_search_sends_the_grants_to_ops(ops, hub):
     for request in case:
         assert request.url.params.get_list("granted_kb_ids") == ["kb2"]
     assert "granted_kb_ids" not in chat.url.params
+
+
+async def test_only_a_read_of_page_content_is_recorded(ops, hub):
+    fake, log = _Ops(), _Log()
+    client = PlatformClient(base_url="http://ops.test", token="runtime", transport=httpx.MockTransport(fake.handle))
+    step = await _step(_SessionStore(), knowledge=["kb2"])
+    try:
+        # The document's links and its statement conflicts are not its content.
+        for context in ("links", "conflicts"):
+            out = await _call("kb_read_page", {"kb_id": "kb2", "path": SOURCE_PATH, "context": context}, step, log, client)
+            assert out.startswith(f"_Evidence: kb=kb2; path={SOURCE_PATH}")
+        assert log.events == []
+
+        window = await _call("kb_read_page", {"kb_id": "kb2", "path": PAGE_PATH, "limit": 10}, step, log, client)
+    finally:
+        await client.aclose()
+
+    assert "Continue with offset=10" in window
+    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST}]
+    assert len(log.events) == 1
+
+
+async def test_a_case_session_without_its_tenant_is_granted_nothing(ops, hub):
+    fake, log = _Ops(), _Log()
+    client = PlatformClient(base_url="http://ops.test", token="runtime", transport=httpx.MockTransport(fake.handle))
+    step = await _step(_SessionStore(), knowledge=["kb2"])
+    try:
+        for name, arguments in (
+            ("kb_read_page", {"kb_id": "kb2", "path": SOURCE_PATH}),
+            ("kb_read_page", {"kb_id": "kb2", "path": SOURCE_PATH, "context": "links"}),
+            ("kb_list_pages", {"kb_id": "kb2"}),
+        ):
+            assert await _call(name, arguments, step, log, client, tenant=False) == NOT_ATTACHED
+        assert fake.requests == []
+
+        await _call("kb_search_pages", {"query": "net pay"}, step, log, client, tenant=False)
+    finally:
+        await client.aclose()
+
+    # A search covers only the agent's own knowledge.
+    [search] = fake.requests
+    assert "granted_kb_ids" not in search.url.params
+    assert log.events == []
+    hub.assert_not_called()
