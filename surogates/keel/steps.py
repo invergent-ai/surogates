@@ -33,12 +33,20 @@ from surogates.channels.memory_boundary import (
     is_case_config,
     is_case_session,
 )
+from surogates.runtime.governance import (
+    BOARD_SELF_TOOLS,
+    CASE_STEP_TOOLS,
+    WORKER_SELF_TOOLS,
+)
 
 __all__ = [
+    "ALWAYS_KEPT",
     "ANSWER_MARKER",
+    "CASE_ALLOWED_TOOLS",
     "CASE_BOUNDARY_PREFIX",
     "CASE_SCOPE_KEY",
     "CASE_STEP_KEY",
+    "CASE_STEP_TOOLS",
     "CaseScope",
     "KICKOFF_MARKER",
     "OutcomeContract",
@@ -46,6 +54,7 @@ __all__ = [
     "StepContract",
     "case_scope_in",
     "case_scope_of",
+    "gate_case_tools",
     "is_case_config",
     "is_case_session",
     "is_case_step",
@@ -69,6 +78,30 @@ KICKOFF_MARKER = "keel_step"
 #: reviewer's request to revise a draft: each written once per Keel key.
 ANSWER_MARKER = "keel_answer"
 REVISION_MARKER = "keel_revision"
+
+#: The built-in tools a session of a case may be offered: work on files, the
+#: terminal, the browser, the web, the agent's memory and knowledge, its
+#: skills, and the helpers it hands work to.  Nothing that talks to people,
+#: schedules work, starts a thread or a case, or edits the agent.
+CASE_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "read_file", "write_file", "patch", "search_files", "list_files",
+    "terminal", "process",
+    "browser_navigate", "browser_get_state", "browser_evaluate", "browser_close",
+    "browser_click", "browser_type", "browser_press_key", "browser_scroll",
+    "browser_drag", "browser_wait", "browser_screenshot",
+    "web_search", "web_extract",
+    "memory", "kb_list_pages", "kb_read_page", "kb_search_pages",
+    # ``skill_step`` is bookkeeping for a procedure skill, as the other two are
+    # for the skills themselves.
+    "skills_list", "skill_view", "skill_step", "todo", "vision_analyze",
+    "delegate_task", "spawn_worker", "send_worker_message", "stop_worker",
+})
+#: What a case keeps when its scope names the work tools it may use: reading,
+#: memory, knowledge, skills and its todo list are how it works, not work it does.
+ALWAYS_KEPT: frozenset[str] = frozenset({
+    "kb_list_pages", "kb_read_page", "kb_search_pages", "skills_list", "skill_view",
+    "memory", "read_file", "list_files", "search_files", "todo",
+})
 
 
 class OutcomeContract(BaseModel):
@@ -157,6 +190,33 @@ def is_case_step(session: object) -> bool:
     A child of the step works on the case too, but is not the step.
     """
     return getattr(session, "parent_id", None) is None and step_contract_of(session) is not None
+
+
+def gate_case_tools(tools: set[str], session: object) -> set[str]:
+    """The tools of *tools* a session may be offered, as a case decides them.
+
+    Runs last in both places that decide what is offered, the prompt and the
+    schemas, so they agree.  A session of no case only loses the step tools.
+    A session of a case keeps the case's allowed tools, its agent's MCP tools
+    and its execution's self-tools; a scope that names work tools narrows the
+    allowed ones to those and :data:`ALWAYS_KEPT`.  Only the step's own
+    session gets the step tools.  Nothing else is ever added, so a tool an
+    earlier gate dropped stays dropped.
+    """
+    if not is_case_session(session):
+        return set(tools) - CASE_STEP_TOOLS
+
+    def platform(name: str) -> bool:
+        return name.startswith("mcp__") or name in WORKER_SELF_TOOLS or name in BOARD_SELF_TOOLS
+
+    kept = {name for name in tools if name in CASE_ALLOWED_TOOLS or platform(name)}
+    scope = case_scope_of(session)
+    if scope is not None and scope.tools is not None:
+        named = set(scope.tools)
+        kept = {name for name in kept if name in named or name in ALWAYS_KEPT or platform(name)}
+    if is_case_step(session):
+        kept |= CASE_STEP_TOOLS
+    return kept
 
 
 def _fence(text: str) -> str:

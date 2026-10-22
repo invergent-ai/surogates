@@ -5442,12 +5442,14 @@ class AgentHarness(
         result = self._tool_filter_for_session_impl(session)
         # A stand-in prompt builder (some tests) has no skill catalog at
         # all; treat that as no skills, so it simply gets no skill_step.
+        # This runs after the Keel case gate, and may: the case's tools
+        # include ``skill_step`` too.
         skills = getattr(self._prompt, "skills", None) or ()
         return gate_skill_step(
             result, all_tools=self._tools.tool_names, skills=skills,
         )
 
-    def _tool_filter_for_session_impl(self, session: Session) -> set[str] | None:
+    def _tool_filter_for_session_impl(self, session: Session) -> set[str]:
         config = session.config or {}
         explicit_allowed = bool(config.get("allowed_tools"))
 
@@ -5513,10 +5515,20 @@ class AgentHarness(
         tool_filter = self._apply_entitlement_exclusions(tool_filter)
         tool_filter = self._drop_project_master_mcp_tools(tool_filter, session)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
-        return self._drop_eval_excluded_tools(
+        tool_filter = self._drop_eval_excluded_tools(
             self._ensure_always_available_tools(
                 tool_filter, explicit_allowed=explicit_allowed,
             ),
+            session,
+        )
+        # Last, as in ``worker._filter_effective_tools``: a Keel case's
+        # sessions keep only the case's tools, and only its step's own
+        # session gets the step tools, which every other session loses.
+        # ``None`` (every registered tool) is spelled out so they can go.
+        from surogates.keel.steps import gate_case_tools
+
+        return gate_case_tools(
+            set(self._tools.tool_names) if tool_filter is None else tool_filter,
             session,
         )
 

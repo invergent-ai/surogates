@@ -24,6 +24,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import has_file_pane
+from surogates.keel.steps import gate_case_tools
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
@@ -253,7 +254,9 @@ def _filter_effective_tools(
        the rule.  Dropping it here alone told the model in prose that
        the tool was gone while still handing it the schema.
 
-    All other tools pass through unchanged.
+    Execution-context self-tools and other per-session groups follow, and
+    the Keel case gate runs last: a case's sessions keep only the case's
+    tools (:func:`surogates.keel.steps.gate_case_tools`).
     """
     result = set(tools)
 
@@ -361,7 +364,10 @@ def _filter_effective_tools(
     if not has_file_pane(session):
         result -= {"office_read", "office_edit"}
 
-    return result
+    # Last: a Keel case's sessions are offered only the case's tools, and only
+    # its step's own session the step tools.  The schemas apply the same gate
+    # last (``AgentHarness._tool_filter_for_session_impl``).
+    return gate_case_tools(result, session)
 
 
 _warned_missing_model_metadata: set[str] = set()
@@ -2005,7 +2011,9 @@ async def run_worker(settings: Settings) -> None:
         # ``skill_step`` is bookkeeping for procedure skills: only offer it
         # (prompt surface here; schema surface is the harness's
         # ``_tool_filter_for_session``, which must agree) when a
-        # graph-backed skill is in this session's catalog.
+        # graph-backed skill is in this session's catalog.  It runs after the
+        # case gate in ``_filter_effective_tools``, and may: the case's tools
+        # include ``skill_step`` too.
         effective_tools = gate_skill_step(
             effective_tools,
             all_tools=tool_registry.tool_names,
