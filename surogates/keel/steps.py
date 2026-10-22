@@ -46,9 +46,11 @@ __all__ = [
     "CASE_BOUNDARY_PREFIX",
     "CASE_SCOPE_KEY",
     "CASE_STEP_KEY",
+    "CASE_STEP_NUDGE",
     "CASE_STEP_TOOLS",
     "CaseScope",
     "KICKOFF_MARKER",
+    "NUDGE_MARKER",
     "OutcomeContract",
     "REVISION_MARKER",
     "STEP_ENDED",
@@ -86,6 +88,13 @@ REVISION_MARKER = "keel_revision"
 #: report for good, and people take the step (``STEP_STOPPED``).
 STEP_ENDED = "Step ended:"
 STEP_STOPPED = "Step stopped:"
+#: What a step's turn that ends in words, with no report, is told once, and
+#: the ``synthetic`` marker of that message.
+CASE_STEP_NUDGE = (
+    "This session works one step of a case. Finish it now: call complete_step "
+    "with one of its outcomes, or raise_hand if you cannot."
+)
+NUDGE_MARKER = "keel_step_nudge"
 
 #: The built-in tools a session of a case may be offered: work on files, the
 #: terminal, the browser, the web, the agent's memory and knowledge, its

@@ -438,17 +438,26 @@ def _sandbox(answers: dict[str, str]) -> MagicMock:
     return pool
 
 
-async def _wake(monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[str, str] | None = None) -> list[dict]:
-    """One wake of the step, the model answering with *replies* in turn: the requests it was sent."""
+async def _wake(
+    monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[str, str] | None = None, streaming: bool = False,
+) -> list[dict]:
+    """One wake of the step, the model answering with *replies* in turn: the requests it was sent.
+
+    *streaming* runs the tool calls as a streamed answer's are, each started as it arrives.
+    """
     sent: list[dict] = []
     script = iter(replies)
 
     async def llm(**call):
         sent.append(deepcopy(call["create_kwargs"]))
         try:
-            return next(script)
+            reply = next(script)
         except StopIteration:
             raise AssertionError("the model was called more often than scripted") from None
+        if call.get("on_tool_call_complete") is not None:
+            for tool_call in reply[0].get("tool_calls") or []:
+                call["on_tool_call_complete"](tool_call)
+        return reply
 
     monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
     harness = _make_harness(
@@ -462,7 +471,7 @@ async def _wake(monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[
         sandbox_pool=_sandbox(sandbox or {}),
     )
     harness._storage = store.storage
-    harness._streaming_enabled = False
+    harness._streaming_enabled = streaming
     harness._prefetch_memory = AsyncMock(return_value="")
     harness._maybe_consult_required_expert = AsyncMock(return_value=None)
     harness._maybe_route_final_response_to_inbox = AsyncMock(return_value=None)
@@ -470,8 +479,14 @@ async def _wake(monkeypatch, store: _StepStore, replies: list, *, sandbox: dict[
     harness._promote_fenced_artifacts = AsyncMock(return_value=None)
     harness._end_turn = AsyncMock(return_value=None)
 
-    kickoff = render_kickoff(step_contract_in(store.row.config))
-    store.write(EventType.USER_MESSAGE, {"content": kickoff, "synthetic": "keel_step"})
+    # A step starts with Keel's kickoff; any other session with a person's message.
+    contract = step_contract_in(store.row.config)
+    if contract is not None:
+        kickoff = render_kickoff(contract)
+        store.write(EventType.USER_MESSAGE, {"content": kickoff, "synthetic": "keel_step"})
+    else:
+        kickoff = "What do the payslips say?"
+        store.write(EventType.USER_MESSAGE, {"content": kickoff})
     await harness._run_loop(
         store.row.model_copy(deep=True), [{"role": "user", "content": kickoff}], "system",
         SimpleNamespace(lease_token=uuid4()), all_events=list(store.log),

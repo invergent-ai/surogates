@@ -109,8 +109,17 @@ from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
+from surogates.tools.builtin.case_step import step_ended_in_wake
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
-from surogates.keel.steps import CASE_STEP_TOOLS, STEP_ENDED, STEP_STOPPED, is_case_step, step_contract_of
+from surogates.keel.steps import (
+    CASE_STEP_NUDGE,
+    CASE_STEP_TOOLS,
+    NUDGE_MARKER,
+    STEP_ENDED,
+    STEP_STOPPED,
+    is_case_step,
+    step_contract_of,
+)
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     describe_for_conversation,
@@ -2766,6 +2775,8 @@ class AgentHarness(
         # marker) because the second-chance turn happens within the
         # same wake -- no re-enqueue, no re-rebuild of events.
         deep_research_delegate_nudge_fired = False
+        # The turn whose end in words a case's step was told to report: once a turn.
+        case_step_nudged_turn: str | None = None
         content_with_tools_cache = ContentWithToolsCache()
         tool_guardrails = ToolGuardrails(
             ToolGuardrailConfig.from_mapping(
@@ -3883,6 +3894,31 @@ class AgentHarness(
                         "delegating; injecting one-shot nudge",
                         session.id,
                     )
+                    continue
+
+                # A case's step ends only with its report.  A turn of the step
+                # that ends in words is told so once, and goes on; one that
+                # ends in words again completes, and Keel hears it had no
+                # outcome.  Not once a report of this wake ended the step.
+                if (
+                    case_step_nudged_turn != turn_id
+                    and is_case_step(session)
+                    and not step_ended_in_wake(session.id, lease.lease_token)
+                ):
+                    case_step_nudged_turn = turn_id
+                    try:
+                        await self._store.emit_event(
+                            session.id, EventType.USER_MESSAGE,
+                            {"content": CASE_STEP_NUDGE, "synthetic": NUDGE_MARKER},
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Session %s: the nudge to report its step was not saved (%s); the turn has it all the same",
+                            session.id, type(exc).__name__,
+                        )
+                    messages.append({"role": "user", "content": CASE_STEP_NUDGE})
+                    self._budget.refund()
+                    logger.info("Session %s: its case step's turn ended in words; nudging it to report", session.id)
                     continue
 
                 # Text-only iteration: kick off the iteration-summary
