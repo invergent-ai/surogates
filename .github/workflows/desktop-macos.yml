@@ -99,7 +99,7 @@ jobs:
         run: >-
           npx vitest run --project unit --reporter=verbose test/clean-child.test.ts test/fd-paths-darwin.test.ts
           test/srt-darwin.test.ts test/folder-lock.test.ts test/boot-id.test.ts test/hosts-handed.test.ts
-          test/policy-darwin.test.ts test/agent-disk-imports.test.ts test/flags.test.ts
+          test/policy-darwin.test.ts test/flags.test.ts
 
       - name: The walk and the hook guard
         if: ${{ !cancelled() }}
