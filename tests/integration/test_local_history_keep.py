@@ -134,6 +134,7 @@ async def test_a_failed_turn_with_nothing_to_keep_keeps_nothing_and_moves_no_bra
     assert "kept" not in report.data["error"]
 
 
+@pytest.mark.slow
 async def test_a_failed_turns_keep_its_computer_does_not_answer_in_time_ends_the_turn_and_its_work_lands_with_the_next(
     api, here, monkeypatch, caplog,
 ):
@@ -255,6 +256,7 @@ async def stopped_in(api, here, monkeypatch, thread, at: str):
     return turn, worker
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("at", sorted(WAITING_IN))
 async def test_a_turn_whose_landing_a_stop_ended_is_kept_on_its_threads_branch_and_lands_with_its_next_turn(api, here, monkeypatch, at):
     heard_soon(monkeypatch)

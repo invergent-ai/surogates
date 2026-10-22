@@ -277,6 +277,7 @@ async def test_a_file_whose_redo_turn_was_refused_is_being_redone_again_once_its
     assert await marks_of(api, project, thread) == [("Report.docx", "redoing"), ("a.md", "landed")]
 
 
+@pytest.mark.slow
 async def test_a_projects_rows_read_their_threads_redos_in_one_statement_however_many_threads_have_one(
     api, monkeypatch, pods, engine,
 ):
@@ -554,6 +555,7 @@ async def test_a_pushed_landing_whose_row_could_not_be_written_is_landed_over_by
     assert await marks_of(api, project, second) == [("b.md", "landed")]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("pruning", ["goes on regardless too", "settles as it should"])
 async def test_a_pushed_landing_another_went_over_is_found_in_mains_history_and_never_put_back(api, monkeypatch, tmp_path, pruning):
     project, first, second, pool = await a_landing_left_pushed(api, monkeypatch, tmp_path)
@@ -598,6 +600,7 @@ async def test_a_pushed_landing_another_went_over_is_found_in_mains_history_and_
     assert (pods.project / "b.md").read_text() == "b\n"
 
 
+@pytest.mark.slow
 async def test_a_landing_that_never_pushed_is_put_back_though_another_went_over_it(api, monkeypatch, tmp_path):
     project = await create(api)
     master = await master_of(api, project)
@@ -651,6 +654,7 @@ async def test_a_landing_that_never_pushed_is_put_back_though_another_went_over_
     assert pods.real_names() == ["Report.docx", "c.md", "d.md", "notes.txt", "start.md"]
 
 
+@pytest.mark.slow
 async def test_a_landing_a_prunings_cut_hides_is_given_up_and_none_of_its_files_is_put_back(api, monkeypatch, tmp_path):
     project = await create(api)
     master = await master_of(api, project)
@@ -1777,6 +1781,7 @@ async def test_a_restore_is_refused_once_another_landing_held_the_lock_past_its_
     assert (await restored(api, project, by_a))["applied"] == ["Report.docx"]
 
 
+@pytest.mark.slow
 async def test_a_restore_that_cannot_read_the_history_or_a_file_says_so_in_words(api, monkeypatch, tmp_path):
     project, first, second, pods, pool, by_a = await two_changes(api, tmp_path)
 
@@ -3098,6 +3103,7 @@ def calls_under_the_lock(monkeypatch) -> tuple[Counter, dict]:
     return calls, held
 
 
+@pytest.mark.slow
 async def test_an_undo_asks_the_store_a_bounded_number_of_times_a_file_under_the_projects_lock(api, monkeypatch, tmp_path):
     many = 40
     project, thread, pods, pool, first = await a_landing(api, tmp_path, f"mkdir -p data && for i in $(seq 1 {many}); do echo v1 $i > data/f$i.txt; done")

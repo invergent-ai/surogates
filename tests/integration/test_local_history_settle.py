@@ -145,6 +145,7 @@ async def back_again(here) -> None:
 # -- a landing nobody resumes, settled by the next in its folder ----------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cut", ["after its look", "after an apply", "in its put-back"])
 async def test_a_landing_lost_before_it_recorded_is_put_back_whole_by_the_next_landing_in_its_folder_before_that_one_looks(
     api, here, monkeypatch, cut,
@@ -188,6 +189,7 @@ async def test_a_landing_lost_before_it_recorded_is_put_back_whole_by_the_next_l
     assert await left_open(api, lost) == []
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("at", ["its first step", "an apply", "its record, before it pushed"])
 async def test_what_a_worker_killed_while_it_waited_left_open_is_closed_before_anything_goes_back_and_never_runs(api, here, monkeypatch, at):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
@@ -213,6 +215,7 @@ async def test_what_a_worker_killed_while_it_waited_left_open_is_closed_before_a
     assert kept(here) == {}
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cut", ["its answer read, its row not written", "its answer lost with its link"])
 async def test_a_landing_lost_once_its_record_pushed_is_completed_by_the_next_landing_and_nothing_of_it_is_put_back(api, here, monkeypatch, cut):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
@@ -256,6 +259,7 @@ async def test_a_landing_lost_once_its_record_pushed_is_completed_by_the_next_la
     assert (own.saga_state, [f["path"] for f in own.files], own.picked_up) == ("completed", ["Y.md"], [])
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cut", ["before its record", "after its record"])
 async def test_a_landing_whose_row_a_turn_taken_up_again_wrote_short_is_settled_by_what_its_computer_was_asked(api, here, monkeypatch, cut):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
@@ -290,6 +294,7 @@ async def test_a_landing_whose_row_a_turn_taken_up_again_wrote_short_is_settled_
     assert kept(here) == {}
 
 
+@pytest.mark.slow
 async def test_a_settle_whose_own_worker_is_lost_in_its_put_back_goes_on_with_it_when_its_turn_resumes(api, here, monkeypatch):
     (here.folder / "Budget.xlsx").write_text("Total,1\n")
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
@@ -327,6 +332,7 @@ async def test_a_settle_whose_own_worker_is_lost_in_its_put_back_goes_on_with_it
     assert (own.saga_state, [f["path"] for f in own.files]) == ("completed", ["Y.md"])
 
 
+@pytest.mark.slow
 async def test_a_landing_a_settle_began_on_is_settled_by_its_own_turn_taken_up_again_never_gone_on_with(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     before = seen(here.folder)
@@ -365,6 +371,7 @@ async def test_a_landing_a_settle_began_on_is_settled_by_its_own_turn_taken_up_a
     assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)] and kept(here) == {}
 
 
+@pytest.mark.slow
 async def test_an_earlier_turns_landing_of_the_settling_thread_is_settled_under_its_own_lease(api, here, monkeypatch):
     monkeypatch.setattr(local_landing, "BUSY_WAIT", 0.2)
     monkeypatch.setattr(local_landing, "BUSY_PATIENCE", 3.0)
@@ -388,6 +395,7 @@ async def test_an_earlier_turns_landing_of_the_settling_thread_is_settled_under_
     assert (here.folder / "Report.docx").read_bytes() == b"PK report v1 edited" and kept(here) == {}
 
 
+@pytest.mark.slow
 async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_worker_still_holds(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     before = seen(here.folder)
@@ -421,6 +429,7 @@ async def test_a_landing_does_not_land_over_one_left_half_done_whose_turn_a_work
         assert (await db.execute(text("SELECT count(*) FROM session_leases WHERE session_id = :id"), {"id": lost.id})).scalar() == 0
 
 
+@pytest.mark.slow
 async def test_a_landing_that_gives_up_waiting_for_a_workers_half_landing_gives_the_folder_back_for_that_worker(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     with monkeypatch.context() as first_run:
@@ -448,6 +457,7 @@ async def test_a_landing_that_gives_up_waiting_for_a_workers_half_landing_gives_
     assert kept(here) == {} and here.app.places.holder is None
 
 
+@pytest.mark.slow
 async def test_a_lost_landing_left_escalated_is_told_before_its_row_says_so(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     with monkeypatch.context() as first_run:
@@ -479,6 +489,7 @@ async def test_a_lost_landing_left_escalated_is_told_before_its_row_says_so(api,
     assert (report.data["landing"], report.data["recovered"], report.data["saga"]) == ("escalated", True, settled.saga_id)
 
 
+@pytest.mark.slow
 async def test_a_settle_keeps_no_answer_of_an_apply_that_names_another_file_than_it_asked_to_write(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     before = seen(here.folder)
@@ -501,6 +512,7 @@ async def test_a_settle_keeps_no_answer_of_an_apply_that_names_another_file_than
     assert but(seen(here.folder), "Y.md") == before and kept(here) == {}
 
 
+@pytest.mark.slow
 async def test_a_settler_that_loses_the_lost_threads_lease_partway_stops_there_and_settles_once_the_lease_is_free(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     before = seen(here.folder)
@@ -558,6 +570,7 @@ def lost_before(monkeypatch, thread, action: str, invocation: str = "land:0") ->
     monkeypatch.setattr(Steps, "ask", asking)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("ended", ["recorded", "put back whole"])
 async def test_a_landing_whose_own_forgetting_never_ran_is_forgotten_by_the_next_landing_in_its_folder(api, here, monkeypatch, ended):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
@@ -594,6 +607,7 @@ async def test_a_landing_whose_own_forgetting_never_ran_is_forgotten_by_the_next
 # -- what a settle cannot finish -------------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_a_lost_landing_that_pushed_and_whose_row_cannot_say_so_stops_every_landing_in_its_folder_until_it_can(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     with monkeypatch.context() as first_run:
@@ -630,6 +644,7 @@ async def test_a_lost_landing_that_pushed_and_whose_row_cannot_say_so_stops_ever
     assert (here.folder / "Y.md").read_text() == "y\n" and kept(here) == {}
 
 
+@pytest.mark.slow
 async def test_a_lost_landing_the_next_cannot_put_back_whole_is_left_escalated_and_its_thread_waits_on_you(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     with monkeypatch.context() as first_run:
@@ -660,6 +675,7 @@ async def test_a_lost_landing_the_next_cannot_put_back_whole_is_left_escalated_a
     assert own.saga_state == "completed" and [p["path"] for p in own.picked_up] == ["Report.docx"]
 
 
+@pytest.mark.slow
 async def test_a_lost_landing_whose_push_a_pruning_hides_is_given_up_with_nothing_put_back(api, here, monkeypatch):
     lost_master, lost, next_master, next_ = await two_threads(api, monkeypatch, here)
     with monkeypatch.context() as first_run:
@@ -740,6 +756,7 @@ async def test_a_landing_resumed_on_another_path_is_settled_from_what_it_asked_a
     assert files_of(report) == [("Budget.xlsx", "landed", None), ("Report.docx", "landed", None)]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cut", ["before its record", "after its record"])
 async def test_a_resumed_turn_that_works_on_lands_what_it_did_after_its_landing_began(api, here, monkeypatch, cut):
     _, master, thread = await begun_with_copy(api, here)
@@ -769,6 +786,7 @@ async def test_a_resumed_turn_that_works_on_lands_what_it_did_after_its_landing_
 # -- a worker without its lease ------------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 async def test_a_worker_that_lost_its_lease_stands_down_and_the_one_that_holds_it_goes_on_with_the_landing(api, here, monkeypatch):
     _, master, thread = await begun_with_copy(api, here)
     ask, applied = Steps.ask, [0]

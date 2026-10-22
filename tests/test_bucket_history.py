@@ -306,6 +306,7 @@ async def test_git_runs_under_none_of_the_apis_own_git_settings(tmp_path, storag
     assert list((tmp_path / "elsewhere").iterdir()) == []
 
 
+@pytest.mark.slow
 async def test_a_pack_never_passes_through_the_apis_memory_whole(tmp_path, storage, project, monkeypatch):
     one = landed(tmp_path, project, "saga:1", {"Report.docx": os.urandom(64 * 2**20)})  # 64 MiB that does not compress
     landed(tmp_path, project, "saga:2", {"Report.docx": os.urandom(48 * 2**20)})
@@ -857,6 +858,7 @@ async def test_the_copy_of_a_project_is_one_folder_by_its_bucket_and_prefix_with
     assert HistorySettings().file_bound == Bounds().file == 2**30
 
 
+@pytest.mark.slow
 async def test_refs_at_their_bound_are_checked_off_the_loop_a_line_at_a_time_whatever_the_number_of_projects(
     tmp_path, storage, monkeypatch,
 ):
@@ -1225,6 +1227,7 @@ async def test_one_project_is_read_by_one_git_at_a_time_and_another_meanwhile(tm
     assert (most[str(one.clone)], most[str(other.clone)], most["together"]) == (1, 1, 2)
 
 
+@pytest.mark.slow
 async def test_a_pack_that_takes_longer_to_bring_in_than_a_pack_may_is_stopped_refused_in_words_and_not_tried_at_every_request(
     tmp_path, storage, project, monkeypatch,
 ):
@@ -1387,6 +1390,7 @@ async def test_a_version_that_is_no_id_never_reaches_git(tmp_path, storage, proj
     assert ran == []
 
 
+@pytest.mark.slow
 async def test_a_version_never_passes_through_the_apis_memory_whole(tmp_path, storage, project, monkeypatch):
     data = os.urandom(64 * 2**20)  # 64 MiB that does not compress
     landed(tmp_path, project, "saga:1", {"Report.docx": data})
@@ -1668,6 +1672,7 @@ async def test_a_version_git_wrote_out_short_is_not_sent_as_if_it_were_whole(tmp
     assert (said(refused.value), isinstance(refused.value, NotKept), staged_in(history), no_ones(history)) == (None, False, [], True)
 
 
+@pytest.mark.slow
 async def test_a_version_git_stored_as_a_change_to_another_is_written_whole_and_refused_in_words_past_gits_memory(
     tmp_path, storage, project, monkeypatch,
 ):
@@ -2075,6 +2080,7 @@ async def test_a_look_finds_a_landing_by_its_saga_back_to_where_it_began_and_say
     assert await found("saga:3", two) == (three, False)
 
 
+@pytest.mark.slow
 async def test_a_file_and_a_version_never_pass_through_the_apis_memory_whole(tmp_path, storage, project, monkeypatch):
     video = os.urandom(48 * 2**20)  # 48 MiB that does not compress
     one = landed(tmp_path, project, "saga:1", {"Report.docx": os.urandom(64 * 2**20)})

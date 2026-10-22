@@ -641,6 +641,7 @@ async def test_a_thread_whose_pod_goes_after_its_turn_took_a_helpers_work_up_and
     assert refs(pods, "handoff") == []
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("third_turn", ["loses its pod", "is stopped"])
 async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_that_starts_the_next(api, monkeypatch, tmp_path, third_turn):
     master = await master_of(api, await create(api))
@@ -853,6 +854,7 @@ async def a_thread_whose_worker_outlives_its_turn(api, monkeypatch, tmp_path):
     return master, thread, pods, mine, worker, theirs
 
 
+@pytest.mark.slow
 async def test_a_stop_of_a_turn_during_which_an_earlier_turns_worker_handed_back_is_carried_out(api, monkeypatch, tmp_path, caplog):
     master, thread, pods, mine, worker, theirs = await a_thread_whose_worker_outlives_its_turn(api, monkeypatch, tmp_path)
 
@@ -967,6 +969,7 @@ async def a_lock_never_had(*args, **kwargs):
     yield
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("way", WAYS_A_STOP_FALLS_SHORT)
 async def test_a_stopped_turns_own_files_never_land_however_its_stop_falls_short(api, monkeypatch, tmp_path, caplog, way):
     pods, said = await a_stop_that_falls_short(api, monkeypatch, tmp_path, caplog, way)
@@ -977,6 +980,7 @@ async def test_a_stopped_turns_own_files_never_land_however_its_stop_falls_short
         assert "was not carried out on its hand-off" in said and "leaves the stopped turn's own files out" in said, said
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("way", WAYS_A_STOP_FALLS_SHORT)
 async def test_no_helpers_finished_work_is_lost_however_a_stop_falls_short(api, monkeypatch, tmp_path, caplog, way):
     pods, _ = await a_stop_that_falls_short(api, monkeypatch, tmp_path, caplog, way)
@@ -1010,6 +1014,7 @@ async def test_a_thread_whose_copy_was_made_again_after_it_handed_on_is_told_wha
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("stop_is", ["carried out", "not carried out"])
 async def test_a_stopped_turns_file_never_lands_when_its_tasks_queued_in_order_hand_back_one_after_the_other(
     api, monkeypatch, tmp_path, stop_is,
@@ -1120,6 +1125,7 @@ async def a_worker_gone_under_a_turn_that_handed_on(api, monkeypatch, tmp_path, 
     return master, thread, pods
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("stopped", ["while no worker runs the turn", "and its worker dies inside the stop"])
 async def test_a_stop_no_worker_carries_out_still_keeps_the_stopped_turns_files_out(api, monkeypatch, tmp_path, stopped):
     master, thread, pods = await a_worker_gone_under_a_turn_that_handed_on(
@@ -1181,6 +1187,7 @@ async def test_a_thread_whose_turn_cannot_be_named_makes_no_pod(api, monkeypatch
     assert (pods.pods, pods.copies) == ({}, {})
 
 
+@pytest.mark.slow
 async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_threads_next_turn_here(api, monkeypatch, tmp_path, caplog):
     master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)
     store = api.app.state.session_store
@@ -1212,6 +1219,7 @@ async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_thr
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "sources.md"]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("read", ["at once", "after a read that failed"])
 async def test_a_stop_its_worker_could_not_write_down_is_written_before_the_threads_next_turn_on_another_worker(api, monkeypatch, tmp_path, read):
     master, thread, pods, mine = await a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_path)

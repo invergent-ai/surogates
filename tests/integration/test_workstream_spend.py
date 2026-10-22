@@ -138,6 +138,7 @@ async def a_firebase_user(api) -> None:
         await db.commit()
 
 
+@pytest.mark.slow
 async def test_a_threads_turn_is_held_and_then_spent_against_the_users_allowance(api, monkeypatch):
     master = await master_of(api, await create(api))
     thread = await start(api, master)
@@ -150,6 +151,7 @@ async def test_a_threads_turn_is_held_and_then_spent_against_the_users_allowance
     assert "allowance_reservations" not in (await api.app.state.session_store.get_session(thread.id)).config
 
 
+@pytest.mark.slow
 async def test_a_threads_turn_holds_a_paid_turn_on_a_monetized_agent(api, monkeypatch):
     await a_firebase_user(api)
     thread = await start(api, await master_of(api, await create(api)))
@@ -227,6 +229,7 @@ async def test_a_paid_turn_the_allowance_then_refuses_is_released(api, monkeypat
     assert ops.spent == [("paid", "hold-1", 0)]
 
 
+@pytest.mark.slow
 async def test_a_message_typed_into_a_thread_is_counted_once(api, monkeypatch):
     master = await master_of(api, await create(api))
     thread = await start(api, master)

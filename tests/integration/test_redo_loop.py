@@ -318,6 +318,7 @@ async def test_a_redo_turn_whose_landing_lost_the_lock_is_not_tried_again_over_i
     ]
 
 
+@pytest.mark.slow
 async def test_two_threads_that_each_change_the_report_over_the_others_change_each_redo_once_and_both_changes_land(
     api, monkeypatch, pods,
 ):
@@ -719,7 +720,9 @@ def dies_as_the_model_answers(store) -> DiesWriting:
     return DiesWriting(store, lambda kind, data: kind == EventType.LLM_RESPONSE and "answers" not in data)
 
 
-@pytest.mark.parametrize("typed", ["as its last message before the clash", "while the clashing turn landed", "after the redo"])
+@pytest.mark.parametrize("typed", [
+    pytest.param("as its last message before the clash", marks=pytest.mark.slow), "while the clashing turn landed", "after the redo",
+])
 async def test_a_redo_turn_cut_off_after_the_model_was_asked_keeps_its_redo_beside_a_skill(workers, monkeypatch, pods, typed):
     api, store = workers.api, workers.store
     master = await master_of(api, await create(api))
@@ -1180,6 +1183,7 @@ async def test_a_landing_settled_as_escalated_puts_its_own_thread_in_waiting_on_
     assert (await row_of(api, project, first))["reason"] == "files"
 
 
+@pytest.mark.slow
 async def test_a_settled_landing_whose_master_could_not_be_told_is_settled_and_told_once_by_the_next_lock_holder(
     api, monkeypatch, pods,
 ):
@@ -1670,6 +1674,7 @@ async def test_a_failed_routine_runs_changes_are_the_routines_too(api, monkeypat
     assert git(pods.project / "_history", "log", "-1", "--format=%an", "refs/heads/main") == "Tidy up"
 
 
+@pytest.mark.slow
 async def test_a_routine_runs_pickup_first_settles_a_landing_a_killed_worker_left(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)

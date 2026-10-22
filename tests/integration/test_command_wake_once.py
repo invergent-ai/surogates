@@ -2620,6 +2620,7 @@ async def what_the_question_got(workers: Workers, chat: UUID) -> dict:
     return json.loads(result.data["content"])
 
 
+@pytest.mark.slow
 async def test_a_command_typed_while_a_question_waits_dismisses_the_question_and_is_run(workers):
     chat = await workers.chat()
     waiting = await a_question_waits(workers, chat)
@@ -2642,6 +2643,7 @@ async def test_a_command_typed_while_a_question_waits_dismisses_the_question_and
     assert json.loads(told["content"])["detail"] == DISMISSED_BY_A_COMMAND
 
 
+@pytest.mark.slow
 async def test_a_question_dismissed_while_its_user_said_more_goes_on_with_what_they_said(workers):
     chat = await workers.chat()
     waiting = await a_question_waits(workers, chat)

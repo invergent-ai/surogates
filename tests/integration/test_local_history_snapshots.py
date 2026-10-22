@@ -671,6 +671,7 @@ async def test_a_stop_whose_computer_does_not_answer_its_undo_lets_the_thread_go
     assert worker_note(EventType.WORKER_COMPLETE.value, finished)["content"].endswith(f"was stopped]\n{STOP_TAKEN_BACK}")
 
 
+@pytest.mark.slow
 async def test_a_stop_whose_undo_is_owed_says_what_no_undo_can_take_back_stays_in_the_copy_and_it_lands_with_the_next_turn(
     api, computer, monkeypatch,
 ):

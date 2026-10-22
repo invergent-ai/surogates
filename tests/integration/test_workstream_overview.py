@@ -302,6 +302,7 @@ async def test_a_project_whose_master_goes_while_the_list_is_read_is_left_out(ap
     assert hiring["id"] in ids and budget["id"] not in ids
 
 
+@pytest.mark.slow
 async def test_a_project_with_more_threads_than_a_statement_binds_still_answers(api):
     project = await create(api)
     master = await master_of(api, project)
@@ -399,6 +400,7 @@ async def streamed(api, monkeypatch, project: dict, changes: int, act) -> list[t
     ]
 
 
+@pytest.mark.slow
 async def test_a_threads_question_and_its_turns_end_reach_the_projects_stream(api, monkeypatch):
     project = await create(api)
     thread = await start(api, await master_of(api, project))
