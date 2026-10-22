@@ -4,14 +4,17 @@ An agent that case types name as their intake agent, a front door that talks
 with people, is offered ``start_case`` while Keel grants it a type: the
 worker asks Keel at each wake (:func:`surogates.keel.intake.intake_case_types`).
 Its schema takes only the granted types, and its description names each one
-and the fields it requires (:func:`describe_intake`).  No session of a case
-is offered it.
+and the fields it requires (:func:`describe_intake`).  Only a conversation's
+own session is offered it: never a session of a case, nor a helper the
+conversation started, which would start cases of its own.
 
-Each call is one request to Keel's door, keyed by the session and the tool
-call: the same call sent again starts no second case, and Keel answers with
-the case it started.  Keel also finds the case a session already started
-with the same data, and refuses a session more cases than it allows.  Keel's
-answer is the tool's result:
+Each call is one request to Keel's door, for the person the conversation is
+with: the sender of its latest message, never the tenant, which on a managed
+channel is the agent's own service account.  It is keyed by the session and
+the tool call: the same call sent again starts no second case, and Keel
+answers with the case it started.  Keel also finds the case a session
+already started with the same data, and refuses a session more cases than
+it allows.  Keel's answer is the tool's result:
 
 - the case started, or was found (201 or 200): ``Case <number> started (<type>).``;
 - Keel refused it (403, 409 or 422): Keel's message and code, as an error the
@@ -33,6 +36,7 @@ import json
 import logging
 from collections.abc import Sequence
 from typing import Any
+from uuid import UUID
 
 from surogates.keel.client import BodyNotJSON, BodyTooLarge, keel_client
 from surogates.tools.registry import ToolSchema
@@ -97,11 +101,17 @@ async def handle_start_case(arguments: dict, **kwargs: Any) -> str:
     client = keel_client()
     if client is None:
         return _error("This runtime has no link to Keel, so no case was started.")
+    # The person the conversation is with; none for a service account's.
+    try:
+        person = await kwargs["session_store"].resolve_acting_principal(UUID(session_id))
+    except Exception as exc:
+        logger.warning("Session %s: whom the conversation is with was not read (%s)", session_id, type(exc).__name__)
+        return _error("Whom this conversation is with could not be read, so no case was started; call start_case again.")
     tenant = kwargs["tenant"]
     body = {
         "agent_id": str(kwargs["agent_id"]),
         "session_id": session_id,
-        "user_id": str(tenant.user_id) if tenant.user_id is not None else None,
+        "user_id": str(person.user_id) if person.user_id is not None else None,
         "channel": kwargs.get("channel"),
         "case_type": case_type,
         "data": data,

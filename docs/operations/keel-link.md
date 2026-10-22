@@ -68,9 +68,9 @@ A worker without both settings has no link to Keel: every report removes the ste
 
 ## An intake agent starts cases
 
-A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a session that works on no case, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case is offered it. A worker without both settings, or one that cannot reach Keel, offers no `start_case` until it next asks.
+A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a conversation's own session, one that works on no case and was not started by another session, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. The wakes that need an agent's list while it is being asked share that one ask, and a Keel that has not answered in 2 seconds grants nothing for the minute: the ask never holds a wake longer. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case, and no helper a conversation started, is offered it. A worker without both settings, or one that cannot reach Keel, offers no `start_case` until it next asks.
 
-Each call asks Keel to start one case, keyed `intake:<session id>:<tool call id>`, so the same call sent again finds the case it started. Keel also finds the case a session already started with the same data, and refuses a session more cases than it allows.
+Each call asks Keel to start one case for the person the conversation is with, the sender of its latest message, or for no user when that is a service account. It is keyed `intake:<session id>:<tool call id>`, so the same call sent again finds the case it started. Keel also finds the case a session already started with the same data, and refuses a session more cases than it allows.
 
 | Keel's answer | The model reads |
 |---|---|

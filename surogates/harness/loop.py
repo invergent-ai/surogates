@@ -5591,9 +5591,10 @@ class AgentHarness(
             session,
         )
         # ``start_case`` goes only to an agent Keel lets start a case of some
-        # type, as in ``worker._filter_effective_tools``.  ``getattr``: some
-        # test harnesses skip ``__init__``; absent means no grants.
-        if not getattr(self, "_intake", ()):
+        # type, and only to a conversation's own session, never a helper's, as
+        # in ``worker._filter_effective_tools``.  ``getattr``: some test
+        # harnesses skip ``__init__``; absent means no grants.
+        if not getattr(self, "_intake", ()) or session.parent_id is not None:
             tool_filter = (
                 set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
             )
