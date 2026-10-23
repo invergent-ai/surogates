@@ -115,6 +115,7 @@ from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
+from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
 from surogates.keel.steps import (
     CASE_ITEM_TOOLS,
     CASE_STEP_NUDGE,
@@ -4210,7 +4211,7 @@ class AgentHarness(
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
             )
-            question_dismissed = _question_dismissed(tool_calls_raw, tool_results)
+            unanswered = _unanswered_question(tool_calls_raw, tool_results)
 
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
@@ -4360,7 +4361,7 @@ class AgentHarness(
             # the model reads at its next turn that the question went
             # unanswered.  Not while something else its user said waits for
             # the model: the turn goes on with it.
-            if question_dismissed and not await self._said_to_the_model(session, steer_cursor):
+            if unanswered == DISMISSED and not await self._said_to_the_model(session, steer_cursor):
                 logger.info(
                     "Session %s: its user dismissed a question with a command; ending turn", session.id,
                 )
@@ -4369,6 +4370,20 @@ class AgentHarness(
                     reason="question_dismissed",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
+                )
+                return
+
+            # A question nobody answered in time ends the turn too, with one
+            # reply that calls no tools: going on built what nobody had
+            # approved.  Not while something its user said waits for the
+            # model: the turn goes on with it.
+            if unanswered == TIMED_OUT and not await self._said_to_the_model(session, steer_cursor):
+                logger.info("Session %s: a question timed out; ending turn", session.id)
+                await self._request_final_summary(
+                    session, messages, system_prompt, lease,
+                    request=request, cost_tracker=cost_tracker, turn_id=turn_id,
+                    iteration_index=turn_iteration_index, reason="question_timed_out",
+                    final_request=_question_timed_out_request(session),
                 )
                 return
 
@@ -5839,8 +5854,12 @@ class AgentHarness(
         turn_id: str | None = None,
         iteration_index: int | None = None,
         reason: str = "budget_exhausted",
+        final_request: str | None = None,
     ) -> None:
         """Request one final LLM response with no tools when the budget is exhausted.
+
+        *final_request*, when given, is what the model is asked instead of
+        the summary (a question that timed out asks for one waiting line).
 
         Also ends a messaging-channel turn a guard stopped (*reason*): the
         person on WhatsApp sees only what is delivered, and a turn halted
@@ -5861,7 +5880,9 @@ class AgentHarness(
             session.id,
         )
 
-        if session.channel in ADAPTER_CHANNELS:
+        if final_request is not None:
+            summary_request = final_request
+        elif session.channel in ADAPTER_CHANNELS:
             summary_request = (
                 "Your tool calls cannot run any more this turn. Without calling any tools, "
                 "reply now to the person you are talking with, in their language: answer "
@@ -6613,10 +6634,26 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
     return None
 
 
-def _question_dismissed(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
-    """Whether a question of *tool_calls_raw*'s went unanswered because its user typed a command instead."""
-    from surogates.tools.builtin.ask_user_question import DISMISSED
+QUESTION_TIMED_OUT_REQUEST = (
+    "Your question got no answer in time. Without calling any tools, tell the user in one "
+    "short line that you'll wait for their answer. Don't say you did or will do anything else."
+)
+QUESTION_TIMED_OUT_CHANNEL_REQUEST = (
+    "Your question got no answer in time. Without calling any tools, tell the person you are "
+    "talking with, in their language, in one short line, that you'll wait for their answer. "
+    "Don't say you did or will do anything else."
+)
 
+
+def _question_timed_out_request(session: Session) -> str:
+    """What the model is asked for once its question timed out: one line that it waits."""
+    if session.channel in ADAPTER_CHANNELS:
+        return QUESTION_TIMED_OUT_CHANNEL_REQUEST
+    return QUESTION_TIMED_OUT_REQUEST
+
+
+def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -> str | None:
+    """Why a question of *tool_calls_raw*'s went unanswered (its result's ``reason``), or ``None``."""
     asked = {call.get("id") for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
     for result in tool_results:
         if result.get("tool_call_id") not in asked:
@@ -6625,9 +6662,9 @@ def _question_dismissed(tool_calls_raw: list[dict], tool_results: list[dict]) ->
             got = json.loads(result.get("content") or "")
         except (TypeError, ValueError):
             continue
-        if isinstance(got, dict) and got.get("reason") == DISMISSED:
-            return True
-    return False
+        if isinstance(got, dict) and got.get("cancelled") is True:
+            return got.get("reason")
+    return None
 
 
 def _whiteboard_sketch_turn_done(

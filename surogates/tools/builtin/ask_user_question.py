@@ -79,6 +79,13 @@ DISMISSED_BY_A_COMMAND = (
     "Ask it again if you still need the answer."
 )
 
+#: Why a question went unanswered when nobody answered it within the wait.
+TIMED_OUT = "timeout"
+TIMED_OUT_DETAIL = (
+    "No answer came in time, so the question was not answered. "
+    "Ask it again if you still need the answer."
+)
+
 #: Why a question went unanswered when its person sent something else on a
 #: channel (a photo, another question).  The message itself reaches the model
 #: next, so the turn goes on with it.
@@ -100,6 +107,7 @@ STEP_CAME_DUE_DETAIL = (
 
 _DETAILS = {
     DISMISSED: DISMISSED_BY_A_COMMAND,
+    TIMED_OUT: TIMED_OUT_DETAIL,
     WROTE_SOMETHING_ELSE: WROTE_SOMETHING_ELSE_DETAIL,
     STEP_CAME_DUE: STEP_CAME_DUE_DETAIL,
 }
@@ -410,7 +418,7 @@ async def _wait_for_response(
                     "ask_user_question tool %s timed out after %ds", tool_call_id,
                     _MAX_WAIT_SECONDS,
                 )
-                return {"cancelled": True, "reason": "timeout"}
+                return {"cancelled": True, "reason": TIMED_OUT}
 
             # Lease renewal keeps ownership while the user composes an answer.
             if lease_token is not None and now >= next_renew:

@@ -46,7 +46,9 @@ from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
-from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND
+import surogates.tools.builtin.ask_user_question as ask_user_question_module
+from surogates.harness.loop import QUESTION_TIMED_OUT_REQUEST
+from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND, TIMED_OUT_DETAIL
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
@@ -2680,6 +2682,47 @@ async def test_a_question_dismissed_while_its_user_said_more_goes_on_with_what_t
     assert workers.ran == []
     await workers.wake(chat)
     assert workers.ran == ["_handle_goal_command"]
+
+
+async def finish_reasons(workers: Workers, chat: UUID) -> list:
+    return [event.data.get("finish_reason") for event in await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE])]
+
+
+@pytest.mark.slow
+async def test_a_question_that_times_out_ends_its_turn_with_one_reply_and_no_tools(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    workers.replies.append(ASKS)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(chat), 10)
+
+    # Nobody answered: the turn ends with one reply that calls no tools, not with work nobody approved.
+    got = await what_the_question_got(workers, chat)
+    assert (got["cancelled"], got["reason"], got["detail"]) == (True, "timeout", TIMED_OUT_DETAIL)
+    assert len(workers.requests) == 2
+    assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_REQUEST
+    assert (await workers.said(chat))[-1] == "I'll wait for your answer."
+    assert await workers.status(chat) == "completed"
+    assert (await finish_reasons(workers, chat))[-1] == "question_timed_out"
+
+
+@pytest.mark.slow
+async def test_a_question_that_times_out_while_its_user_said_more_goes_on_with_what_they_said(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    waiting = await a_question_waits(workers, chat)
+
+    # What a channel that takes no typed words for an answer delivers: a message, for the turn to read.
+    await workers.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Use the Q3 figures."})
+    await asyncio.wait_for(waiting, 10)
+
+    # The question timed out, and the turn goes on with what its user said.
+    assert (await what_the_question_got(workers, chat))["reason"] == "timeout"
+    assert workers.requests[-1][-1] == {"role": "user", "content": "Use the Q3 figures."}
+    assert "question_timed_out" not in await finish_reasons(workers, chat)
 
 
 # -- A routine's run --
