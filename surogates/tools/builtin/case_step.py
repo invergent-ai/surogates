@@ -37,8 +37,11 @@ a crash, and its inputs stay for the person's word.
 The harness checks only what Keel cannot, and what would make Keel refuse
 the whole report: the outcome is one of the contract's, the output is an
 object, the sources map fields to lists of objects, each file named is in
-the case's workspace, and the report is JSON within Keel's bounds.  Keel validates the rest.  No log line here carries
-the case's data, and an error repeats at most a path the model gave.
+the case's workspace, and the report is JSON within Keel's bounds.  A
+raised hand's evidence is checked whole: each fact is the label, value and
+optional source a person sees as a card, and its file one the case's files
+show.  Keel validates the rest.  No log line here carries the case's data,
+and an error repeats at most a path the model gave.
 """
 
 from __future__ import annotations
@@ -52,8 +55,9 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from surogates.keel.case_files import CaseFileError, case_path
 from surogates.keel.client import BodyNotJSON, BodyTooLarge, KeelAnswer, KeelClient, keel_client
-from surogates.keel.files import case_file_value
+from surogates.keel.files import case_file_value, workspace_path
 from surogates.keel.steps import (
     CASE_STEP_KEY,
     REPORTED_KEY,
@@ -81,6 +85,8 @@ QUESTION_CHARS = 2000
 MAX_CHOICES = 20
 CHOICE_CHARS = 200
 MAX_EVIDENCE = 50
+EVIDENCE_LABEL_CHARS = 200
+EVIDENCE_VALUE_CHARS = 500
 
 _NOT_A_STEP = "This session works no step of a case: there is no step to report."
 #: A page's digest, as Keel takes it: SHA-256, in lowercase hex.
@@ -133,6 +139,33 @@ COMPLETE_STEP_SCHEMA = ToolSchema(
     },
 )
 
+# One fact behind a raised hand: what it is, what was found, and where.
+_EVIDENCE_ITEM = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "string", "minLength": 1, "maxLength": EVIDENCE_LABEL_CHARS,
+            "description": "What the fact is, in a few words.",
+        },
+        "value": {
+            "type": "string", "minLength": 1, "maxLength": EVIDENCE_VALUE_CHARS,
+            "description": "What you found.",
+        },
+        "source": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "The path of the file in /workspace where you found it."},
+                "page": {"type": "integer", "minimum": 1, "description": "The page of the file, from 1."},
+            },
+            "required": ["file"],
+            "additionalProperties": False,
+            "description": "Optional: the file you found it in, and the page.",
+        },
+    },
+    "required": ["label", "value"],
+    "additionalProperties": False,
+}
+
 RAISE_HAND_SCHEMA = ToolSchema(
     name="raise_hand",
     description=(
@@ -154,8 +187,11 @@ RAISE_HAND_SCHEMA = ToolSchema(
                 "description": "Optional answers the person can pick from.",
             },
             "evidence": {
-                "type": "array", "maxItems": MAX_EVIDENCE, "items": {"type": "object"},
-                "description": "Optional facts behind the question, each an object: where you looked and what you found.",
+                "type": "array", "maxItems": MAX_EVIDENCE, "items": _EVIDENCE_ITEM,
+                "description": (
+                    "Optional facts behind the question, each what you found and where. The "
+                    "person sees each as a card that opens the file at that page."
+                ),
             },
         },
         "required": ["question"],
@@ -557,6 +593,41 @@ async def handle_complete_step(arguments: dict, **kwargs: Any) -> str:
     )
 
 
+def _fact(index: int, item: Any) -> dict[str, Any] | str:
+    """*item*, the fact at *index* in a raised hand's evidence, as Keel takes it; or what is wrong with it.
+
+    Its file is named as the case's files name it: relative to the case's
+    workspace, and never one their listing leaves out.  An error names the
+    fact by its index, never by the path it gave.
+    """
+    at = f"evidence[{index}]"
+    if not isinstance(item, dict) or not set(item) <= {"label", "value", "source"}:
+        return f"{at} must be an object of a label, a value and an optional source, and nothing else."
+    fact: dict[str, Any] = {}
+    for key, limit in (("label", EVIDENCE_LABEL_CHARS), ("value", EVIDENCE_VALUE_CHARS)):
+        text = item.get(key)
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= limit:
+            return f"{at}.{key} must be 1 to {limit} characters."
+        fact[key] = text.strip()
+    source = item.get("source")
+    if source is None:
+        return fact
+    if not isinstance(source, dict) or not set(source) <= {"file", "page"} or not isinstance(source.get("file"), str):
+        return f"{at}.source must be an object of a file in /workspace and an optional page, and nothing else."
+    page = source.get("page")
+    if page is not None and (not isinstance(page, int) or isinstance(page, bool) or page < 1):
+        return f"{at}.source.page must be a whole number from 1."
+    relative = workspace_path(source["file"])
+    if relative is None:
+        return f"{at}.source.file is not a path in /workspace."
+    try:
+        file = case_path(relative)
+    except CaseFileError:
+        return f"{at}.source.file is not a file of the case: name one in /workspace, outside the platform's own folders."
+    fact["source"] = {"file": file} if page is None else {"file": file, "page": page}
+    return fact
+
+
 def _hand(arguments: dict) -> tuple[str, list[str], list[dict]] | str:
     """The question, choices and evidence of a raised hand, or what is wrong with them."""
     question = arguments.get("question")
@@ -569,9 +640,15 @@ def _hand(arguments: dict) -> tuple[str, list[str], list[dict]] | str:
     ):
         return f"choices must be at most {MAX_CHOICES} answers of at most {CHOICE_CHARS} characters."
     evidence = arguments.get("evidence") or []
-    if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE or not all(isinstance(e, dict) for e in evidence):
-        return f"evidence must be at most {MAX_EVIDENCE} objects."
-    return question.strip(), choices, evidence
+    if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE:
+        return f"evidence must be a list of at most {MAX_EVIDENCE} facts."
+    facts = []
+    for index, item in enumerate(evidence):
+        fact = _fact(index, item)
+        if isinstance(fact, str):
+            return fact
+        facts.append(fact)
+    return question.strip(), choices, facts
 
 
 async def handle_raise_hand(arguments: dict, **kwargs: Any) -> str:
