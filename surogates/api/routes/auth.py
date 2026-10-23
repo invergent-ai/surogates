@@ -295,31 +295,36 @@ async def _firebase_user(
     subject: str,
     email: str | None,
     verified: bool,
+    *,
+    link_by_email: bool,
 ) -> User | None:
     """The user of *org_id* who signs in with this Firebase identity, or None.
 
     First by identity, ``(auth_provider, external_id)``, among the
-    organisation's users, home and member. Failing that, with a verified
-    email, the user of the organisation who has that email is linked to
-    the identity, when they have no external id yet and are not a
-    ``database`` user: an invited account's first sign-in. A manual
-    ``database`` row with a password is never linked. When a home user
-    and a member match, the home user is the one taken.
+    organisation's users, home and member. When a home user and a member
+    match, the home user is the one taken.
+
+    Failing that, and only when *link_by_email* allows it, a home user of
+    the organisation with the verified email is linked to the identity,
+    when they have no external id yet and are not a ``database`` user: an
+    invited account's first sign-in. The link is never a silent backdoor
+    where sign-up is off. A manual ``database`` row with a password is
+    never linked. Nor is a member whose home is another organisation:
+    whoever runs this organisation's Firebase project could otherwise
+    mint a verified token for the member's email and take over their
+    account. A member signs in with their own identity, and their
+    membership admits them.
     """
-    home_first = (User.org_id == org_id).desc()
     user = await session.scalar(
         select(User)
         .where(belongs_to(org_id), User.auth_provider == provider, User.external_id == subject)
-        .order_by(home_first)
+        .order_by((User.org_id == org_id).desc())
         .limit(1)
     )
-    if user is not None or not email or not verified:
+    if user is not None or not link_by_email or not email or not verified:
         return user
     candidate = await session.scalar(
-        select(User)
-        .where(belongs_to(org_id), User.email == email)
-        .order_by(home_first)
-        .limit(1)
+        select(User).where(User.org_id == org_id, User.email == email)
     )
     if (
         candidate is None
@@ -432,9 +437,11 @@ async def firebase_exchange(
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
         # The organisation's users, home and member alike, by Firebase
-        # identity, then by a verified email.
+        # identity, then a home user by a verified email: only during
+        # self-registration, never as a silent backdoor when it is off.
         user = await _firebase_user(
             session, org_id, provider, subject, email, email_verified,
+            link_by_email=self_reg_enabled,
         )
 
         if user is None:
@@ -823,9 +830,10 @@ async def org_firebase_exchange(
 ) -> TokenResponse:
     """Exchange an ID token of the organisation's Firebase project for tokens.
 
-    It never creates a user. The organisation's user is found by Firebase
-    identity, or an invited account of the organisation with the verified
-    email is linked to it; anyone else gets 403.
+    It never creates a user. The organisation's user, home or member, is
+    found by Firebase identity. Failing that, an invited account whose
+    home is the organisation, with the verified email, is linked to it.
+    Anyone else gets 403.
 
     One login spans organisations for local password accounts, and for
     users of one Firebase project the organisations share. A member whose
@@ -875,6 +883,7 @@ async def org_firebase_exchange(
     async with session_factory() as session:
         user = await _firebase_user(
             session, org_id, provider, subject, email, email_verified,
+            link_by_email=True,
         )
         if user is None:
             if audit_store is not None:

@@ -99,6 +99,20 @@ async def add(session_factory, org_id: UUID, user_id: UUID) -> None:
         await db.commit()
 
 
+async def firebase_account(
+    session_factory, org_id: UUID, email: str, firebase_project: str, external_id: str | None = None,
+) -> UUID:
+    """An account of *org_id* that signs in with *firebase_project*; with no external id, it waits for its first sign-in."""
+    user_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(User(
+            id=user_id, org_id=org_id, email=email, display_name=email.split("@")[0],
+            auth_provider=f"firebase:{firebase_project}", external_id=external_id,
+        ))
+        await db.commit()
+    return user_id
+
+
 async def email_of(session_factory, user_id: UUID) -> str:
     async with session_factory() as db:
         return await db.scalar(select(User.email).where(User.id == user_id))
@@ -195,15 +209,8 @@ async def test_the_org_firebase_exchange_never_registers_a_user(
     assert await count_users(session_factory) == users_before
     assert await count_users(session_factory, "stranger@example.com") == 0
 
-    # Invited: an account waiting for its first Firebase sign-in, in the home organisation, a member of ORG_B.
-    invited = uuid.uuid4()
-    async with session_factory() as db:
-        db.add(User(
-            id=invited, org_id=api.org_id, email="invited@example.com", display_name="Invited",
-            auth_provider=f"firebase:{org_b_firebase_project}",
-        ))
-        await db.commit()
-    await add(session_factory, org_b, invited)
+    # Invited: an account of ORG_B waiting for its first Firebase sign-in.
+    invited = await firebase_account(session_factory, org_b, "invited@example.com", org_b_firebase_project)
 
     linked = await api.client.post(
         f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": "uid-invited|Invited@Example.com"},
@@ -238,6 +245,43 @@ async def test_the_org_firebase_exchange_never_registers_a_user(
     )
     assert no_firebase.status_code == 404
     assert no_firebase.json() == {"detail": "Firebase auth is not configured."}
+
+
+async def test_the_org_firebase_exchange_never_relinks_a_member_of_another_organisation(
+    api, session_factory, org_b, org_b_firebase_project, firebase_sign_ins,
+):
+    # Members whose home is the api organisation: one waiting for a Firebase sign-in, one with a password.
+    waiting = await firebase_account(session_factory, api.org_id, "waiting@example.com", org_b_firebase_project)
+    await add(session_factory, org_b, waiting)
+    with_password = await create_user(session_factory, api.org_id, email="local@example.com", password=PASSWORD)
+    await add(session_factory, org_b, with_password)
+
+    for member, email in ((waiting, "waiting@example.com"), (with_password, "local@example.com")):
+        async with session_factory() as db:
+            before = await db.get(User, member)
+            identity = (before.auth_provider, before.external_id)
+
+        refused = await api.client.post(
+            f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"uid-{uuid.uuid4().hex}|{email}"},
+        )
+
+        assert refused.status_code == 403, refused.text
+        assert refused.json() == {"detail": NO_ACCOUNT}
+        async with session_factory() as db:
+            after = await db.get(User, member)
+        assert (after.auth_provider, after.external_id) == identity
+
+    # A member already signed in to the same Firebase project is found by that identity.
+    shared = await firebase_account(
+        session_factory, api.org_id, "shared@example.com", org_b_firebase_project, external_id="uid-shared",
+    )
+    await add(session_factory, org_b, shared)
+    found = await api.client.post(
+        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": "uid-shared|shared@example.com"},
+    )
+    assert found.status_code == 200, found.text
+    assert claims(found.json()["access_token"])["user_id"] == str(shared)
+    assert claims(found.json()["access_token"])["org_id"] == str(org_b)
 
 
 async def test_the_org_sign_in_ignores_any_agent_the_request_names(api, session_factory, org_b):

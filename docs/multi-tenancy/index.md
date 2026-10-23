@@ -83,7 +83,7 @@ A client that serves several orgs and no agent, such as Keel, signs in by org in
 
 - `GET …/config` names the org and gives its Firebase web config, or `null` when the org has no Firebase project.
 - `POST …/login` takes `{"email", "password"}`.
-- `POST …/firebase/exchange` takes `{"id_token"}` of the org's Firebase project. It never creates a user: it finds the org's user by Firebase identity, or links an invited account of the org with the verified email. Anyone else gets 403 `You have no account in this organisation. Ask to be invited.`
+- `POST …/firebase/exchange` takes `{"id_token"}` of the org's Firebase project. It never creates a user: it finds the org's user, home or member, by Firebase identity. Failing that, it links an invited account whose home is the org to the verified email. It never links a member whose home is another org: whoever runs this org's Firebase project could otherwise take over that member's account. A member signs in with their own identity, and their membership admits them. Anyone else gets 403 `You have no account in this organisation. Ask to be invited.`
 
 The org in the path decides. These routes resolve no agent, ignore a `Host` subdomain and `?agent_id=`, and enrol the user on no agent. Their tokens name the org, and are accepted as any token is: while the user belongs to the org. An agent's own sign-in routes stay the right ones for an agent's web app: they enrol the user on the agent.
 

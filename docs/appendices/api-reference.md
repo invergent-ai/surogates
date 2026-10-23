@@ -133,7 +133,7 @@ Sign in with the password of the user's account. Any user of the organisation si
 
 #### `POST /v1/auth/orgs/{org_id}/firebase/exchange`
 
-Exchange an ID token of the organisation's Firebase project for tokens. It never creates a user. It finds the organisation's user by Firebase identity. Failing that, it links the user of the organisation whose email equals the verified Firebase email, who has no external id yet and is not a `database` user: an invited account's first sign-in.
+Exchange an ID token of the organisation's Firebase project for tokens. It never creates a user. It finds the organisation's user, home or member, by Firebase identity. Failing that, it links the home user of the organisation whose email equals the verified Firebase email, who has no external id yet and is not a `database` user: an invited account's first sign-in. A member whose home is another organisation is never linked by email.
 
 **Request:**
 ```json
