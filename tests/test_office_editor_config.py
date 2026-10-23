@@ -90,7 +90,7 @@ def test_editor_config():
     row = uuid4()
     config = build_editor_config(
         settings=_settings(), row_id=row, doc_key="abc", path="docs/Plan.docx",
-        kind=office_kind("docs/Plan.docx"), user_id="user:1", user_name="Flavius", edit=True, theme="dark",
+        kind=office_kind("docs/Plan.docx"), user_id="user:1", user_name="Flavius", access="edit", theme="dark",
     )
     assert config["document"]["key"] == "abc"
     assert config["document"]["title"] == "Plan.docx"
@@ -111,8 +111,25 @@ def test_editor_config():
 def test_view_config_cannot_edit():
     config = build_editor_config(
         settings=_settings(), row_id=uuid4(), doc_key="abc", path="old.doc",
-        kind=office_kind("old.doc"), user_id="user:1", user_name="F", edit=False, theme="light",
+        kind=office_kind("old.doc"), user_id="user:1", user_name="F", access="view", theme="light",
     )
     assert config["editorConfig"]["mode"] == "view"
     assert config["document"]["permissions"]["edit"] is False
     assert config["editorConfig"]["customization"]["uiTheme"] == "theme-light"
+
+
+def test_comment_access_comments_without_editing():
+    def config(access):
+        return build_editor_config(
+            settings=_settings(), row_id=uuid4(), doc_key="abc", path="pack.docx",
+            kind=office_kind("pack.docx"), user_id="user:1", user_name="F", access=access, theme="light",
+        )
+
+    commenting = config("comment")
+    assert commenting["editorConfig"]["mode"] == "edit"
+    assert {key: commenting["document"]["permissions"][key] for key in ("edit", "review", "comment")} == {
+        "edit": False, "review": False, "comment": True,
+    }
+    viewing = config("view")
+    assert viewing["editorConfig"]["mode"] == "view"
+    assert viewing["document"]["permissions"]["comment"] is False

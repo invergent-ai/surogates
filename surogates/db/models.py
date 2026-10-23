@@ -903,6 +903,8 @@ class OfficeSession(Base):
     location: Mapped[str] = mapped_column(Text, nullable=False)
     # The chats whose panes opened the document (UUID strings); events go to all.
     session_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    # The case whose document it is, when a case's file was opened: its files are the case's, and no chat holds it open.
+    case_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID(), nullable=True)
     doc_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     # The file's version when the document server fetched it or a save landed.
     base_version: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

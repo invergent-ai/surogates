@@ -14,6 +14,7 @@ from surogates.db.models import Workstream
 from surogates.devices.binding import binding_of, copy_of, device_of
 from surogates.devices.operations import REQUEST_PREFIX
 from surogates.devices.workspace import MAX_NAMES, DeviceWorkspaceIO
+from surogates.keel.case_files import case_workspace
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.files import DeviceAccess, session_files
 from surogates.session.store import SessionStore
@@ -67,6 +68,17 @@ async def on_disk_spelling(files: DeviceWorkspaceIO, path: str) -> str:
             part = matches[0]
         done.append(part)
     return "/".join(done)
+
+
+def document_files(document: Any, *, storage: Any, settings: Any) -> StorageWorkspaceIO | None:
+    """The files a case's document is read from and saved to: its case's workspace, reached with no chat.
+
+    None for a chat's document, whose files its chat reaches as the chat's pane does.  *document* is an open row,
+    or its snapshot; *settings* are the runtime's, whose storage section names the case's bucket.
+    """
+    if document.case_id is None:
+        return None
+    return case_workspace(storage, settings, document.case_id)
 
 
 class FolderNotReady(Exception):
