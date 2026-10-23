@@ -17,3 +17,7 @@ methods:
 - `cancelScheduledWork`
 
 If `listScheduledWork` is not implemented, the panel renders nothing.
+
+## Documents
+
+`DocumentEditor` opens a document in the document server's editor with no chat session behind it: its `open(theme)` answers `{document_server_url, config, mentionable_users?}`, the editor config the host signed, and it opens again when `reopenKey` or the theme changes, not for a new `open` alone. `loadDocsApi` loads the document server's `api.js` once per server.
