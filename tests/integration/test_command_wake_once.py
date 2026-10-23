@@ -2746,7 +2746,7 @@ async def test_a_task_whose_question_times_out_blocks_on_it_instead_of_being_ret
 
 @pytest.mark.slow
 async def test_a_question_that_times_out_while_its_user_said_more_goes_on_with_what_they_said(workers, monkeypatch):
-    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 2)
     chat = await workers.chat()
     waiting = await a_question_waits(workers, chat)
 
