@@ -70,6 +70,15 @@ the kit carries Work's own components:
 | `responsive-panel` | `ResponsivePanel` | A popover with a cursor, a bottom sheet on a phone. |
 | `timeline` | `Timeline`, `TimelineItem`, `TimelineIndicator`, `TimelineSeparator`, … | A vertical run of steps, each a dot on a connecting line. |
 | `rabbit-mark` | `RabbitMark`, `RABBIT_MARK_PATH`, `RABBIT_MARK_BOX` | The rabbit silhouette as an icon in `currentColor`, and its path for a canvas. |
+| `performer-mark` | `PerformerMark`, `PerformerKind`, `performerWord` | Who does a piece of work, as an icon in a tone: a person, an agent, an agent finished by a person, a system, a rule, a client, a third party or a queue. |
+| `service-level-pill` | `ServiceLevelPill`, `ServiceLevelState`, `formatDuration` | Where work stands against its goal and deadline. The state decides the words and the tone; the deadline only gives the time left or past. |
+| `spec-form` | `SpecForm`, `FormSpec`, `FileValue`, `FormErrors`, `toOutput`, `fromOutput`, `missingInputs`, … | A form drawn from a spec: the outcome first, then titled groups with an input per field type and hint, file uploads and picks, errors beside their field, and check notes. |
+| `flow-canvas` | `FlowCanvas`, `FlowGraph`, `layoutFlow`, `traceFlow` | A read-only flow laid out top to bottom, with the path taken and the open nodes marked. |
+
+`flow-canvas` needs `@xyflow/react` and `@dagrejs/dagre`. They are optional
+peer dependencies: an app that draws flows installs them, and an app that
+never imports `flow-canvas` installs neither. The module brings React Flow's
+stylesheet itself.
 
 Several rely on the `data-*` variants and the `no-scrollbar` utility from
 `shadcn/tailwind.css`; import it alongside the theme.
