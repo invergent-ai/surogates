@@ -125,17 +125,27 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 					<XIcon className="size-4" />
 				</Button>
 			</div>
-			{notice && saveNotice(notice) && (
-				<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
-					{saveNotice(notice)}
-				</div>
-			)}
-			{mentionTrouble && (
-				<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
-					{mentionTrouble}
-				</div>
-			)}
-			<DocumentEditor open={open} fileName={fileName} reopenKey={opens.count} events={events} className="min-h-0 flex-1" />
+			<DocumentEditor
+				open={open}
+				fileName={fileName}
+				reopenKey={opens.count}
+				events={events}
+				className="min-h-0 flex-1"
+				notices={
+					<>
+						{notice && saveNotice(notice) && (
+							<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+								{saveNotice(notice)}
+							</div>
+						)}
+						{mentionTrouble && (
+							<div role="status" className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+								{mentionTrouble}
+							</div>
+						)}
+					</>
+				}
+			/>
 		</aside>
 	);
 }

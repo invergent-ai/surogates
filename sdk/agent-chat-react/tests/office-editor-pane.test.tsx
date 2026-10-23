@@ -162,6 +162,18 @@ describe("save notices in the editor pane", () => {
     expect(view.querySelector('[role="alert"]')).toBeNull();
   });
 
+  it("shows why the editor cannot open above the save notice", async () => {
+    const getWorkspaceEditorConfig = vi.fn().mockRejectedValue(new Error("No document server is configured."));
+    const host = adapter({ getWorkspaceEditorConfig });
+    const pane = (officeEvent?: AgentChatOfficeEvent) => (
+      <WorkspaceFileDrawer adapter={host} sessionId="s-1" path="a.docx" officeEvent={officeEvent} onClose={() => {}} />
+    );
+    const view = await mount(pane());
+    await rerender(pane({ type: "office.save_failed", eventId: 13 }));
+    const lines = [...view.querySelectorAll('[role="alert"], [role="status"]')].map((line) => line.textContent);
+    expect(lines).toEqual(["No document server is configured.", "Your latest changes could not be saved yet."]);
+  });
+
   it("does not show a notice from before the pane opened", async () => {
     const getWorkspaceEditorConfig = vi.fn().mockResolvedValue({ document_server_url: "https://o", config: {} });
     const view = await mount(

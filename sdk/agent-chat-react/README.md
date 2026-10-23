@@ -20,4 +20,4 @@ If `listScheduledWork` is not implemented, the panel renders nothing.
 
 ## Documents
 
-`DocumentEditor` opens a document in the document server's editor with no chat session behind it: its `open(theme)` answers `{document_server_url, config, mentionable_users?}`, the editor config the host signed, and it opens again when `reopenKey` or the theme changes, not for a new `open` alone. `loadDocsApi` loads the document server's `api.js` once per server.
+`DocumentEditor` opens a document in the document server's editor with no chat session behind it: its `open(theme)` answers `{document_server_url, config, mentionable_users?}`, the editor config the host signed, and it opens again when `reopenKey` or the theme changes, not for a new `open` alone. A failure to open shows its message in an alert, or "The document could not be opened." when it has none; `notices` shows the host's own lines under that alert, above the editor. `loadDocsApi` loads the document server's `api.js` once per server.

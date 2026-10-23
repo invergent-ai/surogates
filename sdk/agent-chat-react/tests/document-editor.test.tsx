@@ -109,6 +109,46 @@ describe("a document editor without a session", () => {
     expect(DocEditor).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["a rejection that is no Error", "nope"],
+    ["a rejection with nothing", null],
+    ["an Error with no message", new Error("")],
+  ])("%s shows that the document could not be opened", async (_, reason) => {
+    const open = vi.fn().mockRejectedValue(reason);
+    const view = await render(<DocumentEditor open={open} fileName="Plan.docx" />);
+    expect(view.querySelector('[role="alert"]')?.textContent).toBe("The document could not be opened.");
+    expect(view.textContent).not.toContain("Opening Plan.docx…");
+    expect(DocEditor).not.toHaveBeenCalled();
+  });
+
+  it("an editor script that fails to load shows its alert and makes no editor", async () => {
+    const open = vi.fn().mockResolvedValue({ document_server_url: server, config: {} });
+    const view = await render(<DocumentEditor open={open} fileName="Plan.docx" />);
+    expect(scripts).toHaveLength(1);
+
+    await act(async () => {
+      for (const script of scripts.splice(0)) script.onerror?.(new Event("error"));
+    });
+    await settle();
+    expect(view.querySelector('[role="alert"]')?.textContent).toBe("The document editor could not be loaded.");
+    expect(view.textContent).not.toContain("Opening Plan.docx…");
+    expect(DocEditor).not.toHaveBeenCalled();
+  });
+
+  it("unmounting while the document opens makes no editor", async () => {
+    const opening = deferred<EditorOpening>();
+    const open = vi.fn().mockReturnValue(opening.promise);
+    await render(<DocumentEditor open={open} fileName="Plan.docx" />);
+    act(() => root?.unmount());
+    root = null;
+
+    await act(async () => opening.resolve({ document_server_url: server, config: {} }));
+    await settle();
+    // The opening ended with the unmount: it asks for no editor script, and makes no editor.
+    expect(scripts).toHaveLength(0);
+    expect(DocEditor).not.toHaveBeenCalled();
+  });
+
   it("unmounting destroys the editor", async () => {
     const open = vi.fn().mockResolvedValue({ document_server_url: server, config: {} });
     await render(<DocumentEditor open={open} fileName="Plan.docx" />);
