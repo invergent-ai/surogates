@@ -422,7 +422,6 @@ class StreamingToolExecutor:
                 tool.result = await _emit_skipped_tool_result(
                     tool.tool_call, session=self._session, lease=self._lease, store=self._store,
                 )
-                tool.errored = True
                 return
             if guardrails is not None:
                 before = guardrails.before_call(tool_name, guardrail_args)
