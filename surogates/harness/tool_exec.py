@@ -880,13 +880,16 @@ async def _emit_guardrail_tool_result(
 SKIPPED_BEHIND_QUESTION = "skipped: the question before it in this batch went unanswered"
 
 
-def _is_cancelled(content: Any) -> bool:
-    """Whether a tool result is a JSON object saying ``cancelled`` (an unanswered question)."""
+def cancelled_result(content: Any) -> dict | None:
+    """The JSON object a tool result opens with when it says ``cancelled`` (an unanswered question), else ``None``.
+
+    Only the leading object is read: loop guidance may be appended after it.
+    """
     try:
-        data = json.loads(content)
-    except (TypeError, ValueError):
-        return False
-    return isinstance(data, dict) and data.get("cancelled") is True
+        data, _ = json.JSONDecoder().raw_decode(content.lstrip())
+    except (AttributeError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("cancelled") is True else None
 
 
 async def _emit_skipped_tool_result(
@@ -1279,7 +1282,7 @@ async def execute_tool_calls_sequential(
             interrupt_check=interrupt_check,
         )
         # Read before any guardrail guidance is appended: that makes it no longer JSON.
-        if tool_name == "ask_user_question" and _is_cancelled(result_msg.get("content")):
+        if tool_name == "ask_user_question" and cancelled_result(result_msg.get("content")) is not None:
             unanswered = True
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(

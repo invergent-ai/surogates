@@ -100,7 +100,13 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
-from surogates.harness.tool_exec import _open_local_copy, _turn_now, execute_single_tool, execute_tool_calls
+from surogates.harness.tool_exec import (
+    _open_local_copy,
+    _turn_now,
+    cancelled_result,
+    execute_single_tool,
+    execute_tool_calls,
+)
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.history import PRUNE_DAYS
@@ -6656,13 +6662,7 @@ def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -
     """Why a question of *tool_calls_raw*'s went unanswered (its result's ``reason``), or ``None``."""
     asked = {call.get("id") for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
     for result in tool_results:
-        if result.get("tool_call_id") not in asked:
-            continue
-        try:
-            got = json.loads(result.get("content") or "")
-        except (TypeError, ValueError):
-            continue
-        if isinstance(got, dict) and got.get("cancelled") is True:
+        if result.get("tool_call_id") in asked and (got := cancelled_result(result.get("content"))) is not None:
             return got.get("reason")
     return None
 

@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from surogates.harness import streaming_executor, tool_exec
+from surogates.harness import loop, streaming_executor, tool_exec
 from surogates.harness.tool_exec import SKIPPED_BEHIND_QUESTION
+from surogates.harness.tool_guardrails import append_toolguard_guidance
 
 ASK = {"id": "a", "type": "function", "function": {"name": "ask_user_question", "arguments": "{}"}}
 AFTER = {"id": "b", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
@@ -64,3 +65,11 @@ async def test_streaming_skips_after_an_unanswered_question_with_guidance(ran):
     results = await executor.get_all_results()
     assert ran == ["ask_user_question"]
     assert SKIPPED_BEHIND_QUESTION in results[1]["content"]
+
+
+def test_a_timed_out_question_with_guidance_on_its_result_still_ends_the_turn():
+    warned = append_toolguard_guidance(
+        json.dumps({"cancelled": True, "reason": "timeout"}),
+        SimpleNamespace(action="warn", message="again", code="c", count=2),
+    )
+    assert loop._unanswered_question([ASK], [{"tool_call_id": "a", "content": warned}]) == "timeout"
