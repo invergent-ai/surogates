@@ -641,7 +641,7 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
     return AccessTokenResponse(access_token=access_token)
 
 
-class OrgResponse(BaseModel):
+class MeOrganisation(BaseModel):
     """An organisation the signed-in user belongs to."""
 
     id: UUID
@@ -657,7 +657,7 @@ class MeResponse(UserResponse):
     """
 
     org_name: str
-    organisations: list[OrgResponse]
+    organisations: list[MeOrganisation]
 
 
 async def _me(session: AsyncSession, user: User, org_id: UUID) -> MeResponse:
@@ -680,7 +680,7 @@ async def _me(session: AsyncSession, user: User, org_id: UUID) -> MeResponse:
         sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
         org_name=org_name,
-        organisations=[OrgResponse(id=o.id, name=o.name) for o in organisations],
+        organisations=[MeOrganisation(id=o.id, name=o.name) for o in organisations],
     )
 
 

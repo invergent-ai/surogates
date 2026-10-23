@@ -119,12 +119,20 @@ async def add_member(session: AsyncSession, org_id: UUID, user_id: UUID) -> bool
 async def remove_member(session: AsyncSession, org_id: UUID, user_id: UUID) -> bool:
     """End *user_id*'s membership of *org_id*; False when there is none.
 
-    A user's home organisation is not a membership: leaving it would
+    The user's rows in *org_id* go with it: the rows they own there are
+    deleted and the rest, their sessions and history, are detached from
+    them (:func:`surogates.db.agent_users.clear_user_rows`), so their
+    home account can later be deleted. The account itself stays. A
+    user's home organisation is not a membership: leaving it would
     leave the account with no home.
     """
+    # Imported here: surogates.db.agent_users builds on this module.
+    from surogates.db.agent_users import clear_user_rows
+
     home = await session.scalar(select(User.org_id).where(User.id == user_id))
     if home == org_id:
         raise MembershipError("home-org")
+    await clear_user_rows(session, org_id=org_id, user_id=user_id)
     result = await session.execute(
         delete(OrgMember).where(OrgMember.org_id == org_id, OrgMember.user_id == user_id)
     )

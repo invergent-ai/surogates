@@ -65,7 +65,7 @@ One person can work in several orgs with a single login.
 
 **What follows the home organisation.** Surogate Desktop's sign-in admits the members of the agent's org. Purchases on a paid agent do not: a buyer is a home user with the agent's Firebase identity, so a member on an agent of another org is not metered or charged, as an operator-provisioned account is not. Channel identities, the agent Users tab and the admin user list stay with the home org.
 
-**Ending a membership.** `purge_user_account` in an org the user is only a member of ends the membership, deletes the rows the user owns in that org and detaches their history there. It leaves the account alone. In the home org it deletes the account, and it refuses while the user still belongs to other orgs: take them out of those first.
+**Ending a membership.** Removing a member (`remove_member`, which `surogates org-members remove` and `purge_user_account` in an org the user is only a member of both run) deletes the rows the user owns in that org and detaches their sessions and history there. It leaves the account alone. `purge_user_account` in the home org deletes the account, and it refuses while the user still belongs to other orgs: take them out of those first.
 
 **The CLI.** `surogates org-members` manages memberships, with the database settings of `surogates migrate`:
 

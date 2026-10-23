@@ -37,14 +37,13 @@ from surogates.db.models import (
     McpServer,
     Mission,
     OAuthRefreshToken,
-    OrgMember,
     ScheduledSession,
     Session,
     Skill,
     User,
     Workstream,
 )
-from surogates.tenant.memberships import MembershipsRemain, user_orgs
+from surogates.tenant.memberships import MembershipsRemain, remove_member, user_orgs
 
 # Where a binding came from. Kept as plain strings (not an enum) so a
 # future writer can add a source without a schema migration.
@@ -143,19 +142,13 @@ async def user_visibility(
     return "orphan" if not has_bindings else None
 
 
-async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> None:
-    """Take a user out of *org_id*: their home organisation deletes the account.
+async def clear_user_rows(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> None:
+    """Delete the rows *user_id* owns in *org_id*, and detach the rest from them.
 
-    In an organisation the user is a member of, not their home, this
-    ends the membership and leaves the account alone: it lives in the
-    home organisation. Their rows in *org_id* are cleaned up as below
-    either way.
-
-    In the home organisation it hard-deletes the account, detaching its
-    history first. It refuses (:class:`MembershipsRemain`, before any
-    write) while the user still belongs to other organisations: their
-    rows there name the user, and this organisation does not clean up
-    another's. Take the user out of those first.
+    Both ways a user leaves an organisation run this: ending a
+    membership (:func:`surogates.tenant.memberships.remove_member`) and
+    deleting a home account (:func:`purge_user_account`). It never
+    touches the ``users`` row.
 
     Explicit statement-per-table cleanup (mirroring ops'
     ``delete_agent_data`` discipline) because the ORM relationships
@@ -169,13 +162,6 @@ async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -
     user property). The FK-coverage test in the integration suite pins
     this list against the schema. Caller commits.
     """
-    home = await db.scalar(select(User.org_id).where(User.id == user_id))
-    at_home = home is None or home == org_id
-    if at_home:
-        elsewhere = [o for o in await user_orgs(db, user_id) if o.id != org_id]
-        if elsewhere:
-            raise MembershipsRemain(elsewhere)
-
     def scoped(model):
         return (model.user_id == user_id, model.org_id == org_id)
 
@@ -190,13 +176,31 @@ async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -
         await db.execute(
             update(model).where(*scoped(model)).values(user_id=None)
         )
-    if not at_home:
-        await db.execute(
-            delete(OrgMember).where(
-                OrgMember.org_id == org_id, OrgMember.user_id == user_id,
-            )
-        )
+
+
+async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> None:
+    """Take a user out of *org_id*: their home organisation deletes the account.
+
+    In an organisation the user is a member of, not their home, this
+    ends the membership (:func:`surogates.tenant.memberships.remove_member`),
+    which clears their rows there and leaves the account alone: it
+    lives in the home organisation.
+
+    In the home organisation it hard-deletes the account, after
+    :func:`clear_user_rows` there. It refuses (:class:`MembershipsRemain`,
+    before any write) while the user still belongs to other
+    organisations: their rows there name the user, and this
+    organisation does not clean up another's. Take the user out of
+    those first. Caller commits.
+    """
+    home = await db.scalar(select(User.org_id).where(User.id == user_id))
+    if home is not None and home != org_id:
+        await remove_member(db, org_id, user_id)
         return
+    elsewhere = [o for o in await user_orgs(db, user_id) if o.id != org_id]
+    if elsewhere:
+        raise MembershipsRemain(elsewhere)
+    await clear_user_rows(db, org_id=org_id, user_id=user_id)
     await db.execute(
         delete(User).where(User.id == user_id, User.org_id == org_id)
     )

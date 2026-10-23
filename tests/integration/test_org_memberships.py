@@ -13,7 +13,7 @@ from sqlalchemy import func, select, text
 
 from surogates.cli.main import cli_main
 from surogates.db.agent_users import purge_user_account
-from surogates.db.models import OrgMember, Session, User
+from surogates.db.models import ChannelIdentity, OrgMember, Session, User
 from surogates.tenant.auth.jwt import create_access_token, create_refresh_token
 from surogates.tenant.memberships import (
     MembershipError,
@@ -165,6 +165,32 @@ async def test_purging_a_member_keeps_their_account(api, session_factory):
     assert await memberships_of(session_factory, org_b) == 0
     assert (await me(api, token_for(org_b, api.user_id))).status_code == 401
     assert (await me(api, api.token)).json()["organisations"] == [org(api.org_id)]
+
+
+async def test_removing_a_member_clears_their_rows_there_so_their_home_account_can_go(api, session_factory):
+    org_b = await create_org(session_factory)
+    await add(session_factory, org_b, api.user_id)
+    b_session, identity = uuid.uuid4(), uuid.uuid4()
+    async with session_factory() as db:
+        db.add(Session(id=b_session, org_id=org_b, user_id=api.user_id, agent_id="agent-b", config={}))
+        db.add(ChannelIdentity(
+            id=identity, org_id=org_b, user_id=api.user_id, platform="slack", platform_user_id=f"U{uuid.uuid4().hex[:10]}",
+        ))
+        await db.commit()
+
+    assert await remove(session_factory, org_b, api.user_id) is True
+
+    async with session_factory() as db:
+        assert await db.get(User, api.user_id) is not None
+        assert (await db.get(Session, b_session)).user_id is None
+        assert await db.get(ChannelIdentity, identity) is None
+
+    async with session_factory() as db:
+        await purge_user_account(db, org_id=api.org_id, user_id=api.user_id)
+        await db.commit()
+    async with session_factory() as db:
+        assert await db.get(User, api.user_id) is None
+        assert await db.get(Session, b_session) is not None
 
 
 async def test_a_home_account_is_not_purged_while_it_belongs_to_other_organisations(api, session_factory):
