@@ -558,6 +558,19 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
 PAYSLIP = {"label": "Payslip · September", "value": "€6,180 net", "source": {"file": "/workspace/payslips/sep.pdf", "page": 1}}
 
 
+async def test_a_raised_hand_larger_than_keel_takes_is_never_sent(fake_keel, store):
+    # Each fact is within its bounds; a file's path has none of its own, and these make the report too large.
+    evidence = [{**PAYSLIP, "source": {"file": f"/workspace/{'payslips/' * 700}sep-{n}.pdf"}} for n in range(50)]
+
+    error = json.loads(await _call("raise_hand", {"question": "Which income counts?", "evidence": evidence}, store))["error"]
+
+    size = int(re.match(r"The report is ([\d,]+) bytes, over the 256,000 bytes Keel takes\. ", error)[1].replace(",", ""))
+    assert size > 256_000
+    assert error.endswith("Shorten the question and its evidence and call raise_hand again.")
+    assert fake_keel.requests == []
+    assert store.reported() is None
+
+
 async def test_evidence_is_label_value_and_an_optional_source(fake_keel, store):
     fake_keel.answer(200, {"result": "hand-raised", "message": "A person will answer."})
     evidence = [

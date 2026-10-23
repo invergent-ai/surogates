@@ -600,6 +600,8 @@ def _fact(index: int, item: Any) -> dict[str, Any] | str:
     workspace, and never one their listing leaves out.  An error names the
     fact by its index, never by the path it gave.
     """
+    # Lenient where a model slips: a label's and a value's length is counted once stripped, and a null source or
+    # page is read as absent.
     at = f"evidence[{index}]"
     if not isinstance(item, dict) or not set(item) <= {"label", "value", "source"}:
         return f"{at} must be an object of a label, a value and an optional source, and nothing else."
