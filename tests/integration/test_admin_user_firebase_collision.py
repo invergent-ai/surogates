@@ -153,3 +153,37 @@ async def test_manual_create_blocks_on_any_provider(
     )
     assert response.status_code == 409, response.text
     assert "already in use" in response.json()["detail"].lower()
+
+
+async def test_manual_create_blocks_on_a_members_email(
+    admin_client, session_factory,
+):
+    """A member of the org, whose account lives in another org, holds
+    their email here too: a new account on it is refused, so the
+    password login never meets two users of one email."""
+    from surogates.tenant.memberships import add_member
+
+    org_id, headers = await _admin_token(session_factory)
+    elsewhere = await create_org(session_factory)
+    member = await create_user(session_factory, elsewhere, email="member@example.com")
+    async with session_factory() as session:
+        assert await add_member(session, org_id, member)
+        await session.commit()
+
+    response = await admin_client.post(
+        f"/v1/admin/orgs/{org_id}/users",
+        json={
+            "email": "Member@Example.com",
+            "display_name": "Another",
+            "auth_provider": "database",
+            "password": "hunter2",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 409, response.text
+    assert str(member) in response.json()["detail"]
+    async with session_factory() as session:
+        created = await session.scalar(
+            select(User.id).where(User.org_id == org_id, User.email == "Member@Example.com")
+        )
+    assert created is None

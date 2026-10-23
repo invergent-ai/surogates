@@ -293,18 +293,52 @@ SELECT session_id, count(*) FROM events
 - Verify Garage credentials for s3fs mount.
 - Check NetworkPolicy allows s3fs to reach Garage.
 
-## Database Schema and Migrations
+## Organisation Memberships — `surogates org-members`
 
-Surogates uses Alembic for database migrations. The schema is currently created via SQLAlchemy ORM metadata.
+A user has one home organisation and can also be a member of others. One
+login serves them all. See
+[Users in several organisations](../multi-tenancy/index.md#users-in-several-organisations).
+`surogates org-members` adds, removes and lists memberships. It reads the same
+database settings as `surogates migrate`.
 
 ```bash
-# Run pending migrations
-uv run alembic upgrade head
-
-# Generate a new migration after model changes
-uv run alembic revision --autogenerate -m "description"
-
-# Check current migration status
-uv run alembic current
+surogates org-members add --org <org uuid> --user <user uuid>      # added | already a member
+surogates org-members remove --org <org uuid> --user <user uuid>   # removed | not a member
+surogates org-members list --org <org uuid>                        # <user id> <email> home|member
 ```
+
+- `add` refuses a user whose email, case-insensitively, another user of the
+  organisation already has. The email is the password login's key there.
+- `remove` ends a membership. The rows the user owns in that organisation are
+  deleted, and their sessions and history there are detached from them. The
+  account stays. The next request with a token of that organisation answers
+  401. A user's home organisation cannot be removed.
+- `list` prints the home users first, then the members, each by email.
+- A refused change exits 1 and names the reason: an unknown organisation or
+  user, an email another user of the organisation has, or the user's home
+  organisation.
+
+A home account is not deleted while it still belongs to other organisations.
+Remove those memberships first.
+
+## Database Schema and Migrations
+
+The schema is created and brought up to date by `surogates migrate`, from the
+SQLAlchemy models. It is idempotent: it creates missing tables and applies the
+retrofit DDL, and a second run changes nothing.
+
+```bash
+surogates migrate
+```
+
+### Upgrading
+
+Run `surogates migrate` against the database before the new version's api,
+worker and other runtime processes start. A version can add tables that every
+request reads, and processes started before the migration fail until it has
+run. The version that adds organisation memberships is one: every
+authenticated request reads the `org_members` table.
+
+Rolling the image back to the previous version after the migration is safe.
+Older versions ignore the tables they do not know.
 

@@ -37,6 +37,7 @@ from surogates.tenant.auth.service_account import (
     is_service_account_token,
 )
 from surogates.tenant.context import TenantContext, set_tenant
+from surogates.tenant.memberships import belongs_to
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -639,11 +640,16 @@ async def _load_org(session: AsyncSession, org_id: UUID) -> Org | None:
 async def _load_org_and_user(
     session: AsyncSession, org_id: UUID, user_id: UUID
 ) -> tuple[Org | None, User | None]:
-    """Fetch the ``Org`` and ``User`` rows needed to build a context."""
+    """Fetch the ``Org`` and ``User`` rows needed to build a context.
+
+    The user is found only while they belong to the token's
+    organisation, as its home user or as a member: a member taken out
+    of it gets no user, and so a 401.
+    """
     org = await _load_org(session, org_id)
 
     user_result = await session.execute(
-        select(User).where(User.id == user_id, User.org_id == org_id)
+        select(User).where(User.id == user_id, belongs_to(org_id))
     )
     user: User | None = user_result.scalar_one_or_none()
 

@@ -46,6 +46,9 @@ the kit carries Work's own components:
 | Import | Exports | What it is |
 | --- | --- | --- |
 | `sidebar` | `Sidebar`, `SidebarBrand`, `SidebarUserBar`, `SidebarAction`, `useSidebar` | The desktop sidebar: open, or an icon rail that opens on hover, with the pin toggle at its bottom. `ListRow` and `SectionLabel` inside it collapse with the rail; outside it (a phone drawer) the parts draw open. |
+| `page-header` | `PageHeader` | A page's sticky header: title, badge, subtitle, actions and a back arrow. On a phone the title gives way to the top bar, and the actions move into it unless `stackRightOnMobile`. |
+| `mobile-top-bar` | `MobileTopBar`, `MOBILE_PAGE_ACTIONS_ID` | The phone's top bar: the menu button, the brand mark (linked through `home`, a router `Link`), the page's name and its action slot. |
+| `nav-drawer` | `NavDrawer` | The phone's navigation: a left drawer (vaul) with a close button, holding the sidebar's rows. The app closes it on navigation. |
 | `list-row` | `ListRow`, `ListGroup` | A list entry (icon, label, description, count, chevron) in three densities; a button, or any link via `asChild`. |
 | `section-label` | `SectionLabel` | A rule and a quiet word starting a group of rows. |
 | `collapsible-header` | `CollapsibleHeader` | A styled `CollapsibleTrigger`: `nav` (a group in a list of rows) or `section` (a disclosure; `size="sm"` for the compact one). |

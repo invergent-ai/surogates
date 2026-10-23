@@ -13,30 +13,28 @@ All endpoints require authentication unless noted otherwise. Two token types are
 
 ### `POST /v1/auth/login`
 
-Authenticate and receive tokens.
+Authenticate and receive tokens. The agent's organisation's users sign in, home users and members alike. `POST /v1/auth/firebase/exchange`, the agent's Firebase sign-in, admits them too, and refuses with 409 a sign-up whose email another user of the organisation has.
 
 **Request:**
 ```json
 {
-  "provider": "database",
-  "credentials": {
-    "email": "user@acme.com",
-    "password": "..."
-  }
+  "email": "user@acme.com",
+  "password": "..."
 }
 ```
 
-Credentials: `{"email": "...", "password": "..."}`
+`org_id` is optional. Without it, the organisation is the agent's.
 
 **Response (200):**
 ```json
 {
   "access_token": "eyJ...",
   "refresh_token": "eyJ...",
-  "token_type": "bearer",
-  "expires_in": 1800
+  "token_type": "bearer"
 }
 ```
+
+**Errors:** 401 when the credentials do not match.
 
 ### `POST /v1/auth/refresh`
 
@@ -53,10 +51,97 @@ Refresh an expired access token.
 ```json
 {
   "access_token": "eyJ...",
-  "token_type": "bearer",
-  "expires_in": 1800
+  "token_type": "bearer"
 }
 ```
+
+The refresh token itself is not rotated.
+
+**Errors:** 401 when the refresh token is invalid, or its user no longer belongs to the token's organisation (`User not found.`).
+
+### `GET /v1/auth/me`
+
+The signed-in user. `org_id` and `org_name` name the organisation the token was signed in through. `organisations` lists every organisation the user belongs to: their home organisation first, then the others by name, then by id. See [Users in several organisations](../multi-tenancy/index.md#users-in-several-organisations).
+
+**Response (200):**
+```json
+{
+  "id": "6f1c...",
+  "org_id": "0b7e...",
+  "org_name": "Acme",
+  "email": "user@acme.com",
+  "display_name": "Ada",
+  "username": "ada",
+  "phone": null,
+  "auth_provider": "database",
+  "sign_in_provider": null,
+  "created_at": "2026-10-23T09:00:00Z",
+  "organisations": [
+    {"id": "0b7e...", "name": "Acme"},
+    {"id": "9d2a...", "name": "Globex"}
+  ]
+}
+```
+
+**Errors:** 401 `User not found.` once the user no longer belongs to the token's organisation.
+
+`PATCH /v1/auth/me` takes `display_name`, `email`, `username` and `phone`, and answers the same shape. It answers 409 `That email is already in use.` when another user of any organisation the user belongs to, home or member, has the new email (case-insensitive).
+
+### Sign-in by organisation
+
+For a client that serves several organisations and no agent. These routes need no token. The organisation in the path decides: they resolve no agent, ignore a `Host` subdomain and `?agent_id=`, and enrol the user on no agent. Their tokens name that organisation as `org_id`, and are accepted while the user belongs to it, as a home user or as a member. See [Signing in by organisation](../multi-tenancy/index.md#signing-in-by-organisation).
+
+#### `GET /v1/auth/orgs/{org_id}/config`
+
+How to sign in to the organisation. `firebase` is `null` when the organisation has no Firebase project: its users sign in with a password.
+
+**Response (200):**
+```json
+{
+  "org_id": "0b7e...",
+  "org_name": "Acme",
+  "firebase": {
+    "api_key": "...",
+    "auth_domain": "acme.firebaseapp.com",
+    "project_id": "acme",
+    "app_id": null,
+    "messaging_sender_id": null,
+    "measurement_id": null,
+    "enabled_providers": ["google", "password"]
+  }
+}
+```
+
+**Errors:** 404 `Organisation not found.` 503 `Firebase auth is unavailable. Try again shortly.` when the platform cannot say whether the organisation has a Firebase project.
+
+#### `POST /v1/auth/orgs/{org_id}/login`
+
+Sign in with the password of the user's account. Any user of the organisation signs in, home or member. When a home user and a member share the email, the home user's row is the one checked.
+
+**Request:**
+```json
+{"email": "user@acme.com", "password": "..."}
+```
+
+**Response (200):**
+```json
+{"access_token": "eyJ...", "refresh_token": "eyJ...", "token_type": "bearer"}
+```
+
+**Errors:** 401 `Invalid credentials.`, for every failed sign-in. 404 `Organisation not found.`
+
+#### `POST /v1/auth/orgs/{org_id}/firebase/exchange`
+
+Exchange an ID token of the organisation's Firebase project for tokens. It never creates a user. It finds the organisation's user, home or member, by Firebase identity. Failing that, it links the home user of the organisation whose email equals the verified Firebase email, who has no external id yet and is not a `database` user: an invited account's first sign-in. A member whose home is another organisation is never linked by email.
+
+**Request:**
+```json
+{"id_token": "eyJ..."}
+```
+
+**Response (200):** the same tokens as the login. They carry the time of the Firebase sign-in.
+
+**Errors:** 401 when the Firebase token does not verify. 403 `You have no account in this organisation. Ask to be invited.` 404 `Organisation not found.`, or `Firebase auth is not configured.` 503 `Firebase auth is unavailable. Try again shortly.`
 
 ### `POST /v1/auth/logout`
 
