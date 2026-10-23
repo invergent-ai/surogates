@@ -154,6 +154,15 @@ async function pickFile(input: HTMLInputElement, file: File): Promise<void> {
   });
 }
 
+/** The words an element's `aria-describedby` points at, joined. */
+function describedText(el: Element): string {
+  return (el.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ");
+}
+
 function pickerOf(root: ParentNode, label: string): HTMLSelectElement | null {
   return root.querySelector<HTMLSelectElement>(
     `select[aria-label="Pick a file for ${label}"]`,
@@ -393,6 +402,31 @@ describe("a form drawn from a spec", () => {
     });
   });
 
+  it("a decimal takes a comma or a dot for its decimals, whichever comes last", () => {
+    const examples: [string, string][] = [
+      ["1,5", "1.5"],
+      ["1.5", "1.5"],
+      ["1.234,56", "1234.56"],
+      ["1,234.56", "1234.56"],
+      ["1 234,5", "1234.5"],
+      ["12", "12"],
+    ];
+    for (const [typed, sent] of examples) {
+      expect(toOutput(loanForm, { amount: typed })).toEqual({ amount: sent });
+      expect(missingInputs(loanForm, "approve", { applicant: "Ana Pop", amount: typed })).toEqual(
+        {},
+      );
+    }
+  });
+
+  it("a decimal that is still not a number is a field error", () => {
+    for (const typed of ["lots", "1,2a", "-", "1.5.x"]) {
+      expect(missingInputs(loanForm, "decline", { applicant: "Ana Pop", amount: typed })).toEqual(
+        { amount: "Not a number." },
+      );
+    }
+  });
+
   it("missing inputs name the outcome that requires them", () => {
     expect(missingInputs(loanForm, "approve", { amount: " " })).toEqual({
       applicant: "Required.",
@@ -513,6 +547,37 @@ describe("a form drawn from a spec", () => {
       buttonNamed(fieldOf(root, "Contract"), "Remove id-card.pdf") as HTMLButtonElement,
     );
     expect(onChange).toHaveBeenLastCalledWith("contract", undefined);
+  });
+
+  it("a required file field says it is required to a screen reader", () => {
+    const required = draw({
+      form: { ...loanForm, required: ["contract"] },
+      onUpload: vi.fn(),
+      files: [fileA],
+    }).root;
+    const contract = fieldOf(required, "Contract");
+    const group = contract.querySelector("[role=group][aria-labelledby]") as Element;
+    expect(describedText(group)).toContain("Required.");
+    expect(
+      describedText(
+        buttonNamed(contract, "Upload a file for Contract") as HTMLButtonElement,
+      ),
+    ).toContain("Required.");
+    const picker = pickerOf(required, "Contract") as HTMLSelectElement;
+    expect(picker.getAttribute("aria-required")).toBe("true");
+    expect(describedText(picker)).toContain("Required.");
+
+    const optional = draw({ onUpload: vi.fn(), files: [fileA] }).root;
+    const plain = fieldOf(optional, "Contract");
+    expect(
+      describedText(plain.querySelector("[role=group][aria-labelledby]") as Element),
+    ).not.toContain("Required");
+    expect(
+      describedText(
+        buttonNamed(plain, "Upload a file for Contract") as HTMLButtonElement,
+      ),
+    ).not.toContain("Required");
+    expect(pickerOf(optional, "Contract")?.hasAttribute("aria-required")).toBe(false);
   });
 
   it("a read-only form takes no input", () => {

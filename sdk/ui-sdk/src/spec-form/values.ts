@@ -52,16 +52,46 @@ export function isEmptyValue(value: unknown): boolean {
   return Array.isArray(value) && value.length === 0;
 }
 
-/** A number as people write it, without its spaces and thousands commas. */
+/** A whole number as people write it, without its spaces and thousands commas. */
 function plainNumber(text: string): string {
   return text.replace(/[\s,]/g, "");
+}
+
+/**
+ * A decimal as people write it, made plain digits with a dot. Either a
+ * comma or a dot may mark the decimals: whichever comes last does, and
+ * every other comma, dot or space separates thousands ("1.234,56" and
+ * "1,234.56" both read 1234.56). Null when what is left is not a number.
+ */
+function plainDecimal(text: string): string | null {
+  const compact = text.replace(/\s/g, "");
+  const negative = compact.startsWith("-");
+  const digits = negative ? compact.slice(1) : compact;
+  const separator = Math.max(digits.lastIndexOf(","), digits.lastIndexOf("."));
+  const whole =
+    separator < 0 ? digits : digits.slice(0, separator).replace(/[.,]/g, "");
+  const fraction = separator < 0 ? "" : digits.slice(separator + 1);
+  if (!/^\d*$/.test(whole) || !/^\d*$/.test(fraction)) return null;
+  if (whole === "" && fraction === "") return null;
+  const plain = (whole || "0") + (fraction ? `.${fraction}` : "");
+  return negative ? `-${plain}` : plain;
+}
+
+/** A decimal field's text that does not read as a number. */
+function isNotADecimal(input: FormSpecInput, value: FormValue): boolean {
+  return (
+    input.type === "decimal" &&
+    !isFileInput(input) &&
+    typeof value === "string" &&
+    plainDecimal(value) === null
+  );
 }
 
 function outputOf(input: FormSpecInput, value: FormValue): unknown {
   if (isFileInput(input) || typeof value !== "string") return value;
   switch (input.type) {
     case "decimal":
-      return plainNumber(value);
+      return plainDecimal(value) ?? value;
     case "int": {
       const plain = plainNumber(value);
       return /^-?\d+$/.test(plain) ? Number(plain) : value;
@@ -105,6 +135,7 @@ function pad(n: number, width = 2): string {
 
 /** An instant as a `datetime-local` input reads it: `YYYY-MM-DDTHH:mm`, here. */
 function localDateTime(date: Date): string {
+  // Seconds are dropped on purpose: no form drawn from a spec asks for them.
   return (
     `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
     `T${pad(date.getHours())}:${pad(date.getMinutes())}`
@@ -141,8 +172,9 @@ export function fromOutput(
 }
 
 /**
- * The inputs still empty that the form, or the outcome chosen, requires,
- * each with the words to show beside it.
+ * The inputs that cannot go out yet, each with the words to show beside it:
+ * those still empty that the form, or the outcome chosen, requires, and a
+ * decimal that does not read as a number.
  */
 export function missingInputs(
   form: FormSpec,
@@ -152,7 +184,11 @@ export function missingInputs(
   const chosen = (form.outcomes ?? []).find((o) => o.key === outcome);
   const missing: Record<string, string> = {};
   for (const input of inputsOf(form)) {
-    if (!isEmptyValue(values[input.field])) continue;
+    const value = values[input.field];
+    if (value !== undefined && !isEmptyValue(value)) {
+      if (isNotADecimal(input, value)) missing[input.field] = "Not a number.";
+      continue;
+    }
     if (form.required?.includes(input.field)) {
       missing[input.field] = "Required.";
     } else if (chosen?.required?.includes(input.field)) {

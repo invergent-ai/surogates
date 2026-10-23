@@ -305,6 +305,7 @@ function FileInput({
   labelId,
   value,
   onChange,
+  required,
   describedBy,
   readOnly,
   onUpload,
@@ -321,6 +322,11 @@ function FileInput({
   const [uploading, setUploading] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const failureId = `${id}-failure`;
+  // A group takes no aria-required, so a required set of files says so in
+  // words, read with the group and with each control in it.
+  const requiredId = `${id}-required`;
+  const described = (...ids: (string | false | undefined)[]) =>
+    ids.filter(Boolean).join(" ") || undefined;
   const pickable = (files ?? []).filter(
     (file) => !held.some((h) => h.uri === file.uri),
   );
@@ -360,9 +366,14 @@ function FileInput({
       role="group"
       id={id}
       aria-labelledby={labelId}
-      aria-describedby={describedBy}
+      aria-describedby={described(required && requiredId, describedBy)}
       className="flex flex-col gap-2"
     >
+      {required && (
+        <span id={requiredId} className="sr-only">
+          Required.
+        </span>
+      )}
       {held.length > 0 && (
         <ul className="flex flex-col gap-1.5">
           {held.map((file, index) => (
@@ -416,7 +427,11 @@ function FileInput({
                 disabled={uploading}
                 aria-busy={uploading || undefined}
                 aria-label={`Upload a file for ${input.label}`}
-                aria-describedby={failure ? failureId : undefined}
+                aria-describedby={described(
+                  required && requiredId,
+                  describedBy,
+                  failure !== null && failureId,
+                )}
                 onClick={() => chooser.current?.click()}
               >
                 <UploadIcon />
@@ -427,6 +442,8 @@ function FileInput({
           {pickable.length > 0 && (
             <select
               aria-label={`Pick a file for ${input.label}`}
+              aria-required={required || undefined}
+              aria-describedby={described(required && requiredId, describedBy)}
               className={cn(CONTROL_FIELD, "sm:w-auto sm:min-w-56")}
               value=""
               onChange={pick}
