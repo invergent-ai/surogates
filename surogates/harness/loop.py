@@ -102,6 +102,7 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import (
     _open_local_copy,
+    _parse_tool_args_for_guardrail,
     _turn_now,
     cancelled_result,
     execute_single_tool,
@@ -4391,6 +4392,7 @@ class AgentHarness(
                         reason="question_timed_out",
                         cost_tracker=cost_tracker,
                         turn_id=turn_id,
+                        notify_parent=False,
                     )
                     return
                 await self._request_final_summary(
@@ -5860,12 +5862,16 @@ class AgentHarness(
         from surogates.tasks.tools import _worker_block_handler
 
         prompts = "; ".join(_question_prompts(tool_calls_raw)) or "(no prompt)"
-        got = await _worker_block_handler(
-            {"reason": f"Blocked: no answer to the question: {prompts}"},
-            session_store=self._store, redis=self._redis,
-            session_id=str(session.id), session_factory=self._session_factory,
-        )
-        blocked = json.loads(got).get("ok") is True
+        try:
+            got = await _worker_block_handler(
+                {"reason": f"Blocked: no answer to the question: {prompts}"},
+                session_store=self._store, redis=self._redis,
+                session_id=str(session.id), session_factory=self._session_factory,
+            )
+            blocked = json.loads(got).get("ok") is True
+        except Exception:
+            logger.warning("Session %s: its task could not block on the question", session.id, exc_info=True)
+            return False
         if not blocked:
             logger.warning("Session %s: its task could not block on the question: %s", session.id, got)
         return blocked
@@ -6690,9 +6696,8 @@ def _question_prompts(tool_calls_raw: list[dict]) -> list[str]:
     for call in tool_calls_raw:
         if call.get("function", {}).get("name") != "ask_user_question":
             continue
-        try:
-            questions = json.loads(call["function"].get("arguments") or "{}").get("questions") or []
-        except (TypeError, ValueError, AttributeError):
+        questions = _parse_tool_args_for_guardrail(call).get("questions")
+        if not isinstance(questions, list):
             continue
         prompts += [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
     return prompts

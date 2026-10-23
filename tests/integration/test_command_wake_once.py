@@ -2738,6 +2738,41 @@ async def test_a_task_whose_question_times_out_blocks_on_it_instead_of_being_ret
     assert await workers.status(helper.id) == "completed"
     [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
     assert told.data["reason"] == task.blocked_reason
+    # Blocked is its parent's whole news: no report that the task finished as well.
+    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
+
+
+@pytest.mark.slow
+async def test_a_task_that_cannot_block_on_its_timed_out_question_still_ends_its_turn(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr("surogates.tasks.tools._worker_block_handler", broken)
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        task = Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
+            current_session_id=helper.id, attempt_count=1,
+        )
+        db.add(task)
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
+        await db.commit()
+    workers.replies.append(ASKS)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(helper.id), 10)
+
+    # The block failed: the turn falls back to the one tools-off reply and ends, with nothing raised.
+    assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_REQUEST
+    assert (await workers.said(helper.id))[-1] == "I'll wait for your answer."
+    assert await workers.status(helper.id) == "completed"
+    assert (await finish_reasons(workers, helper.id))[-1] == "question_timed_out"
 
 
 @pytest.mark.slow

@@ -1134,8 +1134,12 @@ class ArtifactCompletionMixin:
         cost_tracker: SessionCostTracker | None = None,
         turn_id: str | None = None,
         user_message: str = "",
+        notify_parent: bool = True,
     ) -> None:
         """Emit SESSION_COMPLETE and advance the cursor.
+
+        ``notify_parent=False`` keeps a worker's parent from hearing it
+        finished: a task that blocked has told its parent so already.
 
         When ``turn_id`` is supplied AND the completion reason represents
         a successful turn end (``stop``/``done``/``complete``/``completed``),
@@ -1376,7 +1380,7 @@ class ArtifactCompletionMixin:
         # Notify parent session if this is a worker (child) session.
         # Scheduled loop runs use parent_id for traceability in the session
         # tree, but should not wake the parent as if they were sub-agent work.
-        if _should_notify_parent_on_completion(session):
+        if notify_parent and _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import notify_parent_on_completion
             try:
                 await notify_parent_on_completion(
