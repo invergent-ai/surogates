@@ -13,7 +13,12 @@ import copy
 from collections.abc import Sequence
 from typing import Any
 
-from surogates.channels.constants import ADAPTER_CHANNELS, API_CHANNEL, STUDIO_CHANNEL, VOICE_TOOLS
+from surogates.channels.constants import (
+    ADAPTER_CHANNELS,
+    API_CHANNEL,
+    STUDIO_CHANNEL,
+    VOICE_TOOLS,
+)
 from surogates.devices.binding import device_of
 from surogates.keel.steps import StepContract
 from surogates.tools.builtin.ask_user_question import widen_for_channel
