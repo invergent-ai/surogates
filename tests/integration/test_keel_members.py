@@ -171,17 +171,30 @@ async def test_a_set_password_link_works_once(link, api, org, session_factory):
     assert (await sign_in(api, org, email, OTHER_PASSWORD)).status_code == 401
 
 
-async def waiting_on_locks(session_factory, count: int) -> None:
-    """Returns once *count* statements wait on a row lock they asked for."""
+#: The backends a backend's lock holds up: those waiting on it, and those queued behind them for the same row.
+_HELD_UP = text("""
+    WITH RECURSIVE held_up(pid) AS (
+        SELECT pid FROM pg_stat_activity WHERE :holder = ANY(pg_blocking_pids(pid))
+        UNION
+        SELECT waiting.pid FROM pg_stat_activity AS waiting
+        JOIN held_up ON held_up.pid = ANY(pg_blocking_pids(waiting.pid))
+    )
+    SELECT count(*) FROM held_up JOIN pg_stat_activity USING (pid) WHERE query LIKE '%FROM users%FOR UPDATE%'
+""")
+
+
+async def waiting_on(session_factory, holder: int, count: int) -> None:
+    """Returns once *count* statements on the users table wait on the row lock the backend *holder* holds.
+
+    Only a statement held up by that lock counts, so another test's waits never do.
+    """
     for _ in range(500):
         async with session_factory() as db:
-            waiting = await db.scalar(text(
-                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%'"
-            ))
+            waiting = await db.scalar(_HELD_UP, {"holder": holder})
         if waiting >= count:
             return
         await asyncio.sleep(0.02)
-    raise AssertionError(f"{count} statements never waited on a lock")
+    raise AssertionError(f"{count} statements never waited on the lock")
 
 
 async def test_two_uses_of_one_link_at_once_set_one_password(link, api, org, session_factory):
@@ -193,10 +206,11 @@ async def test_two_uses_of_one_link_at_once_set_one_password(link, api, org, ses
     # password hashed, wait on it to write: neither has written before the other reads.
     async with session_factory() as holder:
         await holder.execute(select(User.id).where(User.id == UUID(answer["user_id"])).with_for_update())
+        holder_pid = await holder.scalar(text("SELECT pg_backend_pid()"))
         uses = asyncio.gather(
             set_password(api, org, token, PASSWORD), set_password(api, org, token, OTHER_PASSWORD),
         )
-        await waiting_on_locks(session_factory, 2)
+        await waiting_on(session_factory, holder_pid, 2)
         await holder.rollback()
     answers = await uses
 
