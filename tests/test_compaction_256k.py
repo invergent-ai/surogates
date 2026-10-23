@@ -29,7 +29,7 @@ from surogates.harness.context import (
     _estimate_messages_tokens_rough,
 )
 
-WINDOW = 262_144  # surogate-pro
+WINDOW = 262_144  # surogate
 OUTPUT_RESERVE = 16_384  # max_tokens the harness asks for on every main call
 OVERHEAD = 30_000  # system prompt + tool schemas: in every prompt, never compacted
 TASK = "Research CVE-2021-44228 and write up the CSRB recommendations."

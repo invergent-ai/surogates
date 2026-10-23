@@ -299,9 +299,10 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=True,
     ),
+    # Pro is served by Claude Opus, whose window is 1M.
     "surogate-pro": ModelInfo(
         id="surogate-pro",
-        context_window=262_144,
+        context_window=1_000_000,
         max_output_tokens=32_768,
         input_cost_per_1k=0.0,
         output_cost_per_1k=0.0,

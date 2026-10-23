@@ -52,7 +52,7 @@ def test_payload_without_window_projects_none():
         ("surogate3.7", 1_048_576, 1_048_576),  # unknown model, endpoint window
         ("surogate3.7", None, _DEFAULT_CONTEXT_WINDOW),  # unknown, nothing declared
         ("surogate-pro", 100_000, 100_000),  # endpoint beats the catalog
-        ("surogate-pro", None, 262_144),  # catalog when nothing declared
+        ("surogate-pro", None, 1_000_000),  # catalog when nothing declared
     ],
 )
 def test_compressor_window(model, window, expected):
