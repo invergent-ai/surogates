@@ -1,7 +1,7 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
 answers it or asks it for a revision, cancels it, and reads its status.  It
 also lists, reads and writes a case's files: the workspace its step sessions
-share.
+share; and it gives a person the editor config of one of them.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -31,11 +31,13 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.db.models import User
 from surogates.keel.case_files import (
     CaseFileError,
     case_key,
@@ -56,11 +58,14 @@ from surogates.keel.steps import (
     render_message,
     step_contract_of,
 )
-from surogates.office.sessions import OpenDocument, open_at, open_like
+from surogates.office.editor_config import build_editor_config
+from surogates.office.kinds import office_kind
+from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_like, open_waiting
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.storage.backend import TooLarge
 from surogates.tenant.auth.service_account import ServiceAccountStore
+from surogates.tenant.memberships import belongs_to
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +123,18 @@ class StepMessage(BaseModel):
 class StepSessionStatus(BaseModel):
     status: str
     updated_at: datetime
+
+
+class CaseEditorRequest(BaseModel):
+    """Keel's request for one person's editor on a case's document.  Keys this runtime does not know are ignored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    org_id: UUID
+    path: str
+    user_id: UUID
+    access: Literal["edit", "comment", "view"]
+    theme: Literal["light", "dark"] = "light"
 
 
 def _refused(status_code: int, code: str, message: str) -> HTTPException:
@@ -451,16 +468,21 @@ def _case_id(case_id: str) -> UUID:
         ) from None
 
 
-def _case_path(request: Request, case: UUID) -> str:
-    """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
+def _checked_path(request: Request, case: UUID, path: str) -> str:
+    """*path*, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
     try:
-        relative = case_path(request.query_params.get("path") or "")
+        relative = case_path(path)
         case_key(request.app.state.settings, case, relative)
     except CaseFileError as exc:
         raise _refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, "The path is not one of the case's files.",
         ) from None
     return relative
+
+
+def _case_path(request: Request, case: UUID) -> str:
+    """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
+    return _checked_path(request, case, request.query_params.get("path") or "")
 
 
 def _storage_failed(exc: Exception, case: UUID) -> HTTPException:
@@ -472,6 +494,10 @@ def _storage_failed(exc: Exception, case: UUID) -> HTTPException:
     return _refused(
         status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The case's files could not be reached; try again.",
     )
+
+
+def _unknown_file() -> HTTPException:
+    return _refused(status.HTTP_404_NOT_FOUND, "unknown-file", "No such file in the case's workspace.")
 
 
 def _too_large(limit: int) -> HTTPException:
@@ -571,7 +597,7 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
         size = await download_case_file(state.storage, state.settings, case, relative, target, limit=limit)
         source, digest = await asyncio.to_thread(_opened_digest, target)
     except FileNotFoundError:
-        raise _refused(status.HTTP_404_NOT_FOUND, "unknown-file", "No such file in the case's workspace.") from None
+        raise _unknown_file() from None
     except TooLarge:
         raise _too_large(limit) from None
     except (ClientError, BotoCoreError) as exc:
@@ -628,3 +654,73 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
         raise _storage_failed(exc, case) from None
     value = await asyncio.to_thread(file_value, case, relative, data)
     return JSONResponse({**value, "size": len(data)})
+
+
+async def _member_name(request: Request, org_id: UUID, user_id: UUID) -> str:
+    """The display name of *user_id*, a user of *org_id*: 404 ``unknown-user`` for anyone else."""
+    try:
+        async with request.app.state.session_factory() as db:
+            found = (
+                await db.execute(select(User.display_name).where(User.id == user_id, belongs_to(org_id)))
+            ).one_or_none()
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc, logged=f"user {user_id} could not be read", message="The editor could not be opened.",
+        ) from None
+    if found is None:
+        raise _refused(status.HTTP_404_NOT_FOUND, "unknown-user", "No such user in this org.")
+    return found.display_name
+
+
+@router.post("/keel/cases/{case_id}/editor")
+async def open_case_document(case_id: str, request: Request) -> JSONResponse:
+    """One person's editor config for a document of the case's workspace, with the access Keel gives them.
+
+    The person is the runtime user, under their display name, as when they
+    open a file in an agent's chat.  Everyone who opens the file, and any
+    step session of the case that has it open, shares its one editing
+    session.  A kind the editor only converts to view opens read-only,
+    whatever the access.
+    """
+    require_link(request)
+    case = _case_id(case_id)
+    body = await read_body(request, CaseEditorRequest)
+    state = request.app.state
+    office = state.settings.office
+    if not office.enabled:
+        raise _refused(status.HTTP_503_SERVICE_UNAVAILABLE, "office-off", "No document server is configured.")
+    relative = _checked_path(request, case, body.path)
+    kind = office_kind(relative)
+    if kind is None:
+        raise _refused(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "not-a-document", "The file is not an office document.",
+        )
+    workspace = case_workspace(state.storage, state.settings, case)
+    try:
+        found = await workspace.stat(relative)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    if found is None:
+        raise _unknown_file()
+    editor_id = f"user:{body.user_id}"
+    name = await _member_name(request, body.org_id, body.user_id)
+    try:
+        document = await open_waiting(
+            state.session_factory, location=workspace.location(relative), path=relative,
+            session_id=None, case_id=case, user=(editor_id, name),
+        )
+    except DocumentClosing:
+        raise _refused(
+            status.HTTP_409_CONFLICT, "document-closing", "The document is still being saved; try again in a moment.",
+        ) from None
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"a document of case {case} could not be opened",
+            message="The editor could not be opened.",
+        ) from None
+    config = build_editor_config(
+        settings=office, row_id=document.id, doc_key=document.doc_key, path=relative, kind=kind,
+        user_id=editor_id, user_name=name, access=body.access if kind.editable else "view", theme=body.theme,
+    )
+    return JSONResponse({"document_server_url": office.public_url.rstrip("/"), "config": config})

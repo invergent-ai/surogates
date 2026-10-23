@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, cancel it and read its status. It also lists, reads and writes a case's files. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, cancel it and read its status. It also lists, reads and writes a case's files, and opens a case's document in the document editor for a person. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -13,6 +13,7 @@
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
+| `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme"}` and answers `200 {"document_server_url", "config"}`: one person's editor config for the document at the path. See [A case's document in the editor](#a-cases-document-in-the-editor). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
 It has no JWT authentication, no web UI and no OpenAPI schema. Each route checks the link key instead. The public API never serves `/v1/keel/`.
@@ -27,15 +28,19 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
 | 404 | `unknown-session` | No such session, or it is not a step's own session. |
 | 404 | `unknown-file` | No file at the path in the case's workspace. |
+| 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 409 | `agent-stopped` | The agent is stopped. |
 | 409 | `key-in-use` | The key, or the session id, names another step's session. |
 | 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
+| 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
+| 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate, or a case id is not a UUID. |
 | 500 | `internal-error` | The database failed. Only the error's class name is logged. |
+| 503 | `office-off` | The editor was asked for, and no document server is configured. |
 | 503 | `unavailable` | The agent's runtime config could not be read, twice; or the object store refused or did not answer a case's files. Only the error's class name and the case id are logged. |
 
 ## A step's inputs
@@ -57,9 +62,25 @@ The listing names only files these routes can read by the path it gives.
 
 A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when it is not there yet. It is refused while the file is open in the document editor: the editor's next save would land over a file it never saw. A read is copied to a scratch file first, so its digest is sent before its bytes. A read of a file over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`, copied no further. None of these routes logs a path or a file's bytes.
 
+## A case's document in the editor
+
+`POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme"}`: `access` is `edit`, `comment` or `view`, and `theme` is `light` (the default) or `dark`. The path is checked as the file routes check it.
+
+The person is the runtime user `user_id`, who must belong to the org `org_id`. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
+
+| `access` | The editor |
+|---|---|
+| `edit` | Opens in edit mode, with editing, reviewing and commenting on. |
+| `comment` | Opens in edit mode, with editing and reviewing off and commenting on. |
+| `view` | Opens read-only, without comments. |
+
+The document server converts older formats (`.doc`, `.odt`, `.rtf`, `.xls`, `.ods`, `.ppt`, `.odp`) to show them, so these open read-only, without comments, whatever the access.
+
+Everyone who opens the file shares its one editing session, whatever their access, and so does a step session of the case that has the file open. The document belongs to the case: it is read from and saved into the case's files, and stays open while anyone is in it, with or without a chat. While it is open, the listing's `editing` names who is in it, and a write over it is refused. Mentions are not offered: the config names nobody to mention. Like the file routes, it logs no path.
+
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, and read and write any case's files.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, read and write any case's files, and open them in the editor as any user.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 
