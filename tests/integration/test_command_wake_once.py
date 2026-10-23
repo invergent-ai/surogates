@@ -31,6 +31,7 @@ from surogates.harness.landing import last_turn_end, name_turn
 from surogates.harness.local_landing import lands
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
+from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.missions.evaluator import apply_verdict
@@ -2723,6 +2724,62 @@ async def test_a_question_that_times_out_while_its_user_said_more_goes_on_with_w
     assert (await what_the_question_got(workers, chat))["reason"] == "timeout"
     assert workers.requests[-1][-1] == {"role": "user", "content": "Use the Q3 figures."}
     assert "question_timed_out" not in await finish_reasons(workers, chat)
+
+
+SKIP_REASON = "skipped: the question before it in this batch went unanswered"
+BATCH = (
+    {"role": "assistant", "content": "", "tool_calls": [
+        ASKS[0]["tool_calls"][0],
+        {"id": "call_after", "type": "function", "function": {"name": "todo", "arguments": "{}"}},
+    ]},
+    ASKS[1],
+)
+
+
+async def what_a_call_got(workers: Workers, chat: UUID, call_id: str) -> str:
+    [result] = [
+        event for event in await workers.store.get_events(chat, types=[EventType.TOOL_RESULT])
+        if event.data["tool_call_id"] == call_id
+    ]
+    return result.data["content"]
+
+
+@pytest.mark.slow
+async def test_calls_after_an_unanswered_question_in_its_batch_are_skipped(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    workers.replies.append(BATCH)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(chat), 10)
+
+    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIP_REASON)["content"]
+    assert await what_a_call_got(workers, chat, "call_after") == skipped
+
+
+@pytest.mark.slow
+async def test_calls_after_an_answered_question_in_its_batch_still_run(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 30)
+    chat = await workers.chat()
+    workers.replies.append(BATCH)
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch
+    waiting = asyncio.create_task(asking.wake(chat))
+    async with asyncio.timeout(10):
+        while not await workers.store.get_events(chat, types=[EventType.INBOX_INPUT_REQUIRED]):
+            await asyncio.sleep(0.02)
+    await workers.store.emit_event(
+        chat, EventType.ASK_USER_QUESTION_RESPONSE,
+        {"tool_call_id": "call_ask", "responses": [{"question": "Which quarter?", "answer": "Q3"}]},
+    )
+    await asyncio.wait_for(waiting, 10)
+
+    assert (await what_the_question_got(workers, chat)).get("cancelled") is not True
+    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIP_REASON)["content"]
+    assert await what_a_call_got(workers, chat, "call_after") != skipped
 
 
 # -- A routine's run --

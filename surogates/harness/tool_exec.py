@@ -865,6 +865,39 @@ async def _emit_guardrail_tool_result(
         "content": result_content,
     }
 
+def _is_cancelled(content: Any) -> bool:
+    """Whether a tool result is a JSON object saying ``cancelled`` (an unanswered question)."""
+    try:
+        data = json.loads(content)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("cancelled") is True
+
+
+async def _emit_skipped_tool_result(
+    tc: dict[str, Any],
+    *,
+    session: Session,
+    lease: SessionLease,
+    store: SessionStore,
+) -> dict:
+    """Record a call that did not run, so its TOOL_CALL is not left without a result."""
+    msg = make_skipped_tool_result(tc, "skipped: the question before it in this batch went unanswered")
+    name = tc.get("function", {}).get("name", "")
+    await store.emit_event(
+        session.id, EventType.TOOL_CALL,
+        {"tool_call_id": msg["tool_call_id"], "name": name, "arguments": {}},
+    )
+    result_event_id = await store.emit_event(
+        session.id, EventType.TOOL_RESULT,
+        {"tool_call_id": msg["tool_call_id"], "name": name, "content": msg["content"], "elapsed_ms": 0},
+    )
+    await store.advance_harness_cursor(
+        session.id, through_event_id=result_event_id, lease_token=lease.lease_token,
+    )
+    return msg
+
+
 # Patterns that indicate a terminal command may modify/delete files.
 _DESTRUCTIVE_PATTERNS = re.compile(
     r"""(?:^|\s|&&|\|\||;|`)(?:
@@ -1179,11 +1212,17 @@ async def execute_tool_calls_sequential(
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
+    unanswered = False  # an ask_user_question in this batch came back unanswered
 
     for tc in tool_calls:
         # --- Interrupt check before each tool call ---
         if interrupt_check():
             results.append(make_skipped_tool_result(tc))
+            continue
+        if unanswered:
+            results.append(await _emit_skipped_tool_result(
+                tc, session=session, lease=lease, store=store,
+            ))
             continue
 
         guardrail_args = _parse_tool_args_for_guardrail(tc)
@@ -1250,6 +1289,8 @@ async def execute_tool_calls_sequential(
                 ),
             }
         results.append(result_msg)
+        if tool_name == "ask_user_question" and _is_cancelled(result_msg.get("content")):
+            unanswered = True
         if tool_guardrails is not None and tool_guardrails.halt_decision is not None:
             break
 
