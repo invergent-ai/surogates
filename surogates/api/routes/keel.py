@@ -1,7 +1,8 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
 answers it or asks it for a revision, cancels it, and reads its status.  It
 also lists, reads and writes a case's files: the workspace its step sessions
-share; and it gives a person the editor config of one of them.
+share; it gives a person the editor config of one of them; and it invites
+staff into an organisation.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -22,7 +23,7 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Literal, TypeVar
 from uuid import UUID
@@ -30,7 +31,7 @@ from uuid import UUID
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
@@ -64,7 +65,9 @@ from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, op
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.storage.backend import TooLarge
+from surogates.tenant.auth.jwt import signing_secret
 from surogates.tenant.auth.service_account import ServiceAccountStore
+from surogates.tenant.invitations import InvitationError, invite_member
 from surogates.tenant.memberships import belongs_to
 
 logger = logging.getLogger(__name__)
@@ -135,6 +138,34 @@ class CaseEditorRequest(BaseModel):
     user_id: UUID
     access: Literal["edit", "comment", "view"]
     theme: Literal["light", "dark"] = "light"
+
+
+def _printable(value: str) -> str:
+    if not value.isprintable():
+        raise ValueError("holds a character that is not printable")
+    return value
+
+
+class MemberInvitationRequest(BaseModel):
+    """Keel's invitation of one person into an organisation.  Keys this runtime does not know are ignored."""
+
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def _an_email(cls, value: str) -> str:
+        local, _, domain = value.partition("@")
+        if not local or not domain or "@" in domain or any(ch.isspace() for ch in value):
+            raise ValueError("not an email")
+        return _printable(value)
+
+    @field_validator("display_name")
+    @classmethod
+    def _a_name(cls, value: str) -> str:
+        return _printable(value)
 
 
 def _refused(status_code: int, code: str, message: str) -> HTTPException:
@@ -724,3 +755,98 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
         user_id=editor_id, user_name=name, access=body.access if kind.editable else "view", theme=body.theme,
     )
     return JSONResponse({"document_server_url": office.public_url.rstrip("/"), "config": config})
+
+
+# ---------------------------------------------------------------------------
+# Staff invitations
+# ---------------------------------------------------------------------------
+
+#: What each refused invitation answers.
+_INVITATION_REFUSALS = {
+    "unknown-org": (status.HTTP_404_NOT_FOUND, "No such org."),
+    "ambiguous-email": (
+        status.HTTP_409_CONFLICT, "More than one account of other orgs has the email: none is chosen.",
+    ),
+    "other-firebase-project": (
+        status.HTTP_409_CONFLICT, "The account with the email signs in with a Firebase project this org does not use.",
+    ),
+}
+
+
+def _org_id(org_id: str) -> UUID:
+    try:
+        return UUID(org_id)
+    except ValueError:
+        raise _refused(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The org id is not a UUID.",
+        ) from None
+
+
+async def _firebase_project(request: Request, org_id: UUID) -> str | None:
+    """The Firebase project the org signs in with, None when it has none: 503 ``unavailable`` when it cannot be read.
+
+    A failure is no "no Firebase": a password account created in an org
+    that signs in with Firebase would have no way in.
+    """
+    cache = getattr(request.app.state, "firebase_config_cache", None)
+    if cache is None:
+        return None
+    try:
+        config = await cache.get(str(org_id))
+    except LookupError:
+        return None
+    except Exception as exc:  # noqa: BLE001 — the platform's failures, of any kind
+        logger.warning(
+            "keel-link: the Firebase config of org %s could not be read (%s)", org_id, type(exc).__name__,
+        )
+        raise _refused(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The org's sign-in could not be read; try again.",
+        ) from None
+    return config.firebase_project_id
+
+
+@router.post("/keel/orgs/{org_id}/members")
+async def invite_org_member(org_id: str, request: Request) -> JSONResponse:
+    """Invite a person into the org by email: find them, join them from another org, or create their account.
+
+    A new password account without a password, whose home is the org, gets
+    a set-password token, answered once here, never logged or stored, with
+    ``Cache-Control: no-store``.  Neither the email nor the token is logged.
+    """
+    require_link(request)
+    org = _org_id(org_id)
+    body = await read_body(request, MemberInvitationRequest)
+    firebase_project = await _firebase_project(request, org)
+    try:
+        async with request.app.state.session_factory() as db:
+            invitation = await invite_member(
+                db,
+                org_id=org,
+                email=body.email,
+                display_name=body.display_name,
+                firebase_project=firebase_project,
+                secret=signing_secret(),
+                now=datetime.now(UTC),
+            )
+            await db.commit()
+    except InvitationError as exc:
+        status_code, message = _INVITATION_REFUSALS[exc.code]
+        raise _refused(status_code, exc.code, message) from None
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"an invitation into org {org} could not be written",
+            message="The invitation could not be written.",
+        ) from None
+    expires_at = invitation.expires_at
+    return JSONResponse(
+        {
+            "user_id": str(invitation.user_id),
+            "created": invitation.created,
+            "joined": invitation.joined,
+            "sign_in": invitation.sign_in,
+            "set_password_token": invitation.set_password_token,
+            "expires_at": expires_at.isoformat() if expires_at is not None else None,
+        },
+        headers={"Cache-Control": "no-store"},
+    )

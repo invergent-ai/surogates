@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -36,10 +38,12 @@ from surogates.tenant.auth.jwt import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    signing_secret,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
+from surogates.tenant.invitations import InvalidSetPasswordToken, read_set_password_token
 from surogates.tenant.memberships import belongs_to, email_holder, user_orgs
 from surogates.tenant.models import UserResponse
 
@@ -49,6 +53,24 @@ router = APIRouter()
 
 #: What a signed-in user's access token grants, however they signed in.
 USER_PERMISSIONS = frozenset({"sessions:read", "sessions:write", "tools:read"})
+
+#: bcrypt hashes no more of a password than this many bytes, and refuses a longer one.
+_PASSWORD_MAX_BYTES = 72
+
+
+def password_refusal(password: str) -> str | None:
+    """Why the runtime's rules refuse *password* as a new password; None when they take it."""
+    if len(password) < 8:
+        return "New password must be at least 8 characters."
+    try:
+        size = len(password.encode("utf-8"))
+    except UnicodeEncodeError:
+        # A lone surrogate, which JSON can carry and UTF-8 cannot.
+        return "New password must be valid text."
+    if size > _PASSWORD_MAX_BYTES:
+        return f"New password must be at most {_PASSWORD_MAX_BYTES} bytes."
+    return None
+
 
 #: A Firebase sign-up refused: another user of the organisation has the email.
 EMAIL_TAKEN = (
@@ -175,6 +197,27 @@ class OrgLoginRequest(BaseModel):
 
 class OrgFirebaseExchangeRequest(BaseModel):
     id_token: str
+
+
+# A missing field defaults to empty, which is refused as any other link
+# or password is: FastAPI's 422 for a missing field would quote the whole
+# body back, the token with it.
+
+
+class SetPasswordCheckRequest(BaseModel):
+    token: str = ""
+
+
+class SetPasswordCheckResponse(BaseModel):
+    """Whose password a set-password link sets."""
+
+    email: str
+    display_name: str
+
+
+class SetPasswordRequest(BaseModel):
+    token: str = ""
+    password: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +961,81 @@ async def org_firebase_exchange(
     return tokens
 
 
+#: Every set-password link refused answers this, whatever the reason: the answer never tells why.
+SET_PASSWORD_LINK_REFUSED = "This link is not valid or has expired."
+
+
+async def _set_password_user(session: AsyncSession, token: str, org_id: UUID, *, lock: bool) -> User:
+    """The user a set-password link names, locked for the session's transaction when *lock*: 400 for any link refused."""
+    try:
+        return await read_set_password_token(
+            session, token, org_id, signing_secret(), datetime.now(UTC), lock=lock,
+        )
+    except InvalidSetPasswordToken:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=SET_PASSWORD_LINK_REFUSED,
+        ) from None
+
+
+@router.post("/auth/orgs/{org_id}/set-password/check", response_model=SetPasswordCheckResponse)
+async def check_set_password_link(
+    org_id: UUID, body: SetPasswordCheckRequest, request: Request,
+) -> SetPasswordCheckResponse:
+    """Whose password a set-password link sets: their email and display name.  It writes nothing.
+
+    The link is the token Keel's invitation of a new password user gives:
+    see :mod:`surogates.tenant.invitations`.
+    """
+    async with request.app.state.session_factory() as session:
+        await _org_or_404(session, org_id)
+        user = await _set_password_user(session, body.token, org_id, lock=False)
+        return SetPasswordCheckResponse(email=user.email, display_name=user.display_name)
+
+
+@router.post("/auth/orgs/{org_id}/set-password", response_model=TokenResponse)
+async def set_password_from_link(
+    org_id: UUID, body: SetPasswordRequest, request: Request,
+) -> TokenResponse:
+    """Set the password a set-password link names, and sign in to the organisation with it.
+
+    The link works once: setting the password changes the digest it
+    carries.  It is checked, then the password is hashed, then the link is
+    checked again with the user's row locked, in the transaction that
+    writes the hash: of two uses at once, the second waits for the first,
+    finds the password set and is refused.  The tokens are those of the
+    organisation's password login.
+    """
+    session_factory = request.app.state.session_factory
+    audit_store: AuditStore | None = getattr(
+        request.app.state, "audit_store", None,
+    )
+    async with session_factory() as session:
+        await _org_or_404(session, org_id)
+        await _set_password_user(session, body.token, org_id, lock=False)
+    refusal = password_refusal(body.password)
+    if refusal is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=refusal,
+        )
+    password_hash = await asyncio.to_thread(DatabaseAuthProvider.hash_password, body.password)
+    async with session_factory() as session:
+        user = await _set_password_user(session, body.token, org_id, lock=True)
+        user.password_hash = password_hash
+        user_id = user.id
+        await session.commit()
+
+    tokens = _issue_tokens(org_id, user_id, int(time.time()))
+    if audit_store is not None:
+        await audit_store.emit(
+            org_id=org_id,
+            agent_id=None,
+            user_id=user_id,
+            type=AuditType.AUTH_LOGIN,
+            data=auth_login_event("password", source_ip=client_ip(request)),
+        )
+    return tokens
+
+
 class MeOrganisation(BaseModel):
     """An organisation the signed-in user belongs to."""
 
@@ -1130,10 +1248,10 @@ async def change_password(
     identity provider — the web app offers them a reset-email flow
     instead — so this route refuses them with 409.
     """
-    if len(body.new_password) < 8:
+    refusal = password_refusal(body.new_password)
+    if refusal is not None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="New password must be at least 8 characters.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=refusal,
         )
 
     session_factory = request.app.state.session_factory

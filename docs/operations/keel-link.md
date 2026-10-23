@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, cancel it and read its status. It also lists, reads and writes a case's files, and opens a case's document in the document editor for a person. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, cancel it and read its status. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -14,13 +14,14 @@
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
 | `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme"}` and answers `200 {"document_server_url", "config"}`: one person's editor config for the document at the path. See [A case's document in the editor](#a-cases-document-in-the-editor). |
+| `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
 It has no JWT authentication, no web UI and no OpenAPI schema. Each route checks the link key instead. The public API never serves `/v1/keel/`.
 
 A step session is created with the id Keel gives it, on the `api` channel, owned by the org's `case-type:<case type>` service account, which nobody signs in as. Every session of the case carries the case's `case:<case id>` memory and workspace boundary. The step's inputs pass the prompt-injection screen before anything is written, and the session starts with one message that sets out the step: its inputs, as data, its outcomes and its checks.
 
-Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the case's data:
+Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the case's data, an email or a token:
 
 | Status | Code | When |
 |---|---|---|
@@ -29,19 +30,22 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 404 | `unknown-session` | No such session, or it is not a step's own session. |
 | 404 | `unknown-file` | No file at the path in the case's workspace. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
+| 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. |
 | 409 | `key-in-use` | The key, or the session id, names another step's session. |
 | 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
+| 409 | `ambiguous-email` | An invitation for an email that two or more users of other orgs have: none is chosen. |
+| 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate, or a case id is not a UUID. |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), or a case id or an org id is not a UUID. |
 | 500 | `internal-error` | The database failed. Only the error's class name is logged. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; or the object store refused or did not answer a case's files. Only the error's class name and the case id are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; or an invitation could not read the org's Firebase config. Only the error's class name, and the case id or the org id, are logged. |
 
 ## A step's inputs
 
@@ -78,9 +82,23 @@ The document server converts older formats (`.doc`, `.odt`, `.rtf`, `.xls`, `.od
 
 Everyone who opens the file shares its one editing session, whatever their access, and so does a step session of the case that has the file open. The document belongs to the case: it is read from and saved into the case's files, and stays open while anyone is in it, with or without a chat. While it is open, the listing's `editing` names who is in it, and a write over it is refused. Mentions are not offered: the config names nobody to mention. Like the file routes, it logs no path.
 
+## Inviting staff
+
+`POST /v1/keel/orgs/{org_id}/members` takes `{"email", "display_name"}` and gives Keel the org's user with that email. The email is compared without case.
+
+- **Found.** A user of the org, home or member, has the email: `created` and `joined` are false.
+- **Joined.** Exactly one user of other orgs has it: they become a member of the org, and `joined` is true. Two or more is `409 ambiguous-email`, and nothing is written.
+- **Created.** Nobody has it: the account is created in the org, with that display name and the email trimmed and lowercased, and `created` is true. In an org with Firebase sign-in it is a Firebase account of the org's project without a Firebase identity yet: its first sign-in through the org's Firebase exchange links it by verified email. Otherwise it is a password account without a password.
+
+An invitation never changes an existing account: not its password, its way of signing in, nor its display name. Joining adds only the membership.
+
+`sign_in` is `firebase` for an account of the org's Firebase project, and `password` otherwise. An account of another Firebase project has no way into the org, and is refused with `409 other-firebase-project`, as is a Firebase account invited into an org without Firebase. When the org's Firebase config cannot be read, the invitation is `503 unavailable`: a password account is never created in an org that signs in with Firebase.
+
+For a password account without a password whose home is the org, `set_password_token` is a new token and `expires_at` when it lapses, 7 days on; otherwise both are null. An account whose home is another org gets no token: its password is its home org's to set, since one password signs in to every org the account belongs to. Keel gives the token to the person, who sets their password through the runtime's public `POST /v1/auth/orgs/{org_id}/set-password`; see [Invited staff](../multi-tenancy/index.md#invited-staff). The token works once, and not after the password changed. The answer carries `Cache-Control: no-store`, and the token is never logged or stored. Neither is the email.
+
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, read and write any case's files, and open them in the editor as any user.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 
