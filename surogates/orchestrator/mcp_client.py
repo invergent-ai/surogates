@@ -119,21 +119,27 @@ class McpProxyClient:
             if not name:
                 continue
             current.add(name)
+            schema = ToolSchema(
+                name=name,
+                description=tool.get("description", ""),
+                parameters=tool.get("parameters", {}),
+            )
             # The registry is process-wide; another agent may have
-            # already registered this exact tool name.  Registering is
-            # idempotent, but skip the work when it is already present.
-            if name in self._registry.tool_names:
+            # already registered this exact tool name.  An unchanged
+            # schema needs no work, but a changed one replaces it: an MCP
+            # server redeployed with new arguments must reach running
+            # workers, not wait for their restart.
+            # ponytail: one schema per tool name per worker; per-agent
+            # schemas if two agents' same-named servers ever differ.
+            existing = self._registry.get(name)
+            if existing is not None and existing.schema == schema:
                 continue
-            handler = self._make_proxy_handler(name)
             self._registry.register(
                 name=name,
-                schema=ToolSchema(
-                    name=name,
-                    description=tool.get("description", ""),
-                    parameters=tool.get("parameters", {}),
-                ),
-                handler=handler,
+                schema=schema,
+                handler=self._make_proxy_handler(name),
                 toolset="mcp",
+                replace=True,
             )
 
         self._discovered_by_agent[agent_id] = current

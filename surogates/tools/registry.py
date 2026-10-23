@@ -62,14 +62,15 @@ class ToolRegistry:
         toolset: str = "core",
         is_async: bool = True,
         max_result_size: int = 50_000,
+        replace: bool = False,
     ) -> None:
         """Register a tool by *name*.
 
         Raises :class:`ValueError` if a tool with the same name is
-        already registered.
+        already registered, unless *replace* is set.
         """
         with self._lock:
-            if name in self._entries:
+            if name in self._entries and not replace:
                 raise ValueError(f"Tool {name!r} is already registered")
             self._entries[name] = ToolEntry(
                 name=name,
