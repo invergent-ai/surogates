@@ -102,7 +102,7 @@ async def get_workspace_editor(
     edit = kind.editable and not view and not is_scheduled_run_session(session)
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
-        user_id=user_id, user_name=user_name, theme=theme, access="edit" if edit else "view",
+        user_id=user_id, user_name=user_name, theme=theme, access="edit" if edit else "read",
     )
     # The agent answers a comment only where it edits live, in a document it edits, from an editor that edits, in a
     # chat it is sent the office tools in.

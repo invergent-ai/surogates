@@ -21,13 +21,8 @@ from surogates.office import sessions as office_sessions
 from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
 from surogates.office.files import (
-    DENIED_ON_COMPUTER,
-    DOCUMENT_FILES,
+    DENIED_ON_COMPUTER, DOCUMENT_FILES, document_session, editor_files, editor_invocation, editor_request_id,
     document_files,
-    document_session,
-    editor_files,
-    editor_invocation,
-    editor_request_id,
 )
 from surogates.office.runtime_office import close_pages
 from surogates.session.events import EventType

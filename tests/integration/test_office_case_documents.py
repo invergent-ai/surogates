@@ -8,11 +8,14 @@ everyone has left, still closes once it has been idle.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -22,7 +25,7 @@ from surogates.api.routes import office as office_route
 from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
 from surogates.keel.case_files import case_workspace, write_case_file
-from surogates.office import reaper
+from surogates.office import commands, reaper
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.saves import land_pending_saves
@@ -90,6 +93,24 @@ async def client(app):
 @pytest.fixture
 def storage(tmp_path):
     return LocalBackend(str(tmp_path))
+
+
+@pytest.fixture
+def command_service(monkeypatch):
+    """The document server's Command Service, answering *status* and *body*; the commands it was sent."""
+    sent: list[dict] = []
+    real_client = httpx.AsyncClient
+
+    def install(status: int, body: object = None) -> list[dict]:
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            return httpx.Response(status, json=body)
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(commands.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+        return sent
+
+    return install
 
 
 async def _reap(session_factory, storage, *, now=None):
@@ -181,8 +202,9 @@ async def test_a_case_document_never_opened_is_closed(session_factory, storage):
     assert await office_sessions.get_open(session_factory, document.id) is None
 
 
-async def test_a_case_document_everyone_left_closes_once_idle(session_factory, storage):
+async def test_a_case_document_everyone_left_closes_once_idle(session_factory, storage, command_service):
     """The document server's close may never come: a case document nobody is in closes once it has been idle."""
+    command_service(200, {"error": 0})
     document = await _open_for_case(session_factory, uuid.uuid4())
     await office_sessions.record_editors(session_factory, document.id, ["user:1"])
 
@@ -195,3 +217,45 @@ async def test_a_case_document_everyone_left_closes_once_idle(session_factory, s
 
     await _reap(session_factory, storage, now=datetime.now(timezone.utc) + IDLE)
     assert await office_sessions.get_open(session_factory, document.id) is None
+
+
+async def _idle_with_an_editor_listed(session_factory):
+    """A case document whose last editor left long ago, though the document server's close never came."""
+    document = await _open_for_case(session_factory, uuid.uuid4())
+    await office_sessions.record_editors(session_factory, document.id, ["user:1"])
+    return document
+
+
+async def test_a_case_document_the_document_server_no_longer_has_is_closed(session_factory, storage, command_service):
+    sent = command_service(200, {"error": 1})
+    document = await _idle_with_an_editor_listed(session_factory)
+
+    await _reap(session_factory, storage, now=datetime.now(timezone.utc) + IDLE)
+
+    assert [{key: command[key] for key in ("c", "key")} for command in sent] == [{"c": "info", "key": document.doc_key}]
+    assert await office_sessions.get_open(session_factory, document.id) is None
+
+
+async def test_a_case_document_the_document_server_still_has_stays_open(session_factory, storage, command_service):
+    sent = command_service(200, {"error": 0, "key": "k", "users": ["user:1"]})
+    document = await _idle_with_an_editor_listed(session_factory)
+
+    await _reap(session_factory, storage, now=datetime.now(timezone.utc) + IDLE)
+
+    assert len(sent) == 1
+    assert await office_sessions.get_open(session_factory, document.id) is not None
+
+
+async def test_a_case_document_stays_open_while_the_document_server_cannot_be_asked(
+    session_factory, storage, command_service, caplog,
+):
+    command_service(500)
+    document = await _idle_with_an_editor_listed(session_factory)
+
+    with caplog.at_level(logging.WARNING, logger="surogates.office"):
+        await _reap(session_factory, storage, now=datetime.now(timezone.utc) + IDLE)
+
+    assert await office_sessions.get_open(session_factory, document.id) is not None
+    said = [record.getMessage() for record in caplog.records if record.name.startswith("surogates.office")]
+    assert len(said) == 1
+    assert document.doc_key not in said[0]

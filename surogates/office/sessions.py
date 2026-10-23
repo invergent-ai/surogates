@@ -391,6 +391,28 @@ async def close_idle_cases(session_factory: Any, *, older_than: timedelta, now: 
         return result.rowcount or 0
 
 
+async def idle_cases_with_editors(
+    session_factory: Any, *, older_than: timedelta, now: datetime | None = None,
+) -> list[OpenDocument]:
+    """Open case rows that list editors, with no save waiting, untouched for *older_than*.
+
+    Someone may still be in the document, or everyone left a document they did not change and the document server's
+    close was lost: that close names nobody, so the last editor stays listed.  Only the document server can tell.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - older_than
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(
+                OfficeSession.status == OPEN,
+                OfficeSession.case_id.is_not(None),
+                func.jsonb_array_length(OfficeSession.editors) > 0,
+                OfficeSession.pending_save.is_(None),
+                OfficeSession.updated_at < cutoff,
+            )
+        )
+        return [_snapshot(row) for row in rows.all()]
+
+
 def _close(row: OfficeSession) -> None:
     row.status = CLOSED
     row.closed_at = datetime.now(timezone.utc)
