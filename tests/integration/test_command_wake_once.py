@@ -2638,11 +2638,7 @@ async def a_question_waits(workers: Workers, chat: UUID) -> asyncio.Task:
 
 async def what_the_question_got(workers: Workers, chat: UUID) -> dict:
     """What the question's call gave the model."""
-    [result] = [
-        event for event in await workers.store.get_events(chat, types=[EventType.TOOL_RESULT])
-        if event.data["tool_call_id"] == "call_ask"
-    ]
-    return json.loads(result.data["content"])
+    return json.loads(await what_a_call_got(workers, chat, "call_ask"))
 
 
 @pytest.mark.slow

@@ -403,7 +403,7 @@ class StreamingToolExecutor:
         from surogates.harness.tool_exec import (
             _emit_guardrail_tool_result,
             _emit_skipped_tool_result,
-            cancelled_result,
+            question_went_unanswered,
             _parse_tool_args_for_guardrail,
             execute_single_tool,
         )
@@ -470,7 +470,7 @@ class StreamingToolExecutor:
                 offered_tools=self._offered_tools,
             )
             # Read before any guardrail guidance is appended: that makes it no longer JSON.
-            if tool_name == "ask_user_question" and cancelled_result(result.get("content")) is not None:
+            if question_went_unanswered(tool_name, result.get("content")):
                 self._question_unanswered = True
             if guardrails is not None:
                 after = guardrails.after_call(

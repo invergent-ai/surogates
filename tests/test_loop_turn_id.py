@@ -21,7 +21,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.harness.budget import IterationBudget
-from surogates.harness.loop import AgentHarness
+from surogates.harness.loop import AgentHarness, QUESTION_TIMED_OUT_CHANNEL_REQUEST, QUESTION_TIMED_OUT_REQUEST
 from surogates.session.events import EventType
 from surogates.session.files import ComputerAway
 from surogates.session.models import Session
@@ -508,16 +508,14 @@ async def test_a_halted_channel_turn_still_replies_to_the_person(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("channel", "expected"), [
-    ("web", "QUESTION_TIMED_OUT_REQUEST"),
-    ("whatsapp", "QUESTION_TIMED_OUT_CHANNEL_REQUEST"),
+    ("web", QUESTION_TIMED_OUT_REQUEST),
+    ("whatsapp", QUESTION_TIMED_OUT_CHANNEL_REQUEST),
 ])
 async def test_a_timed_out_question_gets_one_tools_off_reply(
     monkeypatch: pytest.MonkeyPatch, channel: str, expected: str,
 ) -> None:
     """A question nobody answered in time ends its turn with one reply that
     calls no tools: the model once built what nobody had approved."""
-    import surogates.harness.loop as loop_module
-
     sent: list[dict] = []
 
     async def fake_call_llm_with_retry(**kwargs: Any) -> tuple[dict, dict]:
@@ -532,11 +530,11 @@ async def test_a_timed_out_question_gets_one_tools_off_reply(
     await harness._request_final_summary(
         session, [{"role": "user", "content": "Draft the report."}], "system",
         SimpleNamespace(lease_token=uuid4()), request="Draft the report.",
-        reason="question_timed_out", final_request=loop_module._question_timed_out_request(session),
+        reason="question_timed_out",
     )
 
     assert "tools" not in sent[0]
-    assert sent[0]["messages"][-1]["content"] == getattr(loop_module, expected)
+    assert sent[0]["messages"][-1]["content"] == expected
     response = next(c.args[2] for c in store.emit_event.await_args_list if c.args[1] == EventType.LLM_RESPONSE)
     assert response["finish_reason"] == "question_timed_out"
     assert harness._complete_session.await_args.kwargs["reason"] == "question_timed_out"

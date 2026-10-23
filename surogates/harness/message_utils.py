@@ -363,3 +363,15 @@ def coerce_message_content(message: dict[str, Any]) -> dict[str, Any]:
         message["content"] = str(content)
 
     return message
+
+
+def leading_json_object(content: Any) -> dict | None:
+    """The JSON object *content* opens with, else ``None``.
+
+    Only the leading value is read: guidance may be appended after it.
+    """
+    try:
+        data, _ = json.JSONDecoder().raw_decode(content.lstrip())
+    except (AttributeError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None

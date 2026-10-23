@@ -9,6 +9,8 @@ import shlex
 from datetime import datetime, timezone
 from typing import Any
 
+from surogates.harness.message_utils import leading_json_object
+
 
 _TERMINAL_TOKEN_RE = re.compile(
     r'''(?:[^\s;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\[^\n])+'''
@@ -181,11 +183,8 @@ def _write_refused(content: Any) -> bool:
     """
     if not isinstance(content, str):
         return False
-    try:
-        result, _ = json.JSONDecoder().raw_decode(content.lstrip())
-    except (ValueError, RecursionError):
-        return False
-    return isinstance(result, dict) and (
+    result = leading_json_object(content)
+    return result is not None and (
         bool(result.get("error")) or result.get("status") == "error"
     )
 

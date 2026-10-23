@@ -4365,25 +4365,22 @@ class AgentHarness(
             # A question its user dismissed by typing a command ends the turn,
             # as the model's answer would: the command's own wake runs it, and
             # the model reads at its next turn that the question went
-            # unanswered.  Not while something else its user said waits for
-            # the model: the turn goes on with it.
-            if unanswered == DISMISSED and not await self._said_to_the_model(session, steer_cursor):
-                logger.info(
-                    "Session %s: its user dismissed a question with a command; ending turn", session.id,
-                )
-                await self._complete_session(
-                    session, messages, lease,
-                    reason="question_dismissed",
-                    cost_tracker=cost_tracker,
-                    turn_id=turn_id,
-                )
-                return
-
-            # A question nobody answered in time ends the turn too, with one
-            # reply that calls no tools: going on built what nobody had
-            # approved.  Not while something its user said waits for the
+            # unanswered.  A question nobody answered in time ends it too, with
+            # one reply that calls no tools: going on built what nobody had
+            # approved.  Not while something else its user said waits for the
             # model: the turn goes on with it.
-            if unanswered == TIMED_OUT and not await self._said_to_the_model(session, steer_cursor):
+            if unanswered in (DISMISSED, TIMED_OUT) and not await self._said_to_the_model(session, steer_cursor):
+                if unanswered == DISMISSED:
+                    logger.info(
+                        "Session %s: its user dismissed a question with a command; ending turn", session.id,
+                    )
+                    await self._complete_session(
+                        session, messages, lease,
+                        reason="question_dismissed",
+                        cost_tracker=cost_tracker,
+                        turn_id=turn_id,
+                    )
+                    return
                 logger.info("Session %s: a question timed out; ending turn", session.id)
                 # A task's worker blocks instead, as ``worker_block`` does: its
                 # parent is told what it asked, and the task waits for the
@@ -4400,7 +4397,6 @@ class AgentHarness(
                     session, messages, system_prompt, lease,
                     request=request, cost_tracker=cost_tracker, turn_id=turn_id,
                     iteration_index=turn_iteration_index, reason="question_timed_out",
-                    final_request=_question_timed_out_request(session),
                 )
                 return
 
@@ -5886,12 +5882,11 @@ class AgentHarness(
         turn_id: str | None = None,
         iteration_index: int | None = None,
         reason: str = "budget_exhausted",
-        final_request: str | None = None,
     ) -> None:
         """Request one final LLM response with no tools, ending the turn for *reason*.
 
-        *final_request*, when given, is what the model is asked instead of
-        the summary (a question that timed out asks for one waiting line).
+        A ``question_timed_out`` end asks for one waiting line instead of
+        the summary.
 
         Also ends a messaging-channel turn a guard stopped (*reason*): the
         person on WhatsApp sees only what is delivered, and a turn halted
@@ -5912,8 +5907,11 @@ class AgentHarness(
             session.id, reason,
         )
 
-        if final_request is not None:
-            summary_request = final_request
+        if reason == "question_timed_out":
+            summary_request = (
+                QUESTION_TIMED_OUT_CHANNEL_REQUEST if session.channel in ADAPTER_CHANNELS
+                else QUESTION_TIMED_OUT_REQUEST
+            )
         elif session.channel in ADAPTER_CHANNELS:
             summary_request = (
                 "Your tool calls cannot run any more this turn. Without calling any tools, "
@@ -6675,13 +6673,6 @@ QUESTION_TIMED_OUT_CHANNEL_REQUEST = (
     "talking with, in their language, in one short line, that you'll wait for their answer. "
     "Don't say you did or will do anything else."
 )
-
-
-def _question_timed_out_request(session: Session) -> str:
-    """What the model is asked for once its question timed out: one line that it waits."""
-    if session.channel in ADAPTER_CHANNELS:
-        return QUESTION_TIMED_OUT_CHANNEL_REQUEST
-    return QUESTION_TIMED_OUT_REQUEST
 
 
 def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -> str | None:

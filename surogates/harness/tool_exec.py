@@ -26,7 +26,7 @@ from surogates.devices.operations import OperationConflict
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
 from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
-from surogates.harness.message_utils import make_skipped_tool_result
+from surogates.harness.message_utils import leading_json_object, make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
 from surogates.harness.tool_guardrails import (
     ToolGuardrailDecision,
@@ -885,11 +885,13 @@ def cancelled_result(content: Any) -> dict | None:
 
     Only the leading object is read: loop guidance may be appended after it.
     """
-    try:
-        data, _ = json.JSONDecoder().raw_decode(content.lstrip())
-    except (AttributeError, ValueError):
-        return None
-    return data if isinstance(data, dict) and data.get("cancelled") is True else None
+    data = leading_json_object(content)
+    return data if data is not None and data.get("cancelled") is True else None
+
+
+def question_went_unanswered(tool_name: str, content: Any) -> bool:
+    """Whether a call to *tool_name* was a question that went unanswered."""
+    return tool_name == "ask_user_question" and cancelled_result(content) is not None
 
 
 async def _emit_skipped_tool_result(
@@ -1282,7 +1284,7 @@ async def execute_tool_calls_sequential(
             interrupt_check=interrupt_check,
         )
         # Read before any guardrail guidance is appended: that makes it no longer JSON.
-        if tool_name == "ask_user_question" and cancelled_result(result_msg.get("content")) is not None:
+        if question_went_unanswered(tool_name, result_msg.get("content")):
             unanswered = True
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
