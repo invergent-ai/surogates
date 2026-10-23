@@ -4385,6 +4385,17 @@ class AgentHarness(
             # model: the turn goes on with it.
             if unanswered == TIMED_OUT and not await self._said_to_the_model(session, steer_cursor):
                 logger.info("Session %s: a question timed out; ending turn", session.id)
+                # A task's worker blocks instead, as ``worker_block`` does: its
+                # parent is told what it asked, and the task waits for the
+                # answer rather than being retried to ask it again.
+                if session.task_id is not None and await self._block_task_on_question(session, tool_calls_raw):
+                    await self._complete_session(
+                        session, messages, lease,
+                        reason="question_timed_out",
+                        cost_tracker=cost_tracker,
+                        turn_id=turn_id,
+                    )
+                    return
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
                     request=request, cost_tracker=cost_tracker, turn_id=turn_id,
@@ -5848,6 +5859,21 @@ class AgentHarness(
     # /compress command handler
     # ------------------------------------------------------------------
 
+    async def _block_task_on_question(self, session: Session, tool_calls_raw: list[dict]) -> bool:
+        """Block *session*'s task on its unanswered question, through ``worker_block``: whether it blocked."""
+        from surogates.tasks.tools import _worker_block_handler
+
+        prompts = "; ".join(_question_prompts(tool_calls_raw)) or "(no prompt)"
+        got = await _worker_block_handler(
+            {"reason": f"Blocked: no answer to the question: {prompts}"},
+            session_store=self._store, redis=self._redis,
+            session_id=str(session.id), session_factory=self._session_factory,
+        )
+        blocked = json.loads(got).get("ok") is True
+        if not blocked:
+            logger.warning("Session %s: its task could not block on the question: %s", session.id, got)
+        return blocked
+
     async def _request_final_summary(
         self,
         session: Session,
@@ -6665,6 +6691,20 @@ def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -
         if result.get("tool_call_id") in asked and (got := cancelled_result(result.get("content"))) is not None:
             return got.get("reason")
     return None
+
+
+def _question_prompts(tool_calls_raw: list[dict]) -> list[str]:
+    """The prompts of every question *tool_calls_raw* asked."""
+    prompts: list[str] = []
+    for call in tool_calls_raw:
+        if call.get("function", {}).get("name") != "ask_user_question":
+            continue
+        try:
+            questions = json.loads(call["function"].get("arguments") or "{}").get("questions") or []
+        except (TypeError, ValueError, AttributeError):
+            continue
+        prompts += [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
+    return prompts
 
 
 def _whiteboard_sketch_turn_done(

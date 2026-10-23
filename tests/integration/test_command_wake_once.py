@@ -2712,6 +2712,39 @@ async def test_a_question_that_times_out_ends_its_turn_with_one_reply_and_no_too
 
 
 @pytest.mark.slow
+async def test_a_task_whose_question_times_out_blocks_on_it_instead_of_being_retried(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        task = Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
+            current_session_id=helper.id, attempt_count=1,
+        )
+        db.add(task)
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
+        await db.commit()
+    workers.replies.append(ASKS)
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(helper.id), 10)
+
+    # Nobody is there to wait with: the task blocks on its question, for its parent to answer, and is not retried.
+    assert (await what_the_question_got(workers, helper.id))["reason"] == "timeout"
+    async with workers.api.app.state.session_factory() as db:
+        task = await db.get(Task, task.id)
+    assert (task.status, task.blocked_reason, task.attempt_count) == (
+        "blocked", "Blocked: no answer to the question: Which quarter?", 0,
+    )
+    assert len(workers.requests) == 1  # no tools-off reply to nobody
+    assert await workers.status(helper.id) == "completed"
+    [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
+    assert told.data["reason"] == task.blocked_reason
+
+
+@pytest.mark.slow
 async def test_a_question_that_times_out_while_its_user_said_more_goes_on_with_what_they_said(workers, monkeypatch):
     monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
     chat = await workers.chat()
