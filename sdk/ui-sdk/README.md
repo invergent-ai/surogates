@@ -72,6 +72,7 @@ the kit carries Work's own components:
 | `rabbit-mark` | `RabbitMark`, `RABBIT_MARK_PATH`, `RABBIT_MARK_BOX` | The rabbit silhouette as an icon in `currentColor`, and its path for a canvas. |
 | `performer-mark` | `PerformerMark`, `PerformerKind`, `performerWord` | Who does a piece of work, as an icon in a tone: a person, an agent, an agent finished by a person, a system, a rule, a client, a third party or a queue. |
 | `service-level-pill` | `ServiceLevelPill`, `ServiceLevelState`, `formatDuration` | Where work stands against its goal and deadline. The state decides the words and the tone; the deadline only gives the time left or past. |
+| `spec-form` | `SpecForm`, `FormSpec`, `FileValue`, `FormErrors`, `toOutput`, `fromOutput`, `missingInputs`, … | A form drawn from a spec: the outcome first, then titled groups with an input per field type and hint, file uploads and picks, errors beside their field, and check notes. |
 
 Several rely on the `data-*` variants and the `no-scrollbar` utility from
 `shadcn/tailwind.css`; import it alongside the theme.

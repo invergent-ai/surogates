@@ -24,6 +24,6 @@
     "verbatimModuleSyntax": false,
     "types": ["react", "react-dom"]
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "tests/**/*"],
   "exclude": ["dist", "node_modules"]
 }
