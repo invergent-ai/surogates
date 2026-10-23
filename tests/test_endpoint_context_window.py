@@ -58,3 +58,21 @@ def test_payload_without_window_projects_none():
 def test_compressor_window(model, window, expected):
     comp = ContextCompressor(model, quiet_mode=True, context_window=window)
     assert comp.context_length == expected
+
+
+@pytest.mark.parametrize(
+    ("window", "threshold", "expected"),
+    [
+        (128_000, None, 0.75),  # unset: small windows keep 75%
+        (262_144, None, 0.75),
+        (1_000_000, None, 0.90),  # unset: large windows compact at 90%
+        (1_000_000, 0.60, 0.60),  # a configured value applies to large windows
+        (262_144, 0.60, 0.75),  # and never goes under 75% on small ones
+        (262_144, 0.85, 0.85),
+    ],
+)
+def test_compaction_threshold_by_window(window, threshold, expected):
+    comp = ContextCompressor(
+        "surogate-pro", quiet_mode=True, context_window=window, threshold_percent=threshold,
+    )
+    assert comp.threshold_tokens == int(window * expected)

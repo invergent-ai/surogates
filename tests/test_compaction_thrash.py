@@ -89,11 +89,11 @@ def test_a_window_under_512k_compacts_at_three_quarters() -> None:
     assert _compressor().threshold_tokens == 96_000
 
 
-def test_a_large_window_keeps_the_configured_threshold_until_it_shrinks() -> None:
+def test_a_large_window_compacts_at_nine_tenths_until_it_shrinks() -> None:
     comp = ContextCompressor(
         "big", quiet_mode=True, model_overrides={"big": {"context_window": 1_000_000}},
     )
-    assert comp.threshold_tokens == 500_000
+    assert comp.threshold_tokens == 900_000
     comp.set_context_length(400_000)
     assert comp.threshold_tokens == 300_000
 
