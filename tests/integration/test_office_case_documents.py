@@ -284,14 +284,14 @@ async def test_a_case_document_whose_save_comes_while_the_reaper_asks_closes_onc
 
 
 class _StoreOutOfReach(LocalBackend):
-    """A store whose uploads fail while it is out of reach."""
+    """A store whose uploads fail while it is out of reach, its error naming the object, as a disk's does."""
 
     out_of_reach = True
 
-    async def upload(self, *args, **kwargs):
+    async def upload(self, bucket, key, *args, **kwargs):
         if self.out_of_reach:
-            raise OSError("the store did not answer")
-        return await super().upload(*args, **kwargs)
+            raise PermissionError(13, "Permission denied", f"{bucket}/{key}")
+        return await super().upload(bucket, key, *args, **kwargs)
 
 
 async def test_a_case_save_that_keeps_failing_is_logged_and_lands_once_the_store_answers(
@@ -332,3 +332,29 @@ async def test_a_case_save_that_keeps_failing_is_logged_and_lands_once_the_store
     assert await land() == 1
     assert await workspace.read("pack.docx") == b"PK-edited"
     assert await office_sessions.get_open(session_factory, document.id) is None
+
+
+async def test_a_case_save_that_fails_to_land_logs_no_path(session_factory, redis_client, tmp_path, caplog):
+    storage = _StoreOutOfReach(str(tmp_path))
+    settings = SimpleNamespace(storage=SimpleNamespace(bucket=f"test-agent-{uuid.uuid4()}", key_prefix=""))
+    case_id = uuid.uuid4()
+    # A case's file can be named after its client.
+    await write_case_file(storage, settings, case_id, "Ionescu loan.docx", b"PK-as-sent")
+    workspace = case_workspace(storage, settings, case_id)
+    document = await office_sessions.open_waiting(
+        session_factory, location=workspace.location("Ionescu loan.docx"), path="Ionescu loan.docx", session_id=None,
+        case_id=case_id,
+    )
+    await office_sessions.record_base_version(session_factory, document.id, await workspace.etag("Ionescu loan.docx"))
+    await storage.write("saves", "pending/save", b"PK-edited")
+    await office_sessions.set_pending(session_factory, document.id, bucket="saves", key="pending/save", close=False)
+
+    with caplog.at_level(logging.DEBUG, logger="surogates"):
+        landed = await land_pending_saves(session_factory=session_factory, session_store=SessionStore(session_factory),
+                                          storage=storage, redis=redis_client, office=OFFICE, settings=settings)
+
+    assert landed == 0
+    # The failure is logged, by the document's id and the error's class: neither its line nor a traceback names the file.
+    [failed] = [record for record in caplog.records if record.name == "surogates.office.saves"]
+    assert str(document.id) in failed.getMessage() and "PermissionError" in failed.getMessage()
+    assert "Ionescu" not in caplog.text

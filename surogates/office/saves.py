@@ -121,7 +121,12 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
                 office_sessions.next_try(row)
                 # Commits with the row; its new updated_at moves it behind the others.
                 attempts = office_sessions.mark_attempt(row)
-                logger.exception("could not land the save of %s (attempt %d)", row.path, attempts)
+                if row.case_id is None:
+                    logger.exception("could not land the save of %s (attempt %d)", row.path, attempts)
+                else:
+                    # The error's text can quote the file's name: a case's failure is logged by its class alone.
+                    logger.error("could not land the save of %s (attempt %d): %s", office_sessions.log_name(row),
+                                 attempts, type(exc).__name__)
                 if attempts == SAVE_FAILED_AFTER:
                     await _announce(session_store, row.session_ids, EventType.OFFICE_SAVE_FAILED,
                                     {"path": row.path, "attempts": attempts})

@@ -76,13 +76,13 @@ async def _save(runtime: RuntimeOffice, office: OfficeSettings, session_factory:
     try:
         if not await runtime.flush(page_id(document.doc_key, session_id)):
             logger.warning("the agent's editor of %s still had unsent changes as the turn ended; "
-                           "autosave or the editor closing saves them", document.path)
+                           "autosave or the editor closing saves them", office_sessions.log_name(document))
             return
     except PageGone:
         pass  # Its page closed; what it sent is on the document server, and the save below takes it.
     except RuntimeOfficeError:
         logger.warning("could not flush the agent's editor of %s; autosave or the editor closing saves it",
-                       document.path, exc_info=True)
+                       office_sessions.log_name(document), exc_info=True)
         return
     userdata = json.dumps({"turn": uuid4().hex})
     # After the flush: 0, a save is coming; 4, nothing is unsaved, so every edit is saved; None, could not ask (logged).
@@ -96,4 +96,5 @@ async def _save(runtime: RuntimeOffice, office: OfficeSettings, session_factory:
         if userdata in (current.pending_save or {}).get("marks", []):
             return  # the save is in; the save job lands it within seconds
         await asyncio.sleep(SAVE_POLL_S)
-    logger.warning("the save of %s did not come within %ss of the turn's end", document.path, SAVE_WAIT_S)
+    logger.warning("the save of %s did not come within %ss of the turn's end", office_sessions.log_name(document),
+                   SAVE_WAIT_S)

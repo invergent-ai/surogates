@@ -275,7 +275,8 @@ async def office_callback(token: str, request: Request) -> JSONResponse:
     elif status_code == 4:
         await office_sessions.close_when_saved(factory, document.id)
     elif status_code in (3, 7):
-        logger.warning("document server could not save %s (status %d, key %s)", document.path, status_code, document.doc_key)
+        logger.warning("document server could not save %s (status %d, key %s)", office_sessions.log_name(document),
+                       status_code, document.doc_key)
         await _announce(request, document, EventType.OFFICE_SAVE_FAILED, {"path": document.path, "status": status_code})
         if status_code == 3:
             await office_sessions.close_when_saved(factory, document.id)
@@ -293,7 +294,8 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     try:
         data = await _download(_internal(str(url), office.internal_url))
     except httpx.HTTPError:
-        logger.warning("could not download the save of %s (key %s)", document.path, document.doc_key, exc_info=True)
+        logger.warning("could not download the save of %s (key %s)", office_sessions.log_name(document), document.doc_key,
+                       exc_info=True)
         raise HTTPException(status_code=502, detail="Could not download the saved document.") from None
     # The pending area is the editor's, outside every chat's and case's files: a case's document keeps it in its
     # workspace's bucket, and a chat on a computer keeps its bucket stamp.

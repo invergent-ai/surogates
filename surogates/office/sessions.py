@@ -426,6 +426,14 @@ async def idle_cases_with_editors(
         return [_snapshot(row) for row in rows.all()]
 
 
+def log_name(document: Any) -> str:
+    """How a log names *document*, an open row or its snapshot: a chat's by its path, a case's by its id alone.
+
+    A case's file can be named after its client, and a case's data never reaches a log.
+    """
+    return f"case document {document.id}" if document.case_id is not None else document.path
+
+
 def _close(row: OfficeSession) -> None:
     row.status = CLOSED
     row.closed_at = datetime.now(timezone.utc)
