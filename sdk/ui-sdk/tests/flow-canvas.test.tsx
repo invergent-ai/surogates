@@ -4,6 +4,7 @@
 // A read-only flow: laid out top to bottom, each node by name and kind, each
 // edge with its label, the path taken and the open nodes marked, and nothing
 // a person drags, connects or deletes changes it.
+import { ThemeProvider } from "next-themes";
 import { act } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -102,6 +103,30 @@ function press(target: EventTarget, key: string): void {
       new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }),
     );
   });
+}
+
+/** A system that prefers a dark or a light colour scheme. */
+function preferring(scheme: "dark" | "light") {
+  return vi.spyOn(window, "matchMedia").mockImplementation(
+    (query: string) =>
+      ({
+        matches: scheme === "dark" && query.includes("dark"),
+        media: query,
+        onchange: null,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList,
+  );
+}
+
+function schemeOf(view: HTMLElement): string | null {
+  const flow = view.querySelector(".react-flow");
+  if (flow?.classList.contains("dark")) return "dark";
+  if (flow?.classList.contains("light")) return "light";
+  return null;
 }
 
 function expectWhole(view: HTMLElement): void {
@@ -235,5 +260,33 @@ describe("flow canvas", () => {
     press(decide, "Delete");
     await settle();
     expectWhole(view);
+  });
+
+  it("without a theme, the canvas takes the system's colour scheme", async () => {
+    for (const scheme of ["dark", "light"] as const) {
+      const system = preferring(scheme);
+      try {
+        expect(schemeOf(await canvas())).toBe(scheme);
+      } finally {
+        system.mockRestore();
+      }
+    }
+  });
+
+  it("with a theme, the canvas takes the theme's colour scheme over the system's", async () => {
+    const system = preferring("dark");
+    try {
+      const view = render(
+        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+          <div style={{ width: "800px", height: "600px" }}>
+            <FlowCanvas graph={graph} />
+          </div>
+        </ThemeProvider>,
+      );
+      await settle();
+      expect(schemeOf(view)).toBe("light");
+    } finally {
+      system.mockRestore();
+    }
   });
 });

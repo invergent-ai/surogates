@@ -4,13 +4,14 @@
 // A form drawn from a spec: the outcome, titled groups with one input per
 // field type and hint, file uploads and picks, errors and check notes, and
 // the values a form sends and takes back.
-import { act } from "react";
+import { act, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   type FileValue,
   type FormSpec,
   type FormSpecOutcome,
+  type FormValues,
   fromOutput,
   missingInputs,
   SpecForm,
@@ -161,6 +162,43 @@ function describedText(el: Element): string {
     .filter(Boolean)
     .map((id) => document.getElementById(id)?.textContent ?? "")
     .join(" ");
+}
+
+const TWO_WAYS = "Write the number without thousands separators.";
+const NOT_A_NUMBER = "Not a number.";
+
+/**
+ * `loanForm` as an app draws it: it keeps what is typed, and shows beside
+ * each field what `missingInputs` says of it. Typing into the field labelled
+ * `label` then reads what the form would send for `field`, the error shown
+ * beside it, and what `missingInputs` says of it.
+ */
+function typingInto(label: string, field: string) {
+  let latest: FormValues = {};
+  function Checked() {
+    const [values, setValues] = useState<FormValues>({ applicant: "Ana Pop" });
+    latest = values;
+    return (
+      <SpecForm
+        form={loanForm}
+        values={values}
+        onChange={(name, value) =>
+          setValues((before) => ({ ...before, [name]: value }))
+        }
+        errors={{ fields: missingInputs(loanForm, null, values) }}
+      />
+    );
+  }
+  const root = render(<Checked />);
+  const control = controlFor(root, label) as HTMLInputElement;
+  return {
+    typing: (text: string) => typeInto(control, text),
+    sent: () => toOutput(loanForm, latest)[field],
+    beside: () =>
+      fieldOf(root, label).querySelector("[data-slot=field-error]")?.textContent ??
+      null,
+    missing: () => missingInputs(loanForm, null, latest)[field],
+  };
 }
 
 function pickerOf(root: ParentNode, label: string): HTMLSelectElement | null {
@@ -402,29 +440,78 @@ describe("a form drawn from a spec", () => {
     });
   });
 
-  it("a decimal takes a comma or a dot for its decimals, whichever comes last", () => {
-    const examples: [string, string][] = [
-      ["1,5", "1.5"],
-      ["1.5", "1.5"],
-      ["1.234,56", "1234.56"],
-      ["1,234.56", "1234.56"],
-      ["1 234,5", "1234.5"],
-      ["12", "12"],
+  it("a decimal reads a comma or a dot as its decimal mark, and refuses one it could read two ways", () => {
+    const { typing, sent, beside, missing } = typingInto("Amount", "amount");
+    const examples: [string, string | undefined][] = [
+      ["1,5", undefined],
+      ["1.5", undefined],
+      ["1.234,56", undefined],
+      ["1,234.56", undefined],
+      ["1 234,5", undefined],
+      ["12", undefined],
+      ["0,001", undefined],
+      ["1.234.567", undefined],
+      ["182,000.50", undefined],
+      ["182,000", TWO_WAYS],
+      ["1.234", TWO_WAYS],
+      ["-1,234", TWO_WAYS],
+      ["1.5.5", NOT_A_NUMBER],
+      ["1,23,4", NOT_A_NUMBER],
+      ["1,2.5", NOT_A_NUMBER],
+      ["1.234,5.6", NOT_A_NUMBER],
+      ["lots", NOT_A_NUMBER],
+      ["-", NOT_A_NUMBER],
     ];
-    for (const [typed, sent] of examples) {
-      expect(toOutput(loanForm, { amount: typed })).toEqual({ amount: sent });
-      expect(missingInputs(loanForm, "approve", { applicant: "Ana Pop", amount: typed })).toEqual(
-        {},
-      );
+    const plain: Record<string, string> = {
+      "1,5": "1.5",
+      "1.5": "1.5",
+      "1.234,56": "1234.56",
+      "1,234.56": "1234.56",
+      "1 234,5": "1234.5",
+      "12": "12",
+      "0,001": "0.001",
+      "1.234.567": "1234567",
+      "182,000.50": "182000.50",
+    };
+    for (const [typed, error] of examples) {
+      typing(typed);
+      expect(beside(), typed).toBe(error ?? null);
+      expect(missing(), typed).toBe(error);
+      // A refused number goes out as typed, for the server to refuse too.
+      expect(sent(), typed).toBe(error ? typed : plain[typed]);
     }
   });
 
-  it("a decimal that is still not a number is a field error", () => {
-    for (const typed of ["lots", "1,2a", "-", "1.5.x"]) {
-      expect(missingInputs(loanForm, "decline", { applicant: "Ana Pop", amount: typed })).toEqual(
-        { amount: "Not a number." },
-      );
+  it("an int takes thousands only in full groups of three, and refuses one it could read two ways", () => {
+    const { typing, sent, beside, missing } = typingInto("Term", "term_years");
+    const examples: [string, number | undefined, string | undefined][] = [
+      ["1,234,567", 1234567, undefined],
+      ["1.234.567", 1234567, undefined],
+      ["1 234", 1234, undefined],
+      ["1 250", 1250, undefined],
+      ["12", 12, undefined],
+      ["-1,234,567", -1234567, undefined],
+      ["1,234", undefined, TWO_WAYS],
+      ["1.234", undefined, TWO_WAYS],
+      ["1.5", undefined, NOT_A_NUMBER],
+      ["1,5", undefined, NOT_A_NUMBER],
+      ["1,23,4", undefined, NOT_A_NUMBER],
+      ["about 20", undefined, NOT_A_NUMBER],
+    ];
+    for (const [typed, number, error] of examples) {
+      typing(typed);
+      expect(beside(), typed).toBe(error ?? null);
+      expect(missing(), typed).toBe(error);
+      expect(sent(), typed).toBe(error ? typed : number);
     }
+  });
+
+  it("a draft's decimal with three places reads back as the number it is", () => {
+    const values = fromOutput(loanForm, { amount: "4.975" });
+    expect(values).toEqual({ amount: "4.9750" });
+    expect(fromOutput(loanForm, { amount: 4.975 })).toEqual({ amount: "4.9750" });
+    expect(missingInputs(loanForm, "approve", { ...values, applicant: "Ana Pop" })).toEqual({});
+    expect(toOutput(loanForm, values)).toEqual({ amount: "4.9750" });
   });
 
   it("missing inputs name the outcome that requires them", () => {
@@ -608,27 +695,27 @@ describe("a form drawn from a spec", () => {
   });
 });
 
-// Keel's generated step form, as `@keel/api` declares it: every key present,
-// and an absent value null. Passing it straight to `SpecForm`, `fromOutput`
-// and the file callbacks is what Keel's console does; if the kit's types
-// drift from this shape, this file stops type-checking.
-interface KeelStepForm {
+// A consumer's step form, as types generated from a server's JSON Schemas
+// declare it: every key present, and an absent value null. A console passes
+// it straight to `SpecForm`, `fromOutput` and the file callbacks; if the
+// kit's types drift from this shape, this file stops type-checking.
+interface ConsumerStepForm {
   checks: string[];
-  groups: KeelFormGroup[];
+  groups: ConsumerFormGroup[];
   key: string;
   name: string;
   outcome_label: string;
-  outcomes: KeelFormOutcome[];
+  outcomes: ConsumerFormOutcome[];
   required: string[];
   schema: { [k: string]: unknown };
   vote: { of: number; required: number } | null;
 }
-interface KeelFormGroup {
+interface ConsumerFormGroup {
   help: string | null;
-  inputs: KeelFormInput[];
+  inputs: ConsumerFormInput[];
   title: string | null;
 }
-interface KeelFormInput {
+interface ConsumerFormInput {
   choices: { label: string; value: string }[];
   field: string;
   file: ("one" | "list") | null;
@@ -663,19 +750,19 @@ interface KeelFormInput {
     | "object";
   unit: string | null;
 }
-interface KeelFormOutcome {
+interface ConsumerFormOutcome {
   key: string;
   label: string;
   required: string[];
 }
-interface KeelCaseFileValue {
+interface ConsumerFileValue {
   name: string;
   sha256: string;
   uri: string;
 }
 
-describe("a form as Keel sends it", () => {
-  const plainInput: Omit<KeelFormInput, "field" | "label" | "type"> = {
+describe("a consumer's step form", () => {
+  const plainInput: Omit<ConsumerFormInput, "field" | "label" | "type"> = {
     choices: [],
     file: null,
     help: null,
@@ -684,7 +771,7 @@ describe("a form as Keel sends it", () => {
     unit: null,
   };
 
-  const keelForm: KeelStepForm = {
+  const consumerForm: ConsumerStepForm = {
     key: "assess",
     name: "Assess",
     outcome_label: "Decision",
@@ -716,23 +803,23 @@ describe("a form as Keel sends it", () => {
     const draft: { output: { [key: string]: unknown } } = {
       output: { amount: "1200.00" },
     };
-    const keelFiles: KeelCaseFileValue[] = [fileA];
-    const opened: KeelCaseFileValue[] = [];
+    const consumerFiles: ConsumerFileValue[] = [fileA];
+    const opened: ConsumerFileValue[] = [];
     const onChange = vi.fn();
     const root = render(
       <SpecForm
-        form={keelForm}
-        values={fromOutput(keelForm, draft.output)}
+        form={consumerForm}
+        values={fromOutput(consumerForm, draft.output)}
         drafted={Object.keys(draft.output)}
         onChange={onChange}
         outcome="approve"
-        files={keelFiles}
-        onUpload={async (file: File): Promise<KeelCaseFileValue> => ({
+        files={consumerFiles}
+        onUpload={async (file: File): Promise<ConsumerFileValue> => ({
           name: file.name,
           uri: `case-file://c1/${file.name}`,
           sha256: "dd44",
         })}
-        onOpenFile={(value: KeelCaseFileValue) => opened.push(value)}
+        onOpenFile={(value: ConsumerFileValue) => opened.push(value)}
       />,
     );
 

@@ -103,7 +103,14 @@ export function FlowCanvas({
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKeyCode={null}
-        colorMode={resolvedTheme === "dark" ? "dark" : "light"}
+        // Without a theme provider, follow the system rather than assume light.
+        colorMode={
+          resolvedTheme === undefined
+            ? "system"
+            : resolvedTheme === "dark"
+              ? "dark"
+              : "light"
+        }
         fitView
       >
         <Background />
