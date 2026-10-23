@@ -61,7 +61,7 @@ from surogates.keel.steps import (
 )
 from surogates.office.editor_config import build_editor_config
 from surogates.office.kinds import office_kind
-from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_like, open_waiting
+from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_under, open_waiting
 from surogates.runtime.firebase_cache import FirebaseConfigUnavailable, project_firebase
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
@@ -556,7 +556,8 @@ async def list_files_of_case(case_id: str, request: Request) -> JSONResponse:
         raise _storage_failed(exc, case) from None
     workspace = case_workspace(state.storage, state.settings, case)
     try:
-        documents = await open_like(state.session_factory, [workspace.location(file.path) for file in files])
+        # Every open row under the case's workspace, by its location's prefix: one query, however many files.
+        documents = await open_under(state.session_factory, workspace.location("")) if files else []
     except DBAPIError as exc:
         raise _database_failed(
             exc,

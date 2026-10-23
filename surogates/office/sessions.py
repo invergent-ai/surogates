@@ -176,6 +176,18 @@ async def open_like(session_factory: Any, locations: list[str]) -> list[OpenDocu
         return [_snapshot(row) for row in rows.all() if row.location in exact or _folded(row.location) in folded]
 
 
+async def open_under(session_factory: Any, prefix: str) -> list[OpenDocument]:
+    """The open rows whose location starts with *prefix*, compared as written: one query however many files are
+    under it."""
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(
+                OfficeSession.status == OPEN, OfficeSession.location.startswith(prefix, autoescape=True),
+            )
+        )
+        return [_snapshot(row) for row in rows.all()]
+
+
 async def open_documents(session_factory: Any) -> list[OpenDocument]:
     async with session_factory() as db:
         rows = (await db.scalars(select(OfficeSession).where(OfficeSession.status == OPEN))).all()
