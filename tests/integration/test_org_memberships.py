@@ -28,6 +28,11 @@ from .test_devices import api  # noqa: F401  (fixture)
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+def unique_email(name: str) -> str:
+    """An email no other test uses: the database is shared within a worker."""
+    return f"{name}-{uuid.uuid4().hex[:8]}@example.com"
+
+
 def token_for(org_id: UUID, user_id: UUID) -> str:
     return create_access_token(org_id, user_id, {"sessions:read", "sessions:write"}, auth_time=int(time.time()))
 
@@ -125,8 +130,9 @@ async def test_a_token_of_an_organisation_the_user_never_joined_is_refused(api, 
 
 async def test_a_member_cannot_share_an_email_with_another_user_of_the_org(api, session_factory):
     org_b = await create_org(session_factory)
-    await create_user(session_factory, org_b, email="Ada@Example.com")
-    candidate = await create_user(session_factory, api.org_id, email="ada@example.com")
+    ada = unique_email("ada")
+    await create_user(session_factory, org_b, email=ada.capitalize())
+    candidate = await create_user(session_factory, api.org_id, email=ada)
 
     async with session_factory() as db:
         with pytest.raises(MembershipError) as clash:
@@ -147,12 +153,13 @@ async def test_a_member_cannot_share_an_email_with_another_user_of_the_org(api, 
 
 async def test_a_member_cannot_take_the_email_of_another_user_of_their_organisations(api, session_factory):
     org_b = await create_org(session_factory)
-    await create_user(session_factory, org_b, email="Grace@Example.com")
+    grace, free = unique_email("grace"), unique_email("ada")
+    await create_user(session_factory, org_b, email=grace.capitalize())
     await add(session_factory, org_b, api.user_id)
 
     for token in (token_for(org_b, api.user_id), api.token):
         refused = await api.client.patch(
-            "/v1/auth/me", json={"email": "grace@example.com", "display_name": "Renamed"}, headers=api.auth(token),
+            "/v1/auth/me", json={"email": grace, "display_name": "Renamed"}, headers=api.auth(token),
         )
         assert refused.status_code == 409, refused.text
         assert refused.json() == {"detail": "That email is already in use."}
@@ -161,10 +168,10 @@ async def test_a_member_cannot_take_the_email_of_another_user_of_their_organisat
     assert (unchanged.email, unchanged.display_name) == (f"user-{api.user_id}@test.com", f"Test User {api.user_id}")
 
     changed = await api.client.patch(
-        "/v1/auth/me", json={"email": "ada@example.com"}, headers=api.auth(token_for(org_b, api.user_id)),
+        "/v1/auth/me", json={"email": free}, headers=api.auth(token_for(org_b, api.user_id)),
     )
     assert changed.status_code == 200, changed.text
-    assert changed.json()["email"] == "ada@example.com"
+    assert changed.json()["email"] == free
 
 
 async def test_purging_a_member_keeps_their_account(api, session_factory):
@@ -237,7 +244,8 @@ async def test_a_home_account_is_not_purged_while_it_belongs_to_other_organisati
 
 async def test_the_cli_adds_lists_and_removes_a_member(api, session_factory, pg_url, monkeypatch, capsys, tmp_path):
     org_b = await create_org(session_factory)
-    resident = await create_user(session_factory, org_b, email="zed@example.com")
+    zed = unique_email("zed")
+    resident = await create_user(session_factory, org_b, email=zed)
     monkeypatch.setenv("SUROGATES_DB_URL", pg_url)
     monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "absent.yaml"))
 
@@ -258,7 +266,7 @@ async def test_the_cli_adds_lists_and_removes_a_member(api, session_factory, pg_
     code, listed, _ = await run("list", "--org", str(org_b))
     assert code == 0
     assert listed.splitlines() == [
-        f"{resident} zed@example.com home",
+        f"{resident} {zed} home",
         f"{api.user_id} user-{api.user_id}@test.com member",
     ]
     assert await run("remove", *member) == (0, "removed\n", "")

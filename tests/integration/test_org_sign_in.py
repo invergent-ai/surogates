@@ -118,8 +118,21 @@ async def email_of(session_factory, user_id: UUID) -> str:
         return await db.scalar(select(User.email).where(User.id == user_id))
 
 
-async def count_users(session_factory, email: str | None = None) -> int:
-    query = select(func.count()).select_from(User)
+# The database is shared within a worker: each test's people have emails and
+# Firebase subjects no other test uses.
+
+
+def unique_email(name: str) -> str:
+    return f"{name}-{uuid.uuid4().hex[:8]}@example.com"
+
+
+def unique_uid(name: str) -> str:
+    return f"uid-{name}-{uuid.uuid4().hex[:8]}"
+
+
+async def count_users(session_factory, org_ids: list[UUID], email: str | None = None) -> int:
+    """The accounts whose home is one of *org_ids*, the organisations this test made."""
+    query = select(func.count()).select_from(User).where(User.org_id.in_(org_ids))
     if email is not None:
         query = query.where(func.lower(User.email) == email.lower())
     async with session_factory() as db:
@@ -147,9 +160,10 @@ async def test_a_member_signs_in_by_organisation_with_their_home_password(api, s
     assert wrong.json() == {"detail": "Invalid credentials."}
 
     # A user with no password says no more than a wrong password does.
-    await create_user(session_factory, org_b, email="no-password@example.com")
+    no_password_email = unique_email("no-password")
+    await create_user(session_factory, org_b, email=no_password_email)
     no_password = await api.client.post(
-        f"/v1/auth/orgs/{org_b}/login", json={"email": "no-password@example.com", "password": PASSWORD},
+        f"/v1/auth/orgs/{org_b}/login", json={"email": no_password_email, "password": PASSWORD},
     )
     assert no_password.status_code == 401
     assert no_password.json() == {"detail": "Invalid credentials."}
@@ -197,23 +211,25 @@ async def test_the_org_config_names_the_organisation_and_its_firebase(api, org_b
 async def test_the_org_firebase_exchange_never_registers_a_user(
     api, session_factory, org_b, org_b_firebase_project, firebase_sign_ins,
 ):
-    users_before = await count_users(session_factory)
+    orgs = [api.org_id, org_b]
+    users_before = await count_users(session_factory, orgs)
+    stranger_email, invited_email, invited_uid = unique_email("stranger"), unique_email("invited"), unique_uid("invited")
 
     stranger = await api.client.post(
-        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": "uid-stranger|stranger@example.com"},
+        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"{unique_uid('stranger')}|{stranger_email}"},
     )
 
     assert stranger.status_code == 403
     assert stranger.json() == {"detail": NO_ACCOUNT}
     assert firebase_sign_ins == [org_b_firebase_project]
-    assert await count_users(session_factory) == users_before
-    assert await count_users(session_factory, "stranger@example.com") == 0
+    assert await count_users(session_factory, orgs) == users_before
+    assert await count_users(session_factory, orgs, stranger_email) == 0
 
     # Invited: an account of ORG_B waiting for its first Firebase sign-in.
-    invited = await firebase_account(session_factory, org_b, "invited@example.com", org_b_firebase_project)
+    invited = await firebase_account(session_factory, org_b, invited_email, org_b_firebase_project)
 
     linked = await api.client.post(
-        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": "uid-invited|Invited@Example.com"},
+        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"{invited_uid}|{invited_email.upper()}"},
     )
 
     assert linked.status_code == 200, linked.text
@@ -225,23 +241,23 @@ async def test_the_org_firebase_exchange_never_registers_a_user(
     assert claims(linked.json()["refresh_token"])["auth_time"] == access["auth_time"]
     async with session_factory() as db:
         user = await db.get(User, invited)
-    assert user.external_id == "uid-invited"
+    assert user.external_id == invited_uid
     assert user.sign_in_provider == "password"
-    assert await count_users(session_factory) == users_before + 1
+    assert await count_users(session_factory, orgs) == users_before + 1
 
     again = await api.client.post(
-        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": "uid-invited|invited@example.com"},
+        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"{invited_uid}|{invited_email}"},
     )
     assert again.status_code == 200, again.text
     assert claims(again.json()["access_token"])["user_id"] == str(invited)
 
     unknown = await api.client.post(
-        f"/v1/auth/orgs/{uuid.uuid4()}/firebase/exchange", json={"id_token": "uid-invited|invited@example.com"},
+        f"/v1/auth/orgs/{uuid.uuid4()}/firebase/exchange", json={"id_token": f"{invited_uid}|{invited_email}"},
     )
     assert unknown.status_code == 404
     assert unknown.json() == {"detail": "Organisation not found."}
     no_firebase = await api.client.post(
-        f"/v1/auth/orgs/{api.org_id}/firebase/exchange", json={"id_token": "uid-invited|invited@example.com"},
+        f"/v1/auth/orgs/{api.org_id}/firebase/exchange", json={"id_token": f"{invited_uid}|{invited_email}"},
     )
     assert no_firebase.status_code == 404
     assert no_firebase.json() == {"detail": "Firebase auth is not configured."}
@@ -251,18 +267,19 @@ async def test_the_org_firebase_exchange_never_relinks_a_member_of_another_organ
     api, session_factory, org_b, org_b_firebase_project, firebase_sign_ins,
 ):
     # Members whose home is the api organisation: one waiting for a Firebase sign-in, one with a password.
-    waiting = await firebase_account(session_factory, api.org_id, "waiting@example.com", org_b_firebase_project)
+    waiting_email, local_email = unique_email("waiting"), unique_email("local")
+    waiting = await firebase_account(session_factory, api.org_id, waiting_email, org_b_firebase_project)
     await add(session_factory, org_b, waiting)
-    with_password = await create_user(session_factory, api.org_id, email="local@example.com", password=PASSWORD)
+    with_password = await create_user(session_factory, api.org_id, email=local_email, password=PASSWORD)
     await add(session_factory, org_b, with_password)
 
-    for member, email in ((waiting, "waiting@example.com"), (with_password, "local@example.com")):
+    for member, email in ((waiting, waiting_email), (with_password, local_email)):
         async with session_factory() as db:
             before = await db.get(User, member)
             identity = (before.auth_provider, before.external_id)
 
         refused = await api.client.post(
-            f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"uid-{uuid.uuid4().hex}|{email}"},
+            f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"{unique_uid('member')}|{email}"},
         )
 
         assert refused.status_code == 403, refused.text
@@ -272,12 +289,13 @@ async def test_the_org_firebase_exchange_never_relinks_a_member_of_another_organ
         assert (after.auth_provider, after.external_id) == identity
 
     # A member already signed in to the same Firebase project is found by that identity.
+    shared_email, shared_uid = unique_email("shared"), unique_uid("shared")
     shared = await firebase_account(
-        session_factory, api.org_id, "shared@example.com", org_b_firebase_project, external_id="uid-shared",
+        session_factory, api.org_id, shared_email, org_b_firebase_project, external_id=shared_uid,
     )
     await add(session_factory, org_b, shared)
     found = await api.client.post(
-        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": "uid-shared|shared@example.com"},
+        f"/v1/auth/orgs/{org_b}/firebase/exchange", json={"id_token": f"{shared_uid}|{shared_email}"},
     )
     assert found.status_code == 200, found.text
     assert claims(found.json()["access_token"])["user_id"] == str(shared)
@@ -303,10 +321,11 @@ async def test_the_org_sign_in_ignores_any_agent_the_request_names(api, session_
 
 
 async def test_an_agent_login_admits_a_member_of_its_organisation(api, session_factory, org_b):
-    member = await create_user(session_factory, org_b, email="ada@example.com", password=PASSWORD)
+    ada = unique_email("ada")
+    member = await create_user(session_factory, org_b, email=ada, password=PASSWORD)
     await add(session_factory, api.org_id, member)
 
-    signed_in = await api.client.post("/v1/auth/login", json={"email": "ada@example.com", "password": PASSWORD})
+    signed_in = await api.client.post("/v1/auth/login", json={"email": ada, "password": PASSWORD})
 
     assert signed_in.status_code == 200, signed_in.text
     access = claims(signed_in.json()["access_token"])
@@ -318,19 +337,21 @@ async def test_an_agent_login_admits_a_member_of_its_organisation(api, session_f
 
 
 async def test_an_agent_sign_up_never_duplicates_a_members_email(api, session_factory, org_b, firebase_sign_ins):
-    member = await create_user(session_factory, org_b, email="grace@example.com", password=PASSWORD)
+    grace = unique_email("grace")
+    member = await create_user(session_factory, org_b, email=grace, password=PASSWORD)
     await add(session_factory, api.org_id, member)
-    users_before = await count_users(session_factory)
+    orgs = [api.org_id, org_b]
+    users_before = await count_users(session_factory, orgs)
 
     refused = await api.client.post(
-        "/v1/auth/firebase/exchange", json={"id_token": "uid-new|Grace@Example.com"},
+        "/v1/auth/firebase/exchange", json={"id_token": f"{unique_uid('new')}|{grace.upper()}"},
     )
 
     assert refused.status_code == 409, refused.text
     assert refused.json() == {"detail": EMAIL_TAKEN}
     assert firebase_sign_ins == ["agent-firebase"]
-    assert await count_users(session_factory) == users_before
-    assert await count_users(session_factory, "grace@example.com") == 1
+    assert await count_users(session_factory, orgs) == users_before
+    assert await count_users(session_factory, orgs, grace) == 1
     async with session_factory() as db:
         kept = await db.get(User, member)
     assert (kept.auth_provider, kept.external_id) == ("database", None)
