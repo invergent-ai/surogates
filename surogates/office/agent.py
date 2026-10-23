@@ -158,7 +158,7 @@ async def open_for_agent(
         raise AgentDocumentError("The document is still being saved; try again in a moment.") from None
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
-        user_id=user_id, user_name=agent_name, edit=True, theme="light", plugins=False,
+        user_id=user_id, user_name=agent_name, access="edit", theme="light", plugins=False,
     )
     page = await runtime.open(doc_key=document.doc_key, session_id=str(session.id), config=config,
                               document_server_url=office.internal_url)

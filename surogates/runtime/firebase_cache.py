@@ -28,7 +28,7 @@ from typing import Awaitable, Callable
 
 from surogates.runtime.firebase import FirebaseConfig
 
-__all__ = ["FirebaseConfigCache"]
+__all__ = ["FirebaseConfigCache", "FirebaseConfigUnavailable", "project_firebase"]
 
 
 class FirebaseConfigCache:
@@ -77,3 +77,25 @@ class FirebaseConfigCache:
                 lock = asyncio.Lock()
                 self._locks[project_id] = lock
             return lock
+
+
+class FirebaseConfigUnavailable(Exception):
+    """The platform did not answer for a project's Firebase config; raised from its failure."""
+
+
+async def project_firebase(cache: FirebaseConfigCache | None, project_id: str) -> FirebaseConfig | None:
+    """The Firebase config of *project_id*, None when it has none or no cache is configured.
+
+    A platform that fails to answer is not "no Firebase": a password form
+    or account in a project that signs in with Firebase would be wrong.
+    That raises :class:`FirebaseConfigUnavailable`, from the failure, for
+    the caller to log and answer as it does.
+    """
+    if cache is None:
+        return None
+    try:
+        return await cache.get(project_id)
+    except LookupError:
+        return None
+    except Exception as exc:  # noqa: BLE001 — the platform's failures, of any kind
+        raise FirebaseConfigUnavailable(project_id) from exc

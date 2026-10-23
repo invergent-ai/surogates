@@ -22,6 +22,7 @@ from surogates.office.chats import live_session
 from surogates.office.commands import drop_editors
 from surogates.office.files import (
     DENIED_ON_COMPUTER, DOCUMENT_FILES, document_session, editor_files, editor_invocation, editor_request_id,
+    document_files,
 )
 from surogates.office.runtime_office import close_pages
 from surogates.session.events import EventType
@@ -120,10 +121,20 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
                 office_sessions.next_try(row)
                 # Commits with the row; its new updated_at moves it behind the others.
                 attempts = office_sessions.mark_attempt(row)
-                logger.exception("could not land the save of %s (attempt %d)", row.path, attempts)
+                if row.case_id is None:
+                    logger.exception("could not land the save of %s (attempt %d)", row.path, attempts)
+                else:
+                    # The error's text can quote the file's name: a case's failure is logged by its class alone.
+                    logger.error("could not land the save of %s (attempt %d): %s", office_sessions.log_name(row),
+                                 attempts, type(exc).__name__)
                 if attempts == SAVE_FAILED_AFTER:
                     await _announce(session_store, row.session_ids, EventType.OFFICE_SAVE_FAILED,
                                     {"path": row.path, "attempts": attempts})
+                    if row.case_id is not None:
+                        # A case's document may have no chat to hear it: the log says so, by ids alone. The save
+                        # keeps retrying, as a chat's does, and its row stays open until it lands.
+                        logger.warning("the save of case %s's document %s keeps failing: it is retried",
+                                       row.case_id, row.id)
         if blob is not None:  # only once the row no longer points at it
             try:
                 await storage.delete(*blob)
@@ -137,14 +148,39 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
     """Land *row*'s pending save; the (bucket, key) of the save, consumed, to delete once the row commits, and whether
     it landed over the file (not as a conflict copy, nor dropped with every chat gone).
 
-    *settings* are the runtime's settings, whose history and saga sections land a project's saves.
+    *settings* are the runtime's settings, whose history and saga sections land a project's saves, and whose storage
+    section names a case's workspace.
     """
     pending = dict(row.pending_save or {})
     blob = (pending["bucket"], pending["key"])
-    session = await live_session(session_store, row.session_ids)
-    if session is None:  # every chat is gone: nothing to save into
+    if row.case_id is not None:
+        if settings is None:
+            raise RuntimeError("landing a case's save needs the runtime's settings")
+        # A case's document saves into the case's workspace: no chat to save into, no computer to wait on.
+        files = document_files(row, storage=storage, settings=settings)
+        copy_path = await _write(row, files, await storage.read(*blob), project=None, session_factory=session_factory,
+                                 session_store=session_store, storage=storage, redis=redis, settings=settings)
+    else:
+        session = await live_session(session_store, row.session_ids)
+        if session is None:  # every chat is gone: nothing to save into
+            office_sessions.mark_closed(row)
+            return blob, False
+        copy_path = await _land_in_chat(row, session, blob, session_factory=session_factory, session_store=session_store,
+                                        storage=storage, redis=redis, settings=settings)
+    if copy_path is not None:
+        await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
+                        {"path": row.path, "conflict_path": copy_path})
+        await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
+        await close_pages(office, row.doc_key, row.session_ids)
         office_sessions.mark_closed(row)
-        return blob, False
+    return blob, copy_path is None
+
+
+async def _land_in_chat(row: OfficeSession, session: Any, blob: tuple[str, str], *, session_factory: Any,
+                        session_store: Any, storage: Any, redis: Any, settings: Any) -> str | None:
+    """Land *row*'s pending save, *blob*, in the files of *session*, a chat it is open in; the conflict copy's path,
+    or None."""
+    pending = dict(row.pending_save or {})
     target = await document_session(session, session_factory=session_factory)
     computer = _computer_of(target)
     if computer is not None:
@@ -160,11 +196,13 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
                                 request_id=editor_request_id(row.doc_key, pending), data=data) as files:
             if not isinstance(files, DOCUMENT_FILES):
                 raise RuntimeError(f"{row.path}: this workspace cannot take the editor's saves")
+            # On a computer the project's own landing records it, as yours: the save is the folder's, through its
+            # master.
+            project = None if computer is not None else await _project_of(session_factory, session)
             # Only the computer's operations run under its wait: a pass joining this request again asks for the same.
             async with asyncio.timeout(COMPUTER_WAIT_S if computer is not None else None) as deadline:
-                copy_path = await _write(row, files, data, session=session, session_factory=session_factory,
-                                         session_store=session_store, storage=storage, redis=redis,
-                                         settings=settings, on_computer=computer is not None)
+                copy_path = await _write(row, files, data, project=project, session_factory=session_factory,
+                                         session_store=session_store, storage=storage, redis=redis, settings=settings)
     except ComputerAway as away:
         if away.revoked:
             raise
@@ -184,13 +222,7 @@ async def _land(row: OfficeSession, *, session_factory: Any, session_store: Any,
         if computer is None or DENIED_ON_COMPUTER not in said(exc):
             raise
         raise SaveDeclined(computer) from None
-    if copy_path is not None:
-        await _announce(session_store, row.session_ids, EventType.OFFICE_CONFLICT,
-                        {"path": row.path, "conflict_path": copy_path})
-        await drop_editors(office, row.doc_key, [str(user) for user in row.editors])
-        await close_pages(office, row.doc_key, row.session_ids)
-        office_sessions.mark_closed(row)
-    return blob, copy_path is None
+    return copy_path
 
 
 async def _cancel_abandoned(row: OfficeSession, target: Any, *, session_factory: Any, redis: Any) -> None:
@@ -215,14 +247,12 @@ def _computer_of(session: Any) -> str | None:
     return str((session.config.get("execution") or {}).get("device_name") or "your computer")
 
 
-async def _write(row: OfficeSession, files: Any, data: bytes, *, session: Any, session_factory: Any, session_store: Any,
-                 storage: Any, redis: Any, settings: Any, on_computer: bool) -> str | None:
+async def _write(row: OfficeSession, files: Any, data: bytes, *, project: Workstream | None, session_factory: Any,
+                 session_store: Any, storage: Any, redis: Any, settings: Any) -> str | None:
     """Write the save over the version the editor opened, or, when the file changed since, beside it as a copy;
-    the copy's path, or None."""
+    the copy's path, or None.  A save to *project*'s real files lands as the project's own landing records it."""
     pending = dict(row.pending_save or {})
     key = await files.resolve(row.path)
-    # On a computer the project's own landing records it, as yours: the save is the folder's, through its master.
-    project = None if on_computer else await _project_of(session_factory, session)
     try:
         if project is None:
             await files.write_if(key, data, expected=row.base_version)

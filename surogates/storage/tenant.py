@@ -47,6 +47,20 @@ def storage_key_prefix(config: dict | None) -> str:
     return str(value) if value else ""
 
 
+#: Top-level folders of a cloud workspace reserved for the platform's own
+#: state, blocked from every route that serves a person's files: artifact
+#: metadata and payloads live under ``_artifacts/{id}/``.
+RESERVED_WORKSPACE_PREFIXES: tuple[str, ...] = ("_artifacts/",)
+#: Top-level folders of a cloud workspace that hold the platform's own state
+#: but stay readable and writable by the client that owns them: the
+#: whiteboard's canvas, a project thread's coding checkouts, the files' history.
+HIDDEN_WORKSPACE_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/", "_history/")
+#: Both, as folder names: the platform's own folders at the top of a cloud workspace.
+PLATFORM_WORKSPACE_FOLDERS: tuple[str, ...] = tuple(
+    prefix.rstrip("/") for prefix in RESERVED_WORKSPACE_PREFIXES + HIDDEN_WORKSPACE_PREFIXES
+)
+
+
 _S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
 

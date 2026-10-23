@@ -84,12 +84,23 @@ A client that serves several orgs and no agent, such as Keel, signs in by org in
 - `GET …/config` names the org and gives its Firebase web config, or `null` when the org has no Firebase project.
 - `POST …/login` takes `{"email", "password"}`.
 - `POST …/firebase/exchange` takes `{"id_token"}` of the org's Firebase project. It never creates a user: it finds the org's user, home or member, by Firebase identity. Failing that, it links an invited account whose home is the org to the verified email. It never links a member whose home is another org: whoever runs this org's Firebase project could otherwise take over that member's account. A member signs in with their own identity, and their membership admits them. Anyone else gets 403 `You have no account in this organisation. Ask to be invited.`
+- `POST …/set-password/check` takes `{"token"}` of a set-password link and names whose password it sets; `POST …/set-password` takes `{"token", "password"}`, sets it and signs in. See [Invited staff](#invited-staff).
 
 The org in the path decides. These routes resolve no agent, ignore a `Host` subdomain and `?agent_id=`, and enrol the user on no agent. Their tokens name the org, and are accepted as any token is: while the user belongs to the org. An agent's own sign-in routes stay the right ones for an agent's web app: they enrol the user on the agent.
 
 One login spans orgs for users of one identity source: local password accounts, or users of one Firebase project the orgs share. A Firebase identity belongs to its Firebase project, so a member whose account signs in with another Firebase project has no identity in this org's project: their Firebase exchange here is refused with 403.
 
 The routes are listed in the [API reference](../appendices/api-reference.md#sign-in-by-organisation).
+
+### Invited staff
+
+Keel invites a person into an org through keel-link (see [keel-link](../operations/keel-link.md#inviting-staff)), and the person then signs in by org:
+
+- **In an org with Firebase sign-in**, a new person gets a Firebase account of the org's project, with no Firebase identity yet. They sign in with Firebase through `POST …/firebase/exchange`: their first sign-in links the account by their verified email.
+- **In an org without Firebase**, a new person gets a password account without a password, and Keel gets a link token for them, valid 7 days. They open it, and `POST …/set-password/check` names whose password it sets; `POST …/set-password` sets it and signs them in. The link works once, and not after the password changed. From then on they sign in through `POST …/login`.
+- **A person who already has an account**, in the org or in exactly one other org, keeps it and signs in as before: one joined from another org signs in with the same password, or the same Firebase project's identity. An account of another Firebase project is not invited.
+
+A new account's email is stored trimmed and lowercased. Only an account's home org sets its password: a person who joined from another org with no password yet sets it through a link of their home org.
 
 ## JWT Token Flow
 

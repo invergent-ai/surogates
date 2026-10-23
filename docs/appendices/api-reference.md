@@ -143,6 +143,37 @@ Exchange an ID token of the organisation's Firebase project for tokens. It never
 
 **Errors:** 401 when the Firebase token does not verify. 403 `You have no account in this organisation. Ask to be invited.` 404 `Organisation not found.`, or `Firebase auth is not configured.` 503 `Firebase auth is unavailable. Try again shortly.`
 
+#### `POST /v1/auth/orgs/{org_id}/set-password/check`
+
+Whose password a set-password link sets. The link's token comes from Keel's invitation of a new password user (see [Invited staff](../multi-tenancy/index.md#invited-staff)). It writes nothing.
+
+**Request:**
+```json
+{"token": "eyJ..."}
+```
+
+**Response (200):**
+```json
+{"email": "ana@bank.test", "display_name": "Ana Pop"}
+```
+
+**Errors:** 400 `This link is not valid or has expired.` 404 `Organisation not found.`
+
+#### `POST /v1/auth/orgs/{org_id}/set-password`
+
+Set the password a set-password link names, and sign in to the organisation with it. The link works once: a second use, or a use after the password changed, is refused.
+
+**Request:**
+```json
+{"token": "eyJ...", "password": "..."}
+```
+
+**Response (200):** the same tokens as the login.
+
+**Errors:** 400 `This link is not valid or has expired.`, for every link refused: one that does not verify, has lapsed (7 days after it was made), names another organisation or no password account whose home is the organisation, or was made before the user's password last changed. 404 `Organisation not found.` 422 when the password breaks the rules of `POST /v1/auth/me/password`: `New password must be at least 8 characters.`, `New password must be at most 72 bytes.` or `New password must be valid text.`
+
+The token is only a set-password link: it is never accepted as an access or a refresh token, and an access or a refresh token is never accepted as a link.
+
 ### `POST /v1/auth/logout`
 
 Invalidate the current session tokens.

@@ -379,17 +379,12 @@ async def test_an_empty_file_is_a_case_file(fake_keel, store):
 
 async def test_a_report_larger_than_keel_takes_is_never_sent(fake_keel, store):
     long_output = {**COMPLETION, "output": {**COMPLETION["output"], "notes": "x" * 300_000}}
-    long_hand = {"question": "Which income counts?", "evidence": [{"excerpt": "x" * 300_000}]}
 
-    for name, arguments, shorten in (
-        ("complete_step", long_output, "Shorten the output and its sources and call complete_step again."),
-        ("raise_hand", long_hand, "Shorten the question and its evidence and call raise_hand again."),
-    ):
-        error = json.loads(await _call(name, arguments, store))["error"]
-        size = int(re.match(r"The report is ([\d,]+) bytes, over the 256,000 bytes Keel takes\. ", error)[1].replace(",", ""))
-        assert size > 300_000
-        assert error.endswith(shorten)
+    error = json.loads(await _call("complete_step", long_output, store))["error"]
 
+    size = int(re.match(r"The report is ([\d,]+) bytes, over the 256,000 bytes Keel takes\. ", error)[1].replace(",", ""))
+    assert size > 300_000
+    assert error.endswith("Shorten the output and its sources and call complete_step again.")
     assert fake_keel.requests == []
     assert not store.redacted()
 
@@ -501,11 +496,10 @@ LONG_ID_ERROR = "This tool call's id is longer than the 200 characters Keel take
      "sources.income must be a list of objects"),
     ("complete_step", _with_nan(COMPLETION, ("output", "income")), "c1", NOT_JSON),
     ("complete_step", _with_nan(COMPLETION, ("sources", "income", 0, "page")), "c1", NOT_JSON),
-    ("raise_hand", _with_nan({"question": "Which?", "evidence": [{"ratio": 1}]}, ("evidence", 0, "ratio")), "c1", NOT_JSON),
     ("complete_step", COMPLETION, LONG_ID, LONG_ID_ERROR),
     ("raise_hand", {"question": "Which?"}, LONG_ID, LONG_ID_ERROR),
 ], ids=[
-    "sources-not-a-list", "sources-not-objects", "nan-in-output", "nan-in-sources", "nan-in-evidence",
+    "sources-not-a-list", "sources-not-objects", "nan-in-output", "nan-in-sources",
     "long-call-id", "long-call-id-hand",
 ])
 async def test_a_report_keel_could_not_read_is_never_sent(fake_keel, store, name, arguments, call_id, error):
@@ -532,7 +526,7 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     hand = {
         "question": "The payslips name two employers. Which income counts?",
         "choices": ["Both", "The current employer only"],
-        "evidence": [{"file": "in/payslips/03.pdf", "employer": "first"}],
+        "evidence": [{"label": "Employer · March", "value": "the first one", "source": {"file": "in/payslips/03.pdf"}}],
     }
 
     result = await _call("raise_hand", hand, store, tool_call_id="c7")
@@ -555,10 +549,71 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
         {"question": "Which?", "choices": [f"choice {n}" for n in range(21)]},
         {"question": "Which?", "choices": ["x" * 201]},
         {"question": "Which?", "evidence": ["a payslip"]},
-        {"question": "Which?", "evidence": [{"n": n} for n in range(51)]},
+        {"question": "Which?", "evidence": [{"label": f"payslip {n}", "value": "found"} for n in range(51)]},
     ):
         assert "error" in json.loads(await _call("raise_hand", bad, store)), bad
     assert len(fake_keel.requests) == 1
+
+
+PAYSLIP = {"label": "Payslip · September", "value": "€6,180 net", "source": {"file": "/workspace/payslips/sep.pdf", "page": 1}}
+
+
+async def test_a_raised_hand_larger_than_keel_takes_is_never_sent(fake_keel, store):
+    # Each fact is within its bounds; a file's path has none of its own, and these make the report too large.
+    evidence = [{**PAYSLIP, "source": {"file": f"/workspace/{'payslips/' * 700}sep-{n}.pdf"}} for n in range(50)]
+
+    error = json.loads(await _call("raise_hand", {"question": "Which income counts?", "evidence": evidence}, store))["error"]
+
+    size = int(re.match(r"The report is ([\d,]+) bytes, over the 256,000 bytes Keel takes\. ", error)[1].replace(",", ""))
+    assert size > 256_000
+    assert error.endswith("Shorten the question and its evidence and call raise_hand again.")
+    assert fake_keel.requests == []
+    assert store.reported() is None
+
+
+async def test_evidence_is_label_value_and_an_optional_source(fake_keel, store):
+    fake_keel.answer(200, {"result": "hand-raised", "message": "A person will answer."})
+    evidence = [
+        PAYSLIP,
+        {"label": "Employer", "value": "Acme Ltd"},
+        {"label": "Contract", "value": "permanent", "source": {"file": "/root/./contracts//acme.pdf"}},
+    ]
+
+    result = await _call("raise_hand", {"question": "Which income counts?", "evidence": evidence}, store)
+
+    assert result == "Step ended: A person will answer."
+    [body] = fake_keel.bodies("/raise-hand")
+    # Each file as the case's files name it: relative to the case's workspace.
+    assert body["evidence"] == [
+        {"label": "Payslip · September", "value": "€6,180 net", "source": {"file": "payslips/sep.pdf", "page": 1}},
+        {"label": "Employer", "value": "Acme Ltd"},
+        {"label": "Contract", "value": "permanent", "source": {"file": "contracts/acme.pdf"}},
+    ]
+
+
+@pytest.mark.parametrize(("bad", "index"), [
+    ({"value": "€6,180 net", "source": PAYSLIP["source"]}, 0),
+    ({**PAYSLIP, "note": "net of tax"}, 1),
+    ({**PAYSLIP, "source": {"file": "/workspace/payslips/sep.pdf", "page": 0}}, 2),
+    ({**PAYSLIP, "source": {"file": "/etc/passwd"}}, 3),
+    ({**PAYSLIP, "source": {"file": "/workspace/payslips/sep.pdf", "sheet": 2}}, 1),
+    ({**PAYSLIP, "source": {"file": "/workspace/_history/payslips/sep.pdf"}}, 1),
+    ({**PAYSLIP, "source": {"file": "/root/workspace/payslips/sep.pdf"}}, 2),
+    ({**PAYSLIP, "source": {"file": "/workspace/../other-case/sep.pdf"}}, 1),
+], ids=[
+    "no-label", "extra-key", "page-0", "outside-the-workspace", "extra-source-key", "platform-folder",
+    "workspace-root-again", "climbs-out",
+])
+async def test_evidence_outside_the_shape_is_refused(fake_keel, store, bad, index):
+    evidence = [PAYSLIP] * index + [bad]
+
+    error = json.loads(await _call("raise_hand", {"question": "Which income counts?", "evidence": evidence}, store))["error"]
+
+    assert error.startswith(f"evidence[{index}]")
+    # The refused path is never repeated back.
+    assert "sep.pdf" not in error and "passwd" not in error
+    assert fake_keel.requests == []
+    assert store.reported() is None
 
 
 def _calls(name: str, arguments: dict, call_id: str = "c1"):

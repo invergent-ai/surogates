@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from surogates.db.models import OfficeSession
@@ -31,6 +31,7 @@ class OpenDocument:
     path: str
     location: str
     session_ids: tuple[UUID, ...]
+    case_id: UUID | None
     base_version: str | None
     editors: tuple[str, ...]
     pending_save: dict[str, Any] | None
@@ -46,6 +47,7 @@ def _snapshot(row: OfficeSession) -> OpenDocument:
         path=row.path,
         location=row.location,
         session_ids=tuple(UUID(str(value)) for value in row.session_ids),
+        case_id=row.case_id,
         base_version=row.base_version,
         editors=tuple(str(value) for value in row.editors),
         pending_save=dict(row.pending_save) if row.pending_save is not None else None,
@@ -60,22 +62,28 @@ class DocumentClosing(Exception):
 
 
 async def open_or_reuse(
-    session_factory: Any, *, location: str, path: str, session_id: UUID, user: tuple[str, str] | None = None,
+    session_factory: Any, *, location: str, path: str, session_id: UUID | None, case_id: UUID | None = None,
+    user: tuple[str, str] | None = None,
 ) -> OpenDocument:
-    """The open row for *location*, created when there is none; *session_id* joins its chats,
-    and *user* (editor user id, name) its names.
+    """The open row for *location*, created when there is none; *session_id* joins its chats (None joins none),
+    *case_id* names the case whose document it is, and *user* (editor user id, name) joins its names.
+
+    A row opened for a case keeps its case however its chats open it later, and a case's open of a chat's row
+    makes it the case's.
 
     Raises :class:`DocumentClosing` for a row whose pending save closes it: the document
     server ended that key's session, so edits made under the key would be lost.
     """
     async with session_factory() as db, db.begin():
-        row = await _insert_and_lock(db, location=location, path=path, session_id=session_id)
+        row = await _insert_and_lock(db, location=location, path=path, session_id=session_id, case_id=case_id)
         if row is None:  # closed between the insert and the select: insert again
-            row = await _insert_and_lock(db, location=location, path=path, session_id=session_id)
+            row = await _insert_and_lock(db, location=location, path=path, session_id=session_id, case_id=case_id)
         if row is None or (row.pending_save or {}).get("close"):
             raise DocumentClosing(location)
-        if str(session_id) not in row.session_ids:
+        if session_id is not None and str(session_id) not in row.session_ids:
             row.session_ids = [*row.session_ids, str(session_id)]
+        if case_id is not None and row.case_id is None:
+            row.case_id = case_id
         if user is not None and (row.user_names or {}).get(user[0]) != user[1]:
             row.user_names = {**(row.user_names or {}), user[0]: user[1]}
         # Every open moves the clock close_never_opened measures from.
@@ -85,27 +93,31 @@ async def open_or_reuse(
 
 
 async def open_waiting(
-    session_factory: Any, *, location: str, path: str, session_id: UUID, user: tuple[str, str] | None = None,
+    session_factory: Any, *, location: str, path: str, session_id: UUID | None, case_id: UUID | None = None,
+    user: tuple[str, str] | None = None,
 ) -> OpenDocument:
     """:func:`open_or_reuse`, waiting up to CLOSING_WAIT_S for a closing row's last save to land;
     raises :class:`DocumentClosing` once the wait is over."""
     deadline = time.monotonic() + CLOSING_WAIT_S
     while True:
         try:
-            return await open_or_reuse(session_factory, location=location, path=path, session_id=session_id, user=user)
+            return await open_or_reuse(session_factory, location=location, path=path, session_id=session_id,
+                                       case_id=case_id, user=user)
         except DocumentClosing:
             if time.monotonic() >= deadline:
                 raise
             await asyncio.sleep(CLOSING_POLL_S)
 
 
-async def _insert_and_lock(db: Any, *, location: str, path: str, session_id: UUID) -> OfficeSession | None:
+async def _insert_and_lock(
+    db: Any, *, location: str, path: str, session_id: UUID | None, case_id: UUID | None,
+) -> OfficeSession | None:
     """Insert an open row for *location* unless one is open, then lock the open row (None if it closed meanwhile)."""
     await db.execute(
         pg_insert(OfficeSession)
         .values(
-            id=uuid4(), path=path, location=location, session_ids=[str(session_id)],
-            doc_key=uuid4().hex, status=OPEN,
+            id=uuid4(), path=path, location=location, session_ids=[] if session_id is None else [str(session_id)],
+            case_id=case_id, doc_key=uuid4().hex, status=OPEN,
         )
         .on_conflict_do_nothing(index_elements=["location"], index_where=text("status = 'open'"))
     )
@@ -162,6 +174,18 @@ async def open_like(session_factory: Any, locations: list[str]) -> list[OpenDocu
             )
         )
         return [_snapshot(row) for row in rows.all() if row.location in exact or _folded(row.location) in folded]
+
+
+async def open_under(session_factory: Any, prefix: str) -> list[OpenDocument]:
+    """The open rows whose location starts with *prefix*, compared as written: one query however many files are
+    under it."""
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(
+                OfficeSession.status == OPEN, OfficeSession.location.startswith(prefix, autoescape=True),
+            )
+        )
+        return [_snapshot(row) for row in rows.all()]
 
 
 async def open_documents(session_factory: Any) -> list[OpenDocument]:
@@ -245,16 +269,17 @@ def _union(first: Any, second: Any) -> list[str]:
     return out
 
 
-async def close_when_saved(session_factory: Any, row_id: UUID) -> None:
-    """Close the row now, or once its pending save lands."""
+async def close_when_saved(session_factory: Any, row_id: UUID) -> bool:
+    """Close the row now, or once its pending save lands; whether it closed now."""
     async with session_factory() as db, db.begin():
         row = await db.get(OfficeSession, row_id, with_for_update=True)
         if row is None or row.status != OPEN:
-            return
+            return False
         if row.pending_save is None:
             _close(row)
-        else:
-            row.pending_save = {**row.pending_save, "close": True}
+            return True
+        row.pending_save = {**row.pending_save, "close": True}
+        return False
 
 
 async def close(session_factory: Any, row_id: UUID) -> str | None:
@@ -355,6 +380,58 @@ async def close_never_opened(session_factory: Any, *, older_than: timedelta, now
             .values(status=CLOSED, closed_at=datetime.now(timezone.utc))
         )
         return result.rowcount or 0
+
+
+async def close_idle_cases(session_factory: Any, *, older_than: timedelta, now: datetime | None = None) -> int:
+    """Close case rows nobody is in, with no save waiting, untouched for *older_than*.
+
+    Everyone left, but the document server's close never came (it crashed, or its callback was lost): no chat going
+    away closes a case's row, so without this it would stay open for good, and every write to its file be refused.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - older_than
+    async with session_factory() as db, db.begin():
+        result = await db.execute(
+            update(OfficeSession)
+            .where(
+                OfficeSession.status == OPEN,
+                OfficeSession.case_id.is_not(None),
+                func.jsonb_array_length(OfficeSession.editors) == 0,
+                OfficeSession.pending_save.is_(None),
+                OfficeSession.updated_at < cutoff,
+            )
+            .values(status=CLOSED, closed_at=datetime.now(timezone.utc))
+        )
+        return result.rowcount or 0
+
+
+async def idle_cases_with_editors(
+    session_factory: Any, *, older_than: timedelta, now: datetime | None = None,
+) -> list[OpenDocument]:
+    """Open case rows that list editors, with no save waiting, untouched for *older_than*.
+
+    Someone may still be in the document, or everyone left a document they did not change and the document server's
+    close was lost: that close names nobody, so the last editor stays listed.  Only the document server can tell.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - older_than
+    async with session_factory() as db:
+        rows = await db.scalars(
+            select(OfficeSession).where(
+                OfficeSession.status == OPEN,
+                OfficeSession.case_id.is_not(None),
+                func.jsonb_array_length(OfficeSession.editors) > 0,
+                OfficeSession.pending_save.is_(None),
+                OfficeSession.updated_at < cutoff,
+            )
+        )
+        return [_snapshot(row) for row in rows.all()]
+
+
+def log_name(document: Any) -> str:
+    """How a log names *document*, an open row or its snapshot: a chat's by its path, a case's by its id alone.
+
+    A case's file can be named after its client, and a case's data never reaches a log.
+    """
+    return f"case document {document.id}" if document.case_id is not None else document.path
 
 
 def _close(row: OfficeSession) -> None:

@@ -4,6 +4,8 @@ fetches, and the saves it calls back with."""
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -31,13 +33,14 @@ from surogates.office import sessions as office_sessions
 from surogates.office.agent import AGENT_KINDS, location_of
 from surogates.office.chats import live_session
 from surogates.office.editor_config import build_editor_config
-from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_session, on_disk_spelling
+from surogates.office.files import DOCUMENT_FILES, FolderNotReady, document_files, document_session, on_disk_spelling
 from surogates.office.guard import office_tools_offered
 from surogates.office.kinds import office_kind
 from surogates.office.mentions import MENTION_SOURCE, agent_address, mention_message, mentionable_agent
 from surogates.office.tokens import InvalidOfficeToken, read_document_server_body, read_url_token
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
 from surogates.session.events import EventType
+from surogates.storage.tenant import agent_session_bucket
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tenant.memberships import belongs_to
@@ -99,7 +102,7 @@ async def get_workspace_editor(
     edit = kind.editable and not view and not is_scheduled_run_session(session)
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
-        user_id=user_id, user_name=user_name, theme=theme, edit=edit,
+        user_id=user_id, user_name=user_name, theme=theme, access="edit" if edit else "read",
     )
     # The agent answers a comment only where it edits live, in a document it edits, from an editor that edits, in a
     # chat it is sent the office tools in.
@@ -229,8 +232,7 @@ async def get_office_file(token: str, request: Request) -> Response:
     # Its key's session has ended: a fresh open would start from bytes about to be replaced.
     if (document.pending_save or {}).get("close"):
         raise HTTPException(status_code=409, detail="The document is still being saved; try again in a moment.")
-    target = await _document_session(request, await _live_session(request, document))
-    async with workspace_files(request, target) as files:
+    async with _files_of(request, document) as files:
         if not isinstance(files, DOCUMENT_FILES):
             raise HTTPException(status_code=409, detail="This workspace cannot be opened in the editor yet.")
         key = await files.resolve(document.path)
@@ -273,7 +275,8 @@ async def office_callback(token: str, request: Request) -> JSONResponse:
     elif status_code == 4:
         await office_sessions.close_when_saved(factory, document.id)
     elif status_code in (3, 7):
-        logger.warning("document server could not save %s (status %d, key %s)", document.path, status_code, document.doc_key)
+        logger.warning("document server could not save %s (status %d, key %s)", office_sessions.log_name(document),
+                       status_code, document.doc_key)
         await _announce(request, document, EventType.OFFICE_SAVE_FAILED, {"path": document.path, "status": status_code})
         if status_code == 3:
             await office_sessions.close_when_saved(factory, document.id)
@@ -291,11 +294,15 @@ async def _take_save(request: Request, document: office_sessions.OpenDocument, p
     try:
         data = await _download(_internal(str(url), office.internal_url))
     except httpx.HTTPError:
-        logger.warning("could not download the save of %s (key %s)", document.path, document.doc_key, exc_info=True)
+        logger.warning("could not download the save of %s (key %s)", office_sessions.log_name(document), document.doc_key,
+                       exc_info=True)
         raise HTTPException(status_code=502, detail="Could not download the saved document.") from None
-    session = await _live_session(request, document)
-    # A chat on a computer keeps its bucket stamp: the pending area is the editor's, outside every chat's files.
-    bucket = session.config["storage_bucket"]
+    # The pending area is the editor's, outside every chat's and case's files: a case's document keeps it in its
+    # workspace's bucket, and a chat on a computer keeps its bucket stamp.
+    if document.case_id is not None:
+        bucket = agent_session_bucket(request.app.state.settings.storage.bucket)
+    else:
+        bucket = (await _live_session(request, document)).config["storage_bucket"]
     key = f"{PENDING_PREFIX}{document.doc_key}/{uuid4().hex}"
     storage = request.app.state.storage
     await storage.write(bucket, key, data)
@@ -368,6 +375,18 @@ async def _document_for(request: Request, token: str, purpose: Literal["file", "
     if document is None:
         raise HTTPException(status_code=404, detail="The document is no longer open.")
     return document
+
+
+@asynccontextmanager
+async def _files_of(request: Request, document: office_sessions.OpenDocument) -> AsyncIterator[Any]:
+    """The files the document is read from: its case's workspace, or its chat's, as the chat's pane reaches them."""
+    files = document_files(document, storage=request.app.state.storage, settings=request.app.state.settings)
+    if files is not None:
+        yield files
+        return
+    target = await _document_session(request, await _live_session(request, document))
+    async with workspace_files(request, target) as files:
+        yield files
 
 
 async def _live_session(request: Request, document: office_sessions.OpenDocument):

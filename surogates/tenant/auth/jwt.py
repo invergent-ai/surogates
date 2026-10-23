@@ -4,6 +4,10 @@ The platform issues its own HS256 JWTs after the pluggable auth provider
 has verified the user's credentials.  Tokens carry the ``org_id``,
 ``user_id``, granted ``permissions``, and a ``type`` discriminator
 (``"access"`` vs ``"refresh"``).
+
+A set-password token is of another kind: it names one ``purpose`` and
+carries no ``type`` and no ``permissions``, so :func:`decode_token` never
+accepts it, and it is read only by :func:`decode_set_password_token`.
 """
 
 from __future__ import annotations
@@ -16,12 +20,16 @@ from uuid import UUID
 from jose import JWTError, jwt
 
 __all__ = [
+    "SET_PASSWORD_PURPOSE",
     "create_access_token",
     "create_channel_session_token",
     "create_refresh_token",
     "create_sandbox_token",
     "create_service_account_session_token",
+    "create_set_password_token",
+    "decode_set_password_token",
     "decode_token",
+    "signing_secret",
     "InvalidTokenError",
 ]
 
@@ -37,6 +45,11 @@ def _get_secret() -> str:
             "JWT operations require a secret key."
         )
     return secret
+
+
+def signing_secret() -> str:
+    """The runtime's signing secret, ``SUROGATES_JWT_SECRET``: every token here is signed with it."""
+    return _get_secret()
 
 
 # ------------------------------------------------------------------
@@ -263,6 +276,39 @@ def create_refresh_token(
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 
+#: The ``purpose`` of a token that lets one user set their password.
+SET_PASSWORD_PURPOSE = "set-password"
+
+
+def create_set_password_token(
+    *,
+    org_id: UUID,
+    user_id: UUID,
+    digest: str,
+    issued_at: int,
+    expires_at: int,
+    secret: str,
+) -> str:
+    """A token that lets *user_id* set their password through *org_id*, and does nothing else.
+
+    *digest* stands for the user's password as it was when the token was
+    minted; the reader compares it with the password's digest now.  The
+    token has a ``purpose`` claim and no ``type`` or ``permissions``
+    claim: :func:`decode_token` refuses it, so it is never an access, a
+    refresh or any other token.  *issued_at* and *expires_at* are epoch
+    seconds.
+    """
+    payload: dict[str, Any] = {
+        "sub": str(user_id),
+        "org_id": str(org_id),
+        "purpose": SET_PASSWORD_PURPOSE,
+        "pwd": digest,
+        "iat": issued_at,
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, secret, algorithm=_ALGORITHM)
+
+
 # ------------------------------------------------------------------
 # Token validation
 # ------------------------------------------------------------------
@@ -327,4 +373,31 @@ def decode_token(token: str) -> dict[str, Any]:
                 f"{token_type} token is missing required claim: 'user_id'"
             )
 
+    return payload
+
+
+def decode_set_password_token(token: str, *, secret: str, now: int) -> dict[str, Any]:
+    """The claims of a set-password token signed with *secret* that has not lapsed by *now* (epoch seconds).
+
+    Raises ``InvalidTokenError`` for any other token, an access or a
+    refresh token among them.  The error's text never quotes the token.
+    The expiry is checked against *now*, not the clock.
+    """
+    try:
+        payload: dict[str, Any] = jwt.decode(
+            token,
+            secret,
+            algorithms=[_ALGORITHM],
+            # ``require_exp`` would check the expiry against the clock: it is checked below, against *now*.
+            options={"verify_exp": False, "require_iat": True, "require_sub": True},
+        )
+    except JWTError as exc:
+        raise InvalidTokenError(str(exc)) from exc
+    if payload.get("purpose") != SET_PASSWORD_PURPOSE or "type" in payload or "permissions" in payload:
+        raise InvalidTokenError("Not a set-password token.")
+    if not all(isinstance(payload.get(claim), str) for claim in ("sub", "org_id", "pwd")):
+        raise InvalidTokenError("Set-password token is missing a claim.")
+    expires_at = payload.get("exp")
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool) or expires_at <= now:
+        raise InvalidTokenError("Set-password token has lapsed.")
     return payload

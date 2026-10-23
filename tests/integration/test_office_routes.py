@@ -122,7 +122,11 @@ async def test_view_param_opens_read_only(client, app, session_factory):
     session_id, headers, _, _ = await _user_chat(client, app, session_factory)
     response = await client.get(f"/v1/sessions/{session_id}/workspace/editor",
                                 params={"path": "docs/Plan.docx", "view": "true"}, headers=headers)
-    assert response.json()["config"]["editorConfig"]["mode"] == "view"
+    config = response.json()["config"]
+    assert config["editorConfig"]["mode"] == "view"
+    assert config["document"]["permissions"] == {
+        "edit": False, "review": False, "comment": True, "download": True, "print": True,
+    }
 
 
 async def test_service_account_names_the_person(client, app, session_factory):

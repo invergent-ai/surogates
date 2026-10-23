@@ -19,6 +19,10 @@ export {
   useChatViewMode,
 } from "./runtime/use-agent-chat-runtime";
 export { forgetChatFiles } from "./components/workspace/chat-files";
+export { DocumentEditor } from "./components/workspace/document-editor";
+export type { DocumentEditorProps, EditorOpening } from "./components/workspace/document-editor";
+export { loadDocsApi } from "./lib/office";
+export type { DocEditorEvent, DocEditorEvents, DocEditorInstance } from "./lib/office";
 export { FetchSseEventStream } from "./runtime/fetch-sse-stream";
 export type { FetchSseEventStreamOptions } from "./runtime/fetch-sse-stream";
 export {

@@ -39,6 +39,11 @@ from surogates.session.files import ComputerAway, DeviceAccess, session_files
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
+from surogates.storage.tenant import (
+    HIDDEN_WORKSPACE_PREFIXES,
+    PLATFORM_WORKSPACE_FOLDERS,
+    RESERVED_WORKSPACE_PREFIXES,
+)
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
@@ -155,7 +160,7 @@ _SKIP_DIRS = frozenset({
 # payloads live under ``_artifacts/{id}/``.  Hidden from the workspace
 # tree and blocked from read/write/delete so users can't see or mutate
 # internal state through the file-browser panel.
-_RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
+_RESERVED_PREFIXES: tuple[str, ...] = RESERVED_WORKSPACE_PREFIXES
 
 # Prefixes hidden from the workspace tree but still readable and writable
 # by their owning client.  The whiteboard canvas is the case this exists
@@ -168,7 +173,7 @@ _RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
 # A project thread's coding checkouts (``.threads/``) are hidden the same
 # way: a clone's thousands of files would count against the tree's limit.
 # So is the files' history (``_history/``), which only the platform writes.
-_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/", ".threads/", "_history/")
+_HIDDEN_PREFIXES: tuple[str, ...] = HIDDEN_WORKSPACE_PREFIXES
 
 # The one file under them the panel's own page writes: the whiteboard's canvas.
 _CANVAS = "_whiteboard/canvas.json"
@@ -177,7 +182,7 @@ _CANVAS = "_whiteboard/canvas.json"
 # so that it never enters them: at any depth a folder of _SKIP_DIRS, and a
 # dot-folder other than SHOWN_DOT_FOLDERS (_should_skip_dir); at the top, the
 # platform's own folders (_is_hidden).
-_TOP_HIDDEN: tuple[str, ...] = tuple(prefix.rstrip("/") for prefix in _RESERVED_PREFIXES + _HIDDEN_PREFIXES)
+_TOP_HIDDEN: tuple[str, ...] = PLATFORM_WORKSPACE_FOLDERS
 # A local folder reserves none: the harness keeps its artifacts under
 # .surogates-results/ there, so an _artifacts/ in it is the user's own.
 _FOLDER_TOP_HIDDEN: tuple[str, ...] = tuple(prefix.rstrip("/") for prefix in _HIDDEN_PREFIXES)
