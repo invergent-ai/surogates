@@ -22,7 +22,9 @@ Round-trip
 7. If the user pauses the session instead of answering, the handler exits
    with ``cancelled: true`` so the LLM sees a clean termination.  So it
    does, with ``reason: "dismissed"``, when the user types a command
-   instead: the harness ends the turn there and runs the command.
+   instead: the harness ends the turn there and runs the command.  A
+   question nobody answers in time (``reason: "timeout"``) ends the turn
+   too: the agent gets no further tool calls and says it will wait.
 """
 
 from __future__ import annotations
@@ -147,7 +149,8 @@ ASK_USER_QUESTION_DESCRIPTION = (
     "Do NOT use for simple yes/no confirmation of dangerous commands (the "
     "terminal tool handles that).  If the user pauses the session "
     "instead of answering, you will receive ``cancelled: true`` -- stop and "
-    "wait for further instructions."
+    "wait for further instructions.  If nobody answers in time, the turn ends: "
+    "you get no further tool calls, only one reply saying you will wait."
 )
 
 
