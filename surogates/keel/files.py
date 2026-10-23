@@ -16,7 +16,7 @@ from surogates.channels.channel_media import normalize_workspace_path
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.storage.tenant import boundary_workspace_key
 
-__all__ = ["case_file_value", "workspace_path"]
+__all__ = ["case_file_value", "file_value", "workspace_path"]
 
 #: The absolute roots a path in the workspace may start with: the sandbox
 #: mounts the workspace at ``/workspace``, and also at its home, ``/root``.
@@ -49,6 +49,11 @@ async def case_file_value(storage: Any, session: Any, case_id: object, path: str
         data = await storage.read(bucket, key)
     except KeyError:
         raise FileNotFoundError(relative) from None
+    return file_value(case_id, relative, data)
+
+
+def file_value(case_id: object, relative: str, data: bytes) -> dict[str, str]:
+    """The Keel file value of *data*, stored at *relative* in the case's workspace."""
     # An empty file is a file: its digest is the empty bytes'.
     return {
         "name": PurePosixPath(relative).name,

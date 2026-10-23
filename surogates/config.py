@@ -910,6 +910,8 @@ class KeelSettings(BaseSettings):
     link_key: str = Field("", repr=False)
     # The port keel-link serves on.
     link_port: int = 8090
+    # The largest file Keel may write to a case's workspace, in bytes.
+    max_file_bytes: int = 52428800
 
 
 class Settings(BaseSettings):

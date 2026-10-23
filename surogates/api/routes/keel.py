@@ -1,5 +1,7 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
-answers it or asks it for a revision, cancels it, and reads its status.
+answers it or asks it for a revision, cancels it, and reads its status.  It
+also lists, reads and writes a case's files: the workspace its step sessions
+share.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -12,21 +14,36 @@ neither does the log: a case's inputs are a client's.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import hmac
 import json
 import logging
+import os
+import tempfile
+from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any, Literal, TypeVar
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO, Literal, TypeVar
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.keel.case_files import (
+    CaseFileError,
+    case_path,
+    case_workspace,
+    download_case_file,
+    list_case_files,
+    write_case_file,
+)
+from surogates.keel.files import file_value
 from surogates.keel.steps import (
     ANSWER_MARKER,
     KICKOFF_MARKER,
@@ -37,6 +54,7 @@ from surogates.keel.steps import (
     render_message,
     step_contract_of,
 )
+from surogates.office.sessions import OpenDocument, open_at, open_like
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.tenant.auth.service_account import ServiceAccountStore
@@ -414,3 +432,169 @@ async def read_step_session(session_id: str, request: Request) -> JSONResponse:
         ) from None
     answer = StepSessionStatus(status=session.status, updated_at=session.updated_at)
     return JSONResponse(answer.model_dump(mode="json"))
+
+
+# ---------------------------------------------------------------------------
+# A case's files
+# ---------------------------------------------------------------------------
+
+
+def _case_id(case_id: str) -> UUID:
+    try:
+        return UUID(case_id)
+    except ValueError:
+        raise _refused(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The case id is not a UUID.",
+        ) from None
+
+
+def _case_path(request: Request) -> str:
+    """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one outside it."""
+    try:
+        return case_path(request.query_params.get("path") or "")
+    except CaseFileError as exc:
+        raise _refused(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, "The path is not one inside the case's workspace.",
+        ) from None
+
+
+def _editing(document: OpenDocument) -> list[str]:
+    """Who is in the document's editor now, each once, by the name they opened it under."""
+    return [
+        document.user_names.get(user) or ("An agent" if user.startswith("agent:") else "Someone")
+        for user in dict.fromkeys(document.editors)
+    ]
+
+
+@router.get("/keel/cases/{case_id}/files")
+async def list_files_of_case(case_id: str, request: Request) -> JSONResponse:
+    """The files of a case's workspace, by path, each with who is in its editor now."""
+    require_link(request)
+    case = _case_id(case_id)
+    state = request.app.state
+    files = await list_case_files(state.storage, state.settings, case)
+    workspace = case_workspace(state.storage, state.settings, case)
+    try:
+        documents = await open_like(state.session_factory, [workspace.location(file.path) for file in files])
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"the open documents of case {case} could not be read",
+            message="The case's files could not be listed.",
+        ) from None
+    editing = {document.location: _editing(document) for document in documents}
+    return JSONResponse({
+        "files": [
+            {
+                "path": file.path,
+                "name": PurePosixPath(file.path).name,
+                "size": file.size,
+                "modified_at": file.modified_at.isoformat(),
+                "editing": editing.get(workspace.location(file.path), []),
+            }
+            for file in files
+        ],
+    })
+
+
+#: How much of a file a read sends at once.
+_CHUNK = 1 << 20
+
+
+def _scratch_file() -> Path:
+    handle, name = tempfile.mkstemp(prefix="keel-case-file-")
+    os.close(handle)
+    return Path(name)
+
+
+def _opened_digest(path: Path) -> tuple[BinaryIO, str]:
+    """*path* opened, and removed, so nothing is left behind however its reader ends; and its digest."""
+    source = open(path, "rb")
+    try:
+        path.unlink()
+        digest = hashlib.sha256()
+        while chunk := source.read(_CHUNK):
+            digest.update(chunk)
+        source.seek(0)
+    except BaseException:
+        source.close()
+        raise
+    return source, digest.hexdigest()
+
+
+async def _streamed(source: BinaryIO) -> AsyncIterator[bytes]:
+    try:
+        while chunk := await asyncio.to_thread(source.read, _CHUNK):
+            yield chunk
+    finally:
+        source.close()
+
+
+@router.get("/keel/cases/{case_id}/files/content")
+async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse:
+    """A file of the case's workspace, streamed, with its digest in ``X-Content-SHA256``.
+
+    The file is copied to a scratch file first, a piece at a time: its digest
+    is known before its first byte is sent, and none of it is held whole.
+    """
+    require_link(request)
+    case = _case_id(case_id)
+    relative = _case_path(request)
+    state = request.app.state
+    target = await asyncio.to_thread(_scratch_file)
+    try:
+        size = await download_case_file(state.storage, state.settings, case, relative, target)
+        source, digest = await asyncio.to_thread(_opened_digest, target)
+    except FileNotFoundError:
+        raise _refused(status.HTTP_404_NOT_FOUND, "unknown-file", "No such file in the case's workspace.") from None
+    finally:
+        target.unlink(missing_ok=True)
+    return StreamingResponse(
+        _streamed(source),
+        media_type="application/octet-stream",
+        headers={"X-Content-SHA256": digest, "Content-Length": str(size)},
+    )
+
+
+async def _body_within(request: Request, limit: int) -> bytes:
+    """The request's body, read no further than one byte past *limit*: 413 ``too-large`` past it."""
+    too_large = _refused(
+        status.HTTP_413_CONTENT_TOO_LARGE, "too-large", f"The file is larger than {limit} bytes.",
+    )
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise too_large
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise too_large
+    return bytes(body)
+
+
+@router.put("/keel/cases/{case_id}/files/content")
+async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
+    """Write the body at the path in the case's workspace, over any file there: the file's Keel value and size.
+
+    A file open in the editor is refused, 409 ``file-open``: the editor's next
+    save would land over a file it never saw.
+    """
+    require_link(request)
+    case = _case_id(case_id)
+    relative = _case_path(request)
+    state = request.app.state
+    data = await _body_within(request, state.settings.keel.max_file_bytes)
+    location = case_workspace(state.storage, state.settings, case).location(relative)
+    try:
+        open_now = await open_at(state.session_factory, location)
+    except DBAPIError as exc:
+        raise _database_failed(
+            exc,
+            logged=f"the open documents of case {case} could not be read",
+            message="The file could not be written.",
+        ) from None
+    if open_now is not None:
+        raise _refused(status.HTTP_409_CONFLICT, "file-open", "The file is open in the editor.")
+    await write_case_file(state.storage, state.settings, case, relative, data)
+    value = await asyncio.to_thread(file_value, case, relative, data)
+    return JSONResponse({**value, "size": len(data)})
