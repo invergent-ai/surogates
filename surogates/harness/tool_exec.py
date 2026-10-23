@@ -822,18 +822,17 @@ def _parse_tool_args_for_guardrail(tc: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-async def _emit_guardrail_tool_result(
+async def _emit_synthetic_tool_result(
     tc: dict[str, Any],
+    content: str,
     *,
-    decision: ToolGuardrailDecision,
     session: Session,
     lease: SessionLease,
     store: SessionStore,
 ) -> dict[str, str]:
-    fn = tc.get("function", {})
-    tool_name = fn.get("name", "")
+    """Record a call that did not run, with *content* as its result."""
+    tool_name = tc.get("function", {}).get("name", "")
     tool_call_id = tc.get("id", "")
-    result_content = toolguard_synthetic_result(decision, tool_name=tool_name)
 
     await store.emit_event(
         session.id,
@@ -850,7 +849,7 @@ async def _emit_guardrail_tool_result(
         {
             "tool_call_id": tool_call_id,
             "name": tool_name,
-            "content": result_content,
+            "content": content,
             "elapsed_ms": 0,
         },
     )
@@ -862,8 +861,24 @@ async def _emit_guardrail_tool_result(
     return {
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": result_content,
+        "content": content,
     }
+
+
+async def _emit_guardrail_tool_result(
+    tc: dict[str, Any],
+    *,
+    decision: ToolGuardrailDecision,
+    session: Session,
+    lease: SessionLease,
+    store: SessionStore,
+) -> dict[str, str]:
+    content = toolguard_synthetic_result(decision, tool_name=tc.get("function", {}).get("name", ""))
+    return await _emit_synthetic_tool_result(tc, content, session=session, lease=lease, store=store)
+
+
+SKIPPED_BEHIND_QUESTION = "skipped: the question before it in this batch went unanswered"
+
 
 def _is_cancelled(content: Any) -> bool:
     """Whether a tool result is a JSON object saying ``cancelled`` (an unanswered question)."""
@@ -881,21 +896,9 @@ async def _emit_skipped_tool_result(
     lease: SessionLease,
     store: SessionStore,
 ) -> dict:
-    """Record a call that did not run, so its TOOL_CALL is not left without a result."""
-    msg = make_skipped_tool_result(tc, "skipped: the question before it in this batch went unanswered")
-    name = tc.get("function", {}).get("name", "")
-    await store.emit_event(
-        session.id, EventType.TOOL_CALL,
-        {"tool_call_id": msg["tool_call_id"], "name": name, "arguments": {}},
-    )
-    result_event_id = await store.emit_event(
-        session.id, EventType.TOOL_RESULT,
-        {"tool_call_id": msg["tool_call_id"], "name": name, "content": msg["content"], "elapsed_ms": 0},
-    )
-    await store.advance_harness_cursor(
-        session.id, through_event_id=result_event_id, lease_token=lease.lease_token,
-    )
-    return msg
+    """Record a call skipped behind an unanswered question."""
+    content = make_skipped_tool_result(tc, SKIPPED_BEHIND_QUESTION)["content"]
+    return await _emit_synthetic_tool_result(tc, content, session=session, lease=lease, store=store)
 
 
 # Patterns that indicate a terminal command may modify/delete files.
@@ -1275,6 +1278,9 @@ async def execute_tool_calls_sequential(
             expert_transcript=expert_transcript,
             interrupt_check=interrupt_check,
         )
+        # Read before any guardrail guidance is appended: that makes it no longer JSON.
+        if tool_name == "ask_user_question" and _is_cancelled(result_msg.get("content")):
+            unanswered = True
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
                 tool_name,
@@ -1289,8 +1295,6 @@ async def execute_tool_calls_sequential(
                 ),
             }
         results.append(result_msg)
-        if tool_name == "ask_user_question" and _is_cancelled(result_msg.get("content")):
-            unanswered = True
         if tool_guardrails is not None and tool_guardrails.halt_decision is not None:
             break
 

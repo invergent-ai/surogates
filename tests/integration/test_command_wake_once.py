@@ -32,6 +32,7 @@ from surogates.harness.local_landing import lands
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
 from surogates.harness.message_utils import make_skipped_tool_result
+from surogates.harness.tool_exec import SKIPPED_BEHIND_QUESTION
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.missions.evaluator import apply_verdict
@@ -2726,7 +2727,6 @@ async def test_a_question_that_times_out_while_its_user_said_more_goes_on_with_w
     assert "question_timed_out" not in await finish_reasons(workers, chat)
 
 
-SKIP_REASON = "skipped: the question before it in this batch went unanswered"
 BATCH = (
     {"role": "assistant", "content": "", "tool_calls": [
         ASKS[0]["tool_calls"][0],
@@ -2745,7 +2745,9 @@ async def what_a_call_got(workers: Workers, chat: UUID, call_id: str) -> str:
 
 
 @pytest.mark.slow
-async def test_calls_after_an_unanswered_question_in_its_batch_are_skipped(workers, monkeypatch):
+@pytest.mark.parametrize("streaming", ["1", "0"])
+async def test_calls_after_an_unanswered_question_in_its_batch_are_skipped(workers, monkeypatch, streaming):
+    monkeypatch.setenv("SUROGATES_STREAMING_ENABLED", streaming)
     monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
     chat = await workers.chat()
     workers.replies.append(BATCH)
@@ -2755,7 +2757,7 @@ async def test_calls_after_an_unanswered_question_in_its_batch_are_skipped(worke
     del asking._tools.dispatch  # the real tools: the question waits for its user
     await asyncio.wait_for(asking.wake(chat), 10)
 
-    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIP_REASON)["content"]
+    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIPPED_BEHIND_QUESTION)["content"]
     assert await what_a_call_got(workers, chat, "call_after") == skipped
 
 
@@ -2778,7 +2780,7 @@ async def test_calls_after_an_answered_question_in_its_batch_still_run(workers, 
     await asyncio.wait_for(waiting, 10)
 
     assert (await what_the_question_got(workers, chat)).get("cancelled") is not True
-    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIP_REASON)["content"]
+    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIPPED_BEHIND_QUESTION)["content"]
     assert await what_a_call_got(workers, chat, "call_after") != skipped
 
 

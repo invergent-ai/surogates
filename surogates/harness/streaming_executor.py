@@ -422,6 +422,7 @@ class StreamingToolExecutor:
                 tool.result = await _emit_skipped_tool_result(
                     tool.tool_call, session=self._session, lease=self._lease, store=self._store,
                 )
+                tool.errored = True
                 return
             if guardrails is not None:
                 before = guardrails.before_call(tool_name, guardrail_args)
@@ -469,6 +470,9 @@ class StreamingToolExecutor:
                 interrupt_check=self._interrupt_check,
                 offered_tools=self._offered_tools,
             )
+            # Read before any guardrail guidance is appended: that makes it no longer JSON.
+            if tool_name == "ask_user_question" and _is_cancelled(result.get("content")):
+                self._question_unanswered = True
             if guardrails is not None:
                 after = guardrails.after_call(
                     tool_name,
@@ -483,8 +487,6 @@ class StreamingToolExecutor:
                 }
             tool.result = result
             tool.errored = _is_error_result(result)
-            if tool_name == "ask_user_question" and _is_cancelled(result.get("content")):
-                self._question_unanswered = True
         except asyncio.CancelledError:
             from surogates.harness.message_utils import make_skipped_tool_result
             # Distinguish interrupt-driven cancellation (harness.interrupt()
