@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Literal, TypeVar
 from uuid import UUID
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -37,6 +38,7 @@ from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.keel.case_files import (
     CaseFileError,
+    case_key,
     case_path,
     case_workspace,
     download_case_file,
@@ -57,6 +59,7 @@ from surogates.keel.steps import (
 from surogates.office.sessions import OpenDocument, open_at, open_like
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
+from surogates.storage.backend import TooLarge
 from surogates.tenant.auth.service_account import ServiceAccountStore
 
 logger = logging.getLogger(__name__)
@@ -448,14 +451,31 @@ def _case_id(case_id: str) -> UUID:
         ) from None
 
 
-def _case_path(request: Request) -> str:
-    """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one outside it."""
+def _case_path(request: Request, case: UUID) -> str:
+    """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
     try:
-        return case_path(request.query_params.get("path") or "")
+        relative = case_path(request.query_params.get("path") or "")
+        case_key(request.app.state.settings, case, relative)
     except CaseFileError as exc:
         raise _refused(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, "The path is not one inside the case's workspace.",
+            status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, "The path is not one of the case's files.",
         ) from None
+    return relative
+
+
+def _storage_failed(exc: Exception, case: UUID) -> HTTPException:
+    """The 503 for a store that would not answer (refused, throttled, unreachable), logged by the error's class name.
+
+    The error's text can quote the object's key: a case's file name.
+    """
+    logger.warning("keel-link: the files of case %s could not be reached (%s)", case, type(exc).__name__)
+    return _refused(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The case's files could not be reached; try again.",
+    )
+
+
+def _too_large(limit: int) -> HTTPException:
+    return _refused(status.HTTP_413_CONTENT_TOO_LARGE, "too-large", f"The file is larger than {limit} bytes.")
 
 
 def _editing(document: OpenDocument) -> list[str]:
@@ -472,7 +492,10 @@ async def list_files_of_case(case_id: str, request: Request) -> JSONResponse:
     require_link(request)
     case = _case_id(case_id)
     state = request.app.state
-    files = await list_case_files(state.storage, state.settings, case)
+    try:
+        files = await list_case_files(state.storage, state.settings, case)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
     workspace = case_workspace(state.storage, state.settings, case)
     try:
         documents = await open_like(state.session_factory, [workspace.location(file.path) for file in files])
@@ -536,17 +559,23 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
 
     The file is copied to a scratch file first, a piece at a time: its digest
     is known before its first byte is sent, and none of it is held whole.
+    One over the size Keel may write is 413 ``too-large``, copied no further.
     """
     require_link(request)
     case = _case_id(case_id)
-    relative = _case_path(request)
+    relative = _case_path(request, case)
     state = request.app.state
+    limit = state.settings.keel.max_file_bytes
     target = await asyncio.to_thread(_scratch_file)
     try:
-        size = await download_case_file(state.storage, state.settings, case, relative, target)
+        size = await download_case_file(state.storage, state.settings, case, relative, target, limit=limit)
         source, digest = await asyncio.to_thread(_opened_digest, target)
     except FileNotFoundError:
         raise _refused(status.HTTP_404_NOT_FOUND, "unknown-file", "No such file in the case's workspace.") from None
+    except TooLarge:
+        raise _too_large(limit) from None
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
     finally:
         target.unlink(missing_ok=True)
     return StreamingResponse(
@@ -558,9 +587,7 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
 
 async def _body_within(request: Request, limit: int) -> bytes:
     """The request's body, read no further than one byte past *limit*: 413 ``too-large`` past it."""
-    too_large = _refused(
-        status.HTTP_413_CONTENT_TOO_LARGE, "too-large", f"The file is larger than {limit} bytes.",
-    )
+    too_large = _too_large(limit)
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > limit:
         raise too_large
@@ -581,7 +608,7 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
     """
     require_link(request)
     case = _case_id(case_id)
-    relative = _case_path(request)
+    relative = _case_path(request, case)
     state = request.app.state
     data = await _body_within(request, state.settings.keel.max_file_bytes)
     location = case_workspace(state.storage, state.settings, case).location(relative)
@@ -595,6 +622,9 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
         ) from None
     if open_now is not None:
         raise _refused(status.HTTP_409_CONFLICT, "file-open", "The file is open in the editor.")
-    await write_case_file(state.storage, state.settings, case, relative, data)
+    try:
+        await write_case_file(state.storage, state.settings, case, relative, data)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
     value = await asyncio.to_thread(file_value, case, relative, data)
     return JSONResponse({**value, "size": len(data)})

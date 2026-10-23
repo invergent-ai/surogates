@@ -8,11 +8,13 @@ one side writes is the file the other reads.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import datetime
 from uuid import UUID
 
 import pytest
+from botocore.exceptions import ClientError
 
 from surogates.keel.files import case_file_value
 from surogates.office.agent import location_of
@@ -62,6 +64,20 @@ async def step_session(link, org, session_store):
     created = await post(link, body(org))
     assert created.status_code == 201, created.text
     return await session_store.get_session(UUID(created.json()["session_id"]))
+
+
+async def written_by_the_session(link_app, session, path: str, data: bytes) -> None:
+    """*data* at *path* in the case's workspace, as the step session's sandbox writes it."""
+    key = boundary_workspace_key(session.config, session, workspace_root_id(session), path)
+    await link_app.state.storage.write(session.config["storage_bucket"], key, data)
+
+
+def listed_paths(answer) -> list[str]:
+    return [entry["path"] for entry in answer.json()["files"]]
+
+
+def refusals(*answers) -> list[tuple[int, str]]:
+    return [(answer.status_code, code_of(answer)) for answer in answers]
 
 
 async def test_a_file_a_step_session_wrote_is_listed_and_read_back(link, link_app, org, session_store):
@@ -181,3 +197,77 @@ async def test_every_case_file_route_needs_the_link_key(link):
         assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 3
 
     assert (await download(link, "memos/credit.docx")).content == b"memo"
+
+
+async def test_the_platforms_own_folders_are_not_a_cases_files(link, link_app, org, session_store):
+    session = await step_session(link, org, session_store)
+    for path in ("_history/memos/credit.docx", "_artifacts/a1/meta.json", ".threads/t1/README.md", "_whiteboard/canvas.json"):
+        await written_by_the_session(link_app, session, path, b"the platform's")
+    await written_by_the_session(link_app, session, "memos/credit.docx", b"memo")
+
+    assert listed_paths(await listing(link)) == ["memos/credit.docx"]
+    for path in ("_history/memos/credit.docx", "_artifacts/a1/meta.json", ".threads/t1/README.md", "./_whiteboard/canvas.json"):
+        assert refusals(await download(link, path), await upload(link, path, b"over it")) == [(422, "invalid-path")] * 2, path
+    assert await link_app.state.storage.read(
+        session.config["storage_bucket"],
+        boundary_workspace_key(session.config, session, workspace_root_id(session), "_history/memos/credit.docx"),
+    ) == b"the platform's"
+
+
+async def test_a_path_a_steps_output_reads_as_another_file_is_refused(link, link_app, org, session_store):
+    # A step's output takes a leading root/ or workspace/ off the path it names.
+    session = await step_session(link, org, session_store)
+    await written_by_the_session(link_app, session, "root/payslip.pdf", b"payslip")
+
+    for path in ("root/payslip.pdf", "workspace/payslip.pdf"):
+        assert refusals(await download(link, path), await upload(link, path, b"x")) == [(422, "invalid-path")] * 2, path
+    assert listed_paths(await listing(link)) == []
+
+
+async def test_encoded_backslashed_and_overlong_paths_are_refused(link):
+    for query in ("%2e%2e%2fx.docx", "%2E%2E/x.docx", "memos/%2e%2e/%2e%2e/x.docx", "memo%00.docx"):
+        answers = [
+            await link.get(f"{content_route(CASE)}?path={query}", headers=link_headers(LINK_KEY)),
+            await link.put(f"{content_route(CASE)}?path={query}", content=b"x", headers=link_headers(LINK_KEY)),
+        ]
+        assert refusals(*answers) == [(422, "invalid-path")] * 2, query
+    # Longer than the 1024 bytes an S3 store takes as a key, in folders a disk would take.
+    overlong = "/".join(["a" * 200] * 6)
+    for path in ("..\\x.docx", "memos\\credit.docx", overlong):
+        assert refusals(await download(link, path), await upload(link, path, b"x")) == [(422, "invalid-path")] * 2, path
+    assert (await listing(link)).json() == {"files": []}
+
+
+async def test_a_file_over_the_limit_is_not_read(link, link_app):
+    assert (await upload(link, "big.pdf", b"123456789")).status_code == 200
+    link_app.state.settings.keel.max_file_bytes = 8
+
+    refused = await download(link, "big.pdf")
+
+    assert (refused.status_code, code_of(refused)) == (413, "too-large")
+
+
+class _RefusingStore:
+    """A store that refuses every call, as one does once its key has lost its rights."""
+
+    def __getattr__(self, operation: str):
+        async def refuse(*args, **kwargs):
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, operation)
+
+        return refuse
+
+
+async def test_a_store_that_refuses_is_unavailable_and_logs_no_path(link, link_app, caplog):
+    link_app.state.storage = _RefusingStore()
+
+    with caplog.at_level(logging.WARNING, logger="surogates.api.routes.keel"):
+        answers = [
+            await listing(link),
+            await download(link, "memos/credit.docx"),
+            await upload(link, "memos/credit.docx", b"memo"),
+        ]
+
+    assert refusals(*answers) == [(503, "unavailable")] * 3
+    logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
+    assert len(logged) == 3 and all(CASE in line and "ClientError" in line for line in logged)
+    assert not any("credit" in line for line in logged)

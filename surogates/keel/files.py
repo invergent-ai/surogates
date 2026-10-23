@@ -16,17 +16,17 @@ from surogates.channels.channel_media import normalize_workspace_path
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.storage.tenant import boundary_workspace_key
 
-__all__ = ["case_file_value", "file_value", "workspace_path"]
+__all__ = ["WORKSPACE_ROOTS", "case_file_value", "file_value", "workspace_path"]
 
 #: The absolute roots a path in the workspace may start with: the sandbox
 #: mounts the workspace at ``/workspace``, and also at its home, ``/root``.
-_WORKSPACE_ROOTS = ("/workspace/", "/root/")
+WORKSPACE_ROOTS = ("/workspace/", "/root/")
 
 
 def workspace_path(path: str) -> str | None:
     """*path* relative to the workspace, or ``None`` for a path outside it: one that climbs out, or another root."""
     raw = (path or "").strip()
-    if raw.startswith("/") and not raw.startswith(_WORKSPACE_ROOTS):
+    if raw.startswith("/") and not raw.startswith(WORKSPACE_ROOTS):
         return None
     return normalize_workspace_path(raw)
 

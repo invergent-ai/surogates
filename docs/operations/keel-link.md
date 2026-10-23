@@ -10,8 +10,8 @@
 | `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, or a reviewer's request to revise its draft, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
-| `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name. A case no session has written to yet has `{"files": []}`. |
-| `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. |
+| `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
+| `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -31,12 +31,12 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 409 | `key-in-use` | The key, or the session id, names another step's session. |
 | 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
-| 413 | `too-large` | A file over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
+| 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
-| 422 | `invalid-path` | A file's path that is empty, absolute, or holds a `..` part. |
+| 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate, or a case id is not a UUID. |
 | 500 | `internal-error` | The database failed. Only the error's class name is logged. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; or the object store refused or did not answer a case's files. Only the error's class name and the case id are logged. |
 
 ## A step's inputs
 
@@ -44,9 +44,18 @@ Once a step is over, cancelled among others, its inputs are removed from the ses
 
 ## A case's files
 
-A case's files are the workspace every step session of the case shares: the `case:<case id>` boundary's, in the session bucket (`SUROGATES_STORAGE_BUCKET`), under the installation's key prefix. keel-link reaches it with no session, so Keel can add a file before the case's first step, and the step sessions read what Keel wrote. A path is relative to the workspace and `/`-separated; `.` and empty parts are dropped, and nothing else is changed.
+A case's files are the workspace every step session of the case shares: the `case:<case id>` boundary's, in the session bucket (`SUROGATES_STORAGE_BUCKET`), under the installation's key prefix. keel-link reaches it with no session, so Keel can add a file before the case's first step, and the step sessions read what Keel wrote.
 
-A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when it is not there yet. It is refused while the file is open in the document editor: the editor's next save would land over a file it never saw. A read is copied to a scratch file first, so its digest is sent before its bytes. None of these routes logs a path or a file's bytes.
+A path is relative to the workspace and `/`-separated; `.` and empty parts are dropped, and nothing else is changed. A path is `422 invalid-path` when:
+
+- it is empty or absolute, or holds a `..` part, a NUL or a backslash;
+- its first folder is one of the platform's own: `_artifacts`, `_whiteboard`, `.threads` or `_history`. These hold the platform's state, not a person's files, and the listing leaves them out too;
+- its first folder is `root` or `workspace`. A step's output takes either off the path it names, so it would read another file;
+- its object key, with the workspace's prefix, is over the 1024 bytes an S3 store takes.
+
+The listing names only files these routes can read by the path it gives.
+
+A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when it is not there yet. It is refused while the file is open in the document editor: the editor's next save would land over a file it never saw. A read is copied to a scratch file first, so its digest is sent before its bytes. A read of a file over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`, copied no further. None of these routes logs a path or a file's bytes.
 
 ## Keep it internal
 
