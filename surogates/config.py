@@ -346,11 +346,12 @@ class LLMSettings(BaseSettings):
     browser_state_keep_last: int = 2
 
     # Fraction of the model's context window at which compaction fires.
-    # The default deliberately leaves room for the response plus the
-    # compaction call itself; raise it to trade a larger working context
-    # for a tighter margin before an overflow.  Windows under 512K tokens
-    # compact at no less than 0.75 (see harness/context.py).
-    compression_threshold: float = Field(default=0.50, gt=0.0, le=0.95)
+    # Unset, windows under 512K tokens compact at 0.75 and larger ones at
+    # 0.90; a set value applies to large windows and never lowers a small
+    # one below 0.75 (see harness/context.py).  It is checked between calls,
+    # so the rest of the window must hold one more round, and a call past
+    # the window steps the session's window down for good.
+    compression_threshold: float | None = Field(default=None, gt=0.0, le=0.95)
 
     summary_model: str = ""  # cheap model for context compression summaries
     summary_base_url: str = ""  # optional auxiliary endpoint for summaries

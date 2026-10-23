@@ -84,6 +84,12 @@ _DEFAULT_CONTEXT_WINDOW: int = 128_000
 _SMALL_CTX_WINDOW_LIMIT: int = 512_000
 _SMALL_CTX_THRESHOLD_PERCENT: float = 0.75
 
+# From that window up, compaction fires at this share unless the operator
+# set one.  The threshold is checked between calls, so the rest must hold
+# one more round: up to 200K characters of tool output, the assistant's
+# message and the response.  0.90 leaves 100K of a 1M window.
+_LARGE_CTX_THRESHOLD_PERCENT: float = 0.90
+
 # Most recent messages the tail keeps even past its token budget.  The full
 # protect_last_n (20) kept runs of bulky tool results nothing could shrink.
 _MAX_TAIL_MESSAGE_FLOOR: int = 8
@@ -220,7 +226,7 @@ class ContextCompressor:
         self,
         model_id: str,
         *,
-        threshold_percent: float = 0.50,
+        threshold_percent: float | None = None,
         protect_first_n: int = 3,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
@@ -300,7 +306,9 @@ class ContextCompressor:
         """
         percent = self.threshold_percent
         if self.context_length < _SMALL_CTX_WINDOW_LIMIT:
-            percent = max(percent, _SMALL_CTX_THRESHOLD_PERCENT)
+            percent = max(percent or 0.0, _SMALL_CTX_THRESHOLD_PERCENT)
+        elif percent is None:
+            percent = _LARGE_CTX_THRESHOLD_PERCENT
         self.threshold_tokens = int(self.context_length * percent)
         # Ratio is relative to the threshold, not to total context.
         self.tail_token_budget = int(self.threshold_tokens * self.summary_target_ratio)
