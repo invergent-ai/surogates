@@ -86,8 +86,8 @@ not answered. Ask it again if you still need the answer."
 - The timeout branch sits next to the dismissed branch, after the case-step and form exits, and
   follows its `_said_to_the_model` rule. A budget or guard stop that fires in the same iteration
   keeps its own path (it already makes a tools-off final call).
-- The caller completes the session (as the dismissed branch does with `_complete_session`);
-  `_request_final_summary` gains a way to take the timeout's request text. Finish reason on the
+- `_request_final_summary` completes the session itself (with its `reason`); it gains a way to
+  take the timeout's request text. Finish reason on the
   `llm.response` and the session-completion reason are both `question_timed_out`. No turn
   summary is written for it, like `budget_exhausted`.
 - Request text has a web variant and a channel variant (the channel one keeps "in their language").
@@ -95,10 +95,9 @@ not answered. Ask it again if you still need the answer."
 - Adding `detail` to the timeout result is safe: the readers found (ops Studio
   `session-thread.tsx`, the agent-chat-react SDK) use only `cancelled` and `reason`, and the
   `dismissed` result already carries a `detail`.
-- DOC-12: `docPath` is only sent by Studio for the copilot. The note still names no tool by a
-  signature the agent may lack: it says to search the page or read only the section needed, and
-  mentions `search_docs`/`read_doc` only if they are in the session's tools; otherwise it just
-  names the doc path.
+- DOC-12: `docPath` is only sent by Studio for the copilot, and the note's builder does not know
+  the session's tools, so the note names no tool: it gives the doc path and says to search that
+  doc or read only the section needed, not the whole page.
 - DOC-13: the prompt builder already has `self._available_tools` (it gates `guidance/skills` on
   it); use it for the reworded index.
 
