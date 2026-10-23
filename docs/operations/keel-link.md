@@ -10,7 +10,7 @@
 | `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, or a reviewer's request to revise its draft, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
-| `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
+| `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
 | `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme"}` and answers `200 {"document_server_url", "config"}`: one person's editor config for the document at the path. See [A case's document in the editor](#a-cases-document-in-the-editor). |
@@ -66,7 +66,7 @@ A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when i
 
 `POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme"}`: `access` is `edit`, `comment` or `view`, and `theme` is `light` (the default) or `dark`. The path is checked as the file routes check it.
 
-The person is the runtime user `user_id`, who must belong to the org `org_id`. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
+The person is the runtime user `user_id`, who must belong to the org `org_id`. `org_id` scopes only the user: the runtime does not check that the case belongs to that org, and the link key is trusted for any case. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
 
 | `access` | The editor |
 |---|---|

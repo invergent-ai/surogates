@@ -19,6 +19,7 @@ import pytest_asyncio
 from botocore.exceptions import ClientError
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+from sqlalchemy import text
 
 from surogates.config import OfficeSettings
 from surogates.keel.case_files import case_workspace
@@ -120,10 +121,14 @@ async def document_server_calls(link_app):
         yield client
 
 
-async def person(session_factory, org_id) -> tuple[UUID, str]:
-    """A user of *org_id*, and the display name they are shown under."""
+async def person(session_factory, org_id, name: str | None = None) -> tuple[UUID, str]:
+    """A user of *org_id*, named *name* when given, and the display name they are shown under."""
     user_id = await create_user(session_factory, org_id)
-    return user_id, f"Test User {user_id}"
+    if name is None:
+        return user_id, f"Test User {user_id}"
+    async with session_factory() as db, db.begin():
+        await db.execute(text("UPDATE users SET display_name = :name WHERE id = :id"), {"name": name, "id": user_id})
+    return user_id, name
 
 
 def permissions(config) -> dict[str, bool]:
@@ -381,8 +386,8 @@ async def test_two_people_share_the_document_and_the_listing_names_who_is_in_it(
     link, link_app, org, session_factory, office_on, document_server_calls,
 ):
     assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
-    editor, editor_name = await person(session_factory, org)
-    commenter, commenter_name = await person(session_factory, org)
+    editor, editor_name = await person(session_factory, org, "Zoe Ionescu")
+    commenter, commenter_name = await person(session_factory, org, "Ana Pop")
 
     editing = await open_editor(link, org, editor, access="edit")
     commenting = await open_editor(link, org, commenter, access="comment")
@@ -396,14 +401,25 @@ async def test_two_people_share_the_document_and_the_listing_names_who_is_in_it(
     [pack] = (await listing(link)).json()["files"]
     assert pack["editing"] == []
 
-    # The document server reports who joined, at the callback the config gave it.
+    # The document server reports who joined, at the callback the config gave it, in the order they joined.
     callback = urlsplit(edit_config["editorConfig"]["callbackUrl"]).path
-    joined = {"key": key, "status": 1, "users": [f"user:{commenter}", f"user:{editor}"]}
-    reported = await document_server_calls.post(callback, json={"token": sign(JWT_SECRET, joined)})
-    assert reported.json() == {"error": 0}, reported.text
+
+    async def joined(*users: str) -> None:
+        report = {"key": key, "status": 1, "users": list(users)}
+        reported = await document_server_calls.post(callback, json={"token": sign(JWT_SECRET, report)})
+        assert reported.json() == {"error": 0}, reported.text
+
+    await joined(f"user:{editor}", f"user:{commenter}")
 
     [pack] = (await listing(link)).json()["files"]
-    assert sorted(pack["editing"]) == sorted([editor_name, commenter_name])
+    assert [editor_name, commenter_name] != sorted([editor_name, commenter_name])
+    assert pack["editing"] == sorted([editor_name, commenter_name])
+
+    # Editors the runtime has no name for: a person, and an agent.
+    await joined(f"user:{editor}", f"user:{uuid.uuid4()}", "agent:intake-agent", f"user:{commenter}")
+
+    [pack] = (await listing(link)).json()["files"]
+    assert pack["editing"] == ["An agent", "Ana Pop", "Someone", "Zoe Ionescu"]
 
 
 async def test_a_document_the_editor_cannot_edit_opens_read_only(link, org, session_factory, office_on):

@@ -505,11 +505,11 @@ def _too_large(limit: int) -> HTTPException:
 
 
 def _editing(document: OpenDocument) -> list[str]:
-    """Who is in the document's editor now, each once, by the name they opened it under."""
-    return [
+    """Who is in the document's editor now, each once, by the name they opened it under, sorted."""
+    return sorted(
         document.user_names.get(user) or ("An agent" if user.startswith("agent:") else "Someone")
         for user in dict.fromkeys(document.editors)
-    ]
+    )
 
 
 @router.get("/keel/cases/{case_id}/files")
