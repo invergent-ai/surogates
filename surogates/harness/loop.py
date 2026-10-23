@@ -5888,7 +5888,7 @@ class AgentHarness(
         reason: str = "budget_exhausted",
         final_request: str | None = None,
     ) -> None:
-        """Request one final LLM response with no tools when the budget is exhausted.
+        """Request one final LLM response with no tools, ending the turn for *reason*.
 
         *final_request*, when given, is what the model is asked instead of
         the summary (a question that timed out asks for one waiting line).
@@ -5905,11 +5905,11 @@ class AgentHarness(
         The model is asked to summarise its work so far without issuing
         any more tool calls.  The summary is emitted as an ``LLM_RESPONSE``
         event.  If the summary call fails, the session is completed with
-        the ``budget_exhausted`` reason and no summary.
+        *reason* and no summary.
         """
         logger.info(
-            "Session %s: budget exhausted, requesting final summary",
-            session.id,
+            "Session %s: %s, requesting a final tools-off response",
+            session.id, reason,
         )
 
         if final_request is not None:
