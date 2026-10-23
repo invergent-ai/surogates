@@ -36,8 +36,18 @@
     "test": "vitest run"
   },
   "peerDependencies": {
+    "@dagrejs/dagre": "^2.0.4",
+    "@xyflow/react": "^12.10.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@dagrejs/dagre": {
+      "optional": true
+    },
+    "@xyflow/react": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@fontsource-variable/fraunces": "^5.2.9",
@@ -55,8 +65,10 @@
     "vaul": "^1.1.2"
   },
   "devDependencies": {
+    "@dagrejs/dagre": "^2.0.4",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@xyflow/react": "^12.10.0",
     "happy-dom": "^15.11.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
