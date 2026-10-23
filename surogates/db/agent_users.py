@@ -37,12 +37,14 @@ from surogates.db.models import (
     McpServer,
     Mission,
     OAuthRefreshToken,
+    OrgMember,
     ScheduledSession,
     Session,
     Skill,
     User,
     Workstream,
 )
+from surogates.tenant.memberships import MembershipsRemain, user_orgs
 
 # Where a binding came from. Kept as plain strings (not an enum) so a
 # future writer can add a source without a schema migration.
@@ -142,7 +144,18 @@ async def user_visibility(
 
 
 async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> None:
-    """Hard-delete an account, detaching its history first.
+    """Take a user out of *org_id*: their home organisation deletes the account.
+
+    In an organisation the user is a member of, not their home, this
+    ends the membership and leaves the account alone: it lives in the
+    home organisation. Their rows in *org_id* are cleaned up as below
+    either way.
+
+    In the home organisation it hard-deletes the account, detaching its
+    history first. It refuses (:class:`MembershipsRemain`, before any
+    write) while the user still belongs to other organisations: their
+    rows there name the user, and this organisation does not clean up
+    another's. Take the user out of those first.
 
     Explicit statement-per-table cleanup (mirroring ops'
     ``delete_agent_data`` discipline) because the ORM relationships
@@ -156,6 +169,13 @@ async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -
     user property). The FK-coverage test in the integration suite pins
     this list against the schema. Caller commits.
     """
+    home = await db.scalar(select(User.org_id).where(User.id == user_id))
+    at_home = home is None or home == org_id
+    if at_home:
+        elsewhere = [o for o in await user_orgs(db, user_id) if o.id != org_id]
+        if elsewhere:
+            raise MembershipsRemain(elsewhere)
+
     def scoped(model):
         return (model.user_id == user_id, model.org_id == org_id)
 
@@ -170,6 +190,13 @@ async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -
         await db.execute(
             update(model).where(*scoped(model)).values(user_id=None)
         )
+    if not at_home:
+        await db.execute(
+            delete(OrgMember).where(
+                OrgMember.org_id == org_id, OrgMember.user_id == user_id,
+            )
+        )
+        return
     await db.execute(
         delete(User).where(User.id == user_id, User.org_id == org_id)
     )
@@ -189,8 +216,10 @@ async def remove_user_from_agent(
     untouched, and neither the backfill nor an automatic login/session
     re-enroll can bring the user back (ON CONFLICT hits the surviving
     row). Orphan (no binding rows at all): hard account delete via
-    :func:`purge_user_account`. Returns False when the user isn't
-    visible from this tab. Stages writes only — the caller commits.
+    :func:`purge_user_account`, which raises :class:`MembershipsRemain`
+    while that user still belongs to other organisations. Returns False
+    when the user isn't visible from this tab. Stages writes only — the
+    caller commits.
     """
     # Tombstone-first: the common case is one UPDATE, no pre-reads.
     result = await db.execute(

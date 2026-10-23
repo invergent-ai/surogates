@@ -33,7 +33,7 @@ An org is the top-level tenant boundary. Each org has:
 
 ### Users
 
-Users belong to exactly one org. A user can have multiple channel identities (e.g., a Slack account and a web login) that all map to the same internal user record, sharing sessions and memory.
+Every user has one home org, which holds their account. A user can also belong to further orgs as a member: see [Users in several organisations](#users-in-several-organisations). A user can have multiple channel identities (e.g., a Slack account and a web login) that all map to the same internal user record, sharing sessions and memory.
 
 ### Channel Identities
 
@@ -48,6 +48,34 @@ When a Slack message arrives, the adapter looks up the platform user ID to find 
 Authentication uses the database provider: users are stored in the database with bcrypt-hashed passwords. The platform issues its own JWTs after verifying credentials.
 
 Login: `POST /v1/auth/login {"email": "...", "password": "..."}`
+
+## Users in several organisations
+
+One person can work in several orgs with a single login.
+
+**The home organisation.** Every user has exactly one: `users.org_id`. It holds the account: the email, the password or Firebase identity, and the profile. An email is unique, case-insensitively, among the home users of an org.
+
+**Memberships.** The `org_members` table lists the further orgs a user belongs to, one row per org. A home org is never a membership row. "The users of an org" means its home users and its members.
+
+**What a token accepts.** An access token names the org it was signed in through (`org_id`). It is accepted while its user belongs to that org, as a home user or as a member. Once a membership ends, the next request with a token of that org answers 401 `User not found.`, and `POST /v1/auth/refresh` mints no new access token for it.
+
+**`GET /v1/auth/me`.** `org_id` and `org_name` name the token's org. `organisations` lists every org the user belongs to, as `{"id", "name"}`: the home org first, then the others by name, then by id.
+
+**One email per org.** A user is not added to an org where another user, home or member, already has their email (case-insensitive). Creating an account through `POST /v1/admin/orgs/{id}/users` refuses an email a member of that org holds.
+
+**What follows the home organisation.** Surogate Desktop's sign-in admits the members of the agent's org. Purchases on a paid agent do not: a buyer is a home user with the agent's Firebase identity, so a member on an agent of another org is not metered or charged, as an operator-provisioned account is not. Channel identities, the agent Users tab and the admin user list stay with the home org.
+
+**Ending a membership.** `purge_user_account` in an org the user is only a member of ends the membership, deletes the rows the user owns in that org and detaches their history there. It leaves the account alone. In the home org it deletes the account, and it refuses while the user still belongs to other orgs: take them out of those first.
+
+**The CLI.** `surogates org-members` manages memberships, with the database settings of `surogates migrate`:
+
+```
+surogates org-members add --org <org uuid> --user <user uuid>      # added | already a member
+surogates org-members remove --org <org uuid> --user <user uuid>   # removed | not a member
+surogates org-members list --org <org uuid>                        # <user id> <email> home|member
+```
+
+`list` prints the home users first, then the members, each by email. A refused change exits 1 with the reason: an unknown org or user, an email another user of the org has, or the user's home org, which they cannot leave.
 
 ## JWT Token Flow
 

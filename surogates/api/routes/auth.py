@@ -13,6 +13,7 @@ import re
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from surogates.audit import (
     AuditStore,
@@ -22,7 +23,7 @@ from surogates.audit import (
     client_ip,
 )
 from surogates.db.agent_users import SOURCE_LOGIN, ensure_agent_user
-from surogates.db.models import ChannelIdentity, Org, User
+from surogates.db.models import ChannelIdentity, User
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.firebase import (
@@ -39,6 +40,7 @@ from surogates.tenant.auth.jwt import (
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
+from surogates.tenant.memberships import belongs_to, user_orgs
 from surogates.tenant.models import UserResponse
 
 logger = logging.getLogger(__name__)
@@ -614,6 +616,18 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
             detail="This sign-in has ended. Sign in again from Surogate Desktop.",
         )
 
+    # Only while the user still belongs to the token's organisation: a
+    # member taken out of it mints no new access token.
+    async with request.app.state.session_factory() as session:
+        belongs = await session.scalar(
+            select(User.id).where(User.id == user_id, belongs_to(org_id))
+        )
+    if belongs is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found.",
+        )
+
     # The sign-in's time, not the refresh's: a refresh is not a sign-in.
     signed_in = payload.get("auth_time")
     access_token = create_access_token(
@@ -627,16 +641,37 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
     return AccessTokenResponse(access_token=access_token)
 
 
+class OrgResponse(BaseModel):
+    """An organisation the signed-in user belongs to."""
+
+    id: UUID
+    name: str
+
+
 class MeResponse(UserResponse):
-    """The signed-in user, with their organisation's name: Surogate Desktop's Settings shows it."""
+    """The signed-in user, with their organisation's name: Surogate Desktop's Settings shows it.
+
+    ``org_id`` and ``org_name`` name the organisation the token was signed
+    in through. ``organisations`` lists every organisation the user
+    belongs to: their home one first, then the others by name.
+    """
 
     org_name: str
+    organisations: list[OrgResponse]
 
 
-def _me(user: User, org_name: str) -> MeResponse:
+async def _me(session: AsyncSession, user: User, org_id: UUID) -> MeResponse:
+    """*user* as signed in through *org_id*; 404 once they no longer belong to it."""
+    organisations = await user_orgs(session, user.id)
+    org_name = next((o.name for o in organisations if o.id == org_id), None)
+    if org_name is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
     return MeResponse(
         id=user.id,
-        org_id=user.org_id,
+        org_id=org_id,
         email=user.email,
         display_name=user.display_name,
         username=user.username,
@@ -645,6 +680,7 @@ def _me(user: User, org_name: str) -> MeResponse:
         sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
         org_name=org_name,
+        organisations=[OrgResponse(id=o.id, name=o.name) for o in organisations],
     )
 
 
@@ -656,24 +692,15 @@ async def me(
     """Return profile information for the currently authenticated user."""
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
-        result = await session.execute(
-            select(User, Org.name)
-            .join(Org, Org.id == User.org_id)
-            .where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
+        # By id alone: the dependency has checked that the user belongs
+        # to the token's organisation, home or member.
+        user = await session.scalar(select(User).where(User.id == tenant.user_id))
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found.",
             )
-        )
-        found = result.one_or_none()
-
-    if found is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
-        )
-
-    user, org_name = found
-    return _me(user, org_name)
+        return await _me(session, user, tenant.org_id)
 
 
 # ---------------------------------------------------------------------------
@@ -729,11 +756,10 @@ async def update_me(
     session_factory = request.app.state.session_factory
 
     async with session_factory() as session:
+        # By id alone: the dependency has checked that the user belongs
+        # to the token's organisation, home or member.
         result = await session.execute(
-            select(User).where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
-            )
+            select(User).where(User.id == tenant.user_id)
         )
         user = result.scalar_one_or_none()
 
@@ -754,9 +780,10 @@ async def update_me(
         if body.email is not None:
             user.email = body.email
         if username is not None:
+            # In the user's home organisation, where the unique index is.
             taken = await session.scalar(
                 select(User.id).where(
-                    User.org_id == tenant.org_id,
+                    User.org_id == user.org_id,
                     func.lower(User.username) == username,
                     User.id != user.id,
                 )
@@ -789,9 +816,7 @@ async def update_me(
                 detail="That username is already taken.",
             )
         await session.refresh(user)
-        org_name = await session.scalar(select(Org.name).where(Org.id == user.org_id))
-
-    return _me(user, org_name)
+        return await _me(session, user, tenant.org_id)
 
 
 # ---------------------------------------------------------------------------
@@ -827,11 +852,10 @@ async def change_password(
 
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
+        # By id alone: the dependency has checked that the user belongs
+        # to the token's organisation, home or member.
         result = await session.execute(
-            select(User).where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
-            )
+            select(User).where(User.id == tenant.user_id)
         )
         user = result.scalar_one_or_none()
         if user is None:

@@ -40,6 +40,7 @@ from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, ra
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.tenant.memberships import belongs_to
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, st
         return f"sa:{tenant.service_account_id}:{acting_id}", name
     if tenant.user_id is not None:
         async with request.app.state.session_factory() as db:
-            user = await db.scalar(select(User).where(User.id == tenant.user_id, User.org_id == tenant.org_id))
+            user = await db.scalar(select(User).where(User.id == tenant.user_id, belongs_to(tenant.org_id)))
         return f"user:{tenant.user_id}", user.display_name if user is not None else "You"
     raise HTTPException(status_code=403, detail="Only a person can open the editor.")
 

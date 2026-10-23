@@ -45,6 +45,7 @@ from surogates.tenant.auth.jwt import create_access_token, create_refresh_token
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens, RefreshGrant
 from surogates.tenant.context import TenantContext
+from surogates.tenant.memberships import belongs_to
 
 router = APIRouter(prefix="/auth/oauth")
 
@@ -93,8 +94,9 @@ def _user_of(tenant: TenantContext, ctx: AgentRuntimeContext) -> UUID:
 
 
 async def _user_exists(request: Request, org_id: UUID, user_id: UUID) -> bool:
+    """Whether *user_id* still belongs to *org_id*, as its home user or as a member."""
     async with request.app.state.session_factory() as db:
-        found = await db.scalar(select(User.id).where(User.id == user_id, User.org_id == org_id))
+        found = await db.scalar(select(User.id).where(User.id == user_id, belongs_to(org_id)))
     return found is not None
 
 

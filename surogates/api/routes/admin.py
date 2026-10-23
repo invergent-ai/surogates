@@ -15,6 +15,7 @@ from surogates.db.models import ChannelIdentity, Org, User
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.tenant.memberships import belongs_to
 from surogates.tenant.models import OrgCreate, OrgResponse, UserCreate, UserResponse
 
 logger = logging.getLogger(__name__)
@@ -189,14 +190,18 @@ async def create_user(
     # Email is the org-scoped login key: ``uq_users_org_lower_email``
     # allows exactly one account per (org, lower(email)), whatever the
     # auth provider. Answer the collision here so the admin gets a 409
-    # naming the existing row instead of a 500 from the index.
+    # naming the existing row instead of a 500 from the index. The
+    # organisation's members count too: the index does not see them.
     if body.email:
         async with session_factory() as session:
             existing = await session.scalar(
-                select(User).where(
-                    User.org_id == org_id,
+                select(User)
+                .where(
+                    belongs_to(org_id),
                     func.lower(User.email) == body.email.lower(),
                 )
+                .order_by((User.org_id == org_id).desc())
+                .limit(1)
             )
         if existing is not None:
             raise HTTPException(

@@ -58,6 +58,36 @@ Refresh an expired access token.
 }
 ```
 
+**Errors:** 401 when the refresh token is invalid, or its user no longer belongs to the token's organisation (`User not found.`).
+
+### `GET /v1/auth/me`
+
+The signed-in user. `org_id` and `org_name` name the organisation the token was signed in through. `organisations` lists every organisation the user belongs to: their home organisation first, then the others by name, then by id. See [Users in several organisations](../multi-tenancy/index.md#users-in-several-organisations).
+
+**Response (200):**
+```json
+{
+  "id": "6f1c...",
+  "org_id": "0b7e...",
+  "org_name": "Acme",
+  "email": "user@acme.com",
+  "display_name": "Ada",
+  "username": "ada",
+  "phone": null,
+  "auth_provider": "database",
+  "sign_in_provider": null,
+  "created_at": "2026-10-23T09:00:00Z",
+  "organisations": [
+    {"id": "0b7e...", "name": "Acme"},
+    {"id": "9d2a...", "name": "Globex"}
+  ]
+}
+```
+
+**Errors:** 401 `User not found.` once the user no longer belongs to the token's organisation.
+
+`PATCH /v1/auth/me` takes `display_name`, `email`, `username` and `phone`, and answers the same shape.
+
 ### `POST /v1/auth/logout`
 
 Invalidate the current session tokens.

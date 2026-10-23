@@ -233,6 +233,39 @@ class User(Base):
 
 
 # ---------------------------------------------------------------------------
+# Organisation memberships
+# ---------------------------------------------------------------------------
+
+
+class OrgMember(Base):
+    """A user's membership of an organisation other than their home one.
+
+    A user's home organisation is ``users.org_id``: every user belongs to
+    it, and it holds their account. This table lists only the further
+    organisations a user belongs to, so the writers that create users
+    need not know it exists. ``surogates.tenant.memberships`` reads and
+    writes it.
+    """
+
+    __tablename__ = "org_members"
+    __table_args__ = (Index("ix_org_members_user_id", "user_id"),)
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Channel Identities
 # ---------------------------------------------------------------------------
 

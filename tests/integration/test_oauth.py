@@ -240,6 +240,32 @@ async def test_a_deleted_account_signs_its_desktop_out(api, session_factory):
     assert (await refresh(api, tokens["refresh_token"])).json() == {"error": "invalid_grant"}
 
 
+async def test_a_member_whose_account_lives_elsewhere_signs_the_desktop_in_until_taken_out(api, session_factory):
+    from surogates.tenant.memberships import add_member, remove_member
+
+    from .conftest import create_org, create_user
+
+    member = await create_user(session_factory, await create_org(session_factory))
+    async with session_factory() as db:
+        await add_member(db, api.org_id, member)
+        await db.commit()
+    token = create_access_token(api.org_id, member, {"sessions:read", "sessions:write"}, auth_time=int(time.time()))
+    verifier, challenge = pkce()
+    allowed = await authorize(api, challenge, token)
+    assert allowed.status_code == 200, allowed.text
+    code = parse_qs(urlsplit(allowed.json()["redirect_to"]).query)["code"][0]
+
+    response = await exchange(api, code, verifier)
+    assert response.status_code == 200, response.text
+    tokens = response.json()
+    assert claims(tokens["access_token"])["user_id"] == str(member)
+
+    async with session_factory() as db:
+        await remove_member(db, api.org_id, member)
+        await db.commit()
+    assert (await refresh(api, tokens["refresh_token"])).json() == {"error": "invalid_grant"}
+
+
 async def test_the_desktop_gives_its_window_a_session_of_its_own_once(api):
     tokens = await signed_in(api)
     minted = await api.client.post("/v1/auth/oauth/web-code", headers=api.auth(tokens["access_token"]))
