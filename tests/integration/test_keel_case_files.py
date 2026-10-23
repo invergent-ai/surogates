@@ -29,6 +29,7 @@ from surogates.office.agent import location_of
 from surogates.office.sessions import open_or_reuse, record_editors
 from surogates.office.tokens import read_url_token, sign
 from surogates.session.attachment_ingest import workspace_root_id
+from surogates.storage.backend import S3Backend
 from surogates.storage.tenant import boundary_workspace_key
 
 from .conftest import create_org, create_user
@@ -324,22 +325,59 @@ class _RefusingStore:
         return refuse
 
 
-async def test_a_store_that_refuses_is_unavailable_and_logs_no_path(link, link_app, org, session_factory, office_on, caplog):
+async def test_a_store_that_refuses_is_unavailable_and_logs_no_path(link, link_app, caplog):
     link_app.state.storage = _RefusingStore()
-    user_id, _ = await person(session_factory, org)
 
     with caplog.at_level(logging.WARNING, logger="surogates.api.routes.keel"):
         answers = [
             await listing(link),
             await download(link, "memos/credit.docx"),
             await upload(link, "memos/credit.docx", b"memo"),
-            await open_editor(link, org, user_id, "memos/credit.docx"),
         ]
 
-    assert refusals(*answers) == [(503, "unavailable")] * 4
+    assert refusals(*answers) == [(503, "unavailable")] * 3
     logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
-    assert len(logged) == 4 and all(CASE in line and "ClientError" in line for line in logged)
+    assert len(logged) == 3 and all(CASE in line and "ClientError" in line for line in logged)
     assert not any("credit" in line for line in logged)
+
+
+class _RefusingS3Client:
+    """An S3 client whose every request the store refuses, as it does once the key has lost its rights."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    def __getattr__(self, operation: str):
+        async def refuse(**kwargs):
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+                operation,
+            )
+
+        return refuse
+
+
+async def test_an_s3_store_that_refuses_the_editors_look_is_unavailable(
+    link, link_app, org, session_factory, office_on, monkeypatch, caplog,
+):
+    # The S3 backend itself, over a client the store refuses: a refused look is no missing file.
+    storage = S3Backend("https://s3.example")
+    monkeypatch.setattr(storage._session, "client", lambda service_name, **kwargs: _RefusingS3Client())
+    link_app.state.storage = storage
+    user_id, _ = await person(session_factory, org)
+
+    with caplog.at_level(logging.WARNING, logger="surogates.api.routes.keel"):
+        refused = await open_editor(link, org, user_id, "memos/credit.docx")
+
+    assert refusals(refused) == [(503, "unavailable")]
+    logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
+    assert len(logged) == 1 and CASE in logged[0] and "ClientError" in logged[0]
+    assert "credit" not in logged[0]
+    location = case_workspace(storage, link_app.state.settings, UUID(CASE)).location("memos/credit.docx")
+    assert await office_sessions.open_at(session_factory, location) is None
 
 
 # ---------------------------------------------------------------------------
