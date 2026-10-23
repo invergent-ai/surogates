@@ -70,6 +70,8 @@ the kit carries Work's own components:
 | `responsive-panel` | `ResponsivePanel` | A popover with a cursor, a bottom sheet on a phone. |
 | `timeline` | `Timeline`, `TimelineItem`, `TimelineIndicator`, `TimelineSeparator`, … | A vertical run of steps, each a dot on a connecting line. |
 | `rabbit-mark` | `RabbitMark`, `RABBIT_MARK_PATH`, `RABBIT_MARK_BOX` | The rabbit silhouette as an icon in `currentColor`, and its path for a canvas. |
+| `performer-mark` | `PerformerMark`, `PerformerKind`, `performerWord` | Who does a piece of work, as an icon in a tone: a person, an agent, an agent finished by a person, a system, a rule, a client, a third party or a queue. |
+| `service-level-pill` | `ServiceLevelPill`, `ServiceLevelState`, `formatDuration` | Where work stands against its goal and deadline. The state decides the words and the tone; the deadline only gives the time left or past. |
 
 Several rely on the `data-*` variants and the `no-scrollbar` utility from
 `shadcn/tailwind.css`; import it alongside the theme.
