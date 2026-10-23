@@ -62,6 +62,7 @@ from surogates.keel.steps import (
 from surogates.office.editor_config import build_editor_config
 from surogates.office.kinds import office_kind
 from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_like, open_waiting
+from surogates.runtime.firebase_cache import FirebaseConfigUnavailable, project_firebase
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.storage.backend import TooLarge
@@ -789,20 +790,17 @@ async def _firebase_project(request: Request, org_id: UUID) -> str | None:
     that signs in with Firebase would have no way in.
     """
     cache = getattr(request.app.state, "firebase_config_cache", None)
-    if cache is None:
-        return None
     try:
-        config = await cache.get(str(org_id))
-    except LookupError:
-        return None
-    except Exception as exc:  # noqa: BLE001 — the platform's failures, of any kind
+        config = await project_firebase(cache, str(org_id))
+    except FirebaseConfigUnavailable as unavailable:
         logger.warning(
-            "keel-link: the Firebase config of org %s could not be read (%s)", org_id, type(exc).__name__,
+            "keel-link: the Firebase config of org %s could not be read (%s)",
+            org_id, type(unavailable.__cause__).__name__,
         )
         raise _refused(
             status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The org's sign-in could not be read; try again.",
         ) from None
-    return config.firebase_project_id
+    return None if config is None else config.firebase_project_id
 
 
 @router.post("/keel/orgs/{org_id}/members")

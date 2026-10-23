@@ -27,6 +27,7 @@ from surogates.audit import (
 from surogates.db.agent_users import SOURCE_LOGIN, ensure_agent_user
 from surogates.db.models import ChannelIdentity, Org, User
 from surogates.runtime import AgentRuntimeContext, FirebaseConfig, agent_runtime_context_dep
+from surogates.runtime.firebase_cache import FirebaseConfigUnavailable, project_firebase
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.firebase import (
     FirebaseTokenError,
@@ -786,20 +787,17 @@ async def _org_firebase(request: Request, org_id: UUID) -> FirebaseConfig | None
     wrong, so that answers 503.
     """
     cache = getattr(request.app.state, "firebase_config_cache", None)
-    if cache is None:
-        return None
     try:
-        return await cache.get(str(org_id))
-    except LookupError:
-        return None
-    except Exception as exc:  # noqa: BLE001 — the platform's failures, of any kind
+        return await project_firebase(cache, str(org_id))
+    except FirebaseConfigUnavailable as unavailable:
+        failure = unavailable.__cause__
         logger.warning(
-            "Firebase config of organisation %s is unavailable", org_id, exc_info=True,
+            "Firebase config of organisation %s is unavailable", org_id, exc_info=failure,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Firebase auth is unavailable. Try again shortly.",
-        ) from exc
+        ) from failure
 
 
 @router.get("/auth/orgs/{org_id}/config", response_model=OrgAuthConfig)

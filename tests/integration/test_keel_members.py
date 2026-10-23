@@ -414,18 +414,23 @@ async def test_a_firebase_account_joins_only_an_organisation_of_its_project(
     assert await member_orgs(session_factory, foreign) == set()
 
 
-async def test_an_unreadable_firebase_config_is_unavailable(link, link_app, session_factory, monkeypatch):
+async def test_an_unreadable_firebase_config_is_unavailable(link, link_app, session_factory, monkeypatch, caplog):
     org_f = await create_org(session_factory)
     monkeypatch.setattr(link_app.state, "firebase_config_cache", FakeFirebaseCache({
         str(org_f): PlatformAuthError("rejected"),
     }), raising=False)
     email = bank_email("outage")
 
-    refused = await invite(link, org_f, email)
+    with caplog.at_level(logging.WARNING, logger="surogates.api.routes.keel"):
+        refused = await invite(link, org_f, email)
 
     assert refused.status_code == 503
     assert code_of(refused) == "unavailable"
     assert await users_with(session_factory, email) == []
+    # The failure is logged by its class alone: its text is the platform's.
+    [logged] = [record for record in caplog.records if record.name == "surogates.api.routes.keel"]
+    assert str(org_f) in logged.getMessage() and "PlatformAuthError" in logged.getMessage()
+    assert "rejected" not in logged.getMessage() and logged.exc_info is None
 
 
 async def test_the_members_route_needs_the_link_key_and_a_known_org(link, org, session_factory):
