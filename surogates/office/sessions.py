@@ -269,16 +269,17 @@ def _union(first: Any, second: Any) -> list[str]:
     return out
 
 
-async def close_when_saved(session_factory: Any, row_id: UUID) -> None:
-    """Close the row now, or once its pending save lands."""
+async def close_when_saved(session_factory: Any, row_id: UUID) -> bool:
+    """Close the row now, or once its pending save lands; whether it closed now."""
     async with session_factory() as db, db.begin():
         row = await db.get(OfficeSession, row_id, with_for_update=True)
         if row is None or row.status != OPEN:
-            return
+            return False
         if row.pending_save is None:
             _close(row)
-        else:
-            row.pending_save = {**row.pending_save, "close": True}
+            return True
+        row.pending_save = {**row.pending_save, "close": True}
+        return False
 
 
 async def close(session_factory: Any, row_id: UUID) -> str | None:

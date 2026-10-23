@@ -28,8 +28,9 @@ async def reap(*, session_factory: Any, session_store: Any, office: OfficeSettin
         # one it has, it calls back: with who is in it, or that it closed.
         answer = await document_info(office, document.doc_key)
         if answer == UNKNOWN_KEY:
-            await office_sessions.close_when_saved(session_factory, document.id)
-            closed += 1
+            # Counted only when closed here: a save that came meanwhile closes it once it lands.
+            if await office_sessions.close_when_saved(session_factory, document.id):
+                closed += 1
         elif answer != 0:
             logger.warning("the document server could not say whether case document %s is open (%s): asked again "
                            "next sweep", document.id, "no answer" if answer is None else f"error {answer}")

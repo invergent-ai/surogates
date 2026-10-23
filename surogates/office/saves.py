@@ -125,6 +125,11 @@ async def land_pending_saves(*, session_factory: Any, session_store: Any, storag
                 if attempts == SAVE_FAILED_AFTER:
                     await _announce(session_store, row.session_ids, EventType.OFFICE_SAVE_FAILED,
                                     {"path": row.path, "attempts": attempts})
+                    if row.case_id is not None:
+                        # A case's document may have no chat to hear it: the log says so, by ids alone. The save
+                        # keeps retrying, as a chat's does, and its row stays open until it lands.
+                        logger.warning("the save of case %s's document %s keeps failing: it is retried",
+                                       row.case_id, row.id)
         if blob is not None:  # only once the row no longer points at it
             try:
                 await storage.delete(*blob)

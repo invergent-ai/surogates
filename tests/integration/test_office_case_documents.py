@@ -13,6 +13,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
@@ -26,6 +27,7 @@ from surogates.config import OfficeSettings
 from surogates.db.models import OfficeSession
 from surogates.keel.case_files import case_workspace, write_case_file
 from surogates.office import commands, reaper
+from surogates.office import saves as office_saves
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.saves import land_pending_saves
@@ -259,3 +261,74 @@ async def test_a_case_document_stays_open_while_the_document_server_cannot_be_as
     said = [record.getMessage() for record in caplog.records if record.name.startswith("surogates.office")]
     assert len(said) == 1
     assert document.doc_key not in said[0]
+
+
+async def test_a_case_document_whose_save_comes_while_the_reaper_asks_closes_once_it_lands(
+    session_factory, storage, monkeypatch,
+):
+    document = await _idle_with_an_editor_listed(session_factory)
+    real_client = httpx.AsyncClient
+
+    async def a_save_lands_meanwhile(request: httpx.Request) -> httpx.Response:
+        # The document server's last save reaches the runtime while the reaper waits on its answer.
+        await office_sessions.set_pending(session_factory, document.id, bucket="b", key="pending/pack.docx", close=False)
+        return httpx.Response(200, json={"error": 1})
+
+    transport = httpx.MockTransport(a_save_lands_meanwhile)
+    monkeypatch.setattr(commands.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+
+    assert await _reap(session_factory, storage, now=datetime.now(timezone.utc) + IDLE) == 0
+    still = await office_sessions.get_open(session_factory, document.id)
+    assert still is not None
+    assert still.pending_save["close"] is True
+
+
+class _StoreOutOfReach(LocalBackend):
+    """A store whose uploads fail while it is out of reach."""
+
+    out_of_reach = True
+
+    async def upload(self, *args, **kwargs):
+        if self.out_of_reach:
+            raise OSError("the store did not answer")
+        return await super().upload(*args, **kwargs)
+
+
+async def test_a_case_save_that_keeps_failing_is_logged_and_lands_once_the_store_answers(
+    session_factory, redis_client, tmp_path, caplog,
+):
+    storage = _StoreOutOfReach(str(tmp_path))
+    settings = SimpleNamespace(storage=SimpleNamespace(bucket=f"test-agent-{uuid.uuid4()}", key_prefix=""))
+    case_id = uuid.uuid4()
+    await write_case_file(storage, settings, case_id, "pack.docx", b"PK-as-sent")
+    workspace = case_workspace(storage, settings, case_id)
+    document = await office_sessions.open_waiting(
+        session_factory, location=workspace.location("pack.docx"), path="pack.docx", session_id=None, case_id=case_id,
+    )
+    await office_sessions.record_base_version(session_factory, document.id, await workspace.etag("pack.docx"))
+    await storage.write("saves", "pending/pack.docx", b"PK-edited")
+    await office_sessions.set_pending(session_factory, document.id, bucket="saves", key="pending/pack.docx", close=True)
+    session_store = SessionStore(session_factory)
+
+    async def land() -> int:
+        return await land_pending_saves(session_factory=session_factory, session_store=session_store, storage=storage,
+                                        redis=redis_client, office=OFFICE, settings=settings)
+
+    with caplog.at_level(logging.WARNING, logger="surogates.office.saves"):
+        for _ in range(office_saves.SAVE_FAILED_AFTER + 2):
+            assert await land() == 0
+
+    # No chat hears of it: one warning says so, by the case's and the document's ids, never by the file's path.
+    warned = [record.getMessage() for record in caplog.records
+              if record.name == "surogates.office.saves" and record.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert str(case_id) in warned[0] and str(document.id) in warned[0]
+    assert "pack.docx" not in warned[0]
+    # The save is not given up, as a chat's is not: its row stays open, however long idle, while it is retried.
+    await _reap(session_factory, storage, now=datetime.now(timezone.utc) + IDLE)
+    assert (await office_sessions.get_open(session_factory, document.id)).pending_save is not None
+
+    storage.out_of_reach = False
+    assert await land() == 1
+    assert await workspace.read("pack.docx") == b"PK-edited"
+    assert await office_sessions.get_open(session_factory, document.id) is None
