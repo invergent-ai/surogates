@@ -620,7 +620,7 @@ async def test_a_service_accounts_mention_is_the_person_it_names(client, app, se
 
     monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
     org_id = await create_org(session_factory)
-    # The control plane's Work chat, which shows the file pane: an integrator's api chat has none, nor the office tools.
+    # The control plane's Work chat, which shows the file pane: an integrator's api chat has none unless it declares one.
     issued = await issue_service_account_token(session_factory, org_id, name=f"ops-chat-{org_id}-42")
     created = await client.post("/v1/api/sessions", json={"channel": "studio", "config": {"source": "ops"}},
                                 headers={"Authorization": f"Bearer {issued.token}"})
@@ -641,6 +641,36 @@ async def test_a_service_accounts_mention_is_the_person_it_names(client, app, se
     assert event.data["content"] == "[Comment on a.xlsx] Ana Popescu: «@Agent total?»"
     assert event.data["metadata"]["author_id"] == f"sa:{issued.id}:42"
     assert event.data["principal_service_account_id"] == str(issued.id)
+
+
+async def test_an_api_chat_answers_mentions_only_where_it_declared_a_file_pane(client, app, session_factory, monkeypatch):
+    # An app that shows the session's workspace and editor beside its own chat says so when it creates the session.
+    app.state.settings.office = AGENT_EDITING
+
+    async def enqueue(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(session_routes, "enqueue_session", enqueue)
+    issued = await issue_service_account_token(session_factory, await create_org(session_factory))
+    acting = {"Authorization": f"Bearer {issued.token}", "X-Surogate-Acting-User-Id": "42"}
+    address = "agent@agent.invalid"
+    mention = {"path": "a.docx", "comment_id": "15689582", "message": f"@{address} is Q1 right?", "emails": [address]}
+    for config, answered in (({"file_pane": True}, True), ({}, False)):
+        created = await client.post("/v1/api/sessions", json={"config": config}, headers=acting)
+        assert created.status_code == 201, created.text
+        session_id = created.json()["id"]
+        session = await SessionStore(session_factory).get_session(UUID(session_id))
+        assert session.channel == "api"
+        await app.state.storage.write(session.config["storage_bucket"], session_workspace_key(session_id, "a.docx"), b"PK")
+        opened = await client.get(f"/v1/api/sessions/{session_id}/workspace/editor", params={"path": "a.docx"}, headers=acting)
+        assert opened.status_code == 200, opened.text
+        assert bool(opened.json()["mentionable_users"]) is answered
+        response = await client.post(f"/v1/api/sessions/{session_id}/workspace/editor/mention", headers=acting, json=mention)
+        if answered:
+            assert response.status_code == 202, response.text
+        else:
+            assert response.status_code == 409
+            assert response.json()["detail"] == "The agent in this chat cannot answer in comments."
 
 
 async def test_a_chat_whose_agent_has_no_office_tools_offers_it_to_nobody_and_refuses_its_mention(

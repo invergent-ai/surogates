@@ -13,7 +13,7 @@ import copy
 from collections.abc import Sequence
 from typing import Any
 
-from surogates.channels.constants import ADAPTER_CHANNELS, STUDIO_CHANNEL, VOICE_TOOLS
+from surogates.channels.constants import ADAPTER_CHANNELS, API_CHANNEL, STUDIO_CHANNEL, VOICE_TOOLS
 from surogates.devices.binding import device_of
 from surogates.keel.steps import StepContract
 from surogates.tools.builtin.ask_user_question import widen_for_channel
@@ -85,16 +85,23 @@ _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
 _OFFICE_TOOLS: frozenset[str] = frozenset({
     "office_read", "office_edit",
 })
+#: The session config key an API caller sets to ``True`` when its own app shows the session's workspace and editor.
+FILE_PANE_KEY = "file_pane"
 
 
 def has_file_pane(session: Any) -> bool:
     """Whether the session's chat shows a document beside it: the web and Surogate Desktop (on a folder of the
-    computer too), Surogate Studio's Work chat and a project's threads; never a phone call, a channel, a website
-    visitor or an API caller."""
+    computer too), Surogate Studio's Work chat, a project's threads, or an API caller that declared a file pane when it
+    created the session; never a phone call, a channel or a website visitor."""
     from surogates.workstreams import is_project_thread
 
     config = getattr(session, "config", None) or {}
-    return getattr(session, "channel", None) in ("web", STUDIO_CHANNEL) or is_project_thread(config)
+    channel = getattr(session, "channel", None)
+    return (
+        channel in ("web", STUDIO_CHANNEL)
+        or is_project_thread(config)
+        or (channel == API_CHANNEL and config.get(FILE_PANE_KEY) is True)
+    )
 
 
 def channel_tool_flags(channel: str | None) -> dict[str, bool]:

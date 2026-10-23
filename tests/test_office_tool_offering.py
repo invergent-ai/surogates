@@ -30,6 +30,11 @@ def test_a_file_pane_is_a_web_chat_or_a_projects_thread():
     assert has_file_pane(SimpleNamespace(channel="api", config={})) is False
     assert has_file_pane(SimpleNamespace(channel="voice", config={})) is False
     assert has_file_pane(SimpleNamespace(channel="website", config={})) is False
+    # An app that shows the session's workspace and editor beside its own chat says so when it creates the session.
+    assert has_file_pane(SimpleNamespace(channel="api", config={"file_pane": True})) is True
+    assert has_file_pane(SimpleNamespace(channel="api", config={"file_pane": "yes"})) is False
+    assert has_file_pane(SimpleNamespace(channel="voice", config={"file_pane": True})) is False
+    assert has_file_pane(SimpleNamespace(channel="website", config={"file_pane": True})) is False
     # Surogate Desktop shows the pane beside a chat on a folder of the computer too.
     assert has_file_pane(SimpleNamespace(channel="web", config=device)) is True
 
@@ -51,6 +56,7 @@ _SESSIONS = [
     ("studio", {}, True),
     ("worker", {"workstream_role": "thread"}, True),
     ("api", {}, False),
+    ("api", {"file_pane": True}, True),
     ("voice", {}, False),
     # A project's master and a /mission chat are strict coordinators: they give the work out.
     ("web", {"coordinator": True, "strict_coordinator": True, "workstream_role": "coordinator",
