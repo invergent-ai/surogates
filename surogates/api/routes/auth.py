@@ -23,8 +23,8 @@ from surogates.audit import (
     client_ip,
 )
 from surogates.db.agent_users import SOURCE_LOGIN, ensure_agent_user
-from surogates.db.models import ChannelIdentity, User
-from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
+from surogates.db.models import ChannelIdentity, Org, User
+from surogates.runtime import AgentRuntimeContext, FirebaseConfig, agent_runtime_context_dep
 from surogates.tenant.auth.database import DatabaseAuthProvider
 from surogates.tenant.auth.firebase import (
     FirebaseTokenError,
@@ -49,6 +49,12 @@ router = APIRouter()
 
 #: What a signed-in user's access token grants, however they signed in.
 USER_PERMISSIONS = frozenset({"sessions:read", "sessions:write", "tools:read"})
+
+#: A Firebase sign-up refused: another user of the organisation has the email.
+EMAIL_TAKEN = (
+    "That email already belongs to an account in this organisation. "
+    "Sign in with its existing method."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +156,27 @@ class FirebaseExchangeRequest(BaseModel):
     phone: str | None = None
 
 
+class OrgAuthConfig(BaseModel):
+    """How to sign in to an organisation: ``GET /v1/auth/orgs/{org_id}/config``.
+
+    ``firebase`` is None when the organisation has no Firebase project:
+    its users sign in with a password.
+    """
+
+    org_id: UUID
+    org_name: str
+    firebase: FirebaseWebConfig | None = None
+
+
+class OrgLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class OrgFirebaseExchangeRequest(BaseModel):
+    id_token: str
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -199,17 +226,20 @@ async def auth_config(
             self_registration_enabled=False, firebase=None, **base,
         )
     return AuthConfigResponse(
-        self_registration_enabled=True,
-        firebase=FirebaseWebConfig(
-            api_key=fb.api_key,
-            auth_domain=fb.auth_domain,
-            project_id=fb.firebase_project_id,
-            app_id=fb.app_id or None,
-            messaging_sender_id=fb.messaging_sender_id or None,
-            measurement_id=fb.measurement_id or None,
-            enabled_providers=list(fb.enabled_providers),
-        ),
-        **base,
+        self_registration_enabled=True, firebase=_web_config(fb), **base,
+    )
+
+
+def _web_config(fb: FirebaseConfig) -> FirebaseWebConfig:
+    """The public part of a project's Firebase config, for a sign-in page."""
+    return FirebaseWebConfig(
+        api_key=fb.api_key,
+        auth_domain=fb.auth_domain,
+        project_id=fb.firebase_project_id,
+        app_id=fb.app_id or None,
+        messaging_sender_id=fb.messaging_sender_id or None,
+        measurement_id=fb.measurement_id or None,
+        enabled_providers=list(fb.enabled_providers),
     )
 
 
@@ -236,6 +266,74 @@ def _sign_in_provider_from_claims(claims: dict) -> str | None:
     return None
 
 
+def _firebase_auth_time(claims: dict) -> int | None:
+    """When the user signed in to Firebase, from the verified ID token.
+
+    A fresh ID token of an old Firebase session is no new sign-in. A
+    token that names no time is not recent.
+    """
+    auth_time = claims.get("auth_time")
+    return auth_time if isinstance(auth_time, int) else None
+
+
+def _issue_tokens(org_id: UUID, user_id: UUID, auth_time: int | None) -> TokenResponse:
+    """A user's access and refresh tokens for *org_id*, signed in at *auth_time*."""
+    return TokenResponse(
+        access_token=create_access_token(
+            org_id=org_id, user_id=user_id, permissions=USER_PERMISSIONS, auth_time=auth_time,
+        ),
+        refresh_token=create_refresh_token(
+            org_id=org_id, user_id=user_id, auth_time=auth_time,
+        ),
+    )
+
+
+async def _firebase_user(
+    session: AsyncSession,
+    org_id: UUID,
+    provider: str,
+    subject: str,
+    email: str | None,
+    verified: bool,
+) -> User | None:
+    """The user of *org_id* who signs in with this Firebase identity, or None.
+
+    First by identity, ``(auth_provider, external_id)``, among the
+    organisation's users, home and member. Failing that, with a verified
+    email, the user of the organisation who has that email is linked to
+    the identity, when they have no external id yet and are not a
+    ``database`` user: an invited account's first sign-in. A manual
+    ``database`` row with a password is never linked. When a home user
+    and a member match, the home user is the one taken.
+    """
+    home_first = (User.org_id == org_id).desc()
+    user = await session.scalar(
+        select(User)
+        .where(belongs_to(org_id), User.auth_provider == provider, User.external_id == subject)
+        .order_by(home_first)
+        .limit(1)
+    )
+    if user is not None or not email or not verified:
+        return user
+    candidate = await session.scalar(
+        select(User)
+        .where(belongs_to(org_id), User.email == email)
+        .order_by(home_first)
+        .limit(1)
+    )
+    if (
+        candidate is None
+        or candidate.external_id is not None
+        or candidate.auth_provider == "database"
+    ):
+        return None
+    candidate.auth_provider = provider
+    candidate.external_id = subject
+    await session.commit()
+    await session.refresh(candidate)
+    return candidate
+
+
 def _display_name_from_firebase_claims(
     claims: dict, email: str | None,
 ) -> str:
@@ -254,6 +352,10 @@ async def firebase_exchange(
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> TokenResponse:
     """Exchange a verified Firebase ID token for Surogates tokens.
+
+    The agent's organisation's users sign in here, its home users and its
+    members. A new account is never created with an email another user of
+    the organisation has: that answers 409.
 
     Behaviour depends on the runtime auth settings:
 
@@ -329,38 +431,11 @@ async def firebase_exchange(
 
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
-        user = await session.scalar(
-            select(User).where(
-                User.org_id == org_id,
-                User.auth_provider == provider,
-                User.external_id == subject,
-            )
+        # The organisation's users, home and member alike, by Firebase
+        # identity, then by a verified email.
+        user = await _firebase_user(
+            session, org_id, provider, subject, email, email_verified,
         )
-        if (
-            user is None
-            and self_reg_enabled
-            and email
-            and email_verified
-        ):
-            # Email-based link upgrade: only happens during self-
-            # registration, never as a silent backdoor when registration
-            # is disabled. We only upgrade rows that have no external_id
-            # yet — never a manual ``database`` row with a password.
-            candidate = await session.scalar(
-                select(User).where(
-                    User.org_id == org_id, User.email == email,
-                )
-            )
-            if (
-                candidate is not None
-                and candidate.external_id is None
-                and candidate.auth_provider != "database"
-            ):
-                candidate.auth_provider = provider
-                candidate.external_id = subject
-                await session.commit()
-                await session.refresh(candidate)
-                user = candidate
 
         if user is None:
             if not self_reg_enabled:
@@ -393,6 +468,18 @@ async def firebase_exchange(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Firebase token must include an email.",
+                )
+            # The email is the login key among the organisation's users,
+            # home and member alike; the unique index below sees only its
+            # home users. Refuse rather than shadow an account that has it.
+            taken = await session.scalar(
+                select(User.id)
+                .where(belongs_to(org_id), func.lower(User.email) == email)
+                .limit(1)
+            )
+            if taken is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail=EMAIL_TAKEN,
                 )
             requested_username = (
                 body.username.strip().lower() if body.username else None
@@ -436,10 +523,7 @@ async def firebase_exchange(
                     # to Firebase. Refuse rather than shadow it.
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            "That email already belongs to an account in this "
-                            "organisation. Sign in with its existing method."
-                        ),
+                        detail=EMAIL_TAKEN,
                     ) from exc
                 # The username unique index caught a concurrent claim;
                 # retry once without it — account creation wins.
@@ -467,16 +551,7 @@ async def firebase_exchange(
             )
             await session.commit()
 
-    # When the user signed in to Firebase, from the verified ID token: a fresh ID token of an
-    # old Firebase session is no new sign-in. A token that names no time is not recent.
-    firebase_auth_time = claims.get("auth_time")
-    signed_in = firebase_auth_time if isinstance(firebase_auth_time, int) else None
-    access_token = create_access_token(
-        org_id=org_id, user_id=user.id, permissions=USER_PERMISSIONS, auth_time=signed_in,
-    )
-    refresh_token = create_refresh_token(
-        org_id=org_id, user_id=user.id, auth_time=signed_in,
-    )
+    tokens = _issue_tokens(org_id, user.id, _firebase_auth_time(claims))
     if audit_store is not None:
         await audit_store.emit(
             org_id=org_id,
@@ -485,9 +560,7 @@ async def firebase_exchange(
             type=AuditType.AUTH_LOGIN,
             data=auth_login_event("firebase", source_ip=source_ip),
         )
-    return TokenResponse(
-        access_token=access_token, refresh_token=refresh_token,
-    )
+    return tokens
 
 
 @router.post("/auth/login", response_model=TokenResponse)
@@ -497,6 +570,9 @@ async def login(
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> TokenResponse:
     """Authenticate a user and issue access + refresh tokens.
+
+    Any user of the organisation signs in, a home user or a member, with
+    the password of their account.
 
     Every attempt — success or failure — is written to ``audit_log``
     via :class:`AuditStore` so compliance tooling can query login
@@ -559,18 +635,7 @@ async def login(
             )
             await enroll_session.commit()
 
-    signed_in = int(time.time())
-    access_token = create_access_token(
-        org_id=org_id,
-        user_id=user_id,
-        permissions=USER_PERMISSIONS,
-        auth_time=signed_in,
-    )
-    refresh_token = create_refresh_token(
-        org_id=org_id,
-        user_id=user_id,
-        auth_time=signed_in,
-    )
+    tokens = _issue_tokens(org_id, user_id, int(time.time()))
 
     if audit_store is not None:
         await audit_store.emit(
@@ -581,10 +646,7 @@ async def login(
             data=auth_login_event("password", source_ip=source_ip),
         )
 
-    return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-    )
+    return tokens
 
 
 @router.post("/auth/refresh", response_model=AccessTokenResponse)
@@ -639,6 +701,212 @@ async def refresh(body: RefreshRequest, request: Request) -> AccessTokenResponse
     )
 
     return AccessTokenResponse(access_token=access_token)
+
+
+# ---------------------------------------------------------------------------
+# Sign-in by organisation
+# ---------------------------------------------------------------------------
+#
+# For a client that serves several organisations and no agent. The
+# organisation in the path decides: these routes resolve no agent, ignore
+# a Host subdomain and ``?agent_id=``, and enrol the user on no agent.
+# Their tokens name the organisation, and are accepted while the user
+# belongs to it, as a home user or as a member.
+
+#: The Firebase exchange of an organisation found no account for the identity.
+NO_ACCOUNT_IN_ORG = "You have no account in this organisation. Ask to be invited."
+
+
+async def _org_or_404(session: AsyncSession, org_id: UUID) -> Org:
+    org = await session.get(Org, org_id)
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organisation not found.",
+        )
+    return org
+
+
+async def _org_firebase(request: Request, org_id: UUID) -> FirebaseConfig | None:
+    """The Firebase project of *org_id*, or None when it has none.
+
+    An organisation's id is its ops project's id, the key the Firebase
+    config cache is read by. A platform that fails to answer is not "no
+    Firebase": a password form shown for a Firebase organisation would be
+    wrong, so that answers 503.
+    """
+    cache = getattr(request.app.state, "firebase_config_cache", None)
+    if cache is None:
+        return None
+    try:
+        return await cache.get(str(org_id))
+    except LookupError:
+        return None
+    except Exception as exc:  # noqa: BLE001 — the platform's failures, of any kind
+        logger.warning(
+            "Firebase config of organisation %s is unavailable", org_id, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firebase auth is unavailable. Try again shortly.",
+        ) from exc
+
+
+@router.get("/auth/orgs/{org_id}/config", response_model=OrgAuthConfig)
+async def org_auth_config(org_id: UUID, request: Request) -> OrgAuthConfig:
+    """The organisation's name, and its Firebase web config when it has one."""
+    async with request.app.state.session_factory() as session:
+        org = await _org_or_404(session, org_id)
+    fb = await _org_firebase(request, org_id)
+    return OrgAuthConfig(
+        org_id=org.id,
+        org_name=org.name,
+        firebase=_web_config(fb) if fb is not None else None,
+    )
+
+
+@router.post("/auth/orgs/{org_id}/login", response_model=TokenResponse)
+async def org_login(
+    org_id: UUID, body: OrgLoginRequest, request: Request,
+) -> TokenResponse:
+    """Sign in to an organisation with a password.
+
+    Any of the organisation's users signs in, home or member, with the
+    password of their account. Every failure answers the same 401, so the
+    answer never tells whether an email has an account; the audit log
+    keeps the reason.
+    """
+    session_factory = request.app.state.session_factory
+    audit_store: AuditStore | None = getattr(
+        request.app.state, "audit_store", None,
+    )
+    source_ip = client_ip(request)
+    async with session_factory() as session:
+        await _org_or_404(session, org_id)
+
+    result = await DatabaseAuthProvider(session_factory, org_id).authenticate(
+        {"email": body.email, "password": body.password}
+    )
+    if not result.authenticated or result.user_id is None:
+        if audit_store is not None:
+            await audit_store.emit(
+                org_id=org_id,
+                agent_id=None,
+                type=AuditType.AUTH_FAILED,
+                data=auth_failed_event(
+                    "password",
+                    result.error or "invalid credentials",
+                    source_ip=source_ip,
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials.",
+        )
+
+    user_id = UUID(result.user_id)
+    tokens = _issue_tokens(org_id, user_id, int(time.time()))
+    if audit_store is not None:
+        await audit_store.emit(
+            org_id=org_id,
+            agent_id=None,
+            user_id=user_id,
+            type=AuditType.AUTH_LOGIN,
+            data=auth_login_event("password", source_ip=source_ip),
+        )
+    return tokens
+
+
+@router.post("/auth/orgs/{org_id}/firebase/exchange", response_model=TokenResponse)
+async def org_firebase_exchange(
+    org_id: UUID, body: OrgFirebaseExchangeRequest, request: Request,
+) -> TokenResponse:
+    """Exchange an ID token of the organisation's Firebase project for tokens.
+
+    It never creates a user. The organisation's user is found by Firebase
+    identity, or an invited account of the organisation with the verified
+    email is linked to it; anyone else gets 403.
+
+    One login spans organisations for local password accounts, and for
+    users of one Firebase project the organisations share. A member whose
+    account belongs to another Firebase project has a different identity
+    there, so their sign-in here is refused with 403.
+    """
+    session_factory = request.app.state.session_factory
+    audit_store: AuditStore | None = getattr(
+        request.app.state, "audit_store", None,
+    )
+    source_ip = client_ip(request)
+    async with session_factory() as session:
+        await _org_or_404(session, org_id)
+    fb = await _org_firebase(request, org_id)
+    if fb is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Firebase auth is not configured.",
+        )
+
+    try:
+        claims = await verify_firebase_id_token(
+            body.id_token, fb.firebase_project_id,
+        )
+    except FirebaseTokenError as exc:
+        if audit_store is not None:
+            await audit_store.emit(
+                org_id=org_id,
+                agent_id=None,
+                type=AuditType.AUTH_FAILED,
+                data=auth_failed_event("firebase", str(exc), source_ip=source_ip),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc),
+        ) from exc
+
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Firebase token subject is missing.",
+        )
+    email, email_verified = _email_from_firebase_claims(claims)
+    provider = firebase_auth_provider_name(fb.firebase_project_id)
+    sign_in_method = _sign_in_provider_from_claims(claims)
+
+    async with session_factory() as session:
+        user = await _firebase_user(
+            session, org_id, provider, subject, email, email_verified,
+        )
+        if user is None:
+            if audit_store is not None:
+                await audit_store.emit(
+                    org_id=org_id,
+                    agent_id=None,
+                    type=AuditType.AUTH_FAILED,
+                    data=auth_failed_event(
+                        "firebase",
+                        "no account in this organisation",
+                        source_ip=source_ip,
+                    ),
+                )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=NO_ACCOUNT_IN_ORG,
+            )
+        # Record how they signed in, only when the token carried it.
+        if sign_in_method is not None and user.sign_in_provider != sign_in_method:
+            user.sign_in_provider = sign_in_method
+            await session.commit()
+        user_id = user.id
+
+    tokens = _issue_tokens(org_id, user_id, _firebase_auth_time(claims))
+    if audit_store is not None:
+        await audit_store.emit(
+            org_id=org_id,
+            agent_id=None,
+            user_id=user_id,
+            type=AuditType.AUTH_LOGIN,
+            data=auth_login_event("firebase", source_ip=source_ip),
+        )
+    return tokens
 
 
 class MeOrganisation(BaseModel):

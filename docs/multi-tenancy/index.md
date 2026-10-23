@@ -63,7 +63,7 @@ One person can work in several orgs with a single login.
 
 **One email per org.** A user is not added to an org where another user, home or member, already has their email (case-insensitive). Creating an account through `POST /v1/admin/orgs/{id}/users` refuses an email a member of that org holds.
 
-**What follows the home organisation.** Surogate Desktop's sign-in admits the members of the agent's org. Purchases on a paid agent do not: a buyer is a home user with the agent's Firebase identity, so a member on an agent of another org is not metered or charged, as an operator-provisioned account is not. Channel identities, the agent Users tab and the admin user list stay with the home org.
+**What follows the home organisation.** An agent's sign-in admits the members of the agent's org: the password login, the Firebase exchange and Surogate Desktop's sign-in. A Firebase sign-up through an agent is refused (409) when another user of the org, home or member, has the email. Purchases on a paid agent do not: a buyer is a home user with the agent's Firebase identity, so a member on an agent of another org is not metered or charged, as an operator-provisioned account is not. Channel identities, the agent Users tab and the admin user list stay with the home org.
 
 **Ending a membership.** Removing a member (`remove_member`, which `surogates org-members remove` and `purge_user_account` in an org the user is only a member of both run) deletes the rows the user owns in that org and detaches their sessions and history there. It leaves the account alone. `purge_user_account` in the home org deletes the account, and it refuses while the user still belongs to other orgs: take them out of those first.
 
@@ -76,6 +76,20 @@ surogates org-members list --org <org uuid>                        # <user id> <
 ```
 
 `list` prints the home users first, then the members, each by email. A refused change exits 1 with the reason: an unknown org or user, an email another user of the org has, or the user's home org, which they cannot leave.
+
+### Signing in by organisation
+
+A client that serves several orgs and no agent, such as Keel, signs in by org instead of by agent. Its routes take the org in the path, `/v1/auth/orgs/{org_id}/`:
+
+- `GET …/config` names the org and gives its Firebase web config, or `null` when the org has no Firebase project.
+- `POST …/login` takes `{"email", "password"}`.
+- `POST …/firebase/exchange` takes `{"id_token"}` of the org's Firebase project. It never creates a user: it finds the org's user by Firebase identity, or links an invited account of the org with the verified email. Anyone else gets 403 `You have no account in this organisation. Ask to be invited.`
+
+The org in the path decides. These routes resolve no agent, ignore a `Host` subdomain and `?agent_id=`, and enrol the user on no agent. Their tokens name the org, and are accepted as any token is: while the user belongs to the org. An agent's own sign-in routes stay the right ones for an agent's web app: they enrol the user on the agent.
+
+One login spans orgs for users of one identity source: local password accounts, or users of one Firebase project the orgs share. A Firebase identity belongs to its Firebase project, so a member whose account signs in with another Firebase project has no identity in this org's project: their Firebase exchange here is refused with 403.
+
+The routes are listed in the [API reference](../appendices/api-reference.md#sign-in-by-organisation).
 
 ## JWT Token Flow
 

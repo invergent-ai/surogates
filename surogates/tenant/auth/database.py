@@ -1,7 +1,7 @@
 """Database-backed authentication provider.
 
-Looks up users by e-mail within the current organisation and verifies
-passwords using bcrypt.
+Looks up users by e-mail among the organisation's users, its home users
+and its members, and verifies passwords using bcrypt.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from surogates.db.models import User
 from surogates.tenant.auth.base import AuthResult
+from surogates.tenant.memberships import belongs_to
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -43,13 +44,16 @@ class DatabaseAuthProvider:
                 error="Both 'email' and 'password' are required.",
             )
 
+        # A home user and a member of the organisation can share an
+        # email: the home user's row is the one checked.
         async with self._session_factory() as session:
             stmt = (
                 select(User)
-                .where(User.org_id == self._org_id, User.email == email)
+                .where(belongs_to(self._org_id), User.email == email)
+                .order_by((User.org_id == self._org_id).desc())
+                .limit(1)
             )
-            result = await session.execute(stmt)
-            user: User | None = result.scalar_one_or_none()
+            user: User | None = await session.scalar(stmt)
 
         if user is None:
             return AuthResult(authenticated=False, error="Invalid credentials.")
