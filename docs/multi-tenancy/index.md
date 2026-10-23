@@ -61,7 +61,7 @@ One person can work in several orgs with a single login.
 
 **`GET /v1/auth/me`.** `org_id` and `org_name` name the token's org. `organisations` lists every org the user belongs to, as `{"id", "name"}`: the home org first, then the others by name, then by id.
 
-**One email per org.** A user is not added to an org where another user, home or member, already has their email (case-insensitive). Creating an account through `POST /v1/admin/orgs/{id}/users` refuses an email a member of that org holds.
+**One email per org.** A user is not added to an org where another user, home or member, already has their email (case-insensitive). Creating an account through `POST /v1/admin/orgs/{id}/users` refuses an email a member of that org holds. `PATCH /v1/auth/me` refuses (409) an email another user of any org the user belongs to holds.
 
 **What follows the home organisation.** An agent's sign-in admits the members of the agent's org: the password login, the Firebase exchange and Surogate Desktop's sign-in. A Firebase sign-up through an agent is refused (409) when another user of the org, home or member, has the email. Purchases on a paid agent do not: a buyer is a home user with the agent's Firebase identity, so a member on an agent of another org is not metered or charged, as an operator-provisioned account is not. Channel identities, the agent Users tab and the admin user list stay with the home org.
 

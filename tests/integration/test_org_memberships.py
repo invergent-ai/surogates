@@ -145,6 +145,28 @@ async def test_a_member_cannot_share_an_email_with_another_user_of_the_org(api, 
     assert home.value.code == "home-org"
 
 
+async def test_a_member_cannot_take_the_email_of_another_user_of_their_organisations(api, session_factory):
+    org_b = await create_org(session_factory)
+    await create_user(session_factory, org_b, email="Grace@Example.com")
+    await add(session_factory, org_b, api.user_id)
+
+    for token in (token_for(org_b, api.user_id), api.token):
+        refused = await api.client.patch(
+            "/v1/auth/me", json={"email": "grace@example.com", "display_name": "Renamed"}, headers=api.auth(token),
+        )
+        assert refused.status_code == 409, refused.text
+        assert refused.json() == {"detail": "That email is already in use."}
+    async with session_factory() as db:
+        unchanged = await db.get(User, api.user_id)
+    assert (unchanged.email, unchanged.display_name) == (f"user-{api.user_id}@test.com", f"Test User {api.user_id}")
+
+    changed = await api.client.patch(
+        "/v1/auth/me", json={"email": "ada@example.com"}, headers=api.auth(token_for(org_b, api.user_id)),
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["email"] == "ada@example.com"
+
+
 async def test_purging_a_member_keeps_their_account(api, session_factory):
     org_b = await create_org(session_factory)
     await add(session_factory, org_b, api.user_id)

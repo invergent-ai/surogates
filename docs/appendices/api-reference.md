@@ -18,25 +18,23 @@ Authenticate and receive tokens. The agent's organisation's users sign in, home 
 **Request:**
 ```json
 {
-  "provider": "database",
-  "credentials": {
-    "email": "user@acme.com",
-    "password": "..."
-  }
+  "email": "user@acme.com",
+  "password": "..."
 }
 ```
 
-Credentials: `{"email": "...", "password": "..."}`
+`org_id` is optional. Without it, the organisation is the agent's.
 
 **Response (200):**
 ```json
 {
   "access_token": "eyJ...",
   "refresh_token": "eyJ...",
-  "token_type": "bearer",
-  "expires_in": 1800
+  "token_type": "bearer"
 }
 ```
+
+**Errors:** 401 when the credentials do not match.
 
 ### `POST /v1/auth/refresh`
 
@@ -53,10 +51,11 @@ Refresh an expired access token.
 ```json
 {
   "access_token": "eyJ...",
-  "token_type": "bearer",
-  "expires_in": 1800
+  "token_type": "bearer"
 }
 ```
+
+The refresh token itself is not rotated.
 
 **Errors:** 401 when the refresh token is invalid, or its user no longer belongs to the token's organisation (`User not found.`).
 
@@ -86,7 +85,7 @@ The signed-in user. `org_id` and `org_name` name the organisation the token was 
 
 **Errors:** 401 `User not found.` once the user no longer belongs to the token's organisation.
 
-`PATCH /v1/auth/me` takes `display_name`, `email`, `username` and `phone`, and answers the same shape.
+`PATCH /v1/auth/me` takes `display_name`, `email`, `username` and `phone`, and answers the same shape. It answers 409 `That email is already in use.` when another user of any organisation the user belongs to, home or member, has the new email (case-insensitive).
 
 ### Sign-in by organisation
 

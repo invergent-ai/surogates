@@ -40,7 +40,7 @@ from surogates.tenant.auth.jwt import (
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
-from surogates.tenant.memberships import belongs_to, user_orgs
+from surogates.tenant.memberships import belongs_to, email_holder, user_orgs
 from surogates.tenant.models import UserResponse
 
 logger = logging.getLogger(__name__)
@@ -1055,6 +1055,15 @@ async def update_me(
                 )
             user.display_name = stripped
         if body.email is not None:
+            # The email is the password login's key in every organisation
+            # the user belongs to, not only the home one the unique index
+            # covers: another user of any of them keeps it.
+            org_ids = [org.id for org in await user_orgs(session, user.id)]
+            if await email_holder(session, org_ids, body.email, other_than=user.id) is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That email is already in use.",
+                )
             user.email = body.email
         if username is not None:
             # In the user's home organisation, where the unique index is.

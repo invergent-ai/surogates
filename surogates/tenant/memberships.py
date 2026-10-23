@@ -12,6 +12,7 @@ only: the caller commits.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -29,6 +30,7 @@ __all__ = [
     "OrgRef",
     "add_member",
     "belongs_to",
+    "email_holder",
     "remove_member",
     "user_orgs",
 ]
@@ -74,6 +76,25 @@ def belongs_to(org_id: UUID) -> ColumnElement[bool]:
     )
 
 
+async def email_holder(
+    session: AsyncSession, org_ids: Iterable[UUID], email: str, *, other_than: UUID,
+) -> UUID | None:
+    """Another user of any of *org_ids* whose email is *email*, case-insensitively; None when none is.
+
+    The email is the password login's key in an organisation, among its
+    home users and its members alike.
+    """
+    return await session.scalar(
+        select(User.id)
+        .where(
+            or_(*(belongs_to(org_id) for org_id in org_ids)),
+            func.lower(User.email) == func.lower(email),
+            User.id != other_than,
+        )
+        .limit(1)
+    )
+
+
 async def user_orgs(session: AsyncSession, user_id: UUID) -> list[OrgRef]:
     """Every organisation *user_id* belongs to: the home one first, then the others by name, then by id."""
     home = select(User.org_id).where(User.id == user_id).scalar_subquery()
@@ -104,12 +125,7 @@ async def add_member(session: AsyncSession, org_id: UUID, user_id: UUID) -> bool
     already = await session.scalar(select(User.id).where(User.id == user_id, belongs_to(org_id)))
     if already is not None:
         return False
-    clash = await session.scalar(
-        select(User.id)
-        .where(belongs_to(org_id), func.lower(User.email) == func.lower(user.email), User.id != user_id)
-        .limit(1)
-    )
-    if clash is not None:
+    if await email_holder(session, [org_id], user.email, other_than=user_id) is not None:
         raise MembershipError("email-taken")
     session.add(OrgMember(org_id=org_id, user_id=user_id))
     await session.flush()
