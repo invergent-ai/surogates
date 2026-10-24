@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // A read-only flow: laid out top to bottom, each node by name and kind, each
-// edge with its label, the path taken and the open nodes marked, and nothing
-// a person drags, connects or deletes changes it.
+// edge with its label, the path taken and the open nodes marked, a node a
+// person picks by click or keyboard and the marks on nodes, and nothing a
+// person drags, connects or deletes changes it.
 import { ThemeProvider } from "next-themes";
 import { act } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   FlowCanvas,
+  type FlowCanvasProps,
   type FlowGraph,
   layoutFlow,
   traceFlow,
@@ -47,9 +49,12 @@ const graph: FlowGraph = {
   ],
 };
 
-/** Draws the flow and waits for React Flow to measure it. */
+/**
+ * Draws the flow, the fixture's unless told another, and waits for React Flow
+ * to measure it.
+ */
 async function canvas(
-  props: { path?: string[]; current?: string[] } = {},
+  props: Partial<FlowCanvasProps> = {},
 ): Promise<HTMLElement> {
   const view = render(
     <div style={{ width: "800px", height: "600px" }}>
@@ -97,12 +102,23 @@ function mouse(
   });
 }
 
-function press(target: EventTarget, key: string): void {
-  act(() => {
-    target.dispatchEvent(
-      new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key }),
-    );
+/** Presses a key on `target`, and returns the event to tell if its default was kept. */
+function press(target: EventTarget, key: string): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
   });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+function paneOf(view: HTMLElement): HTMLElement {
+  const pane = view.querySelector<HTMLElement>(".react-flow__pane");
+  if (!pane) throw new Error("the canvas draws no pane");
+  return pane;
 }
 
 /** A system that prefers a dark or a light colour scheme. */
@@ -221,45 +237,154 @@ describe("flow canvas", () => {
     ).toHaveLength(0);
   });
 
-  it("a drag or a connect attempt changes nothing", async () => {
-    const view = await canvas();
+  it("a drag, a connect or a delete changes nothing, also on a canvas that picks", async () => {
+    for (const props of [{}, { onSelect: vi.fn(), selected: "decide" }]) {
+      cleanup();
+      const view = await canvas(props);
 
-    // A drag starts on the first move and carries the node from the next, so
-    // each attempt moves twice.
+      // A drag starts on the first move and carries the node from the next, so
+      // each attempt moves twice.
+      const review = nodeOf(view, "review");
+      const before = review.style.transform;
+      mouse(review, "mousedown", { x: 100, y: 100 });
+      mouse(window, "mousemove", { x: 200, y: 200 });
+      mouse(window, "mousemove", { x: 300, y: 300 });
+      mouse(window, "mouseup", { x: 300, y: 300 });
+      await settle();
+      expect(nodeOf(view, "review").style.transform).toBe(before);
+      expectWhole(view);
+
+      const from = nodeOf(view, "check").querySelector(
+        ".react-flow__handle.source",
+      );
+      const to = nodeOf(view, "decide").querySelector(
+        ".react-flow__handle.target",
+      );
+      if (!from || !to) throw new Error("a node draws no handle");
+      // The page lays nothing out, so nothing is under the pointer until the
+      // test says what is: decide's target handle, where the attempt ends.
+      const under = vi.spyOn(document, "elementFromPoint").mockReturnValue(to);
+      mouse(from, "mousedown", { x: 100, y: 100 });
+      mouse(to, "mousemove", { x: 120, y: 180 });
+      mouse(to, "mousemove", { x: 150, y: 250 });
+      mouse(to, "mouseup", { x: 150, y: 250 });
+      under.mockRestore();
+      await settle();
+      expectWhole(view);
+
+      const decide = nodeOf(view, "decide");
+      click(decide);
+      press(decide, "Backspace");
+      press(decide, "Delete");
+      await settle();
+      expectWhole(view);
+    }
+  });
+
+  it("clicking a node picks it, and clicking the pane lets it go", async () => {
+    const onSelect = vi.fn();
+    const view = await canvas({ onSelect });
+
+    click(nodeOf(view, "review"));
+    expect(onSelect).toHaveBeenLastCalledWith("review");
+
+    click(paneOf(view));
+    expect(onSelect).toHaveBeenLastCalledWith(null);
+    expect(onSelect).toHaveBeenCalledTimes(2);
+  });
+
+  it("a focused node is picked with Enter or Space, and Escape lets it go", async () => {
+    const onSelect = vi.fn();
+    const view = await canvas({ onSelect });
+
+    // The page keeps no default: Space would otherwise scroll it.
+    expect(press(nodeOf(view, "review"), "Enter").defaultPrevented).toBe(true);
+    expect(onSelect).toHaveBeenLastCalledWith("review");
+
+    expect(press(nodeOf(view, "decide"), " ").defaultPrevented).toBe(true);
+    expect(onSelect).toHaveBeenLastCalledWith("decide");
+
+    press(paneOf(view), "Escape");
+    expect(onSelect).toHaveBeenLastCalledWith(null);
+    expect(onSelect).toHaveBeenCalledTimes(3);
+  });
+
+  it("the picked node is drawn picked and pressed", async () => {
+    const view = await canvas({ selected: "review", onSelect: vi.fn() });
+
     const review = nodeOf(view, "review");
-    const before = review.style.transform;
-    mouse(review, "mousedown", { x: 100, y: 100 });
-    mouse(window, "mousemove", { x: 200, y: 200 });
-    mouse(window, "mousemove", { x: 300, y: 300 });
-    mouse(window, "mouseup", { x: 300, y: 300 });
-    await settle();
-    expect(nodeOf(view, "review").style.transform).toBe(before);
-    expectWhole(view);
+    expect(boxOf(view, "review").hasAttribute("data-selected")).toBe(true);
+    expect(review.getAttribute("role")).toBe("button");
+    expect(review.getAttribute("aria-pressed")).toBe("true");
+    expect(review.getAttribute("aria-label")).toBe("Review");
 
-    const from = nodeOf(view, "check").querySelector(
-      ".react-flow__handle.source",
-    );
-    const to = nodeOf(view, "decide").querySelector(
-      ".react-flow__handle.target",
-    );
-    if (!from || !to) throw new Error("a node draws no handle");
-    // The page lays nothing out, so nothing is under the pointer until the
-    // test says what is: decide's target handle, where the attempt ends.
-    const under = vi.spyOn(document, "elementFromPoint").mockReturnValue(to);
-    mouse(from, "mousedown", { x: 100, y: 100 });
-    mouse(to, "mousemove", { x: 120, y: 180 });
-    mouse(to, "mousemove", { x: 150, y: 250 });
-    mouse(to, "mouseup", { x: 150, y: 250 });
-    under.mockRestore();
-    await settle();
-    expectWhole(view);
+    const check = nodeOf(view, "check");
+    expect(check.getAttribute("role")).toBe("button");
+    expect(check.getAttribute("aria-pressed")).toBe("false");
+    expect(boxOf(view, "check").hasAttribute("data-selected")).toBe(false);
+  });
 
-    const decide = nodeOf(view, "decide");
-    click(decide);
-    press(decide, "Backspace");
-    press(decide, "Delete");
-    await settle();
-    expectWhole(view);
+  it("a marked node shows its mark", async () => {
+    const view = await canvas({
+      marks: { check: { tone: "bad", label: "2 problems" } },
+    });
+
+    const marks = boxOf(view, "check").querySelectorAll(
+      "[data-slot=flow-node-mark]",
+    );
+    expect(marks).toHaveLength(1);
+    expect(marks[0].textContent).toBe("2 problems");
+    expect(marks[0].getAttribute("data-tone")).toBe("bad");
+    expect(view.querySelectorAll("[data-slot=flow-node-mark]")).toHaveLength(1);
+    cleanup();
+
+    // A node a person picks is named with its mark, which its name alone would hide.
+    const picking = await canvas({
+      onSelect: vi.fn(),
+      marks: { check: { tone: "bad", label: "2 problems" } },
+    });
+    expect(nodeOf(picking, "check").getAttribute("aria-label")).toBe(
+      "Check documents, 2 problems",
+    );
+    expect(nodeOf(picking, "review").getAttribute("aria-label")).toBe(
+      "Review",
+    );
+  });
+
+  it("without onSelect nothing is picked", async () => {
+    const view = await canvas({ selected: "review" });
+
+    for (const node of view.querySelectorAll(".react-flow__node")) {
+      expect(node.getAttribute("role")).not.toBe("button");
+      expect(node.hasAttribute("aria-pressed")).toBe(false);
+    }
+    expect(() => click(nodeOf(view, "check"))).not.toThrow();
+    expect(() => press(nodeOf(view, "check"), "Enter")).not.toThrow();
+  });
+
+  it("a node that is not pickable is not a button, and neither a click nor a key picks it", async () => {
+    const onSelect = vi.fn();
+    const view = await canvas({
+      onSelect,
+      graph: {
+        ...graph,
+        nodes: graph.nodes.map((node) =>
+          node.kind === "start" || node.kind === "exit"
+            ? { ...node, pickable: false }
+            : node,
+        ),
+      },
+    });
+
+    for (const key of ["#start", "close:approved"]) {
+      const node = nodeOf(view, key);
+      expect(node.getAttribute("role")).not.toBe("button");
+      expect(node.hasAttribute("aria-pressed")).toBe(false);
+      click(node);
+      press(node, "Enter");
+    }
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(nodeOf(view, "check").getAttribute("role")).toBe("button");
   });
 
   it("without a theme, the canvas takes the system's colour scheme", async () => {

@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // One node of a flow on the canvas: who does it, or its kind's icon, and its
-// name, over the kind in a word. A traced node is lit amber when walked or
-// open, and faded when not reached yet. Its handles only anchor the edges:
-// nothing connects to them.
+// name, over the kind in a word and the node's mark, if it has one. A traced
+// node is lit amber when walked or open, and faded when not reached yet; a
+// picked node is ringed in amber. Its handles only anchor the edges: nothing
+// connects to them.
 "use client";
 
 import { Handle, type Node, type NodeProps, Position } from "@xyflow/react";
@@ -22,6 +23,7 @@ import {
   VoteIcon,
 } from "lucide-react";
 
+import { TonePill } from "../chip";
 import { cn } from "../lib/utils";
 import { PerformerMark } from "../performer-mark";
 import {
@@ -53,23 +55,33 @@ function kindOf(kind: string): { word: string; icon: LucideIcon } {
   );
 }
 
+/** A word on a node in a tone, such as the problems a check found at it. */
+export interface FlowNodeMark {
+  tone: "bad" | "warn" | "info";
+  label: string;
+}
+
 // The flow node travels whole instead of being spread into `data`, so none
 // of its fields can collide with React Flow's own.
 export type FlowNodeData = {
   node: FlowGraphNode;
   /** Its trace state, or null when nothing is traced. */
   state: FlowTraceState | null;
+  /** Whether it is the node shown as picked. */
+  selected: boolean;
+  mark: FlowNodeMark | null;
 };
 
 export type FlowNodeType = Node<FlowNodeData, "flow">;
 
 export function FlowNodeView({ data }: NodeProps<FlowNodeType>) {
-  const { node, state } = data;
+  const { node, state, selected, mark } = data;
   const { word, icon: Icon } = kindOf(node.kind);
   return (
     <div
       data-slot="flow-node"
       data-state={state ?? undefined}
+      data-selected={selected ? "" : undefined}
       style={{ width: FLOW_NODE_WIDTH, height: FLOW_NODE_HEIGHT }}
       className={cn(
         "rounded-[10px] border border-border bg-background px-3 py-2 shadow-sm",
@@ -77,6 +89,7 @@ export function FlowNodeView({ data }: NodeProps<FlowNodeType>) {
         state === "current" &&
           "border-amber-500 bg-amber-500/10 shadow-md shadow-amber-500/30",
         state === "ahead" && "opacity-40",
+        selected && "ring-2 ring-amber-500/60",
       )}
     >
       {node.kind !== "start" && (
@@ -95,7 +108,16 @@ export function FlowNodeView({ data }: NodeProps<FlowNodeType>) {
           {node.name}
         </span>
       </div>
-      <p className="mt-0.5 text-[11.5px] text-muted-foreground">{word}</p>
+      <div className="mt-0.5 flex min-w-0 items-center justify-between gap-2">
+        <p className="min-w-0 truncate text-[11.5px] text-muted-foreground">
+          {word}
+        </p>
+        {mark && (
+          <TonePill data-slot="flow-node-mark" tone={mark.tone}>
+            {mark.label}
+          </TonePill>
+        )}
+      </div>
       {node.kind !== "exit" && (
         <Handle
           type="source"

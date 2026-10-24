@@ -73,7 +73,7 @@ the kit carries Work's own components:
 | `performer-mark` | `PerformerMark`, `PerformerKind`, `performerWord` | Who does a piece of work, as an icon in a tone: a person, an agent, an agent finished by a person, a system, a rule, a client, a third party or a queue. |
 | `service-level-pill` | `ServiceLevelPill`, `ServiceLevelState`, `formatDuration` | Where work stands against its goal and deadline. The state decides the words and the tone; the deadline only gives the time left or past. |
 | `spec-form` | `SpecForm`, `FormSpec`, `FileValue`, `FormErrors`, `toOutput`, `fromOutput`, `missingInputs`, … | A form drawn from a spec: the outcome first, then titled groups with an input per field type and hint, file uploads and picks, errors beside their field, and check notes. |
-| `flow-canvas` | `FlowCanvas`, `FlowGraph`, `layoutFlow`, `traceFlow` | A read-only flow laid out top to bottom, with the path taken and the open nodes marked. |
+| `flow-canvas` | `FlowCanvas`, `FlowGraph`, `FlowNodeMark`, `layoutFlow`, `traceFlow` | A flow laid out top to bottom, with the path taken and the open nodes marked. A person pans and zooms, and with `onSelect` picks a node by click or keyboard; nodes may carry a mark. Nothing moves, connects or deletes. |
 
 `flow-canvas` needs `@xyflow/react` and `@dagrejs/dagre`. They are optional
 peer dependencies: an app that draws flows installs them, and an app that
