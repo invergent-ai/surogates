@@ -14,6 +14,8 @@ export interface FlowGraphNode {
   kind: string;
   name: string;
   performer?: PerformerKind | null;
+  /** False keeps a person from picking it on a canvas that picks. */
+  pickable?: boolean;
 }
 
 /** An edge from one node to the next, with the words that choose it. */
