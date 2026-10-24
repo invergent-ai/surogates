@@ -250,6 +250,7 @@ from surogates.harness.loop_pending import (
     _redo_unread,
     _turn_for_a_hand_back,
     _turn_for_a_redo,
+    _waits_on_its_workers,
 )
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
@@ -1154,10 +1155,13 @@ class AgentHarness(
         request (``_awaited_report_unread``).
 
         Every skipped wake of a finished chat asks this, and reads little of
-        its log: one that never started a worker, as most have not, is told
-        so by a single row.
+        its log: none for a session that does not wait on its workers
+        (``_waits_on_its_workers``), and a single row for one that never
+        started a worker, as most have not.
         """
-        if not await self._store.has_event(session.id, EventType.WORKER_SPAWNED):
+        if not _waits_on_its_workers(session) or not await self._store.has_event(
+            session.id, EventType.WORKER_SPAWNED,
+        ):
             return False
         events = await self._store.get_events(
             session.id,
@@ -1928,10 +1932,12 @@ class AgentHarness(
             # A project's master is also resumed by a thread's report that
             # no turn has read: the master's turn has usually ended long
             # before a thread finishes, and the report is what it waits for.
-            # So is a session no other started by the report of a worker it
-            # started with spawn_worker or spawn_task, which told it the
-            # report comes in its next turn (``_awaited_report_unread``);
-            # only one whose turn completed.
+            # So is a session that waits on its workers by the report of a
+            # worker it started with spawn_worker or spawn_task, which told
+            # it the report comes in its next turn: a chat no other started,
+            # neither a case's step, a routine's run nor a mission's
+            # coordinator, and a report within a day of its worker's start
+            # (``_awaited_report_unread``).  Only one whose turn completed.
             # A project's thread is resumed by a redo no turn has read: its
             # landing left a file out, and the thread redoes it.  Only one
             # whose turn completed, as the redo is written at such an end.

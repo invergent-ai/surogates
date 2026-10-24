@@ -6,7 +6,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from surogates.devices.browser import for_the_pane_alone, resumes_the_agent, takes_the_browser_over
+from surogates.harness.loop_messages import _is_scheduled_run
+from surogates.keel.steps import is_case_step
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.workstreams import is_project_master
 
 _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
     EventType.HARNESS_RECOVERED.value,
@@ -342,9 +345,40 @@ def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: 
     return first
 
 
+#: How long after a worker was spawned its report still wakes the session that spawned it.  A
+#: report later than that, as after an outage, is about work its user has moved on from, and a
+#: chat's channel would message a person about it.
+_AWAITED_REPORT_WINDOW = timedelta(hours=24)
+
+
+def _waits_on_its_workers(session: Any) -> bool:
+    """Whether *session* is one a report of a worker it spawned may wake once its turn is done.
+
+    Only a session no other started: a worker, a delegated child or a
+    planner woken by its own worker's report would run again, and report a
+    second time to the session that started it.  Not a project's master,
+    which any report of its threads wakes, nor a mission's coordinator,
+    strict like a master, to which a task's report that straggles in past
+    the mission's verdict would give one stray turn.  Not a case's step,
+    which ends where Keel takes its report, accepts it or stops it: a turn
+    after that is no step's.  Nor a routine's run, which announces its
+    result where the routine says, and woken again would announce another.
+    Read from the session alone, so a wake asks it before the log.
+    """
+    config = session.config or {}
+    return (
+        session.parent_id is None
+        and not is_project_master(config)
+        and not config.get("strict_coordinator")
+        and not is_case_step(session)
+        and not _is_scheduled_run(session)
+    )
+
+
 def _awaited_report_unread(session: Any, events: list[Any]) -> bool:
     """Whether a report *session* was told to wait for waits in *events*, its log: a worker it
-    started reported, and none of the model's requests came after.
+    started reported, within ``_AWAITED_REPORT_WINDOW`` of its start, and none of the model's
+    requests came after.
 
     ``spawn_worker`` and ``spawn_task`` tell their caller that the worker's
     report comes in its next turn, and the caller has most often ended its
@@ -353,24 +387,25 @@ def _awaited_report_unread(session: Any, events: list[Any]) -> bool:
     ``delegate_task`` child is not: its tool waits for it and hands its
     result back as the tool's, so a report of its that comes later comes
     after the tool gave up on it, which the caller already told its user.
-    And only a session no other started waits so: a worker, a delegated
-    child or a planner woken by its own worker's report would run again,
-    and report a second time to the session that started it.  A project's
-    master is woken by any report of its threads, which this does not say.
+    And only a session that waits on its workers so (``_waits_on_its_workers``).
     """
-    if session.parent_id is not None:
+    if not _waits_on_its_workers(session):
         return False
-    spawned: set[str] = set()
-    unread: set[str] = set()
+    spawned: dict[str, datetime] = {}
+    unread: list[Any] = []
     for event in events:
         event_type = _event_type(event)
         if event_type == EventType.LLM_REQUEST.value:
-            unread = set()
-        elif event_type == EventType.WORKER_SPAWNED.value:
-            spawned.add((event.data or {}).get("worker_id"))
+            unread = []
+        elif event_type == EventType.WORKER_SPAWNED.value and (worker := (event.data or {}).get("worker_id")):
+            spawned[worker] = event.created_at
         elif event_type in _REPORT_EVENT_TYPES:
-            unread.add((event.data or {}).get("worker_id"))
-    return bool((spawned & unread) - {None})
+            unread.append(event)
+    return any(
+        (at := spawned.get((report.data or {}).get("worker_id"))) is not None
+        and _aware(report.created_at) - _aware(at) <= _AWAITED_REPORT_WINDOW
+        for report in unread
+    )
 
 
 #: What ends a turn of the model's for good: after one of these the turn is not one to go on with.

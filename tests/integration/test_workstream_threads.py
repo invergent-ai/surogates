@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.threads as threads_module
@@ -1122,6 +1122,51 @@ async def test_a_failed_chat_waits_for_its_user_though_its_worker_reported(api, 
     await fails(api, chat)
     await reports(api, worker, "completed")
     await not_woken(api, monkeypatch, chat, "failed")
+
+
+async def test_a_late_report_of_a_delegated_child_wakes_no_one_where_a_worker_the_chat_spawned_was_read(
+    api, monkeypatch,
+):
+    # The chat waits on a worker it spawned only while that worker's report is unread.
+    chat = await a_chat(api)
+    worker = await spawned_by(api, chat)
+    child = await create_child_session(store=api.app.state.session_store, parent=chat, channel="delegation")
+    await reports(api, worker, "completed")
+    await turn_of_the_master_ends(api, chat, "The worker found three competitors; the research timed out.")
+    await reports(api, child, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
+
+
+@pytest.mark.parametrize("key, value", [
+    # A routine's run announces its result where the routine says: woken again, it would announce a second one.
+    ("scheduled_session_id", str(uuid4())),
+    # A mission's coordinator: past its verdict, a straggling task's report would give it one stray turn.
+    ("strict_coordinator", True),
+], ids=["a scheduled run", "a strict coordinator"])
+async def test_a_report_of_a_worker_it_spawned_wakes_no_one_that_reads_its_workers_otherwise(
+    api, monkeypatch, key, value,
+):
+    chat = await a_chat(api)
+    await api.app.state.session_store.update_session_config_key(chat.id, key, value)
+    chat = await api.app.state.session_store.get_session(chat.id)
+    worker = await spawned_by(api, chat)
+    await turn_of_the_master_ends(api, chat, "A worker is researching the market.")
+    await reports(api, worker, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
+
+
+async def test_a_report_a_day_after_its_worker_was_spawned_wakes_no_one(api, monkeypatch):
+    # As after an outage: the chat's user has moved on, and its channel would message them about stale work.
+    chat = await a_chat(api)
+    worker = await spawned_by(api, chat)
+    await turn_of_the_master_ends(api, chat, "A worker is researching the market.")
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "UPDATE events SET created_at = created_at - interval '25 hours' WHERE session_id = :id AND type = :type"
+        ), {"id": chat.id, "type": EventType.WORKER_SPAWNED.value})
+        await db.commit()
+    await reports(api, worker, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
 
 
 TODO_CALL = (
