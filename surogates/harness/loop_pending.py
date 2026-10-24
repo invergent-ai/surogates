@@ -342,6 +342,37 @@ def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: 
     return first
 
 
+def _awaited_report_unread(session: Any, events: list[Any]) -> bool:
+    """Whether a report *session* was told to wait for waits in *events*, its log: a worker it
+    started reported, and none of the model's requests came after.
+
+    ``spawn_worker`` and ``spawn_task`` tell their caller that the worker's
+    report comes in its next turn, and the caller has most often ended its
+    turn long before its worker ends: the report is that turn's to read.
+    Such a worker is one a ``worker.spawned`` in the caller's log names.  A
+    ``delegate_task`` child is not: its tool waits for it and hands its
+    result back as the tool's, so a report of its that comes later comes
+    after the tool gave up on it, which the caller already told its user.
+    And only a session no other started waits so: a worker, a delegated
+    child or a planner woken by its own worker's report would run again,
+    and report a second time to the session that started it.  A project's
+    master is woken by any report of its threads, which this does not say.
+    """
+    if session.parent_id is not None:
+        return False
+    spawned: set[str] = set()
+    unread: set[str] = set()
+    for event in events:
+        event_type = _event_type(event)
+        if event_type == EventType.LLM_REQUEST.value:
+            unread = set()
+        elif event_type == EventType.WORKER_SPAWNED.value:
+            spawned.add((event.data or {}).get("worker_id"))
+        elif event_type in _REPORT_EVENT_TYPES:
+            unread.add((event.data or {}).get("worker_id"))
+    return bool((spawned & unread) - {None})
+
+
 #: What ends a turn of the model's for good: after one of these the turn is not one to go on with.
 _TURN_END_EVENT_TYPES = frozenset({
     EventType.SESSION_COMPLETE.value,

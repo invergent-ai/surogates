@@ -131,6 +131,12 @@ class _StepStore(FakeStore):
             if e.session_id == session_id and (after is None or e.id > after) and (wanted is None or e.type in wanted)
         ]
 
+    async def has_event(self, session_id, type, *, after=None, before=None, with_key=None) -> bool:
+        return any(
+            (before is None or e.id < before) and (with_key is None or with_key in (e.data or {}))
+            for e in await self.get_events(session_id, after=after, types=[type])
+        )
+
     async def update_session_status(self, session_id, status) -> None:
         self.row.status = status
 
