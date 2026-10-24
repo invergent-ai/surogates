@@ -75,6 +75,7 @@ the kit carries Work's own components:
 | `spec-form` | `SpecForm`, `FormSpec`, `FileValue`, `FormErrors`, `toOutput`, `fromOutput`, `missingInputs`, … | A form drawn from a spec: the outcome first, then titled groups with an input per field type and hint, file uploads and picks, errors beside their field, and check notes. |
 | `flow-canvas` | `FlowCanvas`, `FlowGraph`, `FlowNodeMark`, `layoutFlow`, `traceFlow` | A flow laid out top to bottom, with the path taken and the open nodes marked. A person pans and zooms, and with `onSelect` picks a node by click or keyboard; nodes may carry a mark. Nothing moves, connects or deletes. |
 | `line-diff` | `LineDiff`, `diffLines`, `DiffRow` | Two texts compared line by line: removed and added lines in their tones, unchanged runs folded to the `context` around each change. |
+| `copy-field` | `CopyField` | A read-only value with Copy, such as an address to send; a secret is masked until Show, for a key shown once. |
 
 `flow-canvas` needs `@xyflow/react` and `@dagrejs/dagre`. They are optional
 peer dependencies: an app that draws flows installs them, and an app that
