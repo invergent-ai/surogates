@@ -93,9 +93,14 @@ export function CopyField({
         </Button>
       </div>
       {description && <FieldDescription>{description}</FieldDescription>}
-      {shown.refused && (
-        <FieldDescription role="status">{REFUSED}</FieldDescription>
-      )}
+      {/* Always there, so a screen reader announces the words when they
+          arrive; out of the layout while empty. */}
+      <FieldDescription
+        role="status"
+        className={shown.refused ? undefined : "sr-only"}
+      >
+        {shown.refused ? REFUSED : null}
+      </FieldDescription>
     </Field>
   );
 }

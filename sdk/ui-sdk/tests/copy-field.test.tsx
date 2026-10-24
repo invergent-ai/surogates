@@ -109,11 +109,14 @@ describe("copy field", () => {
     const writeText = vi.fn().mockRejectedValueOnce(new Error("denied"));
     withClipboard({ writeText });
     const view = render(<CopyField label="Service key" value={KEY} secret />);
+    // The status is there, empty, before anything is refused, so a screen
+    // reader announces the words when they arrive.
+    const status = fieldOf(view, "Service key").querySelector("[role=status]");
+    expect(status?.textContent).toBe("");
 
     click(button(view, "Copy"));
     await settle();
 
-    const status = fieldOf(view, "Service key").querySelector("[role=status]");
     expect(status?.textContent).toBe(REFUSED);
     expect(buttonNamed(view, "Copy")).not.toBeNull();
 
@@ -121,6 +124,7 @@ describe("copy field", () => {
     click(button(view, "Copy"));
     await settle();
 
+    expect(status?.textContent).toBe("");
     expect(view.textContent).not.toContain(REFUSED);
     expect(buttonNamed(view, "Copied")).not.toBeNull();
   });

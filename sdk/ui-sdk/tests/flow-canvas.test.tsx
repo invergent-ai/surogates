@@ -304,7 +304,13 @@ describe("flow canvas", () => {
     expect(press(nodeOf(view, "decide"), " ").defaultPrevented).toBe(true);
     expect(onSelect).toHaveBeenLastCalledWith("decide");
 
+    // With nothing picked, Escape has nothing to let go.
     press(paneOf(view), "Escape");
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    cleanup();
+
+    const picked = await canvas({ onSelect, selected: "decide" });
+    press(paneOf(picked), "Escape");
     expect(onSelect).toHaveBeenLastCalledWith(null);
     expect(onSelect).toHaveBeenCalledTimes(3);
   });

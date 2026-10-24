@@ -62,11 +62,11 @@ export interface FlowCanvasProps {
   path?: readonly string[];
   /** The nodes open now. */
   current?: readonly string[];
-  /** The key of the node shown as picked. */
+  /** The key of the node shown as picked; its ring shows even without `onSelect`. */
   selected?: string | null;
   /**
    * Given, a person picks a node by a click, or by Enter or Space on it, and
-   * lets it go by a click on the pane or by Escape.
+   * lets it go by a click on the pane or, when one is picked, by Escape.
    */
   onSelect?: (key: string | null) => void;
   /** The marks on nodes, by node key. */
@@ -146,7 +146,7 @@ export function FlowCanvas({
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!onSelect) return;
     if (event.key === "Escape") {
-      onSelect(null);
+      if (selected !== null) onSelect(null);
       return;
     }
     if (event.key !== "Enter" && event.key !== " ") return;
