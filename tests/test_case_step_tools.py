@@ -131,6 +131,12 @@ class _StepStore(FakeStore):
             if e.session_id == session_id and (after is None or e.id > after) and (wanted is None or e.type in wanted)
         ]
 
+    async def has_event(self, session_id, type, *, after=None, before=None, with_key=None) -> bool:
+        return any(
+            (before is None or e.id < before) and (with_key is None or with_key in (e.data or {}))
+            for e in await self.get_events(session_id, after=after, types=[type])
+        )
+
     async def update_session_status(self, session_id, status) -> None:
         self.row.status = status
 
@@ -903,6 +909,21 @@ async def test_keels_message_written_while_keel_takes_the_report_keeps_the_turn_
     assert _in_call_order(request["messages"])
     assert content in json.dumps(request["messages"])
     assert len(fake_keel.requests) == 3
+
+
+async def test_a_step_keel_took_is_not_woken_by_the_late_report_of_a_worker_it_spawned(fake_keel, monkeypatch, tmp_path):
+    # The step ended where Keel took its report: a turn of its own after that would be no step's.
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, ACCEPTED)
+    _started(store)
+    worker = str(uuid4())
+    store.write(EventType.WORKER_SPAWNED, {"worker_id": worker, "goal": "Read the payslips."})
+    assert len(await _queued_wake(monkeypatch, store, [_calls("complete_step", COMPLETION)])) == 1
+    assert (_ended_with(store), store.row.status) == ("case_step_ended", "completed")
+
+    store.write(EventType.WORKER_COMPLETE, {"worker_id": worker, "result": "Income is 5200."})
+    assert await _queued_wake(monkeypatch, store, []) == []
+    assert store.row.status == "completed"
 
 
 async def test_a_refused_completion_keeps_the_turn_going(fake_keel, monkeypatch, store):

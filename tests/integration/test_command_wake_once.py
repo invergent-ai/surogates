@@ -52,7 +52,7 @@ from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
 
 from .test_devices import AGENT_ID, api  # noqa: F401  (api is a fixture)
-from .test_workstream_threads import TODO_CALL, answered, queued, start, turn_ends
+from .test_workstream_threads import TODO_CALL, answered, queued, spawned_by, start, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -2198,6 +2198,27 @@ async def test_a_report_that_reached_a_master_before_its_command_was_answered_is
     assert workers.ran == ["_handle_compress_command"]
     assert [conversation[-1]["content"].split("]")[0] for conversation in workers.requests] == [
         f'[Thread "Draft A" ({thread.id}) reported',
+    ]
+
+
+async def test_a_report_that_reached_a_chat_before_its_command_was_answered_is_read_after_it(api, workers):
+    chat = await workers.chat()
+    worker = await spawned_by(api, await workers.session(chat))
+    # The chat's worker reports, and before any wake reads the report its user types a command.
+    await answered(api, worker, "Found three competitors.")
+    await turn_ends(api, worker)
+    await workers.nobody_is_queued()
+    await workers.says(chat, "/compress")
+
+    # One wake answers the command, rests the chat, and queues it for the report still unread.
+    await workers.wake(chat)
+    assert (workers.ran, workers.requests, await workers.status(chat)) == (["_handle_compress_command"], [], "completed")
+    assert await queued(api, await workers.session(chat))
+
+    await workers.wake(chat)
+    assert workers.ran == ["_handle_compress_command"]
+    assert [conversation[-1]["content"].split("\n")[0] for conversation in workers.requests] == [
+        f"[Worker {worker.id} completed]",
     ]
 
 

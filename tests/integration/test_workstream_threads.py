@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 
 import surogates.harness.loop as loop_module
 import surogates.workstreams.threads as threads_module
@@ -1038,6 +1038,135 @@ async def test_a_stopped_master_waits_for_the_user(api, monkeypatch):
     await harness.wake(master.id)
     assert handed == []
     assert (await api.app.state.session_store.get_session(master.id)).status == "paused"
+
+
+async def a_chat(api) -> Session:
+    created = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    return await api.app.state.session_store.get_session(UUID(created.json()["id"]))
+
+
+async def spawned_by(api, caller, goal="Research the Q3 market.") -> Session:
+    """A worker *caller* started with ``spawn_worker``, which tells it the worker's report comes in its next turn."""
+    result = await call_tool(api, caller, "spawn_worker", goal=goal)
+    assert result["status"] == "spawned", result
+    return await api.app.state.session_store.get_session(UUID(result["worker_id"]))
+
+
+async def fails(api, session) -> None:
+    """*session*'s turn fails after its request to the model, as a turn the model's errors end."""
+    store = api.app.state.session_store
+    await store.emit_event(session.id, EventType.LLM_REQUEST, {})
+    lease = await store.try_acquire_lease(session.id, "worker-threads", ttl_seconds=60)
+    await harness_of(api)._fail_session(session, [], lease, reason="llm_error")
+    await store.release_lease(session.id, lease.lease_token)
+
+
+async def reports(api, worker, ending: str) -> None:
+    """*worker*'s turn ends *ending*, which reports it to the session that started it."""
+    if ending == "completed":
+        await answered(api, worker, "Found three competitors.")
+        await turn_ends(api, worker)
+    else:
+        await fails(api, worker)
+
+
+async def not_woken(api, monkeypatch, session, status: str) -> None:
+    """A wake of *session* skips it: no turn, no resume, and it stays *status*."""
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(session.id)
+    assert handed == []
+    assert await events_of(api, session.id, EventType.SESSION_RESUME) == []
+    assert (await api.app.state.session_store.get_session(session.id)).status == status
+
+
+@pytest.mark.parametrize("ending", ["completed", "failed"])
+async def test_a_finished_chat_takes_a_turn_on_the_report_of_a_worker_it_spawned(api, monkeypatch, ending):
+    # The chat's turn ended long before its worker did, and the report is what it was told to wait for.
+    chat = await a_chat(api)
+    worker = await spawned_by(api, chat)
+    await turn_of_the_master_ends(api, chat, "A worker is researching the market.")
+    await reports(api, worker, ending)
+
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(chat.id)
+    [conversation] = handed
+    assert conversation[-2] == {"role": "assistant", "content": "A worker is researching the market."}
+    assert conversation[-1]["content"].startswith(f"[Worker {worker.id} {ending}")
+    [resumed] = await events_of(api, chat.id, EventType.SESSION_RESUME)
+    assert resumed.data == {"source": "worker_report"}
+    assert (await api.app.state.session_store.get_session(chat.id)).status == "active"
+
+
+async def test_a_late_report_of_a_delegated_child_wakes_no_one(api, monkeypatch):
+    # ``delegate_task`` waits for its child itself: a report after the tool gave up is not one the chat waits for.
+    chat = await a_chat(api)
+    child = await create_child_session(store=api.app.state.session_store, parent=chat, channel="delegation")
+    await turn_of_the_master_ends(api, chat, "The research timed out.")
+    await reports(api, child, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
+
+
+async def test_a_report_to_a_child_from_a_worker_it_spawned_wakes_no_one(api, monkeypatch):
+    # Woken, the child would run again and report a second time to its own caller.
+    chat = await a_chat(api)
+    caller = await create_child_session(store=api.app.state.session_store, parent=chat, channel="delegation")
+    worker = await spawned_by(api, caller)
+    await turn_of_the_master_ends(api, caller, "A worker is researching the market.")
+    await reports(api, worker, "completed")
+    await not_woken(api, monkeypatch, caller, "completed")
+
+
+async def test_a_failed_chat_waits_for_its_user_though_its_worker_reported(api, monkeypatch):
+    chat = await a_chat(api)
+    worker = await spawned_by(api, chat)
+    await fails(api, chat)
+    await reports(api, worker, "completed")
+    await not_woken(api, monkeypatch, chat, "failed")
+
+
+async def test_a_late_report_of_a_delegated_child_wakes_no_one_where_a_worker_the_chat_spawned_was_read(
+    api, monkeypatch,
+):
+    # The chat waits on a worker it spawned only while that worker's report is unread.
+    chat = await a_chat(api)
+    worker = await spawned_by(api, chat)
+    child = await create_child_session(store=api.app.state.session_store, parent=chat, channel="delegation")
+    await reports(api, worker, "completed")
+    await turn_of_the_master_ends(api, chat, "The worker found three competitors; the research timed out.")
+    await reports(api, child, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
+
+
+@pytest.mark.parametrize("key, value", [
+    # A routine's run announces its result where the routine says: woken again, it would announce a second one.
+    ("scheduled_session_id", str(uuid4())),
+    # A mission's coordinator: past its verdict, a straggling task's report would give it one stray turn.
+    ("strict_coordinator", True),
+], ids=["a scheduled run", "a strict coordinator"])
+async def test_a_report_of_a_worker_it_spawned_wakes_no_one_that_reads_its_workers_otherwise(
+    api, monkeypatch, key, value,
+):
+    chat = await a_chat(api)
+    await api.app.state.session_store.update_session_config_key(chat.id, key, value)
+    chat = await api.app.state.session_store.get_session(chat.id)
+    worker = await spawned_by(api, chat)
+    await turn_of_the_master_ends(api, chat, "A worker is researching the market.")
+    await reports(api, worker, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
+
+
+async def test_a_report_a_day_after_its_worker_was_spawned_wakes_no_one(api, monkeypatch):
+    # As after an outage: the chat's user has moved on, and its channel would message them about stale work.
+    chat = await a_chat(api)
+    worker = await spawned_by(api, chat)
+    await turn_of_the_master_ends(api, chat, "A worker is researching the market.")
+    async with api.app.state.session_factory() as db:
+        await db.execute(text(
+            "UPDATE events SET created_at = created_at - interval '25 hours' WHERE session_id = :id AND type = :type"
+        ), {"id": chat.id, "type": EventType.WORKER_SPAWNED.value})
+        await db.commit()
+    await reports(api, worker, "completed")
+    await not_woken(api, monkeypatch, chat, "completed")
 
 
 TODO_CALL = (
