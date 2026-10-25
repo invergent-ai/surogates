@@ -197,6 +197,10 @@ A person waits on a case agent, so its wakes queue at its channel's priority, 0 
 
 It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). Its prompt names no skill. It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door (see [How it reads the case](#how-it-reads-the-case)). It gets no step or item tool. Unlike the step and item tools, an agent's policy can take the case tools away.
 
+### Case sessions' guidance
+
+Every case session, a step's, an item's or a case agent's, and every helper it starts, runs without the brainstorming gate: its prompt never sends the agent to design before it works, and its skill index leaves the brainstorming skill out. Each one's prompt carries the `case_session` guidance instead: the case's people never see the agent's skills, tools or instructions, so nothing they read, a reply, a question, a returned item or a comment in a document, names a skill, a tool, a procedure or those instructions. The case agent's prompt also carries the `case_agent` guidance: it cites each fact it uses with the `cite` label of the read that gave it, drafts into the person's form only when they ask, and never submits a form, decides a step or moves the case.
+
 ### How it reads the case
 
 The case agent reads its case only through Keel's door, never the case's workspace. The worker sends each case tool to the door at `SUROGATES_KEEL_URL`, with `SUROGATES_KEEL_DOOR_KEY` as the bearer, under the session's id. Keel answers as the person, and logs each read as a view through the case agent:
