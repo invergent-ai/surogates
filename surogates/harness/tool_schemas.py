@@ -20,9 +20,11 @@ from surogates.channels.constants import (
     VOICE_TOOLS,
 )
 from surogates.devices.binding import device_of
+from surogates.keel.items import ItemContract
 from surogates.keel.steps import StepContract
 from surogates.tools.builtin.ask_user_question import widen_for_channel
 from surogates.tools.builtin.browser import DEVICE_SERVERS_NOTE
+from surogates.tools.builtin.case_item import describe_item_completion
 from surogates.tools.builtin.case_step import describe_completion
 from surogates.tools.builtin.intake import describe_intake
 from surogates.tools.builtin.send_form import describe_forms
@@ -203,13 +205,16 @@ def describe_for_conversation(
     forms: Any,
     contract: StepContract | None = None,
     intake: Sequence[dict] = (),
+    item: ItemContract | None = None,
 ) -> list[dict[str, Any]]:
     """Return *schemas* with ``send_form`` limited to the agent's *forms*,
     ``ask_user_question`` taking as many choices as *channel* does, and
     ``complete_step`` taking the outcomes, form and file fields of a case
-    step's *contract*, and ``start_case`` taking only the case types of
-    *intake*, those an intake agent may start, each named with the fields it
-    requires.  Input is never mutated."""
+    step's *contract*, ``complete_item`` what the work *item* takes (a step's
+    or a vote's outcomes and form, or a raised hand's choices), and
+    ``start_case`` taking only the case types of *intake*, those an intake
+    agent may start, each named with the fields it requires.  Input is never
+    mutated."""
     described: list[dict[str, Any]] = []
     for schema in schemas:
         name = schema["function"]["name"]
@@ -219,6 +224,8 @@ def describe_for_conversation(
             schema = widen_for_channel(schema, channel)
         elif name == "complete_step" and contract is not None:
             schema = describe_completion(schema, contract)
+        elif name == "complete_item" and item is not None:
+            schema = describe_item_completion(schema, item)
         elif name == "start_case" and intake:
             schema = describe_intake(schema, intake)
         described.append(schema)

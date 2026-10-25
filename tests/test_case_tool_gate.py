@@ -4,7 +4,8 @@ A case session works on a case, not with a person in a chat.  It is offered
 the case's work tools, its agent's MCP tools and the self-tools its execution
 needs, and nothing that talks to people, schedules work, starts other work or
 edits the agent.  Only the step's own session gets the two tools that end the
-step; no other session is ever offered them, whatever its config names.
+step, and only a work item's own session the two that report the item; no
+other session is ever offered them, whatever its config names.
 
 The prompt the model reads and the schemas it is sent are decided in two
 places, the worker and the harness, and they must agree.
@@ -33,12 +34,13 @@ from surogates.session.provisioning import create_agent_session, create_child_se
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.runtime import ToolRuntime
-from tests.test_case_step_isolation import CONTRACT, _SessionStore
+from tests.test_case_step_isolation import CONTRACT, ITEM_CONTRACT, _SessionStore
 from tests.test_eval_session_seeding import _route_fixtures
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 MCP_TOOL = "mcp__crm__lookup"
 STEP_TOOLS = {"complete_step", "raise_hand"}
+ITEM_TOOLS = {"complete_item", "return_item"}
 KB_TOOLS = {"kb_list_pages", "kb_read_page", "kb_search_pages"}
 # Chat, scheduling, starting other work and editing the agent: none is a case's.
 NEVER_IN_A_CASE = {
@@ -93,8 +95,11 @@ def _schema_tools(session, registry: ToolRegistry) -> set[str]:
     return harness._tool_filter_for_session(session)
 
 
-async def _sent_on_a_turn(monkeypatch, session, registry: ToolRegistry, *, prompt, metadata=None) -> set[str]:
-    """The tools the model is sent on one turn of *session*, whose message carries *metadata*."""
+async def _sent_on_a_turn(
+    monkeypatch, session, registry: ToolRegistry, *, prompt, metadata=None, policy: dict | None = None,
+) -> set[str]:
+    """The tools the model is sent on one turn of *session*, whose message carries *metadata*, under its
+    agent's *policy*."""
     store = AsyncMock()
     store.emit_event = AsyncMock(side_effect=range(100, 300))
     store.get_events = AsyncMock(return_value=[])
@@ -106,6 +111,7 @@ async def _sent_on_a_turn(monkeypatch, session, registry: ToolRegistry, *, promp
     harness._mcp_tool_names = frozenset({MCP_TOOL})
     harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")
     harness._prompt = prompt
+    harness._governance_gate = build_governance_gate(policy) if policy is not None else None
     sent: list[set[str]] = []
 
     async def llm(**kwargs):
@@ -123,8 +129,9 @@ async def _sent_on_a_turn(monkeypatch, session, registry: ToolRegistry, *, promp
     return sent[0]
 
 
-async def _step(store, *, tools: list[str] | None = None, scoped: bool = True):
-    """A step's own session, made as the Keel link makes one, with a scope naming *tools* when *scoped*."""
+async def _case_session(store, *, tools: list[str] | None = None, scoped: bool = True, **contract):
+    """A case's own session, made as the Keel link makes one: a step's (*case_step*) or a work item's
+    (*case_item*), with a scope naming *tools* when *scoped*."""
     _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
     return await create_agent_session(
         store=store,
@@ -136,9 +143,19 @@ async def _step(store, *, tools: list[str] | None = None, scoped: bool = True):
         channel="api",
         config={"memory_boundary": "case:C1", "workspace_boundary": "case:C1"},
         service_account_id=uuid4(),
-        case_step={**CONTRACT, "tools": tools},
         case_scope={"tools": tools, "knowledge": ["kb-uuid"]} if scoped else None,
+        **contract,
     )
+
+
+async def _step(store, *, tools: list[str] | None = None, scoped: bool = True):
+    """A step's own session, with a scope naming *tools* when *scoped*."""
+    return await _case_session(store, tools=tools, scoped=scoped, case_step={**CONTRACT, "tools": tools})
+
+
+async def _item(store):
+    """A work item's own session."""
+    return await _case_session(store, case_item=ITEM_CONTRACT)
 
 
 def _chat(config: dict) -> Session:
@@ -248,3 +265,28 @@ async def test_a_board_turn_never_hands_a_case_the_board(monkeypatch):
     assert sent <= _schema_tools(step, registry)
     # An ordinary chat's board turn is still narrowed to drawing.
     assert await _sent_on_a_turn(monkeypatch, _chat({}), registry, prompt=board, metadata=drawn) == {"whiteboard_draw"}
+
+
+async def test_only_the_items_own_session_has_the_item_tools(monkeypatch):
+    registry = _registry()
+    store = _SessionStore()
+    item = await _item(store)
+
+    for offered in (_prompt_tools(item, registry), _schema_tools(item, registry)):
+        assert ITEM_TOOLS | {"read_file", "kb_read_page", MCP_TOOL} <= offered
+        assert offered.isdisjoint(STEP_TOOLS | NEVER_IN_A_CASE)
+
+    step = await _step(store)
+    helper = await create_child_session(store=store, parent=item, channel="delegation")
+    # Even a chat whose config names them.
+    narrowed = _chat({"allowed_tools": ["read_file", *sorted(ITEM_TOOLS)]})
+    for session in (step, helper, _chat({}), narrowed):
+        for offered in (_prompt_tools(session, registry), _schema_tools(session, registry)):
+            assert offered.isdisjoint(ITEM_TOOLS)
+
+    # An agent's allow-list that names neither, or a deny-list that names both, leaves them to the item.
+    plain = SimpleNamespace(has_agents=False)
+    for policy in ({"allowed_tools": ["read_file"]}, {"denied_tools": sorted(ITEM_TOOLS)}):
+        sent = await _sent_on_a_turn(monkeypatch, item, registry, prompt=plain, policy=policy)
+        assert ITEM_TOOLS <= sent, policy
+        assert all(build_governance_gate(policy).check(name, {}).allowed for name in ITEM_TOOLS), policy

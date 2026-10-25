@@ -35,11 +35,11 @@ import pytest
 import surogates.harness.loop as loop_module
 from surogates.harness.budget import IterationBudget
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
-from surogates.keel.steps import render_kickoff, step_contract_in
+from surogates.keel.steps import render_kickoff, step_contract_in, work_contract_key
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.session.models import Session
-from surogates.session.store import _redacted_case_config
+from surogates.session.store import _redacted_case_config, _reported_case_config, _unreported_case_config
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_key
 from surogates.tools.registry import ToolRegistry
@@ -160,7 +160,9 @@ class _StepStore(FakeStore):
             for e in self.log
         ):
             return
-        self.row.config = {**self.row.config, "case_step": {**self.row.config["case_step"], "reported": result}}
+        marked = _reported_case_config(self.row.config, result)
+        if marked is not None:
+            self.row.config = marked
 
     def keel_writes(self, kind: str, content: str) -> None:
         """Keel's answer or revision reaching the step through the link: a session at rest set active with a
@@ -169,9 +171,9 @@ class _StepStore(FakeStore):
             self.write(EventType.SESSION_RESUME, {})
             self.row.status = "active"
         self.write(EventType.USER_MESSAGE, {"content": content, "synthetic": f"keel_{kind}", "keel_key": f"keel:{kind}:{content}"})
-        self.row.config = {
-            **self.row.config, "case_step": {k: v for k, v in self.row.config["case_step"].items() if k != "reported"},
-        }
+        unmarked = _unreported_case_config(self.row.config)
+        if unmarked is not None:
+            self.row.config = unmarked
 
     def keel_says(self, content: str) -> None:
         """Keel's plain message reaching the step through the link: a session at rest set active with a
@@ -185,13 +187,17 @@ class _StepStore(FakeStore):
             {"content": content, "synthetic": "keel_message", "keel_key": f"keel:message:{content}"},
         )
 
+    def _contract(self) -> dict:
+        """The session's work contract, a step's or a work item's."""
+        return self.row.config[work_contract_key(self.row.config)]
+
     def redacted(self) -> bool:
-        step = self.row.config["case_step"]
-        return step["inputs"] == {} and step.get("inputs_redacted") is True
+        contract = self._contract()
+        return contract["inputs"] == {} and contract.get("inputs_redacted") is True
 
     def reported(self) -> str | None:
         """What the report that ended the step for this round came to, as the session's row holds it."""
-        return self.row.config["case_step"].get("reported")
+        return self._contract().get("reported")
 
     def result(self, call_id: str) -> str:
         """What the tool call *call_id* answered the model."""

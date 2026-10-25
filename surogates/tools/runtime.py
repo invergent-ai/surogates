@@ -51,6 +51,7 @@ class ToolRuntime:
             artifact,
             ask_user_question,
             browser,
+            case_item,
             case_step,
             channel_files,
             channel_messages,
@@ -130,6 +131,7 @@ class ToolRuntime:
             send_form,  # send_form (a WhatsApp Flow, for agents with published forms)
             voice_call,  # end_call (a phone call's agent hangs up)
             case_step,  # complete_step, raise_hand (a case step's report to Keel)
+            case_item,  # complete_item, return_item (an item session's report to Keel)
             intake,  # start_case (an intake agent starts a case through Keel)
         ]
 

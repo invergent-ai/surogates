@@ -276,6 +276,25 @@ A turn of the step that ends in words, with no report, is told once to report, a
 
 A worker without both settings has no link to Keel: every report removes the step's inputs and ends the turn, and Keel learns of it only from the session's status.
 
+## How an item session reports back
+
+Only a work item's own session is offered `complete_item` and `return_item`; it is offered neither step tool, and no other session, a step's or a helper's, is offered either item tool. An agent's policy cannot take them away. The worker sends each to the item routes of Keel's door, under the session, with `SUROGATES_KEEL_DOOR_KEY`:
+
+- `complete_item` acts on the item. A step or a vote ends with one of its outcomes: the worker posts `{"outcome", "output", "sources", "call_id"}` to `/api/harness/sessions/{session_id}/item/complete`, checked as `complete_step`'s report is, file fields included. A raised hand takes exactly one of `choice`, which must be one of its choices, and `answer`, in words: the worker posts `{"choice"}` or `{"answer"}` with `"note"`, null when the model gives none, `"sources"`, a list of objects, `[]` when it gives none, and `"call_id"`.
+- `return_item` gives the item back to whoever gave it, with the reason: the worker posts `{"reason", "call_id"}` to `/api/harness/sessions/{session_id}/item/return`. `reason` is 1 to 2000 characters, counted once stripped, and sent stripped.
+
+`call_id` is the tool call's id. Keel's answer decides what the session does:
+
+| Keel's answer | The model reads | The session |
+|---|---|---|
+| `200` | `Item ended: Keel recorded it.`, or `Item ended: the item went back.` | Its turn ends. The item's inputs are removed from its config, and the item is marked `completed` or `returned`. |
+| `409 not-running` | `Item ended: the item is no longer this session's.` | Its turn ends. Nothing is marked. |
+| Another `409` | Keel's code and message, as an error. | The model fixes its report and calls again, or returns the item. Nothing is marked. |
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` | The model calls again. A repeated call gets Keel's first answer. |
+| Anything else | `Item stopped: Keel refused this item's report (<status>); people take the item.` | The worker posts `{"status": "failed", "detail": "keel-<status>"}` to `…/item/ended`, removes the inputs, marks the item `stopped`, and ends the turn. People take the item. |
+
+A report Keel would refuse whole is never sent, as a step's is not: one over 256,000 bytes of JSON, one holding NaN or an infinity, sources out of their shape, a choice the raised hand does not offer, or a tool call id over 200 characters. Once a report has ended the item, a later report in the same wake is answered by the worker, without Keel. A worker without both settings has no link to Keel: every report removes the item's inputs, marks it `stopped`, and ends the turn.
+
 ## An intake agent starts cases
 
 A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a conversation's own session, one that works on no case and was not started by another session, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. The wakes that need an agent's list while it is being asked share that one ask, and a Keel that has not answered in 2 seconds grants nothing for the minute: the ask never holds a wake longer. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case, and no helper a conversation started, is offered it. A worker without both settings asks nothing and never offers `start_case`; one that cannot reach Keel offers none until it next asks.

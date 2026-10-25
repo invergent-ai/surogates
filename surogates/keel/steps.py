@@ -39,6 +39,7 @@ from surogates.channels.memory_boundary import (
 )
 from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
+    CASE_ITEM_TOOLS,
     CASE_STEP_TOOLS,
     WORKER_SELF_TOOLS,
 )
@@ -49,12 +50,15 @@ __all__ = [
     "CASE_ALLOWED_TOOLS",
     "CASE_BOUNDARY_PREFIX",
     "CASE_ITEM_KEY",
+    "CASE_ITEM_TOOLS",
     "CASE_SCOPE_KEY",
     "CASE_STEP_KEY",
     "CASE_STEP_NUDGE",
     "CASE_STEP_TOOLS",
     "CaseScope",
+    "ITEM_ENDED",
     "ITEM_KICKOFF_MARKER",
+    "ITEM_STOPPED",
     "KEELS_WORD",
     "KEEL_MESSAGES",
     "KICKOFF_MARKER",
@@ -66,12 +70,14 @@ __all__ = [
     "STEP_ENDED",
     "STEP_STOPPED",
     "StepContract",
+    "WORK_ENDS",
     "case_scope_in",
     "case_scope_of",
     "gate_case_tools",
     "is_case_config",
     "is_case_session",
     "is_case_step",
+    "is_case_work",
     "is_keel_message",
     "is_keels_word",
     "render_kickoff",
@@ -125,6 +131,13 @@ KEEL_MESSAGES: frozenset[str] = KEELS_WORD | {MESSAGE_MARKER}
 #: report for good, and people take the step (``STEP_STOPPED``).
 STEP_ENDED = "Step ended:"
 STEP_STOPPED = "Step stopped:"
+#: The item tools' twins: an item tool's result starts with one of these
+#: exactly when the work item is over for this session.
+ITEM_ENDED = "Item ended:"
+ITEM_STOPPED = "Item stopped:"
+#: Every start of a result that ends a case's work for its session, a step's
+#: or a work item's: the harness ends the turn on any of them.
+WORK_ENDS = (STEP_ENDED, STEP_STOPPED, ITEM_ENDED, ITEM_STOPPED)
 #: What a step's turn that ends in words, with no report, is told once, and
 #: the ``synthetic`` marker of that message.
 CASE_STEP_NUDGE = (
@@ -307,19 +320,32 @@ def is_case_step(session: object) -> bool:
     return getattr(session, "parent_id", None) is None and step_contract_of(session) is not None
 
 
+def is_case_work(session: object) -> bool:
+    """True for a case's own work session: a step's (:func:`is_case_step`) or a
+    work item's (:func:`~surogates.keel.items.is_case_item`)."""
+    # Here, not at the top: ``items`` imports this module.
+    from surogates.keel.items import is_case_item
+
+    return is_case_step(session) or is_case_item(session)
+
+
 def gate_case_tools(tools: set[str], session: object) -> set[str]:
     """The tools of *tools* a session may be offered, as a case decides them.
 
     Runs last in both places that decide what is offered, the prompt and the
-    schemas, so they agree.  A session of no case only loses the step tools.
-    A session of a case keeps the case's allowed tools, its agent's MCP tools
-    and its execution's self-tools; a scope that names work tools narrows the
-    allowed ones to those and :data:`ALWAYS_KEPT`.  Only the step's own
-    session gets the step tools.  Nothing else is ever added, so a tool an
+    schemas, so they agree.  A session of no case only loses the step and
+    item tools.  A session of a case keeps the case's allowed tools, its
+    agent's MCP tools and its execution's self-tools; a scope that names work
+    tools narrows the allowed ones to those and :data:`ALWAYS_KEPT`.  Only
+    the step's own session gets the step tools, and only a work item's own
+    session the item tools.  Nothing else is ever added, so a tool an
     earlier gate dropped stays dropped.
     """
+    # Here, not at the top: ``items`` imports this module.
+    from surogates.keel.items import is_case_item
+
     if not is_case_session(session):
-        return set(tools) - CASE_STEP_TOOLS
+        return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS
 
     def platform(name: str) -> bool:
         return name.startswith("mcp__") or name in WORKER_SELF_TOOLS or name in BOARD_SELF_TOOLS
@@ -331,6 +357,8 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
         kept = {name for name in kept if name in named or name in ALWAYS_KEPT or platform(name)}
     if is_case_step(session):
         kept |= CASE_STEP_TOOLS
+    if is_case_item(session):
+        kept |= CASE_ITEM_TOOLS
     return kept
 
 

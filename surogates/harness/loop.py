@@ -113,13 +113,14 @@ from surogates.channels.capabilities import capabilities_for
 from surogates.channels.memory_boundary import is_eval_session
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
+from surogates.keel.items import is_case_item, item_contract_of
 from surogates.keel.steps import (
+    CASE_ITEM_TOOLS,
     CASE_STEP_NUDGE,
     CASE_STEP_TOOLS,
     MESSAGE_MARKER,
     NUDGE_MARKER,
-    STEP_ENDED,
-    STEP_STOPPED,
+    WORK_ENDS,
     gate_case_tools,
     is_case_session,
     is_case_step,
@@ -3024,6 +3025,7 @@ class AgentHarness(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
             contract=step_contract_of(session) if is_case_step(session) else None,
             intake=getattr(self, "_intake", ()),
+            item=item_contract_of(session) if is_case_item(session) else None,
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
@@ -6668,11 +6670,12 @@ def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
 
 
 def _case_step_ended(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
-    """Whether a step tool of the batch ended its case's step for this session: Keel took its report, the step is
-    no longer the session's, or Keel stopped it."""
-    reports = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") in CASE_STEP_TOOLS}
+    """Whether a step or item tool of the batch ended its case's work for this session: Keel took its report,
+    the step or the item is no longer the session's, or Keel stopped it."""
+    tools = CASE_STEP_TOOLS | CASE_ITEM_TOOLS
+    reports = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") in tools}
     return any(
-        r.get("tool_call_id") in reports and str(r.get("content") or "").startswith((STEP_ENDED, STEP_STOPPED))
+        r.get("tool_call_id") in reports and str(r.get("content") or "").startswith(WORK_ENDS)
         for r in tool_results
     )
 
