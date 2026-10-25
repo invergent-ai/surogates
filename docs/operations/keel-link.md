@@ -71,11 +71,11 @@ The agent reads `<sender> sends you a message about this step: <text>`, or `Some
 
 The answer is `202 {"delivered", "resting"}`. Each key is delivered once: `delivered` is false when the key was delivered already, and nothing is then written or woken.
 
-A message wakes a step whose session is at rest, as an answer wakes it, except a step that rests on its report. A step rests on its report when its last report ended it for this round and it waits for a person: a raised hand, or a draft under review. Such a step is not woken, and keeps its report's mark. Its message stays unread until Keel's next answer or revision wakes the step, and that turn reads the message first. `resting` is true then, and false otherwise; a repeated call answers it as the step stands at that call.
+A message wakes a step whose session is at rest, as an answer wakes it, except a step that rests on its report. A step rests on its report when a report ended it for this round and the step is not over: it waits for a person, on a raised hand or a draft under review. Any other report that ended it but left its inputs in place rests it the same way. Such a step is not woken, and keeps its report's mark. Its message stays unread until Keel's next answer or revision wakes the step, and that turn reads the message first. `resting` is true then, and false otherwise; a repeated call answers it as the step stands at that call.
 
 A message never gives the step back. An answer or a revision ends the rest a report began, and the step then reports to Keel again. A message does neither, and a message that reached the step since a report began does not keep the report's mark from being written. If the turn that made the report reads the message, a further report in that turn is answered by the worker and never reaches Keel.
 
-A step that is over takes no message: `409 step-finished`, as for an answer. The route logs neither a message's text nor its sender.
+A step that is over takes no message: `409 step-finished`, as for an answer. Nor does a message it took before then, and no turn has read, wake it once it is over. The route logs neither a message's text nor its sender.
 
 ## Watching a step session
 
