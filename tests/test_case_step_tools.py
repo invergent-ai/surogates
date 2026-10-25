@@ -385,6 +385,27 @@ async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
     assert len(fake_keel.requests) == 1
 
 
+@pytest.mark.parametrize(("output", "at"), [
+    ({"offer": "/workspace/.skills/credit/SKILL.md"}, "offer"),
+    ({"offer": "_history/out/offer.pdf"}, "offer"),
+    ({"payslips": ["in/payslips/03.pdf", "/root/in/payslips/.cache/04.pdf"]}, "payslips[1]"),
+], ids=["skills-folder", "platform-folder", "hidden-in-a-list"])
+async def test_an_output_file_the_case_files_do_not_show_is_refused(fake_keel, tmp_path, output, at):
+    # A step session stages its skills under .skills/ in the case's workspace; a person never sees them.
+    store = _store_for(tmp_path, files={"offer": "one", "payslips": "list"})
+    for path in (".skills/credit/SKILL.md", "_history/out/offer.pdf", "in/payslips/03.pdf", "in/payslips/.cache/04.pdf"):
+        await store.put(path, b"stored")
+
+    result = await _call("complete_step", {**COMPLETION, "output": {**COMPLETION["output"], **output}}, store)
+
+    assert json.loads(result)["error"] == (
+        f"{at} is not a file of the case: name one in /workspace, outside the platform's own folders, "
+        "with no hidden file or folder in its path."
+    )
+    assert fake_keel.requests == []
+    assert store.reported() is None
+
+
 async def test_an_empty_file_is_a_case_file(fake_keel, store):
     await store.put("out/offer.pdf", b"")
 
@@ -647,7 +668,7 @@ async def test_evidence_from_a_hidden_path_is_refused(fake_keel, store, file):
 
     assert error == (
         "evidence[0].source.file is not a file of the case: name one in /workspace, outside the platform's own "
-        "folders, and with no part of its path starting with a dot."
+        "folders, with no hidden file or folder in its path."
     )
     assert fake_keel.requests == []
     assert store.reported() is None

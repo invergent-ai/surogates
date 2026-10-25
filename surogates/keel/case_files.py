@@ -22,7 +22,6 @@ from uuid import UUID
 from botocore.exceptions import ClientError
 
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
-from surogates.keel.files import WORKSPACE_ROOTS
 from surogates.storage.tenant import (
     PLATFORM_WORKSPACE_FOLDERS,
     agent_session_bucket,
@@ -34,6 +33,7 @@ from surogates.tools.workspace_io import StorageWorkspaceIO
 __all__ = [
     "INVALID_PATH",
     "MAX_KEY_BYTES",
+    "WORKSPACE_ROOTS",
     "CaseFile",
     "CaseFileError",
     "case_key",
@@ -45,6 +45,9 @@ __all__ = [
 ]
 
 INVALID_PATH = "invalid-path"
+#: The absolute roots a path in the workspace may start with: the sandbox
+#: mounts the workspace at ``/workspace``, and also at its home, ``/root``.
+WORKSPACE_ROOTS = ("/workspace/", "/root/")
 #: The longest object key an S3 store takes, in bytes of UTF-8.
 MAX_KEY_BYTES = 1024
 #: First folders no path of Keel's may start with: the platform's own, and the
