@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -304,6 +305,248 @@ async def send_session_events(
 # ---------------------------------------------------------------------------
 
 
+async def session_event_stream(
+    request: Request,
+    store: SessionStore,
+    session_id: UUID,
+    *,
+    after: int,
+    watch: bool,
+) -> AsyncIterator[dict]:
+    """The frames of *session_id*'s event stream, for ``EventSourceResponse``.
+
+    It replays every event after the cursor *after* without ``llm.delta``,
+    says ``stream.live`` once that backlog is sent, then sends each new event
+    as it is written.  ``after=-1`` starts at the session's newest event.
+    Without *watch*, a ``completed`` session ends the stream; with it, only
+    ``archived``, a session gone, or the stream's time running out does.
+    Redis comes from ``request.app.state``; without it, the stream polls.
+
+    ``session_event_stream`` does no access check: each caller checks first.
+    """
+    # Try to get Redis for pub/sub notifications (faster than polling).
+    redis = getattr(request.app.state, "redis", None)
+    # after=-1: from the session's newest event on, with nothing to replay.
+    from_now = after < 0
+    cursor = await asyncio.shield(store.last_event_id(session_id)) if from_now else after
+    elapsed = 0.0
+    # Drop llm.delta events while draining the backlog.  Deltas are
+    # per-token chunks that exist only to animate live streaming; the
+    # corresponding llm.response carries the final content.  For a long
+    # conversation they can outnumber everything else 10:1, and pushing
+    # them through SSE during replay stretches the "streaming in" feel
+    # across seconds.  We filter at the SQL level (not just at yield
+    # time) so the rows never leave the database.  Once we catch up
+    # (first empty fetch), we switch to live mode and forward deltas
+    # unmodified.
+    in_replay = not from_now
+    terminal = _WATCH_TERMINAL_STATUSES if watch else _TERMINAL_STATUSES
+    # Wide replay batch so catching up on a long conversation takes 1-2
+    # DB round-trips instead of hundreds.  Live polling uses the narrow
+    # batch since there's rarely more than a handful of pending events.
+    REPLAY_LIMIT = 5000
+    LIVE_LIMIT = 50
+
+    # Subscribe to Redis channel for this session (if available).
+    pubsub = None
+    if redis is not None:
+        try:
+            pubsub = redis.pubsub()
+            if watch:
+                # By pattern, of the exact name (a UUID has no glob
+                # characters): the agent counts a chat's exact subscribers
+                # as its live viewers, and leaves its check-ins and
+                # completions out of the inbox while one is there. A watch
+                # is no viewer.
+                await pubsub.psubscribe(f"surogates:session:{session_id}")
+                # redis-py sends the subscription without waiting for Redis
+                # to take it, and a watch waits long on the channel after
+                # its first read: a publish in between would be heard of
+                # only at the keepalive. So the first read waits for
+                # Redis's reply.
+                await pubsub.get_message(timeout=_POLL_INTERVAL)
+            else:
+                await pubsub.subscribe(f"surogates:session:{session_id}")
+        except Exception:
+            pubsub = None
+
+    try:
+        # Send an immediate comment to establish the SSE connection
+        # (browsers show the request as "pending" until first byte).
+        yield {"comment": "connected"}
+        if watch:
+            yield {"id": str(cursor), "event": "stream.start", "data": "{}"}
+        if from_now:
+            # Nothing to replay: everything on this stream happens now.
+            yield {"event": "stream.live", "data": "{}"}
+        # Last time any byte was sent to the client. A research/mission
+        # coordinator goes idle for minutes between wakes (dispatch ->
+        # wait for executors -> harvest); without a periodic keepalive
+        # the proxy (Cloudflare / ingress, ~100s idle cap) silently
+        # drops the connection and the live thread freezes until reload.
+        last_emit = asyncio.get_event_loop().time()
+
+        while elapsed < _MAX_STREAM_DURATION:
+            # Check if client disconnected.
+            if await request.is_disconnected():
+                return
+
+            # Shield DB calls from cancellation so an in-flight query
+            # completes cleanly and the asyncpg connection returns to the
+            # pool instead of being terminated mid-statement (which SQLA
+            # logs as a noisy invalidation trace).
+            if in_replay:
+                events = await asyncio.shield(
+                    store.get_events(
+                        session_id,
+                        after=cursor,
+                        limit=REPLAY_LIMIT,
+                        exclude_types=[EventType.LLM_DELTA],
+                    )
+                )
+            else:
+                events = await asyncio.shield(
+                    store.get_events(session_id, after=cursor, limit=LIVE_LIMIT)
+                )
+
+            for event in events:
+                yield {
+                    "id": str(event.id),
+                    "event": event.type,
+                    "data": json.dumps(event.data, default=str),
+                }
+                if event.id is not None:
+                    cursor = event.id
+            if events:
+                last_emit = asyncio.get_event_loop().time()
+
+            if not events:
+                if in_replay:
+                    # The backlog is all sent: what follows happens now. The SDK opens a document only on a live edit.
+                    yield {"event": "stream.live", "data": "{}"}
+                in_replay = False
+                # No new events -- check if the session has terminated.
+                try:
+                    session = await asyncio.shield(
+                        store.get_session(session_id)
+                    )
+                except SessionNotFoundError:
+                    yield {
+                        "event": "session.done",
+                        "data": json.dumps({"reason": "session_not_found"}),
+                        "retry": 0,
+                    }
+                    return
+
+                if session.status in terminal:
+                    # Race guard: a POST /messages currently in flight
+                    # commits SESSION_RESUME and publishes on
+                    # ``surogates:session:{id}``. We subscribed above so
+                    # any publish issued after that point is queued. Wait
+                    # briefly before declaring the session done, then
+                    # re-check status — the POST may have flipped it
+                    # back to active.
+                    #
+                    # Loop on get_message until a real publish or the
+                    # deadline: redis-py queues the subscribe-confirm
+                    # message and ``get_message(ignore_subscribe_messages=
+                    # True)`` consumes it returning None, which without a
+                    # loop would collapse our grace window to zero on the
+                    # very first call after subscribe.
+                    if pubsub is not None:
+                        loop = asyncio.get_event_loop()
+                        deadline = loop.time() + _POLL_INTERVAL
+                        while loop.time() < deadline:
+                            remaining = max(0.0, deadline - loop.time())
+                            try:
+                                msg = await asyncio.wait_for(
+                                    pubsub.get_message(
+                                        ignore_subscribe_messages=True,
+                                        timeout=remaining,
+                                    ),
+                                    timeout=remaining + 0.2,
+                                )
+                            except (asyncio.TimeoutError, Exception):
+                                break
+                            if msg is not None:
+                                break
+                        try:
+                            session = await asyncio.shield(
+                                store.get_session(session_id)
+                            )
+                        except SessionNotFoundError:
+                            yield {
+                                "event": "session.done",
+                                "data": json.dumps(
+                                    {"reason": "session_not_found"},
+                                ),
+                                "retry": 0,
+                            }
+                            return
+
+                    if session.status in terminal:
+                        yield {
+                            "event": "session.done",
+                            "data": json.dumps(
+                                {"reason": session.status, "status": session.status}
+                            ),
+                            "retry": 0,  # tell EventSource not to reconnect
+                        }
+                        return
+                    # Status flipped to active during grace window -- loop
+                    # back so the next iteration fetches the new events.
+                    elapsed += _POLL_INTERVAL
+                    continue
+
+                # Wait for a Redis notification or fall back to polling.
+                if watch and pubsub is not None:
+                    # A watch sits through a chat's idle hours: it reads the
+                    # chat again only when a publish wakes it (every
+                    # emit_event publishes after its commit), or at the
+                    # keepalive, or as the stream ends.
+                    now = asyncio.get_event_loop().time()
+                    elapsed += await _wait_for_publish(
+                        pubsub,
+                        min(last_emit + _KEEPALIVE_INTERVAL - now, _MAX_STREAM_DURATION - elapsed),
+                    )
+                else:
+                    if pubsub is not None:
+                        try:
+                            msg = await asyncio.wait_for(
+                                pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
+                                timeout=_POLL_INTERVAL + 0.5,
+                            )
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                    else:
+                        await asyncio.sleep(_POLL_INTERVAL)
+
+                    elapsed += _POLL_INTERVAL
+
+                # Keep the connection warm through proxy idle timeouts.
+                now = asyncio.get_event_loop().time()
+                if now - last_emit >= _KEEPALIVE_INTERVAL:
+                    yield {"comment": "keepalive"}
+                    last_emit = now
+
+        # Stream duration exceeded -- close gracefully.
+        yield {
+            "event": "stream.timeout",
+            "data": json.dumps({"reason": "max_duration_exceeded"}),
+        }
+    except asyncio.CancelledError:
+        # Client disconnected — exit cleanly without letting the
+        # cancellation propagate through SQLAlchemy's connection pool.
+        return
+    finally:
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe()
+                await pubsub.aclose()
+            except Exception:
+                pass
+
+
 @router.get("/api/sessions/{session_id}/events")
 @router.get("/sessions/{session_id}/events")
 async def stream_events(
@@ -349,235 +592,11 @@ async def stream_events(
     # raced with concurrent POST /messages: a message landing between the
     # ``after`` check and the close meant the SESSION_RESUME pubsub publish
     # had no subscriber, and the new turn never reached the client.
-    # ``event_generator`` now subscribes to pubsub first and applies a brief
+    # ``session_event_stream`` now subscribes to pubsub first and applies a brief
     # grace window before declaring a terminal session done, so the single
     # path is correct for both fresh and historical opens.
 
-    # Try to get Redis for pub/sub notifications (faster than polling).
-    redis = getattr(request.app.state, "redis", None)
-
-    async def event_generator():  # noqa: ANN202
-        # after=-1: from the session's newest event on, with nothing to replay.
-        from_now = after < 0
-        cursor = await asyncio.shield(store.last_event_id(session_id)) if from_now else after
-        elapsed = 0.0
-        # Drop llm.delta events while draining the backlog.  Deltas are
-        # per-token chunks that exist only to animate live streaming; the
-        # corresponding llm.response carries the final content.  For a long
-        # conversation they can outnumber everything else 10:1, and pushing
-        # them through SSE during replay stretches the "streaming in" feel
-        # across seconds.  We filter at the SQL level (not just at yield
-        # time) so the rows never leave the database.  Once we catch up
-        # (first empty fetch), we switch to live mode and forward deltas
-        # unmodified.
-        in_replay = not from_now
-        terminal = _WATCH_TERMINAL_STATUSES if watch else _TERMINAL_STATUSES
-        # Wide replay batch so catching up on a long conversation takes 1-2
-        # DB round-trips instead of hundreds.  Live polling uses the narrow
-        # batch since there's rarely more than a handful of pending events.
-        REPLAY_LIMIT = 5000
-        LIVE_LIMIT = 50
-
-        # Subscribe to Redis channel for this session (if available).
-        pubsub = None
-        if redis is not None:
-            try:
-                pubsub = redis.pubsub()
-                if watch:
-                    # By pattern, of the exact name (a UUID has no glob
-                    # characters): the agent counts a chat's exact subscribers
-                    # as its live viewers, and leaves its check-ins and
-                    # completions out of the inbox while one is there. A watch
-                    # is no viewer.
-                    await pubsub.psubscribe(f"surogates:session:{session_id}")
-                    # redis-py sends the subscription without waiting for Redis
-                    # to take it, and a watch waits long on the channel after
-                    # its first read: a publish in between would be heard of
-                    # only at the keepalive. So the first read waits for
-                    # Redis's reply.
-                    await pubsub.get_message(timeout=_POLL_INTERVAL)
-                else:
-                    await pubsub.subscribe(f"surogates:session:{session_id}")
-            except Exception:
-                pubsub = None
-
-        try:
-            # Send an immediate comment to establish the SSE connection
-            # (browsers show the request as "pending" until first byte).
-            yield {"comment": "connected"}
-            if watch:
-                yield {"id": str(cursor), "event": "stream.start", "data": "{}"}
-            if from_now:
-                # Nothing to replay: everything on this stream happens now.
-                yield {"event": "stream.live", "data": "{}"}
-            # Last time any byte was sent to the client. A research/mission
-            # coordinator goes idle for minutes between wakes (dispatch ->
-            # wait for executors -> harvest); without a periodic keepalive
-            # the proxy (Cloudflare / ingress, ~100s idle cap) silently
-            # drops the connection and the live thread freezes until reload.
-            last_emit = asyncio.get_event_loop().time()
-
-            while elapsed < _MAX_STREAM_DURATION:
-                # Check if client disconnected.
-                if await request.is_disconnected():
-                    return
-
-                # Shield DB calls from cancellation so an in-flight query
-                # completes cleanly and the asyncpg connection returns to the
-                # pool instead of being terminated mid-statement (which SQLA
-                # logs as a noisy invalidation trace).
-                if in_replay:
-                    events = await asyncio.shield(
-                        store.get_events(
-                            session_id,
-                            after=cursor,
-                            limit=REPLAY_LIMIT,
-                            exclude_types=[EventType.LLM_DELTA],
-                        )
-                    )
-                else:
-                    events = await asyncio.shield(
-                        store.get_events(session_id, after=cursor, limit=LIVE_LIMIT)
-                    )
-
-                for event in events:
-                    yield {
-                        "id": str(event.id),
-                        "event": event.type,
-                        "data": json.dumps(event.data, default=str),
-                    }
-                    if event.id is not None:
-                        cursor = event.id
-                if events:
-                    last_emit = asyncio.get_event_loop().time()
-
-                if not events:
-                    if in_replay:
-                        # The backlog is all sent: what follows happens now. The SDK opens a document only on a live edit.
-                        yield {"event": "stream.live", "data": "{}"}
-                    in_replay = False
-                    # No new events -- check if the session has terminated.
-                    try:
-                        session = await asyncio.shield(
-                            store.get_session(session_id)
-                        )
-                    except SessionNotFoundError:
-                        yield {
-                            "event": "session.done",
-                            "data": json.dumps({"reason": "session_not_found"}),
-                            "retry": 0,
-                        }
-                        return
-
-                    if session.status in terminal:
-                        # Race guard: a POST /messages currently in flight
-                        # commits SESSION_RESUME and publishes on
-                        # ``surogates:session:{id}``. We subscribed above so
-                        # any publish issued after that point is queued. Wait
-                        # briefly before declaring the session done, then
-                        # re-check status — the POST may have flipped it
-                        # back to active.
-                        #
-                        # Loop on get_message until a real publish or the
-                        # deadline: redis-py queues the subscribe-confirm
-                        # message and ``get_message(ignore_subscribe_messages=
-                        # True)`` consumes it returning None, which without a
-                        # loop would collapse our grace window to zero on the
-                        # very first call after subscribe.
-                        if pubsub is not None:
-                            loop = asyncio.get_event_loop()
-                            deadline = loop.time() + _POLL_INTERVAL
-                            while loop.time() < deadline:
-                                remaining = max(0.0, deadline - loop.time())
-                                try:
-                                    msg = await asyncio.wait_for(
-                                        pubsub.get_message(
-                                            ignore_subscribe_messages=True,
-                                            timeout=remaining,
-                                        ),
-                                        timeout=remaining + 0.2,
-                                    )
-                                except (asyncio.TimeoutError, Exception):
-                                    break
-                                if msg is not None:
-                                    break
-                            try:
-                                session = await asyncio.shield(
-                                    store.get_session(session_id)
-                                )
-                            except SessionNotFoundError:
-                                yield {
-                                    "event": "session.done",
-                                    "data": json.dumps(
-                                        {"reason": "session_not_found"},
-                                    ),
-                                    "retry": 0,
-                                }
-                                return
-
-                        if session.status in terminal:
-                            yield {
-                                "event": "session.done",
-                                "data": json.dumps(
-                                    {"reason": session.status, "status": session.status}
-                                ),
-                                "retry": 0,  # tell EventSource not to reconnect
-                            }
-                            return
-                        # Status flipped to active during grace window -- loop
-                        # back so the next iteration fetches the new events.
-                        elapsed += _POLL_INTERVAL
-                        continue
-
-                    # Wait for a Redis notification or fall back to polling.
-                    if watch and pubsub is not None:
-                        # A watch sits through a chat's idle hours: it reads the
-                        # chat again only when a publish wakes it (every
-                        # emit_event publishes after its commit), or at the
-                        # keepalive, or as the stream ends.
-                        now = asyncio.get_event_loop().time()
-                        elapsed += await _wait_for_publish(
-                            pubsub,
-                            min(last_emit + _KEEPALIVE_INTERVAL - now, _MAX_STREAM_DURATION - elapsed),
-                        )
-                    else:
-                        if pubsub is not None:
-                            try:
-                                msg = await asyncio.wait_for(
-                                    pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
-                                    timeout=_POLL_INTERVAL + 0.5,
-                                )
-                            except (asyncio.TimeoutError, Exception):
-                                pass
-                        else:
-                            await asyncio.sleep(_POLL_INTERVAL)
-
-                        elapsed += _POLL_INTERVAL
-
-                    # Keep the connection warm through proxy idle timeouts.
-                    now = asyncio.get_event_loop().time()
-                    if now - last_emit >= _KEEPALIVE_INTERVAL:
-                        yield {"comment": "keepalive"}
-                        last_emit = now
-
-            # Stream duration exceeded -- close gracefully.
-            yield {
-                "event": "stream.timeout",
-                "data": json.dumps({"reason": "max_duration_exceeded"}),
-            }
-        except asyncio.CancelledError:
-            # Client disconnected — exit cleanly without letting the
-            # cancellation propagate through SQLAlchemy's connection pool.
-            return
-        finally:
-            if pubsub is not None:
-                try:
-                    await pubsub.unsubscribe()
-                    await pubsub.aclose()
-                except Exception:
-                    pass
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(session_event_stream(request, store, session_id, after=after, watch=watch))
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,9 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
 answers it, asks it for a revision or sends it a message, cancels it, and
-reads its status.  It also lists, reads and writes a case's files: the
-workspace its step sessions share; it gives a person the editor config of
-one of them; and it invites staff into an organisation.
+reads its status and its events, by page and live.  It also lists, reads
+and writes a case's files: the workspace its step sessions share; it gives
+a person the editor config of one of them; and it invites staff into an
+organisation.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -34,7 +35,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sse_starlette.sse import EventSourceResponse
 
+from surogates.api.routes.events import session_event_stream
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -65,6 +68,8 @@ from surogates.office.editor_config import build_editor_config
 from surogates.office.kinds import office_kind
 from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_under, open_waiting
 from surogates.runtime.firebase_cache import FirebaseConfigUnavailable, project_firebase
+from surogates.session.events import EventType
+from surogates.session.models import Event
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.storage.backend import TooLarge
@@ -85,6 +90,11 @@ _SCREEN_SOURCE = "keel_case_step"
 _MESSAGE_MARKERS = {"answer": ANSWER_MARKER, "revision": REVISION_MARKER, "message": MESSAGE_MARKER}
 #: Why a cancelled step's session paused: its pause event's and its interrupt's reason.
 _CANCELLED = "case_step_cancelled"
+#: The largest event id Postgres holds: a cursor past it is refused.
+_BIGINT_MAX = 2**63 - 1
+#: How many events a page holds, unless Keel asks for fewer; and at most.
+_PAGE_DEFAULT = 200
+_PAGE_MAX = 500
 
 
 class StepSessionRequest(BaseModel):
@@ -203,6 +213,43 @@ def _database_failed(exc: DBAPIError, *, logged: str, message: str) -> HTTPExcep
     """
     logger.warning("keel-link: %s (%s)", logged, type(exc).__name__)
     return _refused(status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", message)
+
+
+def _database_unavailable(exc: DBAPIError, *, logged: str, message: str) -> HTTPException:
+    """The 503 for a failed database read, which Keel tries again, logged by the error's class name alone.
+
+    The error's text can quote the rows read, the case's data among them.
+    """
+    logger.warning("keel-link: %s (%s)", logged, type(exc).__name__)
+    return _refused(status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", message)
+
+
+def _query_int(request: Request, name: str, *, default: int, low: int, high: int | None) -> int:
+    """The query parameter *name* as an integer from *low* to *high*, or *default* when absent.
+
+    Anything else is 422 ``invalid-request``.  Only ASCII digits make an
+    integer here: no sign, no space.
+    """
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw) if raw.isascii() and raw.isdecimal() else None
+    except ValueError:
+        # More digits than Python converts.
+        value = None
+    if value is None or value < low or (high is not None and value > high):
+        bounds = f"from {low}" if high is None else f"from {low} to {high}"
+        raise _refused(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request",
+            f"The {name} query parameter is not an integer {bounds}.",
+        )
+    return value
+
+
+def _as_utc(value: datetime) -> datetime:
+    """*value* in UTC, a value without an offset read as one in UTC: the database's clock is."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def require_link(request: Request) -> None:
@@ -517,6 +564,62 @@ async def read_step_session(session_id: str, request: Request) -> JSONResponse:
         ) from None
     answer = StepSessionStatus(status=session.status, updated_at=session.updated_at)
     return JSONResponse(answer.model_dump(mode="json"))
+
+
+def _paged(event: Event) -> dict[str, Any]:
+    """*event* as a page holds it: its id, type, data, and when it was written, with its offset."""
+    item = event.model_dump(mode="json", include={"id", "type", "data"})
+    item["created_at"] = None if event.created_at is None else _as_utc(event.created_at).isoformat()
+    return item
+
+
+@router.get("/keel/step-sessions/{session_id}/events")
+async def read_step_session_events(session_id: str, request: Request) -> JSONResponse:
+    """A page of a step session's events after the cursor ``after``, in id order, without ``llm.delta``.
+
+    ``has_more`` says more events follow: Keel reads on with ``after`` set to
+    the page's last id.
+    """
+    require_link(request)
+    try:
+        session = await _step_session(request, session_id)
+        after = _query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
+        limit = _query_int(request, "limit", default=_PAGE_DEFAULT, low=1, high=_PAGE_MAX)
+        # One more than the page holds tells whether more follow.
+        read = await request.app.state.session_store.get_events(
+            session.id, after=after, limit=limit + 1, exclude_types=[EventType.LLM_DELTA],
+        )
+    except DBAPIError as exc:
+        raise _database_unavailable(
+            exc,
+            logged=f"the events of step session {session_id} could not be read",
+            message="The step session's events could not be read; try again.",
+        ) from None
+    return JSONResponse({"events": [_paged(event) for event in read[:limit]], "has_more": len(read) > limit})
+
+
+@router.get("/keel/step-sessions/{session_id}/events/stream")
+async def stream_step_session_events(session_id: str, request: Request) -> EventSourceResponse:
+    """A step session's events after the cursor ``after``, then live, as the session stream sends them when it watches.
+
+    The link key, the session and ``after`` are checked before anything
+    streams.  A step at rest between its turns does not end the stream: only
+    its time running out, the session archived or gone does.  Keel takes up
+    after an end with ``after`` set to the last event id it received.
+    """
+    require_link(request)
+    try:
+        session = await _step_session(request, session_id)
+    except DBAPIError as exc:
+        raise _database_unavailable(
+            exc,
+            logged=f"step session {session_id} could not be read",
+            message="The step session's events could not be read; try again.",
+        ) from None
+    after = _query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
+    return EventSourceResponse(
+        session_event_stream(request, request.app.state.session_store, session.id, after=after, watch=True),
+    )
 
 
 # ---------------------------------------------------------------------------
