@@ -1752,6 +1752,92 @@ describe("AgentChat", () => {
     }
   });
 
+  /** A chat on a stream of its own, in a container of its own: the one an earlier call drew goes. */
+  async function watchChat(props: { hideComposer?: boolean } = {}) {
+    if (root) act(() => root?.unmount());
+    container?.remove();
+    const stream = new FakeEventStream();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={createAdapter(stream)} sessionId="s-1" {...props} />);
+      await Promise.resolve();
+    });
+    return { stream, view: container };
+  }
+
+  it("consecutive notices sit together in one run", async () => {
+    const said = ["Started", "Reading the payslips", "Checked the employer"];
+    const rows = (view: HTMLElement) =>
+      [...view.querySelectorAll('[role="status"]')].filter((row) => said.includes(row.textContent ?? ""));
+    // The rows a notice's run holds: its parent's children.
+    const runOf = (row: Element) => [...row.parentElement!.children].map((sibling) => sibling.textContent);
+
+    const together = await watchChat();
+    act(() => {
+      together.stream.emit("user.message", 1, { content: "Check the payslips" });
+      said.forEach((content, at) => together.stream.emit("llm.response", at + 2, { notice: true, content }));
+    });
+    expect(rows(together.view).map(runOf)).toEqual([said, said, said]);
+
+    const split = await watchChat();
+    act(() => {
+      split.stream.emit("llm.response", 1, { notice: true, content: said[0] });
+      split.stream.emit("llm.response", 2, { notice: true, content: said[1] });
+      split.stream.emit("user.message", 3, { content: "Go on" });
+      split.stream.emit("llm.response", 4, { notice: true, content: said[2] });
+    });
+    const firstRun = [said[0], said[1]];
+    expect(rows(split.view).map(runOf)).toEqual([firstRun, firstRun, [said[2]]]);
+  });
+
+  /** A turn that says what it found, with a list, as it calls a tool, then answers. */
+  function payslipTurn(stream: FakeEventStream, found: string) {
+    act(() => {
+      stream.emit("user.message", 1, { content: "Check the payslips" });
+      stream.emit("llm.request", 2, {});
+      stream.emit("tool.call", 3, { tool_call_id: "read-1", name: "read_file", arguments: { path: "payslips.pdf" } });
+      stream.emit("llm.response", 4, {
+        message: {
+          content: found,
+          tool_calls: [{ id: "read-1", type: "function", function: { name: "read_file", arguments: '{"path":"payslips.pdf"}' } }],
+        },
+      });
+      stream.emit("tool.result", 5, { tool_call_id: "read-1", name: "read_file", content: "two payslips" });
+      stream.emit("llm.request", 6, {});
+      stream.emit("llm.response", 7, { message: { content: "Both match." } });
+    });
+  }
+
+  it("a read-only chat shows every reply whole", async () => {
+    // Simple mode is where a reply that calls a tool shows only its first sentence.
+    window.localStorage.setItem("@invergent/agent-chat-react:viewMode", "simple");
+    const found = "Found two payslips.\n\n- May: 4,200\n- June: 4,250";
+    const items = (view: HTMLElement) => [...view.querySelectorAll("li")].map((item) => item.textContent?.trim());
+
+    const watched = await watchChat({ hideComposer: true });
+    payslipTurn(watched.stream, found);
+    expect(items(watched.view)).toEqual(expect.arrayContaining(["May: 4,200", "June: 4,250"]));
+    expect(watched.view.textContent).toContain("Both match.");
+
+    const written = await watchChat();
+    payslipTurn(written.stream, found);
+    expect(written.view.textContent).toContain("Found two payslips.");
+    expect(written.view.textContent).not.toContain("June: 4,250");
+    expect(written.view.textContent).toContain("Both match.");
+  });
+
+  it("a reply longer than a narration line shows whole in a read-only chat", async () => {
+    window.localStorage.setItem("@invergent/agent-chat-react:viewMode", "simple");
+    const reply = `${"The payslip lists the gross pay, the tax and the net pay for the month, ".repeat(4)}and all add.`;
+    expect(reply).toHaveLength(300);
+
+    const watched = await watchChat({ hideComposer: true });
+    payslipTurn(watched.stream, reply);
+    expect(watched.view.textContent).toContain(reply);
+  });
+
   it("shows a chat the host only reads its browser to watch, and nothing that takes it over or shuts it down", async () => {
     // The shell opens a socket as it mounts; happy-dom would dial it.
     vi.stubGlobal("WebSocket", class {

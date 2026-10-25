@@ -33,6 +33,10 @@ const adapter = readOnlyAdapter({ getSession, openEventStream });
 integrations band, and the transcript fills the chat. A board draws no prompt either. It implies `disabled`, so nothing in the
 transcript writes either: no Stop, no Retry, no answer to the agent's questions.
 
+A watcher reads what the agent says, so with `hideComposer` every reply shows whole, at the final
+answer's size: a reply that calls a tool is never cut to its first sentence. In any chat, consecutive
+notices sit together, at the pitch of the rows in a turn.
+
 `readOnlyAdapter` takes from its source only the reads it names: `getSession` and
 `openEventStream`, and optionally `pollEvents`, `getArtifact`, `getWorkspaceTree`,
 `getWorkspaceFile`, `getBrowserState`, `getChatViewMode` and `getWorkspaceDownloadUrl`. A write
