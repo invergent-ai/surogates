@@ -69,6 +69,8 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/project_threads_cloud",
     "guidance/project_threads_on_computer",
     "guidance/project_thread",
+    "guidance/case_session",
+    "guidance/case_agent",
     "guidance/execution_discipline",
     "guidance/working_principles",
     "identity/default_personality",

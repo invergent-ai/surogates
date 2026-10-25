@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
 from surogates.devices.binding import device_of
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
@@ -143,8 +144,10 @@ class PromptBuilder:
             slash_commands or SlashCommandConfig()
         )
         # When False the brainstorming-gate guidance (force a design pass
-        # before creative work) is left out of the system prompt.
-        self._brainstorming_gate: bool = brainstorming_gate
+        # before creative work) is left out of the system prompt.  A case's
+        # sessions never have it: its people read what they write, and the
+        # design loop's talk of skills and design passes would reach them.
+        self._brainstorming_gate: bool = brainstorming_gate and not is_case_session(session)
         # Active sub-agent type for the current session, or None when
         # the session runs with the default identity.  When set, the
         # agent def's system_prompt body replaces the org-level
@@ -353,6 +356,14 @@ class PromptBuilder:
         # reports back to the master.
         if self._session is not None and is_project_thread(self._session.config):
             parts.append(self._prompts.get("guidance/project_thread"))
+
+        # A case's people never see the agent's skills, tools or
+        # instructions, so no session of the case names them.  A person's
+        # case agent also answers from the case's reads alone and cites them.
+        if is_case_session(self._session):
+            parts.append(self._prompts.get("guidance/case_session"))
+            if is_case_agent_session(self._session):
+                parts.append(self._prompts.get("guidance/case_agent"))
 
         # Execution discipline (verification, missing_context,
         # execute-don't-narrate, etc.) applies to any response from a

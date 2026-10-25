@@ -25,7 +25,6 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import has_file_pane
-from surogates.keel.case_agents import is_case_agent
 from surogates.keel.intake import intake_case_types
 from surogates.keel.steps import case_scope_of, gate_case_tools, is_case_session
 from surogates.runtime.entitlements import (
@@ -92,6 +91,7 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 from surogates.channels.constants import REALTIME_CHANNELS
 from surogates.channels.memory_boundary import (
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
+    is_case_agent_config,
     is_eval_session,
 )  # noqa: E402
 
@@ -1125,7 +1125,9 @@ async def _load_prompt_catalogs_entitled(
     the system prompt; the skill tool and the API listing apply the
     same allowlist per call, so a remembered name still refuses.  A
     project's master has no skill that makes a document either: the skill
-    tools leave the same ones out.
+    tools leave the same ones out.  A person's case agent stages no skill
+    at all: its prompt names none, so neither ``gate_skill_step`` nor the
+    harness's hands it ``skill_step`` back after the case gate took it away.
     """
     from surogates.runtime.entitlements import (
         entitled_skills,
@@ -1134,6 +1136,8 @@ async def _load_prompt_catalogs_entitled(
     from surogates.workstreams import skills_left_out
 
     agents_catalog, skills_catalog = await _load_prompt_catalogs(**kwargs)
+    if is_case_agent_config(session_config):
+        return agents_catalog, []
     skills_catalog = filter_entitled_skills(
         skills_catalog, entitled_skills(session_config),
     )
@@ -1985,11 +1989,6 @@ async def run_worker(settings: Settings) -> None:
             available_skills = [
                 s for s in available_skills if not is_advisor_expert(s)
             ]
-        # A person's case agent stages no skill: its prompt names none, so
-        # ``gate_skill_step`` below, and the harness's, never hand it
-        # ``skill_step`` back after the case gate took it away.
-        if is_case_agent(session):
-            available_skills = []
 
         # The knowledge bases this session may read. Empty list when
         # KB tools are unavailable (no ops DB) or it has none to read.

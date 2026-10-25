@@ -160,7 +160,13 @@ _EVIDENCE_ITEM = {
         "source": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "The path of the file in /workspace where you found it."},
+                "file": {
+                    "type": "string",
+                    "description": (
+                        "A path from the case's files, as it is in /workspace: "
+                        "never a case number, a field's name or a document's title."
+                    ),
+                },
                 "page": {"type": "integer", "minimum": 1, "description": "The page of the file, from 1."},
             },
             "required": ["file"],
