@@ -103,6 +103,19 @@ export interface AgentChatProps {
   goalsEnabled?: boolean;
   compressEnabled?: boolean;
   /**
+   * The composer's Commands menu. Default true. When false, the Commands
+   * toggle is not drawn and no menu lists the builtin commands. The
+   * Scheduled toggle follows `loopsEnabled`, not this.
+   */
+  commandsEnabled?: boolean;
+  /**
+   * The composer's Skills menu. Default true. When false, the Skills toggle
+   * is not drawn, no menu lists skills or says none are attached, and the
+   * adapter's `listSlashCommands` is not called. With `commandsEnabled`
+   * also false, typing `/` opens no menu: the message is sent as typed.
+   */
+  skillsEnabled?: boolean;
+  /**
    * Called when the user clicks the integrations band under the composer.
    * Hosts navigate to their Integrations route. When omitted, the band is
    * not rendered.
@@ -181,6 +194,8 @@ export function AgentChat({
   missionsEnabled = true,
   goalsEnabled = true,
   compressEnabled = true,
+  commandsEnabled = true,
+  skillsEnabled = true,
   onOpenIntegrations,
   onOpenBilling,
   composerFooter,
@@ -608,6 +623,8 @@ export function AgentChat({
               missionsEnabled={missionsEnabled}
               goalsEnabled={goalsEnabled}
               compressEnabled={compressEnabled}
+              commandsEnabled={commandsEnabled}
+              skillsEnabled={skillsEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}
               agentId={agentId}

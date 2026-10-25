@@ -169,6 +169,10 @@ interface ChatThreadProps {
   missionsEnabled?: boolean;
   goalsEnabled?: boolean;
   compressEnabled?: boolean;
+  // The composer's Commands and Skills menus. Forwarded as-is to
+  // ChatComposer (default shown).
+  commandsEnabled?: boolean;
+  skillsEnabled?: boolean;
 
   // Curated research sources from the active deep-research workflow.
   // When non-empty an expandable "Sources" strip renders above the
@@ -1993,6 +1997,8 @@ export function ChatThread({
   missionsEnabled = true,
   goalsEnabled = true,
   compressEnabled = true,
+  commandsEnabled = true,
+  skillsEnabled = true,
   researchSources = [],
   hideTurnSummary = false,
   agentId,
@@ -2162,6 +2168,8 @@ export function ChatThread({
             missionsEnabled={missionsEnabled}
             goalsEnabled={goalsEnabled}
             compressEnabled={compressEnabled}
+            commandsEnabled={commandsEnabled}
+            skillsEnabled={skillsEnabled}
           />
           {composerFooter}
           {onOpenIntegrations && (
