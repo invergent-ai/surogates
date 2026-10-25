@@ -35,10 +35,13 @@ transcript writes either: no Stop, no Retry, no answer to the agent's questions.
 
 `readOnlyAdapter` takes from its source only the reads it names: `getSession` and
 `openEventStream`, and optionally `pollEvents`, `getArtifact`, `getWorkspaceTree`,
-`getWorkspaceFile`, `getBrowserState` and `getChatViewMode`. A write on a wider object never
-passes through. Every write refuses with a `ReadOnlyChatError`, and so does a read the source
-does not have; a source with no `getBrowserState` shows no browser. The adapter leaves out the
-optional features, so the chat leaves them off.
+`getWorkspaceFile`, `getBrowserState`, `getChatViewMode` and `getWorkspaceDownloadUrl`. A write
+on a wider object never passes through. Every write refuses with a `ReadOnlyChatError`, and so
+does a read the source does not have that answers a promise; a source with no `getBrowserState`
+shows no browser. A URL the source has none for is `""`: the browser's live view and, without
+the source's `getWorkspaceDownloadUrl`, the files' downloads are left out, and a generated image
+or video shows its file's name. The adapter leaves out the optional features, so the chat leaves
+them off.
 
 ## Documents
 

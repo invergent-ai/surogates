@@ -92,6 +92,7 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 	};
 
 	const fileName = path.split("/").pop() ?? path;
+	const downloadUrl = adapter.getWorkspaceDownloadUrl({ sessionId, path });
 	return (
 		<aside
 			ref={paneRef}
@@ -101,16 +102,19 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 			<div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
 				<FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
 				<div className="min-w-0 flex-1 truncate font-medium">{fileName}</div>
-				<Button asChild variant="ghost" size="icon-xs">
-					<a
-						href={adapter.getWorkspaceDownloadUrl({ sessionId, path })}
-						download={fileName}
-						aria-label={`Download ${fileName}`}
-						title="Download"
-					>
-						<DownloadIcon className="size-4" />
-					</a>
-				</Button>
+				{/* An adapter with no URL for the file offers no download. */}
+				{downloadUrl && (
+					<Button asChild variant="ghost" size="icon-xs">
+						<a
+							href={downloadUrl}
+							download={fileName}
+							aria-label={`Download ${fileName}`}
+							title="Download"
+						>
+							<DownloadIcon className="size-4" />
+						</a>
+					</Button>
+				)}
 				<Button
 					type="button"
 					variant="ghost"

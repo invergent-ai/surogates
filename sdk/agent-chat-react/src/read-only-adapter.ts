@@ -1,6 +1,6 @@
 import type { AgentChatAdapter } from "./types";
 
-/** What a read-only adapter refuses with: every write, and every read its source does not have. */
+/** What a read-only adapter refuses with: every write, and every read its source does not have that answers a promise. */
 export class ReadOnlyChatError extends Error {
   constructor() {
     super("This chat is read-only.");
@@ -18,6 +18,7 @@ export type AgentChatReadSource = Pick<AgentChatAdapter, "getSession" | "openEve
     | "getWorkspaceFile"
     | "getBrowserState"
     | "getChatViewMode"
+    | "getWorkspaceDownloadUrl"
   >>;
 
 async function refuse(): Promise<never> {
@@ -27,8 +28,9 @@ async function refuse(): Promise<never> {
 /**
  * An adapter that only reads, from *source*. It takes from *source* only the reads
  * `AgentChatReadSource` names, so a write on a wider object never passes through. Every other
- * method the adapter must have refuses with `ReadOnlyChatError`; the optional ones it leaves out,
- * so the chat leaves their features off.
+ * method the adapter must have that answers a promise refuses with `ReadOnlyChatError`. A URL
+ * it has none for is `""`, which the chat draws as no download and no live browser. The optional
+ * methods it leaves out, so the chat leaves their features off.
  */
 export function readOnlyAdapter(source: AgentChatReadSource): AgentChatAdapter {
   return {
@@ -51,11 +53,8 @@ export function readOnlyAdapter(source: AgentChatReadSource): AgentChatAdapter {
     deleteWorkspaceFile: refuse,
     acquireBrowserControl: refuse,
     releaseBrowserControl: refuse,
-    getWorkspaceDownloadUrl() {
-      throw new ReadOnlyChatError();
-    },
-    browserShellUrl() {
-      throw new ReadOnlyChatError();
-    },
+    // The chat asks for these as it draws: a refusal there would take the whole chat down.
+    getWorkspaceDownloadUrl: source.getWorkspaceDownloadUrl ?? (() => ""),
+    browserShellUrl: () => "",
   };
 }

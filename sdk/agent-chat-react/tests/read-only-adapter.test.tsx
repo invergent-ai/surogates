@@ -1,9 +1,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentChatAdapterProvider } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
+import { ArtifactImage } from "../src/components/chat/artifacts/artifact-media";
 import { ReadOnlyChatError, readOnlyAdapter } from "../src/read-only-adapter";
 import type {
+  AgentChatAdapter,
   AgentChatEventStream,
   AgentChatEventType,
   AgentChatSession,
@@ -49,6 +52,31 @@ async function getSession(input: { sessionId: string }): Promise<AgentChatSessio
 /** The adapter over a source that has only the two reads every source has. */
 function watching(stream = new FakeEventStream()) {
   return readOnlyAdapter({ getSession, openEventStream: () => stream });
+}
+
+/**
+ * Watches a turn that wrote a file and ended, with no composer, and answers what the render threw
+ * past the chat, if anything.
+ */
+async function watchTurnThatWroteAFile(adapter: AgentChatAdapter, stream: FakeEventStream): Promise<unknown[]> {
+  const thrown: unknown[] = [];
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container, { onUncaughtError: (error) => thrown.push(error) });
+  await act(async () => {
+    root?.render(<AgentChat adapter={adapter} sessionId="s-1" hideComposer />);
+    await Promise.resolve();
+  });
+  await act(async () => {
+    stream.emit("user.message", 1, { content: "Write the report" });
+    stream.emit("llm.request", 2, {});
+    stream.emit("tool.call", 3, { tool_call_id: "w-1", name: "write_file", arguments: { path: "reports/Summary.docx", content: "Both payslips match." } });
+    stream.emit("tool.result", 4, { tool_call_id: "w-1", name: "write_file", content: "{}" });
+    stream.emit("llm.response", 5, { message: { content: "The report is written." } });
+    stream.emit("session.done", 6, {});
+    await Promise.resolve();
+  });
+  return thrown;
 }
 
 async function refusal(call: () => Promise<unknown>): Promise<unknown> {
@@ -103,7 +131,47 @@ describe("readOnlyAdapter", () => {
       expect(error, name).toBeInstanceOf(ReadOnlyChatError);
       expect((error as Error).message, name).toBe("This chat is read-only.");
     }
-    expect(() => adapter.browserShellUrl("s-1")).toThrow(ReadOnlyChatError);
+    // What a chat draws as it goes asks for no write: a URL it cannot have is none.
+    expect(adapter.browserShellUrl("s-1")).toBe("");
+    expect(adapter.getWorkspaceDownloadUrl({ sessionId: "s-1", path: "reports/Summary.docx" })).toBe("");
+  });
+
+  it("a source's download URL is the adapter's", async () => {
+    const stream = new FakeEventStream();
+    const adapter = readOnlyAdapter({
+      getSession,
+      openEventStream: () => stream,
+      getWorkspaceDownloadUrl: ({ sessionId, path }) => `/files/${sessionId}/${path}`,
+    });
+    expect(await watchTurnThatWroteAFile(adapter, stream)).toEqual([]);
+    const download = container!.querySelector<HTMLAnchorElement>("a[download]");
+    expect(download?.textContent).toBe("Download");
+    expect(download?.getAttribute("href")).toBe("/files/s-1/reports/Summary.docx");
+  });
+
+  it("a watched turn that wrote a file shows without a download", async () => {
+    const stream = new FakeEventStream();
+    expect(await watchTurnThatWroteAFile(watching(stream), stream)).toEqual([]);
+    expect(container!.textContent).toContain("Write the report");
+    expect(container!.textContent).toContain("The report is written.");
+    expect(container!.textContent).toContain("Summary");
+    expect(container!.querySelector("a[download]")).toBeNull();
+    expect(container!.textContent).not.toContain("Download");
+  });
+
+  it("a watched image with no download URL shows its file's name, and no image", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root?.render(
+        <AgentChatAdapterProvider value={{ adapter: watching(), sessionId: "s-1" }}>
+          <ArtifactImage sessionId="s-1" spec={{ path: "charts/payslips.png", caption: "Both payslips" }} />
+        </AgentChatAdapterProvider>,
+      );
+    });
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toBe("payslips.png");
   });
 
   it("a write the source carries is not passed through", async () => {

@@ -19,7 +19,7 @@ export interface AgentChatAdapterContextValue {
   projectComputer?: { deviceId: string; name: string } | null;
   /** That project's threads, live, by id: what their cards show. */
   threadRows?: Record<string, AgentChatThreadRow>;
-  /** A chat the host only reads (AgentChat's ``disabled``): nothing in it answers the agent's questions. */
+  /** A chat the host only reads (AgentChat's ``disabled`` or ``hideComposer``): nothing in it answers the agent's questions. */
   readOnly?: boolean;
 }
 

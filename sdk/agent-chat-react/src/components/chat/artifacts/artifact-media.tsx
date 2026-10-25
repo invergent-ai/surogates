@@ -25,6 +25,17 @@ function useMediaSrc(sessionId: string, path: string): string {
   );
 }
 
+/** A medium an adapter has no URL for: its file's name stands in for it. */
+function MediaFileName({ path }: { path: string }) {
+  return (
+    <figure className="m-0">
+      <figcaption className="px-3 py-2 text-xs leading-snug text-muted-foreground">
+        {path.split("/").pop() || path}
+      </figcaption>
+    </figure>
+  );
+}
+
 function MediaCaption({ caption }: { caption?: string | null }) {
   if (!caption) return null;
   return (
@@ -36,6 +47,7 @@ function MediaCaption({ caption }: { caption?: string | null }) {
 
 export function ArtifactImage({ sessionId, spec, fill = false }: ArtifactMediaProps) {
   const src = useMediaSrc(sessionId, spec.path);
+  if (!src) return <MediaFileName path={spec.path} />;
   return (
     <figure className="m-0">
       <img
@@ -54,6 +66,7 @@ export function ArtifactImage({ sessionId, spec, fill = false }: ArtifactMediaPr
 
 export function ArtifactVideo({ sessionId, spec, fill = false }: ArtifactMediaProps) {
   const src = useMediaSrc(sessionId, spec.path);
+  if (!src) return <MediaFileName path={spec.path} />;
   return (
     <figure className="m-0">
       {/* biome-ignore lint/a11y/useMediaCaption: generated videos have no caption track */}

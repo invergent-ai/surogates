@@ -117,6 +117,23 @@ describe("office documents in the file pane", () => {
     expect(getWorkspaceFile).not.toHaveBeenCalled();
     expect(DocEditor).not.toHaveBeenCalled();
   });
+
+  it("offers no download of an office file the adapter has no URL for", async () => {
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceDownloadUrl: () => "" })} sessionId="s-1" path="docs/Plan.docx" onClose={() => {}} />,
+    );
+    expect(view.textContent).toContain("Plan.docx");
+    expect(view.querySelector("a[download]")).toBeNull();
+  });
+
+  it("offers no download of any other file the adapter has no URL for", async () => {
+    const getWorkspaceFile = vi.fn().mockResolvedValue({ path: "notes.txt", content: "Both payslips match.", size: 20, mime_type: "text/plain", encoding: "utf-8", truncated: false });
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceFile, getWorkspaceDownloadUrl: () => "" })} sessionId="s-1" path="notes.txt" onClose={() => {}} />,
+    );
+    expect(view.textContent).toContain("Both payslips match.");
+    expect(view.querySelector("a[download]")).toBeNull();
+  });
 });
 
 describe("save notices in the editor pane", () => {
