@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and reads its status and cancels it. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -16,6 +16,10 @@
 | `POST /v1/keel/item-sessions?agent_id=<agent>` | Starts the agent's session on one work item, or finds the one Keel's key already started: `201 {"session_id"}` made, `200 {"session_id"}` found. See [An agent's work item](#an-agents-work-item). |
 | `GET /v1/keel/item-sessions/{session_id}` | The item session's `session_id` and `status`. |
 | `POST /v1/keel/item-sessions/{session_id}/cancel` | Ends the item as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
+| `POST /v1/keel/item-sessions/{session_id}/messages` | Gives the item a plain message from whoever works on the case: `202 {"status": "queued"}` when it wakes the session, `202 {"status": "resting"}` when the item rests on its report or is over and keeps it unread. Each key is written once. See [A message to an item](#a-message-to-an-item). |
+| `GET /v1/keel/item-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the item session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/item-sessions/{session_id}/events/stream?after=<id>` | The item session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/item-sessions/{session_id}/progress` | The item session's status, todo list and last activity, as a step session's progress. See [Progress](#progress). |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
@@ -48,10 +52,10 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a step session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step session's events or progress were read. Only the error's class name is logged. |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
+| 500 | `internal-error` | The database failed, other than while a step or item session's events or progress were read. Only the error's class name is logged. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step or item session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
 
 ## A step's inputs
 
@@ -115,9 +119,28 @@ Then come the item's inputs, as data, in a JSON code fence. A raised hand adds i
 
 `POST /v1/keel/item-sessions/{session_id}/cancel` ends the item as a step's cancel ends a step: its inputs leave the session's config and are marked `inputs_redacted`, the session pauses, and every call interrupts its turn. `GET /v1/keel/item-sessions/{session_id}` answers `200 {"session_id", "status"}`.
 
+### A message to an item
+
+`POST /v1/keel/item-sessions/{session_id}/messages` gives the agent working an item a plain word from whoever works on the case, a person or another agent. Its body is `{"text", "sender", "idempotency_key"}`:
+
+- `text` is 1 to 20000 characters;
+- `sender` is the display name of whoever sends it, 1 to 200 printable characters, or null;
+- `idempotency_key` is 1 to 200 characters.
+
+Any other key, `kind` and `note` among them, is `422 invalid-request`: an item takes plain messages alone.
+
+The agent reads `<sender> sends you a message about this work item: <text>`, or `Someone working on the case sends you a message about this work item: <text>` without a sender. Then, after a blank line: `Take it into account, and go on with the item.` In the session's events, the message is a `user.message` whose `data` holds `content`, the text the agent reads, `synthetic: "keel_message"` and `keel_key`, the idempotency key, as a step's plain message does.
+
+The answer is `202 {"status"}`:
+
+- `queued`: the message wakes the item. A session at rest resumes, with a `session.resume` before the message, and a turn under way reads it at its next request to the model. Either way the session is queued, behind people.
+- `resting`: the item rests on its report, once `complete_item` or `return_item` reported it, or it is over, its inputs redacted, as after a cancel. The message is kept unread: nothing resumes, the session's status does not change, and nothing is queued.
+
+Each key is written once. A repeated key writes nothing and wakes nothing, and answers as the item stands at that call. A message never gives the item back: a report's mark stays. Unlike a step, an item that is over does not refuse the message; it keeps it, unread. The route logs neither a message's text nor its sender.
+
 ## Watching a step session
 
-Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The runtime keeps each session's events as an append-only log, and an event never changes once written:
+Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The same reads serve an item session, at `GET /v1/keel/item-sessions/{session_id}/events`, `…/events/stream` and `…/progress`: each answers as the step session's route below does, and is refused the same way. The runtime keeps each session's events as an append-only log, and an event never changes once written:
 
 - `id` is an integer that only grows, unique across all sessions;
 - `type` is the event's type, and `data` its payload as the runtime wrote it, a JSON object;
@@ -167,7 +190,7 @@ A stream counts as no one reading the chat: the session's check-ins and completi
 - `todos` is the session's todo list, as its agent last wrote it with its `todo` tool: a list of `{"id", "content", "status"}` in the agent's order, whose `status` is `pending`, `in_progress`, `completed` or `cancelled`. It is null when the agent never wrote one, and `[]` when it emptied it. `todos_at` is when the list was last written, or null.
 - `last_activity` is the session's newest event that is not an `llm.delta`, as `{"event_id", "type", "at", "tool"}`. `tool` is the tool's name when the event is a `tool.call` or a `tool.result`, and null otherwise. `last_activity` is null for a session with no events.
 
-`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's own session is read: a helper the step started keeps its own list, which progress does not give. Stored data out of its shape never fails the read: a todo item out of its shape is left out, a stored list that is not one reads as `todos` null, and a newest event out of its shape as `last_activity` null. Each is logged by the session id and the kind of error alone. The route logs neither the list nor an event's data.
+`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's or the item's own session is read: a helper it started keeps its own list, which progress does not give. Stored data out of its shape never fails the read: a todo item out of its shape is left out, a stored list that is not one reads as `todos` null, and a newest event out of its shape as `last_activity` null. Each is logged by the session id and the kind of error alone. The route logs neither the list nor an event's data.
 
 ## A case's files
 
@@ -219,7 +242,7 @@ A person joined from another org who has no password yet gets no link from the o
 
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, send any step's agent a message, read every step session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, send any step's or item's agent a message, read every step or item session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 

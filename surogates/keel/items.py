@@ -1,4 +1,4 @@
-"""An agent's session on a work item: the contract Keel starts it with, and its first message.
+"""An agent's session on a work item: the contract Keel starts it with, its first message, and Keel's messages.
 
 A case gives an agent a work item as it gives a person one: a step to do, a
 vote to cast, or a raised hand to answer.  Keel starts the agent's session on
@@ -35,6 +35,7 @@ __all__ = [
     "item_contract_in",
     "item_contract_of",
     "render_item_kickoff",
+    "render_item_message",
 ]
 
 #: A raised hand's question and choices, as Keel's raise-hand route takes them.
@@ -138,3 +139,12 @@ def render_item_kickoff(contract: ItemContract) -> str:
         ]
     lines += ["", f"{closing} {_RETURN_TAIL}"]
     return "\n".join(lines)
+
+
+def render_item_message(text: str, sender: str | None) -> str:
+    """Keel's plain message to an item, as its session reads it: from a person
+    or another agent working on the case, under its *sender*'s name."""
+    return (
+        f"{sender or 'Someone working on the case'} sends you a message about this work item: {text}"
+        "\n\nTake it into account, and go on with the item."
+    )

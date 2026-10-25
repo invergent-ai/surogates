@@ -1057,8 +1057,16 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
     step = await completed_step(link, org, session_store, redis_client)
     # A child of the step works on the case, but is not the step.
     child = await create_child_session(store=session_store, parent=step, channel=API_CHANNEL)
+    # An agent's session on a work item of the case is no step's either.  The
+    # item tests import this module, so their helpers are imported here.
+    from .test_keel_item_sessions import item_body
+    from .test_keel_item_sessions import post as post_item
 
-    for session_id in (chat.id, child.id, uuid.uuid4(), "not-a-session-id"):
+    made = await post_item(link, item_body(org))
+    assert made.status_code == 201, made.text
+    item = await session_store.get_session(UUID(made.json()["session_id"]))
+
+    for session_id in (chat.id, child.id, item.id, uuid.uuid4(), "not-a-session-id"):
         answers = [
             await send(link, session_id),
             await cancel(link, session_id),
@@ -1072,6 +1080,8 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
     for session in (chat, child):
         assert await timeline(session_store, session.id) == []
         assert (await session_store.get_session(session.id)).status == session.status
+    assert await timeline(session_store, item.id) == [("user.message", "keel_item")]
+    assert (await session_store.get_session(item.id)).status == item.status
 
 
 async def test_every_step_session_route_needs_the_link_key(link, org, session_store, redis_client):

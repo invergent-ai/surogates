@@ -1,4 +1,5 @@
-"""Keel starts an agent's session on a work item through ``keel-link``, reads its status and cancels it.
+"""Keel starts an agent's session on a work item through ``keel-link``, sends it messages,
+reads its status, its events and its progress, and cancels it.
 
 A work item is a step, a vote or a raised hand that a case gives an agent
 as it gives a person.  Its session runs as a step's does: on ``api``,
@@ -17,15 +18,18 @@ from uuid import UUID
 import pytest
 
 from surogates.channels.constants import API_CHANNEL
-from surogates.config import INTERRUPT_CHANNEL_PREFIX
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_agent_session, create_child_session
 from surogates.session.store import SessionNotFoundError
 from surogates.tenant.auth.service_account import ServiceAccountStore
 
+from .test_events_stream import _read_sse_events
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org are fixtures)
     AGENT,
     LINK_KEY,
     code_of,
+    completed_step,
     interrupt_listener,
     interrupts_heard,
     link,
@@ -33,10 +37,12 @@ from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org ar
     link_headers,
     org,
     queue_score,
+    timeline,
     user_messages,
 )
 from .test_keel_step_sessions import body as step_body
 from .test_keel_step_sessions import post as post_step
+from .test_keel_watch import CALL, REQUEST, RESPONSE, delta, short_streams, todos, written
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -288,3 +294,216 @@ async def test_status_and_cancel_of_an_item_session(link, org, session_store, re
     assert heard == [(f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}", {"reason": "case_step_cancelled"})]
     pauses = await session_store.get_events(UUID(session_id), types=[EventType.SESSION_PAUSE])
     assert [p.data for p in pauses] == [{"reason": "case_step_cancelled"}]
+
+
+# ---------------------------------------------------------------------------
+# Messages to an item session
+# ---------------------------------------------------------------------------
+
+MESSAGE = "Check the guarantor's income too."
+MESSAGE_KEY = "keel:c:1:item:1:message:1"
+
+
+async def completed_item(link, org: UUID, session_store, redis_client):
+    """An item session whose turn has ended, and which is no longer queued."""
+    created = await post(link, item_body(org))
+    assert created.status_code == 201, created.text
+    session_id = UUID(created.json()["session_id"])
+    await session_store.update_session_status(session_id, "completed")
+    session = await session_store.get_session(session_id)
+    await redis_client.zrem(
+        SHARED_WORK_QUEUE_KEY,
+        encode_queue_member(org_id=str(org), agent_id=session.agent_id, session_id=str(session_id)),
+    )
+    return session
+
+
+def item_message_of(**overrides) -> dict:
+    """Keel's message to an item, from a person working on the case."""
+    return {"text": MESSAGE, "sender": "Ana Popescu", "idempotency_key": MESSAGE_KEY, **overrides}
+
+
+async def send_item_message(client, session_id, *, auth: str | None = LINK_KEY, **overrides):
+    return await client.post(
+        item_route(session_id, "messages"), json=item_message_of(**overrides), headers=link_headers(auth),
+    )
+
+
+async def test_a_message_wakes_an_item_at_rest_as_its_sender_wrote_it(link, org, session_store, redis_client):
+    item = await completed_item(link, org, session_store, redis_client)
+
+    sent = await send_item_message(link, item.id)
+
+    assert (sent.status_code, sent.json()) == (202, {"status": "queued"})
+    assert await timeline(session_store, item.id) == [
+        ("user.message", "keel_item"),
+        ("session.resume", None),
+        ("user.message", "keel_message"),
+    ]
+    message = (await user_messages(session_store, item.id))[-1]
+    assert message.data["content"] == (
+        "Ana Popescu sends you a message about this work item: Check the guarantor's income too.\n\n"
+        "Take it into account, and go on with the item."
+    )
+    assert message.data["keel_key"] == MESSAGE_KEY
+    assert (await session_store.get_session(item.id)).status == "active"
+    # Behind interactive work, as every wake of an item.
+    assert await queue_score(redis_client, item) == 1.0
+
+
+@pytest.mark.parametrize("done", ["completed", "returned", "cancelled"])
+async def test_a_message_to_an_item_that_is_done_rests(link, org, session_store, redis_client, done):
+    item = await completed_item(link, org, session_store, redis_client)
+    if done == "cancelled":
+        cancelled = await link.post(item_route(item.id, "cancel"), headers=link_headers(LINK_KEY))
+        assert cancelled.status_code == 200, cancelled.text
+    else:
+        await session_store.mark_case_step_reported(item.id, done)
+    before = await timeline(session_store, item.id)
+    status = (await session_store.get_session(item.id)).status
+
+    sent = await send_item_message(link, item.id)
+
+    assert (sent.status_code, sent.json()) == (202, {"status": "resting"})
+    # Kept unread: no resume, no change of status, nothing queued.
+    assert await timeline(session_store, item.id) == [*before, ("user.message", "keel_message")]
+    assert (await session_store.get_session(item.id)).status == status
+    assert await queue_score(redis_client, item) is None
+
+    again = await send_item_message(link, item.id)
+
+    assert (again.status_code, again.json()) == (202, {"status": "resting"})
+    assert await timeline(session_store, item.id) == [*before, ("user.message", "keel_message")]
+    assert await queue_score(redis_client, item) is None
+
+
+async def test_a_message_mid_turn_is_queued_without_a_resume(link, org, session_store, redis_client):
+    item = await completed_item(link, org, session_store, redis_client)
+    await session_store.update_session_status(item.id, "active")
+
+    sent = await send_item_message(link, item.id)
+
+    assert (sent.status_code, sent.json()) == (202, {"status": "queued"})
+    assert await timeline(session_store, item.id) == [
+        ("user.message", "keel_item"),
+        ("user.message", "keel_message"),
+    ]
+    assert (await session_store.get_session(item.id)).status == "active"
+    assert await queue_score(redis_client, item) == 1.0
+
+
+async def test_an_item_message_that_does_not_validate_is_invalid(link, org, session_store, redis_client):
+    item = await completed_item(link, org, session_store, redis_client)
+
+    answers = [
+        # Keys the route does not know: an item takes plain messages alone.
+        await send_item_message(link, item.id, note="x"),
+        await send_item_message(link, item.id, kind="message"),
+        await send_item_message(link, item.id, text=""),
+        # Its sender is a name on one line, of at most 200 characters, or null.
+        await send_item_message(link, item.id, sender="Ana\nPopescu"),
+        await send_item_message(link, item.id, sender="a" * 201),
+    ]
+
+    assert [(a.status_code, code_of(a)) for a in answers] == [(422, "invalid-request")] * 5
+    assert (await session_store.get_session(item.id)).status == "completed"
+    assert await timeline(session_store, item.id) == [("user.message", "keel_item")]
+
+
+# ---------------------------------------------------------------------------
+# Watching an item session
+# ---------------------------------------------------------------------------
+
+
+async def test_an_item_sessions_events_by_page_and_live(link, org, session_store, redis_client, monkeypatch):
+    short_streams(monkeypatch)
+    item = await completed_item(link, org, session_store, redis_client)
+    await written(session_store, item.id, REQUEST, delta("I read"), delta(" the offer."), RESPONSE)
+
+    page = await link.get(item_route(item.id, "events"), params={"after": 0}, headers=link_headers(LINK_KEY))
+
+    assert page.status_code == 200, page.text
+    assert [event["type"] for event in page.json()["events"]] == ["user.message", "llm.request", "llm.response"]
+    assert page.json()["has_more"] is False
+
+    async def streamed() -> list[tuple[str, str]]:
+        async with link.stream(
+            "GET", item_route(item.id, "events/stream"), params={"after": 0}, headers=link_headers(LINK_KEY),
+        ) as response:
+            assert response.status_code == 200
+            return await _read_sse_events(response, until_types={"stream.live"}, deadline_s=8.0)
+
+    events = await asyncio.wait_for(streamed(), 10)
+
+    assert [event_type for event_type, _data in events] == [
+        "stream.start", "user.message", "llm.request", "llm.response", "stream.live",
+    ]
+
+
+async def test_an_item_sessions_progress(link, org, session_store, redis_client):
+    item = await completed_item(link, org, session_store, redis_client)
+    listed = [{"id": "1", "content": "Read the offer", "status": "in_progress"}]
+    await written(session_store, item.id, todos(listed), CALL)
+
+    answer = await link.get(item_route(item.id, "progress"), headers=link_headers(LINK_KEY))
+
+    assert answer.status_code == 200, answer.text
+    progress = answer.json()
+    assert progress["status"] == "completed"
+    assert progress["todos"] == listed
+    assert progress["last_activity"]["type"] == "tool.call"
+    assert progress["last_activity"]["tool"] == "read_file"
+
+
+async def item_routes_answer(link, session_id, *, auth: str | None = LINK_KEY) -> list:
+    """What each route on one item session answers."""
+    headers = link_headers(auth)
+    return [
+        await link.get(item_route(session_id), headers=headers),
+        await link.post(item_route(session_id, "cancel"), headers=headers),
+        await send_item_message(link, session_id, auth=auth),
+        await link.get(item_route(session_id, "events"), headers=headers),
+        await link.get(item_route(session_id, "events/stream"), headers=headers),
+        await link.get(item_route(session_id, "progress"), headers=headers),
+    ]
+
+
+async def test_a_session_that_is_not_an_items_is_unknown(link, link_app, org, session_store, redis_client):
+    item = await completed_item(link, org, session_store, redis_client)
+    step = await completed_step(link, org, session_store, redis_client)
+    # A helper of the item works on the case, but is not the item.
+    helper = await create_child_session(store=session_store, parent=item, channel=API_CHANNEL)
+    chat = await create_agent_session(
+        store=session_store,
+        storage=link_app.state.storage,
+        settings=link_app.state.settings,
+        org_id=org,
+        user_id=None,
+        agent_id=AGENT,
+        channel=API_CHANNEL,
+    )
+
+    for session_id in (step.id, helper.id, chat.id, uuid.uuid4(), "not-a-session-id"):
+        answers = await item_routes_answer(link, session_id)
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 6, session_id
+
+    assert await timeline(session_store, step.id) == [("user.message", "keel_step")]
+    for session in (step, helper, chat):
+        assert (await session_store.get_session(session.id)).status == session.status
+    for session in (helper, chat):
+        assert await timeline(session_store, session.id) == []
+
+
+async def test_every_item_session_route_needs_the_link_key(link, org, session_store, redis_client):
+    item = await completed_item(link, org, session_store, redis_client)
+
+    for key in (None, "not-the-link-key"):
+        created = await link.post(
+            ROUTE, params={"agent_id": AGENT}, json=item_body(org, "keel:c:1:item:9"), headers=link_headers(key),
+        )
+        answers = [created, *await item_routes_answer(link, item.id, auth=key)]
+        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 7
+
+    assert await session_store.get_session_by_idempotency_key(org, "keel:c:1:item:9") is None
+    assert (await session_store.get_session(item.id)).status == "completed"
+    assert await timeline(session_store, item.id) == [("user.message", "keel_item")]

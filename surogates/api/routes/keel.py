@@ -9,8 +9,9 @@ Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
 :func:`require_link`, and loads sessions directly: no tenant, no JWT.  The
 public helpers here serve the other keel-link routers too: refusals,
-database failures, the agent's resolution, the injection screen, and the
-create, lookup and cancel of a session Keel starts.
+database failures, the agent's resolution, the injection screen, the
+create, lookup, queueing and cancel of a session Keel starts, and the reads
+of its events, by page and live, and of its progress.
 
 An error is ``HTTPException(status, {"code", "message"})``, which answers
 ``{"detail": {"code", "message"}}``.  Its message names no case data, and
@@ -36,6 +37,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -136,6 +138,22 @@ class StepSessionCreated(BaseModel):
     created: bool
 
 
+def _printable(value: str) -> str:
+    if not value.isprintable():
+        raise ValueError("holds a character that is not printable")
+    return value
+
+
+def _a_name(value: str) -> str:
+    if not value.strip():
+        raise ValueError("is blank")
+    return _printable(value)
+
+
+#: The display name of the person or agent who sends Keel's plain message: 1 to 200 printable characters, not blank.
+SenderName = Annotated[str, Field(min_length=1, max_length=200), AfterValidator(_a_name)]
+
+
 class StepMessage(BaseModel):
     """Keel's message to a step: a person's answer to its raised hand, a draft's
     revision request, or a plain message.  A key this route does not know is refused."""
@@ -146,18 +164,9 @@ class StepMessage(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
     # An answer's or a revision's alone.
     note: str | None = Field(default=None, max_length=20000)
-    # A plain message's alone: the display name of the person or agent who sends it.
-    sender: str | None = Field(default=None, min_length=1, max_length=200)
+    # A plain message's alone.
+    sender: SenderName | None = None
     idempotency_key: str = Field(min_length=1, max_length=200)
-
-    @field_validator("sender")
-    @classmethod
-    def _a_name(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value.strip():
-            raise ValueError("is blank")
-        return _printable(value)
 
     @model_validator(mode="after")
     def _fields_of_its_kind(self) -> StepMessage:
@@ -178,7 +187,7 @@ _IsoTime = Annotated[datetime, PlainSerializer(datetime.isoformat, when_used="js
 
 
 class TodoItem(BaseModel):
-    """One item of a step's todo list, as its agent's todo tool writes it.  Keys beyond these are left out."""
+    """One item of a session's todo list, as its agent's todo tool writes it.  Keys beyond these are left out."""
 
     # A stored item out of this shape is left out, never turned into one.
     model_config = ConfigDict(strict=True)
@@ -189,7 +198,7 @@ class TodoItem(BaseModel):
 
 
 class LastActivity(BaseModel):
-    """A step session's newest event that is not an ``llm.delta``; ``tool`` names a tool call's or result's tool."""
+    """A session's newest event that is not an ``llm.delta``; ``tool`` names a tool call's or result's tool."""
 
     event_id: int
     type: str
@@ -215,12 +224,6 @@ class CaseEditorRequest(BaseModel):
     user_id: UUID
     access: Literal["edit", "comment", "view"]
     theme: Literal["light", "dark"] = "light"
-
-
-def _printable(value: str) -> str:
-    if not value.isprintable():
-        raise ValueError("holds a character that is not printable")
-    return value
 
 
 class MemberInvitationRequest(BaseModel):
@@ -379,6 +382,17 @@ def _key_in_use() -> HTTPException:
     )
 
 
+async def queue_session(request: Request, session: Any) -> None:
+    """Queue *session* for a worker to wake, at its priority: a case's work waits behind people."""
+    await enqueue_session(
+        request.app.state.redis,
+        org_id=str(session.org_id),
+        agent_id=session.agent_id,
+        session_id=session.id,
+        priority=session_queue_priority(session),
+    )
+
+
 async def kick_off(request: Request, session: Any, *, content: str, synthetic: str, key: str) -> None:
     """Write a session's first message, marked *synthetic*, unless it has it; queue it when this call wrote it.
 
@@ -387,15 +401,8 @@ async def kick_off(request: Request, session: Any, *, content: str, synthetic: s
     written = await request.app.state.session_store.emit_keyed_synthetic_message(
         session.id, content=content, synthetic=synthetic, key=key,
     )
-    if written is None:
-        return
-    await enqueue_session(
-        request.app.state.redis,
-        org_id=str(session.org_id),
-        agent_id=session.agent_id,
-        session_id=session.id,
-        priority=session_queue_priority(session),
-    )
+    if written is not None:
+        await queue_session(request, session)
 
 
 class _KeelCreate(Protocol):
@@ -550,7 +557,8 @@ async def create_case_session(request: Request, body: _CaseWorkCreate, agent_id:
     )
 
 
-def _unknown_session() -> HTTPException:
+def unknown_session() -> HTTPException:
+    """404 ``unknown-session``: no such session, or none the route serves."""
     return refused(status.HTTP_404_NOT_FOUND, "unknown-session", "No such session.")
 
 
@@ -562,14 +570,29 @@ async def session_where(request: Request, session_id: str, holds: Callable[[Any]
     try:
         session_uuid = UUID(session_id)
     except ValueError:
-        raise _unknown_session() from None
+        raise unknown_session() from None
     try:
         session = await request.app.state.session_store.get_session(session_uuid)
     except SessionNotFoundError:
-        raise _unknown_session() from None
+        raise unknown_session() from None
     if not holds(session):
-        raise _unknown_session()
+        raise unknown_session()
     return session
+
+
+async def watched_session(request: Request, session_id: str, holds: Callable[[Any], bool]) -> Any:
+    """The session a read of its events or its progress names, as :func:`session_where` finds it.
+
+    A database failure is 503 ``unavailable``, which Keel tries again.
+    """
+    try:
+        return await session_where(request, session_id, holds)
+    except DBAPIError as exc:
+        raise database_unavailable(
+            exc,
+            logged=f"session {session_id} could not be read",
+            message="The session could not be read; try again.",
+        ) from None
 
 
 async def _step_session(request: Request, session_id: str) -> Any:
@@ -607,7 +630,7 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
         )
     except SessionNotFoundError:
         # Deleted since the lookup above.
-        raise _unknown_session() from None
+        raise unknown_session() from None
     except StepFinishedError:
         raise refused(
             status.HTTP_409_CONFLICT, "step-finished", "The step is over; it takes no more messages.",
@@ -619,13 +642,7 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
             message="The message could not be delivered.",
         ) from None
     if written is not None and not written.resting:
-        await enqueue_session(
-            request.app.state.redis,
-            org_id=str(session.org_id),
-            agent_id=session.agent_id,
-            session_id=session.id,
-            priority=session_queue_priority(session),
-        )
+        await queue_session(request, session)
     answer: dict[str, bool] = {"delivered": written is not None}
     if body.kind == "message":
         # A repeat writes nothing: the row read above says whether the step rests.
@@ -663,7 +680,7 @@ async def cancel_work_session(request: Request, session: Any) -> JSONResponse:
         await request.app.state.session_store.cancel_case_step(session.id, {"reason": _CANCELLED})
     except SessionNotFoundError:
         # Deleted since the lookup.
-        raise _unknown_session() from None
+        raise unknown_session() from None
     except DBAPIError as exc:
         raise database_failed(
             exc,
@@ -699,18 +716,15 @@ def _paged(event: Event) -> dict[str, Any]:
     return item
 
 
-@router.get("/keel/step-sessions/{session_id}/events")
-async def read_step_session_events(session_id: str, request: Request) -> JSONResponse:
-    """A page of a step session's events after the cursor ``after``, in id order, without ``llm.delta``.
+async def events_page(request: Request, session: Any) -> JSONResponse:
+    """A page of *session*'s events after the cursor ``after``, in id order, without ``llm.delta``.
 
     ``has_more`` says more events follow: Keel reads on with ``after`` set to
-    the page's last id.
+    the page's last id.  The route checks the link key and finds the session first.
     """
-    require_link(request)
+    after = query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
+    limit = query_int(request, "limit", default=_PAGE_DEFAULT, low=1, high=_PAGE_MAX)
     try:
-        session = await _step_session(request, session_id)
-        after = query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
-        limit = query_int(request, "limit", default=_PAGE_DEFAULT, low=1, high=_PAGE_MAX)
         # One more than the page holds tells whether more follow.
         read = await request.app.state.session_store.get_events(
             session.id, after=after, limit=limit + 1, exclude_types=[EventType.LLM_DELTA],
@@ -718,34 +732,42 @@ async def read_step_session_events(session_id: str, request: Request) -> JSONRes
     except DBAPIError as exc:
         raise database_unavailable(
             exc,
-            logged=f"the events of step session {session_id} could not be read",
-            message="The step session's events could not be read; try again.",
+            logged=f"the events of session {session.id} could not be read",
+            message="The session's events could not be read; try again.",
         ) from None
     return JSONResponse({"events": [_paged(event) for event in read[:limit]], "has_more": len(read) > limit})
 
 
-@router.get("/keel/step-sessions/{session_id}/events/stream")
-async def stream_step_session_events(session_id: str, request: Request) -> EventSourceResponse:
-    """A step session's events after the cursor ``after``, then live, as the session stream sends them when it watches.
+async def events_stream(request: Request, session: Any) -> EventSourceResponse:
+    """*session*'s events after the cursor ``after``, then live, as the session stream sends them when it watches.
 
-    The link key, the session and ``after`` are checked before anything
-    streams.  A step at rest between its turns does not end the stream: only
-    its time running out, the session archived or gone does.  Keel takes up
-    after an end with ``after`` set to the last event id it received.
+    The route checks the link key and finds the session first, and ``after``
+    is checked here, before anything streams.  A session at rest between its
+    turns does not end the stream: only its time running out, the session
+    archived or gone does.  Keel takes up after an end with ``after`` set to
+    the last event id it received.
     """
-    require_link(request)
-    try:
-        session = await _step_session(request, session_id)
-    except DBAPIError as exc:
-        raise database_unavailable(
-            exc,
-            logged=f"step session {session_id} could not be read",
-            message="The step session's events could not be read; try again.",
-        ) from None
     after = query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
     return EventSourceResponse(
         session_event_stream(request, request.app.state.session_store, session.id, after=after, watch=True),
     )
+
+
+@router.get("/keel/step-sessions/{session_id}/events")
+async def read_step_session_events(session_id: str, request: Request) -> JSONResponse:
+    """A page of a step session's events after the cursor ``after``, without ``llm.delta`` (:func:`events_page`)."""
+    require_link(request)
+    return await events_page(request, await watched_session(request, session_id, is_case_step))
+
+
+@router.get("/keel/step-sessions/{session_id}/events/stream")
+async def stream_step_session_events(session_id: str, request: Request) -> EventSourceResponse:
+    """A step session's events after the cursor ``after``, then live (:func:`events_stream`).
+
+    A step at rest between its turns does not end the stream.
+    """
+    require_link(request)
+    return await events_stream(request, await watched_session(request, session_id, is_case_step))
 
 
 #: The events whose ``data["name"]`` names the tool they call or answer.
@@ -753,15 +775,15 @@ _TOOL_EVENTS = frozenset({EventType.TOOL_CALL.value, EventType.TOOL_RESULT.value
 
 
 def _out_of_shape(what: str, session_id: UUID, kind: str) -> None:
-    """Log that a stored value of the step session is out of its shape, by *kind* alone: its text quotes the case."""
-    logger.warning("keel-link: %s of step session %s is out of its shape (%s)", what, session_id, kind)
+    """Log that a stored value of the session is out of its shape, by *kind* alone: its text quotes the case."""
+    logger.warning("keel-link: %s of session %s is out of its shape (%s)", what, session_id, kind)
 
 
 async def _todo_list(store: Any, session_id: UUID) -> tuple[list[TodoItem] | None, datetime | None]:
-    """The step's todo list as its agent last wrote it, and when; ``(None, None)`` when it never wrote one.
+    """The session's todo list as its agent last wrote it, and when; ``(None, None)`` when it never wrote one.
 
     A stored list out of its shape reads as none, and an item out of its
-    shape is left out: one bad row never keeps Keel from a step's progress.
+    shape is left out: one bad row never keeps Keel from a session's progress.
     """
     try:
         listed = await store.last_event(session_id, EventType.TODO_UPDATED)
@@ -787,7 +809,7 @@ async def _todo_list(store: Any, session_id: UUID) -> tuple[list[TodoItem] | Non
 
 
 async def _last_activity(store: Any, session_id: UUID) -> LastActivity | None:
-    """The step session's newest event that is not an ``llm.delta``; None when it has none, or it is out of its shape."""
+    """The session's newest event that is not an ``llm.delta``; None when it has none, or it is out of its shape."""
     try:
         event = await store.newest_event(session_id, except_types=[EventType.LLM_DELTA])
     except ValidationError as exc:
@@ -804,29 +826,37 @@ async def _last_activity(store: Any, session_id: UUID) -> LastActivity | None:
     )
 
 
-@router.get("/keel/step-sessions/{session_id}/progress")
-async def read_step_session_progress(session_id: str, request: Request) -> JSONResponse:
-    """A step session's status, its todo list as its agent last wrote it, and its last activity.
+async def progress_answer(request: Request, session: Any) -> JSONResponse:
+    """*session*'s status, its todo list as its agent last wrote it, and its last activity.
 
-    Only the step's own session is read: a helper it started keeps its own
-    list.  Stored data out of its shape never fails the read: a todo item
-    out of its shape is left out, a list out of its shape reads as none,
-    and so does a newest event out of its shape.
+    Only *session* is read: a helper it started keeps its own list.  Stored
+    data out of its shape never fails the read: a todo item out of its shape
+    is left out, a list out of its shape reads as none, and so does a newest
+    event out of its shape.  The route checks the link key and finds the
+    session first.
     """
-    require_link(request)
     store = request.app.state.session_store
     try:
-        session = await _step_session(request, session_id)
         todos, todos_at = await _todo_list(store, session.id)
         last_activity = await _last_activity(store, session.id)
     except DBAPIError as exc:
         raise database_unavailable(
             exc,
-            logged=f"the progress of step session {session_id} could not be read",
-            message="The step session's progress could not be read; try again.",
+            logged=f"the progress of session {session.id} could not be read",
+            message="The session's progress could not be read; try again.",
         ) from None
     answer = StepProgress(status=session.status, todos=todos, todos_at=todos_at, last_activity=last_activity)
     return JSONResponse(answer.model_dump(mode="json"))
+
+
+@router.get("/keel/step-sessions/{session_id}/progress")
+async def read_step_session_progress(session_id: str, request: Request) -> JSONResponse:
+    """A step session's status, its todo list and its last activity (:func:`progress_answer`).
+
+    Only the step's own session is read: a helper it started keeps its own list.
+    """
+    require_link(request)
+    return await progress_answer(request, await watched_session(request, session_id, is_case_step))
 
 
 # ---------------------------------------------------------------------------
