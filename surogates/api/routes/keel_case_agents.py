@@ -30,6 +30,7 @@ from surogates.api.routes.keel import (
     database_failed,
     events_page,
     events_stream,
+    note_case_org,
     org_member_name,
     queue_session,
     read_body,
@@ -136,6 +137,7 @@ async def create_case_agent_session(request: Request) -> JSONResponse:
             logged=f"the case agent session of case {ref.case_id} could not be written",
             message="The case agent session could not be created.",
         ) from None
+    await note_case_org(request, ref.case_id, body.org_id)
     return JSONResponse(
         {"session_id": str(session.id)},
         status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

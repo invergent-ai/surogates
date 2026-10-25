@@ -65,6 +65,7 @@ from surogates.keel.case_files import (
     case_workspace,
     download_case_file,
     list_case_files,
+    record_case_org,
     write_case_file,
 )
 from surogates.keel.files import file_value
@@ -85,7 +86,7 @@ from surogates.office.agent import AGENT_KINDS
 from surogates.office.editor_config import build_editor_config
 from surogates.office.guard import office_tools_offered
 from surogates.office.kinds import office_kind
-from surogates.office.mentions import MENTION_SOURCE, mention_message
+from surogates.office.mentions import MENTION_SOURCE, mention_message, mentionable_agent
 from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_under, open_waiting
 from surogates.runtime.firebase_cache import FirebaseConfigUnavailable, project_firebase
 from surogates.session.events import EventType
@@ -238,6 +239,13 @@ class StepProgress(BaseModel):
     last_activity: LastActivity | None
 
 
+class MentionableAgent(BaseModel):
+    """An agent Keel offers to mention in a case's document: the agent id, and Keel's name for it."""
+
+    id: str = Field(min_length=1, max_length=200)
+    name: Annotated[str, Field(min_length=1, max_length=200), AfterValidator(_printable)]
+
+
 class CaseEditorRequest(BaseModel):
     """Keel's request for one person's editor on a case's document.  Keys this runtime does not know are ignored."""
 
@@ -248,6 +256,8 @@ class CaseEditorRequest(BaseModel):
     user_id: UUID
     access: Literal["edit", "comment", "view"]
     theme: Literal["light", "dark"] = "light"
+    # The agents the editor offers to mention: a draft step's, whose agent answers in the comment's thread.
+    mentionable: list[MentionableAgent] = Field(default=[], max_length=20)
 
 
 class MemberInvitationRequest(BaseModel):
@@ -494,6 +504,20 @@ async def _exists(store: Any, session_id: UUID) -> bool:
     return True
 
 
+async def note_case_org(request: Request, case_id: UUID, org_id: UUID) -> None:
+    """Record *org_id* as the case's org, unless one is recorded already, once a session of the case exists.
+
+    A create never refuses on it: a failure is logged by the case id and the
+    error's class name, and changes nothing.
+    """
+    state = request.app.state
+    try:
+        await record_case_org(state.storage, state.settings, case_id, org_id)
+    except Exception as exc:
+        # The error's text can name the record's key, or the org.
+        logger.warning("keel-link: the org of case %s could not be recorded (%s)", case_id, type(exc).__name__)
+
+
 def _answer(session: Any, *, created: bool) -> JSONResponse:
     answer = StepSessionCreated(
         session_id=session.id,
@@ -546,6 +570,7 @@ async def create_step_session(request: Request) -> JSONResponse:
             logged=f"the step session of case {contract.case_id} could not be written",
             message="The step session could not be created.",
         ) from None
+    await note_case_org(request, contract.case_id, body.org_id)
     return _answer(session, created=created)
 
 
@@ -1190,6 +1215,12 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
     step session of the case that has it open, shares its one editing
     session.  A kind the editor only converts to view opens read-only,
     whatever the access.
+
+    The case's org is recorded first, when none is: a case recorded under
+    another org is 404 ``unknown-file``, as a file that is not there.  The
+    agents Keel names are offered to mention where an agent answers a
+    comment: the runtime has agent editing, and the editor edits a
+    document an agent edits.
     """
     require_link(request)
     case = _case_id(case_id)
@@ -1206,7 +1237,9 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
         )
     workspace = case_workspace(state.storage, state.settings, case)
     try:
-        found = await workspace.stat(relative)
+        recorded = await record_case_org(state.storage, state.settings, case, body.org_id)
+        # Another org's case is not told apart from a file that is not there.
+        found = await workspace.stat(relative) if recorded == body.org_id else None
     except (ClientError, BotoCoreError) as exc:
         raise _storage_failed(exc, case) from None
     if found is None:
@@ -1228,11 +1261,17 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
             logged=f"a document of case {case} could not be opened",
             message="The editor could not be opened.",
         ) from None
+    access = body.access if kind.editable else "view"
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=relative, kind=kind,
-        user_id=editor_id, user_name=name, access=body.access if kind.editable else "view", theme=body.theme,
+        user_id=editor_id, user_name=name, access=access, theme=body.theme,
     )
-    return JSONResponse({"document_server_url": office.public_url.rstrip("/"), "config": config})
+    offered = office.agent_editing and access != "view" and kind.file_type in AGENT_KINDS
+    return JSONResponse({
+        "document_server_url": office.public_url.rstrip("/"),
+        "config": config,
+        "mentionable_users": [mentionable_agent(agent.id, agent.name) for agent in body.mentionable] if offered else [],
+    })
 
 
 # ---------------------------------------------------------------------------

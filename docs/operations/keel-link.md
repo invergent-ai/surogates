@@ -30,7 +30,7 @@
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
-| `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme"}` and answers `200 {"document_server_url", "config"}`: one person's editor config for the document at the path. See [A case's document in the editor](#a-cases-document-in-the-editor). |
+| `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme", "mentionable"}` and answers `200 {"document_server_url", "config", "mentionable_users"}`: one person's editor config for the document at the path, and the agents it offers to mention. See [A case's document in the editor](#a-cases-document-in-the-editor). |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -45,7 +45,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
 | 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
-| 404 | `unknown-file` | No file at the path in the case's workspace. |
+| 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. |
@@ -331,9 +331,11 @@ A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when i
 
 ## A case's document in the editor
 
-`POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme"}`: `access` is `edit`, `comment` or `view`, and `theme` is `light` (the default) or `dark`. The path is checked as the file routes check it.
+`POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme", "mentionable"}`: `access` is `edit`, `comment` or `view`, `theme` is `light` (the default) or `dark`, and `mentionable` is optional. The path is checked as the file routes check it.
 
-The person is the runtime user `user_id`, who must belong to the org `org_id`. `org_id` scopes only the user: the runtime does not check that the case belongs to that org, and the link key is trusted for any case. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
+The person is the runtime user `user_id`, who must belong to the org `org_id`. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
+
+The runtime records the org a case belongs to the first time it is told: at the creation of a step, item or case agent session of the case, or at the editor, whichever comes first. The record sits beside the case's workspace, in `boundaries/case:<case_id>/org.json` in the session bucket, where no sandbox mounts it and no file route lists or reads it. A create never refuses on it: when the record cannot be written, the failure is logged by the case id and the error's class name, and the session starts all the same. The editor reads the record before anything else of the case: a case recorded under another org than `org_id` answers `404 unknown-file`, as a file that is not there, and a record the object store will not give is `503 unavailable`. A record that cannot be read as an org is written over.
 
 | `access` | The editor |
 |---|---|
@@ -343,7 +345,9 @@ The person is the runtime user `user_id`, who must belong to the org `org_id`. `
 
 The document server converts older formats (`.doc`, `.odt`, `.rtf`, `.xls`, `.ods`, `.ppt`, `.odp`) to show them, so these open read-only, without comments, whatever the access.
 
-Everyone who opens the file shares its one editing session, whatever their access, and so does a step session of the case that has the file open. The document belongs to the case: it is read from and saved into the case's files, and stays open while anyone is in it, with or without a chat. While it is open, the listing's `editing` names who is in it, and a write over it is refused. Mentions are not offered: the config names nobody to mention. Like the file routes, it logs no path.
+Everyone who opens the file shares its one editing session, whatever their access, and so does a step session of the case that has the file open. The document belongs to the case: it is read from and saved into the case's files, and stays open while anyone is in it, with or without a chat. While it is open, the listing's `editing` names who is in it, and a write over it is refused. Like the file routes, it logs no path.
+
+`mentionable` names the agents the person may mention in a comment, at most 20, each `{"id", "name"}`: `id` is the agent id, 1 to 200 characters, and `name` Keel's name for it, 1 to 200 printable characters. Keel names a draft step's agent, which answers in the comment's thread once Keel forwards the mention (see [A comment that mentions the step's agent](#a-comment-that-mentions-the-steps-agent)). The answer's `mentionable_users` lists them for the editor to offer, each `{"id": "agent:<id>", "name", "email"}`, where `email` is the runtime's address for the agent, made of its name: `Credit analyst` is `credit-analyst@agent.invalid`. No mail can reach an `.invalid` address. They are offered only where an agent answers a comment: the runtime has agent editing, the editor opens the document to edit or comment, and it is a Word document, a spreadsheet, a slide deck or a PDF. Anywhere else, and without `mentionable`, `mentionable_users` is `[]`.
 
 ## Inviting staff
 

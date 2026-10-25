@@ -24,7 +24,7 @@ from surogates.session.store import SessionNotFoundError
 
 from .conftest import create_org
 from .test_events_stream import _read_sse_events
-from .test_keel_case_files import person
+from .test_keel_case_files import office_on, open_editor, person, refusals, upload  # noqa: F401  (office_on is a fixture)
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org are fixtures)
     AGENT,
     LINK_KEY,
@@ -175,6 +175,19 @@ async def test_a_person_outside_the_org_is_not_a_member(link, org, session_store
     assert [(a.status_code, code_of(a)) for a in answers] == [(409, "not-a-member")] * 2
     for payload in payloads:
         assert await nothing_made(session_store, org, payload), payload["idempotency_key"]
+
+
+async def test_a_case_agent_session_records_its_cases_org(link, org, session_factory, session_store, office_on):
+    assert (await upload(link, "pack.docx", b"PK-pack", CASE_ID)).status_code == 200
+    user_id, _ = await person(session_factory, org)
+    other = await create_org(session_factory)
+    outsider, _ = await person(session_factory, other)
+    await case_agent(link, org, session_factory, session_store)
+
+    elsewhere = await open_editor(link, other, outsider, case_id=CASE_ID)
+
+    assert refusals(elsewhere) == [(404, "unknown-file")]
+    assert (await open_editor(link, org, user_id, case_id=CASE_ID)).status_code == 200
 
 
 async def test_unknown_and_stopped_agents_are_refused(link, org, session_store, session_factory):

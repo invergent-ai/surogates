@@ -9,10 +9,14 @@ Keel reaches only a person's files there: never the platform's own folders
 at the top of the workspace, never a hidden file or folder (a step session
 stages its skills under ``.skills``), and never a path a step's output would
 read as another file.
+
+Beside the workspace, outside what a sandbox mounts, the boundary records
+the organisation the case is under (:func:`record_case_org`).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +35,7 @@ from surogates.storage.tenant import (
 from surogates.tools.workspace_io import StorageWorkspaceIO
 
 __all__ = [
+    "CASE_ORG_OBJECT",
     "INVALID_PATH",
     "MAX_KEY_BYTES",
     "WORKSPACE_ROOTS",
@@ -41,10 +46,13 @@ __all__ = [
     "case_workspace",
     "download_case_file",
     "list_case_files",
+    "record_case_org",
     "write_case_file",
 ]
 
 INVALID_PATH = "invalid-path"
+#: The object beside a case's workspace, in its boundary's folder, that records the organisation the case is under.
+CASE_ORG_OBJECT = "org.json"
 #: The absolute roots a path in the workspace may start with: the sandbox
 #: mounts the workspace at ``/workspace``, and also at its home, ``/root``.
 WORKSPACE_ROOTS = ("/workspace/", "/root/")
@@ -196,3 +204,42 @@ async def write_case_file(storage: Any, settings: Any, case_id: UUID, path: str,
     case_key(settings, case_id, path)
     await storage.create_bucket(agent_session_bucket(settings.storage.bucket))
     await case_workspace(storage, settings, case_id).write(path, data)
+
+
+def _org_record_key(settings: Any, case_id: UUID) -> tuple[str, str]:
+    """Where *case_id*'s org record is: the bucket, and the key beside the workspace, which no sandbox mounts."""
+    bucket, workspace = _bucket_and_prefix(settings, case_id)
+    boundary = workspace.rstrip("/").rpartition("/")[0]
+    return bucket, f"{boundary}/{CASE_ORG_OBJECT}"
+
+
+def _recorded_org(data: bytes) -> UUID | None:
+    """The org a record names; None for one that cannot be read as ``{"org_id": "<uuid>"}``."""
+    try:
+        record = json.loads(data)
+        return UUID(str(record["org_id"])) if isinstance(record, dict) else None
+    except (ValueError, KeyError):
+        return None
+
+
+async def record_case_org(storage: Any, settings: Any, case_id: UUID, org_id: UUID) -> UUID:
+    """The org *case_id* is recorded under: the one its record names, or *org_id*, recorded now when none is.
+
+    The record is read first; with none there, or one that cannot be read
+    as an org, the bucket is made and *org_id* written over it.  The
+    store's own errors are raised as they are.
+    """
+    bucket, key = _org_record_key(settings, case_id)
+    try:
+        recorded = _recorded_org(await storage.read(bucket, key))
+    except KeyError:
+        recorded = None
+    except ClientError as exc:
+        if not _no_bucket(exc):
+            raise
+        recorded = None
+    if recorded is not None:
+        return recorded
+    await storage.create_bucket(bucket)
+    await storage.write(bucket, key, json.dumps({"org_id": str(org_id)}).encode())
+    return org_id

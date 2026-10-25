@@ -33,6 +33,7 @@ from surogates.api.routes.keel import (
     events_page,
     events_stream,
     kick_off,
+    note_case_org,
     progress_answer,
     queue_session,
     read_body,
@@ -141,6 +142,7 @@ async def create_item_session(request: Request) -> JSONResponse:
             logged=f"the item session of case {contract.case_id} could not be written",
             message="The item session could not be created.",
         ) from None
+    await note_case_org(request, contract.case_id, body.org_id)
     return JSONResponse(
         {"session_id": str(session.id)},
         status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

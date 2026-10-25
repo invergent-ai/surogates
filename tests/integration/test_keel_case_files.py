@@ -22,7 +22,7 @@ from jose import jwt
 from sqlalchemy import text
 
 from surogates.config import OfficeSettings
-from surogates.keel.case_files import case_workspace
+from surogates.keel.case_files import CASE_ORG_OBJECT, case_workspace
 from surogates.keel.files import case_file_value
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
@@ -43,6 +43,8 @@ from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org ar
     link_headers,
     org,
     post,
+    queue_score,
+    user_messages,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -95,13 +97,12 @@ async def written_by_the_session(link_app, session, path: str, data: bytes) -> N
 
 async def open_editor(
     client, org_id, user_id, path: str = "pack.docx", access: str = "edit", case_id=CASE, *,
-    theme: str = "light", auth: str | None = LINK_KEY,
+    theme: str = "light", auth: str | None = LINK_KEY, mentionable: list[dict] | None = None,
 ):
-    return await client.post(
-        f"/v1/keel/cases/{case_id}/editor",
-        json={"org_id": str(org_id), "path": path, "user_id": str(user_id), "access": access, "theme": theme},
-        headers=link_headers(auth),
-    )
+    request = {"org_id": str(org_id), "path": path, "user_id": str(user_id), "access": access, "theme": theme}
+    if mentionable is not None:
+        request["mentionable"] = mentionable
+    return await client.post(f"/v1/keel/cases/{case_id}/editor", json=request, headers=link_headers(auth))
 
 
 @pytest.fixture
@@ -421,8 +422,9 @@ async def test_a_person_opens_a_case_document_with_the_access_keel_gives(link, l
 
     assert opened.status_code == 200, opened.text
     answer = opened.json()
-    # Mentions are not offered: nothing but the server and the config.
-    assert set(answer) == {"document_server_url", "config"}
+    # Keel named no agent to mention: the editor offers nobody.
+    assert set(answer) == {"document_server_url", "config", "mentionable_users"}
+    assert answer["mentionable_users"] == []
     assert answer["document_server_url"] == "https://office.example"
     config = answer["config"]
     assert config["editorConfig"]["user"] == {"id": f"user:{commenter}", "name": commenter_name}
@@ -545,3 +547,145 @@ async def test_a_document_whose_last_save_is_landing_is_closing(link, org, sessi
     closing = await open_editor(link, org, user_id)
 
     assert refusals(closing) == [(409, "document-closing")]
+
+
+# ---------------------------------------------------------------------------
+# The step's agent to mention, and the case's organisation
+# ---------------------------------------------------------------------------
+
+#: The agent Keel names to mention in a case's document, by its own name for it.
+LOAN_AGENT = {"id": "loan-agent", "name": "Credit analyst"}
+
+
+async def test_the_editor_offers_the_agents_keel_names(link, link_app, org, session_factory):
+    assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
+    assert (await upload(link, "letters/old.doc", b"legacy")).status_code == 200
+    user_id, _ = await person(session_factory, org)
+    link_app.state.settings.office = OFFICE.model_copy(update={"runtime_office_url": "http://runtime-office.test"})
+
+    offered = await open_editor(link, org, user_id, mentionable=[LOAN_AGENT])
+    commenting = await open_editor(link, org, user_id, access="comment", mentionable=[LOAN_AGENT])
+    unnamed = await open_editor(link, org, user_id)
+    converted = await open_editor(link, org, user_id, "letters/old.doc", mentionable=[LOAN_AGENT])
+    viewing = await open_editor(link, org, user_id, access="view", mentionable=[LOAN_AGENT])
+
+    assert [a.status_code for a in (offered, commenting, unnamed, converted, viewing)] == [200] * 5
+    agent = {"id": "agent:loan-agent", "name": "Credit analyst", "email": "credit-analyst@agent.invalid"}
+    assert offered.json()["mentionable_users"] == [agent]
+    assert commenting.json()["mentionable_users"] == [agent]
+    assert unnamed.json()["mentionable_users"] == []
+    # The editor only shows a converted document, and a viewer comments on nothing: neither mentions the agent.
+    assert converted.json()["mentionable_users"] == []
+    assert viewing.json()["mentionable_users"] == []
+
+    # Without agent editing, no agent answers a comment: none is offered.
+    link_app.state.settings.office = OFFICE
+    no_agent_editing = await open_editor(link, org, user_id, mentionable=[LOAN_AGENT])
+
+    assert no_agent_editing.status_code == 200, no_agent_editing.text
+    assert no_agent_editing.json()["mentionable_users"] == []
+
+
+async def test_the_editor_refuses_mentionable_agents_out_of_their_shape(link, org, session_factory, office_on):
+    assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
+    user_id, _ = await person(session_factory, org)
+
+    for mentionable in (
+        [{"id": "", "name": "Credit analyst"}],
+        [{"id": "a" * 201, "name": "Credit analyst"}],
+        [{"id": "loan-agent", "name": ""}],
+        [{"id": "loan-agent", "name": "n" * 201}],
+        [{"id": "loan-agent", "name": "Credit\nanalyst"}],
+        [LOAN_AGENT] * 21,
+    ):
+        answer = await open_editor(link, org, user_id, mentionable=mentionable)
+        assert refusals(answer) == [(422, "invalid-request")], mentionable
+
+
+async def test_a_case_of_another_org_does_not_open(link, org, session_factory, office_on):
+    assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
+    user_id, _ = await person(session_factory, org)
+    other = await create_org(session_factory)
+    outsider, _ = await person(session_factory, other)
+
+    first = await open_editor(link, org, user_id)
+    elsewhere = await open_editor(link, other, outsider)
+    again = await open_editor(link, org, user_id)
+
+    assert first.status_code == 200, first.text
+    # Told apart from no file at all by nothing.
+    assert refusals(elsewhere) == [(404, "unknown-file")]
+    assert elsewhere.json() == (await open_editor(link, other, outsider, "memos/none.docx")).json()
+    assert again.status_code == 200, again.text
+
+
+async def test_a_step_session_records_its_cases_org(link, org, session_factory, session_store, office_on):
+    assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
+    user_id, _ = await person(session_factory, org)
+    other = await create_org(session_factory)
+    outsider, _ = await person(session_factory, other)
+    await step_session(link, org, session_store)
+
+    elsewhere = await open_editor(link, other, outsider)
+
+    assert refusals(elsewhere) == [(404, "unknown-file")]
+    assert (await open_editor(link, org, user_id)).status_code == 200
+
+
+class _RefusingTheOrgRecord:
+    """The test's store, refusing every read of the case's org record, as a store does once a key has lost its rights there."""
+
+    def __init__(self, storage) -> None:
+        self._storage = storage
+
+    def __getattr__(self, operation: str):
+        return getattr(self._storage, operation)
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        if key.endswith(f"{CASE}/{CASE_ORG_OBJECT}"):
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": f"Access Denied: {key}"}}, "GetObject")
+        return await self._storage.read(bucket, key)
+
+
+async def test_an_unreadable_org_record_is_unavailable(link, link_app, org, session_factory, office_on, caplog):
+    assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
+    user_id, _ = await person(session_factory, org)
+    link_app.state.storage = _RefusingTheOrgRecord(link_app.state.storage)
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG):
+        refused = await open_editor(link, org, user_id)
+
+    assert refusals(refused) == [(503, "unavailable")]
+    logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
+    assert len(logged) == 1 and CASE in logged[0] and "ClientError" in logged[0]
+    assert str(org) not in caplog.text
+    assert CASE_ORG_OBJECT not in caplog.text and "pack" not in caplog.text
+    location = case_workspace(link_app.state.storage, link_app.state.settings, UUID(CASE)).location("pack.docx")
+    assert await office_sessions.open_at(session_factory, location) is None
+
+
+async def test_a_step_session_starts_when_the_org_cannot_be_recorded(
+    link, link_app, org, session_store, redis_client, caplog,
+):
+    link_app.state.storage = _RefusingTheOrgRecord(link_app.state.storage)
+
+    with caplog.at_level(logging.DEBUG):
+        session = await step_session(link, org, session_store)
+
+    # Started as any step: its kickoff written, and queued.
+    assert len(await user_messages(session_store, session.id)) == 1
+    assert await queue_score(redis_client, session) is not None
+    logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
+    assert len(logged) == 1 and CASE in logged[0] and "ClientError" in logged[0]
+    assert str(org) not in caplog.text and CASE_ORG_OBJECT not in caplog.text
+
+
+async def test_the_case_files_never_list_the_org_record(link, org, session_factory, office_on):
+    assert (await upload(link, "pack.docx", b"PK-pack")).status_code == 200
+    user_id, _ = await person(session_factory, org)
+
+    assert (await open_editor(link, org, user_id)).status_code == 200
+
+    assert listed_paths(await listing(link)) == ["pack.docx"]
+    assert refusals(await download(link, CASE_ORG_OBJECT)) == [(404, "unknown-file")]

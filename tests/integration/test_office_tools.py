@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ from surogates.office.guide import GUIDES_KEY, RETRY_AFTER_S
 from surogates.office.runtime_office import OfficeBusy, PageGone, RuntimeOfficeError
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
-from surogates.storage.tenant import session_workspace_key
+from surogates.storage.tenant import boundary_workspace_key, session_workspace_key
 from surogates.tools.builtin import office as office_tools
 from tests.device_computer import computer_io
 
@@ -139,6 +140,29 @@ async def test_busy_and_bad_requests_are_said(session_factory, storage, redis_cl
     assert "slide decks" in json.loads(await office_tools._office_edit({"path": "a.odt", "ops": [{"op": "delete"}]}, **kwargs))["error"]
     FakeRuntime.busy = True
     assert "try again" in json.loads(await office_tools._office_read({"path": "a.docx"}, **kwargs))["error"]
+
+
+async def test_a_case_sessions_failed_call_logs_no_path(session_factory, storage, redis_client, caplog):
+    # A draft step's session, which edits the case's documents: their paths are the case's data.
+    boundary = f"case:{uuid4()}"
+    config = {"memory_boundary": boundary, "workspace_boundary": boundary}
+    session, kwargs = await _kwargs(session_factory, storage, redis_client, config=config)
+    await storage.write("b", boundary_workspace_key(session.config, session, session.id, "offers/Marinescu.docx"), b"PK-docx")
+    caplog.set_level(logging.DEBUG)
+
+    FakeRuntime.busy = True
+    full = json.loads(await office_tools._office_read({"path": "offers/Marinescu.docx"}, **kwargs))
+    FakeRuntime.busy, FakeRuntime.refuses = False, ("offers/Marinescu.docx did not answer", 502)
+    failed = json.loads(await office_tools._office_edit({"path": "offers/Marinescu.docx", "ops": [{"op": "delete"}]}, **kwargs))
+
+    assert "try again" in full["error"] and "could not do that" in failed["error"]
+    logged = [record for record in caplog.records if record.name == office_tools.__name__]
+    assert [record.getMessage() for record in logged] == [
+        f"runtime-office is full (session {session.id})",
+        f"runtime-office failed (session {session.id}): RuntimeOfficeError",
+    ]
+    assert all(record.exc_info is None for record in logged)
+    assert "Marinescu" not in caplog.text and "offers" not in caplog.text
 
 
 async def test_each_view_and_its_target_reach_runtime_office(session_factory, storage, redis_client):

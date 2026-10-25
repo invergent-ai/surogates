@@ -18,6 +18,7 @@ from uuid import UUID
 
 from PIL import Image
 
+from surogates.channels.memory_boundary import is_case_session
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.office.agent import AGENT_KINDS, AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
@@ -264,13 +265,21 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
     except AgentDocumentError as exc:
         return _error(str(exc), **reading)
     except OfficeBusy:
-        logger.warning("runtime-office is full: %s in session %s", path, session.id)
+        if is_case_session(session):
+            # A case's document path is the case's data.
+            logger.warning("runtime-office is full (session %s)", session.id)
+        else:
+            logger.warning("runtime-office is full: %s in session %s", path, session.id)
         return _error("The office service has as many documents open as it can hold; try again in a minute.", **reading)
     except RuntimeOfficeError as exc:
         if exc.status == 400:
             # Refused for what it says (a slide's format or fit, a Word block's content, an op): as above.
             return await _with_guide({"error": str(exc), **reading}, file_type, session, kwargs)
-        logger.warning("runtime-office failed on %s", path, exc_info=True)
+        if is_case_session(session):
+            # The error's words, and its traceback, can name the case's document.
+            logger.warning("runtime-office failed (session %s): %s", session.id, type(exc).__name__)
+        else:
+            logger.warning("runtime-office failed on %s", path, exc_info=True)
         return _error(f"The editor could not do that: {exc}", **reading)
     # Named as its saves and notices name it, the computer's spelling of it: the next call finds it at once.
     answer: dict[str, Any] = {"document": document.document.path, "open_by": _open_by(document), **reading}

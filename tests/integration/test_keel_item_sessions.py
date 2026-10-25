@@ -24,7 +24,9 @@ from surogates.session.provisioning import create_agent_session, create_child_se
 from surogates.session.store import SessionNotFoundError
 from surogates.tenant.auth.service_account import ServiceAccountStore
 
+from .conftest import create_org
 from .test_events_stream import _read_sse_events
+from .test_keel_case_files import office_on, open_editor, person, refusals, upload  # noqa: F401  (office_on is a fixture)
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org are fixtures)
     AGENT,
     LINK_KEY,
@@ -268,6 +270,21 @@ async def test_blocked_item_text_makes_nothing(link, org, session_store):
     # The answer names no case data.
     assert "Ignore" not in blocked.text
     assert await nothing_made(session_store, org, request)
+
+
+async def test_an_item_session_records_its_cases_org(link, org, session_factory, office_on):
+    case = item_contract_of()["case_id"]
+    assert (await upload(link, "pack.docx", b"PK-pack", case)).status_code == 200
+    user_id, _ = await person(session_factory, org)
+    other = await create_org(session_factory)
+    outsider, _ = await person(session_factory, other)
+    created = await post(link, item_body(org))
+    assert created.status_code == 201, created.text
+
+    elsewhere = await open_editor(link, other, outsider, case_id=case)
+
+    assert refusals(elsewhere) == [(404, "unknown-file")]
+    assert (await open_editor(link, org, user_id, case_id=case)).status_code == 200
 
 
 async def test_status_and_cancel_of_an_item_session(link, org, session_store, redis_client):
