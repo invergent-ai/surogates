@@ -10,7 +10,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from surogates.channels.memory_boundary import is_case_agent_config
 from surogates.tools.registry import ToolRegistry, ToolSchema
+
+#: What a person's case agent is told when it saves to the ``user`` target.
+_NO_FACTS_ABOUT_PEOPLE = "This session keeps no facts about people: save to the 'memory' target."
 
 
 def register(registry: ToolRegistry) -> None:
@@ -75,7 +79,14 @@ async def _memory_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
 ) -> str:
-    """Primary memory tool -- delegates to MemoryManager or API client."""
+    """Primary memory tool -- delegates to MemoryManager or API client.
+
+    A person's case agent keeps no facts about people: its ``user`` target is
+    refused, and nothing is written.
+    """
+    if arguments.get("target") == "user" and is_case_agent_config(kwargs.get("session_config")):
+        return json.dumps({"success": False, "error": _NO_FACTS_ABOUT_PEOPLE})
+
     # API-mediated mode: delegate to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:

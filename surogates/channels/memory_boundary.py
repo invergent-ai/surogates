@@ -14,10 +14,13 @@ from collections.abc import Mapping
 __all__ = [
     "MANAGED_CHANNELS",
     "BUYER_BOUNDARY_PREFIX",
+    "CASE_AGENT_KEY",
     "CASE_BOUNDARY_PREFIX",
     "EVAL_BOUNDARY_PREFIX",
     "PROJECT_BOUNDARY_PREFIX",
     "boundary_token",
+    "is_case_agent_config",
+    "is_case_agent_session",
     "is_case_config",
     "is_case_session",
     "is_eval_session",
@@ -52,6 +55,12 @@ BUYER_BOUNDARY_PREFIX = "buyer:"
 # it; the session create routes strip a client's, and a child copies its
 # parent's.
 CASE_BOUNDARY_PREFIX = "case:"
+
+# A person's case agent is a session of the case too: it carries the case's
+# ``case:`` boundary for its memory alone, never the case's workspace, and
+# holds which case and which person under this key.  Only the Keel link
+# stamps it; every other create path strips it, and a child never copies it.
+CASE_AGENT_KEY = "case_agent"
 
 
 def boundary_token(
@@ -138,6 +147,21 @@ def is_case_session(session: object) -> bool:
     the children a step makes are case sessions too.
     """
     return is_case_config(getattr(session, "config", None))
+
+
+def is_case_agent_config(config: Mapping | None) -> bool:
+    """True when a session's config is a person's case agent's: a case's
+    config (:func:`is_case_config`) holding a mapping under :data:`CASE_AGENT_KEY`.
+
+    Tools hold only the session's config; anything that is not a mapping
+    is no case agent.
+    """
+    return is_case_config(config) and isinstance((config or {}).get(CASE_AGENT_KEY), Mapping)
+
+
+def is_case_agent_session(session: object) -> bool:
+    """True when this session is a person's case agent, by its config alone (:func:`is_case_agent_config`)."""
+    return is_case_agent_config(getattr(session, "config", None))
 
 
 def _legacy_boundary_fallback_id(session: object, cfg: dict) -> str:

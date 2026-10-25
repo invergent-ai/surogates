@@ -32,6 +32,7 @@ from surogates.config import (
     parse_queue_member,
 )
 from surogates.harness.error_classify import classify_harness_error
+from surogates.keel.steps import PERSON_MARKER
 from surogates.runtime.pubsub import listen_forever
 from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import MESSAGE_TYPES, EventType
@@ -662,7 +663,9 @@ class Orchestrator:
         Synthetic user messages — mission continuations in particular —
         must NOT count: they re-injected the same poisoned conversation
         every iteration in the original incident.  A project coordinator's
-        follow-up to its thread counts as a typed message does.
+        follow-up to its thread counts as a typed message does, and so does
+        a person's message to their case agent: Keel marks it only so it
+        never runs as a command.
         """
         events = await self.session_store.get_events(
             session_id,
@@ -673,7 +676,7 @@ class Orchestrator:
             data = event.data or {}
             if (
                 event.type in MESSAGE_TYPES
-                and not data.get("synthetic")
+                and (not data.get("synthetic") or data.get("synthetic") == PERSON_MARKER)
             ):
                 return True
             if (

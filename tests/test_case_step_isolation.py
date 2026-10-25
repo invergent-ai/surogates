@@ -17,7 +17,7 @@ import pytest
 from fastapi import Response
 
 from surogates.api.routes import sessions as sessions_route
-from surogates.channels.memory_boundary import session_memory_boundary
+from surogates.channels.memory_boundary import CASE_AGENT_KEY, is_case_agent_session, session_memory_boundary
 from surogates.config import Settings
 from surogates.keel.items import is_case_item
 from surogates.keel.steps import (
@@ -66,6 +66,7 @@ ITEM_CONTRACT = {
     "kind": "raised_hand",
     "question": "Which payslip is the latest?",
 }
+CASE_AGENT = {"case_id": CONTRACT["case_id"], "case_number": "LN-000001", "person_id": str(uuid4())}
 SCOPE = {"tools": ["write_file"], "knowledge": ["kb-uuid"]}
 
 
@@ -113,16 +114,20 @@ async def test_a_client_cannot_make_a_case_session(route):
     session = await _create_through(route, {
         CASE_STEP_KEY: CONTRACT,
         CASE_ITEM_KEY: ITEM_CONTRACT,
+        CASE_AGENT_KEY: CASE_AGENT,
         CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
         "memory_boundary": "case:x",
         "workspace_boundary": "case:x",
     })
 
-    kept = {CASE_STEP_KEY, CASE_ITEM_KEY, CASE_SCOPE_KEY, "memory_boundary", "workspace_boundary"} & set(session.config)
+    kept = {
+        CASE_STEP_KEY, CASE_ITEM_KEY, CASE_AGENT_KEY, CASE_SCOPE_KEY, "memory_boundary", "workspace_boundary",
+    } & set(session.config)
     assert kept == set()
     assert not is_case_session(session)
     assert not is_case_step(session)
     assert not is_case_item(session)
+    assert not is_case_agent_session(session)
     assert step_contract_of(session) is None
     assert case_scope_of(session) is None
 
@@ -151,6 +156,7 @@ async def test_a_child_inherits_the_case_and_its_scope_but_is_no_step():
         config={
             CASE_STEP_KEY: CONTRACT,
             CASE_ITEM_KEY: ITEM_CONTRACT,
+            CASE_AGENT_KEY: CASE_AGENT,
             CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
         },
     )
@@ -161,6 +167,7 @@ async def test_a_child_inherits_the_case_and_its_scope_but_is_no_step():
     assert case_scope_of(child) == CaseScope(tools=["write_file"], knowledge=["kb-uuid"])
     assert not is_case_step(child)
     assert CASE_ITEM_KEY not in child.config
+    assert CASE_AGENT_KEY not in child.config
     assert step_contract_of(child) is None
 
 

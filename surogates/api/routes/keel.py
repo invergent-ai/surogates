@@ -674,7 +674,9 @@ async def cancel_work_session(request: Request, session: Any) -> JSONResponse:
 
     ``200 {"status": "paused"}``, also when it was paused already.  Every
     cancel interrupts the turn, so a retry stops a turn its first attempt
-    did not reach; only the first pauses the session.
+    did not reach; only the first pauses the session.  A person's case
+    agent has no inputs: its turn is interrupted and its session paused,
+    and the person's next message wakes it again.
     """
     try:
         await request.app.state.session_store.cancel_case_step(session.id, {"reason": _CANCELLED})
@@ -1062,20 +1064,28 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
     return JSONResponse({**value, "size": len(data)})
 
 
+async def org_member_name(request: Request, org_id: UUID, user_id: UUID) -> str | None:
+    """The display name of *user_id* when they are a user of *org_id*, a home user or a member; None for anyone else.
+
+    A database failure is raised as it is, for the route to answer.
+    """
+    async with request.app.state.session_factory() as db:
+        return (
+            await db.execute(select(User.display_name).where(User.id == user_id, belongs_to(org_id)))
+        ).scalar_one_or_none()
+
+
 async def _member_name(request: Request, org_id: UUID, user_id: UUID) -> str:
     """The display name of *user_id*, a user of *org_id*: 404 ``unknown-user`` for anyone else."""
     try:
-        async with request.app.state.session_factory() as db:
-            found = (
-                await db.execute(select(User.display_name).where(User.id == user_id, belongs_to(org_id)))
-            ).one_or_none()
+        name = await org_member_name(request, org_id, user_id)
     except DBAPIError as exc:
         raise database_failed(
             exc, logged=f"user {user_id} could not be read", message="The editor could not be opened.",
         ) from None
-    if found is None:
+    if name is None:
         raise refused(status.HTTP_404_NOT_FOUND, "unknown-user", "No such user in this org.")
-    return found.display_name
+    return name
 
 
 @router.post("/keel/cases/{case_id}/editor")

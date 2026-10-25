@@ -59,9 +59,11 @@ KIND_AGENT_PRINCIPAL = "agent_principal"
 KIND_API_KEY = "api_key"
 #: An ordinary org-scoped account with no agent binding.
 KIND_SERVICE = "service"
-#: The identity a Keel case type's agent-step sessions run under.  One per
-#: case type per org — see the ``uq_service_accounts_case_type`` partial
-#: unique index.  Its token is discarded at creation; nobody signs in as it.
+#: The identities Keel's sessions run under: ``case-type:<case type>``, a
+#: case type's agent-step and work-item sessions, and ``keel-case-agent``,
+#: every person's case agent.  One of each name per org — see the
+#: ``uq_service_accounts_case_type`` partial unique index.  Its token is
+#: discarded at creation; nobody signs in as it.
 KIND_CASE_TYPE = "case_type"
 
 TOKEN_PREFIX = "surg_sk_"
@@ -287,11 +289,10 @@ class ServiceAccountStore:
             kind=row.kind,
         )
 
-    async def case_type_account(self, org_id: UUID, case_type: str) -> UUID:
-        """Return the id of ``org_id``'s account for ``case_type``, creating it.
+    async def keel_account(self, org_id: UUID, name: str) -> UUID:
+        """Return the id of ``org_id``'s account named ``name`` that Keel's sessions run under, creating it.
 
-        The account is named ``case-type:<case_type>`` and is of kind
-        :data:`KIND_CASE_TYPE`.  It exists so a case type's agent-step
+        The account is of kind :data:`KIND_CASE_TYPE`.  It exists so Keel's
         sessions have an owner; nobody signs in as it.  Its ``token_hash`` is
         the digest of a fresh token that is neither returned nor stored, so no
         bearer token resolves to it.
@@ -299,7 +300,6 @@ class ServiceAccountStore:
         Two concurrent first calls race on ``uq_service_accounts_case_type``:
         the loser's insert does nothing and it reads the winner's row.
         """
-        name = f"case-type:{case_type}"
         existing = select(ServiceAccount.id).where(
             ServiceAccount.org_id == org_id,
             ServiceAccount.name == name,
@@ -331,6 +331,23 @@ class ServiceAccountStore:
             if created is not None:
                 return created
             return (await db.execute(existing)).scalar_one()
+
+    async def case_type_account(self, org_id: UUID, case_type: str) -> UUID:
+        """Return the id of ``org_id``'s account for ``case_type``, ``case-type:<case_type>``, creating it.
+
+        A case type's agent-step and work-item sessions run under it (:meth:`keel_account`).
+        """
+        return await self.keel_account(org_id, f"case-type:{case_type}")
+
+    async def case_agent_account(self, org_id: UUID) -> UUID:
+        """Return the id of ``org_id``'s ``keel-case-agent`` account, creating it.
+
+        Every person's case agent session in the org runs under it (:meth:`keel_account`).
+        """
+        # Here, not at the top: Keel's modules import this one, through the runtime.
+        from surogates.keel.case_agents import CASE_AGENT_ACCOUNT
+
+        return await self.keel_account(org_id, CASE_AGENT_ACCOUNT)
 
     async def get_by_token(self, token: str) -> ResolvedServiceAccount | None:
         """Resolve a raw bearer token to a :class:`ResolvedServiceAccount`.

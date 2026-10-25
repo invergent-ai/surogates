@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -20,6 +20,12 @@
 | `GET /v1/keel/item-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the item session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/item-sessions/{session_id}/events/stream?after=<id>` | The item session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/item-sessions/{session_id}/progress` | The item session's status, todo list and last activity, as a step session's progress. See [Progress](#progress). |
+| `POST /v1/keel/case-agent-sessions?agent_id=<agent>` | Starts one person's case agent on a case, or finds the one Keel's key already started: `201 {"session_id"}` made, `200 {"session_id"}` found. See [A person's case agent](#a-persons-case-agent). |
+| `POST /v1/keel/case-agent-sessions/{session_id}/messages` | Gives the case agent its person's message and wakes it: `202 {"status": "queued"}`. Each key is written once. See [A person's message](#a-persons-message). |
+| `POST /v1/keel/case-agent-sessions/{session_id}/cancel` | Interrupts the case agent's turn and pauses its session: `200 {"status": "paused"}`, also when it was paused already. The person's next message wakes it again. |
+| `GET /v1/keel/case-agent-sessions/{session_id}` | The case agent session's `session_id` and `status`. |
+| `GET /v1/keel/case-agent-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the case agent session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/case-agent-sessions/{session_id}/events/stream?after=<id>` | The case agent session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
@@ -37,12 +43,13 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
-| 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, or of a work item, for an item route. |
+| 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
 | 404 | `unknown-file` | No file at the path in the case's workspace. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. |
-| 409 | `key-in-use` | The key, or the session id, names another session: another step's or item's, or one of another agent. |
+| 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's or case agent's, or one of another agent. |
+| 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
 | 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
@@ -53,9 +60,9 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step or item session's events or progress were read. Only the error's class name is logged. |
+| 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step or item session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item or case agent session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
 
 ## A step's inputs
 
@@ -138,9 +145,39 @@ The answer is `202 {"status"}`:
 
 Each key is written once. A repeated key writes nothing and wakes nothing, and answers as the item stands at that call. A message never gives the item back: a report's mark stays. Unlike a step, an item that is over does not refuse the message; it keeps it, unread. The route logs neither a message's text nor its sender.
 
+## A person's case agent
+
+A person's case agent is the agent that helps one person on one case: it answers their questions about the case and drafts into their form. `POST /v1/keel/case-agent-sessions?agent_id=<agent>` starts its session. Its body is `{"org_id", "case_id", "case_number", "person_id", "idempotency_key", "session_id"}`: `case_number` and `idempotency_key` are 1 to 200 characters, and keys the runtime does not know are ignored. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this case agent's session when that session has Keel's id, the agent, the case and the person. Any other session under the key, a step's or an item's among them, or another session with Keel's id, is `409 key-in-use`. The agent is checked as for a step: `404 unknown-agent`, `409 agent-stopped`. Nothing is written to the session or queued: the person's first message wakes it.
+
+### Its owner and the person
+
+`person_id` must be a user of the org `org_id`, a home user or a member: anyone else is `409 not-a-member`, and nothing is made. The session is not the person's. It is made with the id Keel gives it, on the `api` channel, with no user, owned by the org's `keel-case-agent` service account: one per org, of the same kind as the case types' accounts, which nobody signs in as and no admin route lists. Keel acts as the person when the agent reads the case. The session's config holds `case_agent`, `{"case_id", "case_number", "person_id"}`, and only keel-link sets it: every other way of creating a session drops it, and a helper never copies it.
+
+### Its boundary and its workspace
+
+The session carries the case's `case:<case id>` memory boundary, and nothing more of the case's. The boundary is memory-only, as an evaluation's is: the agent works in a scratch workspace of its own, the per-session one, never in the case's files, and reads those only through Keel. A session whose `case_agent` names another case than its boundary is no case agent: the case agent routes answer it `404 unknown-session`.
+
+Its memory keeps no facts about people. The `memory` tool refuses the `user` target with `This session keeps no facts about people: save to the 'memory' target.`, and writes nothing; the `memory` target works as in any session of the case.
+
+### Its priority and its tools
+
+A person waits on a case agent, so its wakes queue at its channel's priority, 0 on `api`, beside people's work and ahead of every step and item session.
+
+It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door. It gets no step or item tool.
+
+### A person's message
+
+`POST /v1/keel/case-agent-sessions/{session_id}/messages` gives the case agent its person's message. Its body is `{"text", "idempotency_key"}`: `text` is 1 to 20000 characters and `idempotency_key` 1 to 200. Any other key is `422 invalid-request`.
+
+In the session's events, the message is a `user.message` whose `data` holds `content`, the person's text as they wrote it, `synthetic: "keel_person_message"` and `keel_key`, the idempotency key. The agent reads it as it reads a typed message: a turn under way at its next request to the model, otherwise the session's next turn. The marker keeps the text from ever running as a harness command, as an unmarked message starting with `/` would. The worker still counts it as a person's message: it wakes a session whose wakes kept crashing, as a typed message does.
+
+The answer is `202 {"status": "queued"}`. A session at rest resumes, with a `session.resume` before the message, and the session is queued. Each key is written once: a repeated key writes nothing, wakes nothing and queues nothing, and answers the same.
+
+`POST /v1/keel/case-agent-sessions/{session_id}/cancel` interrupts the agent's turn and pauses its session: `200 {"status": "paused"}`, also when it was paused already, and every call interrupts the turn again. Nothing leaves the session's config, and the person's next message wakes it. `GET /v1/keel/case-agent-sessions/{session_id}` answers `200 {"session_id", "status"}`. Its events are read as a step session's, by page and live; it has no progress route. The routes log neither a message's text nor the person.
+
 ## Watching a step session
 
-Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The same reads serve an item session, at `GET /v1/keel/item-sessions/{session_id}/events`, `…/events/stream` and `…/progress`: each answers as the step session's route below does, and is refused the same way. The runtime keeps each session's events as an append-only log, and an event never changes once written:
+Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The same reads serve an item session, at `GET /v1/keel/item-sessions/{session_id}/events`, `…/events/stream` and `…/progress`, and a case agent session, at `GET /v1/keel/case-agent-sessions/{session_id}/events` and `…/events/stream`: each answers as the step session's route below does, and is refused the same way. The runtime keeps each session's events as an append-only log, and an event never changes once written:
 
 - `id` is an integer that only grows, unique across all sessions;
 - `type` is the event's type, and `data` its payload as the runtime wrote it, a JSON object;
@@ -242,7 +279,7 @@ A person joined from another org who has no password yet gets no link from the o
 
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, send any step's or item's agent a message, read every step or item session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, start a case agent session for any person of any org, send any step's or item's agent, or any case agent, a message, read every step, item or case agent session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 
@@ -314,4 +351,4 @@ A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, o
 
 ## Step sessions wait behind people
 
-Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent.
+Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent. A person's case agent does not wait: a person waits on it, so its wakes are queued at 0, as interactive work is.

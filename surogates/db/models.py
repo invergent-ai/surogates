@@ -1718,8 +1718,10 @@ class ServiceAccount(Base):
       channel.  Many per agent, minted and revoked by the agent's operator.
     * ``service`` — an ordinary org-scoped account with no agent binding
       (synthetic-data pipelines, ops-chat, evaluation identities).
-    * ``case_type`` — the identity a Keel case type's agent-step sessions run
-      under.  One per case type per org, named ``case-type:<case_type>``,
+    * ``case_type`` — the identities Keel's sessions run under:
+      ``case-type:<case_type>``, one per case type per org, for a case type's
+      agent-step and work-item sessions, and ``keel-case-agent``, one per
+      org, for every person's case agent.  Each name is one per org,
       enforced by ``uq_service_accounts_case_type``.  Its token is discarded
       at creation, so nobody signs in as it.
 

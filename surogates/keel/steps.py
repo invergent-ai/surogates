@@ -65,6 +65,7 @@ __all__ = [
     "MESSAGE_MARKER",
     "NUDGE_MARKER",
     "OutcomeContract",
+    "PERSON_MARKER",
     "REPORTED_KEY",
     "REVISION_MARKER",
     "STEP_ENDED",
@@ -121,10 +122,14 @@ KEELS_WORD: frozenset[str] = frozenset({ANSWER_MARKER, REVISION_MARKER})
 #: another agent working on the case: written once per Keel key.  It neither
 #: answers a raised hand nor reviews a draft, so it gives no step back.
 MESSAGE_MARKER = "keel_message"
-#: Every message Keel sends a step: the markers of the messages its session
+#: The ``synthetic`` marker of a person's message to their case agent, which
+#: the session reads as it reads Keel's messages and never runs as a command:
+#: written once per Keel key.
+PERSON_MARKER = "keel_person_message"
+#: Every message Keel sends a session: the markers of the messages its session
 #: reads as it reads a person's, whenever they land, in a turn under way or
 #: after its end.
-KEEL_MESSAGES: frozenset[str] = KEELS_WORD | {MESSAGE_MARKER}
+KEEL_MESSAGES: frozenset[str] = KEELS_WORD | {MESSAGE_MARKER, PERSON_MARKER}
 #: A step tool's result starts with one of these exactly when the step is over
 #: for this session, and the harness ends the turn on it: Keel took the report,
 #: or the step is no longer the session's (``STEP_ENDED``); or Keel refused the
@@ -180,7 +185,8 @@ def is_keels_word(data: object) -> bool:
 
 def is_keel_message(data: object) -> bool:
     """Whether *data*, a message event's payload, is any message Keel sent a step,
-    which its session reads as it reads a person's (:data:`KEEL_MESSAGES`)."""
+    a work item or a case agent, which its session reads as it reads a person's
+    (:data:`KEEL_MESSAGES`)."""
     return isinstance(data, Mapping) and data.get("synthetic") in KEEL_MESSAGES
 
 
