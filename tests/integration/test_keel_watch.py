@@ -1,8 +1,11 @@
-"""Keel reads a step session's events through ``keel-link``: a page after a cursor, and a stream that follows the step live.
+"""Keel reads a step session through ``keel-link``: its events, by a page after a cursor and by a stream
+that follows the step live, and its progress.
 
 A page leaves ``llm.delta`` out.  The stream frames each event as the
 public session stream does, and follows the step across its turns: only an
-archived or deleted session, or its time running out, ends it.
+archived or deleted session, or its time running out, ends it.  Progress
+gives the step's todo list, as its agent last wrote it, and its last
+activity, the newest event that is not an ``llm.delta``.
 
 ASGITransport hands a streamed response back only once its generator ends,
 so every stream test cuts the stream short, and writes what arrives live
@@ -20,7 +23,9 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 import surogates.api.routes.events as events_module
+from surogates.channels.constants import API_CHANNEL
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 
 from .test_events_stream import _read_sse_events
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org are fixtures)
@@ -32,6 +37,7 @@ from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org ar
     link_headers,
     org,
     page_of,
+    progress_of,
     send,
     step_route,
     stream_refused,
@@ -187,7 +193,14 @@ async def test_a_bad_cursor_or_limit_is_invalid(link, org, session_store, redis_
 
 @pytest.mark.parametrize(
     ("route", "read"),
-    [("events", "get_session"), ("events", "get_events"), ("events/stream", "get_session")],
+    [
+        ("events", "get_session"),
+        ("events", "get_events"),
+        ("events/stream", "get_session"),
+        ("progress", "get_session"),
+        ("progress", "last_event"),
+        ("progress", "newest_event"),
+    ],
 )
 async def test_a_failed_read_is_unavailable_and_logs_no_case_data(
     link, link_app, org, session_store, redis_client, monkeypatch, caplog, route, read,
@@ -325,3 +338,107 @@ async def test_the_stream_ends_when_the_session_is_archived(
 
     assert events[-1] == ("session.done", '{"reason": "archived", "status": "archived"}')
     assert "stream.timeout" not in [event_type for event_type, _data in events]
+
+
+# ---------------------------------------------------------------------------
+# Progress
+# ---------------------------------------------------------------------------
+
+TODOS = [
+    {"id": "1", "content": "Read the payslips", "status": "completed"},
+    {"id": "2", "content": "Check the employer", "status": "in_progress"},
+]
+
+
+def todos(items: list) -> tuple[EventType, dict]:
+    return EventType.TODO_UPDATED, {"todos": items}
+
+
+async def written_at(store, session_id, event_id: int) -> datetime:
+    """When the session's event *event_id* was written, in UTC."""
+    [event] = [event for event in await store.get_events(session_id) if event.id == event_id]
+    return event.created_at.replace(tzinfo=UTC)
+
+
+def in_utc(value: str) -> datetime:
+    """*value*, an ISO 8601 time that must carry the offset of UTC."""
+    assert value.endswith("+00:00"), value
+    parsed = datetime.fromisoformat(value)
+    assert parsed.utcoffset() == timedelta(0)
+    return parsed
+
+
+async def test_progress_gives_the_todo_list_and_the_last_activity(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    todo_id, call_id, _delta_id = await written(session_store, step.id, todos(TODOS), CALL, delta("Reading"))
+
+    answer = await progress_of(link, step.id)
+
+    assert answer.status_code == 200, answer.text
+    progress = answer.json()
+    assert set(progress) == {"status", "todos", "todos_at", "last_activity"}
+    assert progress["status"] == "completed"
+    assert progress["todos"] == TODOS
+    assert in_utc(progress["todos_at"]) == await written_at(session_store, step.id, todo_id)
+    # The delta after the call is a piece of a response, no activity of its own.
+    activity = progress["last_activity"]
+    assert {key: activity[key] for key in ("event_id", "type", "tool")} == {
+        "event_id": call_id, "type": "tool.call", "tool": "read_file",
+    }
+    assert set(activity) == {"event_id", "type", "at", "tool"}
+    assert in_utc(activity["at"]) == await written_at(session_store, step.id, call_id)
+
+    [result_id] = await written(session_store, step.id, RESULT)
+    after_result = (await progress_of(link, step.id)).json()["last_activity"]
+
+    assert (after_result["event_id"], after_result["type"], after_result["tool"]) == (
+        result_id, "tool.result", "read_file",
+    )
+
+
+async def test_progress_tells_a_list_never_written_from_an_emptied_one(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    kickoff = (await session_store.get_events(step.id))[0]
+
+    never = (await progress_of(link, step.id)).json()
+    [emptied_id] = await written(session_store, step.id, todos([]))
+    emptied = (await progress_of(link, step.id)).json()
+
+    assert (never["todos"], never["todos_at"]) == (None, None)
+    assert never["last_activity"] == {
+        "event_id": kickoff.id,
+        "type": "user.message",
+        "at": kickoff.created_at.replace(tzinfo=UTC).isoformat(),
+        "tool": None,
+    }
+    assert emptied["todos"] == []
+    assert in_utc(emptied["todos_at"]) == await written_at(session_store, step.id, emptied_id)
+    assert (emptied["last_activity"]["event_id"], emptied["last_activity"]["tool"]) == (emptied_id, None)
+
+
+async def test_progress_reads_only_the_steps_own_session(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    kickoff = (await session_store.get_events(step.id))[0]
+    # A helper the step started keeps its own list.
+    helper = await create_child_session(store=session_store, parent=step, channel=API_CHANNEL)
+    await written(session_store, helper.id, todos(TODOS), CALL)
+
+    progress = (await progress_of(link, step.id)).json()
+
+    assert (progress["todos"], progress["todos_at"]) == (None, None)
+    assert progress["last_activity"]["event_id"] == kickoff.id
+
+
+async def test_a_todo_list_out_of_its_shape_is_an_error_that_logs_no_case_data(
+    link, org, session_store, redis_client, caplog,
+):
+    step = await completed_step(link, org, session_store, redis_client)
+    await written(session_store, step.id, todos([{"id": 1, "content": "Check Ioana's employer", "status": "pending"}]))
+    caplog.set_level(logging.INFO)
+
+    answer = await progress_of(link, step.id)
+
+    assert (answer.status_code, code_of(answer)) == (500, "internal-error")
+    assert "ValidationError" in caplog.text
+    assert "Ioana" not in caplog.text
+    assert "Ioana" not in answer.text

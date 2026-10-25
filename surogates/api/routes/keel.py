@@ -1,9 +1,9 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
 answers it, asks it for a revision or sends it a message, cancels it, and
-reads its status and its events, by page and live.  It also lists, reads
-and writes a case's files: the workspace its step sessions share; it gives
-a person the editor config of one of them; and it invites staff into an
-organisation.
+reads its status, its events, by page and live, and its progress.  It also
+lists, reads and writes a case's files: the workspace its step sessions
+share; it gives a person the editor config of one of them; and it invites
+staff into an organisation.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -26,13 +26,21 @@ import tempfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Literal, TypeVar
+from typing import Annotated, Any, BinaryIO, Literal, TypeVar
 from uuid import UUID
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sse_starlette.sse import EventSourceResponse
@@ -160,6 +168,38 @@ class StepMessage(BaseModel):
 class StepSessionStatus(BaseModel):
     status: str
     updated_at: datetime
+
+
+#: A time answered in ISO 8601 with its offset, ``+00:00`` for UTC.
+_IsoTime = Annotated[datetime, PlainSerializer(datetime.isoformat, when_used="json")]
+
+
+class TodoItem(BaseModel):
+    """One item of a step's todo list, as its agent's todo tool writes it.  Keys beyond these are left out."""
+
+    # A stored item out of this shape is refused, never turned into one.
+    model_config = ConfigDict(strict=True)
+
+    id: str
+    content: str
+    status: str
+
+
+class LastActivity(BaseModel):
+    """A step session's newest event that is not an ``llm.delta``; ``tool`` names a tool call's or result's tool."""
+
+    event_id: int
+    type: str
+    at: _IsoTime
+    tool: str | None
+
+
+class StepProgress(BaseModel):
+    status: str
+    # None: the agent never wrote a list; []: it emptied it.
+    todos: list[TodoItem] | None
+    todos_at: _IsoTime | None
+    last_activity: LastActivity | None
 
 
 class CaseEditorRequest(BaseModel):
@@ -620,6 +660,60 @@ async def stream_step_session_events(session_id: str, request: Request) -> Event
     return EventSourceResponse(
         session_event_stream(request, request.app.state.session_store, session.id, after=after, watch=True),
     )
+
+
+#: The events whose ``data["name"]`` names the tool they call or answer.
+_TOOL_EVENTS = frozenset({EventType.TOOL_CALL.value, EventType.TOOL_RESULT.value})
+
+
+def _last_activity(event: Event | None) -> LastActivity | None:
+    if event is None:
+        return None
+    name = event.data.get("name") if event.type in _TOOL_EVENTS else None
+    return LastActivity(
+        event_id=event.id,
+        type=event.type,
+        at=_as_utc(event.created_at),
+        tool=name if isinstance(name, str) else None,
+    )
+
+
+@router.get("/keel/step-sessions/{session_id}/progress")
+async def read_step_session_progress(session_id: str, request: Request) -> JSONResponse:
+    """A step session's status, its todo list as its agent last wrote it, and its last activity.
+
+    Only the step's own session is read: a helper it started keeps its own
+    list.  A stored list out of its shape is 500 ``internal-error``, logged
+    by the error's class name alone: the error's text quotes the list.
+    """
+    require_link(request)
+    store = request.app.state.session_store
+    try:
+        session = await _step_session(request, session_id)
+        listed = await store.last_event(session.id, EventType.TODO_UPDATED)
+        newest = await store.newest_event(session.id, except_types=[EventType.LLM_DELTA])
+        todos = listed.data.get("todos") if listed is not None else None
+        written = isinstance(todos, list)
+        answer = StepProgress(
+            status=session.status,
+            todos=todos if written else None,
+            todos_at=_as_utc(listed.created_at) if written else None,
+            last_activity=_last_activity(newest),
+        )
+    except DBAPIError as exc:
+        raise _database_unavailable(
+            exc,
+            logged=f"the progress of step session {session_id} could not be read",
+            message="The step session's progress could not be read; try again.",
+        ) from None
+    except ValidationError as exc:
+        logger.warning(
+            "keel-link: the progress of step session %s is out of its shape (%s)", session_id, type(exc).__name__,
+        )
+        raise _refused(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", "The step session's progress could not be read.",
+        ) from None
+    return JSONResponse(answer.model_dump(mode="json"))
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -2054,6 +2054,21 @@ class SessionStore:
             stmt = stmt.where(not_(EventRow.data.has_key(without_key)))
         if before is not None:
             stmt = stmt.where(EventRow.id < before)
+        stmt = stmt.order_by(EventRow.id.desc()).limit(1)
+        async with self._sf() as db:
+            row = (await db.execute(stmt)).scalars().first()
+        return Event.model_validate(row) if row is not None else None
+
+    async def newest_event(
+        self, session_id: UUID, *, except_types: Collection[EventType] = (),
+    ) -> Event | None:
+        """The session's event with the highest id whose type is none of *except_types*; None when it has none.
+
+        One row is read, walking the session's events from the newest.
+        """
+        stmt = select(EventRow).where(EventRow.session_id == session_id)
+        if except_types:
+            stmt = stmt.where(EventRow.type.notin_([t.value for t in except_types]))
         stmt = stmt.order_by(EventRow.id.desc()).limit(1)
         async with self._sf() as db:
             row = (await db.execute(stmt)).scalars().first()

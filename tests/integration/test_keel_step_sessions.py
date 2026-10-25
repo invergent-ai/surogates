@@ -606,6 +606,10 @@ async def stream_refused(client: AsyncClient, session_id, *, auth: str | None = 
     return await client.get(step_route(session_id, "events/stream"), params=params, headers=link_headers(auth))
 
 
+async def progress_of(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY):
+    return await client.get(step_route(session_id, "progress"), headers=link_headers(auth))
+
+
 async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client):
     """A step session whose turn has ended, and which is no longer queued."""
     created = await post(link, body(org))
@@ -1061,8 +1065,9 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
             await status_of(link, session_id),
             await page_of(link, session_id),
             await stream_refused(link, session_id),
+            await progress_of(link, session_id),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 5, session_id
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 6, session_id
 
     for session in (chat, child):
         assert await timeline(session_store, session.id) == []
@@ -1079,8 +1084,9 @@ async def test_every_step_session_route_needs_the_link_key(link, org, session_st
             await status_of(link, step.id, auth=key),
             await page_of(link, step.id, auth=key),
             await stream_refused(link, step.id, auth=key),
+            await progress_of(link, step.id, auth=key),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 5
+        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 6
 
     assert (await session_store.get_session(step.id)).status == "completed"
     assert await timeline(session_store, step.id) == [("user.message", "keel_step")]
