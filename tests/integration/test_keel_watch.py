@@ -20,6 +20,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 import surogates.api.routes.events as events_module
@@ -429,16 +430,84 @@ async def test_progress_reads_only_the_steps_own_session(link, org, session_stor
     assert progress["last_activity"]["event_id"] == kickoff.id
 
 
-async def test_a_todo_list_out_of_its_shape_is_an_error_that_logs_no_case_data(
-    link, org, session_store, redis_client, caplog,
-):
+#: A stored value out of its shape, quoting the case: an error's text would quote it too.
+CASE_TEXT = "Check Ioana's employer"
+
+
+async def overwritten(session_factory, event_id: int, data) -> None:
+    """Store *data* as the event's payload, past the checks every writer makes: a row out of its shape."""
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE events SET data = CAST(:data AS jsonb) WHERE id = :id"),
+            {"data": json.dumps(data), "id": event_id},
+        )
+        await db.commit()
+
+
+def route_log(caplog) -> str:
+    """What keel-link's routes logged, without the client's own request lines, which name the session too."""
+    return "\n".join(record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel")
+
+
+def no_case_text(answer, caplog) -> None:
+    assert CASE_TEXT not in answer.text
+    assert "Ioana" not in caplog.text
+
+
+async def test_progress_leaves_out_a_todo_item_out_of_its_shape(link, org, session_store, redis_client, caplog):
     step = await completed_step(link, org, session_store, redis_client)
-    await written(session_store, step.id, todos([{"id": 1, "content": "Check Ioana's employer", "status": "pending"}]))
+    [todo_id] = await written(
+        session_store, step.id, todos([TODOS[0], {"id": 1, "content": CASE_TEXT, "status": "pending"}, TODOS[1]]),
+    )
     caplog.set_level(logging.INFO)
+    # Only what the read logs.
+    caplog.clear()
 
     answer = await progress_of(link, step.id)
 
-    assert (answer.status_code, code_of(answer)) == (500, "internal-error")
-    assert "ValidationError" in caplog.text
-    assert "Ioana" not in caplog.text
-    assert "Ioana" not in answer.text
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["todos"] == TODOS
+    assert in_utc(answer.json()["todos_at"]) == await written_at(session_store, step.id, todo_id)
+    assert str(step.id) in route_log(caplog) and "ValidationError" in route_log(caplog)
+    no_case_text(answer, caplog)
+
+
+@pytest.mark.parametrize("stored", ["todos-not-a-list", "payload-not-an-object"])
+async def test_progress_reads_a_todo_payload_out_of_its_shape_as_no_list(
+    link, org, session_store, session_factory, redis_client, caplog, stored,
+):
+    step = await completed_step(link, org, session_store, redis_client)
+    if stored == "todos-not-a-list":
+        await written(session_store, step.id, (EventType.TODO_UPDATED, {"todos": {"1": CASE_TEXT}}))
+    else:
+        [todo_id] = await written(session_store, step.id, todos(TODOS))
+        await overwritten(session_factory, todo_id, [CASE_TEXT])
+    caplog.set_level(logging.INFO)
+    # Only what the read logs.
+    caplog.clear()
+
+    answer = await progress_of(link, step.id)
+
+    assert answer.status_code == 200, answer.text
+    assert (answer.json()["todos"], answer.json()["todos_at"]) == (None, None)
+    assert str(step.id) in route_log(caplog)
+    no_case_text(answer, caplog)
+
+
+async def test_progress_reads_a_malformed_newest_event_as_no_activity(
+    link, org, session_store, session_factory, redis_client, caplog,
+):
+    step = await completed_step(link, org, session_store, redis_client)
+    _todo_id, call_id = await written(session_store, step.id, todos(TODOS), CALL)
+    await overwritten(session_factory, call_id, [CASE_TEXT])
+    caplog.set_level(logging.INFO)
+    # Only what the read logs.
+    caplog.clear()
+
+    answer = await progress_of(link, step.id)
+
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["last_activity"] is None
+    assert answer.json()["todos"] == TODOS
+    assert str(step.id) in route_log(caplog) and "ValidationError" in route_log(caplog)
+    no_case_text(answer, caplog)

@@ -2064,7 +2064,9 @@ class SessionStore:
     ) -> Event | None:
         """The session's event with the highest id whose type is none of *except_types*; None when it has none.
 
-        One row is read, walking the session's events from the newest.
+        One query reads back from the session's newest event until it finds
+        one of another type, passing the events of *except_types* after it:
+        the trailing ``llm.delta`` rows of a response still streaming, say.
         """
         stmt = select(EventRow).where(EventRow.session_id == session_id)
         if except_types:

@@ -46,7 +46,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a step session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step session's events or progress were read; or a step session's stored todo list is out of its shape. Only the error's class name is logged. |
+| 500 | `internal-error` | The database failed, other than while a step session's events or progress were read. Only the error's class name is logged. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
 | 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
 
@@ -129,7 +129,7 @@ A stream counts as no one reading the chat: the session's check-ins and completi
 - `todos` is the session's todo list, as its agent last wrote it with its `todo` tool: a list of `{"id", "content", "status"}` in the agent's order, whose `status` is `pending`, `in_progress`, `completed` or `cancelled`. It is null when the agent never wrote one, and `[]` when it emptied it. `todos_at` is when the list was last written, or null.
 - `last_activity` is the session's newest event that is not an `llm.delta`, as `{"event_id", "type", "at", "tool"}`. `tool` is the tool's name when the event is a `tool.call` or a `tool.result`, and null otherwise. `last_activity` is null for a session with no events.
 
-`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's own session is read: a helper the step started keeps its own list, which progress does not give. A stored list out of its shape is `500 internal-error`. The route logs neither the list nor an event's data.
+`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's own session is read: a helper the step started keeps its own list, which progress does not give. Stored data out of its shape never fails the read: a todo item out of its shape is left out, a stored list that is not one reads as `todos` null, and a newest event out of its shape as `last_activity` null. Each is logged by the session id and the kind of error alone. The route logs neither the list nor an event's data.
 
 ## A case's files
 

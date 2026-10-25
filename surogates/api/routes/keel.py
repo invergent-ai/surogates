@@ -177,7 +177,7 @@ _IsoTime = Annotated[datetime, PlainSerializer(datetime.isoformat, when_used="js
 class TodoItem(BaseModel):
     """One item of a step's todo list, as its agent's todo tool writes it.  Keys beyond these are left out."""
 
-    # A stored item out of this shape is refused, never turned into one.
+    # A stored item out of this shape is left out, never turned into one.
     model_config = ConfigDict(strict=True)
 
     id: str
@@ -666,7 +666,47 @@ async def stream_step_session_events(session_id: str, request: Request) -> Event
 _TOOL_EVENTS = frozenset({EventType.TOOL_CALL.value, EventType.TOOL_RESULT.value})
 
 
-def _last_activity(event: Event | None) -> LastActivity | None:
+def _out_of_shape(what: str, session_id: UUID, kind: str) -> None:
+    """Log that a stored value of the step session is out of its shape, by *kind* alone: its text quotes the case."""
+    logger.warning("keel-link: %s of step session %s is out of its shape (%s)", what, session_id, kind)
+
+
+async def _todo_list(store: Any, session_id: UUID) -> tuple[list[TodoItem] | None, datetime | None]:
+    """The step's todo list as its agent last wrote it, and when; ``(None, None)`` when it never wrote one.
+
+    A stored list out of its shape reads as none, and an item out of its
+    shape is left out: one bad row never keeps Keel from a step's progress.
+    """
+    try:
+        listed = await store.last_event(session_id, EventType.TODO_UPDATED)
+    except ValidationError as exc:
+        _out_of_shape("the todo list", session_id, type(exc).__name__)
+        return None, None
+    if listed is None:
+        return None, None
+    stored = listed.data.get("todos")
+    if not isinstance(stored, list):
+        _out_of_shape("the todo list", session_id, type(stored).__name__)
+        return None, None
+    items: list[TodoItem] = []
+    dropped: str | None = None
+    for item in stored:
+        try:
+            items.append(TodoItem.model_validate(item))
+        except ValidationError as exc:
+            dropped = type(exc).__name__
+    if dropped is not None:
+        _out_of_shape("a todo item", session_id, dropped)
+    return items, _as_utc(listed.created_at)
+
+
+async def _last_activity(store: Any, session_id: UUID) -> LastActivity | None:
+    """The step session's newest event that is not an ``llm.delta``; None when it has none, or it is out of its shape."""
+    try:
+        event = await store.newest_event(session_id, except_types=[EventType.LLM_DELTA])
+    except ValidationError as exc:
+        _out_of_shape("the newest event", session_id, type(exc).__name__)
+        return None
     if event is None:
         return None
     name = event.data.get("name") if event.type in _TOOL_EVENTS else None
@@ -683,36 +723,23 @@ async def read_step_session_progress(session_id: str, request: Request) -> JSONR
     """A step session's status, its todo list as its agent last wrote it, and its last activity.
 
     Only the step's own session is read: a helper it started keeps its own
-    list.  A stored list out of its shape is 500 ``internal-error``, logged
-    by the error's class name alone: the error's text quotes the list.
+    list.  Stored data out of its shape never fails the read: a todo item
+    out of its shape is left out, a list out of its shape reads as none,
+    and so does a newest event out of its shape.
     """
     require_link(request)
     store = request.app.state.session_store
     try:
         session = await _step_session(request, session_id)
-        listed = await store.last_event(session.id, EventType.TODO_UPDATED)
-        newest = await store.newest_event(session.id, except_types=[EventType.LLM_DELTA])
-        todos = listed.data.get("todos") if listed is not None else None
-        written = isinstance(todos, list)
-        answer = StepProgress(
-            status=session.status,
-            todos=todos if written else None,
-            todos_at=_as_utc(listed.created_at) if written else None,
-            last_activity=_last_activity(newest),
-        )
+        todos, todos_at = await _todo_list(store, session.id)
+        last_activity = await _last_activity(store, session.id)
     except DBAPIError as exc:
         raise _database_unavailable(
             exc,
             logged=f"the progress of step session {session_id} could not be read",
             message="The step session's progress could not be read; try again.",
         ) from None
-    except ValidationError as exc:
-        logger.warning(
-            "keel-link: the progress of step session %s is out of its shape (%s)", session_id, type(exc).__name__,
-        )
-        raise _refused(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", "The step session's progress could not be read.",
-        ) from None
+    answer = StepProgress(status=session.status, todos=todos, todos_at=todos_at, last_activity=last_activity)
     return JSONResponse(answer.model_dump(mode="json"))
 
 
