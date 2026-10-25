@@ -236,8 +236,13 @@ export function SpecInput(props: SpecInputProps) {
       const unit = input.unit;
       if (!unit) return <Input {...control} />;
       const money = isMoney(input);
+      // The group's inline addons carry no padding of their own, so the
+      // unit takes the same inset from the border as an input's text.
       const addon = (
-        <InputGroupAddon align={money ? "inline-start" : "inline-end"}>
+        <InputGroupAddon
+          align={money ? "inline-start" : "inline-end"}
+          className={money ? "pl-3.5" : "pr-3.5"}
+        >
           <InputGroupText>{unit}</InputGroupText>
         </InputGroupAddon>
       );
