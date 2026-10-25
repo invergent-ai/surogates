@@ -7,7 +7,7 @@
 | Route | What it does |
 |---|---|
 | `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
-| `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, or a reviewer's request to revise its draft, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. |
+| `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, a reviewer's request to revise its draft, or a plain message from whoever works on the case, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. A plain message also answers `resting`, and wakes no step that rests on its report. See [A message to a step](#a-message-to-a-step). |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
@@ -50,6 +50,29 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 ## A step's inputs
 
 Once a step is over, cancelled among others, its inputs are removed from the session's config and the contract is marked `inputs_redacted`. A step marked so takes no more messages. The redaction covers the config only: the step's first message, which sets out the inputs, stays in the session's event log, which no generic route serves for a case's sessions.
+
+## A message to a step
+
+`POST /v1/keel/step-sessions/{session_id}/messages` takes three kinds of message. `answer` is a person's answer to the step's raised hand, and `revision` a reviewer's request to revise its draft: each takes a `note`, and gives the step back. `message` is a plain word to the agent working the step, from a person or from another agent. It neither answers a raised hand nor reviews a draft.
+
+A plain message's body is `{"kind": "message", "text", "sender", "idempotency_key"}`:
+
+- `text` is 1 to 20000 characters;
+- `sender` is the display name of whoever sends it, 1 to 200 printable characters, or null;
+- `idempotency_key` is 1 to 200 characters;
+- `note` must be null or absent.
+
+An answer or a revision takes no `sender`, and a key the route does not know is refused: either is `422 invalid-request`.
+
+The agent reads `<sender> sends you a message about this step: <text>`, or `Someone working on the case sends you a message about this step: <text>` without a sender. Then, after a blank line: `It does not answer a raised hand or review a draft. Take it into account, and go on with the step.` It reads it as it reads an answer: a turn under way at its next request to the model, otherwise the session's next turn. In the session's events, the message is a `user.message` whose `data` holds `content`, the text the agent reads, `synthetic: "keel_message"` and `keel_key`, the idempotency key.
+
+The answer is `202 {"delivered", "resting"}`. Each key is delivered once: `delivered` is false when the key was delivered already, and nothing is then written or woken.
+
+A message wakes a step whose session is at rest, as an answer wakes it, except a step that rests on its report. A step rests on its report when its last report ended it for this round and it waits for a person: a raised hand, or a draft under review. Such a step is not woken, and keeps its report's mark. Its message stays unread until Keel's next answer or revision wakes the step, and that turn reads the message first. `resting` is true then, and false otherwise; a repeated call answers it as the step stands at that call.
+
+A message never gives the step back. An answer or a revision ends the rest a report began, and the step then reports to Keel again. A message does neither, and a message that reached the step since a report began does not keep the report's mark from being written. If the turn that made the report reads the message, a further report in that turn is answered by the worker and never reaches Keel.
+
+A step that is over takes no message: `409 step-finished`, as for an answer. The route logs neither a message's text nor its sender.
 
 ## A case's files
 

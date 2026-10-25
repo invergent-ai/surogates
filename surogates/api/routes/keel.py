@@ -1,8 +1,8 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
-answers it or asks it for a revision, cancels it, and reads its status.  It
-also lists, reads and writes a case's files: the workspace its step sessions
-share; it gives a person the editor config of one of them; and it invites
-staff into an organisation.
+answers it, asks it for a revision or sends it a message, cancels it, and
+reads its status.  It also lists, reads and writes a case's files: the
+workspace its step sessions share; it gives a person the editor config of
+one of them; and it invites staff into an organisation.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -52,11 +52,13 @@ from surogates.keel.files import file_value
 from surogates.keel.steps import (
     ANSWER_MARKER,
     KICKOFF_MARKER,
+    MESSAGE_MARKER,
     REVISION_MARKER,
     StepContract,
     is_case_step,
     render_kickoff,
     render_message,
+    rests_on_its_report,
     step_contract_of,
 )
 from surogates.office.editor_config import build_editor_config
@@ -80,7 +82,7 @@ _Body = TypeVar("_Body", bound=BaseModel)
 #: The prompt-injection screen's name for a step's inputs.
 _SCREEN_SOURCE = "keel_case_step"
 #: The ``synthetic`` marker of each kind of message Keel sends a step.
-_MESSAGE_MARKERS = {"answer": ANSWER_MARKER, "revision": REVISION_MARKER}
+_MESSAGE_MARKERS = {"answer": ANSWER_MARKER, "revision": REVISION_MARKER, "message": MESSAGE_MARKER}
 #: Why a cancelled step's session paused: its pause event's and its interrupt's reason.
 _CANCELLED = "case_step_cancelled"
 
@@ -114,14 +116,35 @@ class StepSessionCreated(BaseModel):
 
 
 class StepMessage(BaseModel):
-    """A person's message to a step: an answer to its raised hand, or a draft's revision request."""
+    """Keel's message to a step: a person's answer to its raised hand, a draft's
+    revision request, or a plain message.  A key this route does not know is refused."""
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["answer", "revision"]
+    kind: Literal["answer", "revision", "message"]
     text: str = Field(min_length=1, max_length=20000)
+    # An answer's or a revision's alone.
     note: str | None = Field(default=None, max_length=20000)
+    # A plain message's alone: the display name of the person or agent who sends it.
+    sender: str | None = Field(default=None, min_length=1, max_length=200)
     idempotency_key: str = Field(min_length=1, max_length=200)
+
+    @field_validator("sender")
+    @classmethod
+    def _a_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("is blank")
+        return _printable(value)
+
+    @model_validator(mode="after")
+    def _fields_of_its_kind(self) -> StepMessage:
+        if self.kind == "message" and self.note is not None:
+            raise ValueError("a message takes no note")
+        if self.kind != "message" and self.sender is not None:
+            raise ValueError("only a message has a sender")
+        return self
 
 
 class StepSessionStatus(BaseModel):
@@ -403,11 +426,16 @@ async def _step_session(request: Request, session_id: str) -> Any:
 
 @router.post("/keel/step-sessions/{session_id}/messages")
 async def send_step_message(session_id: str, request: Request) -> JSONResponse:
-    """Give a step a person's answer or revision request, once per key, and wake it: 202.
+    """Give a step Keel's message, once per key, and wake it: 202.
 
     The message is written, and a session at rest resumed, only when this
     call is the first with the key; only then is the session queued.  A step
     that is over, cancelled among others, takes none: 409 ``step-finished``.
+
+    An answer or a revision gives the step back: it clears a report's mark.
+    A plain message does not.  A step resting on its report takes it
+    unwoken, for the turn Keel's next answer or revision wakes, and the
+    answer says so in ``resting``, a repeat's included.
     """
     require_link(request)
     try:
@@ -415,10 +443,11 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
         body = await read_body(request, StepMessage)
         written = await request.app.state.session_store.emit_keyed_synthetic_message(
             session.id,
-            content=render_message(body.kind, body.text, body.note),
+            content=render_message(body.kind, body.text, body.note, body.sender),
             synthetic=_MESSAGE_MARKERS[body.kind],
             key=body.idempotency_key,
             resume=True,
+            keep_report=body.kind == "message",
         )
     except SessionNotFoundError:
         # Deleted since the lookup above.
@@ -433,7 +462,7 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
             logged=f"the message to step session {session_id} could not be written",
             message="The message could not be delivered.",
         ) from None
-    if written is not None:
+    if written is not None and not written.resting:
         await enqueue_session(
             request.app.state.redis,
             org_id=str(session.org_id),
@@ -441,7 +470,11 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
             session_id=session.id,
             priority=session_queue_priority(session),
         )
-    return JSONResponse({"delivered": written is not None}, status_code=status.HTTP_202_ACCEPTED)
+    answer: dict[str, bool] = {"delivered": written is not None}
+    if body.kind == "message":
+        # A repeat writes nothing: the row read above says whether the step rests.
+        answer["resting"] = written.resting if written is not None else rests_on_its_report(session.config)
+    return JSONResponse(answer, status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.post("/keel/step-sessions/{session_id}/cancel")
