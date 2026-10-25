@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentChatAdapterProvider } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
+import { ArtifactBlock } from "../src/components/chat/artifacts/artifact-block";
 import { ArtifactImage } from "../src/components/chat/artifacts/artifact-media";
 import { ReadOnlyChatError, readOnlyAdapter } from "../src/read-only-adapter";
 import type {
@@ -172,6 +173,41 @@ describe("readOnlyAdapter", () => {
     });
     expect(container.querySelector("img")).toBeNull();
     expect(container.textContent).toBe("payslips.png");
+  });
+
+  it("a watched image artifact offers no download when the source has no download URL", async () => {
+    const adapter = readOnlyAdapter({
+      getSession,
+      openEventStream: () => new FakeEventStream(),
+      getArtifact: async () => ({
+        meta: {
+          artifact_id: "a-watched-image",
+          session_id: "s-1",
+          name: "Payslips chart",
+          kind: "image",
+          version: 1,
+          size: 12,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+        kind: "image",
+        spec: { path: "charts/payslips.png" },
+      }),
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <AgentChatAdapterProvider value={{ adapter, sessionId: "s-1" }}>
+          <ArtifactBlock sessionId="s-1" artifactId="a-watched-image" name="Payslips chart" kind="image" version={1} />
+        </AgentChatAdapterProvider>,
+      );
+      await Promise.resolve();
+    });
+    const actions = [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+    expect(container.textContent).toContain("payslips.png");
+    expect(actions).toContain("Copy artifact");
+    expect(actions).not.toContain("Download artifact");
   });
 
   it("a write the source carries is not passed through", async () => {

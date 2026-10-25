@@ -150,16 +150,20 @@ export function ArtifactBlock({
     }
   };
 
+  // Media bytes live in the workspace, not the payload: they download from
+  // the authenticated workspace URL. An adapter with no URL for them ("")
+  // offers no download.
+  const mediaUrl =
+    payload && (payload.kind === "image" || payload.kind === "video")
+      ? adapter.getWorkspaceDownloadUrl({ sessionId, path: payload.spec.path })
+      : null;
+
   const handleDownload = () => {
     if (!payload) return;
-    if (payload.kind === "image" || payload.kind === "video") {
-      // Media bytes live in the workspace, not the payload — hand the
-      // browser the authenticated download URL instead of serialising.
+    if (mediaUrl !== null) {
+      // Hand the browser the download URL instead of serialising.
       const a = document.createElement("a");
-      a.href = adapter.getWorkspaceDownloadUrl({
-        sessionId,
-        path: payload.spec.path,
-      });
+      a.href = mediaUrl;
       a.download = "";
       document.body.appendChild(a);
       a.click();
@@ -201,13 +205,15 @@ export function ArtifactBlock({
                   copied ? "text-emerald-500 hover:text-emerald-500" : ""
                 }
               />
-              <ArtifactAction
-                tooltip="Download"
-                label="Download artifact"
-                icon={DownloadIcon}
-                disabled={!payload}
-                onClick={handleDownload}
-              />
+              {mediaUrl !== "" && (
+                <ArtifactAction
+                  tooltip="Download"
+                  label="Download artifact"
+                  icon={DownloadIcon}
+                  disabled={!payload}
+                  onClick={handleDownload}
+                />
+              )}
               <ArtifactAction
                 tooltip="Full screen"
                 label="Open artifact in full screen"

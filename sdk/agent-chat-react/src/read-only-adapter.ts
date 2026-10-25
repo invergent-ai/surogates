@@ -31,6 +31,8 @@ async function refuse(): Promise<never> {
  * method the adapter must have that answers a promise refuses with `ReadOnlyChatError`. A URL
  * it has none for is `""`, which the chat draws as no download and no live browser. The optional
  * methods it leaves out, so the chat leaves their features off.
+ *
+ * Pass plain functions: the adapter copies each method without its `this`.
  */
 export function readOnlyAdapter(source: AgentChatReadSource): AgentChatAdapter {
   return {

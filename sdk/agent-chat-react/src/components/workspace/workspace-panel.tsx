@@ -141,6 +141,8 @@ function RenderEntries({
 				}
 
 				const fileName = entry.name;
+				// An adapter with no URL for the file ("") offers no download.
+				const downloadUrl = downloadUrlFor(entry.path);
 
 				return (
 					<FileTreeFile key={entry.path} name={entry.name} path={entry.path}>
@@ -153,22 +155,24 @@ function RenderEntries({
 							</span>
 						)}
 						<div className="ml-1 flex shrink-0 items-center gap-0 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
-							<Button
-								asChild
-								variant="ghost"
-								size="icon-xs"
-								className="text-muted-foreground hover:text-foreground"
-							>
-								<a
-									href={downloadUrlFor(entry.path)}
-									download={fileName}
-									onClick={(event) => event.stopPropagation()}
-									title="Download"
-									aria-label={`Download ${fileName}`}
+							{downloadUrl && (
+								<Button
+									asChild
+									variant="ghost"
+									size="icon-xs"
+									className="text-muted-foreground hover:text-foreground"
 								>
-									<DownloadIcon className="size-5" />
-								</a>
-							</Button>
+									<a
+										href={downloadUrl}
+										download={fileName}
+										onClick={(event) => event.stopPropagation()}
+										title="Download"
+										aria-label={`Download ${fileName}`}
+									>
+										<DownloadIcon className="size-5" />
+									</a>
+								</Button>
+							)}
 							<Button
 								type="button"
 								variant="ghost"

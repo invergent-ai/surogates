@@ -141,6 +141,11 @@ export interface AgentWhiteboardProps {
   onNewBoard?: () => void;
   disabled?: boolean;
   /**
+   * The board draws no prompt: no question field, nor its actions, Work it out
+   * or New board. The view switch stays. `AgentChat` passes its own.
+   */
+  hideComposer?: boolean;
+  /**
    * View-mode switch, when the board is hosted inside `AgentChat`. The
    * control lives in the chat composer, so without it here the board is
    * a room with no door back.
@@ -181,6 +186,7 @@ export function WhiteboardSurface({
   onSessionChange,
   onNewBoard,
   disabled,
+  hideComposer = false,
   viewMode,
   onViewModeChange,
   runtime,
@@ -1209,6 +1215,9 @@ export function WhiteboardSurface({
   // the half-restored document -- the agent's objects without the ink
   // they answer.
   const busy = runtime.isRunning || disabled || !canvasReady;
+  // The row under the board holds its prompt and the view switch; with
+  // neither to show, it is not drawn.
+  const viewSwitch = Boolean(viewMode && onViewModeChange && hasAnswer);
 
   // The newest thing the agent has said it is doing. A sketch turn is a
   // single round-trip and never produces one; a deep turn produces one
@@ -1393,90 +1402,96 @@ export function WhiteboardSurface({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 border-t p-2">
-        {/* Bounded rather than `flex-1`: filling the row pushed the
-            buttons onto the right edge, under the host's floating
-            Copilot button. Everything now packs left and the corner
-            stays clear. `min-w-0` keeps it shrinking on a narrow
-            window instead of forcing the buttons off the end. */}
-        <Input
-          className="w-64 min-w-0 shrink"
-          placeholder="Ask about the board (optional)"
-          value={question}
-          disabled={busy}
-          onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void ask("answer");
-            }
-          }}
-        />
-        {/* PenEcho's action menu as the send buttons: the click says
-            what the user wants, so nothing is left for the board to
-            infer. Answer is the common case and reads as the default. */}
-        <TooltipProvider>
-          <ButtonGroup aria-label="Actions">
-            {USER_ACTIONS.map((a) => (
-              <Tooltip key={a.id}>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant={a.id === "answer" ? "default" : "outline"}
-                    disabled={busy}
-                    aria-label={a.label}
-                    onClick={() => void ask(a.id)}
-                  >
-                    {a.label}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">{a.hint}</TooltipContent>
-              </Tooltip>
-            ))}
-          </ButtonGroup>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="flex items-center gap-2 px-1">
-                <Checkbox
-                  id="wb-work-it-out"
-                  aria-label="Work it out"
-                  checked={deep}
+      {(!hideComposer || viewSwitch) && (
+        <div className="flex items-center gap-2 border-t p-2">
+          {!hideComposer && (
+            <>
+              {/* Bounded rather than `flex-1`: filling the row pushed the
+                  buttons onto the right edge, under the host's floating
+                  Copilot button. Everything now packs left and the corner
+                  stays clear. `min-w-0` keeps it shrinking on a narrow
+                  window instead of forcing the buttons off the end. */}
+              <Input
+                className="w-64 min-w-0 shrink"
+                placeholder="Ask about the board (optional)"
+                value={question}
+                disabled={busy}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void ask("answer");
+                  }
+                }}
+              />
+              {/* PenEcho's action menu as the send buttons: the click says
+                  what the user wants, so nothing is left for the board to
+                  infer. Answer is the common case and reads as the default. */}
+              <TooltipProvider>
+                <ButtonGroup aria-label="Actions">
+                  {USER_ACTIONS.map((a) => (
+                    <Tooltip key={a.id}>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant={a.id === "answer" ? "default" : "outline"}
+                          disabled={busy}
+                          aria-label={a.label}
+                          onClick={() => void ask(a.id)}
+                        >
+                          {a.label}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">{a.hint}</TooltipContent>
+                    </Tooltip>
+                  ))}
+                </ButtonGroup>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="flex items-center gap-2 px-1">
+                      <Checkbox
+                        id="wb-work-it-out"
+                        aria-label="Work it out"
+                        checked={deep}
+                        disabled={busy}
+                        onCheckedChange={(v) => setDeep(v === true)}
+                      />
+                      <Label htmlFor="wb-work-it-out">Work it out</Label>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    Let the agent search, compute and build before it draws,
+                    over several passes. Slower; for what the board alone
+                    cannot settle. Off, it answers your ink in one pass.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              {onNewBoard ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  aria-label="New board"
                   disabled={busy}
-                  onCheckedChange={(v) => setDeep(v === true)}
-                />
-                <Label htmlFor="wb-work-it-out">Work it out</Label>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="top">
-              Let the agent search, compute and build before it draws,
-              over several passes. Slower; for what the board alone
-              cannot settle. Off, it answers your ink in one pass.
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-        {onNewBoard ? (
-          <Button
-            type="button"
-            variant="ghost"
-            aria-label="New board"
-            disabled={busy}
-            onClick={() => {
-              setWantFresh(true);
-              onNewBoard();
-            }}
-          >
-            New board
-          </Button>
-        ) : null}
-        {viewMode && onViewModeChange && hasAnswer ? (
-          <SegmentedControl
-            aria-label="View"
-            segments={VIEW_MODE_SEGMENTS}
-            value={viewMode}
-            onChange={onViewModeChange}
-          />
-        ) : null}
-      </div>
+                  onClick={() => {
+                    setWantFresh(true);
+                    onNewBoard();
+                  }}
+                >
+                  New board
+                </Button>
+              ) : null}
+            </>
+          )}
+          {viewMode && onViewModeChange && hasAnswer ? (
+            <SegmentedControl
+              aria-label="View"
+              segments={VIEW_MODE_SEGMENTS}
+              value={viewMode}
+              onChange={onViewModeChange}
+            />
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

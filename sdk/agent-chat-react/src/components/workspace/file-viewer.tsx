@@ -125,7 +125,9 @@ export function FileViewer({
         )}
 
         {file && isBinary && (
-          <FileViewerError message="Preview not available. Download the file to open it." />
+          <FileViewerError
+            message={downloadUrl ? "Preview not available. Download the file to open it." : "Preview not available."}
+          />
         )}
 
         {file && isImage && (

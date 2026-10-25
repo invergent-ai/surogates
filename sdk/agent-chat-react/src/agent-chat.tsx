@@ -530,6 +530,7 @@ export function AgentChat({
                 sessionId={sessionId}
                 onSessionChange={onSessionChange}
                 disabled={effectiveDisabled}
+                hideComposer={hideComposer}
                 runtime={runtime}
                 viewMode={runtime.viewMode}
                 onViewModeChange={runtime.setViewMode}

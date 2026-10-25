@@ -124,6 +124,19 @@ describe("office documents in the file pane", () => {
     );
     expect(view.textContent).toContain("Plan.docx");
     expect(view.querySelector("a[download]")).toBeNull();
+    expect(view.querySelector('[role="alert"]')?.textContent).toBe("Preview not available.");
+  });
+
+  it.each([
+    ["/download?path=payslips.zip", "Preview not available. Download the file to open it."],
+    ["", "Preview not available."],
+  ])("says of a file it cannot preview, with the download URL %j, %j", async (url, said) => {
+    const getWorkspaceFile = vi.fn().mockResolvedValue({ path: "payslips.zip", content: "UEsDBA==", size: 6, mime_type: "application/zip", encoding: "base64", truncated: false });
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceFile, getWorkspaceDownloadUrl: () => url })} sessionId="s-1" path="payslips.zip" onClose={() => {}} />,
+    );
+    expect(view.textContent).toContain(said);
+    expect(view.textContent?.includes("Download the file")).toBe(url !== "");
   });
 
   it("offers no download of any other file the adapter has no URL for", async () => {
