@@ -12,12 +12,12 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 import hashlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import and_, case, exists, not_, select, text, true, update, delete, func, or_, tuple_
@@ -55,7 +55,13 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
-from surogates.keel.steps import ANSWER_MARKER, CASE_STEP_KEY, REPORTED_KEY, REVISION_MARKER
+from surogates.keel.steps import (
+    ANSWER_MARKER,
+    CASE_STEP_KEY,
+    REPORTED_KEY,
+    REVISION_MARKER,
+    rests_on_its_report,
+)
 from surogates.session.acting_principal import (
     ActingPrincipal,
     resolve_principal_from_event_data,
@@ -86,6 +92,14 @@ class SessionNotFoundError(Exception):
 
 class StepFinishedError(Exception):
     """Raised when a message would wake a case step that is over: its inputs are redacted."""
+
+
+class KeyedMessage(NamedTuple):
+    """A keyed message just written: its event's id, and whether it found the
+    step resting on its report, and so woke nothing."""
+
+    event_id: int
+    resting: bool
 
 
 @dataclass(slots=True)
@@ -2045,6 +2059,23 @@ class SessionStore:
             row = (await db.execute(stmt)).scalars().first()
         return Event.model_validate(row) if row is not None else None
 
+    async def newest_event(
+        self, session_id: UUID, *, except_types: Collection[EventType] = (),
+    ) -> Event | None:
+        """The session's event with the highest id whose type is none of *except_types*; None when it has none.
+
+        One query reads back from the session's newest event until it finds
+        one of another type, passing the events of *except_types* after it:
+        the trailing ``llm.delta`` rows of a response still streaming, say.
+        """
+        stmt = select(EventRow).where(EventRow.session_id == session_id)
+        if except_types:
+            stmt = stmt.where(EventRow.type.notin_([t.value for t in except_types]))
+        stmt = stmt.order_by(EventRow.id.desc()).limit(1)
+        async with self._sf() as db:
+            row = (await db.execute(stmt)).scalars().first()
+        return Event.model_validate(row) if row is not None else None
+
     async def has_event(
         self, session_id: UUID, type: EventType, *,
         after: int | None = None, before: int | None = None, with_key: str | None = None,
@@ -2419,13 +2450,21 @@ class SessionStore:
         return stmt
 
     async def emit_keyed_synthetic_message(
-        self, session_id: UUID, *, content: str, synthetic: str, key: str, resume: bool = False,
-    ) -> int | None:
+        self,
+        session_id: UUID,
+        *,
+        content: str,
+        synthetic: str,
+        key: str,
+        resume: bool = False,
+        keep_report: bool = False,
+    ) -> KeyedMessage | None:
         """Write a synthetic user message for one Keel key, unless the session has it.
 
         The check and the write are one transaction under the session row's
         lock, so calls racing on one key write it once.  Returns the new
-        event's id, or ``None`` when the message was there already.
+        event's id, with whether the step rests on its report, or ``None``
+        when the message was there already.
 
         With *resume*, a session at rest (completed, paused or failed) is set
         ``active`` with a ``session.resume`` before the message, in the same
@@ -2434,9 +2473,16 @@ class SessionStore:
         takes no new message: it raises :class:`StepFinishedError` and writes
         nothing.  The check holds the same lock as a cancel's redaction, so a
         message racing a cancel never revives the step.  A message written
-        with *resume* also clears the step's report mark in the same
+        with *resume* alone also clears the step's report mark in the same
         transaction, whatever the session's status: the step is the
         session's to work on again.
+
+        *keep_report*, beside *resume*, writes a message that gives no step
+        back: a plain message.  A step that is over still refuses it.  A
+        step resting on its report keeps its mark and stays at rest: the
+        message is written with no ``session.resume`` and no status change,
+        for the turn Keel's next answer or revision wakes, and ``resting``
+        is true.  Any other session is woken as with *resume* alone.
         """
         message = await self._ready_event(
             session_id,
@@ -2459,11 +2505,16 @@ class SessionStore:
             if resumed is not None and _step_is_over(locked.config):
                 await db.rollback()
                 raise StepFinishedError(f"the step of session {session_id} is over")
-            if resume and (unreported := _unreported_case_config(locked.config)) is not None:
+            resting = keep_report and rests_on_its_report(locked.config)
+            if (
+                resume
+                and not keep_report
+                and (unreported := _unreported_case_config(locked.config)) is not None
+            ):
                 await db.execute(
                     update(SessionRow).where(SessionRow.id == session_id).values(config=unreported, updated_at=func.now())
                 )
-            if resumed is not None and locked.status not in _RESUMABLE_STATUSES:
+            if resumed is not None and (resting or locked.status not in _RESUMABLE_STATUSES):
                 resumed = None
             if resumed is not None:
                 await self._write_event(db, resumed, status="active")
@@ -2472,7 +2523,7 @@ class SessionStore:
         if resumed is not None:
             await self._announce_event(resumed)
         await self._announce_event(message)
-        return message.id
+        return KeyedMessage(message.id, resting)
 
     async def cancel_case_step(self, session_id: UUID, data: dict) -> bool:
         """End a case step: redact its inputs, and pause its session with a
@@ -2506,9 +2557,10 @@ class SessionStore:
     async def mark_case_step_reported(self, session_id: UUID, result: str, *, since: int | None = None) -> None:
         """Mark the step contract in *session_id*'s config as reported, with Keel's *result*.
 
-        A report ended the step for this round: until Keel writes to the step
-        again (:meth:`emit_keyed_synthetic_message` with *resume*), no turn of
-        the session is nudged to report, and no end of one is told to Keel.
+        A report ended the step for this round: until Keel answers or revises
+        the step (:meth:`emit_keyed_synthetic_message` with *resume*, without
+        *keep_report*), no turn of the session is nudged to report, and no end
+        of one is told to Keel.
         Under the session row's lock, as a redaction.  A session with no
         contract is left as it is.
 
@@ -2517,7 +2569,9 @@ class SessionStore:
         first: its write cleared no mark yet, so none is written now, and the
         step stays the session's to work on.  The check holds the lock that
         message's write takes, so one or the other comes first, never both
-        at once.  Without *since* the mark is written unchecked.
+        at once.  A plain message written since gives no step back, so it
+        does not hold the mark back.  Without *since* the mark is written
+        unchecked.
         """
         async with self._sf() as db:
             row = (await db.execute(

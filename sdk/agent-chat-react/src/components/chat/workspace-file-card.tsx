@@ -130,17 +130,20 @@ export function WorkspaceFileCard({
         <div className="truncate text-sm text-foreground">{title}</div>
         <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
       </div>
-      <Button asChild variant="secondary" size="sm">
-        <a
-          href={downloadUrl}
-          download={downloadName}
-          // Stop the click from opening the pane viewer.
-          onClick={(e) => e.stopPropagation()}
-          aria-label={`Download ${downloadName}`}
-        >
-          Download
-        </a>
-      </Button>
+      {/* An adapter with no URL for the file offers no download. */}
+      {downloadUrl && (
+        <Button asChild variant="secondary" size="sm">
+          <a
+            href={downloadUrl}
+            download={downloadName}
+            // Stop the click from opening the pane viewer.
+            onClick={(e) => e.stopPropagation()}
+            aria-label={`Download ${downloadName}`}
+          >
+            Download
+          </a>
+        </Button>
+      )}
     </div>
   );
 }

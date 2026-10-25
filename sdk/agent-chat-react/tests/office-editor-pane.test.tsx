@@ -117,6 +117,36 @@ describe("office documents in the file pane", () => {
     expect(getWorkspaceFile).not.toHaveBeenCalled();
     expect(DocEditor).not.toHaveBeenCalled();
   });
+
+  it("offers no download of an office file the adapter has no URL for", async () => {
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceDownloadUrl: () => "" })} sessionId="s-1" path="docs/Plan.docx" onClose={() => {}} />,
+    );
+    expect(view.textContent).toContain("Plan.docx");
+    expect(view.querySelector("a[download]")).toBeNull();
+    expect(view.querySelector('[role="alert"]')?.textContent).toBe("Preview not available.");
+  });
+
+  it.each([
+    ["/download?path=payslips.zip", "Preview not available. Download the file to open it."],
+    ["", "Preview not available."],
+  ])("says of a file it cannot preview, with the download URL %j, %j", async (url, said) => {
+    const getWorkspaceFile = vi.fn().mockResolvedValue({ path: "payslips.zip", content: "UEsDBA==", size: 6, mime_type: "application/zip", encoding: "base64", truncated: false });
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceFile, getWorkspaceDownloadUrl: () => url })} sessionId="s-1" path="payslips.zip" onClose={() => {}} />,
+    );
+    expect(view.textContent).toContain(said);
+    expect(view.textContent?.includes("Download the file")).toBe(url !== "");
+  });
+
+  it("offers no download of any other file the adapter has no URL for", async () => {
+    const getWorkspaceFile = vi.fn().mockResolvedValue({ path: "notes.txt", content: "Both payslips match.", size: 20, mime_type: "text/plain", encoding: "utf-8", truncated: false });
+    const view = await mount(
+      <WorkspaceFileDrawer adapter={adapter({ getWorkspaceFile, getWorkspaceDownloadUrl: () => "" })} sessionId="s-1" path="notes.txt" onClose={() => {}} />,
+    );
+    expect(view.textContent).toContain("Both payslips match.");
+    expect(view.querySelector("a[download]")).toBeNull();
+  });
 });
 
 describe("save notices in the editor pane", () => {

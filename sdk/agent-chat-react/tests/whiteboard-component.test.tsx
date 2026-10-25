@@ -875,6 +875,18 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Answer")).toHaveProperty("disabled", true);
     expect(byLabel(el, "Pen")).toHaveProperty("disabled", true);
   });
+
+  it("draws no prompt with its composer hidden, and still the board", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" onNewBoard={() => {}} hideComposer />,
+    );
+    expect(byLabel(el, "Whiteboard canvas")).not.toBeNull();
+    expect(el.querySelector('input[placeholder="Ask about the board (optional)"]')).toBeNull();
+    for (const control of ["Answer", "Continue", "Explain", "Hint", "Work it out", "New board"]) {
+      expect(byLabel(el, control), control).toBeNull();
+    }
+  });
 });
 
 describe("returning to the board after an agent reply", () => {

@@ -1,15 +1,18 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, cancel it and read its status. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
 | Route | What it does |
 |---|---|
 | `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
-| `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, or a reviewer's request to revise its draft, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. |
+| `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, a reviewer's request to revise its draft, or a plain message from whoever works on the case, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. A plain message also answers `resting`, and wakes no step that rests on its report. See [A message to a step](#a-message-to-a-step). |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
+| `GET /v1/keel/step-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the session's events after the cursor `after`, without `llm.delta`: `200 {"events": [{"id", "type", "data", "created_at"}], "has_more"}`. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/step-sessions/{session_id}/events/stream?after=<id>` | The session's events after the cursor `after`, then each new one as it is written, as server-sent events. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/step-sessions/{session_id}/progress` | The session's status, its todo list as its agent last wrote it, and its last activity: `200 {"status", "todos", "todos_at", "last_activity"}`. See [Progress](#progress). |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
@@ -42,14 +45,91 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), or a case id or an org id is not a UUID. |
-| 500 | `internal-error` | The database failed. Only the error's class name is logged. |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a step session's events were asked for with a cursor or a page size out of range. |
+| 500 | `internal-error` | The database failed, other than while a step session's events or progress were read. Only the error's class name is logged. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; or an invitation could not read the org's Firebase config. Only the error's class name, and the case id or the org id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
 
 ## A step's inputs
 
-Once a step is over, cancelled among others, its inputs are removed from the session's config and the contract is marked `inputs_redacted`. A step marked so takes no more messages. The redaction covers the config only: the step's first message, which sets out the inputs, stays in the session's event log, which no generic route serves for a case's sessions.
+Once a step is over, cancelled among others, its inputs are removed from the session's config and the contract is marked `inputs_redacted`. A step marked so takes no more messages. The redaction covers the config only: the step's first message, which sets out the inputs, stays in the session's event log, which only keel-link serves, to Keel.
+
+## A message to a step
+
+`POST /v1/keel/step-sessions/{session_id}/messages` takes three kinds of message. `answer` is a person's answer to the step's raised hand, and `revision` a reviewer's request to revise its draft: each takes a `note`, and gives the step back. `message` is a plain word to the agent working the step, from a person or from another agent. It neither answers a raised hand nor reviews a draft.
+
+A plain message's body is `{"kind": "message", "text", "sender", "idempotency_key"}`:
+
+- `text` is 1 to 20000 characters;
+- `sender` is the display name of whoever sends it, 1 to 200 printable characters, or null;
+- `idempotency_key` is 1 to 200 characters;
+- `note` must be null or absent.
+
+An answer or a revision takes no `sender`, and a key the route does not know is refused: either is `422 invalid-request`.
+
+The agent reads `<sender> sends you a message about this step: <text>`, or `Someone working on the case sends you a message about this step: <text>` without a sender. Then, after a blank line: `It does not answer a raised hand or review a draft. Take it into account, and go on with the step.` It reads it as it reads an answer: a turn under way at its next request to the model, otherwise the session's next turn. In the session's events, the message is a `user.message` whose `data` holds `content`, the text the agent reads, `synthetic: "keel_message"` and `keel_key`, the idempotency key.
+
+The answer is `202 {"delivered", "resting"}`. Each key is delivered once: `delivered` is false when the key was delivered already, and nothing is then written or woken.
+
+A message wakes a step whose session is at rest, as an answer wakes it, except a step that rests on its report. A step rests on its report when a report ended it for this round and the step is not over: it waits for a person, on a raised hand or a draft under review. Any other report that ended it but left its inputs in place rests it the same way. Such a step is not woken, and keeps its report's mark. Its message stays unread until Keel's next answer or revision wakes the step, and that turn reads the message first. `resting` is true then, and false otherwise; a repeated call answers it as the step stands at that call.
+
+A message never gives the step back. An answer or a revision ends the rest a report began, and the step then reports to Keel again. A message does neither, and a message that reached the step since a report began does not keep the report's mark from being written. If the turn that made the report reads the message, a further report in that turn is answered by the worker and never reaches Keel.
+
+A step that is over takes no message: `409 step-finished`, as for an answer. Nor does a message it took before then, and no turn has read, wake it once it is over. The route logs neither a message's text nor its sender.
+
+## Watching a step session
+
+Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The runtime keeps each session's events as an append-only log, and an event never changes once written:
+
+- `id` is an integer that only grows, unique across all sessions;
+- `type` is the event's type, and `data` its payload as the runtime wrote it, a JSON object;
+- `created_at` is when it was written, in ISO 8601 with its offset: UTC, `+00:00`.
+
+The runtime adds event types and payload keys over time, so a reader keeps the types it knows and passes over the rest.
+
+A cursor is the `id` of the last event read. `after` is a cursor: an integer from 0 to 9223372036854775807, the largest id the database holds, written in digits alone. It is 0 by default, before the first event. Any other `after` is `422 invalid-request`.
+
+### By page
+
+`GET /v1/keel/step-sessions/{session_id}/events?after=&limit=` answers `200 {"events": [{"id", "type", "data", "created_at"}], "has_more"}`: the session's events whose `id` is greater than `after`, in `id` order, at most `limit` of them. `limit` is 1 to 500, and 200 by default; any other is `422 invalid-request`. `has_more` is true when more events follow the page: Keel reads on with `after` set to the page's last `id`.
+
+A page never holds `llm.delta` events. Each is a piece of a model response still streaming, and the `llm.response` after it carries the whole response.
+
+### Live
+
+`GET /v1/keel/step-sessions/{session_id}/events/stream?after=` takes `after` as a page does. The link key, the session and `after` are checked before the stream opens, and refused with the JSON errors above.
+
+The stream is server-sent events, framed as the runtime's own session stream frames them when it watches a session. In order:
+
+1. `: connected`, a comment.
+2. `event: stream.start`, whose `id` is `after` and whose `data` is `{}`.
+3. Every event with an `id` greater than `after`, in `id` order, without `llm.delta`, each as `id: <event id>`, `event: <type>`, `data: <the event's data, as JSON>`.
+4. `event: stream.live` with `data: {}` and no `id`, once: from here on, what comes happens now.
+5. Each new event as it is written, `llm.delta` included, framed as in 3.
+
+While no frame goes out for 15 seconds, the stream sends a `: keepalive` comment.
+
+The stream ends:
+
+- with `event: stream.timeout` and `data: {"reason": "max_duration_exceeded"}`, after 300 seconds of waiting for events (a stream that always has an event to send runs longer);
+- with `event: session.done` and `data: {"reason": "archived", "status": "archived"}` once the session is archived;
+- with `event: session.done` and `data: {"reason": "session_not_found"}` once the session is gone.
+
+A session at rest (`completed`, `paused` or `failed`) does not end the stream: a step rests between its turns, and Keel's next message wakes it. A failure while the stream is open closes it without a frame.
+
+To go on after an end, or after a dropped connection, Keel opens the stream again with `after` set to the last event `id` it received. Every event then reaches Keel exactly once.
+
+A stream counts as no one reading the chat: the session's check-ins and completions still reach the inbox, as they do while nobody reads it. Neither route logs an event's data.
+
+### Progress
+
+`GET /v1/keel/step-sessions/{session_id}/progress` answers `200 {"status", "todos", "todos_at", "last_activity"}`:
+
+- `status` is the session's status, as `GET /v1/keel/step-sessions/{session_id}` gives it: `active`, `completed`, `paused`, `failed` or another the runtime adds.
+- `todos` is the session's todo list, as its agent last wrote it with its `todo` tool: a list of `{"id", "content", "status"}` in the agent's order, whose `status` is `pending`, `in_progress`, `completed` or `cancelled`. It is null when the agent never wrote one, and `[]` when it emptied it. `todos_at` is when the list was last written, or null.
+- `last_activity` is the session's newest event that is not an `llm.delta`, as `{"event_id", "type", "at", "tool"}`. `tool` is the tool's name when the event is a `tool.call` or a `tool.result`, and null otherwise. `last_activity` is null for a session with no events.
+
+`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's own session is read: a helper the step started keeps its own list, which progress does not give. Stored data out of its shape never fails the read: a todo item out of its shape is left out, a stored list that is not one reads as `todos` null, and a newest event out of its shape as `last_activity` null. Each is logged by the session id and the kind of error alone. The route logs neither the list nor an event's data.
 
 ## A case's files
 
@@ -59,6 +139,7 @@ A path is relative to the workspace and `/`-separated; `.` and empty parts are d
 
 - it is empty or absolute, or holds a `..` part, a NUL or a backslash;
 - its first folder is one of the platform's own: `_artifacts`, `_whiteboard`, `.threads` or `_history`. These hold the platform's state, not a person's files, and the listing leaves them out too;
+- a part of it, once the `.` parts are dropped, starts with `.`: a hidden file or folder, at the top or deeper. A step session stages its skills under `.skills` in the case's workspace, and a person never sees a skill, so the listing leaves these out too;
 - its first folder is `root` or `workspace`. A step's output takes either off the path it names, so it would read another file;
 - its object key, with the workspace's prefix, is over the 1024 bytes an S3 store takes.
 
@@ -100,7 +181,7 @@ A person joined from another org who has no password yet gets no link from the o
 
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, send any step's agent a message, read every step session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 
@@ -124,7 +205,9 @@ Only a step's own session is offered `complete_step` and `raise_hand`. The worke
 | No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | The model calls again. A repeated call gets Keel's first answer. |
 | Anything else | Keel refused the report for good: the worker tells Keel the step failed, removes the inputs, and ends the turn. People take the step. |
 
-A raised hand carries its `question`, its `choices` and its `evidence`: at most 50 facts, each `{"label", "value", "source"?: {"file", "page"?}}`. `label` is 1 to 200 characters and `value` 1 to 500, counted once stripped; `page` is a whole number from 1; a null `source` or `page` is read as absent. `file` must be one the case's files show: the model names it in `/workspace`, and the report carries it as the case's files list it, relative to the case's workspace. A path outside the workspace, or in the platform's own folders, is refused. Whether the file exists is not checked.
+A raised hand carries its `question`, its `choices` and its `evidence`: at most 50 facts, each `{"label", "value", "source"?: {"file", "page"?}}`. `label` is 1 to 200 characters and `value` 1 to 500, counted once stripped; `page` is a whole number from 1; a null `source` or `page` is read as absent. `file` must be one the case's files show: the model names it in `/workspace`, and the report carries it as the case's files list it, relative to the case's workspace. A path outside the workspace, in the platform's own folders, or with a hidden file or folder in it, is refused. Whether the file exists is not checked.
+
+A file field of `complete_step` takes the same files. Each path names a file in `/workspace` that the case's files show, and the report carries the file's `{"name", "uri", "sha256"}`, with `uri` the `case-file://` value the case's files give it. A path in the platform's own folders, or with a hidden file or folder in it, is refused by the field's name, and its index in a list, never by its path. So is a path a step's output would read as another file. A path with no file behind it is refused too.
 
 A report Keel would refuse whole is never sent, and the model is told what to fix: one over 256,000 bytes of JSON, one holding NaN or an infinity, sources that are not lists of objects, a raised hand's evidence outside its shape, or a tool call id over 200 characters. A refused fact is named by its index, never by its path. Once a report has ended the step, a later report in the same wake is answered by the worker, without Keel.
 

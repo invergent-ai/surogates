@@ -36,8 +36,8 @@ a crash, and its inputs stay for the person's word.
 
 The harness checks only what Keel cannot, and what would make Keel refuse
 the whole report: the outcome is one of the contract's, the output is an
-object, the sources map fields to lists of objects, each file named is in
-the case's workspace, and the report is JSON within Keel's bounds.  A
+object, the sources map fields to lists of objects, each file named is one
+the case's files show, and the report is JSON within Keel's bounds.  A
 raised hand's evidence is checked whole: each fact is the label, value and
 optional source a person sees as a card, and its file one the case's files
 show.  Keel validates the rest.  No log line here carries the case's data,
@@ -89,6 +89,8 @@ EVIDENCE_LABEL_CHARS = 200
 EVIDENCE_VALUE_CHARS = 500
 
 _NOT_A_STEP = "This session works no step of a case: there is no step to report."
+#: How to name a file the case's files show, told when the model named another; it never repeats that path.
+_NAME_A_CASE_FILE = "name one in /workspace, outside the platform's own folders, with no hidden file or folder in its path."
 #: A page's digest, as Keel takes it: SHA-256, in lowercase hex.
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 #: What a report Keel took came to, as the step's mark; and the mark of a report Keel refused for good.
@@ -554,9 +556,12 @@ async def _files(
                 return f"{name}: give the path of one file in /workspace."
             paths = [value]
         files = []
-        for path in paths:
+        for index, path in enumerate(paths):
             try:
                 files.append(await case_file_value(storage, session, contract.case_id, path))
+            except CaseFileError:
+                at = f"{name}[{index}]" if kind == "list" else name
+                return f"{at} is not a file of the case: {_NAME_A_CASE_FILE}"
             except ValueError:
                 return f"{name}: {path} is not a path in /workspace."
             except FileNotFoundError:
@@ -625,7 +630,7 @@ def _fact(index: int, item: Any) -> dict[str, Any] | str:
     try:
         file = case_path(relative)
     except CaseFileError:
-        return f"{at}.source.file is not a file of the case: name one in /workspace, outside the platform's own folders."
+        return f"{at}.source.file is not a file of the case: {_NAME_A_CASE_FILE}"
     fact["source"] = {"file": file} if page is None else {"file": file, "page": page}
     return fact
 

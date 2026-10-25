@@ -12,7 +12,9 @@ answer decides what the session does next:
 
 Keel's word to the step, an answer or a revision, that lands while the step
 reports keeps the turn going: the model reads it, and the step is the
-session's again.
+session's again.  Keel's plain message is read as an answer is, but gives
+the step nothing back: a step that rests on its report stays Keel's, and the
+message waits for Keel's next word.
 """
 from __future__ import annotations
 
@@ -170,6 +172,18 @@ class _StepStore(FakeStore):
         self.row.config = {
             **self.row.config, "case_step": {k: v for k, v in self.row.config["case_step"].items() if k != "reported"},
         }
+
+    def keel_says(self, content: str) -> None:
+        """Keel's plain message reaching the step through the link: a session at rest set active with a
+        ``session.resume`` first, unless the step rests on its report, then the message written.  The
+        report's mark is kept."""
+        if self.reported() is None and self.row.status in ("completed", "paused", "failed"):
+            self.write(EventType.SESSION_RESUME, {})
+            self.row.status = "active"
+        self.write(
+            EventType.USER_MESSAGE,
+            {"content": content, "synthetic": "keel_message", "keel_key": f"keel:message:{content}"},
+        )
 
     def redacted(self) -> bool:
         step = self.row.config["case_step"]
@@ -369,6 +383,27 @@ async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
         result = await _call("complete_step", files(**output), store)
         assert json.loads(result)["error"].startswith(error), output
     assert len(fake_keel.requests) == 1
+
+
+@pytest.mark.parametrize(("output", "at"), [
+    ({"offer": "/workspace/.skills/credit/SKILL.md"}, "offer"),
+    ({"offer": "_history/out/offer.pdf"}, "offer"),
+    ({"payslips": ["in/payslips/03.pdf", "/root/in/payslips/.cache/04.pdf"]}, "payslips[1]"),
+], ids=["skills-folder", "platform-folder", "hidden-in-a-list"])
+async def test_an_output_file_the_case_files_do_not_show_is_refused(fake_keel, tmp_path, output, at):
+    # A step session stages its skills under .skills/ in the case's workspace; a person never sees them.
+    store = _store_for(tmp_path, files={"offer": "one", "payslips": "list"})
+    for path in (".skills/credit/SKILL.md", "_history/out/offer.pdf", "in/payslips/03.pdf", "in/payslips/.cache/04.pdf"):
+        await store.put(path, b"stored")
+
+    result = await _call("complete_step", {**COMPLETION, "output": {**COMPLETION["output"], **output}}, store)
+
+    assert json.loads(result)["error"] == (
+        f"{at} is not a file of the case: name one in /workspace, outside the platform's own folders, "
+        "with no hidden file or folder in its path."
+    )
+    assert fake_keel.requests == []
+    assert store.reported() is None
 
 
 async def test_an_empty_file_is_a_case_file(fake_keel, store):
@@ -618,6 +653,23 @@ async def test_evidence_outside_the_shape_is_refused(fake_keel, store, bad, inde
     assert error.startswith(f"evidence[{index}]")
     # The refused path is never repeated back.
     assert "sep.pdf" not in error and "passwd" not in error
+    assert fake_keel.requests == []
+    assert store.reported() is None
+
+
+@pytest.mark.parametrize("file", [
+    "/workspace/.skills/payslips/sep.pdf", "/root/payslips/.cache/sep.pdf", "payslips/.sep.pdf",
+], ids=["skills-folder", "hidden-folder", "hidden-file"])
+async def test_evidence_from_a_hidden_path_is_refused(fake_keel, store, file):
+    # A step session stages its skills under .skills/ in the case's workspace; a person never sees them.
+    evidence = [{**PAYSLIP, "source": {"file": file}}]
+
+    error = json.loads(await _call("raise_hand", {"question": "Which income counts?", "evidence": evidence}, store))["error"]
+
+    assert error == (
+        "evidence[0].source.file is not a file of the case: name one in /workspace, outside the platform's own "
+        "folders, with no hidden file or folder in its path."
+    )
     assert fake_keel.requests == []
     assert store.reported() is None
 
@@ -909,6 +961,125 @@ async def test_keels_message_written_while_keel_takes_the_report_keeps_the_turn_
     assert _in_call_order(request["messages"])
     assert content in json.dumps(request["messages"])
     assert len(fake_keel.requests) == 3
+
+
+MESSAGE = "Ana Popescu sends you a message about this step: count the bonus too."
+
+
+async def test_keels_plain_message_reaches_the_turn_under_way(fake_keel, monkeypatch, tmp_path):
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(409, REJECTION)
+    fake_keel.answer(200, HAND_RAISED)
+
+    def keel_says_during_the_first_report() -> None:
+        if len(fake_keel.requests) == 1:
+            store.keel_says(MESSAGE)
+
+    fake_keel.during = keel_says_during_the_first_report
+    _started(store)
+    arguments = {"question": "Which income counts?"}
+
+    replies = [_calls("raise_hand", arguments, "c1"), _calls("raise_hand", arguments, "c2")]
+    sent = await _queued_wake(monkeypatch, store, replies)
+
+    # The turn's next request reads the message, after the call it landed in and that call's result.
+    assert len(sent) == 2
+    assert MESSAGE not in json.dumps(sent[0]["messages"])
+    assert json.dumps(sent[1]["messages"]).count(MESSAGE) == 1
+    assert _in_call_order(sent[1]["messages"])
+    assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
+    assert store.reported() == "hand-raised"
+
+    # Keel answers: the next wake reads the log in the order the turn did, the message after the call's result.
+    fake_keel.during = None
+    store.keel_writes("answer", ANSWER)
+    [request] = await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c3")])
+    assert _in_call_order(request["messages"])
+    assert json.dumps(request["messages"]).count(MESSAGE) == 1
+
+
+async def test_keels_plain_message_during_a_report_gives_the_step_no_back(fake_keel, monkeypatch, tmp_path):
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, HAND_RAISED)
+
+    def keel_says_during_the_report() -> None:
+        if len(fake_keel.requests) == 1:
+            store.keel_says(MESSAGE)
+
+    fake_keel.during = keel_says_during_the_report
+    _started(store)
+    arguments = {"question": "Which income counts?"}
+
+    replies = [_calls("raise_hand", arguments, "c1"), _calls("raise_hand", arguments, "c2")]
+    sent = await _queued_wake(monkeypatch, store, replies)
+
+    # The turn goes on to read the message, but the step stays Keel's: a second report never reaches it.
+    assert len(sent) == 2
+    assert MESSAGE in json.dumps(sent[1]["messages"])
+    assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1"]
+    assert store.result("c2") == "Step ended: the step is no longer this session's."
+    assert store.reported() == "hand-raised"
+
+
+async def test_a_message_to_a_resting_step_is_read_with_keels_next_word(fake_keel, monkeypatch, tmp_path):
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, HAND_RAISED)
+    _started(store)
+    arguments = {"question": "Which income counts?"}
+    assert len(await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c1")])) == 1
+    assert (store.reported(), store.row.status) == ("hand-raised", "completed")
+
+    # The step rests on its report: the message wakes nothing and waits.
+    resumes = sum(e.type == EventType.SESSION_RESUME.value for e in store.log)
+    store.keel_says(MESSAGE)
+    assert sum(e.type == EventType.SESSION_RESUME.value for e in store.log) == resumes
+    assert store.row.status == "completed"
+
+    store.keel_writes("answer", ANSWER)
+    [request] = await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c2")])
+
+    # Keel's answer wakes the step, and its turn reads the message first.
+    said = json.dumps(request["messages"])
+    assert said.count(MESSAGE) == 1 and ANSWER in said
+    assert said.index(MESSAGE) < said.index(ANSWER)
+    assert _in_call_order(request["messages"])
+    assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
+
+
+async def test_a_message_to_a_resting_step_is_not_read_at_a_wake_keel_did_not_send(fake_keel, monkeypatch, tmp_path):
+    # A person holds the step: only Keel's next word wakes it, never the late report of a worker it spawned.
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, HAND_RAISED)
+    _started(store)
+    worker = str(uuid4())
+    store.write(EventType.WORKER_SPAWNED, {"worker_id": worker, "goal": "Read the payslips."})
+    arguments = {"question": "Which income counts?"}
+    assert len(await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c1")])) == 1
+    store.keel_says(MESSAGE)
+
+    store.write(EventType.WORKER_COMPLETE, {"worker_id": worker, "result": "Income is 5200."})
+    assert await _queued_wake(monkeypatch, store, []) == []
+    assert (store.reported(), store.row.status) == ("hand-raised", "completed")
+    assert len(fake_keel.requests) == 1
+
+
+async def test_a_message_left_unread_wakes_no_step_that_is_over(fake_keel, monkeypatch, tmp_path):
+    # The message waits on the resting step; then the step completes and its inputs leave the session.
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, HAND_RAISED)
+    _started(store)
+    arguments = {"question": "Which income counts?"}
+    assert len(await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c1")])) == 1
+    store.keel_says(MESSAGE)
+    await store.mark_case_step_reported(store.row.id, "completed")
+    await store.redact_case_inputs(store.row.id)
+    log = len(store.log)
+
+    # No turn of the step is left to read the message: the next wake runs none, and the session stays at rest.
+    assert await _queued_wake(monkeypatch, store, []) == []
+    assert store.row.status == "completed"
+    assert not any(e.type == EventType.SESSION_RESUME.value for e in store.log[log:])
+    assert len(fake_keel.requests) == 1
 
 
 async def test_a_step_keel_took_is_not_woken_by_the_late_report_of_a_worker_it_spawned(fake_keel, monkeypatch, tmp_path):

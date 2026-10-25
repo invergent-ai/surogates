@@ -50,7 +50,9 @@ __all__ = [
     "CASE_STEP_TOOLS",
     "CaseScope",
     "KEELS_WORD",
+    "KEEL_MESSAGES",
     "KICKOFF_MARKER",
+    "MESSAGE_MARKER",
     "NUDGE_MARKER",
     "OutcomeContract",
     "REPORTED_KEY",
@@ -64,9 +66,12 @@ __all__ = [
     "is_case_config",
     "is_case_session",
     "is_case_step",
+    "is_keel_message",
     "is_keels_word",
     "render_kickoff",
     "render_message",
+    "rests_on_its_report",
+    "sleeps_through_a_plain_message",
     "step_contract_in",
     "step_contract_of",
 ]
@@ -81,8 +86,9 @@ CASE_STEP_KEY = "case_step"
 CASE_SCOPE_KEY = "case_scope"
 #: In the step contract of a session's config: what the report that ended the
 #: step for this round came to (``completed``, ``drafted``, ``hand-raised``,
-#: or ``stopped`` when Keel refused it for good).  Keel's next message to the
-#: step, an answer or a revision, clears it: the step is the session's again.
+#: or ``stopped`` when Keel refused it for good).  Keel's next answer or
+#: revision to the step clears it: the step is the session's again.  A plain
+#: message keeps it.
 REPORTED_KEY = "reported"
 #: The ``synthetic`` marker of the message that starts a step: written once per Keel key.
 KICKOFF_MARKER = "keel_step"
@@ -90,9 +96,18 @@ KICKOFF_MARKER = "keel_step"
 #: reviewer's request to revise a draft: each written once per Keel key.
 ANSWER_MARKER = "keel_answer"
 REVISION_MARKER = "keel_revision"
-#: Keel's word to a step's session: the markers of the messages it reads as it
-#: reads a person's, whenever they land, in a turn under way or after its end.
+#: Keel's word to a step's session: the markers of the messages that give the
+#: step back.  An answer or a revision ends the rest a report began, and the
+#: step then reports to Keel again.
 KEELS_WORD: frozenset[str] = frozenset({ANSWER_MARKER, REVISION_MARKER})
+#: The ``synthetic`` marker of a plain message to a step, from a person or
+#: another agent working on the case: written once per Keel key.  It neither
+#: answers a raised hand nor reviews a draft, so it gives no step back.
+MESSAGE_MARKER = "keel_message"
+#: Every message Keel sends a step: the markers of the messages its session
+#: reads as it reads a person's, whenever they land, in a turn under way or
+#: after its end.
+KEEL_MESSAGES: frozenset[str] = KEELS_WORD | {MESSAGE_MARKER}
 #: A step tool's result starts with one of these exactly when the step is over
 #: for this session, and the harness ends the turn on it: Keel took the report,
 #: or the step is no longer the session's (``STEP_ENDED``); or Keel refused the
@@ -133,9 +148,45 @@ ALWAYS_KEPT: frozenset[str] = frozenset({
 
 
 def is_keels_word(data: object) -> bool:
-    """Whether *data*, a message event's payload, is Keel's word to a step: its
-    answer to a raised hand, or its request to revise a draft (:data:`KEELS_WORD`)."""
+    """Whether *data*, a message event's payload, is Keel's word to a step, which
+    gives the step back: its answer to a raised hand, or its request to revise a
+    draft (:data:`KEELS_WORD`).  A plain message is not."""
     return isinstance(data, Mapping) and data.get("synthetic") in KEELS_WORD
+
+
+def is_keel_message(data: object) -> bool:
+    """Whether *data*, a message event's payload, is any message Keel sent a step,
+    which its session reads as it reads a person's (:data:`KEEL_MESSAGES`)."""
+    return isinstance(data, Mapping) and data.get("synthetic") in KEEL_MESSAGES
+
+
+def rests_on_its_report(config: object) -> bool:
+    """Whether a session's *config* holds a step that rests on its report.
+
+    A report ended the step for this round (:data:`REPORTED_KEY`), and it
+    waits for a person: a raised hand, or a draft under review.  Only Keel's
+    next answer or revision wakes it.  A step that is over, its inputs
+    redacted, waits for nobody.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, Mapping) else None
+    return (
+        isinstance(contract, Mapping)
+        and REPORTED_KEY in contract
+        and contract.get("inputs_redacted") is not True
+    )
+
+
+def sleeps_through_a_plain_message(config: object) -> bool:
+    """Whether a plain message (:data:`MESSAGE_MARKER`) leaves the step a
+    session's *config* holds at rest, unread.
+
+    A step that rests on its report (:func:`rests_on_its_report`) waits for
+    Keel's next answer or revision, whose turn reads the message first.  A
+    step that is over, its inputs redacted, has no turn left to read it.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, Mapping) else None
+    over = isinstance(contract, Mapping) and contract.get("inputs_redacted") is True
+    return over or rests_on_its_report(config)
 
 
 class OutcomeContract(BaseModel):
@@ -301,8 +352,20 @@ def render_kickoff(contract: StepContract) -> str:
     return "\n".join(lines)
 
 
-def render_message(kind: Literal["answer", "revision"], text: str, note: str | None) -> str:
-    """A person's message to a step: an answer to its raised hand, or a draft's revision request."""
+def render_message(
+    kind: Literal["answer", "revision", "message"], text: str, note: str | None, sender: str | None = None,
+) -> str:
+    """Keel's message to a step, as its session reads it.
+
+    A person's answer to its raised hand, or a draft's revision request, with
+    their note; or a plain message, from a person or another agent working
+    on the case, under its *sender*'s name.
+    """
+    if kind == "message":
+        return (
+            f"{sender or 'Someone working on the case'} sends you a message about this step: {text}"
+            "\n\nIt does not answer a raised hand or review a draft. Take it into account, and go on with the step."
+        )
     if kind == "answer":
         message = f"A person answered your raised hand: {text}"
     else:

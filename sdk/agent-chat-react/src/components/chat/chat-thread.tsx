@@ -191,6 +191,9 @@ interface ChatThreadProps {
   deviceWait?: AgentChatDeviceWaitState | null;
   // What the host says under the composer, as where a new chat will work.
   composerFooter?: ReactNode;
+  // No composer, footer or integrations band: the transcript fills the chat. The area under it
+  // still shows the device-wait line, the retry banner and the research sources.
+  hideComposer?: boolean;
 }
 
 // ── Timeline item types ──────────────────────────────────────────────
@@ -1978,6 +1981,7 @@ export function ChatThread({
   onOpenIntegrations,
   deviceWait = null,
   composerFooter,
+  hideComposer = false,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const activeAssistantId = useMemo(() => {
@@ -2113,38 +2117,42 @@ export function ChatThread({
           <ResearchSourcesPanel sources={researchSources} />
         </div>
       )}
-      <ChatComposer
-        onSend={onSend}
-        onStop={onStop}
-        isRunning={isRunning}
-        disabled={composerDisabled}
-        disabledReason={composerDisabledReason}
-        awaitingAnswer={askPolicy !== null && !askPolicy.locked}
-        placeholder={askPolicy?.placeholder}
-        tokenUsage={tokenUsage}
-        onComposerError={onComposerError}
-        paneCards={paneCards}
-        browserProfileId={browserProfileId}
-        onSelectBrowserProfile={onSelectBrowserProfile}
-        browserProfilesEnabled={browserProfilesEnabled}
-        browserProfileLocked={browserProfileLocked}
-        viewMode={viewMode}
-        onViewModeChange={onViewModeChange}
-        deepResearchEnabled={deepResearchEnabled}
-        researchEnabled={researchEnabled}
-        codeAgentsEnabled={codeAgentsEnabled}
-        whiteboardEnabled={whiteboardEnabled}
-        loopsEnabled={loopsEnabled}
-        missionsEnabled={missionsEnabled}
-        goalsEnabled={goalsEnabled}
-        compressEnabled={compressEnabled}
-      />
-      {composerFooter}
-      {onOpenIntegrations && (
-        <IntegrationsBandSlot
-          agentId={agentId}
-          onOpenIntegrations={onOpenIntegrations}
-        />
+      {!hideComposer && (
+        <>
+          <ChatComposer
+            onSend={onSend}
+            onStop={onStop}
+            isRunning={isRunning}
+            disabled={composerDisabled}
+            disabledReason={composerDisabledReason}
+            awaitingAnswer={askPolicy !== null && !askPolicy.locked}
+            placeholder={askPolicy?.placeholder}
+            tokenUsage={tokenUsage}
+            onComposerError={onComposerError}
+            paneCards={paneCards}
+            browserProfileId={browserProfileId}
+            onSelectBrowserProfile={onSelectBrowserProfile}
+            browserProfilesEnabled={browserProfilesEnabled}
+            browserProfileLocked={browserProfileLocked}
+            viewMode={viewMode}
+            onViewModeChange={onViewModeChange}
+            deepResearchEnabled={deepResearchEnabled}
+            researchEnabled={researchEnabled}
+            codeAgentsEnabled={codeAgentsEnabled}
+            whiteboardEnabled={whiteboardEnabled}
+            loopsEnabled={loopsEnabled}
+            missionsEnabled={missionsEnabled}
+            goalsEnabled={goalsEnabled}
+            compressEnabled={compressEnabled}
+          />
+          {composerFooter}
+          {onOpenIntegrations && (
+            <IntegrationsBandSlot
+              agentId={agentId}
+              onOpenIntegrations={onOpenIntegrations}
+            />
+          )}
+        </>
       )}
     </div>
   );

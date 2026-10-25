@@ -116,13 +116,16 @@ from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.keel.steps import (
     CASE_STEP_NUDGE,
     CASE_STEP_TOOLS,
+    MESSAGE_MARKER,
     NUDGE_MARKER,
     STEP_ENDED,
     STEP_STOPPED,
     gate_case_tools,
     is_case_session,
     is_case_step,
+    is_keel_message,
     is_keels_word,
+    sleeps_through_a_plain_message,
     step_contract_of,
 )
 from surogates.harness.tool_schemas import (
@@ -950,17 +953,24 @@ class AgentHarness(
         terminal session (same rule as the dispatcher's crash-loop
         ``_has_user_signal_since``).  A project coordinator's follow-up to
         its thread counts as a message does, and so does Keel's word to a
-        case's step, written as the turn that reported the step ended.
+        case's step, or its plain message, written as the turn that
+        reported the step ended.  Not a plain message to a step that
+        sleeps through one (:func:`sleeps_through_a_plain_message`).  A
+        step resting on its report is a person's to hold: the message waits
+        for Keel's next answer or revision, whose own resume wakes the
+        step.  A step that is over has no turn left to read it.
         Completion bookkeeping events (turn.summary, session.complete,
         inbox.task_complete) always sit past the cursor and are
         excluded by the type filter.
         """
         cursor = await self._store.get_harness_cursor(session.id)
+        asleep = sleeps_through_a_plain_message(session.config)
         # A command is not stranded by the cursor: a command's end leaves
         # the cursor before a report no turn has read, and one that still
         # waits revives a finished session by its own rule.
         return any(
             self._is_for_the_model(session, event)
+            and not (asleep and (event.data or {}).get("synthetic") == MESSAGE_MARKER)
             for event in await self._store.get_events(session.id, after=cursor, types=list(MESSAGE_TYPES))
         )
 
@@ -988,11 +998,13 @@ class AgentHarness(
     def _is_for_the_model(self, session: Session, event: Any) -> bool:
         """Whether *event* is a message the model is to read, in the turn
         under way or the next: a plain message (:meth:`_is_plain_message`),
-        or Keel's word to a case's step, its answer to a raised hand or its
-        request to revise a draft, which the step's session reads as it
-        reads a person's.  The harness's own messages, nudges and
-        continuations, are not: the turn that writes one reads it."""
-        return self._is_plain_message(session, event) or is_keels_word(event.data)
+        Keel's word to a case's step, its answer to a raised hand or its
+        request to revise a draft, or Keel's plain message to the step,
+        which the step's session reads as it reads a person's.  Only the
+        answer and the revision give the step back.  The harness's own
+        messages, nudges and continuations, are not for the model: the
+        turn that writes one reads it."""
+        return self._is_plain_message(session, event) or is_keel_message(event.data)
 
     def _is_command(self, session: Session, event: Any) -> bool:
         """Whether *event* is a message the user wrote themselves that is a command of the harness's."""
@@ -1274,10 +1286,11 @@ class AgentHarness(
 
         Reads the messages for the model (:meth:`_is_for_the_model`): the
         user's own ``user.message`` events, a project coordinator's
-        follow-ups to its thread, and Keel's word to a case's step, appended
-        after ``after_event_id``, renders each through the same path replay
-        uses (:func:`build_user_message_dict`), and coalesces them into one
-        user turn so a burst of follow-ups becomes a single steered turn.
+        follow-ups to its thread, and Keel's word or plain message to a
+        case's step, appended after ``after_event_id``, renders each through
+        the same path replay uses (:func:`build_user_message_dict`), and
+        coalesces them into one user turn so a burst of follow-ups becomes a
+        single steered turn.
 
         Returns ``(coalesced_message_or_None, new_cursor)``.  The cursor
         advances to the highest event id seen even when no message was for
@@ -1307,6 +1320,7 @@ class AgentHarness(
         if not rendered:
             return None, new_cursor
         # Keel's word gives a case's step back to the session: a report the turn makes now reaches Keel.
+        # Its plain message does not: a report the turn makes after reading only that stays the runtime's.
         if any(is_keels_word(event.data) for event in events):
             step_given_back(session.id)
         return coalesce_user_messages(rendered), new_cursor

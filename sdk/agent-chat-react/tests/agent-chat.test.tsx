@@ -1676,6 +1676,82 @@ describe("AgentChat", () => {
     expect(buttons()).not.toContain("Retry");
   });
 
+  it("a chat with its composer hidden shows the transcript and no composer", async () => {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" hideComposer />);
+      await Promise.resolve();
+    });
+    act(() => {
+      stream.emit("user.message", 1, { content: "Check the payslips" });
+      stream.emit("llm.response", 2, { message: { content: "Both payslips match." } });
+    });
+    expect(container.textContent).toContain("Check the payslips");
+    expect(container.textContent).toContain("Both payslips match.");
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(container.querySelector("form")).toBeNull();
+    // The same chat with its composer drawn holds one, so the selector finds a composer where there is one.
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    expect(container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("a chat with its composer hidden offers nothing that writes", async () => {
+    const stream = new FakeEventStream();
+    const base = createAdapter(stream);
+    const spies = {
+      sendMessage: vi.fn(base.sendMessage),
+      createSession: vi.fn(base.createSession),
+      pauseSession: vi.fn(base.pauseSession),
+      retrySession: vi.fn(base.retrySession),
+      submitAskUserQuestionResponse: vi.fn(base.submitAskUserQuestionResponse),
+      listSlashCommands: vi.fn(base.listSlashCommands),
+      getWorkspaceTree: vi.fn(base.getWorkspaceTree),
+    };
+    const adapter: AgentChatAdapter = { ...base, ...spies };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" hideComposer />);
+      await Promise.resolve();
+    });
+    const buttons = () => [...container!.querySelectorAll("button")].map((button) => button.textContent?.trim() || button.getAttribute("aria-label"));
+    act(() => {
+      stream.emit("user.message", 1, { content: "Tidy my notes" });
+      stream.emit("llm.request", 2, {});
+      stream.emit("tool.call", 3, {
+        tool_call_id: "ask-1",
+        name: "ask_user_question",
+        arguments: { questions: [{ prompt: "Which folder first?", choices: [{ label: "Notes" }, { label: "Drafts" }] }] },
+      });
+      stream.emit("tool.call", 4, {
+        tool_call_id: "ask-2",
+        name: "ask_user_question",
+        arguments: { questions: [{ prompt: "Keep the drafts?" }, { prompt: "Rename the notes?" }] },
+      });
+    });
+    expect(container.textContent).toContain("Which folder first?");
+    expect(buttons()).not.toContain("Notes");
+    expect(buttons()).not.toContain("Submit");
+    expect(buttons()).not.toContain("Stop");
+    await act(async () => {
+      stream.emit("session.fail", 5, { error_category: "provider_error", error_title: "The model failed", retryable: true });
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("The model failed");
+    expect(buttons()).not.toContain("Retry");
+    for (const [name, spy] of Object.entries(spies)) {
+      expect(spy, name).not.toHaveBeenCalled();
+    }
+  });
+
   it("shows a chat the host only reads its browser to watch, and nothing that takes it over or shuts it down", async () => {
     // The shell opens a socket as it mounts; happy-dom would dial it.
     vi.stubGlobal("WebSocket", class {

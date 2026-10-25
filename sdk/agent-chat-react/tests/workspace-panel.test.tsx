@@ -65,6 +65,27 @@ describe("WorkspacePanel", () => {
     expect(signals[0]?.aborted ?? false).toBe(false);
   });
 
+  it("lists a file the adapter has no download URL for with no download", async () => {
+    const adapter = {
+      getWorkspaceTree: vi.fn().mockResolvedValue({ root: "r", entries: [{ name: "notes.txt", path: "notes.txt", kind: "file" }], truncated: false }),
+      uploadWorkspaceFile: vi.fn(),
+      deleteWorkspaceFile: vi.fn(),
+      getWorkspaceDownloadUrl: vi.fn(() => ""),
+    } as unknown as AgentChatAdapter;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <TooltipProvider>
+          <WorkspacePanel adapter={adapter} sessionId="s-1" selectedPath={null} onSelectedPathChange={() => {}} />
+        </TooltipProvider>,
+      );
+    });
+    expect(container.textContent).toContain("notes.txt");
+    expect(container.querySelector("a[download]")).toBeNull();
+  });
+
   it("shows a chat only its own tree under its wait, never the last chat's files", async () => {
     const adapter = {
       getWorkspaceTree: vi.fn(({ sessionId, onWaiting }: { sessionId: string; onWaiting?: (said: string) => void }) => {

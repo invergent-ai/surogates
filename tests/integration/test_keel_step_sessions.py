@@ -574,9 +574,13 @@ def link_headers(key: str | None) -> dict:
 
 
 def message_of(
-    kind: str = "answer", text: str = ANSWER, note: str | None = None, key: str = ANSWER_KEY,
+    kind: str = "answer",
+    text: str = ANSWER,
+    note: str | None = None,
+    key: str = ANSWER_KEY,
+    sender: str | None = None,
 ) -> dict:
-    return {"kind": kind, "text": text, "note": note, "idempotency_key": key}
+    return {"kind": kind, "text": text, "note": note, "sender": sender, "idempotency_key": key}
 
 
 async def send(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY, **message):
@@ -591,6 +595,19 @@ async def cancel(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY
 
 async def status_of(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY):
     return await client.get(step_route(session_id), headers=link_headers(auth))
+
+
+async def page_of(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY, **params):
+    return await client.get(step_route(session_id, "events"), params=params, headers=link_headers(auth))
+
+
+async def stream_refused(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY, **params):
+    """The answer to opening the session's event stream, for a call refused before it streams."""
+    return await client.get(step_route(session_id, "events/stream"), params=params, headers=link_headers(auth))
+
+
+async def progress_of(client: AsyncClient, session_id, *, auth: str | None = LINK_KEY):
+    return await client.get(step_route(session_id, "progress"), headers=link_headers(auth))
 
 
 async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client):
@@ -842,6 +859,176 @@ async def test_a_reports_mark_never_hides_a_message_keel_sent_since_the_report_b
     assert (await session_store.get_session(step.id)).config["case_step"]["reported"] == "drafted"
 
 
+MESSAGE = "Check the guarantor's income too."
+MESSAGE_KEY = "keel:c:1:message:1"
+MESSAGE_CLOSE = (
+    "\n\nIt does not answer a raised hand or review a draft. Take it into account, and go on with the step."
+)
+
+
+async def send_message(client: AsyncClient, session_id, *, sender: str | None = "Ana Popescu"):
+    """Keel's plain message to a step, from a person working on the case."""
+    return await send(client, session_id, kind="message", text=MESSAGE, sender=sender, key=MESSAGE_KEY)
+
+
+async def test_a_message_wakes_a_step_at_rest_as_its_sender_wrote_it(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    sent = await send_message(link, step.id)
+
+    assert (sent.status_code, sent.json()) == (202, {"delivered": True, "resting": False})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.resume", None),
+        ("user.message", "keel_message"),
+    ]
+    message = (await user_messages(session_store, step.id))[-1]
+    assert message.data["content"] == (
+        "Ana Popescu sends you a message about this step: Check the guarantor's income too.\n\n"
+        "It does not answer a raised hand or review a draft. Take it into account, and go on with the step."
+    )
+    assert message.data["keel_key"] == MESSAGE_KEY
+    assert (await session_store.get_session(step.id)).status == "active"
+    # Behind interactive work, as every wake of a step.
+    assert await queue_score(redis_client, step) == 1.0
+
+
+async def test_a_message_without_a_sender_names_nobody(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+
+    sent = await send_message(link, step.id, sender=None)
+
+    assert (sent.status_code, sent.json()) == (202, {"delivered": True, "resting": False})
+    message = (await user_messages(session_store, step.id))[-1]
+    assert message.data["content"] == (
+        f"Someone working on the case sends you a message about this step: {MESSAGE}{MESSAGE_CLOSE}"
+    )
+
+
+@pytest.mark.parametrize(("reported", "kind"), [("hand-raised", "answer"), ("drafted", "revision")])
+async def test_a_message_to_a_step_resting_on_its_report_waits_for_keels_next_word(
+    link, org, session_store, redis_client, reported, kind,
+):
+    # A raised hand, or a draft under review: a person holds the step.
+    step = await completed_step(link, org, session_store, redis_client)
+    await session_store.mark_case_step_reported(step.id, reported)
+
+    sent = await send_message(link, step.id)
+
+    assert (sent.status_code, sent.json()) == (202, {"delivered": True, "resting": True})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("user.message", "keel_message"),
+    ]
+    session = await session_store.get_session(step.id)
+    assert session.status == "completed"
+    assert session.config["case_step"]["reported"] == reported
+    assert await queue_score(redis_client, step) is None
+
+    # Keel's retry while the step still rests answers as the first call did.
+    again = await send_message(link, step.id)
+
+    assert (again.status_code, again.json()) == (202, {"delivered": False, "resting": True})
+    assert await queue_score(redis_client, step) is None
+
+    # Keel's next word gives the step back: the turn it wakes reads the message first.
+    word = await send(link, step.id, kind=kind, text="Lower the offer to 175000.", key=f"keel:c:1:{kind}:1")
+
+    assert (word.status_code, word.json()) == (202, {"delivered": True})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("user.message", "keel_message"),
+        ("session.resume", None),
+        ("user.message", f"keel_{kind}"),
+    ]
+    session = await session_store.get_session(step.id)
+    assert session.status == "active"
+    assert "reported" not in session.config["case_step"]
+    assert await queue_score(redis_client, step) == 1.0
+
+    late = await send_message(link, step.id)
+
+    assert (late.status_code, late.json()) == (202, {"delivered": False, "resting": False})
+
+
+async def test_a_message_mid_turn_is_queued_without_a_resume(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    await session_store.update_session_status(step.id, "active")
+
+    sent = await send_message(link, step.id)
+
+    assert (sent.status_code, sent.json()) == (202, {"delivered": True, "resting": False})
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("user.message", "keel_message"),
+    ]
+    assert (await session_store.get_session(step.id)).status == "active"
+    assert await queue_score(redis_client, step) == 1.0
+
+
+async def test_a_message_is_delivered_once_per_key(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    first = await send_message(link, step.id)
+    # The message's turn ran and ended before Keel's retry came.
+    await session_store.update_session_status(step.id, "completed")
+    await redis_client.zrem(
+        SHARED_WORK_QUEUE_KEY,
+        encode_queue_member(org_id=str(org), agent_id=step.agent_id, session_id=str(step.id)),
+    )
+
+    again = await send_message(link, step.id)
+
+    assert (first.status_code, first.json()) == (202, {"delivered": True, "resting": False})
+    assert (again.status_code, again.json()) == (202, {"delivered": False, "resting": False})
+    markers = [m.data.get("synthetic") for m in await user_messages(session_store, step.id)]
+    assert markers == ["keel_step", "keel_message"]
+    # The retry neither wakes the session nor queues it again.
+    assert (await session_store.get_session(step.id)).status == "completed"
+    assert await queue_score(redis_client, step) is None
+
+
+@pytest.mark.parametrize("reported", [None, "hand-raised"])
+async def test_a_finished_step_takes_no_message(link, org, session_store, redis_client, reported):
+    step = await completed_step(link, org, session_store, redis_client)
+    if reported is not None:
+        await session_store.mark_case_step_reported(step.id, reported)
+    await cancel(link, step.id)
+
+    sent = await send_message(link, step.id)
+
+    assert (sent.status_code, code_of(sent)) == (409, "step-finished")
+    assert await timeline(session_store, step.id) == [
+        ("user.message", "keel_step"),
+        ("session.pause", None),
+    ]
+    assert await queue_score(redis_client, step) is None
+
+
+async def test_a_retry_of_a_message_once_the_step_is_over_does_not_rest(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    await session_store.mark_case_step_reported(step.id, "hand-raised")
+    first = await send_message(link, step.id)
+    await cancel(link, step.id)
+
+    again = await send_message(link, step.id)
+
+    assert first.json() == {"delivered": True, "resting": True}
+    # The step no longer waits for a person: it is over.
+    assert (again.status_code, again.json()) == (202, {"delivered": False, "resting": False})
+
+
+async def test_a_message_since_a_report_began_does_not_hold_its_mark_back(link, org, session_store, redis_client):
+    step = await completed_step(link, org, session_store, redis_client)
+    began = await session_store.last_event_id(step.id)
+    # A person's message reached the step while its turn raised a hand.
+    sent = await send_message(link, step.id)
+    assert sent.json() == {"delivered": True, "resting": False}
+
+    await session_store.mark_case_step_reported(step.id, "hand-raised", since=began)
+
+    assert (await session_store.get_session(step.id)).config["case_step"]["reported"] == "hand-raised"
+
+
 async def test_status_reads_the_session(link, org, session_store, redis_client):
     step = await completed_step(link, org, session_store, redis_client)
 
@@ -876,8 +1063,11 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
             await send(link, session_id),
             await cancel(link, session_id),
             await status_of(link, session_id),
+            await page_of(link, session_id),
+            await stream_refused(link, session_id),
+            await progress_of(link, session_id),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 3, session_id
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 6, session_id
 
     for session in (chat, child):
         assert await timeline(session_store, session.id) == []
@@ -892,8 +1082,11 @@ async def test_every_step_session_route_needs_the_link_key(link, org, session_st
             await send(link, step.id, auth=key),
             await cancel(link, step.id, auth=key),
             await status_of(link, step.id, auth=key),
+            await page_of(link, step.id, auth=key),
+            await stream_refused(link, step.id, auth=key),
+            await progress_of(link, step.id, auth=key),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 3
+        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 6
 
     assert (await session_store.get_session(step.id)).status == "completed"
     assert await timeline(session_store, step.id) == [("user.message", "keel_step")]
@@ -909,16 +1102,36 @@ async def test_a_message_that_does_not_validate_is_invalid(link, org, session_st
         await send(link, step.id, note="x" * 20001),
         await send(link, step.id, key=""),
         await send(link, step.id, key="k" * 201),
+        # A plain message takes no note, and its sender is a name on one line, or null.
+        await send(link, step.id, kind="message", note="x"),
+        await send(link, step.id, kind="message", sender=""),
+        await send(link, step.id, kind="message", sender="Ana\nPopescu"),
+        await send(link, step.id, kind="message", sender="a" * 201),
+        await send(link, step.id, kind="message", text=""),
+        await send(link, step.id, kind="message", sender="   "),
+        # Only a plain message names its sender.
+        await send(link, step.id, kind="answer", sender="Ana Popescu"),
+        await send(link, step.id, kind="revision", sender="Ana Popescu"),
+        # A key the route does not know.
+        await link.post(
+            step_route(step.id, "messages"),
+            json={**message_of(kind="message"), "priority": "high"},
+            headers=link_headers(LINK_KEY),
+        ),
     ]
 
-    assert [(a.status_code, code_of(a)) for a in answers] == [(422, "invalid-request")] * 6
+    assert [(a.status_code, code_of(a)) for a in answers] == [(422, "invalid-request")] * 15
     assert (await session_store.get_session(step.id)).status == "completed"
     assert await timeline(session_store, step.id) == [("user.message", "keel_step")]
 
 
 @pytest.mark.parametrize(
     ("action", "write"),
-    [("answer", "emit_keyed_synthetic_message"), ("cancel", "cancel_case_step")],
+    [
+        ("answer", "emit_keyed_synthetic_message"),
+        ("message", "emit_keyed_synthetic_message"),
+        ("cancel", "cancel_case_step"),
+    ],
 )
 async def test_a_failed_write_answers_500_and_logs_no_case_data(
     link, link_app, org, session_store, redis_client, monkeypatch, caplog, action, write,
@@ -926,10 +1139,10 @@ async def test_a_failed_write_answers_500_and_logs_no_case_data(
     step = await completed_step(link, org, session_store, redis_client)
     answer = "Ioana Marinescu earns 987654.32 a year."
 
-    # The database's error quotes the statement's parameters: the answer,
-    # or the config holding the case's inputs.
+    # The database's error quotes the statement's parameters: the message as
+    # the step reads it, or the config holding the case's inputs.
     async def failed_write(*args, **kwargs):
-        quoted = json.dumps({"content": answer, "case_step": step.config["case_step"]})
+        quoted = json.dumps({"content": kwargs.get("content", answer), "case_step": step.config["case_step"]})
         raise OperationalError(
             "UPDATE sessions SET config = $1::JSONB", (quoted,),
             Exception(f"canceling statement due to statement timeout\nCONTEXT:  {quoted}"),
@@ -938,7 +1151,13 @@ async def test_a_failed_write_answers_500_and_logs_no_case_data(
     monkeypatch.setattr(link_app.state.session_store, write, failed_write)
     caplog.set_level(logging.INFO)
 
-    failed = await (send(link, step.id, text=answer) if action == "answer" else cancel(link, step.id))
+    if action == "answer":
+        failed = await send(link, step.id, text=answer)
+    elif action == "message":
+        # Neither the message's text nor its sender's name.
+        failed = await send(link, step.id, kind="message", text="Use the May payslip.", sender="Dana Marinescu")
+    else:
+        failed = await cancel(link, step.id)
 
     assert failed.status_code == 500, failed.text
     assert code_of(failed) == "internal-error"
