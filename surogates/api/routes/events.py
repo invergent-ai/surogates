@@ -541,7 +541,11 @@ async def session_event_stream(
     finally:
         if pubsub is not None:
             try:
-                await pubsub.unsubscribe()
+                # As it subscribed: a watch by pattern, any other stream by name.
+                if watch:
+                    await pubsub.punsubscribe()
+                else:
+                    await pubsub.unsubscribe()
                 await pubsub.aclose()
             except Exception:
                 pass
