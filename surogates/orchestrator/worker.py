@@ -25,6 +25,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_schemas import has_file_pane
+from surogates.keel.case_agents import is_case_agent
 from surogates.keel.intake import intake_case_types
 from surogates.keel.steps import case_scope_of, gate_case_tools, is_case_session
 from surogates.runtime.entitlements import (
@@ -1976,6 +1977,11 @@ async def run_worker(settings: Settings) -> None:
             available_skills = [
                 s for s in available_skills if not is_advisor_expert(s)
             ]
+        # A person's case agent stages no skill: its prompt names none, so
+        # ``gate_skill_step`` below, and the harness's, never hand it
+        # ``skill_step`` back after the case gate took it away.
+        if is_case_agent(session):
+            available_skills = []
 
         # The knowledge bases this session may read. Empty list when
         # KB tools are unavailable (no ops DB) or it has none to read.

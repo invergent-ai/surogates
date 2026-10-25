@@ -169,6 +169,14 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # An item session's report to Keel: the same, through the door's item routes.
     "complete_item": ToolLocation.HARNESS,
     "return_item": ToolLocation.HARNESS,
+    # A person's case agent reads its case, and drafts into the person's form,
+    # through Keel's door: the worker's door key.  It never reads the case's
+    # workspace.
+    "case_read": ToolLocation.HARNESS,
+    "case_history": ToolLocation.HARNESS,
+    "case_files": ToolLocation.HARNESS,
+    "case_file_read": ToolLocation.HARNESS,
+    "case_draft_form": ToolLocation.HARNESS,
     # An intake agent starts a case through Keel's door: the worker's door key.
     "start_case": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)

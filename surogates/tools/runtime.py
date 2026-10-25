@@ -69,6 +69,7 @@ class ToolRuntime:
             file_ops,
             github,
             kb_tools,
+            keel_case,
             loop_control,
             media_gen,
             memory,
@@ -132,6 +133,7 @@ class ToolRuntime:
             voice_call,  # end_call (a phone call's agent hangs up)
             case_step,  # complete_step, raise_hand (a case step's report to Keel)
             case_item,  # complete_item, return_item (an item session's report to Keel)
+            keel_case,  # case_read, case_history, case_files, case_file_read, case_draft_form (a case agent, through Keel)
             intake,  # start_case (an intake agent starts a case through Keel)
         ]
 

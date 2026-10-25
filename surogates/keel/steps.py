@@ -41,12 +41,14 @@ from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
     CASE_ITEM_TOOLS,
     CASE_STEP_TOOLS,
+    KEEL_CASE_TOOLS,
     WORKER_SELF_TOOLS,
 )
 
 __all__ = [
     "ALWAYS_KEPT",
     "ANSWER_MARKER",
+    "CASE_AGENT_REFUSED",
     "CASE_ALLOWED_TOOLS",
     "CASE_BOUNDARY_PREFIX",
     "CASE_ITEM_KEY",
@@ -60,6 +62,7 @@ __all__ = [
     "ITEM_KICKOFF_MARKER",
     "ITEM_STOPPED",
     "KEELS_WORD",
+    "KEEL_CASE_TOOLS",
     "KEEL_MESSAGES",
     "KICKOFF_MARKER",
     "MESSAGE_MARKER",
@@ -167,6 +170,15 @@ CASE_ALLOWED_TOOLS: frozenset[str] = frozenset({
     # for the skills themselves.
     "skills_list", "skill_view", "skill_step", "todo", "vision_analyze",
     "delegate_task", "spawn_worker", "send_worker_message", "stop_worker",
+})
+#: What a person's case agent is never offered of the tools a case allows: it
+#: reads the case only through Keel (:data:`KEEL_CASE_TOOLS`) and drafts only
+#: into the person's form, so it stages no skill, runs no command, writes no
+#: file and edits no document; and it starts no helper, which would work in
+#: the case's own workspace.
+CASE_AGENT_REFUSED: frozenset[str] = frozenset({
+    "skills_list", "skill_view", "skill_step", "terminal", "process", "write_file", "patch",
+    "office_read", "office_edit", "delegate_task", "spawn_worker", "send_worker_message", "stop_worker",
 })
 #: What a case keeps when its scope names the work tools it may use: reading,
 #: memory, knowledge, skills and its todo list are how it works, not work it does.
@@ -339,19 +351,23 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     """The tools of *tools* a session may be offered, as a case decides them.
 
     Runs last in both places that decide what is offered, the prompt and the
-    schemas, so they agree.  A session of no case only loses the step and
-    item tools.  A session of a case keeps the case's allowed tools, its
-    agent's MCP tools and its execution's self-tools; a scope that names work
-    tools narrows the allowed ones to those and :data:`ALWAYS_KEPT`.  Only
-    the step's own session gets the step tools, and only a work item's own
-    session the item tools.  Nothing else is ever added, so a tool an
-    earlier gate dropped stays dropped.
+    schemas, so they agree.  A session of no case only loses the step, item
+    and case agent tools.  A session of a case keeps the case's allowed
+    tools, its agent's MCP tools and its execution's self-tools; a scope that
+    names work tools narrows the allowed ones to those and
+    :data:`ALWAYS_KEPT`.  Only the step's own session gets the step tools,
+    and only a work item's own session the item tools.  A person's case
+    agent keeps those less :data:`CASE_AGENT_REFUSED`, and gets
+    :data:`KEEL_CASE_TOOLS`, which no other session gets, and no step or
+    item tool.  Nothing else is ever added, so a tool an earlier gate
+    dropped stays dropped.
     """
-    # Here, not at the top: ``items`` imports this module.
+    # Here, not at the top: both import this module.
+    from surogates.keel.case_agents import is_case_agent
     from surogates.keel.items import is_case_item
 
     if not is_case_session(session):
-        return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS
+        return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS - KEEL_CASE_TOOLS
 
     def platform(name: str) -> bool:
         return name.startswith("mcp__") or name in WORKER_SELF_TOOLS or name in BOARD_SELF_TOOLS
@@ -361,6 +377,8 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     if scope is not None and scope.tools is not None:
         named = set(scope.tools)
         kept = {name for name in kept if name in named or name in ALWAYS_KEPT or platform(name)}
+    if is_case_agent(session):
+        return (kept - CASE_AGENT_REFUSED) | KEEL_CASE_TOOLS
     if is_case_step(session):
         kept |= CASE_STEP_TOOLS
     if is_case_item(session):

@@ -7,6 +7,10 @@ edits the agent.  Only the step's own session gets the two tools that end the
 step, and only a work item's own session the two that report the item; no
 other session is ever offered them, whatever its config names.
 
+A person's case agent reads its case only through Keel: it is offered the
+case tools in place of the skills, the terminal, file writing, office and the
+helpers, and no other session is offered the case tools.
+
 The prompt the model reads and the schemas it is sent are decided in two
 places, the worker and the harness, and they must agree.
 """
@@ -41,6 +45,14 @@ from tests.test_steer_loop import _final_response, _make_loop_harness
 MCP_TOOL = "mcp__crm__lookup"
 STEP_TOOLS = {"complete_step", "raise_hand"}
 ITEM_TOOLS = {"complete_item", "return_item"}
+CASE_TOOLS = {"case_read", "case_history", "case_files", "case_file_read", "case_draft_form"}
+HELPER_TOOLS = {"delegate_task", "spawn_worker", "send_worker_message", "stop_worker"}
+# What a person's case agent never gets: skills, the terminal, file writing,
+# office, and the helpers, any of which would work in the case's workspace.
+NEVER_FOR_A_CASE_AGENT = HELPER_TOOLS | {
+    "skills_list", "skill_view", "skill_step", "terminal", "process", "write_file", "patch",
+    "office_read", "office_edit",
+}
 KB_TOOLS = {"kb_list_pages", "kb_read_page", "kb_search_pages"}
 # Chat, scheduling, starting other work and editing the agent: none is a case's.
 NEVER_IN_A_CASE = {
@@ -156,6 +168,24 @@ async def _step(store, *, tools: list[str] | None = None, scoped: bool = True):
 async def _item(store):
     """A work item's own session."""
     return await _case_session(store, case_item=ITEM_CONTRACT)
+
+
+async def _case_agent(store):
+    """A person's case agent session, made as the Keel link makes one."""
+    _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+    case_id = str(uuid4())
+    return await create_agent_session(
+        store=store,
+        storage=request.app.state.storage,
+        settings=request.app.state.settings,
+        org_id=uuid4(),
+        user_id=None,
+        agent_id="support-bot",
+        channel="api",
+        config={"memory_boundary": f"case:{case_id}"},
+        service_account_id=uuid4(),
+        case_agent={"case_id": case_id, "case_number": "LD-000001", "person_id": str(uuid4())},
+    )
 
 
 def _chat(config: dict) -> Session:
@@ -290,3 +320,28 @@ async def test_only_the_items_own_session_has_the_item_tools(monkeypatch):
         sent = await _sent_on_a_turn(monkeypatch, item, registry, prompt=plain, policy=policy)
         assert ITEM_TOOLS <= sent, policy
         assert all(build_governance_gate(policy).check(name, {}).allowed for name in ITEM_TOOLS), policy
+
+
+async def test_a_case_agent_gets_the_case_tools_and_none_that_write_or_stage_skills():
+    registry = _registry()
+    agent = await _case_agent(_SessionStore())
+
+    prompt = _prompt_tools(agent, registry)
+    schema = _schema_tools(agent, registry)
+
+    assert prompt == schema
+    assert CASE_TOOLS | {"web_search", "memory", "read_file", "todo", MCP_TOOL} <= prompt
+    # No helper: none could land in the case's workspace.
+    assert prompt.isdisjoint(HELPER_TOOLS)
+    assert prompt.isdisjoint(NEVER_FOR_A_CASE_AGENT | STEP_TOOLS | ITEM_TOOLS | NEVER_IN_A_CASE)
+
+
+async def test_no_other_session_gets_the_case_tools():
+    registry = _registry()
+    store = _SessionStore()
+    # Even a chat whose config names them.
+    narrowed = _chat({"allowed_tools": ["read_file", *sorted(CASE_TOOLS)]})
+
+    for session in (await _step(store), await _item(store), _chat({}), narrowed):
+        for offered in (_prompt_tools(session, registry), _schema_tools(session, registry)):
+            assert offered.isdisjoint(CASE_TOOLS), session.config

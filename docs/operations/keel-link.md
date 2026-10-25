@@ -163,7 +163,36 @@ Its memory keeps no facts about people. The `memory` tool refuses the `user` tar
 
 A person waits on a case agent, so its wakes queue at its channel's priority, 0 on `api`, beside people's work and ahead of every step and item session.
 
-It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door. It gets no step or item tool.
+It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). Its prompt names no skill. It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door (see [How it reads the case](#how-it-reads-the-case)). It gets no step or item tool. Unlike the step and item tools, an agent's policy can take the case tools away.
+
+### How it reads the case
+
+The case agent reads its case only through Keel's door, never the case's workspace. The worker sends each case tool to the door at `SUROGATES_KEEL_URL`, with `SUROGATES_KEEL_DOOR_KEY` as the bearer, under the session's id. Keel answers as the person, and logs each read as a view through the case agent:
+
+| Tool | Door route | The model reads |
+|---|---|---|
+| `case_read` | `GET /api/harness/sessions/{session_id}/case` | Keel's answer: the case, its data field by field, and the steps open on it. |
+| `case_history` | `GET /api/harness/sessions/{session_id}/case/history` | Keel's answer: the case's history, entry by entry. |
+| `case_files` | `GET /api/harness/sessions/{session_id}/case/files` | Keel's answer: the case's files. |
+| `case_file_read` | `GET /api/harness/sessions/{session_id}/case/file?path=<path>` | `{"path", "cite", "text", "truncated"}`: the file as text. |
+| `case_draft_form` | `POST /api/harness/sessions/{session_id}/case/form-draft` | Keel's answer, `{"drafted": [field, …]}`, as it came. |
+
+Each item Keel gives carries a `cite` label, which the agent cites. `case_draft_form` posts `{"token", "values", "sources"}`: the open step's token, the values by form field, and where they come from, a non-empty list of objects. A draft without all three is never sent, nor is one over 256,000 bytes of JSON or one holding NaN or an infinity. Keel drafts only into a step the person holds: any other token is `409 not-yours`.
+
+`case_file_read` gives the model the file's text, never its bytes. Keel sends a file of at most 8 MiB: a larger one, `413 too-large`, reads `The file is larger than the 8 MiB Keel sends.` The worker converts a file by its suffix:
+
+- A document (PDF; Word, Excel and PowerPoint, legacy and macro-enabled ones included; OpenDocument; RTF) is converted to text as `read_file` converts one.
+- Any other file is read as UTF-8 text when it holds no NUL byte.
+- Anything else is refused, by the file's name: `<name> is neither a document nor text: case_file_read cannot read it.` A document that cannot be converted reads `<name> could not be read as a document.`
+
+Text longer than 200,000 characters is cut there, and `truncated` is true. Keel's other answers:
+
+| Keel's answer | The model reads |
+|---|---|
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` |
+| Anything else | Keel's message, or `Keel refused the call (<status>).`, as an error with Keel's code, and Keel's `problems` when it gave them. |
+
+No other session, a step's, an item's or a chat's, is offered the case tools, and one called from any of them reaches no Keel. A worker without both settings has no link to Keel: each case tool answers `This runtime has no link to Keel.`
 
 ### A person's message
 
@@ -286,7 +315,7 @@ keel-link reads the same state as the API (database, Redis, storage, the platfor
 | Setting | Held by | What it is |
 |---|---|---|
 | `SUROGATES_KEEL_LINK_KEY` | keel-link alone | The bearer Keel shows keel-link. |
-| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, and where an intake agent starts cases. |
+| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, where an intake agent starts cases, and where a case agent reads its case. |
 | `SUROGATES_KEEL_DOOR_KEY` | the worker alone | The bearer the worker shows Keel's door. |
 | `SUROGATES_KEEL_MAX_FILE_BYTES` | keel-link | The largest file Keel may write to a case's workspace, in bytes: 52428800 (50 MiB) by default. |
 

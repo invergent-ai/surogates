@@ -91,6 +91,13 @@ CASE_STEP_TOOLS: frozenset[str] = frozenset({"complete_step", "raise_hand"})
 # the step tools are: an item whose agent policy took them away could never
 # be finished nor given back.
 CASE_ITEM_TOOLS: frozenset[str] = frozenset({"complete_item", "return_item"})
+# How a person's case agent reads its case, and drafts into the person's
+# form, through Keel: only a case agent's own session is offered them
+# (``surogates.keel.steps.gate_case_tools``).  Not protected: ops's catalog
+# names them, so an agent's policy may allow them or take them away.
+KEEL_CASE_TOOLS: frozenset[str] = frozenset({
+    "case_read", "case_history", "case_files", "case_file_read", "case_draft_form",
+})
 
 # Tools no agent policy may take away. The ops catalog omits these names
 # so Studio cannot offer them and the policy validator rejects them with
