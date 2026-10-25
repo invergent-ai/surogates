@@ -289,11 +289,13 @@ Only a work item's own session is offered `complete_item` and `return_item`; it 
 |---|---|---|
 | `200` | `Item ended: Keel recorded it.`, or `Item ended: the item went back.` | Its turn ends. The item's inputs are removed from its config, and the item is marked `completed` or `returned`. |
 | `409 not-running` | `Item ended: the item is no longer this session's.` | Its turn ends. Nothing is marked. |
-| Another `409` | Keel's code and message, as an error. | The model fixes its report and calls again, or returns the item. Nothing is marked. |
+| Another `409` | Keel's code and message, as an error, with the attempts left when Keel counts them. | The model fixes its report and calls again, or returns the item. Nothing is marked. |
 | No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` | The model calls again. A repeated call gets Keel's first answer. |
 | Anything else | `Item stopped: Keel refused this item's report (<status>); people take the item.` | The worker posts `{"status": "failed", "detail": "keel-<status>"}` to `…/item/ended`, removes the inputs, marks the item `stopped`, and ends the turn. People take the item. |
 
 A report Keel would refuse whole is never sent, as a step's is not: one over 256,000 bytes of JSON, one holding NaN or an infinity, sources out of their shape, a choice the raised hand does not offer, or a tool call id over 200 characters. Once a report has ended the item, a later report in the same wake is answered by the worker, without Keel. A worker without both settings has no link to Keel: every report removes the item's inputs, marks it `stopped`, and ends the turn.
+
+A turn of the item that ends in words, with no report, is told once, by a message marked `keel_step_nudge`: `This session works one work item of a case. Finish it now: call complete_item, or return_item with your reason if you cannot.` The turn goes on. When it still ends without a report ending the item, the worker posts `{"status": "no-outcome", "detail"}` to `…/item/ended`, with the code of how the turn ended as `detail`, and Keel gives the item back. Once Keel answers `200`, the item's inputs are removed and it is marked `returned`; otherwise both stay. A turn that fails, and a session the worker gives up on because its wakes kept crashing or never recovered, is posted as `{"status": "failed", "detail"}`, with the failure's code and never its text, and the inputs are removed whatever Keel answers. A marked item, or one whose inputs were already removed, is never nudged, and no later end of its turns is told to Keel. Neither is a helper of the item. A report of a response the worker drops before saving it never reaches Keel. Keel being unreachable never keeps a turn from ending: the worker logs it by session id. As with a step, the late report of a helper the session started never wakes it.
 
 ## An intake agent starts cases
 

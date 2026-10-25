@@ -7,7 +7,7 @@ from typing import Any
 
 from surogates.devices.browser import for_the_pane_alone, resumes_the_agent, takes_the_browser_over
 from surogates.harness.loop_messages import _is_scheduled_run
-from surogates.keel.steps import is_case_step
+from surogates.keel.steps import is_case_work
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.workstreams import is_project_master
 
@@ -359,9 +359,10 @@ def _waits_on_its_workers(session: Any) -> bool:
     second time to the session that started it.  Not a project's master,
     which any report of its threads wakes, nor a mission's coordinator,
     strict like a master, to which a task's report that straggles in past
-    the mission's verdict would give one stray turn.  Not a case's step,
-    which ends where Keel takes its report, accepts it or stops it: a turn
-    after that is no step's.  Nor a routine's run, which announces its
+    the mission's verdict would give one stray turn.  Not a case's work
+    session, a step's or a work item's, which ends where Keel takes its
+    report, accepts it or stops it: a turn after that is no step's nor
+    item's.  Nor a routine's run, which announces its
     result where the routine says, and woken again would announce another.
     Read from the session alone, so a wake asks it before the log.
     """
@@ -370,7 +371,7 @@ def _waits_on_its_workers(session: Any) -> bool:
         session.parent_id is None
         and not is_project_master(config)
         and not config.get("strict_coordinator")
-        and not is_case_step(session)
+        and not is_case_work(session)
         and not _is_scheduled_run(session)
     )
 

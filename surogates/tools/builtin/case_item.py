@@ -28,6 +28,12 @@ A report Keel could not read is never sent, as a step's is not, and the
 checks are the step tools' own.  Once a report ended the item, a later
 report in the same wake is answered here, without Keel.  No log line here
 carries the case's data.
+
+A turn of the item's session that ends with no report ending the item is
+told to Keel through :func:`report_item_no_outcome`, and Keel gives the item
+back; a session of the item that fails, at its turn's end or in the
+dispatcher, through :func:`report_item_failed`.  Neither tells Keel of an
+item that is marked or over (:func:`item_awaiting_report`).
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from uuid import UUID
 
 from surogates.keel.client import KeelAnswer, KeelClient, keel_client
 from surogates.keel.items import ItemContract, item_contract_in
-from surogates.keel.steps import ITEM_ENDED, ITEM_STOPPED
+from surogates.keel.steps import CASE_ITEM_KEY, ITEM_ENDED, ITEM_STOPPED
 from surogates.tools.builtin.case_step import (
     _STOPPED,
     _began,
@@ -53,6 +59,8 @@ from surogates.tools.builtin.case_step import (
     _remember_the_end,
     _sent,
     _specialise,
+    _tell_keel,
+    work_awaiting_report,
 )
 from surogates.tools.registry import ToolSchema
 
@@ -279,6 +287,51 @@ async def handle_return_item(arguments: dict, **kwargs: Any) -> str:
     if (refused := _call_id_refused(kwargs, "return_item")) is not None:
         return _error(refused)
     return await _report("return_item", kwargs, {"reason": reason.strip()}, shorten="the reason")
+
+
+async def item_awaiting_report(store: Any, session: Any) -> Any | None:
+    """*session*'s row as it is now, when it is a work item's own session whose item awaits its report: neither
+    marked nor redacted (:func:`~surogates.tools.builtin.case_step.work_awaiting_report`).
+
+    ``None`` otherwise, and when the row cannot be read, which is logged by
+    session id.
+    """
+    return await work_awaiting_report(store, session, CASE_ITEM_KEY)
+
+
+async def report_item_no_outcome(store: Any, session: Any, *, reason: str) -> None:
+    """Tell Keel that a turn of a work item's session ended with no report ending the item.
+
+    Keel gets ``no-outcome``, with *reason*, the turn end's own code, and
+    gives the item back: once Keel took it, the item is marked ``returned``
+    and its inputs leave the session.  Nothing is sent unless the item awaits
+    its report (:func:`item_awaiting_report`).  Never raises: the turn ends
+    whatever Keel answers.
+    """
+    if await item_awaiting_report(store, session) is None:
+        return
+    since = await _began(store, session.id)
+    answer = await _tell_keel(
+        session.id, lambda keel: keel.item_ended(session.id, status="no-outcome", detail=reason),
+    )
+    if answer is not None and answer.status == 200:
+        await _redact(store, session.id)
+        await _mark(store, session.id, "returned", since=since)
+
+
+async def report_item_failed(store: Any, session: Any, *, code: str) -> None:
+    """Tell Keel that a work item's session failed, and take the item's inputs out of it.
+
+    Keel gets ``failed`` with *code*, the failure's own short code, never its
+    text.  The item is over for the session whether or not Keel heard.  Both
+    the end of a turn and the dispatcher report through here.  Nothing is
+    sent, and nothing redacted, unless the item awaits its report
+    (:func:`item_awaiting_report`).  Never raises.
+    """
+    if await item_awaiting_report(store, session) is None:
+        return
+    await _tell_keel(session.id, lambda keel: keel.item_ended(session.id, status="failed", detail=code))
+    await _redact(store, session.id)
 
 
 def register(registry: Any) -> None:

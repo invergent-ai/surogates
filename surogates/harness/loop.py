@@ -111,9 +111,10 @@ from surogates.workstreams import is_project_master, is_project_thread, master_r
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.memory_boundary import is_eval_session
+from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
-from surogates.keel.items import is_case_item, item_contract_of
+from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.keel.steps import (
     CASE_ITEM_TOOLS,
     CASE_STEP_NUDGE,
@@ -124,6 +125,7 @@ from surogates.keel.steps import (
     gate_case_tools,
     is_case_session,
     is_case_step,
+    is_case_work,
     is_keel_message,
     is_keels_word,
     sleeps_through_a_plain_message,
@@ -3968,30 +3970,31 @@ class AgentHarness(
                     )
                     continue
 
-                # A case's step ends only with its report.  A turn of the step
-                # that ends in words is told so once, and goes on; one that
-                # ends in words again completes, and Keel hears it had no
-                # outcome.  Not once a report ended the step for this round,
-                # in this wake or an earlier one: Keel has it.
+                # A case's step or work item ends only with its report.  A
+                # turn of its own session that ends in words is told so once,
+                # and goes on; one that ends in words again completes, and
+                # Keel hears it had no outcome.  Not once a report ended the
+                # work for this round, in this wake or an earlier one: Keel
+                # has it.
                 if (
                     case_step_nudged_turn != turn_id
-                    and is_case_step(session)
-                    and await step_awaiting_report(self._store, session) is not None
+                    and is_case_work(session)
+                    and (nudge := await _report_nudge(self._store, session)) is not None
                 ):
                     case_step_nudged_turn = turn_id
                     try:
                         await self._store.emit_event(
                             session.id, EventType.USER_MESSAGE,
-                            {"content": CASE_STEP_NUDGE, "synthetic": NUDGE_MARKER},
+                            {"content": nudge, "synthetic": NUDGE_MARKER},
                         )
                     except Exception as exc:
                         logger.warning(
-                            "Session %s: the nudge to report its step was not saved (%s); the turn has it all the same",
+                            "Session %s: the nudge to report its case work was not saved (%s); the turn has it all the same",
                             session.id, type(exc).__name__,
                         )
-                    messages.append({"role": "user", "content": CASE_STEP_NUDGE})
+                    messages.append({"role": "user", "content": nudge})
                     self._budget.refund()
-                    logger.info("Session %s: its case step's turn ended in words; nudging it to report", session.id)
+                    logger.info("Session %s: its case work's turn ended in words; nudging it to report", session.id)
                     continue
 
                 # Text-only iteration: kick off the iteration-summary
@@ -6667,6 +6670,14 @@ def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
         r.get("tool_call_id") in sent and str(r.get("content") or "").startswith(FORM_SENT)
         for r in tool_results
     )
+
+
+async def _report_nudge(store: Any, session: Session) -> str | None:
+    """What a case's work session whose turn ended in words is told: its work item's nudge, or its step's, when
+    that work awaits its report; ``None`` when it does not."""
+    if is_case_item(session):
+        return ITEM_NUDGE if await item_awaiting_report(store, session) is not None else None
+    return CASE_STEP_NUDGE if await step_awaiting_report(store, session) is not None else None
 
 
 def _case_step_ended(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:

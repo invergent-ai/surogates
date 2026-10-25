@@ -51,7 +51,7 @@ import json
 import logging
 import re
 from collections import OrderedDict
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -351,14 +351,18 @@ async def _stopped(
     return text
 
 
+#: A completion's way out, named beside the attempts Keel has left for it: the tool that hands the work to a person.
+_WAY_OUT = {"complete_step": "raise_hand", "complete_item": "return_item"}
+
+
 def _rejection(answer: KeelAnswer, tool: str) -> str:
-    """Keel's rejection of a report, with the attempts it has left for the step when it says."""
+    """Keel's rejection of a report, with the attempts it has left for the step or the work item when it says."""
     message = answer.message or "Keel rejected the report."
     left = answer.data.get("attempts_left") if isinstance(answer.data, dict) else None
     if isinstance(left, int) and not isinstance(left, bool) and left >= 0:
         attempts = f"{left} attempt{'' if left == 1 else 's'} left"
-        if tool == "complete_step":
-            attempts += "; fix the report and call complete_step again, or call raise_hand"
+        if tool in _WAY_OUT:
+            attempts += f"; fix the report and call {tool} again, or call {_WAY_OUT[tool]}"
         message += f" ({attempts})"
     return _error(message, code=answer.code)
 
@@ -488,19 +492,20 @@ async def step_awaiting_report(store: Any, session: Any) -> Any | None:
     return await work_awaiting_report(store, session, CASE_STEP_KEY)
 
 
-async def _tell_keel(session_id: Any, **end: Any) -> KeelAnswer | None:
-    """Send Keel one ``ended`` for *session_id*, and return its answer; log by session id what was not sent.
+async def _tell_keel(session_id: Any, end: Callable[[KeelClient], Awaitable[KeelAnswer]]) -> KeelAnswer | None:
+    """Tell Keel how session *session_id*'s case work ended, by *end*, the client's call that says it, and return
+    Keel's answer; log by session id what was not sent.
 
     Never raises: ``None`` when nothing was sent.
     """
     try:
         client = keel_client()
         if client is None:
-            logger.warning("Session %s: no link to Keel; Keel is not told how its step ended", session_id)
+            logger.warning("Session %s: no link to Keel; Keel is not told how its case work ended", session_id)
             return None
-        return await client.ended(session_id, **end)
+        return await end(client)
     except Exception as exc:
-        logger.warning("Session %s: Keel was not told how its step ended (%s)", session_id, type(exc).__name__)
+        logger.warning("Session %s: Keel was not told how its case work ended (%s)", session_id, type(exc).__name__)
         return None
 
 
@@ -518,7 +523,9 @@ async def report_no_outcome(store: Any, session: Any, *, reason: str) -> None:
     if row is None:
         return
     since = await _began(store, session.id)
-    answer = await _tell_keel(session.id, reason="no-outcome", detail=reason, usage=_usage(row))
+    answer = await _tell_keel(
+        session.id, lambda keel: keel.ended(session.id, reason="no-outcome", detail=reason, usage=_usage(row)),
+    )
     if answer is not None and answer.status == 200 and isinstance(answer.data, dict) and (
         answer.data.get("result") == "hand-raised"
     ):
@@ -538,7 +545,7 @@ async def report_step_failed(store: Any, session: Any, *, code: str) -> None:
     """
     if await step_awaiting_report(store, session) is None:
         return
-    await _tell_keel(session.id, reason="failed", detail=code)
+    await _tell_keel(session.id, lambda keel: keel.ended(session.id, reason="failed", detail=code))
     await _redact(store, session.id)
 
 

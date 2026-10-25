@@ -184,14 +184,21 @@ async def test_a_file_field_of_a_step_item_becomes_a_case_file(fake_keel: _FakeK
     assert len(fake_keel.requests) == 1
 
 
-async def test_keels_refusal_comes_back_to_fix(fake_keel: _FakeKeel, tmp_path):
+@pytest.mark.parametrize(("rejection", "shown"), [
+    ({"code": "authority", "message": "Over your limit."}, "Over your limit."),
+    (
+        {"code": "missing-sources", "message": "No source for amount.", "attempts_left": 1},
+        "No source for amount. (1 attempt left; fix the report and call complete_item again, or call return_item)",
+    ),
+], ids=["uncounted", "counted"])
+async def test_keels_refusal_comes_back_to_fix(fake_keel: _FakeKeel, tmp_path, rejection, shown):
     store = _store(tmp_path, STEP_ITEM)
-    fake_keel.answer(409, {"code": "authority", "message": "Over your limit."})
+    fake_keel.answer(409, rejection)
     fake_keel.answer(200, {"recorded": True})
 
     refused = json.loads(await _call("complete_item", STEP_COMPLETION, store, "c1"))
 
-    assert refused == {"error": "Over your limit.", "code": "authority"}
+    assert refused == {"error": shown, "code": rejection["code"]}
     assert store.reported() is None
     assert not store.redacted()
 

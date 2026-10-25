@@ -30,6 +30,7 @@ from surogates.keel.steps import (
 )
 
 __all__ = [
+    "ITEM_NUDGE",
     "ItemContract",
     "is_case_item",
     "item_contract_in",
@@ -42,6 +43,13 @@ __all__ = [
 _QUESTION_MAX = 2000
 _CHOICES_MAX = 20
 _CHOICE_MAX = 200
+
+#: What an item's turn that ends in words, with no report, is told once,
+#: marked as a step's is (:data:`~surogates.keel.steps.NUDGE_MARKER`).
+ITEM_NUDGE = (
+    "This session works one work item of a case. Finish it now: call complete_item, "
+    "or return_item with your reason if you cannot."
+)
 
 #: The closing line's tail, the same for every kind of item.
 _RETURN_TAIL = "If you cannot, call return_item with your reason: the item goes back to whoever gave it to you."

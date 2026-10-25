@@ -915,10 +915,11 @@ class Orchestrator:
 
         Once, where the dispatcher stops retrying or gives the session up: a
         crash it retries is not the session's end, and those told would hear
-        of every attempt.  A case's step tells Keel by *code* alone, never
-        *error*, and its inputs leave it, as at a failed turn's end; the
-        session that started it hears *error*.
+        of every attempt.  A case's step or work item tells Keel by *code*
+        alone, never *error*, and its inputs leave it, as at a failed turn's
+        end; the session that started it hears *error*.
         """
+        from surogates.tools.builtin.case_item import report_item_failed
         from surogates.tools.builtin.case_step import report_step_failed
 
         try:
@@ -927,6 +928,7 @@ class Orchestrator:
             logger.warning("Could not read session %s to report its failure", session_id, exc_info=True)
             return
         await report_step_failed(self.session_store, session, code=code)
+        await report_item_failed(self.session_store, session, code=code)
         await self._report_failure_to_parent(session, error)
 
     async def _report_failure_to_parent(self, session: Any, error: str) -> None:
