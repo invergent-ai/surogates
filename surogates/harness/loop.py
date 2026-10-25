@@ -1246,7 +1246,8 @@ class AgentHarness(
         """Post the acknowledgement in the thread of each mention in *events* that no wake or request has followed:
         the person sees the agent took their comment before the model answers it.  A failure, or an acknowledgement
         that takes longer than ACK_TIMEOUT_SECONDS, is logged, and the turn goes on.  Each document acknowledged in is
-        saved at the turn's end with those the turn edited."""
+        saved at the turn's end with those the turn edited.  A case's session logs only its id and the error's class:
+        the document's path, and the editor's words about it, are the case's data."""
         mentions = unacknowledged(events)
         if not mentions:
             return
@@ -1260,6 +1261,7 @@ class AgentHarness(
         # Local: the office tools import surogates.session, whose store imports this package.
         from surogates.tools.builtin.office import acknowledge_mention
 
+        of_a_case = is_case_session(session)
         for mention in mentions:
             try:
                 answer = json.loads(await asyncio.wait_for(acknowledge_mention(
@@ -1268,15 +1270,25 @@ class AgentHarness(
                     platform_client=self._platform_client,
                 ), timeout=ACK_TIMEOUT_SECONDS))
             except TimeoutError:
-                logger.warning("Could not acknowledge a mention in %s (session %s): no answer in %s seconds",
-                               mention["path"], session.id, ACK_TIMEOUT_SECONDS)
+                if of_a_case:
+                    logger.warning("Could not acknowledge a mention (session %s): TimeoutError", session.id)
+                else:
+                    logger.warning("Could not acknowledge a mention in %s (session %s): no answer in %s seconds",
+                                   mention["path"], session.id, ACK_TIMEOUT_SECONDS)
                 continue
-            except Exception:
-                logger.exception("Could not acknowledge a mention in %s (session %s)", mention["path"], session.id)
+            except Exception as exc:
+                if of_a_case:
+                    logger.warning("Could not acknowledge a mention (session %s): %s", session.id, type(exc).__name__)
+                else:
+                    logger.exception("Could not acknowledge a mention in %s (session %s)", mention["path"], session.id)
                 continue
             if answer.get("error") or not answer.get("applied"):
-                logger.warning("Could not acknowledge a mention in %s (session %s): %s", mention["path"], session.id,
-                               answer.get("error") or answer.get("refused"))
+                if of_a_case:
+                    logger.warning("Could not acknowledge a mention (session %s): %s", session.id,
+                                   "the editor answered an error" if answer.get("error") else "the editor did not apply it")
+                else:
+                    logger.warning("Could not acknowledge a mention in %s (session %s): %s", mention["path"], session.id,
+                                   answer.get("error") or answer.get("refused"))
                 continue
             self._mention_paths = (*self._mention_paths, mention["path"])
 

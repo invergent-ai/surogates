@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -43,6 +44,7 @@ from surogates.session.models import Session
 from surogates.session.store import _redacted_case_config, _reported_case_config, _unreported_case_config
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_key
+from surogates.tools.builtin import office as office_tools
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_case_step_isolation import CONTRACT
@@ -1065,6 +1067,48 @@ async def test_the_steps_turn_reads_a_mention_with_its_thread_note(fake_keel, mo
     assert _in_call_order(sent[1]["messages"])
     assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
     assert store.reported() == "drafted"
+
+
+@pytest.mark.parametrize(("failure", "logged"), [
+    ("raises", "RuntimeError"),
+    ("times-out", "TimeoutError"),
+    ("answers-an-error", "the editor answered an error"),
+    ("applies-nothing", "the editor did not apply it"),
+])
+async def test_a_failed_acknowledgement_in_a_step_logs_no_case_data(monkeypatch, tmp_path, caplog, failure, logged):
+    store = _QueuedStore(_step({**deepcopy(CONTRACT), "mode": "draft"}), LocalBackend(str(tmp_path)))
+    words = "The comment in offers/Ioana Marinescu.docx is not there any more."
+
+    async def acknowledge(mention, **kwargs):
+        if failure == "raises":
+            raise RuntimeError(words)
+        if failure == "times-out":
+            await asyncio.Event().wait()
+        return json.dumps({"error": words} if failure == "answers-an-error" else {"applied": False, "refused": words})
+
+    monkeypatch.setattr(office_tools, "acknowledge_mention", acknowledge)
+    monkeypatch.setattr(loop_module, "load_settings", lambda: SimpleNamespace(office=SimpleNamespace(agent_editing=True)))
+    monkeypatch.setattr(loop_module, "ACK_TIMEOUT_SECONDS", 0.05)
+    content, metadata = mention_message(
+        path="offers/Ioana Marinescu.docx", thread="c1a2", kind="docx", author="Ana Popescu",
+        author_id=f"user:{uuid4()}", comment="@credit-analyst@agent.invalid check the rate", agent_name="Credit Analyst",
+    )
+    mention = store.write(EventType.USER_MESSAGE, {
+        "content": content, "synthetic": "keel_mention", "keel_key": "keel:c:1:mention:1",
+        "source": "office_mention", "metadata": metadata,
+    })
+    harness = _step_harness(monkeypatch, store, [], [])
+    caplog.set_level(logging.DEBUG)
+
+    await harness._acknowledge_mentions(store.row.model_copy(deep=True), [mention])
+
+    # The turn goes on, and the log names the session and the error's class: not the case's file, nor the editor's words.
+    assert harness._mention_paths == ()
+    [record] = [r for r in caplog.records if r.getMessage().startswith("Could not acknowledge a mention")]
+    assert record.getMessage() == f"Could not acknowledge a mention (session {store.row.id}): {logged}"
+    assert record.exc_info is None
+    assert "Marinescu" not in caplog.text
+    assert "offers" not in caplog.text
 
 
 async def test_a_message_to_a_resting_step_is_read_with_keels_next_word(fake_keel, monkeypatch, tmp_path):

@@ -10,12 +10,18 @@ the acknowledgement in the comment's thread, and the agent answers there.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
+import surogates.harness.loop as loop_module
 from surogates.config import SHARED_WORK_QUEUE_KEY, OfficeSettings, encode_queue_member
+from surogates.keel.case_files import case_workspace, write_case_file
+from surogates.office import sessions as office_sessions
+from surogates.tools.builtin import office as office_tools
+from tests.test_office_mentions import _harness
 
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app and org are fixtures)
     LINK_KEY,
@@ -133,6 +139,56 @@ async def test_a_mention_without_an_author_name_is_someones(link, org, session_s
     assert message.data["metadata"]["path"] == "out/terms.xlsx"
     assert message.data["metadata"]["kind"] == "xlsx"
     assert message.data["metadata"]["author"] == "Someone"
+
+
+async def test_the_worker_acknowledges_a_mention_in_the_comments_thread_of_the_cases_document(
+    link, link_app, org, session_store, session_factory, redis_client, monkeypatch,
+):
+    case_id = uuid.uuid4()
+    step = await completed_step(link, org, session_store, redis_client, case_id=str(case_id), mode="draft")
+    state = link_app.state
+    await write_case_file(state.storage, state.settings, case_id, "offer.docx", b"PK-docx")
+    edits: list[tuple[str, list]] = []
+
+    class RuntimeOffice:
+        """runtime-office, as far as an acknowledgement reaches it: it opens the agent's page, and takes its edits."""
+
+        def __init__(self, office) -> None:
+            pass
+
+        async def open(self, *, doc_key, session_id, config, document_server_url):
+            return f"{doc_key}.{session_id}"
+
+        async def edit(self, page, ops):
+            edits.append((page, ops))
+            return {"applied": True, "results": [{"op": 0}], "flushed": True}
+
+    monkeypatch.setattr(office_tools, "RuntimeOffice", RuntimeOffice)
+    for module in (office_tools, loop_module):
+        monkeypatch.setattr(module, "load_settings", lambda: SimpleNamespace(office=AGENT_EDITING))
+    before = await session_store.last_event_id(step.id)
+    sent = await mention(link, step.id)
+    assert sent.status_code == 202, sent.text
+
+    # The step's worker reads the mention as a turn does, and posts the acknowledgement before the model reads it.
+    worker = _harness(session_store)
+    worker._storage, worker._session_factory, worker._redis = state.storage, session_factory, redis_client
+    message, _ = await worker._collect_steer_messages(await session_store.get_session(step.id), before)
+
+    # In the case's own document, through the step's agent's editor page, in the comment's thread.
+    document = await office_sessions.open_at(
+        session_factory, case_workspace(state.storage, state.settings, case_id).location("offer.docx"),
+    )
+    assert document is not None
+    assert document.session_ids == (step.id,)
+    assert edits == [(
+        f"{document.doc_key}.{step.id}",
+        [{"op": "reply", "thread": "c1a2", "body": "On it, I'll reply here when done."}],
+    )]
+    # Saved with the documents the turn edits, at its end; and the model reads the comment with its thread's note.
+    assert worker._mention_paths == ("offer.docx",)
+    assert message["content"].startswith("[A comment in offer.docx mentioned you.")
+    assert message["content"].endswith("[Comment on offer.docx] Ana Popescu: «@Credit Analyst check the rate»")
 
 
 async def test_a_mention_wakes_a_draft_under_review_and_keeps_its_mark(link, org, session_store, redis_client):
