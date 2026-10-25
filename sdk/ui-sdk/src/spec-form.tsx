@@ -64,6 +64,8 @@ export interface SpecFormProps {
   /** The fields a draft filled, each marked with `draftedNote`. */
   drafted?: readonly string[];
   draftedNote?: string;
+  /** A note per drafted field, which wins over `draftedNote`; a field with a note here is marked even when `drafted` leaves it out. */
+  draftedNotes?: Record<string, string>;
   /** Shows the values with every control disabled, and no upload, pick or remove. */
   readOnly?: boolean;
   /** Uploads a file and resolves the value a file field then holds. */
@@ -173,6 +175,7 @@ export function SpecForm({
   errors,
   drafted,
   draftedNote = "Drafted",
+  draftedNotes,
   readOnly,
   onUpload,
   files,
@@ -185,7 +188,8 @@ export function SpecForm({
     ...(form.required ?? []),
     ...(chosen?.required ?? []),
   ]);
-  const draftedFields = new Set(drafted ?? []);
+  const fieldNotes = new Map(Object.entries(draftedNotes ?? {}));
+  const draftedFields = new Set([...(drafted ?? []), ...fieldNotes.keys()]);
   const fieldErrors = errors?.fields ?? {};
   const shown = new Set(inputsOf(form).map((input) => input.field));
   // An error naming a field this form does not show would have nowhere to
@@ -236,7 +240,11 @@ export function SpecForm({
               value={values[input.field]}
               onChange={(value) => onChange(input.field, value)}
               required={required.has(input.field)}
-              note={draftedFields.has(input.field) ? draftedNote : undefined}
+              note={
+                draftedFields.has(input.field)
+                  ? (fieldNotes.get(input.field) ?? draftedNote)
+                  : undefined
+              }
               error={fieldErrors[input.field]}
               readOnly={readOnly}
               onUpload={onUpload}

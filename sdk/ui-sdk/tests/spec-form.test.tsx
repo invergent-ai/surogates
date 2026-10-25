@@ -343,6 +343,32 @@ describe("a form drawn from a spec", () => {
     expect(fieldOf(plain, "Applicant").textContent).toContain("Drafted");
   });
 
+  it("a field's own drafted note wins", () => {
+    const stepNote =
+      "Drafted by Credit analyst agent. Nothing is sent until you submit.";
+    const caseNote =
+      "Drafted by the case agent at your request. Nothing is sent until you submit.";
+    const { root } = draw({
+      drafted: ["amount", "applicant"],
+      draftedNote: stepNote,
+      draftedNotes: { amount: caseNote },
+    });
+
+    expect(fieldOf(root, "Amount").textContent).toContain(caseNote);
+    expect(fieldOf(root, "Amount").textContent).not.toContain(stepNote);
+    expect(fieldOf(root, "Applicant").textContent).toContain(stepNote);
+    expect(fieldOf(root, "Applicant").textContent).not.toContain(caseNote);
+  });
+
+  it("a field with its own note is marked though drafted leaves it out", () => {
+    const caseNote =
+      "Drafted by the case agent at your request. Nothing is sent until you submit.";
+    const { root } = draw({ draftedNotes: { applicant: caseNote } });
+
+    expect(fieldOf(root, "Applicant").textContent).toContain(caseNote);
+    expect(fieldOf(root, "Amount").textContent).not.toContain("Drafted");
+  });
+
   it("errors show beside their field, the form's error above it, and check messages under it", () => {
     const { root } = draw({
       errors: {
