@@ -43,6 +43,11 @@ export interface AgentChatProps {
    */
   disabled?: boolean;
   /**
+   * The chat draws no composer: no input, nor its Files and Browser fold, its footer or the
+   * integrations band. The transcript fills the chat. It implies `disabled`.
+   */
+  hideComposer?: boolean;
+  /**
    * Called when the composer rejects a file selection before sending —
    * size/count caps, accept-pattern misses.  Host apps wire this to
    * their toast system; the SDK does not surface these on its own.
@@ -163,6 +168,7 @@ export function AgentChat({
   onFileSelect,
   onMessagesChange,
   disabled,
+  hideComposer,
   onComposerError,
   browserProfileId,
   onSelectBrowserProfile,
@@ -250,6 +256,8 @@ export function AgentChat({
     officeAutoOpened.current.clear();
   }, [sessionId]);
   const readOnly = readOnlyReasonForSession(runtime.session);
+  // A chat with no composer is one the host only reads.
+  const readsOnly = disabled === true || hideComposer === true;
   // The canvas view is offered only on a session that was created as a
   // board: the harness loads ``whiteboard_draw`` on the same stamp, so
   // anywhere else the segment would open a canvas the agent cannot draw
@@ -265,7 +273,7 @@ export function AgentChat({
       ? "simple"
       : runtime.viewMode;
 
-  const effectiveDisabled = disabled || readOnly.readOnly;
+  const effectiveDisabled = readsOnly || readOnly.readOnly;
   const disabledReason = readOnly.reason;
   // TurnDownloads lists the files the just-completed turn delivered.
   // Suppress it on:
@@ -457,7 +465,7 @@ export function AgentChat({
         projectId,
         projectComputer,
         threadRows,
-        readOnly: disabled === true,
+        readOnly: readsOnly,
       }}
     >
       <TooltipProvider>
@@ -538,10 +546,11 @@ export function AgentChat({
               }
               onStop={() => runtime.stop()}
               // A chat the host only reads is not run again from here.
-              onRetry={disabled ? undefined : runtime.retry}
+              onRetry={readsOnly ? undefined : runtime.retry}
               onFileSelect={handleFileSelect}
               disabled={effectiveDisabled}
               disabledReason={disabledReason}
+              hideComposer={hideComposer}
               tokenUsage={runtime.tokenUsage}
               retryIndicator={runtime.retryIndicator}
               onComposerError={onComposerError}
@@ -631,7 +640,7 @@ export function AgentChat({
                   {browserOnComputer ? (
                     <ComputerBrowserPane
                       available={browserState.status !== "unavailable"}
-                      readOnly={disabled === true}
+                      readOnly={readsOnly}
                       draw={computerBrowser}
                     />
                   ) : (
@@ -640,7 +649,7 @@ export function AgentChat({
                       state={browserState}
                       adapter={adapter}
                       onClose={() => setOpenPane(null)}
-                      readOnly={disabled === true}
+                      readOnly={readsOnly}
                     />
                   )}
                 </div>

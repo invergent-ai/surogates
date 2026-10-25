@@ -1,4 +1,6 @@
 export { AgentChat } from "./agent-chat";
+export { ReadOnlyChatError, readOnlyAdapter } from "./read-only-adapter";
+export type { AgentChatReadSource } from "./read-only-adapter";
 export {
   AgentWhiteboard,
   WhiteboardSurface,
