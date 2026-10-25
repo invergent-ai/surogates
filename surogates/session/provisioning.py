@@ -6,8 +6,8 @@ from contextvars import ContextVar
 from typing import Any
 from uuid import UUID, uuid4
 
-from surogates.channels.memory_boundary import MANAGED_CHANNELS
-from surogates.keel.steps import CASE_SCOPE_KEY, CASE_STEP_KEY
+from surogates.channels.memory_boundary import CASE_AGENT_KEY, MANAGED_CHANNELS
+from surogates.keel.steps import CASE_ITEM_KEY, CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
 from surogates.session.store import SessionStore
@@ -130,7 +130,9 @@ async def create_agent_session(
     device_name: str | None = None,
     folder: str | None = None,
     case_step: dict | None = None,
+    case_item: dict | None = None,
     case_scope: dict | None = None,
+    case_agent: dict | None = None,
 ) -> Session:
     sid = session_id or uuid4()
 
@@ -149,15 +151,23 @@ async def create_agent_session(
     # Server-owned too: where a session runs is decided from a device the API
     # checked, never by caller-supplied config.
     merged_config.pop("execution", None)
-    # A case's step contract and scope come from the Keel link alone, through
-    # *case_step* and *case_scope*: a caller naming them in config would make
-    # its session a step, or widen what a case's session may reach.
+    # A case's step or item contract, its scope and a person's case agent come
+    # from the Keel link alone, through *case_step*, *case_item*, *case_scope*
+    # and *case_agent*: a caller naming them in config would make its session
+    # a step, an item or a person's case agent, or widen what a case's session
+    # may reach.
     merged_config.pop(CASE_STEP_KEY, None)
+    merged_config.pop(CASE_ITEM_KEY, None)
     merged_config.pop(CASE_SCOPE_KEY, None)
+    merged_config.pop(CASE_AGENT_KEY, None)
     if case_step is not None:
         merged_config[CASE_STEP_KEY] = dict(case_step)
+    if case_item is not None:
+        merged_config[CASE_ITEM_KEY] = dict(case_item)
     if case_scope is not None:
         merged_config[CASE_SCOPE_KEY] = dict(case_scope)
+    if case_agent is not None:
+        merged_config[CASE_AGENT_KEY] = dict(case_agent)
     # Tool paths that receive only ``session_config`` (media_gen, vision)
     # reconstruct a minimal session shape for boundary resolution; carry the
     # channel so a managed-channel session without a pinned workspace_boundary
@@ -249,10 +259,13 @@ async def create_child_session(
         merged_config.pop(field, None)
         if field in parent_config:
             merged_config[field] = parent_config[field]
-    # So does a case's scope, which every session of the case keeps.  The
-    # step's contract stays with the step's own session: a child is no step.
+    # So does a case's scope, which every session of the case keeps.  A step's
+    # or an item's contract, and a person's case agent, stay with their own
+    # session: a helper is no step, no item and no case agent.
     merged_config.pop(CASE_SCOPE_KEY, None)
     merged_config.pop(CASE_STEP_KEY, None)
+    merged_config.pop(CASE_ITEM_KEY, None)
+    merged_config.pop(CASE_AGENT_KEY, None)
     if CASE_SCOPE_KEY in parent_config:
         merged_config[CASE_SCOPE_KEY] = parent_config[CASE_SCOPE_KEY]
     # The user's package, as the parent's last turn pinned it: a helper's

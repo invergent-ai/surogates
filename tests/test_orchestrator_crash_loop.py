@@ -200,6 +200,30 @@ async def test_a_project_coordinators_follow_up_clears_breaker() -> None:
     assert len(wakes) > 0  # as a message typed into the thread does
 
 
+async def test_a_persons_message_to_their_case_agent_clears_breaker() -> None:
+    """Keel marks a person's message to a case agent only so it never runs as a command: a person typed it."""
+    session_id = uuid4()
+    redis = FakeRedis()
+    store = FakeStore()
+    orchestrator, wakes = await _trip_breaker(session_id, redis, store)
+    wakes.clear()
+    store.events_since_trip = [
+        SimpleNamespace(
+            id=200,
+            type=EventType.USER_MESSAGE.value,
+            data={
+                "content": "What income did the applicant declare?",
+                "synthetic": "keel_person_message",
+                "keel_key": "keel:c:1:agent:1:message:1",
+            },
+        ),
+    ]
+
+    await orchestrator._process(session_id)
+
+    assert len(wakes) > 0
+
+
 async def test_user_retry_resume_clears_breaker() -> None:
     session_id = uuid4()
     redis = FakeRedis()

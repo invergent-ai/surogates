@@ -192,7 +192,8 @@ interface ChatThreadProps {
   // What the host says under the composer, as where a new chat will work.
   composerFooter?: ReactNode;
   // No composer, footer or integrations band: the transcript fills the chat. The area under it
-  // still shows the device-wait line, the retry banner and the research sources.
+  // still shows the device-wait line, the retry banner and the research sources. Every reply
+  // shows whole, at the final answer's size, never cut to its first sentence.
   hideComposer?: boolean;
 }
 
@@ -557,8 +558,9 @@ function groupWebSearchEntries(entries: TimelineEntry[]): TimelineEntry[] {
  * System markers (``skill.invoked``) are folded into the *following*
  * assistant group as leading messages, so they render as the first item
  * of the assistant's vertical timeline alongside its reasoning and tool
- * calls -- not as a floating row outside the timeline.  Trailing system
- * markers (no assistant turn yet) get their own ``system`` group.
+ * calls -- not as a floating row outside the timeline.  Consecutive
+ * system markers no assistant turn follows (yet) share one ``system``
+ * group, which the thread draws as a run.
  */
 interface MessageGroup {
   role: "user" | "assistant" | "system";
@@ -571,8 +573,13 @@ function groupMessages(messages: ChatMessageType[]): MessageGroup[] {
   let pendingSystem: { msg: ChatMessageType; index: number }[] = [];
 
   const drainPendingAsOrphans = () => {
-    for (const { msg, index } of pendingSystem) {
-      groups.push({ role: "system", messages: [msg], lastGlobalIndex: index });
+    const last = pendingSystem[pendingSystem.length - 1];
+    if (last) {
+      groups.push({
+        role: "system",
+        messages: pendingSystem.map((p) => p.msg),
+        lastGlobalIndex: last.index,
+      });
     }
     pendingSystem = [];
   };
@@ -602,8 +609,8 @@ function groupMessages(messages: ChatMessageType[]): MessageGroup[] {
       continue;
     }
 
-    // user — drain any orphan system markers (no assistant followed),
-    // then push the user turn as its own group.
+    // user — drain any orphan system markers (no assistant followed)
+    // into one group, then push the user turn as its own group.
     drainPendingAsOrphans();
     groups.push({ role: "user", messages: [msg], lastGlobalIndex: i });
   }
@@ -644,21 +651,25 @@ function unpackArtifactMeta(
 // ── Orphan system marker (no following assistant yet) ───────────────
 //
 // Rendered only when a system event arrives but the LLM has not yet
-// produced an assistant turn to fold it into.
+// produced an assistant turn to fold it into. In a run of markers
+// (``inRun``) the run spaces its rows, so a row drops its own margin.
 
 function OrphanSystemMarker({
   message,
   sessionId,
   onRetry,
+  inRun = false,
 }: {
   message: ChatMessageType;
   sessionId: string | null;
   onRetry?: () => Promise<void>;
+  inRun?: boolean;
 }) {
+  const margin = inRun ? undefined : "my-2";
   if (message.systemKind === "skill_invoked") {
     const skill = (message.systemMeta?.skill as string) ?? message.content;
     return (
-      <div className="my-2 flex items-center gap-2 px-4 text-xs text-foreground/60 ">
+      <div className={cn(margin, "flex items-center gap-2 px-4 text-xs text-foreground/60")}>
         <span className="size-2 rounded-full bg-emerald-500" />
         <span>
           <span className="font-semibold text-foreground">Running skill{" "}</span>
@@ -690,7 +701,8 @@ function OrphanSystemMarker({
     return (
       <div
         className={cn(
-          "my-2 flex items-center gap-2 px-4 text-xs",
+          margin,
+          "flex items-center gap-2 px-4 text-xs",
           warning ? "text-amber-600" : "text-foreground/60",
         )}
         role={warning ? "alert" : "status"}
@@ -707,7 +719,7 @@ function OrphanSystemMarker({
 
   if (message.systemKind === "error" && message.errorInfo) {
     return (
-      <div className="mx-auto my-2 w-full max-w-4xl">
+      <div className={cn(margin, "mx-auto w-full max-w-4xl")}>
         <ErrorMessage errorInfo={message.errorInfo} onRetry={onRetry} />
       </div>
     );
@@ -1603,6 +1615,7 @@ function SimpleAssistantGroup({
   sessionId,
   onRetry,
   hideTurnSummary = false,
+  fullReplies = false,
 }: {
   messages: ChatMessageType[];
   activeAssistantId?: string;
@@ -1610,6 +1623,8 @@ function SimpleAssistantGroup({
   sessionId: string | null;
   onRetry?: () => Promise<void>;
   hideTurnSummary?: boolean;
+  /** Every reply whole, at the final answer's size, never cut to a narration line. */
+  fullReplies?: boolean;
 }) {
   const assistantMessages = messages.filter((m) => m.role === "assistant");
   const tail = assistantMessages[assistantMessages.length - 1];
@@ -1716,13 +1731,13 @@ function SimpleAssistantGroup({
     // ``ask_user_question`` content is the full message the user must act
     // on (the proposed design behind the widget), so render the whole body
     // — collapsing it to a narration line would hide what they're
-    // approving.
-    const askBody = hasUserFacingAskContent(message) ? cleaned : null;
-    if (askBody || narrationLine) {
+    // approving. A chat with ``fullReplies`` renders every reply whole.
+    const wholeBody = fullReplies || hasUserFacingAskContent(message) ? cleaned : null;
+    if (wholeBody || narrationLine) {
       endRun();
       rows.push(
-        askBody ? (
-          <MessageResponse key={`${message.id}:narration`}>{askBody}</MessageResponse>
+        wholeBody ? (
+          <MessageResponse key={`${message.id}:narration`}>{wholeBody}</MessageResponse>
         ) : (
           <p key={`${message.id}:narration`} className="text-sm text-foreground">
             {renderInlineMarkdown(narrationLine ?? "")}
@@ -1793,6 +1808,7 @@ function AssistantGroup({
   onRetry,
   viewMode = "simple",
   hideTurnSummary = false,
+  fullReplies = false,
 }: {
   messages: ChatMessageType[];
   activeAssistantId?: string;
@@ -1805,6 +1821,7 @@ function AssistantGroup({
   onRetry?: () => Promise<void>;
   viewMode?: "simple" | "expert";
   hideTurnSummary?: boolean;
+  fullReplies?: boolean;
 }) {
   if (viewMode === "simple") {
     return (
@@ -1815,6 +1832,7 @@ function AssistantGroup({
         sessionId={sessionId}
         onRetry={onRetry}
         hideTurnSummary={hideTurnSummary}
+        fullReplies={fullReplies}
       />
     );
   }
@@ -2205,23 +2223,25 @@ export function ChatThread({
                 }
 
                 if (group.role === "system") {
-                  const msg = group.messages[0];
                   // Simple mode hides skill_invoked markers entirely.
-                  if (
-                    viewMode === "simple"
-                    && msg.systemKind === "skill_invoked"
-                  ) {
-                    return null;
-                  }
-                  const groupRetry =
-                    msg.id === activeFailureId ? onRetry : undefined;
+                  const shown = group.messages.filter(
+                    (msg) => !(viewMode === "simple" && msg.systemKind === "skill_invoked"),
+                  );
+                  if (shown.length === 0) return null;
+                  // One run: its markers sit at the in-group pitch, not
+                  // the thread's gap between groups.
                   return (
-                    <OrphanSystemMarker
-                      key={msg.id}
-                      message={msg}
-                      sessionId={sessionId}
-                      onRetry={groupRetry}
-                    />
+                    <div key={group.messages[0].id} className="space-y-2">
+                      {shown.map((msg) => (
+                        <OrphanSystemMarker
+                          key={msg.id}
+                          message={msg}
+                          sessionId={sessionId}
+                          onRetry={msg.id === activeFailureId ? onRetry : undefined}
+                          inRun
+                        />
+                      ))}
+                    </div>
                   );
                 }
 
@@ -2245,6 +2265,7 @@ export function ChatThread({
                     onRetry={groupRetry}
                     viewMode={viewMode}
                     hideTurnSummary={hideTurnSummary}
+                    fullReplies={hideComposer}
                   />
                 );
               })}

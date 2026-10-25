@@ -46,7 +46,7 @@ from surogates.channels.constants import (
     outbound_dm,
     session_queue_priority,
 )
-from surogates.channels.memory_boundary import BUYER_BOUNDARY_PREFIX, EVAL_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import BUYER_BOUNDARY_PREFIX, CASE_AGENT_KEY, EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
 from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -61,7 +61,7 @@ from surogates.devices.binding import device_of, is_binding_root
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceRecord, DeviceStore
 from surogates.devices.workspace import DeviceOperationError
-from surogates.keel.steps import CASE_SCOPE_KEY, CASE_STEP_KEY
+from surogates.keel.steps import CASE_ITEM_KEY, CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -631,9 +631,9 @@ def apply_eval_isolation(
     account its buy page forwards every buyer through. Any other key holder
     naming a buyer id would otherwise read that buyer's memory.
 
-    A case's step contract and scope go too, on every channel: only the Keel
-    link stamps them, and a client naming them would make its session a
-    case's step.
+    A case's step or item contract, its scope and a person's case agent go
+    too, on every channel: only the Keel link stamps them, and a client naming
+    them would make its session a case's step, work item or case agent.
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
@@ -644,7 +644,9 @@ def apply_eval_isolation(
     for key in SERVER_OWNED_KEYS:
         resolved.pop(key, None)
     resolved.pop(CASE_STEP_KEY, None)
+    resolved.pop(CASE_ITEM_KEY, None)
     resolved.pop(CASE_SCOPE_KEY, None)
+    resolved.pop(CASE_AGENT_KEY, None)
     if channel != API_CHANNEL:
         return resolved
     if buyer_principal and resolved.get("public_buyer_id"):

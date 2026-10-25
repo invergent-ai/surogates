@@ -86,6 +86,26 @@ PROJECT_THREAD_TOOLS: frozenset[str] = frozenset({
 # (``surogates.keel.steps.gate_case_tools``).  Protected as well: a step
 # whose agent policy took them away could never finish nor ask for help.
 CASE_STEP_TOOLS: frozenset[str] = frozenset({"complete_step", "raise_hand"})
+# How an agent's work item of a Keel case ends: only the item's own session
+# is offered them (``surogates.keel.steps.gate_case_tools``).  Protected as
+# the step tools are: an item whose agent policy took them away could never
+# be finished nor given back.
+CASE_ITEM_TOOLS: frozenset[str] = frozenset({"complete_item", "return_item"})
+# How a person's case agent reads its case, and drafts into the person's
+# form, through Keel: only a case agent's own session is offered them
+# (``surogates.keel.steps.gate_case_tools``).  Not protected: ops's catalog
+# names them, so an agent's policy may allow them or take them away.
+KEEL_CASE_TOOLS: frozenset[str] = frozenset({
+    "case_read", "case_history", "case_files", "case_file_read", "case_draft_form",
+})
+# How the designer agent works on the draft a builder opened it on, through
+# Keel: offered only where an agent's policy has an allow-list naming them
+# (``GovernanceGate.allow_listed``), never under an open or deny-only policy,
+# and never in a case's session.  Not protected: they are the allow-list's to
+# give.
+KEEL_DESIGNER_TOOLS: frozenset[str] = frozenset({
+    "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+})
 
 # Tools no agent policy may take away. The ops catalog omits these names
 # so Studio cannot offer them and the policy validator rejects them with
@@ -93,7 +113,7 @@ CASE_STEP_TOOLS: frozenset[str] = frozenset({"complete_step", "raise_hand"})
 # hand-written or legacy blobs.
 PROTECTED_TOOLS: frozenset[str] = (
     WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS | PROJECT_THREAD_TOOLS
-    | CASE_STEP_TOOLS
+    | CASE_STEP_TOOLS | CASE_ITEM_TOOLS
 )
 
 # Tools a channel brings with it (``tool_schemas.channel_tool_flags``): ``end_call`` exists only on phone

@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from surogates.channels.constants import API_CHANNEL
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
+from surogates.harness.tool_schemas import has_file_pane
 from surogates.keel.steps import (
     CaseScope,
     StepContract,
@@ -250,6 +251,20 @@ async def test_a_draft_step_says_a_person_submits(link, org, session_store):
     content = kickoff.data["content"]
     assert "complete_step proposes the result, and a person reviews and submits it" in content
     assert "Finish the step with complete_step" not in content
+
+
+async def test_a_draft_step_has_a_file_pane_and_a_complete_step_none(link, org, session_store):
+    draft = await post(link, body(org, "keel:c:1:1", mode="draft"))
+    complete = await post(link, body(org, "keel:c:1:2"))
+
+    assert draft.status_code == 201, draft.text
+    assert complete.status_code == 201, complete.text
+    drafting = await session_store.get_session(UUID(draft.json()["session_id"]))
+    completing = await session_store.get_session(UUID(complete.json()["session_id"]))
+    assert drafting.config["file_pane"] is True
+    assert has_file_pane(drafting)
+    assert "file_pane" not in completing.config
+    assert not has_file_pane(completing)
 
 
 async def test_a_retry_makes_one_session_and_one_kickoff(link, org, session_store):
@@ -610,9 +625,9 @@ async def progress_of(client: AsyncClient, session_id, *, auth: str | None = LIN
     return await client.get(step_route(session_id, "progress"), headers=link_headers(auth))
 
 
-async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client):
-    """A step session whose turn has ended, and which is no longer queued."""
-    created = await post(link, body(org))
+async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client, *, key: str = KEY, **contract):
+    """A step session whose turn has ended, and which is no longer queued; *contract* overrides the loan's."""
+    created = await post(link, body(org, key, **contract))
     assert created.status_code == 201, created.text
     session_id = UUID(created.json()["session_id"])
     await session_store.update_session_status(session_id, "completed")
@@ -1057,36 +1072,52 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
     step = await completed_step(link, org, session_store, redis_client)
     # A child of the step works on the case, but is not the step.
     child = await create_child_session(store=session_store, parent=step, channel=API_CHANNEL)
+    # An agent's session on a work item of the case is no step's either.  The
+    # item tests import this module, so their helpers are imported here.
+    from .test_keel_item_sessions import item_body
+    from .test_keel_item_sessions import post as post_item
 
-    for session_id in (chat.id, child.id, uuid.uuid4(), "not-a-session-id"):
+    made = await post_item(link, item_body(org))
+    assert made.status_code == 201, made.text
+    item = await session_store.get_session(UUID(made.json()["session_id"]))
+    # The mention tests import this module too.
+    from .test_keel_mentions import mention
+
+    for session_id in (chat.id, child.id, item.id, uuid.uuid4(), "not-a-session-id"):
         answers = [
             await send(link, session_id),
+            await mention(link, session_id),
             await cancel(link, session_id),
             await status_of(link, session_id),
             await page_of(link, session_id),
             await stream_refused(link, session_id),
             await progress_of(link, session_id),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 6, session_id
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 7, session_id
 
     for session in (chat, child):
         assert await timeline(session_store, session.id) == []
         assert (await session_store.get_session(session.id)).status == session.status
+    assert await timeline(session_store, item.id) == [("user.message", "keel_item")]
+    assert (await session_store.get_session(item.id)).status == item.status
 
 
 async def test_every_step_session_route_needs_the_link_key(link, org, session_store, redis_client):
     step = await completed_step(link, org, session_store, redis_client)
+    # The mention tests import this module too.
+    from .test_keel_mentions import mention
 
     for key in (None, "not-the-link-key"):
         answers = [
             await send(link, step.id, auth=key),
+            await mention(link, step.id, auth=key),
             await cancel(link, step.id, auth=key),
             await status_of(link, step.id, auth=key),
             await page_of(link, step.id, auth=key),
             await stream_refused(link, step.id, auth=key),
             await progress_of(link, step.id, auth=key),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 6
+        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 7
 
     assert (await session_store.get_session(step.id)).status == "completed"
     assert await timeline(session_store, step.id) == [("user.message", "keel_step")]

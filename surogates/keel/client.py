@@ -1,8 +1,10 @@
 """The runtime's client for Keel's harness door.
 
 The worker reports a step session's end to Keel through the door: a
-completion, a raised hand, or how a turn ended with neither.  The door also
-tells an intake agent which case types it may start, and starts them.
+completion, a raised hand, or how a turn ended with neither.  An agent's
+session on a work item reports the item through its own routes under the
+session (:meth:`KeelClient.session_call`).  The door also tells an intake
+agent which case types it may start, and starts them.
 
 Every request carries the door key as a bearer.  An answer is a
 :class:`KeelAnswer`: the status Keel gave, and its decoded JSON body.  A
@@ -39,6 +41,9 @@ ENDED_TIMEOUT_SECONDS = 5.0
 DETAIL_CHARS = 2000
 #: The largest body the door takes, in bytes of JSON as sent.
 MAX_BODY_BYTES = 256_000
+#: The largest draft file the door's designer routes take, in bytes of JSON
+#: as sent: a Keel that serves them takes 1 MiB.
+MAX_DRAFT_BYTES = 1_048_576
 
 
 class BodyTooLarge(ValueError):
@@ -112,8 +117,10 @@ class KeelClient:
         method: str,
         path: str,
         *,
-        body: dict | None = None,
+        body: dict | list | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+        limit: int = MAX_BODY_BYTES,
     ) -> KeelAnswer:
         sent = {"Authorization": f"Bearer {self._key}", **(headers or {})}
         content = None
@@ -125,14 +132,14 @@ class KeelClient:
                 # Its message quotes the value: the class says enough.
                 raise BodyNotJSON("the body holds NaN or an infinity") from None
             content = encoded.encode("utf-8")
-            if len(content) > MAX_BODY_BYTES:
-                raise BodyTooLarge(len(content), MAX_BODY_BYTES)
+            if len(content) > limit:
+                raise BodyTooLarge(len(content), limit)
             sent["Content-Type"] = "application/json"
         try:
             async with httpx.AsyncClient(
                 base_url=self._url, timeout=TIMEOUT_SECONDS, transport=self._transport,
             ) as client:
-                response = await client.request(method, path, content=content, headers=sent)
+                response = await client.request(method, path, content=content, headers=sent, params=params)
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
             logger.warning("Keel's door could not be reached for %s %s (%s)", method, path, type(exc).__name__)
             return KeelAnswer(None)
@@ -142,13 +149,33 @@ class KeelClient:
             data = {}
         return KeelAnswer(response.status_code, data if isinstance(data, (dict, list)) else {})
 
+    async def session_call(
+        self,
+        method: str,
+        session_id: object,
+        route: str,
+        *,
+        params: dict[str, str] | None = None,
+        body: dict | list | None = None,
+        limit: int = MAX_BODY_BYTES,
+    ) -> KeelAnswer:
+        """A request to the door's *route* of session *session_id*: ``/api/harness/sessions/{session_id}/{route}``.
+
+        The session id in the path is the session's capability.  Raises :class:`BodyTooLarge`, and sends
+        nothing, for a body over *limit* bytes (:data:`MAX_BODY_BYTES` unless given), and
+        :class:`BodyNotJSON` for one holding NaN or an infinity.
+        """
+        return await self._send(
+            method, f"/api/harness/sessions/{_segment(session_id)}/{route}", body=body, params=params, limit=limit,
+        )
+
     async def complete(self, session_id: object, body: dict) -> KeelAnswer:
         """Report a step session's result: ``{"call_id", "outcome", "output", "sources", "pages_read", "usage"}``.
 
         Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
         :class:`BodyNotJSON` for one holding NaN or an infinity.
         """
-        return await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/complete", body=body)
+        return await self.session_call("POST", session_id, "complete", body=body)
 
     async def raise_hand(self, session_id: object, body: dict) -> KeelAnswer:
         """Raise a hand on a step session's step: ``{"call_id", "question", "choices", "evidence", "pages_read", "usage"}``.
@@ -156,7 +183,7 @@ class KeelClient:
         Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
         :class:`BodyNotJSON` for one holding NaN or an infinity.
         """
-        return await self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/raise-hand", body=body)
+        return await self.session_call("POST", session_id, "raise-hand", body=body)
 
     async def ended(
         self,
@@ -175,10 +202,25 @@ class KeelClient:
         body: dict[str, Any] = {"reason": reason, "detail": detail[:DETAIL_CHARS]}
         if usage is not None:
             body["usage"] = usage
+        return await self._ended(session_id, "ended", body)
+
+    async def item_ended(self, session_id: object, *, status: str, detail: str) -> KeelAnswer:
+        """Tell Keel an item session's work item ended without a report (``no-outcome``) or failed (``failed``).
+
+        Keel gives the item back.  Waits for Keel at most
+        :data:`ENDED_TIMEOUT_SECONDS`.  Logs, by session id, an end Keel did
+        not take, and never raises.
+        """
+        return await self._ended(session_id, "item/ended", {"status": status, "detail": detail[:DETAIL_CHARS]})
+
+    async def _ended(self, session_id: object, route: str, body: dict) -> KeelAnswer:
+        """Send *body*, how session *session_id* ended, to its *route*, within :data:`ENDED_TIMEOUT_SECONDS`.
+
+        Logs, by session id, an end Keel did not take, and never raises.
+        """
         try:
             answer = await asyncio.wait_for(
-                self._send("POST", f"/api/harness/sessions/{_segment(session_id)}/ended", body=body),
-                ENDED_TIMEOUT_SECONDS,
+                self.session_call("POST", session_id, route, body=body), ENDED_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             logger.warning(

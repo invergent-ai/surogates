@@ -32,6 +32,7 @@ from surogates.config import (
     parse_queue_member,
 )
 from surogates.harness.error_classify import classify_harness_error
+from surogates.keel.steps import PERSON_MARKER
 from surogates.runtime.pubsub import listen_forever
 from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import MESSAGE_TYPES, EventType
@@ -662,7 +663,9 @@ class Orchestrator:
         Synthetic user messages — mission continuations in particular —
         must NOT count: they re-injected the same poisoned conversation
         every iteration in the original incident.  A project coordinator's
-        follow-up to its thread counts as a typed message does.
+        follow-up to its thread counts as a typed message does, and so does
+        a person's message to their case agent: Keel marks it only so it
+        never runs as a command.
         """
         events = await self.session_store.get_events(
             session_id,
@@ -673,7 +676,7 @@ class Orchestrator:
             data = event.data or {}
             if (
                 event.type in MESSAGE_TYPES
-                and not data.get("synthetic")
+                and (not data.get("synthetic") or data.get("synthetic") == PERSON_MARKER)
             ):
                 return True
             if (
@@ -915,10 +918,11 @@ class Orchestrator:
 
         Once, where the dispatcher stops retrying or gives the session up: a
         crash it retries is not the session's end, and those told would hear
-        of every attempt.  A case's step tells Keel by *code* alone, never
-        *error*, and its inputs leave it, as at a failed turn's end; the
-        session that started it hears *error*.
+        of every attempt.  A case's step or work item tells Keel by *code*
+        alone, never *error*, and its inputs leave it, as at a failed turn's
+        end; the session that started it hears *error*.
         """
+        from surogates.tools.builtin.case_item import report_item_failed
         from surogates.tools.builtin.case_step import report_step_failed
 
         try:
@@ -927,6 +931,7 @@ class Orchestrator:
             logger.warning("Could not read session %s to report its failure", session_id, exc_info=True)
             return
         await report_step_failed(self.session_store, session, code=code)
+        await report_item_failed(self.session_store, session, code=code)
         await self._report_failure_to_parent(session, error)
 
     async def _report_failure_to_parent(self, session: Any, error: str) -> None:

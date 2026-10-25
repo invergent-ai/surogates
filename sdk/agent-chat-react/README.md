@@ -33,6 +33,10 @@ const adapter = readOnlyAdapter({ getSession, openEventStream });
 integrations band, and the transcript fills the chat. A board draws no prompt either. It implies `disabled`, so nothing in the
 transcript writes either: no Stop, no Retry, no answer to the agent's questions.
 
+A watcher reads what the agent says, so with `hideComposer` every reply shows whole, at the final
+answer's size: a reply that calls a tool is never cut to its first sentence. In any chat, consecutive
+notices sit together, at the pitch of the rows in a turn.
+
 `readOnlyAdapter` takes from its source only the reads it names: `getSession` and
 `openEventStream`, and optionally `pollEvents`, `getArtifact`, `getWorkspaceTree`,
 `getWorkspaceFile`, `getBrowserState`, `getChatViewMode` and `getWorkspaceDownloadUrl`. A write
@@ -50,3 +54,5 @@ Pass the source's reads as plain functions, as above: the adapter copies each me
 ## Documents
 
 `DocumentEditor` opens a document in the document server's editor with no chat session behind it: its `open(theme)` answers `{document_server_url, config, mentionable_users?}`, the editor config the host signed, and it opens again when `reopenKey` or the theme changes, not for a new `open` alone. A failure to open shows its message in an alert, or "The document could not be opened." when it has none; `notices` shows the host's own lines under that alert, above the editor. `loadDocsApi` loads the document server's `api.js` once per server.
+
+`editorMentions(users, tell)` is a `DocumentEditor`'s `events` for its comments' mentions, answered as the chat's own editor answers them. A comment's mention is offered `users`, and any other list the editor asks for gets nobody. A comment that mentions one of `users`, by email in any case, calls `tell(thread, comment, emails)`, which handles its own failure. With no `users`, the editor gets no events.

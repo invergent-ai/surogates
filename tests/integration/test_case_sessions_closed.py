@@ -147,6 +147,8 @@ async def case(app, session_factory):
     user_id = await create_user(session_factory, org_id)
     return SimpleNamespace(
         org_id=org_id,
+        case_id=case_id,
+        user_id=user_id,
         session=session,
         case_type=case_type,
         api_key={"Authorization": f"Bearer {key.token}"},
@@ -205,13 +207,27 @@ _USER_ROUTES = (
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("target", ["step", "child"])
-async def test_generic_routes_never_reach_a_case_session(client, case, session_store, target):
+@pytest.mark.parametrize("target", ["step", "child", "case_agent"])
+async def test_generic_routes_never_reach_a_case_session(app, client, case, session_store, session_factory, target):
     # A child the step makes, as delegation makes one, inherits the case.
     session = case.session
     if target == "child":
         session = await create_child_session(
             store=session_store, parent=case.session, channel="delegation",
+        )
+    elif target == "case_agent":
+        # The person's own case agent on the case, which not even the person reaches.
+        session = await create_agent_session(
+            store=app.state.session_store,
+            storage=app.state.storage,
+            settings=app.state.settings,
+            org_id=case.org_id,
+            user_id=None,
+            agent_id=AGENT,
+            channel=API_CHANNEL,
+            service_account_id=await ServiceAccountStore(session_factory).case_agent_account(case.org_id),
+            config={"memory_boundary": f"case:{case.case_id}"},
+            case_agent={"case_id": str(case.case_id), "case_number": "LN-000001", "person_id": str(case.user_id)},
         )
     sid = session.id
 

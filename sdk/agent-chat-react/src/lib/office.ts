@@ -40,6 +40,35 @@ export interface DocEditorInstance {
   setUsers(answer: { c?: unknown; users: AgentChatMentionableUser[] }): void;
 }
 
+/**
+ * The editor's mention events for a host whose comments can mention *users*, given the open editor: null for
+ * none to mention. A comment's mention is offered *users*. Any other list the editor asks for (a sheet's
+ * protected range) gets nobody: a mention id is no editor's, and a right given to it grants none. A comment that
+ * mentions one of *users*, by email in any case, goes to *tell*: its thread (the comment's id, a reply's is its
+ * thread's), its words, and the emails it names. *tell* handles its own failure.
+ */
+export function editorMentions(
+  users: AgentChatMentionableUser[],
+  tell: (thread: string, comment: string, emails: string[]) => void,
+): (editor: () => DocEditorInstance | null) => DocEditorEvents | null {
+  return (editor) => {
+    if (!users.length) return null;
+    return {
+      onRequestUsers: (event) => {
+        const c = (event.data as { c?: unknown } | undefined)?.c;
+        editor()?.setUsers({ c, users: c === "mention" || c === "info" ? users : [] });
+      },
+      onRequestSendNotify: (event) => {
+        const mention = (event.data ?? {}) as MentionNotice;
+        const emails = mention.emails ?? [];
+        const named = new Set(emails.map((email) => email.toLowerCase()));
+        if (!users.some((user) => named.has(user.email.toLowerCase()))) return;
+        tell(String(mention.actionLink?.action?.data ?? mention.actionId ?? ""), mention.message ?? "", emails);
+      },
+    };
+  };
+}
+
 declare global {
   interface Window {
     DocsAPI?: {

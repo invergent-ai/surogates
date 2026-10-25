@@ -111,18 +111,21 @@ from surogates.workstreams import is_project_master, is_project_thread, master_r
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.memory_boundary import is_eval_session
+from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
+from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.keel.steps import (
+    CASE_ITEM_TOOLS,
     CASE_STEP_NUDGE,
     CASE_STEP_TOOLS,
     MESSAGE_MARKER,
     NUDGE_MARKER,
-    STEP_ENDED,
-    STEP_STOPPED,
+    WORK_ENDS,
     gate_case_tools,
     is_case_session,
     is_case_step,
+    is_case_work,
     is_keel_message,
     is_keels_word,
     sleeps_through_a_plain_message,
@@ -1243,7 +1246,8 @@ class AgentHarness(
         """Post the acknowledgement in the thread of each mention in *events* that no wake or request has followed:
         the person sees the agent took their comment before the model answers it.  A failure, or an acknowledgement
         that takes longer than ACK_TIMEOUT_SECONDS, is logged, and the turn goes on.  Each document acknowledged in is
-        saved at the turn's end with those the turn edited."""
+        saved at the turn's end with those the turn edited.  A case's session logs only its id and the error's class:
+        the document's path, and the editor's words about it, are the case's data."""
         mentions = unacknowledged(events)
         if not mentions:
             return
@@ -1257,6 +1261,7 @@ class AgentHarness(
         # Local: the office tools import surogates.session, whose store imports this package.
         from surogates.tools.builtin.office import acknowledge_mention
 
+        of_a_case = is_case_session(session)
         for mention in mentions:
             try:
                 answer = json.loads(await asyncio.wait_for(acknowledge_mention(
@@ -1265,15 +1270,25 @@ class AgentHarness(
                     platform_client=self._platform_client,
                 ), timeout=ACK_TIMEOUT_SECONDS))
             except TimeoutError:
-                logger.warning("Could not acknowledge a mention in %s (session %s): no answer in %s seconds",
-                               mention["path"], session.id, ACK_TIMEOUT_SECONDS)
+                if of_a_case:
+                    logger.warning("Could not acknowledge a mention (session %s): TimeoutError", session.id)
+                else:
+                    logger.warning("Could not acknowledge a mention in %s (session %s): no answer in %s seconds",
+                                   mention["path"], session.id, ACK_TIMEOUT_SECONDS)
                 continue
-            except Exception:
-                logger.exception("Could not acknowledge a mention in %s (session %s)", mention["path"], session.id)
+            except Exception as exc:
+                if of_a_case:
+                    logger.warning("Could not acknowledge a mention (session %s): %s", session.id, type(exc).__name__)
+                else:
+                    logger.exception("Could not acknowledge a mention in %s (session %s)", mention["path"], session.id)
                 continue
             if answer.get("error") or not answer.get("applied"):
-                logger.warning("Could not acknowledge a mention in %s (session %s): %s", mention["path"], session.id,
-                               answer.get("error") or answer.get("refused"))
+                if of_a_case:
+                    logger.warning("Could not acknowledge a mention (session %s): %s", session.id,
+                                   "the editor answered an error" if answer.get("error") else "the editor did not apply it")
+                else:
+                    logger.warning("Could not acknowledge a mention in %s (session %s): %s", mention["path"], session.id,
+                                   answer.get("error") or answer.get("refused"))
                 continue
             self._mention_paths = (*self._mention_paths, mention["path"])
 
@@ -3024,6 +3039,7 @@ class AgentHarness(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
             contract=step_contract_of(session) if is_case_step(session) else None,
             intake=getattr(self, "_intake", ()),
+            item=item_contract_of(session) if is_case_item(session) else None,
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
@@ -3966,30 +3982,31 @@ class AgentHarness(
                     )
                     continue
 
-                # A case's step ends only with its report.  A turn of the step
-                # that ends in words is told so once, and goes on; one that
-                # ends in words again completes, and Keel hears it had no
-                # outcome.  Not once a report ended the step for this round,
-                # in this wake or an earlier one: Keel has it.
+                # A case's step or work item ends only with its report.  A
+                # turn of its own session that ends in words is told so once,
+                # and goes on; one that ends in words again completes, and
+                # Keel hears it had no outcome.  Not once a report ended the
+                # work for this round, in this wake or an earlier one: Keel
+                # has it.
                 if (
                     case_step_nudged_turn != turn_id
-                    and is_case_step(session)
-                    and await step_awaiting_report(self._store, session) is not None
+                    and is_case_work(session)
+                    and (nudge := await _report_nudge(self._store, session)) is not None
                 ):
                     case_step_nudged_turn = turn_id
                     try:
                         await self._store.emit_event(
                             session.id, EventType.USER_MESSAGE,
-                            {"content": CASE_STEP_NUDGE, "synthetic": NUDGE_MARKER},
+                            {"content": nudge, "synthetic": NUDGE_MARKER},
                         )
                     except Exception as exc:
                         logger.warning(
-                            "Session %s: the nudge to report its step was not saved (%s); the turn has it all the same",
+                            "Session %s: the nudge to report its case work was not saved (%s); the turn has it all the same",
                             session.id, type(exc).__name__,
                         )
-                    messages.append({"role": "user", "content": CASE_STEP_NUDGE})
+                    messages.append({"role": "user", "content": nudge})
                     self._budget.refund()
-                    logger.info("Session %s: its case step's turn ended in words; nudging it to report", session.id)
+                    logger.info("Session %s: its case work's turn ended in words; nudging it to report", session.id)
                     continue
 
                 # Text-only iteration: kick off the iteration-summary
@@ -5665,14 +5682,21 @@ class AgentHarness(
                 set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
             )
             tool_filter.discard("start_case")
+        # The designer's tools go only to an agent whose policy's allow-list
+        # names them, as in ``worker._filter_effective_tools``: none without a
+        # gate.  ``None`` (every registered tool) is spelled out so they can
+        # go.  ``getattr``: some test harnesses skip ``__init__``.
+        from surogates.runtime.governance import KEEL_DESIGNER_TOOLS
+
+        gate = getattr(self, "_governance_gate", None)
+        allow_listed = gate.allow_listed(KEEL_DESIGNER_TOOLS) if gate is not None else frozenset()
+        tool_filter = (
+            set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
+        ) - (KEEL_DESIGNER_TOOLS - allow_listed)
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
-        # ``None`` (every registered tool) is spelled out so they can go.
-        return gate_case_tools(
-            set(self._tools.tool_names) if tool_filter is None else tool_filter,
-            session,
-        )
+        return gate_case_tools(tool_filter, session)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(
@@ -6667,12 +6691,21 @@ def _form_sent(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
     )
 
 
+async def _report_nudge(store: Any, session: Session) -> str | None:
+    """What a case's work session whose turn ended in words is told: its work item's nudge, or its step's, when
+    that work awaits its report; ``None`` when it does not."""
+    if is_case_item(session):
+        return ITEM_NUDGE if await item_awaiting_report(store, session) is not None else None
+    return CASE_STEP_NUDGE if await step_awaiting_report(store, session) is not None else None
+
+
 def _case_step_ended(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
-    """Whether a step tool of the batch ended its case's step for this session: Keel took its report, the step is
-    no longer the session's, or Keel stopped it."""
-    reports = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") in CASE_STEP_TOOLS}
+    """Whether a step or item tool of the batch ended its case's work for this session: Keel took its report,
+    the step or the item is no longer the session's, or Keel stopped it."""
+    tools = CASE_STEP_TOOLS | CASE_ITEM_TOOLS
+    reports = {c.get("id") for c in tool_calls_raw if c.get("function", {}).get("name") in tools}
     return any(
-        r.get("tool_call_id") in reports and str(r.get("content") or "").startswith((STEP_ENDED, STEP_STOPPED))
+        r.get("tool_call_id") in reports and str(r.get("content") or "").startswith(WORK_ENDS)
         for r in tool_results
     )
 

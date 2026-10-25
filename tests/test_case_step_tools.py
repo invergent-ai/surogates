@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -35,13 +36,15 @@ import pytest
 import surogates.harness.loop as loop_module
 from surogates.harness.budget import IterationBudget
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
-from surogates.keel.steps import render_kickoff, step_contract_in
+from surogates.keel.steps import render_kickoff, step_contract_in, work_contract_key
+from surogates.office.mentions import mention_message
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.session.models import Session
-from surogates.session.store import _redacted_case_config
+from surogates.session.store import _redacted_case_config, _reported_case_config, _unreported_case_config
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_key
+from surogates.tools.builtin import office as office_tools
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_case_step_isolation import CONTRACT
@@ -160,7 +163,9 @@ class _StepStore(FakeStore):
             for e in self.log
         ):
             return
-        self.row.config = {**self.row.config, "case_step": {**self.row.config["case_step"], "reported": result}}
+        marked = _reported_case_config(self.row.config, result)
+        if marked is not None:
+            self.row.config = marked
 
     def keel_writes(self, kind: str, content: str) -> None:
         """Keel's answer or revision reaching the step through the link: a session at rest set active with a
@@ -169,9 +174,9 @@ class _StepStore(FakeStore):
             self.write(EventType.SESSION_RESUME, {})
             self.row.status = "active"
         self.write(EventType.USER_MESSAGE, {"content": content, "synthetic": f"keel_{kind}", "keel_key": f"keel:{kind}:{content}"})
-        self.row.config = {
-            **self.row.config, "case_step": {k: v for k, v in self.row.config["case_step"].items() if k != "reported"},
-        }
+        unmarked = _unreported_case_config(self.row.config)
+        if unmarked is not None:
+            self.row.config = unmarked
 
     def keel_says(self, content: str) -> None:
         """Keel's plain message reaching the step through the link: a session at rest set active with a
@@ -185,13 +190,17 @@ class _StepStore(FakeStore):
             {"content": content, "synthetic": "keel_message", "keel_key": f"keel:message:{content}"},
         )
 
+    def _contract(self) -> dict:
+        """The session's work contract, a step's or a work item's."""
+        return self.row.config[work_contract_key(self.row.config)]
+
     def redacted(self) -> bool:
-        step = self.row.config["case_step"]
-        return step["inputs"] == {} and step.get("inputs_redacted") is True
+        contract = self._contract()
+        return contract["inputs"] == {} and contract.get("inputs_redacted") is True
 
     def reported(self) -> str | None:
         """What the report that ended the step for this round came to, as the session's row holds it."""
-        return self.row.config["case_step"].get("reported")
+        return self._contract().get("reported")
 
     def result(self, call_id: str) -> str:
         """What the tool call *call_id* answered the model."""
@@ -1019,6 +1028,87 @@ async def test_keels_plain_message_during_a_report_gives_the_step_no_back(fake_k
     assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1"]
     assert store.result("c2") == "Step ended: the step is no longer this session's."
     assert store.reported() == "hand-raised"
+
+
+def _user_texts_with(messages: list[dict], words: str) -> list[str]:
+    """The text of each user message among *messages* that holds *words*."""
+    return [m["content"] for m in messages if m["role"] == "user" and isinstance(m["content"], str) and words in m["content"]]
+
+
+async def test_the_steps_turn_reads_a_mention_with_its_thread_note(fake_keel, monkeypatch, tmp_path):
+    store = _QueuedStore(_step({**deepcopy(CONTRACT), "mode": "draft"}), LocalBackend(str(tmp_path)))
+    fake_keel.answer(409, REJECTION)
+    fake_keel.answer(200, DRAFTED)
+    content, metadata = mention_message(
+        path="offer.docx", thread="c1a2", kind="docx", author="Ana Popescu", author_id=f"user:{uuid4()}",
+        comment="@credit-analyst@agent.invalid check the rate", agent_name="Credit Analyst",
+    )
+
+    def a_comment_mentions_the_agent_during_the_first_report() -> None:
+        # As keel-link writes it into a turn under way: no resume, nothing given back.
+        if len(fake_keel.requests) == 1:
+            store.write(EventType.USER_MESSAGE, {
+                "content": content, "synthetic": "keel_mention", "keel_key": "keel:c:1:mention:1",
+                "source": "office_mention", "metadata": metadata,
+            })
+
+    fake_keel.during = a_comment_mentions_the_agent_during_the_first_report
+    _started(store)
+
+    replies = [_calls("complete_step", COMPLETION, "c1"), _calls("complete_step", COMPLETION, "c2")]
+    sent = await _queued_wake(monkeypatch, store, replies)
+
+    # The turn's next request reads the comment, with the note that tells the agent where its thread is.
+    assert len(sent) == 2
+    assert _user_texts_with(sent[0]["messages"], content) == []
+    [said] = _user_texts_with(sent[1]["messages"], content)
+    assert said.startswith("[A comment in offer.docx mentioned you.")
+    assert said.endswith(content)
+    assert _in_call_order(sent[1]["messages"])
+    assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
+    assert store.reported() == "drafted"
+
+
+@pytest.mark.parametrize(("failure", "logged"), [
+    ("raises", "RuntimeError"),
+    ("times-out", "TimeoutError"),
+    ("answers-an-error", "the editor answered an error"),
+    ("applies-nothing", "the editor did not apply it"),
+])
+async def test_a_failed_acknowledgement_in_a_step_logs_no_case_data(monkeypatch, tmp_path, caplog, failure, logged):
+    store = _QueuedStore(_step({**deepcopy(CONTRACT), "mode": "draft"}), LocalBackend(str(tmp_path)))
+    words = "The comment in offers/Ioana Marinescu.docx is not there any more."
+
+    async def acknowledge(mention, **kwargs):
+        if failure == "raises":
+            raise RuntimeError(words)
+        if failure == "times-out":
+            await asyncio.Event().wait()
+        return json.dumps({"error": words} if failure == "answers-an-error" else {"applied": False, "refused": words})
+
+    monkeypatch.setattr(office_tools, "acknowledge_mention", acknowledge)
+    monkeypatch.setattr(loop_module, "load_settings", lambda: SimpleNamespace(office=SimpleNamespace(agent_editing=True)))
+    monkeypatch.setattr(loop_module, "ACK_TIMEOUT_SECONDS", 0.05)
+    content, metadata = mention_message(
+        path="offers/Ioana Marinescu.docx", thread="c1a2", kind="docx", author="Ana Popescu",
+        author_id=f"user:{uuid4()}", comment="@credit-analyst@agent.invalid check the rate", agent_name="Credit Analyst",
+    )
+    mention = store.write(EventType.USER_MESSAGE, {
+        "content": content, "synthetic": "keel_mention", "keel_key": "keel:c:1:mention:1",
+        "source": "office_mention", "metadata": metadata,
+    })
+    harness = _step_harness(monkeypatch, store, [], [])
+    caplog.set_level(logging.DEBUG)
+
+    await harness._acknowledge_mentions(store.row.model_copy(deep=True), [mention])
+
+    # The turn goes on, and the log names the session and the error's class: not the case's file, nor the editor's words.
+    assert harness._mention_paths == ()
+    [record] = [r for r in caplog.records if r.getMessage().startswith("Could not acknowledge a mention")]
+    assert record.getMessage() == f"Could not acknowledge a mention (session {store.row.id}): {logged}"
+    assert record.exc_info is None
+    assert "Marinescu" not in caplog.text
+    assert "offers" not in caplog.text
 
 
 async def test_a_message_to_a_resting_step_is_read_with_keels_next_word(fake_keel, monkeypatch, tmp_path):

@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -8,15 +8,29 @@
 |---|---|
 | `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
 | `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, a reviewer's request to revise its draft, or a plain message from whoever works on the case, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. A plain message also answers `resting`, and wakes no step that rests on its report. See [A message to a step](#a-message-to-a-step). |
+| `POST /v1/keel/step-sessions/{session_id}/mentions` | Gives a draft step's agent a comment in one of the case's documents that mentions it, and wakes the session, a draft under review too: `202 {}`. Each key is written once. See [A comment that mentions the step's agent](#a-comment-that-mentions-the-steps-agent). |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
 | `GET /v1/keel/step-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the session's events after the cursor `after`, without `llm.delta`: `200 {"events": [{"id", "type", "data", "created_at"}], "has_more"}`. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/step-sessions/{session_id}/events/stream?after=<id>` | The session's events after the cursor `after`, then each new one as it is written, as server-sent events. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/step-sessions/{session_id}/progress` | The session's status, its todo list as its agent last wrote it, and its last activity: `200 {"status", "todos", "todos_at", "last_activity"}`. See [Progress](#progress). |
+| `POST /v1/keel/item-sessions?agent_id=<agent>` | Starts the agent's session on one work item, or finds the one Keel's key already started: `201 {"session_id"}` made, `200 {"session_id"}` found. See [An agent's work item](#an-agents-work-item). |
+| `GET /v1/keel/item-sessions/{session_id}` | The item session's `session_id` and `status`. |
+| `POST /v1/keel/item-sessions/{session_id}/cancel` | Ends the item as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
+| `POST /v1/keel/item-sessions/{session_id}/messages` | Gives the item a plain message from whoever works on the case: `202 {"status": "queued"}` when it wakes the session, `202 {"status": "resting"}` when the item rests on its report or is over and keeps it unread. Each key is written once. See [A message to an item](#a-message-to-an-item). |
+| `GET /v1/keel/item-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the item session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/item-sessions/{session_id}/events/stream?after=<id>` | The item session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/item-sessions/{session_id}/progress` | The item session's status, todo list and last activity, as a step session's progress. See [Progress](#progress). |
+| `POST /v1/keel/case-agent-sessions?agent_id=<agent>` | Starts one person's case agent on a case, or finds the one Keel's key already started: `201 {"session_id"}` made, `200 {"session_id"}` found. See [A person's case agent](#a-persons-case-agent). |
+| `POST /v1/keel/case-agent-sessions/{session_id}/messages` | Gives the case agent its person's message and wakes it: `202 {"status": "queued"}`. Each key is written once. See [A person's message](#a-persons-message). |
+| `POST /v1/keel/case-agent-sessions/{session_id}/cancel` | Interrupts the case agent's turn and pauses its session: `200 {"status": "paused"}`, also when it was paused already. The person's next message wakes it again. |
+| `GET /v1/keel/case-agent-sessions/{session_id}` | The case agent session's `session_id` and `status`. |
+| `GET /v1/keel/case-agent-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the case agent session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/case-agent-sessions/{session_id}/events/stream?after=<id>` | The case agent session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
-| `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme"}` and answers `200 {"document_server_url", "config"}`: one person's editor config for the document at the path. See [A case's document in the editor](#a-cases-document-in-the-editor). |
+| `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme", "mentionable"}` and answers `200 {"document_server_url", "config", "mentionable_users"}`: one person's editor config for the document at the path, and the agents it offers to mention. See [A case's document in the editor](#a-cases-document-in-the-editor). |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -30,29 +44,33 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
-| 404 | `unknown-session` | No such session, or it is not a step's own session. |
-| 404 | `unknown-file` | No file at the path in the case's workspace. |
+| 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
+| 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. |
-| 409 | `key-in-use` | The key, or the session id, names another step's session. |
-| 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
+| 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's or case agent's, or one of another agent. |
+| 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
+| 409 | `step-finished` | A message or a mention for a step that is over: its inputs were redacted. |
+| 409 | `no-office` | A mention for a step whose agent does not edit the case's documents: not a draft step's, or the runtime has no agent editing. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
 | 409 | `ambiguous-email` | An invitation for an email that two or more users of other orgs have: none is chosen. |
 | 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
-| 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
-| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
+| 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
+| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a step session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step session's events or progress were read. Only the error's class name is logged. |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
+| 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item or case agent session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
 
 ## A step's inputs
 
 Once a step is over, cancelled among others, its inputs are removed from the session's config and the contract is marked `inputs_redacted`. A step marked so takes no more messages. The redaction covers the config only: the step's first message, which sets out the inputs, stays in the session's event log, which only keel-link serves, to Keel.
+
+A draft step's agent edits the case's documents beside the person. keel-link creates a draft step's session with `file_pane` set, and the session keeps `office_read` and `office_edit` whatever the step's `tools` name, when the agent has them: registered where the runtime has agent editing, and allowed by its policy. It edits within the document server's capacity: when runtime-office holds as many documents open as it can, the tool answers `The office service has as many documents open as it can hold; try again in a minute.` No other session of a case gets the office tools: not a complete step's, a helper's, a work item's or a case agent's.
 
 ## A message to a step
 
@@ -77,9 +95,177 @@ A message never gives the step back. An answer or a revision ends the rest a rep
 
 A step that is over takes no message: `409 step-finished`, as for an answer. Nor does a message it took before then, and no turn has read, wake it once it is over. The route logs neither a message's text nor its sender.
 
+## A comment that mentions the step's agent
+
+`POST /v1/keel/step-sessions/{session_id}/mentions` gives a draft step's agent a comment in one of the case's documents that mentions it, as a chat's editor gives its agent one. Its body is `{"path", "thread", "comment", "author_id", "author_name", "idempotency_key"}`:
+
+- `path` is the document's path in the case's files, 1 to 4096 characters;
+- `thread` is the comment's thread, as the editor names it, matching `^[A-Za-z0-9{}_-]{1,64}$`;
+- `comment` is the comment or the reply that mentions the agent, as written, 1 to 20000 characters;
+- `author_id` is the runtime user who wrote it, a UUID;
+- `author_name` is their display name, 1 to 200 printable characters, or null;
+- `idempotency_key` is 1 to 200 characters.
+
+A key the route does not know is refused, as is a body out of this shape: `422 invalid-request`. The path is then checked as the file routes check it, `422 invalid-path`, and a file that is not a document an agent edits, `.docx`, `.xlsx`, `.pptx` or `.pdf`, is `415 not-a-document`.
+
+Only a draft step's agent can be mentioned, and only where the runtime has agent editing: a document server with runtime-office beside it. That agent edits the case's documents beside the person (see [A step's inputs](#a-steps-inputs)). Any other step, a complete step's among them, is `409 no-office`, and so is a draft step when the runtime has no agent editing.
+
+The session gets the message a chat's mention becomes. In the session's events it is a `user.message` whose `data` holds:
+
+- `content`, `[Comment on <file name>] <author>: «<comment>»`, where the agent's address in the comment reads `@` and the agent's display name, and the author is `Someone` for a null `author_name`;
+- `source: "office_mention"`;
+- `metadata`, `{"path", "thread", "kind", "author", "author_id", "comment"}`: the path as the case's files name it, `kind` the document's extension (`docx`, `xlsx`, `pptx` or `pdf`), `author_id` `user:<author_id>`, and the comment as sent;
+- `synthetic: "keel_mention"` and `keel_key`, the idempotency key.
+
+The agent reads it as it reads Keel's messages: a turn under way at its next request to the model, otherwise the session's next turn. Before the model reads it, the worker posts `On it, I'll reply here when done.` in the comment's thread, under the agent's name, so the person sees the agent took it. The agent then does the work with `office_read` and `office_edit`, answers in the thread with only the result, through `office_edit`'s `reply`, and resolves the thread.
+
+A mention wakes the step whose session is at rest, a draft under review among them, and keeps its report's mark. A plain message waits for Keel's next word, but the person who wrote the comment waits in the document for the agent's answer in the thread. The mention does not give the step back: the draft stays the reviewer's, and a report the turn makes is answered by the worker and never reaches Keel.
+
+The answer is `202 {}`. Each key is written once: a repeated key writes and wakes nothing, and answers `202 {}` as the first call did, also once the step is over. A new key to a step that is over is `409 step-finished`. The route logs neither the comment, its author nor the path.
+
+## An agent's work item
+
+A case gives an agent a work item as it gives a person one: a step to do, a vote to cast, or a raised hand to answer. `POST /v1/keel/item-sessions?agent_id=<agent>` starts the agent's session on it. Its body is `{"org_id", "case_type", "idempotency_key", "session_id", "contract"}`: `case_type` is 1 to 200 characters and must be the contract's, and `idempotency_key` is 1 to 200 characters. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this item's session when that session has Keel's id, the agent, and the contract's `case_id` and `item_id`. Any other session under the key, or another session with Keel's id, is `409 key-in-use`.
+
+### The item's contract
+
+| Key | What it is |
+|---|---|
+| `case_id`, `case_number`, `case_type`, `type_version` | The case. |
+| `item_id` | Keel's id for the item. |
+| `kind` | `step`, `vote` or `raised_hand`. |
+| `token`, `node`, `step` | Where in the case the item is; for a raised hand, the step that raised it. |
+| `inputs` | The case's data the item reads. |
+| `form`, `outcomes`, `files` | A step's or a vote's, and required for both: the form as JSON Schema, empty for a vote; the outcomes it ends with, each with the outputs it requires; and its file fields, each taking one file or a list. |
+| `question`, `choices`, `evidence` | A raised hand's: its question, required, 1 to 2000 characters; at most 20 choices, of at most 200 characters each; and the facts behind it. |
+| `tools`, `mcp_servers`, `knowledge` | As a step's: null keeps the agent's own work tools or MCP servers, and a list narrows them. `knowledge` is the full grant. |
+
+Keys the runtime does not know are ignored. A contract out of this shape, such as a vote without its form or a raised hand without its question, is `422 invalid-request`, and nothing is made.
+
+### Its owner and its boundaries
+
+The item's session is made as a step's is: with the id Keel gives it, on the `api` channel, owned by the org's `case-type:<case type>` service account, inside the case's `case:<case id>` memory and workspace boundaries, and narrowed to the contract's MCP servers when it names them. Its wakes wait behind people, as a step's do. The contract is in the session's config under `case_item`, never `case_step`, and only keel-link sets it: every other way of creating a session drops it. A helper the session starts keeps the case's boundaries and scope, but not the contract: a helper is no item.
+
+### Its kickoff
+
+The item's inputs, and a raised hand's question, choices and evidence, pass the prompt-injection screen before anything is written: `422 inputs-blocked`. The session then starts with one message, marked `keel_item` and written once per key. Its first line names the case and the item:
+
+- a step: `Case <number>, a <case type> case, gives you a work item: its step "<step>". Work on it now.`
+- a vote: `Case <number>, a <case type> case, asks for your vote on "<step>". Work on it now.`
+- a raised hand: `Case <number>, a <case type> case, asks you to answer a raised hand at its step "<step>". Work on it now.`
+
+Then come the item's inputs, as data, in a JSON code fence. A raised hand adds its question, its choices and its evidence, the same way. A step or a vote adds its outcomes, with the outputs each requires, and its file fields. The last line says how the item ends: with `complete_item`, which finishes a step, casts a vote, or answers a raised hand with one of its choices or in words; or with `return_item` and a reason, which gives the item back to whoever gave it to the agent.
+
+`POST /v1/keel/item-sessions/{session_id}/cancel` ends the item as a step's cancel ends a step: its inputs leave the session's config and are marked `inputs_redacted`, the session pauses, and every call interrupts its turn. `GET /v1/keel/item-sessions/{session_id}` answers `200 {"session_id", "status"}`.
+
+### A message to an item
+
+`POST /v1/keel/item-sessions/{session_id}/messages` gives the agent working an item a plain word from whoever works on the case, a person or another agent. Its body is `{"text", "sender", "idempotency_key"}`:
+
+- `text` is 1 to 20000 characters;
+- `sender` is the display name of whoever sends it, 1 to 200 printable characters, or null;
+- `idempotency_key` is 1 to 200 characters.
+
+Any other key, `kind` and `note` among them, is `422 invalid-request`: an item takes plain messages alone.
+
+The agent reads `<sender> sends you a message about this work item: <text>`, or `Someone working on the case sends you a message about this work item: <text>` without a sender. Then, after a blank line: `Take it into account, and go on with the item.` In the session's events, the message is a `user.message` whose `data` holds `content`, the text the agent reads, `synthetic: "keel_message"` and `keel_key`, the idempotency key, as a step's plain message does.
+
+The answer is `202 {"status"}`:
+
+- `queued`: the message wakes the item. A session at rest resumes, with a `session.resume` before the message, and a turn under way reads it at its next request to the model. Either way the session is queued, behind people.
+- `resting`: the item rests on its report, once `complete_item` or `return_item` reported it, or it is over, its inputs redacted, as after a cancel. The message is kept unread: nothing resumes, the session's status does not change, and nothing is queued.
+
+Each key is written once. A repeated key writes nothing and wakes nothing, and answers as the item stands at that call. A message never gives the item back: a report's mark stays. Unlike a step, an item that is over does not refuse the message; it keeps it, unread. The route logs neither a message's text nor its sender.
+
+## A person's case agent
+
+A person's case agent is the agent that helps one person on one case: it answers their questions about the case and drafts into their form. `POST /v1/keel/case-agent-sessions?agent_id=<agent>` starts its session. Its body is `{"org_id", "case_id", "case_number", "person_id", "idempotency_key", "session_id"}`: `case_number` and `idempotency_key` are 1 to 200 characters, and keys the runtime does not know are ignored. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this case agent's session when that session has Keel's id, the agent, the case and the person. Any other session under the key, a step's or an item's among them, or another session with Keel's id, is `409 key-in-use`. The agent is checked as for a step: `404 unknown-agent`, `409 agent-stopped`. Nothing is written to the session or queued: the person's first message wakes it.
+
+### Its owner and the person
+
+`person_id` must be a user of the org `org_id`, a home user or a member: anyone else is `409 not-a-member`, and nothing is made. The session is not the person's. It is made with the id Keel gives it, on the `api` channel, with no user, owned by the org's `keel-case-agent` service account: one per org, of the same kind as the case types' accounts, which nobody signs in as and no admin route lists. Keel acts as the person when the agent reads the case. The session's config holds `case_agent`, `{"case_id", "case_number", "person_id"}`, and only keel-link sets it: every other way of creating a session drops it, and a helper never copies it.
+
+### Its boundary and its workspace
+
+The session carries the case's `case:<case id>` memory boundary, and nothing more of the case's. The boundary is memory-only, as an evaluation's is: the agent works in a scratch workspace of its own, the per-session one, never in the case's files, and reads those only through Keel. A session whose `case_agent` names another case than its boundary is no case agent: the case agent routes answer it `404 unknown-session`.
+
+Its memory keeps no facts about people. The `memory` tool refuses the `user` target with `This session keeps no facts about people: save to the 'memory' target.`, and writes nothing; the `memory` target works as in any session of the case.
+
+### Its priority and its tools
+
+A person waits on a case agent, so its wakes queue at its channel's priority, 0 on `api`, beside people's work and ahead of every step and item session.
+
+It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). Its prompt names no skill. It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door (see [How it reads the case](#how-it-reads-the-case)). It gets no step or item tool. Unlike the step and item tools, an agent's policy can take the case tools away.
+
+### Case sessions' guidance
+
+Every case session, a step's, an item's or a case agent's, and every helper it starts, runs without the brainstorming gate: its prompt never sends the agent to design before it works, and its skill index leaves the brainstorming skill out. Each one's prompt carries the `case_session` guidance instead: the case's people never see the agent's skills, tools or instructions, so nothing they read, a reply, a question, a returned item or a comment in a document, names a skill, a tool, a procedure or those instructions. The case agent's prompt also carries the `case_agent` guidance: it cites each fact it uses with the `cite` label of the read that gave it, drafts into the person's form only when they ask, and never submits a form, decides a step or moves the case.
+
+### How it reads the case
+
+The case agent reads its case only through Keel's door, never the case's workspace. The worker sends each case tool to the door at `SUROGATES_KEEL_URL`, with `SUROGATES_KEEL_DOOR_KEY` as the bearer, under the session's id. Keel answers as the person, and logs each read as a view through the case agent:
+
+| Tool | Door route | The model reads |
+|---|---|---|
+| `case_read` | `GET /api/harness/sessions/{session_id}/case` | Keel's answer: the case, its data field by field, and the steps open on it. |
+| `case_history` | `GET /api/harness/sessions/{session_id}/case/history` | Keel's answer: the case's history, entry by entry. |
+| `case_files` | `GET /api/harness/sessions/{session_id}/case/files` | Keel's answer: the case's files. |
+| `case_file_read` | `GET /api/harness/sessions/{session_id}/case/file?path=<path>` | `{"path", "cite", "text", "truncated"}`: the file as text. |
+| `case_draft_form` | `POST /api/harness/sessions/{session_id}/case/form-draft` | Keel's answer, `{"drafted": [field, …]}`, as it came. |
+
+Each item Keel gives carries a `cite` label, which the agent cites. `case_draft_form` posts `{"token", "values", "sources"}`: the open step's token, the values by form field, and where they come from, a non-empty list of objects. A draft without all three is never sent, nor is one over 256,000 bytes of JSON or one holding NaN or an infinity. Keel drafts only into a step the person holds: any other token is `409 not-yours`.
+
+`case_file_read` gives the model the file's text, never its bytes. Keel sends a file of at most 8 MiB: a larger one, `413 too-large`, reads `The file is larger than the 8 MiB Keel sends.` The worker converts a file by its suffix:
+
+- A document (PDF; Word, Excel and PowerPoint, legacy and macro-enabled ones included; OpenDocument; RTF) is converted to text as `read_file` converts one.
+- Any other file is read as UTF-8 text when it holds no NUL byte.
+- Anything else is refused, by the file's name: `<name> is neither a document nor text: case_file_read cannot read it.` A document that cannot be converted reads `<name> could not be read as a document.`
+
+Text longer than 200,000 characters is cut there, and `truncated` is true. Text whose result, as JSON, would run past 300,000 characters, as one dense with quotes or line breaks may, is cut shorter, so the result always comes whole, with `truncated` true. Keel's other answers:
+
+| Keel's answer | The model reads |
+|---|---|
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` |
+| Anything else | Keel's message, or `Keel refused the call (<status>).`, as an error with Keel's code, and Keel's `problems` when it gave them. |
+
+No other session, a step's, an item's or a chat's, is offered the case tools, and one called from any of them reaches no Keel. A worker without both settings has no link to Keel: each case tool answers `This runtime has no link to Keel.`
+
+### A person's message
+
+`POST /v1/keel/case-agent-sessions/{session_id}/messages` gives the case agent its person's message. Its body is `{"text", "idempotency_key"}`: `text` is 1 to 20000 characters and `idempotency_key` 1 to 200. Any other key is `422 invalid-request`.
+
+In the session's events, the message is a `user.message` whose `data` holds `content`, the person's text as they wrote it, `synthetic: "keel_person_message"` and `keel_key`, the idempotency key. The agent reads it as it reads a typed message: a turn under way at its next request to the model, otherwise the session's next turn. The marker keeps the text from ever running as a harness command, as an unmarked message starting with `/` would. The worker still counts it as a person's message: it wakes a session whose wakes kept crashing, as a typed message does.
+
+The answer is `202 {"status": "queued"}`. A session at rest resumes, with a `session.resume` before the message, and the session is queued. Each key is written once: a repeated key writes nothing, wakes nothing and queues nothing, and answers the same.
+
+`POST /v1/keel/case-agent-sessions/{session_id}/cancel` interrupts the agent's turn and pauses its session: `200 {"status": "paused"}`, also when it was paused already, and every call interrupts the turn again. Nothing leaves the session's config, and the person's next message wakes it. `GET /v1/keel/case-agent-sessions/{session_id}` answers `200 {"session_id", "status"}`. Its events are read as a step session's, by page and live; it has no progress route. The routes log neither a message's text nor the person.
+
+## The designer agent's tools
+
+The designer agent helps a builder change a project's definitions in a draft. The builder opens it on one draft, and Keel delegates that draft to the builder's chat with it. Its `keel_designer` tools work on the draft through Keel's door: the worker sends each to `SUROGATES_KEEL_URL`, with `SUROGATES_KEEL_DOOR_KEY` as the bearer, under the session's id. Keel finds the draft by the session's live delegation and acts on it as the builder. None publishes: publishing stays the builder's.
+
+| Tool | Door route | The model reads |
+|---|---|---|
+| `draft_files` | `GET /api/harness/sessions/{session_id}/draft/files` | Keel's answer: `{"draft_id", "files": [{"path", "kind", "key"}]}`. |
+| `draft_read` | `GET /api/harness/sessions/{session_id}/draft/file?path=<path>` | Keel's answer: `{"path", "content"}`, the file's JSON. |
+| `draft_main` | `GET /api/harness/sessions/{session_id}/draft/main`, with `?path=<path>` only when the model gives one | Keel's answer, from the project's published definitions: without a path, `{"files": [path, …]}`; with one, `{"path", "content"}`. |
+| `draft_save_file` | `PUT /api/harness/sessions/{session_id}/draft/file?path=<path>`, the file's JSON object as the body | Keel's answer: `{"head"}`, the draft's new head. A file Keel finds invalid is `422 invalid-file`, with its `problems`. |
+| `draft_save_scenario` | `PUT /api/harness/sessions/{session_id}/draft/scenario?path=<path>`, the scenario's JSON object as the body | Keel's answer: `{"head"}`. |
+| `draft_dry_run` | `POST /api/harness/sessions/{session_id}/draft/dry-run` | Keel's answer: the dry run's, with `ops_checked: false`. |
+
+A read or a save without its path is never sent, nor is a save whose content is not a JSON object, or one holding NaN or an infinity. A save over 1 MiB of JSON is never sent either: it reads `The file is over the 1 MiB Keel takes: split it or shorten it.` A file whose answer, as JSON, would run past 300,000 characters comes back as `{"path", "content", "truncated": true}`, with `content` the file's JSON text, cut, so the result always comes whole. Keel's other answers:
+
+| Keel's answer | The model reads |
+|---|---|
+| `404 no-delegation`: the session holds no live delegation | `No draft is open to this chat: ask the builder to open the designer on a draft.` |
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` |
+| Anything else | Keel's message, or `Keel refused the call (<status>).`, as an error with Keel's code, and Keel's `problems` when it gave them. |
+
+An agent gets the designer's tools only through an allow-list naming them: its policy's `allowed_tools`. An agent with no policy, or a policy with only a deny-list, is offered none, and a session's own config never adds them. No session of a case is offered them, whatever its agent's policy, and one called from a case's session reaches no Keel. A worker without both settings has no link to Keel: each designer tool answers `This runtime has no link to Keel.`
+
 ## Watching a step session
 
-Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The runtime keeps each session's events as an append-only log, and an event never changes once written:
+Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The same reads serve an item session, at `GET /v1/keel/item-sessions/{session_id}/events`, `…/events/stream` and `…/progress`, and a case agent session, at `GET /v1/keel/case-agent-sessions/{session_id}/events` and `…/events/stream`: each answers as the step session's route below does, and is refused the same way. The runtime keeps each session's events as an append-only log, and an event never changes once written:
 
 - `id` is an integer that only grows, unique across all sessions;
 - `type` is the event's type, and `data` its payload as the runtime wrote it, a JSON object;
@@ -129,7 +315,7 @@ A stream counts as no one reading the chat: the session's check-ins and completi
 - `todos` is the session's todo list, as its agent last wrote it with its `todo` tool: a list of `{"id", "content", "status"}` in the agent's order, whose `status` is `pending`, `in_progress`, `completed` or `cancelled`. It is null when the agent never wrote one, and `[]` when it emptied it. `todos_at` is when the list was last written, or null.
 - `last_activity` is the session's newest event that is not an `llm.delta`, as `{"event_id", "type", "at", "tool"}`. `tool` is the tool's name when the event is a `tool.call` or a `tool.result`, and null otherwise. `last_activity` is null for a session with no events.
 
-`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's own session is read: a helper the step started keeps its own list, which progress does not give. Stored data out of its shape never fails the read: a todo item out of its shape is left out, a stored list that is not one reads as `todos` null, and a newest event out of its shape as `last_activity` null. Each is logged by the session id and the kind of error alone. The route logs neither the list nor an event's data.
+`todos_at` and `at` are in UTC, `+00:00`, as an event's `created_at` is. Only the step's or the item's own session is read: a helper it started keeps its own list, which progress does not give. Stored data out of its shape never fails the read: a todo item out of its shape is left out, a stored list that is not one reads as `todos` null, and a newest event out of its shape as `last_activity` null. Each is logged by the session id and the kind of error alone. The route logs neither the list nor an event's data.
 
 ## A case's files
 
@@ -149,9 +335,11 @@ A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when i
 
 ## A case's document in the editor
 
-`POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme"}`: `access` is `edit`, `comment` or `view`, and `theme` is `light` (the default) or `dark`. The path is checked as the file routes check it.
+`POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme", "mentionable"}`: `access` is `edit`, `comment` or `view`, `theme` is `light` (the default) or `dark`, and `mentionable` is optional. The path is checked as the file routes check it.
 
-The person is the runtime user `user_id`, who must belong to the org `org_id`. `org_id` scopes only the user: the runtime does not check that the case belongs to that org, and the link key is trusted for any case. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
+The person is the runtime user `user_id`, who must belong to the org `org_id`. The editor shows them under their display name, with the editor user id `user:<user_id>`: the same as when they open a file in an agent's chat.
+
+The runtime records the org a case belongs to the first time it is told: at the creation of a step, item or case agent session of the case, or at the editor, whichever comes first. The record sits beside the case's workspace, in `boundaries/case:<case_id>/org.json` in the session bucket, where no sandbox mounts it and no file route lists or reads it. A create never refuses on it: when the record cannot be written, the failure is logged by the case id and the error's class name, and the session starts all the same. The editor reads the record before anything else of the case: a case recorded under another org than `org_id` answers `404 unknown-file`, as a file that is not there, and a record the object store will not give is `503 unavailable`. A record that cannot be read as an org is written over.
 
 | `access` | The editor |
 |---|---|
@@ -161,7 +349,9 @@ The person is the runtime user `user_id`, who must belong to the org `org_id`. `
 
 The document server converts older formats (`.doc`, `.odt`, `.rtf`, `.xls`, `.ods`, `.ppt`, `.odp`) to show them, so these open read-only, without comments, whatever the access.
 
-Everyone who opens the file shares its one editing session, whatever their access, and so does a step session of the case that has the file open. The document belongs to the case: it is read from and saved into the case's files, and stays open while anyone is in it, with or without a chat. While it is open, the listing's `editing` names who is in it, and a write over it is refused. Mentions are not offered: the config names nobody to mention. Like the file routes, it logs no path.
+Everyone who opens the file shares its one editing session, whatever their access, and so does a step session of the case that has the file open. The document belongs to the case: it is read from and saved into the case's files, and stays open while anyone is in it, with or without a chat. While it is open, the listing's `editing` names who is in it, and a write over it is refused. Like the file routes, it logs no path.
+
+`mentionable` names the agents the person may mention in a comment, at most 20, each `{"id", "name"}`: `id` is the agent id, 1 to 200 characters, and `name` Keel's name for it, 1 to 200 printable characters. Keel names a draft step's agent, which answers in the comment's thread once Keel forwards the mention (see [A comment that mentions the step's agent](#a-comment-that-mentions-the-steps-agent)). The answer's `mentionable_users` lists them for the editor to offer, each `{"id": "agent:<id>", "name", "email"}`, where `email` is the runtime's address for the agent, made of its name: `Credit analyst` is `credit-analyst@agent.invalid`. No mail can reach an `.invalid` address. They are offered only where an agent answers a comment: the runtime has agent editing, the editor opens the document to edit or comment, and it is a Word document, a spreadsheet, a slide deck or a PDF. Anywhere else, and without `mentionable`, `mentionable_users` is `[]`.
 
 ## Inviting staff
 
@@ -181,14 +371,14 @@ A person joined from another org who has no password yet gets no link from the o
 
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, send any step's agent a message, read every step session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, start a case agent session for any person of any org, send any step's or item's agent, or any case agent, a message, read every step, item or case agent session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 
 | Setting | Held by | What it is |
 |---|---|---|
 | `SUROGATES_KEEL_LINK_KEY` | keel-link alone | The bearer Keel shows keel-link. |
-| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, and where an intake agent starts cases. |
+| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, where an intake agent starts cases, where a case agent reads its case, and where the designer agent works on its draft. |
 | `SUROGATES_KEEL_DOOR_KEY` | the worker alone | The bearer the worker shows Keel's door. |
 | `SUROGATES_KEEL_MAX_FILE_BYTES` | keel-link | The largest file Keel may write to a case's workspace, in bytes: 52428800 (50 MiB) by default. |
 
@@ -215,6 +405,27 @@ A turn of the step that ends in words, with no report, is told once to report, a
 
 A worker without both settings has no link to Keel: every report removes the step's inputs and ends the turn, and Keel learns of it only from the session's status.
 
+## How an item session reports back
+
+Only a work item's own session is offered `complete_item` and `return_item`; it is offered neither step tool, and no other session, a step's or a helper's, is offered either item tool. An agent's policy cannot take them away. The worker sends each to the item routes of Keel's door, under the session, with `SUROGATES_KEEL_DOOR_KEY`:
+
+- `complete_item` acts on the item. A step or a vote ends with one of its outcomes: the worker posts `{"outcome", "output", "sources", "call_id"}` to `/api/harness/sessions/{session_id}/item/complete`, checked as `complete_step`'s report is, file fields included. A raised hand takes exactly one of `choice`, which must be one of its choices, and `answer`, in words: the worker posts `{"choice"}` or `{"answer"}` with `"note"`, null when the model gives none, `"sources"`, a list of objects, `[]` when it gives none, and `"call_id"`.
+- `return_item` gives the item back to whoever gave it, with the reason: the worker posts `{"reason", "call_id"}` to `/api/harness/sessions/{session_id}/item/return`. `reason` is 1 to 2000 characters, counted once stripped, and sent stripped.
+
+`call_id` is the tool call's id. Keel's answer decides what the session does:
+
+| Keel's answer | The model reads | The session |
+|---|---|---|
+| `200` | `Item ended: Keel recorded it.`, or `Item ended: the item went back.` | Its turn ends. The item's inputs are removed from its config, and the item is marked `completed` or `returned`. |
+| `409 not-running` | `Item ended: the item is no longer this session's.` | Its turn ends. Nothing is marked. |
+| Another `409` | Keel's code and message, as an error, with the attempts left when Keel counts them. | The model fixes its report and calls again, or returns the item. Nothing is marked. |
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` | The model calls again. A repeated call gets Keel's first answer. |
+| Anything else | `Item stopped: Keel refused this item's report (<status>); people take the item.` | The worker posts `{"status": "failed", "detail": "keel-<status>"}` to `…/item/ended`, removes the inputs, marks the item `stopped`, and ends the turn. People take the item. |
+
+A report Keel would refuse whole is never sent, as a step's is not: one over 256,000 bytes of JSON, one holding NaN or an infinity, sources out of their shape, a choice the raised hand does not offer, or a tool call id over 200 characters. Once a report has ended the item, a later report in the same wake is answered by the worker, without Keel. A worker without both settings has no link to Keel: every report removes the item's inputs, marks it `stopped`, and ends the turn.
+
+A turn of the item that ends in words, with no report, is told once, by a message marked `keel_step_nudge`: `This session works one work item of a case. Finish it now: call complete_item, or return_item with your reason if you cannot.` The turn goes on. When it still ends without a report ending the item, the worker posts `{"status": "no-outcome", "detail"}` to `…/item/ended`, with the code of how the turn ended as `detail`, and Keel gives the item back. Once Keel answers `200`, the item's inputs are removed and it is marked `returned`; otherwise both stay. A turn that fails, and a session the worker gives up on because its wakes kept crashing or never recovered, is posted as `{"status": "failed", "detail"}`, with the failure's code and never its text, and the inputs are removed whatever Keel answers. A marked item, or one whose inputs were already removed, is never nudged, and no later end of its turns is told to Keel. Neither is a helper of the item. A report of a response the worker drops before saving it never reaches Keel. Keel being unreachable never keeps a turn from ending: the worker logs it by session id. As with a step, the late report of a helper the session started never wakes it.
+
 ## An intake agent starts cases
 
 A case type can name agents as its intake agents: front doors, such as a WhatsApp agent, that talk with people and start their cases. At each wake of a conversation's own session, one that works on no case and was not started by another session, the worker asks Keel's door which case types the session's agent may start, and keeps the answer a minute per org and agent. The wakes that need an agent's list while it is being asked share that one ask, and a Keel that has not answered in 2 seconds grants nothing for the minute: the ask never holds a wake longer. While the list is not empty, the session is offered `start_case`: it takes only the listed case types, and its description names each one with the fields it requires. No session of a case, and no helper a conversation started, is offered it. A worker without both settings asks nothing and never offers `start_case`; one that cannot reach Keel offers none until it next asks.
@@ -232,4 +443,4 @@ A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, o
 
 ## Step sessions wait behind people
 
-Every wake of a step session, and of each session a step starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent.
+Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent. A person's case agent does not wait: a person waits on it, so its wakes are queued at 0, as interactive work is.

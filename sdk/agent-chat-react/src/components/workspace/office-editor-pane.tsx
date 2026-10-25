@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@invergent/ui-sdk/button";
 import { DownloadIcon, FileTextIcon, Maximize2Icon, Minimize2Icon, XIcon } from "lucide-react";
-import type { DocEditorEvents, DocEditorInstance, MentionNotice } from "../../lib/office";
+import { type DocEditorEvents, type DocEditorInstance, editorMentions } from "../../lib/office";
 import type { AgentChatAdapter, AgentChatOfficeEvent } from "../../types";
 import { DocumentEditor, type EditorOpening } from "./document-editor";
 
@@ -68,32 +68,17 @@ export function OfficeEditorPane({ adapter, sessionId, path, view, officeEvent, 
 	};
 
 	const events = (editor: () => DocEditorInstance | null, opened: EditorOpening): Partial<DocEditorEvents> | null => {
-		const users = opened.mentionable_users ?? [];
 		const notify = adapter.notifyWorkspaceEditorMention?.bind(adapter);
 		// The chat's agent is the one person a comment can mention. A comment that mentions it is sent to this
-		// chat, whose agent answers in the comment's thread. Any other list the editor asks for (a sheet's
-		// protected range) gets nobody: the agent's mention id is no editor's, and a right given to it grants none.
-		if (!users.length || !notify) return null;
-		return {
-			onRequestUsers: (event) => {
-				const c = (event.data as { c?: unknown } | undefined)?.c;
-				editor()?.setUsers({ c, users: c === "mention" || c === "info" ? users : [] });
-			},
-			onRequestSendNotify: (event) => {
-				const mention = (event.data ?? {}) as MentionNotice;
-				const emails = mention.emails ?? [];
-				const named = new Set(emails.map((email) => email.toLowerCase()));
-				if (!users.some((user) => named.has(user.email.toLowerCase()))) return;
-				setMentionTrouble(null);
-				void notify({
-					sessionId, path, emails, message: mention.message ?? "",
-					commentId: String(mention.actionLink?.action?.data ?? mention.actionId ?? ""),
-				}).catch((sendError: unknown) => {
-					// A closed editor's trouble is old news.
-					if (editor()) setMentionTrouble(`The agent was not told about your comment: ${(sendError as Error).message}`);
-				});
-			},
-		};
+		// chat, whose agent answers in the comment's thread.
+		if (!notify) return null;
+		return editorMentions(opened.mentionable_users ?? [], (commentId, message, emails) => {
+			setMentionTrouble(null);
+			void notify({ sessionId, path, emails, message, commentId }).catch((sendError: unknown) => {
+				// A closed editor's trouble is old news.
+				if (editor()) setMentionTrouble(`The agent was not told about your comment: ${(sendError as Error).message}`);
+			});
+		})(editor);
 	};
 
 	const fileName = path.split("/").pop() ?? path;

@@ -12,7 +12,7 @@ of literals scattered per file.
 from __future__ import annotations
 
 from surogates.channels.capabilities import BUILTIN
-from surogates.channels.memory_boundary import is_case_session
+from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
 
 __all__ = [
     "ADAPTER_CHANNELS",
@@ -68,19 +68,21 @@ def queue_priority(channel: str | None) -> float:
     return REALTIME_PRIORITY if channel in REALTIME_CHANNELS else 0.0
 
 
-#: Every wake of a Keel case's session, its step's own or a child's: behind
-#: interactive work, which is queued at 0.  A case waits; a person does not.
+#: Every wake of a Keel case's work session, a step's, a work item's or a
+#: child's: behind interactive work, which is queued at 0.  A case waits; a
+#: person does not.
 CASE_STEP_PRIORITY = 1.0
 
 
 def session_queue_priority(session: object) -> float:
     """The work-queue score of one of *session*'s wakes.
 
-    A case's sessions wait behind interactive work; otherwise the channel
-    decides (:func:`queue_priority`).  A row read without its channel or
+    A case's sessions wait behind interactive work, except a person's case
+    agent: a person waits on it, so the channel decides, as for any other
+    session (:func:`queue_priority`).  A row read without its channel or
     config scores as ordinary work.
     """
-    if is_case_session(session):
+    if is_case_session(session) and not is_case_agent_session(session):
         return CASE_STEP_PRIORITY
     return queue_priority(getattr(session, "channel", None))
 
