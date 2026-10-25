@@ -185,7 +185,7 @@ Each item Keel gives carries a `cite` label, which the agent cites. `case_draft_
 - Any other file is read as UTF-8 text when it holds no NUL byte.
 - Anything else is refused, by the file's name: `<name> is neither a document nor text: case_file_read cannot read it.` A document that cannot be converted reads `<name> could not be read as a document.`
 
-Text longer than 200,000 characters is cut there, and `truncated` is true. Keel's other answers:
+Text longer than 200,000 characters is cut there, and `truncated` is true. Text whose result, as JSON, would run past 300,000 characters, as one dense with quotes or line breaks may, is cut shorter, so the result always comes whole, with `truncated` true. Keel's other answers:
 
 | Keel's answer | The model reads |
 |---|---|

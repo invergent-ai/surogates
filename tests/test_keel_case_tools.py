@@ -149,6 +149,32 @@ async def test_case_file_read_refuses_what_is_not_text_and_cuts_what_is_long(fak
     assert long["truncated"] is True
 
 
+async def test_a_file_whose_json_outgrows_the_result_comes_back_whole_and_cut(fake_keel: _FakeKeel):
+    agent = _case_agent()
+    # 200,000 characters, each escaped to two in JSON.
+    dense = '"\n' * 100_000
+    fake_keel.answer(200, _file("in/quotes.txt", dense.encode(), "text/plain"))
+
+    result = json.loads(await _call("case_file_read", {"path": "in/quotes.txt"}, agent))
+
+    assert result["path"] == "in/quotes.txt"
+    assert result["truncated"] is True
+    assert 0 < len(result["text"]) < len(dense)
+    assert dense.startswith(result["text"])
+
+
+async def test_a_long_case_comes_back_whole(fake_keel: _FakeKeel):
+    agent = _case_agent()
+    entry = CASE_HISTORY["entries"][0]
+    history = {
+        "entries": [{**entry, "seq": seq, "cite": f"History #{seq}"} for seq in range(1, 1500)],
+        "explanation": CASE_HISTORY["explanation"],
+    }
+    fake_keel.answer(200, history)
+
+    assert json.loads(await _call("case_history", {}, agent)) == history
+
+
 async def test_case_draft_form_drafts_into_the_persons_form(fake_keel: _FakeKeel):
     agent = _case_agent()
     draft = CASE_TOOLS["case_draft_form"]
@@ -176,6 +202,33 @@ async def test_case_draft_form_drafts_into_the_persons_form(fake_keel: _FakeKeel
     unsourced = json.loads(await _call("case_draft_form", {**draft, "sources": []}, agent))
     assert "error" in unsourced
     assert len(fake_keel.requests) == 3
+
+
+async def test_a_draft_keel_would_refuse_whole_is_never_sent(fake_keel: _FakeKeel):
+    agent = _case_agent()
+    draft = CASE_TOOLS["case_draft_form"]
+
+    too_large = json.loads(await _call("case_draft_form", {**draft, "values": {"notes": "x" * 300_000}}, agent))
+    not_json = json.loads(await _call("case_draft_form", {**draft, "values": {"amount": float("nan")}}, agent))
+
+    assert too_large["error"].startswith("The draft is ")
+    assert too_large["error"].endswith(
+        "bytes, over the 256,000 bytes Keel takes. Shorten the values and their sources and call case_draft_form again.",
+    )
+    assert not_json["error"].startswith("The draft holds a number JSON cannot carry (NaN or Infinity).")
+    assert fake_keel.requests == []
+
+
+@pytest.mark.parametrize(("status", "body", "shown"), [
+    (429, {"code": "rate-limited", "message": "Slow down."}, {"error": "Keel could not be reached; call case_read again."}),
+    (502, {}, {"error": "Keel could not be reached; call case_read again."}),
+    (503, {"code": "harness-off", "message": "The door is off."}, {"error": "The door is off.", "code": "harness-off"}),
+    (404, {}, {"error": "Keel refused the call (404).", "code": None}),
+], ids=["429", "502", "harness-off", "404-without-a-message"])
+async def test_keels_other_answers(fake_keel: _FakeKeel, status, body, shown):
+    fake_keel.answer(status, body)
+
+    assert json.loads(await _call("case_read", {}, _case_agent())) == shown
 
 
 async def test_a_case_tool_outside_a_case_agent_session_reaches_nothing(fake_keel: _FakeKeel):

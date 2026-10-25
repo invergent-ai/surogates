@@ -35,10 +35,11 @@ from surogates.tools.registry import ToolSchema
 
 #: The longest text of a file ``case_file_read`` gives the model.
 CASE_TEXT_CHARS = 200_000
-#: The longest result ``case_file_read`` returns: room for its text with the
-#: escapes JSON adds to ordinary text, and the file's path and cite, so the
-#: result is never cut and ``truncated`` survives.
-_FILE_RESULT_CHARS = 300_000
+#: The longest result a case tool that reads returns, as the registry counts
+#: it: room for a long case's answer, and for a file's text with the escapes
+#: JSON adds to it.  ``case_file_read`` shortens the text until its result
+#: fits, so the registry never cuts it and ``truncated`` survives.
+_RESULT_CHARS = 300_000
 
 _NOT_A_CASE_AGENT = "This session is no person's case agent: it has no case to read through Keel."
 _NO_LINK = "This runtime has no link to Keel."
@@ -216,7 +217,22 @@ async def handle_case_file_read(arguments: dict, **kwargs: Any) -> str:
         text, truncated = await file_text(data, named)
     except ValueError as exc:
         return _error(str(exc))
-    return json.dumps({"path": named, "cite": sent.get("cite"), "text": text, "truncated": truncated}, ensure_ascii=False)
+    return _file_result(named, sent.get("cite"), text, truncated)
+
+
+def _file_result(path: str, cite: Any, text: str, truncated: bool) -> str:
+    """``case_file_read``'s result, ``{"path", "cite", "text", "truncated"}``, as JSON of at most :data:`_RESULT_CHARS`.
+
+    Escapes can make the JSON of a text far longer than the text: the text
+    is then shortened until the result fits, and ``truncated`` is true.
+    Each character cut takes at least one off the JSON.
+    """
+    while True:
+        result = json.dumps({"path": path, "cite": cite, "text": text, "truncated": truncated}, ensure_ascii=False)
+        over = len(result) - _RESULT_CHARS
+        if over <= 0 or not text:
+            return result
+        text, truncated = text[: max(len(text) - over, 0)], True
 
 
 def _draft(arguments: dict) -> dict[str, Any] | str:
@@ -240,7 +256,7 @@ async def handle_case_draft_form(arguments: dict, **kwargs: Any) -> str:
         return _error(draft)
     answer = await _sent(
         keel.session_call("POST", kwargs["session_id"], "case/form-draft", body=draft),
-        tool="case_draft_form", shorten="the values and their sources",
+        tool="case_draft_form", shorten="the values and their sources", noun="draft",
     )
     return answer if isinstance(answer, str) else answered(answer, "case_draft_form")
 
@@ -250,10 +266,11 @@ def register(registry: Any) -> None:
         (CASE_READ_SCHEMA, handle_case_read),
         (CASE_HISTORY_SCHEMA, handle_case_history),
         (CASE_FILES_SCHEMA, handle_case_files),
-        (CASE_DRAFT_FORM_SCHEMA, handle_case_draft_form),
+        (CASE_FILE_READ_SCHEMA, handle_case_file_read),
     ):
-        registry.register(name=schema.name, schema=schema, handler=handler, toolset="keel_case")
+        registry.register(
+            name=schema.name, schema=schema, handler=handler, toolset="keel_case", max_result_size=_RESULT_CHARS,
+        )
     registry.register(
-        name="case_file_read", schema=CASE_FILE_READ_SCHEMA, handler=handle_case_file_read,
-        toolset="keel_case", max_result_size=_FILE_RESULT_CHARS,
+        name="case_draft_form", schema=CASE_DRAFT_FORM_SCHEMA, handler=handle_case_draft_form, toolset="keel_case",
     )

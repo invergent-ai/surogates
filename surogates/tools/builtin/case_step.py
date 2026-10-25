@@ -412,19 +412,21 @@ def _remember_the_end(kwargs: dict[str, Any]) -> None:
         _ENDED_IN_WAKE.popitem(last=False)
 
 
-async def _sent(report: Awaitable[KeelAnswer], *, tool: str, shorten: str) -> KeelAnswer | str:
-    """Keel's answer to *report*, a call of *tool* sending its report; or, when the report was never sent, the
-    error the model reads: what to fix (*shorten*, for one larger than Keel takes) before calling again."""
+async def _sent(
+    report: Awaitable[KeelAnswer], *, tool: str, shorten: str, noun: str = "report",
+) -> KeelAnswer | str:
+    """Keel's answer to *report*, a call of *tool* sending its *noun*; or, when it was never sent, the error the
+    model reads: what to fix (*shorten*, for one larger than Keel takes) before calling again."""
     try:
         return await report
     except BodyTooLarge as exc:
         return _error(
-            f"The report is {exc.size:,} bytes, over the {exc.limit:,} bytes Keel takes. "
+            f"The {noun} is {exc.size:,} bytes, over the {exc.limit:,} bytes Keel takes. "
             f"Shorten {shorten} and call {tool} again.",
         )
     except BodyNotJSON:
         return _error(
-            "The report holds a number JSON cannot carry (NaN or Infinity). Give a real "
+            f"The {noun} holds a number JSON cannot carry (NaN or Infinity). Give a real "
             f"number, or leave the value out, and call {tool} again.",
         )
 
