@@ -26,7 +26,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
-from surogates.keel.steps import is_keels_word
+from surogates.keel.steps import is_keel_message
 from surogates.session.events import MESSAGE_TYPES, PLATFORM_NOTE, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 
@@ -776,10 +776,11 @@ class ContextReplayMixin:
 
             elif etype in MESSAGE_TYPES:
                 # A coordinator's follow-up is read as a typed message is: its marked content.
-                # So is Keel's word to a case's step, which lands whenever Keel sends it, in a call
-                # under way too: a request to the model never reads it between a call and its result.
+                # So is Keel's word to a case's step, an answer, a revision or a plain message, which
+                # lands whenever Keel sends it, in a call under way too: a request to the model never
+                # reads it between a call and its result.
                 rendered = build_user_message_dict(event.data)
-                if iteration_open and (not (event.data or {}).get("synthetic") or is_keels_word(event.data)):
+                if iteration_open and (not (event.data or {}).get("synthetic") or is_keel_message(event.data)):
                     deferred_users.append(rendered)
                 else:
                     messages.append(rendered)
