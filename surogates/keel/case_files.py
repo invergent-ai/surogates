@@ -6,8 +6,9 @@ and the prefix a step session of the case resolves, built by the same
 functions, so a file one side writes is the file the other reads.
 
 Keel reaches only a person's files there: never the platform's own folders
-at the top of the workspace, and never a path a step's output would read as
-another file.
+at the top of the workspace, never a hidden file or folder (a step session
+stages its skills under ``.skills``), and never a path a step's output would
+read as another file.
 """
 
 from __future__ import annotations
@@ -73,10 +74,11 @@ def case_path(path: str) -> str:
     """*path*, relative to a case's workspace and ``/``-separated, without its ``.`` and empty parts.
 
     Raises ``CaseFileError("invalid-path")`` for an empty path, an absolute
-    one, one with a ``..`` part, one holding a NUL or a backslash, one that
-    is not UTF-8, and one whose first folder is the platform's own or a
-    root of the workspace.  Nothing else changes: no root is taken off, so
-    the path names the file Keel named.
+    one, one with a part starting with ``.`` (``..``, or a hidden file or
+    folder), one holding a NUL or a backslash, one that is not UTF-8, and one
+    whose first folder is the platform's own or a root of the workspace.
+    Nothing else changes: no root is taken off, so the path names the file
+    Keel named.
     """
     if not path or "\x00" in path or "\\" in path or path.startswith("/"):
         raise CaseFileError(INVALID_PATH)
@@ -85,7 +87,7 @@ def case_path(path: str) -> str:
     except UnicodeEncodeError:
         raise CaseFileError(INVALID_PATH) from None
     parts = [part for part in path.split("/") if part not in ("", ".")]
-    if not parts or ".." in parts or parts[0] in _REFUSED_TOP:
+    if not parts or any(part.startswith(".") for part in parts) or parts[0] in _REFUSED_TOP:
         raise CaseFileError(INVALID_PATH)
     return "/".join(parts)
 
@@ -142,9 +144,9 @@ def _reachable(path: str) -> bool:
 async def list_case_files(storage: Any, settings: Any, case_id: UUID) -> list[CaseFile]:
     """Every file Keel may reach in *case_id*'s workspace, by path.
 
-    The platform's own folders are left out, and so is any file Keel could
-    not read by the path listed.  None for a case no session has written to
-    yet, nor before the bucket itself is made.
+    The platform's own folders and hidden files and folders are left out,
+    and so is any file Keel could not read by the path listed.  None for a
+    case no session has written to yet, nor before the bucket itself is made.
     """
     bucket, prefix = _bucket_and_prefix(settings, case_id)
     try:

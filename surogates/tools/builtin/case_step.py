@@ -625,7 +625,10 @@ def _fact(index: int, item: Any) -> dict[str, Any] | str:
     try:
         file = case_path(relative)
     except CaseFileError:
-        return f"{at}.source.file is not a file of the case: name one in /workspace, outside the platform's own folders."
+        return (
+            f"{at}.source.file is not a file of the case: name one in /workspace, outside the platform's own "
+            "folders, and with no part of its path starting with a dot."
+        )
     fact["source"] = {"file": file} if page is None else {"file": file, "page": page}
     return fact
 

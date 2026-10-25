@@ -282,6 +282,33 @@ async def test_the_platforms_own_folders_are_not_a_cases_files(link, link_app, o
     ) == b"the platform's"
 
 
+async def test_the_case_files_list_leaves_out_hidden_paths(link, link_app, org, session_store):
+    # A step session stages its skills under .skills/ in the case's workspace.
+    session = await step_session(link, org, session_store)
+    await written_by_the_session(link_app, session, ".skills/credit/SKILL.md", b"a skill")
+    await written_by_the_session(link_app, session, "docs/offer.docx", b"offer")
+
+    listed = await listing(link)
+
+    assert listed.status_code == 200, listed.text
+    assert listed_paths(listed) == ["docs/offer.docx"]
+
+
+async def test_a_hidden_path_is_refused(link, link_app, org, session_store):
+    session = await step_session(link, org, session_store)
+    await written_by_the_session(link_app, session, ".skills/credit/SKILL.md", b"a skill")
+
+    for path in (".skills/credit/SKILL.md", "docs/.cache/x"):
+        assert refusals(await download(link, path), await upload(link, path, b"over it")) == [(422, "invalid-path")] * 2, path
+
+    def key(path: str) -> str:
+        return boundary_workspace_key(session.config, session, workspace_root_id(session), path)
+
+    assert await link_app.state.storage.read(session.config["storage_bucket"], key(".skills/credit/SKILL.md")) == b"a skill"
+    with pytest.raises(KeyError):
+        await link_app.state.storage.read(session.config["storage_bucket"], key("docs/.cache/x"))
+
+
 async def test_a_path_a_steps_output_reads_as_another_file_is_refused(link, link_app, org, session_store):
     # A step's output takes a leading root/ or workspace/ off the path it names.
     session = await step_session(link, org, session_store)
@@ -495,7 +522,7 @@ async def test_the_case_editor_refuses_what_it_cannot_open(link, link_app, org, 
         (422, "invalid-request"),
         (422, "invalid-request"),
     ]
-    for path in ("../x.docx", "/etc/x.docx", "_history/pack.docx", "root/pack.docx", "memos\\pack.docx", ""):
+    for path in ("../x.docx", "/etc/x.docx", "_history/pack.docx", ".skills/pack.docx", "root/pack.docx", "memos\\pack.docx", ""):
         assert refusals(await open_editor(link, org, user_id, path)) == [(422, "invalid-path")], path
 
     link_app.state.settings.office = OfficeSettings()

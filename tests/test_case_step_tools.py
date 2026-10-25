@@ -636,6 +636,23 @@ async def test_evidence_outside_the_shape_is_refused(fake_keel, store, bad, inde
     assert store.reported() is None
 
 
+@pytest.mark.parametrize("file", [
+    "/workspace/.skills/payslips/sep.pdf", "/root/payslips/.cache/sep.pdf", "payslips/.sep.pdf",
+], ids=["skills-folder", "hidden-folder", "hidden-file"])
+async def test_evidence_from_a_hidden_path_is_refused(fake_keel, store, file):
+    # A step session stages its skills under .skills/ in the case's workspace; a person never sees them.
+    evidence = [{**PAYSLIP, "source": {"file": file}}]
+
+    error = json.loads(await _call("raise_hand", {"question": "Which income counts?", "evidence": evidence}, store))["error"]
+
+    assert error == (
+        "evidence[0].source.file is not a file of the case: name one in /workspace, outside the platform's own "
+        "folders, and with no part of its path starting with a dot."
+    )
+    assert fake_keel.requests == []
+    assert store.reported() is None
+
+
 def _calls(name: str, arguments: dict, call_id: str = "c1"):
     """The model's answer calling *name*."""
     return _batch((name, arguments, call_id))

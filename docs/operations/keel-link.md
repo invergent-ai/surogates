@@ -139,6 +139,7 @@ A path is relative to the workspace and `/`-separated; `.` and empty parts are d
 
 - it is empty or absolute, or holds a `..` part, a NUL or a backslash;
 - its first folder is one of the platform's own: `_artifacts`, `_whiteboard`, `.threads` or `_history`. These hold the platform's state, not a person's files, and the listing leaves them out too;
+- a part of it, once the `.` parts are dropped, starts with `.`: a hidden file or folder, at the top or deeper. A step session stages its skills under `.skills` in the case's workspace, and a person never sees a skill, so the listing leaves these out too;
 - its first folder is `root` or `workspace`. A step's output takes either off the path it names, so it would read another file;
 - its object key, with the workspace's prefix, is over the 1024 bytes an S3 store takes.
 
