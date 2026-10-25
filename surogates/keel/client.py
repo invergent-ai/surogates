@@ -41,6 +41,9 @@ ENDED_TIMEOUT_SECONDS = 5.0
 DETAIL_CHARS = 2000
 #: The largest body the door takes, in bytes of JSON as sent.
 MAX_BODY_BYTES = 256_000
+#: The largest draft file the door's designer routes take, in bytes of JSON
+#: as sent: a Keel that serves them takes 1 MiB.
+MAX_DRAFT_BYTES = 1_048_576
 
 
 class BodyTooLarge(ValueError):
@@ -117,6 +120,7 @@ class KeelClient:
         body: dict | list | None = None,
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
+        limit: int = MAX_BODY_BYTES,
     ) -> KeelAnswer:
         sent = {"Authorization": f"Bearer {self._key}", **(headers or {})}
         content = None
@@ -128,8 +132,8 @@ class KeelClient:
                 # Its message quotes the value: the class says enough.
                 raise BodyNotJSON("the body holds NaN or an infinity") from None
             content = encoded.encode("utf-8")
-            if len(content) > MAX_BODY_BYTES:
-                raise BodyTooLarge(len(content), MAX_BODY_BYTES)
+            if len(content) > limit:
+                raise BodyTooLarge(len(content), limit)
             sent["Content-Type"] = "application/json"
         try:
             async with httpx.AsyncClient(
@@ -153,15 +157,16 @@ class KeelClient:
         *,
         params: dict[str, str] | None = None,
         body: dict | list | None = None,
+        limit: int = MAX_BODY_BYTES,
     ) -> KeelAnswer:
         """A request to the door's *route* of session *session_id*: ``/api/harness/sessions/{session_id}/{route}``.
 
         The session id in the path is the session's capability.  Raises :class:`BodyTooLarge`, and sends
-        nothing, for a body over :data:`MAX_BODY_BYTES`, and :class:`BodyNotJSON` for one holding NaN or an
-        infinity.
+        nothing, for a body over *limit* bytes (:data:`MAX_BODY_BYTES` unless given), and
+        :class:`BodyNotJSON` for one holding NaN or an infinity.
         """
         return await self._send(
-            method, f"/api/harness/sessions/{_segment(session_id)}/{route}", body=body, params=params,
+            method, f"/api/harness/sessions/{_segment(session_id)}/{route}", body=body, params=params, limit=limit,
         )
 
     async def complete(self, session_id: object, body: dict) -> KeelAnswer:

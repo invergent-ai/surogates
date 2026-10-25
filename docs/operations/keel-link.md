@@ -249,7 +249,7 @@ The designer agent helps a builder change a project's definitions in a draft. Th
 | `draft_save_scenario` | `PUT /api/harness/sessions/{session_id}/draft/scenario?path=<path>`, the scenario's JSON object as the body | Keel's answer: `{"head"}`. |
 | `draft_dry_run` | `POST /api/harness/sessions/{session_id}/draft/dry-run` | Keel's answer: the dry run's, with `ops_checked: false`. |
 
-A read or a save without its path is never sent, nor is a save whose content is not a JSON object, or one holding NaN or an infinity. A save over 256,000 bytes of JSON is never sent either: it reads `The file is over the 256,000 bytes Keel takes: split it or shorten it.` A file whose answer, as JSON, would run past 300,000 characters comes back as `{"path", "content", "truncated": true}`, with `content` the file's JSON text, cut, so the result always comes whole. Keel's other answers:
+A read or a save without its path is never sent, nor is a save whose content is not a JSON object, or one holding NaN or an infinity. A save over 1 MiB of JSON is never sent either: it reads `The file is over the 1 MiB Keel takes: split it or shorten it.` A file whose answer, as JSON, would run past 300,000 characters comes back as `{"path", "content", "truncated": true}`, with `content` the file's JSON text, cut, so the result always comes whole. Keel's other answers:
 
 | Keel's answer | The model reads |
 |---|---|

@@ -117,13 +117,25 @@ async def test_a_session_without_a_delegation_is_told_to_open_the_designer(fake_
 
 
 async def test_a_file_over_the_doors_limit_is_never_sent(fake_keel: _FakeKeel):
-    long = {**LOAN, "description": "x" * 300_000}
+    long = {**LOAN, "description": "x" * 1_048_576}
 
     for tool in ("draft_save_file", "draft_save_scenario"):
         result = json.loads(await _call(tool, {"path": "case_types/loan.json", "content": long}, _designer()))
 
-        assert result == {"error": "The file is over the 256,000 bytes Keel takes: split it or shorten it."}
+        assert result == {"error": "The file is over the 1 MiB Keel takes: split it or shorten it."}
     assert fake_keel.requests == []
+
+
+async def test_a_file_within_the_doors_limit_is_sent_whole(fake_keel: _FakeKeel):
+    fake_keel.answer(200, {"head": "c3"})
+    # Over the 256,000 bytes Keel's other routes are sent at most, and within the 1 MiB a draft file takes.
+    long = {**LOAN, "description": "x" * 1_000_000}
+
+    for tool in ("draft_save_file", "draft_save_scenario"):
+        result = json.loads(await _call(tool, {"path": "case_types/loan.json", "content": long}, _designer()))
+
+        assert result == {"head": "c3"}, tool
+    assert [json.loads(request.content) for request in fake_keel.requests] == [long, long]
 
 
 async def test_a_call_without_its_path_or_its_file_is_never_sent(fake_keel: _FakeKeel):

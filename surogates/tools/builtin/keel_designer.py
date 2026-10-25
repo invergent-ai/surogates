@@ -24,14 +24,14 @@ import json
 from typing import Any
 
 from surogates.channels.memory_boundary import is_case_config
-from surogates.keel.client import MAX_BODY_BYTES, BodyNotJSON, BodyTooLarge, KeelAnswer, KeelClient, keel_client
+from surogates.keel.client import MAX_DRAFT_BYTES, BodyNotJSON, BodyTooLarge, KeelAnswer, KeelClient, keel_client
 from surogates.tools.builtin.case_step import _error
 from surogates.tools.builtin.keel_case import _NO_LINK, _RESULT_CHARS, answered, fit_result
 from surogates.tools.registry import ToolSchema
 
 _IN_A_CASE = "This session works on a case, not on a draft: the designer's tools act only in a designer's chat."
 _NO_DELEGATION = "No draft is open to this chat: ask the builder to open the designer on a draft."
-_TOO_LARGE = f"The file is over the {MAX_BODY_BYTES:,} bytes Keel takes: split it or shorten it."
+_TOO_LARGE = "The file is over the 1 MiB Keel takes: split it or shorten it."
 
 _ON_THE_DRAFT = (
     "It acts, through Keel, on the one draft the builder opened the designer on, and never publishes: "
@@ -170,7 +170,9 @@ async def _save(tool: str, route: str, arguments: dict, kwargs: dict[str, Any], 
     if not isinstance(content, dict):
         return _error(f"content must be the {noun}'s whole JSON object.")
     try:
-        answer = await keel.session_call("PUT", kwargs["session_id"], route, params={"path": path}, body=content)
+        answer = await keel.session_call(
+            "PUT", kwargs["session_id"], route, params={"path": path}, body=content, limit=MAX_DRAFT_BYTES,
+        )
     except BodyTooLarge:
         return _error(_TOO_LARGE)
     except BodyNotJSON:
