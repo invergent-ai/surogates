@@ -1,6 +1,7 @@
 """Keel's routes: through ``keel-link``, Keel starts an agent's step session,
-answers it, asks it for a revision or sends it a message, cancels it, and
-reads its status, its events, by page and live, and its progress.  It also
+answers it, asks it for a revision or sends it a message, gives it a comment
+that mentions its agent, cancels it, and reads its status, its events, by
+page and live, and its progress.  It also
 lists, reads and writes a case's files: the workspace its step sessions
 share; it gives a person the editor config of one of them; and it invites
 staff into an organisation.
@@ -51,6 +52,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.routes.events import session_event_stream
+from surogates.api.routes.office import agent_display_name
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -69,6 +71,7 @@ from surogates.keel.files import file_value
 from surogates.keel.steps import (
     ANSWER_MARKER,
     KICKOFF_MARKER,
+    MENTION_MARKER,
     MESSAGE_MARKER,
     REVISION_MARKER,
     StepContract,
@@ -78,8 +81,11 @@ from surogates.keel.steps import (
     rests_on_its_report,
     step_contract_of,
 )
+from surogates.office.agent import AGENT_KINDS
 from surogates.office.editor_config import build_editor_config
+from surogates.office.guard import office_tools_offered
 from surogates.office.kinds import office_kind
+from surogates.office.mentions import MENTION_SOURCE, mention_message
 from surogates.office.sessions import DocumentClosing, OpenDocument, open_at, open_under, open_waiting
 from surogates.runtime.firebase_cache import FirebaseConfigUnavailable, project_firebase
 from surogates.session.events import EventType
@@ -176,6 +182,23 @@ class StepMessage(BaseModel):
         if self.kind != "message" and self.sender is not None:
             raise ValueError("only a message has a sender")
         return self
+
+
+class MentionRequest(BaseModel):
+    """A comment in one of the case's documents that mentions a draft step's
+    agent.  A key this route does not know is refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=4096)
+    # The comment's thread as the editor names it: Word's hex, a spreadsheet's
+    # or a deck's {GUID}, a PDF's hex.  Nothing else reaches the note the model reads.
+    thread: str = Field(pattern=r"^[A-Za-z0-9{}_-]{1,64}$")
+    comment: str = Field(min_length=1, max_length=20000)
+    author_id: UUID
+    # Null when Keel has no name for the person: the message says "Someone".
+    author_name: SenderName | None = None
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 
 class StepSessionStatus(BaseModel):
@@ -656,6 +679,68 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
         # A repeat writes nothing: the row read above says whether the step rests.
         answer["resting"] = written.resting if written is not None else rests_on_its_report(session.config)
     return JSONResponse(answer, status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/keel/step-sessions/{session_id}/mentions")
+async def mention_step_agent(session_id: str, request: Request) -> JSONResponse:
+    """A comment in one of the case's documents mentions a draft step's agent:
+    give the step the message a chat's mention becomes, once per key, and wake it: ``202 {}``.
+
+    Only a step whose agent edits the case's documents beside the person
+    takes one: a draft step's, where the runtime has agent editing; any
+    other is 409 ``no-office``.  The message wakes a draft under review
+    too, and keeps its report's mark: the agent answers in the comment's
+    thread, and the draft stays the reviewer's.  The session is queued only
+    when this call wrote the message.  A step that is over takes none: 409
+    ``step-finished``.  The route logs neither the comment, its author nor the path.
+    """
+    require_link(request)
+    try:
+        session = await _step_session(request, session_id)
+        body = await read_body(request, MentionRequest)
+        path = _checked_path(request, step_contract_of(session).case_id, body.path)
+        kind = office_kind(path)
+        if kind is None or kind.file_type not in AGENT_KINDS:
+            raise refused(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "not-a-document", "The file is not a document an agent edits.",
+            )
+        if not (request.app.state.settings.office.agent_editing and office_tools_offered(session)):
+            raise refused(status.HTTP_409_CONFLICT, "no-office", "The step's session has no office tools.")
+        content, metadata = mention_message(
+            path=path,
+            thread=body.thread,
+            kind=kind.file_type,
+            author=body.author_name or "Someone",
+            author_id=f"user:{body.author_id}",
+            comment=body.comment,
+            agent_name=await agent_display_name(request, session.agent_id),
+        )
+        written = await request.app.state.session_store.emit_keyed_synthetic_message(
+            session.id,
+            content=content,
+            synthetic=MENTION_MARKER,
+            key=body.idempotency_key,
+            extra={"source": MENTION_SOURCE, "metadata": metadata},
+            resume=True,
+            keep_report=True,
+            wake_resting=True,
+        )
+    except SessionNotFoundError:
+        # Deleted since the lookup above.
+        raise unknown_session() from None
+    except StepFinishedError:
+        raise refused(
+            status.HTTP_409_CONFLICT, "step-finished", "The step is over; it takes no more messages.",
+        ) from None
+    except DBAPIError as exc:
+        raise database_failed(
+            exc,
+            logged=f"the mention to step session {session_id} could not be written",
+            message="The mention could not be delivered.",
+        ) from None
+    if written is not None:
+        await queue_session(request, session)
+    return JSONResponse({}, status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.post("/keel/step-sessions/{session_id}/cancel")

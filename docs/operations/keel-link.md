@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -8,6 +8,7 @@
 |---|---|
 | `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
 | `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, a reviewer's request to revise its draft, or a plain message from whoever works on the case, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. A plain message also answers `resting`, and wakes no step that rests on its report. See [A message to a step](#a-message-to-a-step). |
+| `POST /v1/keel/step-sessions/{session_id}/mentions` | Gives a draft step's agent a comment in one of the case's documents that mentions it, and wakes the session, a draft under review too: `202 {}`. Each key is written once. See [A comment that mentions the step's agent](#a-comment-that-mentions-the-steps-agent). |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
 | `GET /v1/keel/step-sessions/{session_id}` | The session's `status` and `updated_at`. |
 | `GET /v1/keel/step-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the session's events after the cursor `after`, without `llm.delta`: `200 {"events": [{"id", "type", "data", "created_at"}], "has_more"}`. See [Watching a step session](#watching-a-step-session). |
@@ -50,13 +51,14 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 409 | `agent-stopped` | The agent is stopped. |
 | 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's or case agent's, or one of another agent. |
 | 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
-| 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
+| 409 | `step-finished` | A message or a mention for a step that is over: its inputs were redacted. |
+| 409 | `no-office` | A mention for a step whose agent does not edit the case's documents: not a draft step's, or the runtime has no agent editing. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
 | 409 | `ambiguous-email` | An invitation for an email that two or more users of other orgs have: none is chosen. |
 | 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
-| 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
+| 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
@@ -92,6 +94,34 @@ A message wakes a step whose session is at rest, as an answer wakes it, except a
 A message never gives the step back. An answer or a revision ends the rest a report began, and the step then reports to Keel again. A message does neither, and a message that reached the step since a report began does not keep the report's mark from being written. If the turn that made the report reads the message, a further report in that turn is answered by the worker and never reaches Keel.
 
 A step that is over takes no message: `409 step-finished`, as for an answer. Nor does a message it took before then, and no turn has read, wake it once it is over. The route logs neither a message's text nor its sender.
+
+## A comment that mentions the step's agent
+
+`POST /v1/keel/step-sessions/{session_id}/mentions` gives a draft step's agent a comment in one of the case's documents that mentions it, as a chat's editor gives its agent one. Its body is `{"path", "thread", "comment", "author_id", "author_name", "idempotency_key"}`:
+
+- `path` is the document's path in the case's files, 1 to 4096 characters;
+- `thread` is the comment's thread, as the editor names it, matching `^[A-Za-z0-9{}_-]{1,64}$`;
+- `comment` is the comment or the reply that mentions the agent, as written, 1 to 20000 characters;
+- `author_id` is the runtime user who wrote it, a UUID;
+- `author_name` is their display name, 1 to 200 printable characters, or null;
+- `idempotency_key` is 1 to 200 characters.
+
+A key the route does not know is refused, as is a body out of this shape: `422 invalid-request`. The path is then checked as the file routes check it, `422 invalid-path`, and a file that is not a document an agent edits, `.docx`, `.xlsx`, `.pptx` or `.pdf`, is `415 not-a-document`.
+
+Only a draft step's agent can be mentioned, and only where the runtime has agent editing: a document server with runtime-office beside it. That agent edits the case's documents beside the person (see [A step's inputs](#a-steps-inputs)). Any other step, a complete step's among them, is `409 no-office`, and so is a draft step when the runtime has no agent editing.
+
+The session gets the message a chat's mention becomes. In the session's events it is a `user.message` whose `data` holds:
+
+- `content`, `[Comment on <file name>] <author>: «<comment>»`, where the agent's address in the comment reads `@` and the agent's display name, and the author is `Someone` for a null `author_name`;
+- `source: "office_mention"`;
+- `metadata`, `{"path", "thread", "kind", "author", "author_id", "comment"}`: the path as the case's files name it, `kind` the document's extension (`docx`, `xlsx`, `pptx` or `pdf`), `author_id` `user:<author_id>`, and the comment as sent;
+- `synthetic: "keel_mention"` and `keel_key`, the idempotency key.
+
+The agent reads it as it reads Keel's messages: a turn under way at its next request to the model, otherwise the session's next turn. Before the model reads it, the worker posts `On it, I'll reply here when done.` in the comment's thread, under the agent's name, so the person sees the agent took it. The agent then does the work with `office_read` and `office_edit`, answers in the thread with only the result, through `office_edit`'s `reply`, and resolves the thread.
+
+A mention wakes the step whose session is at rest, a draft under review among them, and keeps its report's mark. A plain message waits for Keel's next word, but the person who wrote the comment waits in the document for the agent's answer in the thread. The mention does not give the step back: the draft stays the reviewer's, and a report the turn makes is answered by the worker and never reaches Keel.
+
+The answer is `202 {}`. Each key is written once: a repeated key writes and wakes nothing, and answers `202 {}` as the first call did, also once the step is over. A new key to a step that is over is `409 step-finished`. The route logs neither the comment, its author nor the path.
 
 ## An agent's work item
 

@@ -107,7 +107,7 @@ async def get_workspace_editor(
     # The agent answers a comment only where it edits live, in a document it edits, from an editor that edits, in a
     # chat it is sent the office tools in.
     mentionable = (
-        [mentionable_agent(session.agent_id, await _agent_name(request, session.agent_id))]
+        [mentionable_agent(session.agent_id, await agent_display_name(request, session.agent_id))]
         if office.agent_editing and edit and kind.file_type in AGENT_KINDS and office_tools_offered(session) else []
     )
     return EditorConfigResponse(document_server_url=office.public_url.rstrip("/"), config=config, mentionable_users=mentionable)
@@ -149,7 +149,7 @@ async def _acting_user(request: Request, tenant: TenantContext) -> tuple[str, st
     raise HTTPException(status_code=403, detail="Only a person can open the editor.")
 
 
-async def _agent_name(request: Request, agent_id: str) -> str:
+async def agent_display_name(request: Request, agent_id: str) -> str:
     """The agent's display name, as its editor session shows it; "Agent" where the runtime config does not say."""
     cache = getattr(request.app.state, "runtime_config_cache", None)
     if cache is None:
@@ -201,7 +201,7 @@ async def mention_agent(
     if not office_tools_offered(session):
         raise HTTPException(status_code=409, detail="The agent in this chat cannot answer in comments.")
     # The address the editor offered: made of the agent's name as it is now.
-    agent_name = await _agent_name(request, session.agent_id)
+    agent_name = await agent_display_name(request, session.agent_id)
     if agent_address(agent_name).lower() not in {email.lower() for email in body.emails}:
         raise HTTPException(status_code=400, detail="The comment does not mention the agent.")
     author_id, author = await _acting_user(request, tenant)

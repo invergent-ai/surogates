@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -2463,6 +2463,8 @@ class SessionStore:
         key: str,
         resume: bool = False,
         keep_report: bool = False,
+        extra: Mapping[str, Any] | None = None,
+        wake_resting: bool = False,
     ) -> KeyedMessage | None:
         """Write a synthetic user message for one Keel key, unless the session has it.
 
@@ -2488,11 +2490,19 @@ class SessionStore:
         message is written with no ``session.resume`` and no status change,
         for the turn Keel's next answer or revision wakes, and ``resting``
         is true.  Any other session is woken as with *resume* alone.
+
+        *wake_resting*, beside *resume* and *keep_report*, wakes a step
+        resting on its report too, as a comment that mentions its agent
+        does: a ``session.resume`` and status ``active``, its mark kept,
+        and ``resting`` false.  A step that is over still refuses it.
+
+        *extra*'s keys join the message's data; ``content``, ``synthetic``
+        and ``keel_key`` win over them.
         """
         message = await self._ready_event(
             session_id,
             EventType.USER_MESSAGE,
-            {"content": content, "synthetic": synthetic, "keel_key": key},
+            {**(extra or {}), "content": content, "synthetic": synthetic, "keel_key": key},
         )
         resumed = await self._ready_event(session_id, EventType.SESSION_RESUME, {}) if resume else None
         async with self._sf() as db:
@@ -2510,7 +2520,7 @@ class SessionStore:
             if resumed is not None and _step_is_over(locked.config):
                 await db.rollback()
                 raise StepFinishedError(f"the step of session {session_id} is over")
-            resting = keep_report and rests_on_its_report(locked.config)
+            resting = keep_report and not wake_resting and rests_on_its_report(locked.config)
             if (
                 resume
                 and not keep_report

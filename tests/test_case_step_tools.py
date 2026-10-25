@@ -36,6 +36,7 @@ import surogates.harness.loop as loop_module
 from surogates.harness.budget import IterationBudget
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
 from surogates.keel.steps import render_kickoff, step_contract_in, work_contract_key
+from surogates.office.mentions import mention_message
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.session.models import Session
@@ -1025,6 +1026,45 @@ async def test_keels_plain_message_during_a_report_gives_the_step_no_back(fake_k
     assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1"]
     assert store.result("c2") == "Step ended: the step is no longer this session's."
     assert store.reported() == "hand-raised"
+
+
+def _user_texts_with(messages: list[dict], words: str) -> list[str]:
+    """The text of each user message among *messages* that holds *words*."""
+    return [m["content"] for m in messages if m["role"] == "user" and isinstance(m["content"], str) and words in m["content"]]
+
+
+async def test_the_steps_turn_reads_a_mention_with_its_thread_note(fake_keel, monkeypatch, tmp_path):
+    store = _QueuedStore(_step({**deepcopy(CONTRACT), "mode": "draft"}), LocalBackend(str(tmp_path)))
+    fake_keel.answer(409, REJECTION)
+    fake_keel.answer(200, DRAFTED)
+    content, metadata = mention_message(
+        path="offer.docx", thread="c1a2", kind="docx", author="Ana Popescu", author_id=f"user:{uuid4()}",
+        comment="@credit-analyst@agent.invalid check the rate", agent_name="Credit Analyst",
+    )
+
+    def a_comment_mentions_the_agent_during_the_first_report() -> None:
+        # As keel-link writes it into a turn under way: no resume, nothing given back.
+        if len(fake_keel.requests) == 1:
+            store.write(EventType.USER_MESSAGE, {
+                "content": content, "synthetic": "keel_mention", "keel_key": "keel:c:1:mention:1",
+                "source": "office_mention", "metadata": metadata,
+            })
+
+    fake_keel.during = a_comment_mentions_the_agent_during_the_first_report
+    _started(store)
+
+    replies = [_calls("complete_step", COMPLETION, "c1"), _calls("complete_step", COMPLETION, "c2")]
+    sent = await _queued_wake(monkeypatch, store, replies)
+
+    # The turn's next request reads the comment, with the note that tells the agent where its thread is.
+    assert len(sent) == 2
+    assert _user_texts_with(sent[0]["messages"], content) == []
+    [said] = _user_texts_with(sent[1]["messages"], content)
+    assert said.startswith("[A comment in offer.docx mentioned you.")
+    assert said.endswith(content)
+    assert _in_call_order(sent[1]["messages"])
+    assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
+    assert store.reported() == "drafted"
 
 
 async def test_a_message_to_a_resting_step_is_read_with_keels_next_word(fake_keel, monkeypatch, tmp_path):

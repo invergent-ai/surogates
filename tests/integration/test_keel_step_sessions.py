@@ -625,9 +625,9 @@ async def progress_of(client: AsyncClient, session_id, *, auth: str | None = LIN
     return await client.get(step_route(session_id, "progress"), headers=link_headers(auth))
 
 
-async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client):
-    """A step session whose turn has ended, and which is no longer queued."""
-    created = await post(link, body(org))
+async def completed_step(link: AsyncClient, org: UUID, session_store, redis_client, *, key: str = KEY, **contract):
+    """A step session whose turn has ended, and which is no longer queued; *contract* overrides the loan's."""
+    created = await post(link, body(org, key, **contract))
     assert created.status_code == 201, created.text
     session_id = UUID(created.json()["session_id"])
     await session_store.update_session_status(session_id, "completed")
@@ -1080,17 +1080,20 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
     made = await post_item(link, item_body(org))
     assert made.status_code == 201, made.text
     item = await session_store.get_session(UUID(made.json()["session_id"]))
+    # The mention tests import this module too.
+    from .test_keel_mentions import mention
 
     for session_id in (chat.id, child.id, item.id, uuid.uuid4(), "not-a-session-id"):
         answers = [
             await send(link, session_id),
+            await mention(link, session_id),
             await cancel(link, session_id),
             await status_of(link, session_id),
             await page_of(link, session_id),
             await stream_refused(link, session_id),
             await progress_of(link, session_id),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 6, session_id
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 7, session_id
 
     for session in (chat, child):
         assert await timeline(session_store, session.id) == []
@@ -1101,17 +1104,20 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
 
 async def test_every_step_session_route_needs_the_link_key(link, org, session_store, redis_client):
     step = await completed_step(link, org, session_store, redis_client)
+    # The mention tests import this module too.
+    from .test_keel_mentions import mention
 
     for key in (None, "not-the-link-key"):
         answers = [
             await send(link, step.id, auth=key),
+            await mention(link, step.id, auth=key),
             await cancel(link, step.id, auth=key),
             await status_of(link, step.id, auth=key),
             await page_of(link, step.id, auth=key),
             await stream_refused(link, step.id, auth=key),
             await progress_of(link, step.id, auth=key),
         ]
-        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 6
+        assert [(a.status_code, code_of(a)) for a in answers] == [(401, "bad-link-key")] * 7
 
     assert (await session_store.get_session(step.id)).status == "completed"
     assert await timeline(session_store, step.id) == [("user.message", "keel_step")]

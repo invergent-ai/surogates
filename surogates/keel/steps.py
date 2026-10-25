@@ -65,6 +65,7 @@ __all__ = [
     "KEEL_CASE_TOOLS",
     "KEEL_MESSAGES",
     "KICKOFF_MARKER",
+    "MENTION_MARKER",
     "MESSAGE_MARKER",
     "NUDGE_MARKER",
     "OutcomeContract",
@@ -129,10 +130,14 @@ MESSAGE_MARKER = "keel_message"
 #: the session reads as it reads Keel's messages and never runs as a command:
 #: written once per Keel key.
 PERSON_MARKER = "keel_person_message"
+#: The ``synthetic`` marker of a comment in a case's document that mentions a
+#: draft step's agent: the message a chat's mention becomes, written once per
+#: Keel key.  It wakes a draft under review, and gives no step back.
+MENTION_MARKER = "keel_mention"
 #: Every message Keel sends a session: the markers of the messages its session
 #: reads as it reads a person's, whenever they land, in a turn under way or
 #: after its end.
-KEEL_MESSAGES: frozenset[str] = KEELS_WORD | {MESSAGE_MARKER, PERSON_MARKER}
+KEEL_MESSAGES: frozenset[str] = KEELS_WORD | {MESSAGE_MARKER, PERSON_MARKER, MENTION_MARKER}
 #: A step tool's result starts with one of these exactly when the step is over
 #: for this session, and the harness ends the turn on it: Keel took the report,
 #: or the step is no longer the session's (``STEP_ENDED``); or Keel refused the
