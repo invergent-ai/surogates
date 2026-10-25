@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from surogates.channels.constants import API_CHANNEL
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
+from surogates.harness.tool_schemas import has_file_pane
 from surogates.keel.steps import (
     CaseScope,
     StepContract,
@@ -250,6 +251,20 @@ async def test_a_draft_step_says_a_person_submits(link, org, session_store):
     content = kickoff.data["content"]
     assert "complete_step proposes the result, and a person reviews and submits it" in content
     assert "Finish the step with complete_step" not in content
+
+
+async def test_a_draft_step_has_a_file_pane_and_a_complete_step_none(link, org, session_store):
+    draft = await post(link, body(org, "keel:c:1:1", mode="draft"))
+    complete = await post(link, body(org, "keel:c:1:2"))
+
+    assert draft.status_code == 201, draft.text
+    assert complete.status_code == 201, complete.text
+    drafting = await session_store.get_session(UUID(draft.json()["session_id"]))
+    completing = await session_store.get_session(UUID(complete.json()["session_id"]))
+    assert drafting.config["file_pane"] is True
+    assert has_file_pane(drafting)
+    assert "file_pane" not in completing.config
+    assert not has_file_pane(completing)
 
 
 async def test_a_retry_makes_one_session_and_one_kickoff(link, org, session_store):

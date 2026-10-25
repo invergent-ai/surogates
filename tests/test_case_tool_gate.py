@@ -14,6 +14,9 @@ helpers, and no other session is offered the case tools.
 The designer's tools work on a builder's draft: only an agent whose policy's
 allow-list names them is offered them, and never in a case's session.
 
+A draft step's agent edits the case's documents beside the person: only the
+draft step's own session keeps the office tools, whatever its scope names.
+
 The prompt the model reads and the schemas it is sent are decided in two
 places, the worker and the harness, and they must agree.
 """
@@ -47,6 +50,7 @@ from tests.test_eval_session_seeding import _route_fixtures
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 MCP_TOOL = "mcp__crm__lookup"
+OFFICE_TOOLS = {"office_read", "office_edit"}
 STEP_TOOLS = {"complete_step", "raise_hand"}
 ITEM_TOOLS = {"complete_item", "return_item"}
 CASE_TOOLS = {"case_read", "case_history", "case_files", "case_file_read", "case_draft_form"}
@@ -74,10 +78,12 @@ KEPT_UNDER_ANY_SCOPE = {
 
 
 def _registry() -> ToolRegistry:
-    """Every built-in tool, the step tools among them, and one MCP tool of the agent's."""
+    """Every built-in tool, the step tools among them, the office tools a runtime with agent editing has, and one
+    MCP tool of the agent's."""
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
-    registry.register(MCP_TOOL, ToolSchema(name=MCP_TOOL, description="d", parameters={}), AsyncMock())
+    for name in (MCP_TOOL, *sorted(OFFICE_TOOLS)):
+        registry.register(name, ToolSchema(name=name, description="d", parameters={}), AsyncMock())
     return registry
 
 
@@ -156,10 +162,15 @@ async def _sent_on_a_turn(
     return sent[0]
 
 
-async def _case_session(store, *, tools: list[str] | None = None, scoped: bool = True, **contract):
+async def _case_session(
+    store, *, tools: list[str] | None = None, scoped: bool = True, file_pane: bool = False, **contract,
+):
     """A case's own session, made as the Keel link makes one: a step's (*case_step*) or a work item's
-    (*case_item*), with a scope naming *tools* when *scoped*."""
+    (*case_item*), with a scope naming *tools* when *scoped*, and a file pane when *file_pane*."""
     _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+    config: dict = {"memory_boundary": "case:C1", "workspace_boundary": "case:C1"}
+    if file_pane:
+        config["file_pane"] = True
     return await create_agent_session(
         store=store,
         storage=request.app.state.storage,
@@ -168,27 +179,39 @@ async def _case_session(store, *, tools: list[str] | None = None, scoped: bool =
         user_id=None,
         agent_id="support-bot",
         channel="api",
-        config={"memory_boundary": "case:C1", "workspace_boundary": "case:C1"},
+        config=config,
         service_account_id=uuid4(),
         case_scope={"tools": tools, "knowledge": ["kb-uuid"]} if scoped else None,
         **contract,
     )
 
 
-async def _step(store, *, tools: list[str] | None = None, scoped: bool = True):
-    """A step's own session, with a scope naming *tools* when *scoped*."""
-    return await _case_session(store, tools=tools, scoped=scoped, case_step={**CONTRACT, "tools": tools})
+async def _step(store, *, tools: list[str] | None = None, scoped: bool = True, file_pane: bool = False):
+    """A step's own session, with a scope naming *tools* when *scoped*, and a file pane when *file_pane*."""
+    return await _case_session(
+        store, tools=tools, scoped=scoped, file_pane=file_pane, case_step={**CONTRACT, "tools": tools},
+    )
 
 
-async def _item(store):
-    """A work item's own session."""
-    return await _case_session(store, case_item=ITEM_CONTRACT)
+async def _draft_step(store, *, tools: list[str] | None = None):
+    """A draft step's own session, with the file pane the Keel link gives it, and a scope naming *tools*."""
+    return await _case_session(
+        store, tools=tools, file_pane=True, case_step={**CONTRACT, "mode": "draft", "tools": tools},
+    )
 
 
-async def _case_agent(store):
-    """A person's case agent session, made as the Keel link makes one."""
+async def _item(store, *, file_pane: bool = False):
+    """A work item's own session, with a file pane when *file_pane*."""
+    return await _case_session(store, file_pane=file_pane, case_item=ITEM_CONTRACT)
+
+
+async def _case_agent(store, *, file_pane: bool = False):
+    """A person's case agent session, made as the Keel link makes one, with a file pane when *file_pane*."""
     _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
     case_id = str(uuid4())
+    config: dict = {"memory_boundary": f"case:{case_id}"}
+    if file_pane:
+        config["file_pane"] = True
     return await create_agent_session(
         store=store,
         storage=request.app.state.storage,
@@ -197,7 +220,7 @@ async def _case_agent(store):
         user_id=None,
         agent_id="support-bot",
         channel="api",
-        config={"memory_boundary": f"case:{case_id}"},
+        config=config,
         service_account_id=uuid4(),
         case_agent={"case_id": case_id, "case_number": "LD-000001", "person_id": str(uuid4())},
     )
@@ -390,3 +413,36 @@ async def test_an_allow_list_naming_the_designer_tools_offers_them():
     for session in (await _step(store), await _item(store), await _case_agent(store)):
         for offered in _offered(session, registry, policy=policy):
             assert offered.isdisjoint(DESIGNER_TOOLS), session.config
+
+
+async def test_a_draft_step_gets_the_office_tools():
+    registry = _registry()
+    store = _SessionStore()
+    draft = await _draft_step(store)
+    narrowed = await _draft_step(store, tools=["web_search"])
+
+    for offered in (_prompt_tools(draft, registry), _schema_tools(draft, registry)):
+        assert OFFICE_TOOLS | STEP_TOOLS <= offered
+    # Whatever its scope names.
+    for offered in (_prompt_tools(narrowed, registry), _schema_tools(narrowed, registry)):
+        assert OFFICE_TOOLS | STEP_TOOLS | {"web_search"} <= offered
+        assert offered.isdisjoint({"terminal", "write_file", "browser_navigate"})
+
+
+async def test_no_other_case_session_gets_the_office_tools():
+    registry = _registry()
+    store = _SessionStore()
+    draft = await _draft_step(store)
+    # A helper as delegate_task starts it, and one that declares a file pane.
+    helper = await create_child_session(store=store, parent=draft, channel="delegation")
+    paned_helper = await create_child_session(store=store, parent=draft, channel="api", config={"file_pane": True})
+
+    # Each with a file pane, so only the case decides.
+    others = (
+        await _step(store, file_pane=True), helper, paned_helper,
+        await _item(store, file_pane=True), await _case_agent(store, file_pane=True),
+    )
+    for session in others:
+        for offered in (_prompt_tools(session, registry), _schema_tools(session, registry)):
+            assert "read_file" in offered, session.config
+            assert offered.isdisjoint(OFFICE_TOOLS), session.config

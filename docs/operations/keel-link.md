@@ -68,6 +68,8 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 
 Once a step is over, cancelled among others, its inputs are removed from the session's config and the contract is marked `inputs_redacted`. A step marked so takes no more messages. The redaction covers the config only: the step's first message, which sets out the inputs, stays in the session's event log, which only keel-link serves, to Keel.
 
+A draft step's agent edits the case's documents beside the person. keel-link creates a draft step's session with `file_pane` set, and the session keeps `office_read` and `office_edit` whatever the step's `tools` name, when the agent has them: registered where the runtime has agent editing, and allowed by its policy. It edits within the document server's capacity: when runtime-office holds as many documents open as it can, the tool answers `The office service has as many documents open as it can hold; try again in a minute.` No other session of a case gets the office tools: not a complete step's, a helper's, a work item's or a case agent's.
+
 ## A message to a step
 
 `POST /v1/keel/step-sessions/{session_id}/messages` takes three kinds of message. `answer` is a person's answer to the step's raised hand, and `revision` a reviewer's request to revise its draft: each takes a `note`, and gives the step back. `message` is a plain word to the agent working the step, from a person or from another agent. It neither answers a raised hand nor reviews a draft.

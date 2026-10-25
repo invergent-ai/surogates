@@ -356,15 +356,19 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     tools, its agent's MCP tools and its execution's self-tools; a scope that
     names work tools narrows the allowed ones to those and
     :data:`ALWAYS_KEPT`.  Only the step's own session gets the step tools,
-    and only a work item's own session the item tools.  A person's case
-    agent keeps those less :data:`CASE_AGENT_REFUSED`, and gets
+    and only a work item's own session the item tools.  A draft step's own
+    session also keeps the office tools it has, whatever its scope names:
+    its agent edits the case's documents beside the person.  No other
+    session of a case keeps them.  A person's case agent keeps the allowed
+    tools less :data:`CASE_AGENT_REFUSED`, and gets
     :data:`KEEL_CASE_TOOLS`, which no other session gets, and no step or
     item tool.  Nothing else is ever added, so a tool an earlier gate
     dropped stays dropped.
     """
-    # Here, not at the top: both import this module.
+    # Here, not at the top: each imports this module, the office guard through its own imports.
     from surogates.keel.case_agents import is_case_agent
     from surogates.keel.items import is_case_item
+    from surogates.office.guard import OFFICE_TOOLS
 
     if not is_case_session(session):
         return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS - KEEL_CASE_TOOLS
@@ -381,6 +385,8 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
         return (kept - CASE_AGENT_REFUSED) | KEEL_CASE_TOOLS
     if is_case_step(session):
         kept |= CASE_STEP_TOOLS
+        if step_contract_of(session).mode == "draft":
+            kept |= set(tools) & OFFICE_TOOLS
     if is_case_item(session):
         kept |= CASE_ITEM_TOOLS
     return kept

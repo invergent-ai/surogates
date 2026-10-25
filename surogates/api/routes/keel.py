@@ -55,6 +55,7 @@ from surogates.channels.constants import API_CHANNEL, session_queue_priority
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.db.models import User
+from surogates.harness.tool_schemas import FILE_PANE_KEY
 from surogates.keel.case_files import (
     CaseFileError,
     case_key,
@@ -511,7 +512,9 @@ async def create_step_session(request: Request) -> JSONResponse:
             request,
             body,
             matches=this_step,
-            make=lambda: create_case_session(request, body, agent_id, case_step=contract.model_dump(mode="json")),
+            make=lambda: create_case_session(
+                request, body, agent_id, file_pane=contract.mode == "draft", case_step=contract.model_dump(mode="json"),
+            ),
             start=start,
         )
     except DBAPIError as exc:
@@ -523,14 +526,17 @@ async def create_step_session(request: Request) -> JSONResponse:
     return _answer(session, created=created)
 
 
-async def create_case_session(request: Request, body: _CaseWorkCreate, agent_id: str, **work: dict[str, Any]) -> Any:
+async def create_case_session(
+    request: Request, body: _CaseWorkCreate, agent_id: str, *, file_pane: bool = False, **work: dict[str, Any],
+) -> Any:
     """Create the session Keel starts on a step or a work item of a case, with Keel's id and key.
 
     It is on ``api``, owned by the org's account for the body's case type,
     inside the case's ``case:`` memory and workspace boundaries, narrowed to
     the contract's MCP servers when it names them, and scoped to its tools
-    and knowledge.  *work* is the contract as it is stamped: ``case_step``
-    or ``case_item``.
+    and knowledge.  With *file_pane*, a draft step's, it shows the case's
+    documents beside the person, so its agent may edit them.  *work* is the
+    contract as it is stamped: ``case_step`` or ``case_item``.
     """
     contract = body.contract
     account_id = await ServiceAccountStore(request.app.state.session_factory).case_type_account(
@@ -538,6 +544,8 @@ async def create_case_session(request: Request, body: _CaseWorkCreate, agent_id:
     )
     boundary = f"{CASE_BOUNDARY_PREFIX}{contract.case_id}"
     config: dict[str, Any] = {"memory_boundary": boundary, "workspace_boundary": boundary}
+    if file_pane:
+        config[FILE_PANE_KEY] = True
     if contract.mcp_servers is not None:
         config["entitlements"] = {"mcp_server_ids": list(contract.mcp_servers)}
     return await create_agent_session(
