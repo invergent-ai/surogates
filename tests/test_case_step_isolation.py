@@ -1,11 +1,12 @@
 """A case's sessions are marked by the server alone.
 
-Keel starts an agent's step session with a contract (``config.case_step``), a
-tool and knowledge scope (``config.case_scope``) and the case's ``case:``
-boundaries. A client naming any of them would make itself a step, widen its
+Keel starts an agent's step session with a contract (``config.case_step``), or
+its session on a work item with the item's (``config.case_item``), a tool and
+knowledge scope (``config.case_scope``) and the case's ``case:`` boundaries. A
+client naming any of them would make itself a step or an item, widen its
 knowledge, or read and write a case's memory and workspace, so only the Keel
 link stamps them. Every session of the case, children included, keeps the
-case's memory, while only the step's root session is the step.
+case's memory, while only the root session is the step or the item.
 """
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ from fastapi import Response
 from surogates.api.routes import sessions as sessions_route
 from surogates.channels.memory_boundary import session_memory_boundary
 from surogates.config import Settings
+from surogates.keel.items import is_case_item
 from surogates.keel.steps import (
+    CASE_ITEM_KEY,
     CASE_SCOPE_KEY,
     CASE_STEP_KEY,
     CaseScope,
@@ -56,6 +59,12 @@ CONTRACT = {
     "tools": None,
     "mcp_servers": None,
     "knowledge": ["kb-uuid"],
+}
+ITEM_CONTRACT = {
+    **{key: CONTRACT[key] for key in ("case_id", "case_number", "case_type", "type_version", "token", "node", "step")},
+    "item_id": "item-1",
+    "kind": "raised_hand",
+    "question": "Which payslip is the latest?",
 }
 SCOPE = {"tools": ["write_file"], "knowledge": ["kb-uuid"]}
 
@@ -103,15 +112,17 @@ async def _create_through(route: str, config: dict):
 async def test_a_client_cannot_make_a_case_session(route):
     session = await _create_through(route, {
         CASE_STEP_KEY: CONTRACT,
+        CASE_ITEM_KEY: ITEM_CONTRACT,
         CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
         "memory_boundary": "case:x",
         "workspace_boundary": "case:x",
     })
 
-    kept = {CASE_STEP_KEY, CASE_SCOPE_KEY, "memory_boundary", "workspace_boundary"} & set(session.config)
+    kept = {CASE_STEP_KEY, CASE_ITEM_KEY, CASE_SCOPE_KEY, "memory_boundary", "workspace_boundary"} & set(session.config)
     assert kept == set()
     assert not is_case_session(session)
     assert not is_case_step(session)
+    assert not is_case_item(session)
     assert step_contract_of(session) is None
     assert case_scope_of(session) is None
 
@@ -139,6 +150,7 @@ async def test_a_child_inherits_the_case_and_its_scope_but_is_no_step():
         # What the code making the child names is never its scope or a contract.
         config={
             CASE_STEP_KEY: CONTRACT,
+            CASE_ITEM_KEY: ITEM_CONTRACT,
             CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
         },
     )
@@ -148,6 +160,7 @@ async def test_a_child_inherits_the_case_and_its_scope_but_is_no_step():
     assert session_memory_boundary(child) == "case:C1"
     assert case_scope_of(child) == CaseScope(tools=["write_file"], knowledge=["kb-uuid"])
     assert not is_case_step(child)
+    assert CASE_ITEM_KEY not in child.config
     assert step_contract_of(child) is None
 
 

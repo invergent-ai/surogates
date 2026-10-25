@@ -61,7 +61,7 @@ from surogates.devices.binding import device_of, is_binding_root
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceRecord, DeviceStore
 from surogates.devices.workspace import DeviceOperationError
-from surogates.keel.steps import CASE_SCOPE_KEY, CASE_STEP_KEY
+from surogates.keel.steps import CASE_ITEM_KEY, CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -631,9 +631,9 @@ def apply_eval_isolation(
     account its buy page forwards every buyer through. Any other key holder
     naming a buyer id would otherwise read that buyer's memory.
 
-    A case's step contract and scope go too, on every channel: only the Keel
-    link stamps them, and a client naming them would make its session a
-    case's step.
+    A case's step or item contract and its scope go too, on every channel:
+    only the Keel link stamps them, and a client naming them would make its
+    session a case's step or work item.
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
@@ -644,6 +644,7 @@ def apply_eval_isolation(
     for key in SERVER_OWNED_KEYS:
         resolved.pop(key, None)
     resolved.pop(CASE_STEP_KEY, None)
+    resolved.pop(CASE_ITEM_KEY, None)
     resolved.pop(CASE_SCOPE_KEY, None)
     if channel != API_CHANNEL:
         return resolved

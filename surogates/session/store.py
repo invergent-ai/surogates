@@ -57,10 +57,10 @@ from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
 from surogates.keel.steps import (
     ANSWER_MARKER,
-    CASE_STEP_KEY,
     REPORTED_KEY,
     REVISION_MARKER,
     rests_on_its_report,
+    work_contract_key,
 )
 from surogates.session.acting_principal import (
     ActingPrincipal,
@@ -91,7 +91,7 @@ class SessionNotFoundError(Exception):
 
 
 class StepFinishedError(Exception):
-    """Raised when a message would wake a case step that is over: its inputs are redacted."""
+    """Raised when a message would wake a step or a work item that is over: its inputs are redacted."""
 
 
 class KeyedMessage(NamedTuple):
@@ -239,42 +239,47 @@ _STOPPED_CONFIRMATION = "⏹ Stopped."
 _RESUMABLE_STATUSES = frozenset({"completed", "paused", "failed"})
 
 
+def _work_contract(config: Any) -> tuple[str, dict] | tuple[None, None]:
+    """The key and the contract of the step or the work item *config* holds, or ``(None, None)``."""
+    key = work_contract_key(config)
+    contract = config.get(key) if key is not None and isinstance(config, dict) else None
+    return (key, contract) if isinstance(contract, dict) else (None, None)
+
+
 def _step_is_over(config: Any) -> bool:
-    """Whether *config* holds a step contract whose inputs were redacted: the step is over."""
-    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
-    return isinstance(contract, dict) and contract.get("inputs_redacted") is True
+    """Whether *config* holds a step or a work item whose inputs were redacted: it is over."""
+    _, contract = _work_contract(config)
+    return contract is not None and contract.get("inputs_redacted") is True
 
 
 def _redacted_case_config(config: Any) -> dict | None:
-    """*config* with its step contract's inputs emptied and marked redacted.
+    """*config* with the inputs of its step or work item emptied and marked redacted.
 
     ``None`` when there is nothing to redact: no contract, or one redacted already.
     """
-    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
-    if not isinstance(contract, dict) or (
-        contract.get("inputs") == {} and contract.get("inputs_redacted") is True
-    ):
+    key, contract = _work_contract(config)
+    if contract is None or (contract.get("inputs") == {} and contract.get("inputs_redacted") is True):
         return None
-    return {**config, CASE_STEP_KEY: {**contract, "inputs": {}, "inputs_redacted": True}}
+    return {**config, key: {**contract, "inputs": {}, "inputs_redacted": True}}
 
 
 def _reported_case_config(config: Any, result: str) -> dict | None:
-    """*config* with its step contract marked as reported, with *result*.
+    """*config* with its step or work item marked as reported, with *result*.
 
     ``None`` when there is nothing to mark: no contract, or one marked so already.
     """
-    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
-    if not isinstance(contract, dict) or contract.get(REPORTED_KEY) == result:
+    key, contract = _work_contract(config)
+    if contract is None or contract.get(REPORTED_KEY) == result:
         return None
-    return {**config, CASE_STEP_KEY: {**contract, REPORTED_KEY: result}}
+    return {**config, key: {**contract, REPORTED_KEY: result}}
 
 
 def _unreported_case_config(config: Any) -> dict | None:
-    """*config* with its step contract's report mark cleared; ``None`` when it has none."""
-    contract = config.get(CASE_STEP_KEY) if isinstance(config, dict) else None
-    if not isinstance(contract, dict) or REPORTED_KEY not in contract:
+    """*config* with the report mark of its step or work item cleared; ``None`` when it has none."""
+    key, contract = _work_contract(config)
+    if contract is None or REPORTED_KEY not in contract:
         return None
-    return {**config, CASE_STEP_KEY: {k: v for k, v in contract.items() if k != REPORTED_KEY}}
+    return {**config, key: {k: v for k, v in contract.items() if k != REPORTED_KEY}}
 
 _INBOX_EVENTS = frozenset({
     EventType.INBOX_INPUT_REQUIRED,
@@ -2469,9 +2474,9 @@ class SessionStore:
         With *resume*, a session at rest (completed, paused or failed) is set
         ``active`` with a ``session.resume`` before the message, in the same
         transaction: the message wakes the session it is written to, and a
-        retry of one already written wakes nothing.  A case step that is over
-        takes no new message: it raises :class:`StepFinishedError` and writes
-        nothing.  The check holds the same lock as a cancel's redaction, so a
+        retry of one already written wakes nothing.  A step or a work item
+        that is over takes no new message: it raises :class:`StepFinishedError`
+        and writes nothing.  The check holds the same lock as a cancel's redaction, so a
         message racing a cancel never revives the step.  A message written
         with *resume* alone also clears the step's report mark in the same
         transaction, whatever the session's status: the step is the
@@ -2526,9 +2531,9 @@ class SessionStore:
         return KeyedMessage(message.id, resting)
 
     async def cancel_case_step(self, session_id: UUID, data: dict) -> bool:
-        """End a case step: redact its inputs, and pause its session with a
-        ``session.pause`` whose data is *data* unless it is paused already;
-        whether this call paused it.
+        """End a step or a work item: redact its inputs, and pause its session
+        with a ``session.pause`` whose data is *data* unless it is paused
+        already; whether this call paused it.
 
         Both are one transaction under the session row's lock, so a message
         racing the cancel finds the step either running or over, and calls
@@ -2555,7 +2560,7 @@ class SessionStore:
         return paused
 
     async def mark_case_step_reported(self, session_id: UUID, result: str, *, since: int | None = None) -> None:
-        """Mark the step contract in *session_id*'s config as reported, with Keel's *result*.
+        """Mark the step or the work item in *session_id*'s config as reported, with Keel's *result*.
 
         A report ended the step for this round: until Keel answers or revises
         the step (:meth:`emit_keyed_synthetic_message` with *resume*, without
@@ -2596,10 +2601,10 @@ class SessionStore:
             await db.commit()
 
     async def redact_case_inputs(self, session_id: UUID) -> None:
-        """Empty the inputs of the step contract in *session_id*'s config, and mark them redacted.
+        """Empty the inputs of the step or the work item in *session_id*'s config, and mark them redacted.
 
-        Once a step ends for its session, the case's inputs leave the
-        session's config; the rest of the contract stays.  A session with no
+        Once a step or a work item ends for its session, the case's inputs
+        leave the session's config; the rest of the contract stays.  A session with no
         contract, or one redacted already, is left as it is.
         """
         async with self._sf() as db:

@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and reads its status and cancels it. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -13,6 +13,9 @@
 | `GET /v1/keel/step-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the session's events after the cursor `after`, without `llm.delta`: `200 {"events": [{"id", "type", "data", "created_at"}], "has_more"}`. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/step-sessions/{session_id}/events/stream?after=<id>` | The session's events after the cursor `after`, then each new one as it is written, as server-sent events. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/step-sessions/{session_id}/progress` | The session's status, its todo list as its agent last wrote it, and its last activity: `200 {"status", "todos", "todos_at", "last_activity"}`. See [Progress](#progress). |
+| `POST /v1/keel/item-sessions?agent_id=<agent>` | Starts the agent's session on one work item, or finds the one Keel's key already started: `201 {"session_id"}` made, `200 {"session_id"}` found. See [An agent's work item](#an-agents-work-item). |
+| `GET /v1/keel/item-sessions/{session_id}` | The item session's `session_id` and `status`. |
+| `POST /v1/keel/item-sessions/{session_id}/cancel` | Ends the item as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
@@ -30,12 +33,12 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
-| 404 | `unknown-session` | No such session, or it is not a step's own session. |
+| 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, or of a work item, for an item route. |
 | 404 | `unknown-file` | No file at the path in the case's workspace. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. |
-| 409 | `key-in-use` | The key, or the session id, names another step's session. |
+| 409 | `key-in-use` | The key, or the session id, names another session: another step's or item's, or one of another agent. |
 | 409 | `step-finished` | A message for a step that is over: its inputs were redacted. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
@@ -43,7 +46,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document. |
-| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs. |
+| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a step session's events were asked for with a cursor or a page size out of range. |
 | 500 | `internal-error` | The database failed, other than while a step session's events or progress were read. Only the error's class name is logged. |
@@ -76,6 +79,41 @@ A message wakes a step whose session is at rest, as an answer wakes it, except a
 A message never gives the step back. An answer or a revision ends the rest a report began, and the step then reports to Keel again. A message does neither, and a message that reached the step since a report began does not keep the report's mark from being written. If the turn that made the report reads the message, a further report in that turn is answered by the worker and never reaches Keel.
 
 A step that is over takes no message: `409 step-finished`, as for an answer. Nor does a message it took before then, and no turn has read, wake it once it is over. The route logs neither a message's text nor its sender.
+
+## An agent's work item
+
+A case gives an agent a work item as it gives a person one: a step to do, a vote to cast, or a raised hand to answer. `POST /v1/keel/item-sessions?agent_id=<agent>` starts the agent's session on it. Its body is `{"org_id", "case_type", "idempotency_key", "session_id", "contract"}`: `case_type` is 1 to 200 characters and must be the contract's, and `idempotency_key` is 1 to 200 characters. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this item's session when that session has Keel's id, the agent, and the contract's `case_id` and `item_id`. Any other session under the key, or another session with Keel's id, is `409 key-in-use`.
+
+### The item's contract
+
+| Key | What it is |
+|---|---|
+| `case_id`, `case_number`, `case_type`, `type_version` | The case. |
+| `item_id` | Keel's id for the item. |
+| `kind` | `step`, `vote` or `raised_hand`. |
+| `token`, `node`, `step` | Where in the case the item is; for a raised hand, the step that raised it. |
+| `inputs` | The case's data the item reads. |
+| `form`, `outcomes`, `files` | A step's or a vote's, and required for both: the form as JSON Schema, empty for a vote; the outcomes it ends with, each with the outputs it requires; and its file fields, each taking one file or a list. |
+| `question`, `choices`, `evidence` | A raised hand's: its question, required, 1 to 2000 characters; at most 20 choices, of at most 200 characters each; and the facts behind it. |
+| `tools`, `mcp_servers`, `knowledge` | As a step's: null keeps the agent's own work tools or MCP servers, and a list narrows them. `knowledge` is the full grant. |
+
+Keys the runtime does not know are ignored. A contract out of this shape, such as a vote without its form or a raised hand without its question, is `422 invalid-request`, and nothing is made.
+
+### Its owner and its boundaries
+
+The item's session is made as a step's is: with the id Keel gives it, on the `api` channel, owned by the org's `case-type:<case type>` service account, inside the case's `case:<case id>` memory and workspace boundaries, and narrowed to the contract's MCP servers when it names them. Its wakes wait behind people, as a step's do. The contract is in the session's config under `case_item`, never `case_step`, and only keel-link sets it: every other way of creating a session drops it. A helper the session starts keeps the case's boundaries and scope, but not the contract: a helper is no item.
+
+### Its kickoff
+
+The item's inputs, and a raised hand's question, choices and evidence, pass the prompt-injection screen before anything is written: `422 inputs-blocked`. The session then starts with one message, marked `keel_item` and written once per key. Its first line names the case and the item:
+
+- a step: `Case <number>, a <case type> case, gives you a work item: its step "<step>". Work on it now.`
+- a vote: `Case <number>, a <case type> case, asks for your vote on "<step>". Work on it now.`
+- a raised hand: `Case <number>, a <case type> case, asks you to answer a raised hand at its step "<step>". Work on it now.`
+
+Then come the item's inputs, as data, in a JSON code fence. A raised hand adds its question, its choices and its evidence, the same way. A step or a vote adds its outcomes, with the outputs each requires, and its file fields. The last line says how the item ends: with `complete_item`, which finishes a step, casts a vote, or answers a raised hand with one of its choices or in words; or with `return_item` and a reason, which gives the item back to whoever gave it to the agent.
+
+`POST /v1/keel/item-sessions/{session_id}/cancel` ends the item as a step's cancel ends a step: its inputs leave the session's config and are marked `inputs_redacted`, the session pauses, and every call interrupts its turn. `GET /v1/keel/item-sessions/{session_id}` answers `200 {"session_id", "status"}`.
 
 ## Watching a step session
 
@@ -232,4 +270,4 @@ A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, o
 
 ## Step sessions wait behind people
 
-Every wake of a step session, and of each session a step starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent.
+Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent.

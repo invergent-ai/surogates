@@ -7,7 +7,10 @@ staff into an organisation.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
-:func:`require_link`, and loads sessions directly: no tenant, no JWT.
+:func:`require_link`, and loads sessions directly: no tenant, no JWT.  The
+public helpers here serve the other keel-link routers too: refusals,
+database failures, the agent's resolution, the injection screen, and the
+create, lookup and cancel of a session Keel starts.
 
 An error is ``HTTPException(status, {"code", "message"})``, which answers
 ``{"detail": {"code", "message"}}``.  Its message names no case data, and
@@ -23,10 +26,10 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, BinaryIO, Literal, TypeVar
+from typing import Annotated, Any, BinaryIO, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -92,7 +95,7 @@ router = APIRouter()
 
 _Body = TypeVar("_Body", bound=BaseModel)
 
-#: The prompt-injection screen's name for a step's inputs.
+#: The prompt-injection screen's name for the case data Keel sends.
 _SCREEN_SOURCE = "keel_case_step"
 #: The ``synthetic`` marker of each kind of message Keel sends a step.
 _MESSAGE_MARKERS = {"answer": ANSWER_MARKER, "revision": REVISION_MARKER, "message": MESSAGE_MARKER}
@@ -242,29 +245,29 @@ class MemberInvitationRequest(BaseModel):
         return _printable(value)
 
 
-def _refused(status_code: int, code: str, message: str) -> HTTPException:
+def refused(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code, {"code": code, "message": message})
 
 
-def _database_failed(exc: DBAPIError, *, logged: str, message: str) -> HTTPException:
+def database_failed(exc: DBAPIError, *, logged: str, message: str) -> HTTPException:
     """The generic 500 for a failed database call, logged by the error's class name alone.
 
     The error's text quotes the statement's parameters, the case's data among them.
     """
     logger.warning("keel-link: %s (%s)", logged, type(exc).__name__)
-    return _refused(status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", message)
+    return refused(status.HTTP_500_INTERNAL_SERVER_ERROR, "internal-error", message)
 
 
-def _database_unavailable(exc: DBAPIError, *, logged: str, message: str) -> HTTPException:
+def database_unavailable(exc: DBAPIError, *, logged: str, message: str) -> HTTPException:
     """The 503 for a failed database read, which Keel tries again, logged by the error's class name alone.
 
     The error's text can quote the rows read, the case's data among them.
     """
     logger.warning("keel-link: %s (%s)", logged, type(exc).__name__)
-    return _refused(status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", message)
+    return refused(status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", message)
 
 
-def _query_int(request: Request, name: str, *, default: int, low: int, high: int | None) -> int:
+def query_int(request: Request, name: str, *, default: int, low: int, high: int | None) -> int:
     """The query parameter *name* as an integer from *low* to *high*, or *default* when absent.
 
     Anything else is 422 ``invalid-request``.  Only ASCII digits make an
@@ -280,7 +283,7 @@ def _query_int(request: Request, name: str, *, default: int, low: int, high: int
         value = None
     if value is None or value < low or (high is not None and value > high):
         bounds = f"from {low}" if high is None else f"from {low} to {high}"
-        raise _refused(
+        raise refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request",
             f"The {name} query parameter is not an integer {bounds}.",
         )
@@ -301,7 +304,7 @@ def require_link(request: Request) -> None:
         or scheme.lower() != "bearer"
         or not hmac.compare_digest(presented.strip().encode(), expected.encode())
     ):
-        raise _refused(
+        raise refused(
             status.HTTP_401_UNAUTHORIZED, "bad-link-key", "The link key is missing or wrong.",
         )
 
@@ -312,15 +315,25 @@ async def read_body(request: Request, model: type[_Body]) -> _Body:
         return model.model_validate(await request.json())
     except (ValueError, ValidationError):
         # Not the validation error's text: it would quote the case's data.
-        raise _refused(
+        raise refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The request body does not validate.",
         ) from None
 
 
-async def _resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[str, Any]:
+def agent_id_of(request: Request) -> str:
+    """The ``agent_id`` query parameter of a create: 422 ``invalid-request`` when it is missing."""
+    agent_id = request.query_params.get("agent_id") or ""
+    if not agent_id:
+        raise refused(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The agent_id query parameter is required.",
+        )
+    return agent_id
+
+
+async def resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[str, Any]:
     """The agent's runtime config, when it is the org's and running."""
     cache = request.app.state.runtime_config_cache
-    unknown = _refused(status.HTTP_404_NOT_FOUND, "unknown-agent", "No such agent in this org.")
+    unknown = refused(status.HTTP_404_NOT_FOUND, "unknown-agent", "No such agent in this org.")
     for attempt in (1, 2):
         try:
             payload = await cache.get(agent_id)
@@ -332,7 +345,7 @@ async def _resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[
                 logger.warning(
                     "keel-link: agent %s could not be resolved (%s)", agent_id, type(exc).__name__,
                 )
-                raise _refused(
+                raise refused(
                     status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The agent could not be resolved; try again.",
                 ) from None
     try:
@@ -343,36 +356,36 @@ async def _resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[
     if not same_org:
         raise unknown
     if not payload.get("enabled"):
-        raise _refused(status.HTTP_409_CONFLICT, "agent-stopped", "The agent is stopped.")
+        raise refused(status.HTTP_409_CONFLICT, "agent-stopped", "The agent is stopped.")
     return payload
 
 
-def _screen_inputs(contract: StepContract) -> None:
-    """Refuse inputs the prompt-injection screen blocks, before anything is written."""
+def screen(value: object, *, case_id: UUID) -> None:
+    """Refuse case data the prompt-injection screen blocks, before anything is written: 422 ``inputs-blocked``."""
     from surogates.api.routes.sessions import _get_injection_detector
 
-    text = json.dumps(contract.inputs, indent=2, sort_keys=True, ensure_ascii=False)
+    text = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
     result = _get_injection_detector().detect(text, source=_SCREEN_SOURCE)
     if result.is_injection:
-        logger.warning("keel-link: the inputs of case %s were blocked", contract.case_id)
-        raise _refused(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, "inputs-blocked", "The step's inputs were blocked.",
+        logger.warning("keel-link: the inputs of case %s were blocked", case_id)
+        raise refused(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "inputs-blocked", "The case's inputs were blocked.",
         )
 
 
 def _key_in_use() -> HTTPException:
-    return _refused(
-        status.HTTP_409_CONFLICT, "key-in-use", "The key or the session id names another step's session.",
+    return refused(
+        status.HTTP_409_CONFLICT, "key-in-use", "The key or the session id names another session.",
     )
 
 
-async def _start(request: Request, session: Any, contract: StepContract, key: str) -> None:
-    """Write the step's kickoff unless the session has it, and queue the session when this call wrote it.
+async def kick_off(request: Request, session: Any, *, content: str, synthetic: str, key: str) -> None:
+    """Write a session's first message, marked *synthetic*, unless it has it; queue it when this call wrote it.
 
     Calls racing on one key, as a retry of a call still running, write it once.
     """
     written = await request.app.state.session_store.emit_keyed_synthetic_message(
-        session.id, content=render_kickoff(contract), synthetic=KICKOFF_MARKER, key=key,
+        session.id, content=content, synthetic=synthetic, key=key,
     )
     if written is None:
         return
@@ -385,21 +398,61 @@ async def _start(request: Request, session: Any, contract: StepContract, key: st
     )
 
 
-async def _found(
-    request: Request, existing: Any, body: StepSessionRequest, agent_id: str,
-) -> JSONResponse:
-    """The session a key already holds: this very step's, or the key is in use."""
-    held = step_contract_of(existing)
-    if (
-        existing.id != body.session_id
-        or existing.agent_id != agent_id
-        or held is None
-        or held.case_id != body.contract.case_id
-        or held.token != body.contract.token
-    ):
-        raise _key_in_use()
-    await _start(request, existing, body.contract, body.idempotency_key)
-    return _answer(existing, created=False)
+class _KeelCreate(Protocol):
+    """What :func:`create_or_find` reads of a create's body."""
+
+    org_id: UUID
+    idempotency_key: str
+    session_id: UUID
+
+
+class _CaseWorkCreate(_KeelCreate, Protocol):
+    """What :func:`create_case_session` reads of a create's body: also its case type and its work contract."""
+
+    case_type: str
+    contract: Any
+
+
+async def create_or_find(
+    request: Request,
+    body: _KeelCreate,
+    *,
+    matches: Callable[[Any], bool],
+    make: Callable[[], Awaitable[Any]],
+    start: Callable[[Any], Awaitable[None]],
+) -> tuple[Any, bool]:
+    """The session *body*'s key holds, or a new one made by *make*; either way started by *start*.
+
+    A session the key holds is this one when it has Keel's id and *matches*
+    says so; otherwise the key is in use, 409 ``key-in-use``, as is Keel's
+    id once another session has it.  A found session is started again, so a
+    retry writes a first message its first call lost.  Calls racing on one
+    key make one session.  Answers the session, and whether this call made it.
+    """
+    store = request.app.state.session_store
+
+    async def found(existing: Any) -> tuple[Any, bool]:
+        if existing.id != body.session_id or not matches(existing):
+            raise _key_in_use()
+        await start(existing)
+        return existing, False
+
+    existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
+    if existing is not None:
+        return await found(existing)
+    try:
+        session = await make()
+    except IntegrityError:
+        # A concurrent call with the key made it first, or the id is taken.
+        existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
+        if existing is not None:
+            return await found(existing)
+        if await _exists(store, body.session_id):
+            raise _key_in_use() from None
+        # Another constraint broke: the route answers it as any database failure.
+        raise
+    await start(session)
+    return session, True
 
 
 async def _exists(store: Any, session_id: UUID) -> bool:
@@ -427,33 +480,52 @@ async def create_step_session(request: Request) -> JSONResponse:
     """Start the agent's session for one step of a case: 201 made, or 200 found by its key."""
     require_link(request)
     body = await read_body(request, StepSessionRequest)
-    agent_id = request.query_params.get("agent_id") or ""
-    if not agent_id:
-        raise _refused(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The agent_id query parameter is required.",
-        )
-    await _resolve_agent(request, agent_id, body.org_id)
+    agent_id = agent_id_of(request)
+    await resolve_agent(request, agent_id, body.org_id)
     contract = body.contract
-    _screen_inputs(contract)
+    screen(contract.inputs, case_id=contract.case_id)
+
+    def this_step(existing: Any) -> bool:
+        held = step_contract_of(existing)
+        return (
+            existing.agent_id == agent_id
+            and held is not None
+            and held.case_id == contract.case_id
+            and held.token == contract.token
+        )
+
+    async def start(session: Any) -> None:
+        await kick_off(
+            request, session, content=render_kickoff(contract), synthetic=KICKOFF_MARKER, key=body.idempotency_key,
+        )
 
     try:
-        return await _create_or_find(request, body, agent_id)
+        session, created = await create_or_find(
+            request,
+            body,
+            matches=this_step,
+            make=lambda: create_case_session(request, body, agent_id, case_step=contract.model_dump(mode="json")),
+            start=start,
+        )
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"the step session of case {contract.case_id} could not be written",
             message="The step session could not be created.",
         ) from None
+    return _answer(session, created=created)
 
 
-async def _create_or_find(request: Request, body: StepSessionRequest, agent_id: str) -> JSONResponse:
-    """Find the session the key holds, or create it; either way, give it its kickoff."""
+async def create_case_session(request: Request, body: _CaseWorkCreate, agent_id: str, **work: dict[str, Any]) -> Any:
+    """Create the session Keel starts on a step or a work item of a case, with Keel's id and key.
+
+    It is on ``api``, owned by the org's account for the body's case type,
+    inside the case's ``case:`` memory and workspace boundaries, narrowed to
+    the contract's MCP servers when it names them, and scoped to its tools
+    and knowledge.  *work* is the contract as it is stamped: ``case_step``
+    or ``case_item``.
+    """
     contract = body.contract
-    store = request.app.state.session_store
-    existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
-    if existing is not None:
-        return await _found(request, existing, body, agent_id)
-
     account_id = await ServiceAccountStore(request.app.state.session_factory).case_type_account(
         body.org_id, body.case_type,
     )
@@ -461,42 +533,32 @@ async def _create_or_find(request: Request, body: StepSessionRequest, agent_id: 
     config: dict[str, Any] = {"memory_boundary": boundary, "workspace_boundary": boundary}
     if contract.mcp_servers is not None:
         config["entitlements"] = {"mcp_server_ids": list(contract.mcp_servers)}
-    try:
-        session = await create_agent_session(
-            store=store,
-            storage=request.app.state.storage,
-            settings=request.app.state.settings,
-            org_id=body.org_id,
-            user_id=None,
-            agent_id=agent_id,
-            channel=API_CHANNEL,
-            config=config,
-            service_account_id=account_id,
-            idempotency_key=body.idempotency_key,
-            session_id=body.session_id,
-            case_step=contract.model_dump(mode="json"),
-            case_scope={"tools": contract.tools, "knowledge": contract.knowledge},
-        )
-    except IntegrityError:
-        # A concurrent call with the key made it first, or the id is taken.
-        existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
-        if existing is not None:
-            return await _found(request, existing, body, agent_id)
-        if await _exists(store, body.session_id):
-            raise _key_in_use() from None
-        # Another constraint broke: the route answers it as any database failure.
-        raise
-
-    await _start(request, session, contract, body.idempotency_key)
-    return _answer(session, created=True)
+    return await create_agent_session(
+        store=request.app.state.session_store,
+        storage=request.app.state.storage,
+        settings=request.app.state.settings,
+        org_id=body.org_id,
+        user_id=None,
+        agent_id=agent_id,
+        channel=API_CHANNEL,
+        config=config,
+        service_account_id=account_id,
+        idempotency_key=body.idempotency_key,
+        session_id=body.session_id,
+        case_scope={"tools": contract.tools, "knowledge": contract.knowledge},
+        **work,
+    )
 
 
 def _unknown_session() -> HTTPException:
-    return _refused(status.HTTP_404_NOT_FOUND, "unknown-session", "No such step session.")
+    return refused(status.HTTP_404_NOT_FOUND, "unknown-session", "No such session.")
 
 
-async def _step_session(request: Request, session_id: str) -> Any:
-    """The step session *session_id* names: 404 ``unknown-session`` for any other id."""
+async def session_where(request: Request, session_id: str, holds: Callable[[Any], bool]) -> Any:
+    """The session *session_id* names, when *holds* says it is one this route serves.
+
+    404 ``unknown-session`` for any other id, and for one that is not a UUID.
+    """
     try:
         session_uuid = UUID(session_id)
     except ValueError:
@@ -505,10 +567,17 @@ async def _step_session(request: Request, session_id: str) -> Any:
         session = await request.app.state.session_store.get_session(session_uuid)
     except SessionNotFoundError:
         raise _unknown_session() from None
-    # A child of the step works on the case, and a chat on none: neither is the step's.
-    if not is_case_step(session):
+    if not holds(session):
         raise _unknown_session()
     return session
+
+
+async def _step_session(request: Request, session_id: str) -> Any:
+    """The step session *session_id* names: 404 ``unknown-session`` for any other id.
+
+    A child of the step works on the case, and a chat on none: neither is the step's.
+    """
+    return await session_where(request, session_id, is_case_step)
 
 
 @router.post("/keel/step-sessions/{session_id}/messages")
@@ -540,11 +609,11 @@ async def send_step_message(session_id: str, request: Request) -> JSONResponse:
         # Deleted since the lookup above.
         raise _unknown_session() from None
     except StepFinishedError:
-        raise _refused(
+        raise refused(
             status.HTTP_409_CONFLICT, "step-finished", "The step is over; it takes no more messages.",
         ) from None
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"the message to step session {session_id} could not be written",
             message="The message could not be delivered.",
@@ -574,15 +643,32 @@ async def cancel_step_session(session_id: str, request: Request) -> JSONResponse
     require_link(request)
     try:
         session = await _step_session(request, session_id)
-        await request.app.state.session_store.cancel_case_step(session.id, {"reason": _CANCELLED})
-    except SessionNotFoundError:
-        # Deleted since the lookup above.
-        raise _unknown_session() from None
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"step session {session_id} could not be cancelled",
             message="The step session could not be cancelled.",
+        ) from None
+    return await cancel_work_session(request, session)
+
+
+async def cancel_work_session(request: Request, session: Any) -> JSONResponse:
+    """End the step or the work item *session* works: redact its inputs, pause it and interrupt its turn.
+
+    ``200 {"status": "paused"}``, also when it was paused already.  Every
+    cancel interrupts the turn, so a retry stops a turn its first attempt
+    did not reach; only the first pauses the session.
+    """
+    try:
+        await request.app.state.session_store.cancel_case_step(session.id, {"reason": _CANCELLED})
+    except SessionNotFoundError:
+        # Deleted since the lookup.
+        raise _unknown_session() from None
+    except DBAPIError as exc:
+        raise database_failed(
+            exc,
+            logged=f"session {session.id} could not be cancelled",
+            message="The session could not be cancelled.",
         ) from None
     await request.app.state.redis.publish(
         f"{INTERRUPT_CHANNEL_PREFIX}:{session.id}", json.dumps({"reason": _CANCELLED}),
@@ -597,7 +683,7 @@ async def read_step_session(session_id: str, request: Request) -> JSONResponse:
     try:
         session = await _step_session(request, session_id)
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"step session {session_id} could not be read",
             message="The step session could not be read.",
@@ -623,14 +709,14 @@ async def read_step_session_events(session_id: str, request: Request) -> JSONRes
     require_link(request)
     try:
         session = await _step_session(request, session_id)
-        after = _query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
-        limit = _query_int(request, "limit", default=_PAGE_DEFAULT, low=1, high=_PAGE_MAX)
+        after = query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
+        limit = query_int(request, "limit", default=_PAGE_DEFAULT, low=1, high=_PAGE_MAX)
         # One more than the page holds tells whether more follow.
         read = await request.app.state.session_store.get_events(
             session.id, after=after, limit=limit + 1, exclude_types=[EventType.LLM_DELTA],
         )
     except DBAPIError as exc:
-        raise _database_unavailable(
+        raise database_unavailable(
             exc,
             logged=f"the events of step session {session_id} could not be read",
             message="The step session's events could not be read; try again.",
@@ -651,12 +737,12 @@ async def stream_step_session_events(session_id: str, request: Request) -> Event
     try:
         session = await _step_session(request, session_id)
     except DBAPIError as exc:
-        raise _database_unavailable(
+        raise database_unavailable(
             exc,
             logged=f"step session {session_id} could not be read",
             message="The step session's events could not be read; try again.",
         ) from None
-    after = _query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
+    after = query_int(request, "after", default=0, low=0, high=_BIGINT_MAX)
     return EventSourceResponse(
         session_event_stream(request, request.app.state.session_store, session.id, after=after, watch=True),
     )
@@ -734,7 +820,7 @@ async def read_step_session_progress(session_id: str, request: Request) -> JSONR
         todos, todos_at = await _todo_list(store, session.id)
         last_activity = await _last_activity(store, session.id)
     except DBAPIError as exc:
-        raise _database_unavailable(
+        raise database_unavailable(
             exc,
             logged=f"the progress of step session {session_id} could not be read",
             message="The step session's progress could not be read; try again.",
@@ -752,7 +838,7 @@ def _case_id(case_id: str) -> UUID:
     try:
         return UUID(case_id)
     except ValueError:
-        raise _refused(
+        raise refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The case id is not a UUID.",
         ) from None
 
@@ -763,7 +849,7 @@ def _checked_path(request: Request, case: UUID, path: str) -> str:
         relative = case_path(path)
         case_key(request.app.state.settings, case, relative)
     except CaseFileError as exc:
-        raise _refused(
+        raise refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code, "The path is not one of the case's files.",
         ) from None
     return relative
@@ -780,17 +866,17 @@ def _storage_failed(exc: Exception, case: UUID) -> HTTPException:
     The error's text can quote the object's key: a case's file name.
     """
     logger.warning("keel-link: the files of case %s could not be reached (%s)", case, type(exc).__name__)
-    return _refused(
+    return refused(
         status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The case's files could not be reached; try again.",
     )
 
 
 def _unknown_file() -> HTTPException:
-    return _refused(status.HTTP_404_NOT_FOUND, "unknown-file", "No such file in the case's workspace.")
+    return refused(status.HTTP_404_NOT_FOUND, "unknown-file", "No such file in the case's workspace.")
 
 
 def _too_large(limit: int) -> HTTPException:
-    return _refused(status.HTTP_413_CONTENT_TOO_LARGE, "too-large", f"The file is larger than {limit} bytes.")
+    return refused(status.HTTP_413_CONTENT_TOO_LARGE, "too-large", f"The file is larger than {limit} bytes.")
 
 
 def _editing(document: OpenDocument) -> list[str]:
@@ -816,7 +902,7 @@ async def list_files_of_case(case_id: str, request: Request) -> JSONResponse:
         # Every open row under the case's workspace, by its location's prefix: one query, however many files.
         documents = await open_under(state.session_factory, workspace.location("")) if files else []
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"the open documents of case {case} could not be read",
             message="The case's files could not be listed.",
@@ -931,13 +1017,13 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
     try:
         open_now = await open_at(state.session_factory, location)
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"the open documents of case {case} could not be read",
             message="The file could not be written.",
         ) from None
     if open_now is not None:
-        raise _refused(status.HTTP_409_CONFLICT, "file-open", "The file is open in the editor.")
+        raise refused(status.HTTP_409_CONFLICT, "file-open", "The file is open in the editor.")
     try:
         await write_case_file(state.storage, state.settings, case, relative, data)
     except (ClientError, BotoCoreError) as exc:
@@ -954,11 +1040,11 @@ async def _member_name(request: Request, org_id: UUID, user_id: UUID) -> str:
                 await db.execute(select(User.display_name).where(User.id == user_id, belongs_to(org_id)))
             ).one_or_none()
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc, logged=f"user {user_id} could not be read", message="The editor could not be opened.",
         ) from None
     if found is None:
-        raise _refused(status.HTTP_404_NOT_FOUND, "unknown-user", "No such user in this org.")
+        raise refused(status.HTTP_404_NOT_FOUND, "unknown-user", "No such user in this org.")
     return found.display_name
 
 
@@ -978,11 +1064,11 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
     state = request.app.state
     office = state.settings.office
     if not office.enabled:
-        raise _refused(status.HTTP_503_SERVICE_UNAVAILABLE, "office-off", "No document server is configured.")
+        raise refused(status.HTTP_503_SERVICE_UNAVAILABLE, "office-off", "No document server is configured.")
     relative = _checked_path(request, case, body.path)
     kind = office_kind(relative)
     if kind is None:
-        raise _refused(
+        raise refused(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "not-a-document", "The file is not an office document.",
         )
     workspace = case_workspace(state.storage, state.settings, case)
@@ -1000,11 +1086,11 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
             session_id=None, case_id=case, user=(editor_id, name),
         )
     except DocumentClosing:
-        raise _refused(
+        raise refused(
             status.HTTP_409_CONFLICT, "document-closing", "The document is still being saved; try again in a moment.",
         ) from None
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"a document of case {case} could not be opened",
             message="The editor could not be opened.",
@@ -1036,7 +1122,7 @@ def _org_id(org_id: str) -> UUID:
     try:
         return UUID(org_id)
     except ValueError:
-        raise _refused(
+        raise refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The org id is not a UUID.",
         ) from None
 
@@ -1055,7 +1141,7 @@ async def _firebase_project(request: Request, org_id: UUID) -> str | None:
             "keel-link: the Firebase config of org %s could not be read (%s)",
             org_id, type(unavailable.__cause__).__name__,
         )
-        raise _refused(
+        raise refused(
             status.HTTP_503_SERVICE_UNAVAILABLE, "unavailable", "The org's sign-in could not be read; try again.",
         ) from None
     return None if config is None else config.firebase_project_id
@@ -1087,9 +1173,9 @@ async def invite_org_member(org_id: str, request: Request) -> JSONResponse:
             await db.commit()
     except InvitationError as exc:
         status_code, message = _INVITATION_REFUSALS[exc.code]
-        raise _refused(status_code, exc.code, message) from None
+        raise refused(status_code, exc.code, message) from None
     except DBAPIError as exc:
-        raise _database_failed(
+        raise database_failed(
             exc,
             logged=f"an invitation into org {org} could not be written",
             message="The invitation could not be written.",
