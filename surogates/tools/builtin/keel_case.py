@@ -14,8 +14,9 @@ agent.  Every item Keel gives carries a ``cite`` label the agent cites.
 - ``case_draft_form`` drafts values into the person's form on an open step,
   each with its sources, and answers Keel's JSON as it came.
 
-Keel's other answers come back through :func:`answered`, which the
-designer's tools share.  No log line here carries the case's data.
+Keel's other answers come back through :func:`answered`, and a text too
+long for the result is cut to fit by :func:`fit_result`: the designer's tools
+share both.  No log line here carries the case's data.
 """
 
 from __future__ import annotations
@@ -221,18 +222,25 @@ async def handle_case_file_read(arguments: dict, **kwargs: Any) -> str:
 
 
 def _file_result(path: str, cite: Any, text: str, truncated: bool) -> str:
-    """``case_file_read``'s result, ``{"path", "cite", "text", "truncated"}``, as JSON of at most :data:`_RESULT_CHARS`.
+    """``case_file_read``'s result, ``{"path", "cite", "text", "truncated"}``, as JSON of at most :data:`_RESULT_CHARS`."""
+    return fit_result({"path": path, "cite": cite, "text": text, "truncated": truncated}, "text")
+
+
+def fit_result(fields: dict[str, Any], key: str) -> str:
+    """*fields*, which hold a text under *key* and ``truncated``, as JSON of at most :data:`_RESULT_CHARS`.
 
     Escapes can make the JSON of a text far longer than the text: the text
     is then shortened until the result fits, and ``truncated`` is true.
     Each character cut takes at least one off the JSON.
     """
+    fields = dict(fields)
     while True:
-        result = json.dumps({"path": path, "cite": cite, "text": text, "truncated": truncated}, ensure_ascii=False)
+        result = json.dumps(fields, ensure_ascii=False)
         over = len(result) - _RESULT_CHARS
+        text = fields[key]
         if over <= 0 or not text:
             return result
-        text, truncated = text[: max(len(text) - over, 0)], True
+        fields[key], fields["truncated"] = text[: max(len(text) - over, 0)], True
 
 
 def _draft(arguments: dict) -> dict[str, Any] | str:

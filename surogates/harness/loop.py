@@ -5670,14 +5670,21 @@ class AgentHarness(
                 set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
             )
             tool_filter.discard("start_case")
+        # The designer's tools go only to an agent whose policy's allow-list
+        # names them, as in ``worker._filter_effective_tools``: none without a
+        # gate.  ``None`` (every registered tool) is spelled out so they can
+        # go.  ``getattr``: some test harnesses skip ``__init__``.
+        from surogates.runtime.governance import KEEL_DESIGNER_TOOLS
+
+        gate = getattr(self, "_governance_gate", None)
+        allow_listed = gate.allow_listed(KEEL_DESIGNER_TOOLS) if gate is not None else frozenset()
+        tool_filter = (
+            set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
+        ) - (KEEL_DESIGNER_TOOLS - allow_listed)
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
-        # ``None`` (every registered tool) is spelled out so they can go.
-        return gate_case_tools(
-            set(self._tools.tool_names) if tool_filter is None else tool_filter,
-            session,
-        )
+        return gate_case_tools(tool_filter, session)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(

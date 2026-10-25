@@ -177,6 +177,14 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "case_files": ToolLocation.HARNESS,
     "case_file_read": ToolLocation.HARNESS,
     "case_draft_form": ToolLocation.HARNESS,
+    # The designer agent works on a builder's draft through Keel's door: the
+    # worker's door key.
+    "draft_files": ToolLocation.HARNESS,
+    "draft_read": ToolLocation.HARNESS,
+    "draft_main": ToolLocation.HARNESS,
+    "draft_save_file": ToolLocation.HARNESS,
+    "draft_save_scenario": ToolLocation.HARNESS,
+    "draft_dry_run": ToolLocation.HARNESS,
     # An intake agent starts a case through Keel's door: the worker's door key.
     "start_case": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)

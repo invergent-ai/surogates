@@ -11,6 +11,9 @@ A person's case agent reads its case only through Keel: it is offered the
 case tools in place of the skills, the terminal, file writing, office and the
 helpers, and no other session is offered the case tools.
 
+The designer's tools work on a builder's draft: only an agent whose policy's
+allow-list names them is offered them, and never in a case's session.
+
 The prompt the model reads and the schemas it is sent are decided in two
 places, the worker and the harness, and they must agree.
 """
@@ -24,6 +27,7 @@ from uuid import uuid4
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.governance.policy import GovernanceGate
 from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
@@ -46,6 +50,9 @@ MCP_TOOL = "mcp__crm__lookup"
 STEP_TOOLS = {"complete_step", "raise_hand"}
 ITEM_TOOLS = {"complete_item", "return_item"}
 CASE_TOOLS = {"case_read", "case_history", "case_files", "case_file_read", "case_draft_form"}
+DESIGNER_TOOLS = {
+    "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+}
 HELPER_TOOLS = {"delegate_task", "spawn_worker", "send_worker_message", "stop_worker"}
 # What a person's case agent never gets: skills, the terminal, file writing,
 # office, and the helpers, any of which would work in the case's workspace.
@@ -82,8 +89,8 @@ def _tenant(session) -> TenantContext:
     )
 
 
-def _prompt_tools(session, registry: ToolRegistry) -> set[str]:
-    """The tools the worker tells the model about."""
+def _prompt_tools(session, registry: ToolRegistry, *, gate: GovernanceGate | None = None) -> set[str]:
+    """The tools the worker tells the model about, under the wake's governance *gate*."""
     return _filter_effective_tools(
         tools=set(registry.tool_names),
         tenant=_tenant(session),
@@ -91,20 +98,28 @@ def _prompt_tools(session, registry: ToolRegistry) -> set[str]:
         use_api_for_harness_tools=True,
         whiteboard_enabled=True,
         programs_enabled=True,
+        allow_listed=gate.allow_listed(DESIGNER_TOOLS) if gate is not None else frozenset(),
     )
 
 
-def _schema_tools(session, registry: ToolRegistry) -> set[str]:
-    """The tools whose schemas the harness sends the model."""
+def _schema_tools(session, registry: ToolRegistry, *, gate: GovernanceGate | None = None) -> set[str]:
+    """The tools whose schemas the harness sends the model, under the wake's governance *gate*."""
     harness = AgentHarness(
         session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
         tenant=_tenant(session), worker_id="w", budget=IterationBudget(max_total=10),
         context_compressor=MagicMock(spec=ContextCompressor),
         prompt_builder=MagicMock(spec=PromptBuilder),
         sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
-        mcp_tool_names=frozenset({MCP_TOOL}),
+        mcp_tool_names=frozenset({MCP_TOOL}), governance_gate=gate,
     )
     return harness._tool_filter_for_session(session)
+
+
+def _offered(session, registry: ToolRegistry, *, policy: dict | None) -> tuple[set[str], set[str]]:
+    """The tools the worker tells the model about, and those whose schemas the harness sends it, under its
+    agent's *policy*: one gate for both, as a wake builds it."""
+    gate = build_governance_gate(policy)
+    return _prompt_tools(session, registry, gate=gate), _schema_tools(session, registry, gate=gate)
 
 
 async def _sent_on_a_turn(
@@ -345,3 +360,33 @@ async def test_no_other_session_gets_the_case_tools():
     for session in (await _step(store), await _item(store), _chat({}), narrowed):
         for offered in (_prompt_tools(session, registry), _schema_tools(session, registry)):
             assert offered.isdisjoint(CASE_TOOLS), session.config
+
+
+async def test_an_open_policy_offers_no_designer_tool():
+    registry = _registry()
+    chat = _chat({})
+
+    for policy in (None, {"denied_tools": ["web_search"]}):
+        for offered in _offered(chat, registry, policy=policy):
+            assert "read_file" in offered, policy
+            assert offered.isdisjoint(DESIGNER_TOOLS), policy
+    # A harness without a gate, and a chat whose config names them.
+    narrowed = _chat({"allowed_tools": ["read_file", *sorted(DESIGNER_TOOLS)]})
+    assert _schema_tools(chat, registry).isdisjoint(DESIGNER_TOOLS)
+    assert _schema_tools(narrowed, registry) == {"read_file"}
+
+
+async def test_an_allow_list_naming_the_designer_tools_offers_them():
+    registry = _registry()
+    store = _SessionStore()
+    policy = {"allowed_tools": [*sorted(DESIGNER_TOOLS), "web_search"]}
+
+    for offered in _offered(_chat({}), registry, policy=policy):
+        assert DESIGNER_TOOLS <= offered
+    # Only those it names.
+    for offered in _offered(_chat({}), registry, policy={"allowed_tools": ["draft_files", "draft_read"]}):
+        assert offered & DESIGNER_TOOLS == {"draft_files", "draft_read"}
+    # Never in a case's session.
+    for session in (await _step(store), await _item(store), await _case_agent(store)):
+        for offered in _offered(session, registry, policy=policy):
+            assert offered.isdisjoint(DESIGNER_TOOLS), session.config

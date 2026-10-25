@@ -34,6 +34,7 @@ from surogates.runtime.entitlements import (
 )
 from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
+    KEEL_DESIGNER_TOOLS,
     RESEARCH_SPINE_TOOLS,
     WORKER_SELF_TOOLS,
     build_governance_gate,
@@ -235,6 +236,9 @@ def _filter_effective_tools(
     # The case types Keel lets this agent start: none, no ``start_case``.
     # Only a root session that works on no case is offered it.
     intake: Sequence[dict] = (),
+    # The designer's tools the agent's policy allow-lists
+    # (``GovernanceGate.allow_listed``): none, no designer tool.
+    allow_listed: frozenset[str] = frozenset(),
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
@@ -378,6 +382,10 @@ def _filter_effective_tools(
     # the schemas keep (``AgentHarness._tool_filter_for_session_impl``).
     if not intake or getattr(session, "parent_id", None) is not None or is_eval_session(session):
         result.discard("start_case")
+
+    # The designer's tools go only to an agent whose policy's allow-list names
+    # them, as the schemas keep (``AgentHarness._tool_filter_for_session_impl``).
+    result -= KEEL_DESIGNER_TOOLS - allow_listed
 
     # Last: a Keel case's sessions are offered only the case's tools, and only
     # its step's own session the step tools.  The schemas apply the same gate
@@ -2033,6 +2041,11 @@ async def run_worker(settings: Settings) -> None:
             [] if is_case_session(session) or session.parent_id is not None or is_eval_session(session)
             else await intake_case_types(session.org_id, session.agent_id)
         )
+        # Per-wake enforcement gate from the agent's runtime-config
+        # governance projection (allow/deny lists + egress composed onto the
+        # platform floor, frozen).  Built once: the prompt surface reads its
+        # allow-list here, and the harness gets this same gate.
+        governance_gate = build_governance_gate(ctx.governance)
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
@@ -2048,6 +2061,7 @@ async def run_worker(settings: Settings) -> None:
             whiteboard_enabled=ctx.whiteboard_enabled,
             programs_enabled=ctx.programs_enabled,
             intake=intake,
+            allow_listed=governance_gate.allow_listed(KEEL_DESIGNER_TOOLS),
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding
@@ -2202,10 +2216,7 @@ async def run_worker(settings: Settings) -> None:
             # A project's thread runs a saga whatever saga.enabled says.
             saga_settings=settings.saga,
             log_policy_allowed=settings.governance.log_allowed,
-            # Per-wake enforcement gate from the agent's runtime-config
-            # governance projection (allow/deny lists + egress composed
-            # onto the platform floor, frozen).
-            governance_gate=build_governance_gate(ctx.governance),
+            governance_gate=governance_gate,
             summary_client=(
                 summary_slot.client if summary_slot is not None else None
             ),

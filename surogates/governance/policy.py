@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -194,6 +195,14 @@ class GovernanceGate:
         return self._skips_role_check(tool_name) or tool_name in self._engine.state_permissions.get(
             _DEFAULT_ROLE, set(),
         )
+
+    def allow_listed(self, names: Iterable[str]) -> frozenset[str]:
+        """Those of *names* this gate's allow-list holds, less any it denies;
+        none under an open or deny-only policy, which has no allow-list."""
+        if not self._has_allow_list:
+            return frozenset()
+        held = self._engine.state_permissions.get(_DEFAULT_ROLE, set())
+        return frozenset(name for name in names if name in held)
 
     def _name_decision(self, tool_name: str) -> PolicyDecision | None:
         """What the tool's name alone decides, before any argument is read;

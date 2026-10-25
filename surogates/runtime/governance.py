@@ -98,6 +98,14 @@ CASE_ITEM_TOOLS: frozenset[str] = frozenset({"complete_item", "return_item"})
 KEEL_CASE_TOOLS: frozenset[str] = frozenset({
     "case_read", "case_history", "case_files", "case_file_read", "case_draft_form",
 })
+# How the designer agent works on the draft a builder opened it on, through
+# Keel: offered only where an agent's policy has an allow-list naming them
+# (``GovernanceGate.allow_listed``), never under an open or deny-only policy,
+# and never in a case's session.  Not protected: they are the allow-list's to
+# give.
+KEEL_DESIGNER_TOOLS: frozenset[str] = frozenset({
+    "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+})
 
 # Tools no agent policy may take away. The ops catalog omits these names
 # so Studio cannot offer them and the policy validator rejects them with

@@ -204,6 +204,29 @@ The answer is `202 {"status": "queued"}`. A session at rest resumes, with a `ses
 
 `POST /v1/keel/case-agent-sessions/{session_id}/cancel` interrupts the agent's turn and pauses its session: `200 {"status": "paused"}`, also when it was paused already, and every call interrupts the turn again. Nothing leaves the session's config, and the person's next message wakes it. `GET /v1/keel/case-agent-sessions/{session_id}` answers `200 {"session_id", "status"}`. Its events are read as a step session's, by page and live; it has no progress route. The routes log neither a message's text nor the person.
 
+## The designer agent's tools
+
+The designer agent helps a builder change a project's definitions in a draft. The builder opens it on one draft, and Keel delegates that draft to the builder's chat with it. Its `keel_designer` tools work on the draft through Keel's door: the worker sends each to `SUROGATES_KEEL_URL`, with `SUROGATES_KEEL_DOOR_KEY` as the bearer, under the session's id. Keel finds the draft by the session's live delegation and acts on it as the builder. None publishes: publishing stays the builder's.
+
+| Tool | Door route | The model reads |
+|---|---|---|
+| `draft_files` | `GET /api/harness/sessions/{session_id}/draft/files` | Keel's answer: `{"draft_id", "files": [{"path", "kind", "key"}]}`. |
+| `draft_read` | `GET /api/harness/sessions/{session_id}/draft/file?path=<path>` | Keel's answer: `{"path", "content"}`, the file's JSON. |
+| `draft_main` | `GET /api/harness/sessions/{session_id}/draft/main`, with `?path=<path>` only when the model gives one | Keel's answer, from the project's published definitions: without a path, `{"files": [path, …]}`; with one, `{"path", "content"}`. |
+| `draft_save_file` | `PUT /api/harness/sessions/{session_id}/draft/file?path=<path>`, the file's JSON object as the body | Keel's answer: `{"head"}`, the draft's new head. A file Keel finds invalid is `422 invalid-file`, with its `problems`. |
+| `draft_save_scenario` | `PUT /api/harness/sessions/{session_id}/draft/scenario?path=<path>`, the scenario's JSON object as the body | Keel's answer: `{"head"}`. |
+| `draft_dry_run` | `POST /api/harness/sessions/{session_id}/draft/dry-run` | Keel's answer: the dry run's, with `ops_checked: false`. |
+
+A read or a save without its path is never sent, nor is a save whose content is not a JSON object, or one holding NaN or an infinity. A save over 256,000 bytes of JSON is never sent either: it reads `The file is over the 256,000 bytes Keel takes: split it or shorten it.` A file whose answer, as JSON, would run past 300,000 characters comes back as `{"path", "content", "truncated": true}`, with `content` the file's JSON text, cut, so the result always comes whole. Keel's other answers:
+
+| Keel's answer | The model reads |
+|---|---|
+| `404 no-delegation`: the session holds no live delegation | `No draft is open to this chat: ask the builder to open the designer on a draft.` |
+| No answer, `408`, `429`, or a `5xx` other than `503 harness-off` | `Keel could not be reached; call <tool> again.` |
+| Anything else | Keel's message, or `Keel refused the call (<status>).`, as an error with Keel's code, and Keel's `problems` when it gave them. |
+
+An agent gets the designer's tools only through an allow-list naming them: its policy's `allowed_tools`. An agent with no policy, or a policy with only a deny-list, is offered none, and a session's own config never adds them. No session of a case is offered them, whatever its agent's policy, and one called from a case's session reaches no Keel. A worker without both settings has no link to Keel: each designer tool answers `This runtime has no link to Keel.`
+
 ## Watching a step session
 
 Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The same reads serve an item session, at `GET /v1/keel/item-sessions/{session_id}/events`, `…/events/stream` and `…/progress`, and a case agent session, at `GET /v1/keel/case-agent-sessions/{session_id}/events` and `…/events/stream`: each answers as the step session's route below does, and is refused the same way. The runtime keeps each session's events as an append-only log, and an event never changes once written:
@@ -315,7 +338,7 @@ keel-link reads the same state as the API (database, Redis, storage, the platfor
 | Setting | Held by | What it is |
 |---|---|---|
 | `SUROGATES_KEEL_LINK_KEY` | keel-link alone | The bearer Keel shows keel-link. |
-| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, where an intake agent starts cases, and where a case agent reads its case. |
+| `SUROGATES_KEEL_URL` | the worker | The base URL of Keel's door, where the worker reports how a step ended, where an intake agent starts cases, where a case agent reads its case, and where the designer agent works on its draft. |
 | `SUROGATES_KEEL_DOOR_KEY` | the worker alone | The bearer the worker shows Keel's door. |
 | `SUROGATES_KEEL_MAX_FILE_BYTES` | keel-link | The largest file Keel may write to a case's workspace, in bytes: 52428800 (50 MiB) by default. |
 

@@ -70,6 +70,7 @@ class ToolRuntime:
             github,
             kb_tools,
             keel_case,
+            keel_designer,
             loop_control,
             media_gen,
             memory,
@@ -134,6 +135,7 @@ class ToolRuntime:
             case_step,  # complete_step, raise_hand (a case step's report to Keel)
             case_item,  # complete_item, return_item (an item session's report to Keel)
             keel_case,  # case_read, case_history, case_files, case_file_read, case_draft_form (a case agent, through Keel)
+            keel_designer,  # draft_files, draft_read, draft_main, draft_save_file, draft_save_scenario, draft_dry_run (the designer, through Keel)
             intake,  # start_case (an intake agent starts a case through Keel)
         ]
 
