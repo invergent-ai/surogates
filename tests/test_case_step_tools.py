@@ -1063,6 +1063,25 @@ async def test_a_message_to_a_resting_step_is_not_read_at_a_wake_keel_did_not_se
     assert len(fake_keel.requests) == 1
 
 
+async def test_a_message_left_unread_wakes_no_step_that_is_over(fake_keel, monkeypatch, tmp_path):
+    # The message waits on the resting step; then the step completes and its inputs leave the session.
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    fake_keel.answer(200, HAND_RAISED)
+    _started(store)
+    arguments = {"question": "Which income counts?"}
+    assert len(await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c1")])) == 1
+    store.keel_says(MESSAGE)
+    await store.mark_case_step_reported(store.row.id, "completed")
+    await store.redact_case_inputs(store.row.id)
+    log = len(store.log)
+
+    # No turn of the step is left to read the message: the next wake runs none, and the session stays at rest.
+    assert await _queued_wake(monkeypatch, store, []) == []
+    assert store.row.status == "completed"
+    assert not any(e.type == EventType.SESSION_RESUME.value for e in store.log[log:])
+    assert len(fake_keel.requests) == 1
+
+
 async def test_a_step_keel_took_is_not_woken_by_the_late_report_of_a_worker_it_spawned(fake_keel, monkeypatch, tmp_path):
     # The step ended where Keel took its report: a turn of its own after that would be no step's.
     store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))

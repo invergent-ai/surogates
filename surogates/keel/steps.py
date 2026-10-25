@@ -71,6 +71,7 @@ __all__ = [
     "render_kickoff",
     "render_message",
     "rests_on_its_report",
+    "sleeps_through_a_plain_message",
     "step_contract_in",
     "step_contract_of",
 ]
@@ -173,6 +174,19 @@ def rests_on_its_report(config: object) -> bool:
         and REPORTED_KEY in contract
         and contract.get("inputs_redacted") is not True
     )
+
+
+def sleeps_through_a_plain_message(config: object) -> bool:
+    """Whether a plain message (:data:`MESSAGE_MARKER`) leaves the step a
+    session's *config* holds at rest, unread.
+
+    A step that rests on its report (:func:`rests_on_its_report`) waits for
+    Keel's next answer or revision, whose turn reads the message first.  A
+    step that is over, its inputs redacted, has no turn left to read it.
+    """
+    contract = config.get(CASE_STEP_KEY) if isinstance(config, Mapping) else None
+    over = isinstance(contract, Mapping) and contract.get("inputs_redacted") is True
+    return over or rests_on_its_report(config)
 
 
 class OutcomeContract(BaseModel):

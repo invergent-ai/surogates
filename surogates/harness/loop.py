@@ -125,7 +125,7 @@ from surogates.keel.steps import (
     is_case_step,
     is_keel_message,
     is_keels_word,
-    rests_on_its_report,
+    sleeps_through_a_plain_message,
     step_contract_of,
 )
 from surogates.harness.tool_schemas import (
@@ -954,21 +954,23 @@ class AgentHarness(
         ``_has_user_signal_since``).  A project coordinator's follow-up to
         its thread counts as a message does, and so does Keel's word to a
         case's step, or its plain message, written as the turn that
-        reported the step ended.  Not a plain message to a step that rests
-        on its report: a person holds the step, and the message waits for
-        Keel's next answer or revision, whose own resume wakes the step.
+        reported the step ended.  Not a plain message to a step that
+        sleeps through one (:func:`sleeps_through_a_plain_message`).  A
+        step resting on its report is a person's to hold: the message waits
+        for Keel's next answer or revision, whose own resume wakes the
+        step.  A step that is over has no turn left to read it.
         Completion bookkeeping events (turn.summary, session.complete,
         inbox.task_complete) always sit past the cursor and are
         excluded by the type filter.
         """
         cursor = await self._store.get_harness_cursor(session.id)
-        resting = rests_on_its_report(session.config)
+        asleep = sleeps_through_a_plain_message(session.config)
         # A command is not stranded by the cursor: a command's end leaves
         # the cursor before a report no turn has read, and one that still
         # waits revives a finished session by its own rule.
         return any(
             self._is_for_the_model(session, event)
-            and not (resting and (event.data or {}).get("synthetic") == MESSAGE_MARKER)
+            and not (asleep and (event.data or {}).get("synthetic") == MESSAGE_MARKER)
             for event in await self._store.get_events(session.id, after=cursor, types=list(MESSAGE_TYPES))
         )
 
