@@ -54,3 +54,5 @@ Pass the source's reads as plain functions, as above: the adapter copies each me
 ## Documents
 
 `DocumentEditor` opens a document in the document server's editor with no chat session behind it: its `open(theme)` answers `{document_server_url, config, mentionable_users?}`, the editor config the host signed, and it opens again when `reopenKey` or the theme changes, not for a new `open` alone. A failure to open shows its message in an alert, or "The document could not be opened." when it has none; `notices` shows the host's own lines under that alert, above the editor. `loadDocsApi` loads the document server's `api.js` once per server.
+
+`editorMentions(users, tell)` is a `DocumentEditor`'s `events` for its comments' mentions, answered as the chat's own editor answers them. A comment's mention is offered `users`, and any other list the editor asks for gets nobody. A comment that mentions one of `users`, by email in any case, calls `tell(thread, comment, emails)`, which handles its own failure. With no `users`, the editor gets no events.
