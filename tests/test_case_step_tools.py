@@ -985,7 +985,7 @@ async def test_keels_plain_message_reaches_the_turn_under_way(fake_keel, monkeyp
     # The turn's next request reads the message, after the call it landed in and that call's result.
     assert len(sent) == 2
     assert MESSAGE not in json.dumps(sent[0]["messages"])
-    assert MESSAGE in json.dumps(sent[1]["messages"])
+    assert json.dumps(sent[1]["messages"]).count(MESSAGE) == 1
     assert _in_call_order(sent[1]["messages"])
     assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]
     assert store.reported() == "hand-raised"
@@ -995,7 +995,7 @@ async def test_keels_plain_message_reaches_the_turn_under_way(fake_keel, monkeyp
     store.keel_writes("answer", ANSWER)
     [request] = await _queued_wake(monkeypatch, store, [_calls("raise_hand", arguments, "c3")])
     assert _in_call_order(request["messages"])
-    assert MESSAGE in json.dumps(request["messages"])
+    assert json.dumps(request["messages"]).count(MESSAGE) == 1
 
 
 async def test_keels_plain_message_during_a_report_gives_the_step_no_back(fake_keel, monkeypatch, tmp_path):
@@ -1040,7 +1040,7 @@ async def test_a_message_to_a_resting_step_is_read_with_keels_next_word(fake_kee
 
     # Keel's answer wakes the step, and its turn reads the message first.
     said = json.dumps(request["messages"])
-    assert MESSAGE in said and ANSWER in said
+    assert said.count(MESSAGE) == 1 and ANSWER in said
     assert said.index(MESSAGE) < said.index(ANSWER)
     assert _in_call_order(request["messages"])
     assert [json.loads(r.content)["call_id"] for r in fake_keel.requests] == ["c1", "c2"]

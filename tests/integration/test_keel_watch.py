@@ -231,6 +231,11 @@ async def test_a_failed_read_is_unavailable_and_logs_no_case_data(
 # ---------------------------------------------------------------------------
 # Live
 # ---------------------------------------------------------------------------
+# The step's stream is the public stream's watch, subscribed by pattern. These
+# tests follow the pattern of
+# test_events_stream.py::test_a_watch_reads_the_chat_once_redis_has_taken_its_subscription:
+# they write to the step's log while its watch is open, and read what reaches
+# the stream live.
 
 
 async def test_the_stream_replays_then_goes_live(link, link_app, org, session_store, redis_client, monkeypatch):
