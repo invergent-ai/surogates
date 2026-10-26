@@ -27,6 +27,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -711,11 +712,30 @@ def _sandbox(answers: dict[str, str]) -> MagicMock:
     return pool
 
 
+class _Bundle:
+    """An agent's bundle at *version* that holds no files."""
+
+    def __init__(self, version: str) -> None:
+        self.version = version
+
+    async def list(self, prefix: str = "") -> list[str]:
+        return []
+
+    async def read_text(self, path: str, encoding: str = "utf-8") -> str:
+        raise LookupError(path)
+
+    async def read_bytes(self, path: str) -> bytes:
+        raise LookupError(path)
+
+
 def _step_harness(
     monkeypatch, store: _StepStore, replies: list, sent: list[dict], *,
-    sandbox: dict[str, str] | None = None, streaming: bool = False,
+    sandbox: dict[str, str] | None = None, streaming: bool = False, bundle: Any = None,
 ):
-    """A worker's harness for the step's session, the model answering with *replies* in turn; *sent* gets each request."""
+    """A worker's harness for the step's session, the model answering with *replies* in turn; *sent* gets each request.
+
+    *bundle* is the agent's bundle the harness was built with, if any.
+    """
     script = iter(replies)
 
     async def llm(**call):
@@ -745,6 +765,7 @@ def _step_harness(
         sandbox_pool=_sandbox(sandbox or {}),
     )
     harness._storage = store.storage
+    harness._bundle = bundle
     harness._streaming_enabled = streaming
     harness._prefetch_memory = AsyncMock(return_value="")
     harness._maybe_consult_required_expert = AsyncMock(return_value=None)
@@ -791,6 +812,7 @@ async def _wake(
 
 async def _queued_wake(
     monkeypatch, store: _QueuedStore, replies: list, *, sandbox: dict[str, str] | None = None, ending=None,
+    bundle: Any = None,
 ) -> list[dict]:
     """A worker's wake of the step's session, taken from the queue, the model answering with *replies* in turn:
     the requests it was sent.
@@ -798,11 +820,12 @@ async def _queued_wake(
     The wake reads the session's status, its cursor and its log as a worker
     does.  *ending* is what else happens as a turn of the wake ends, while
     the turn's end detaches the sandbox: after the turn's last look for
-    messages, before its end is written.
+    messages, before its end is written.  *bundle* is the agent's bundle the
+    worker's harness was built with, if any.
     """
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
     sent: list[dict] = []
-    harness = _step_harness(monkeypatch, store, replies, sent, sandbox=sandbox)
+    harness = _step_harness(monkeypatch, store, replies, sent, sandbox=sandbox, bundle=bundle)
     # The prompt and the context are another worker's concern: the wake's own checks run as they are.
     harness._prompt.set_agent_def = lambda _agent_def: None
     harness._compressor.prune_stale_browser_states = lambda messages: messages
@@ -1295,3 +1318,15 @@ async def test_a_turn_ending_without_a_report_tells_keel_what_every_call_used(fa
     ], sandbox={"read_file": "Checklist: payslips, ID."}, streaming=True)
 
     assert [body["usage"] for body in fake_keel.bodies("/ended")] == [store.used()]
+
+
+@pytest.mark.parametrize(("bundle", "version"), [(_Bundle("v12"), "v12"), (None, None)], ids=["a bundle", "no bundle"])
+async def test_a_wake_records_the_bundle_version_it_ran_with(fake_keel, monkeypatch, tmp_path, bundle, version):
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    _started(store)
+
+    await _queued_wake(monkeypatch, store, [_calls("complete_step", COMPLETION)], bundle=bundle)
+
+    [wake] = [e.data for e in store.log if e.type == EventType.HARNESS_WAKE.value]
+    assert {"worker_id", "cursor"} <= wake.keys()
+    assert wake["bundle_version"] == version

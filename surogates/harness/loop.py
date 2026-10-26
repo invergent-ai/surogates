@@ -2182,11 +2182,18 @@ class AgentHarness(
             # a client that reads the thread's row then sees it.
             await self._answer_file_waits(session, all_events)
 
-            # 5. Emit HARNESS_WAKE event.
+            # 5. Emit HARNESS_WAKE event.  It records the bundle version this
+            # wake ran with, which is not always the one the agent's config
+            # names now: the worker's bundle cache can lag a publish.
             await self._store.emit_event(
                 session_id,
                 EventType.HARNESS_WAKE,
-                {"worker_id": self._worker_id, "cursor": cursor, NAMES_ANSWERS: True},
+                {
+                    "worker_id": self._worker_id,
+                    "cursor": cursor,
+                    NAMES_ANSWERS: True,
+                    "bundle_version": self._bundle.version if self._bundle is not None else None,
+                },
             )
 
             # A thread that works in a copy of its own on its computer opens

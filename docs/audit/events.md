@@ -152,7 +152,18 @@ backend-specific diagnostics (pod name, phase, etc.).
 
 ### Harness lifecycle
 
-`harness.wake` — worker acquired the lease and started processing.
+`harness.wake` — worker acquired the lease and started processing.  The
+wake of a turn carries:
+
+| key | type | notes |
+|---|---|---|
+| `worker_id` | string | The worker that took the lease. |
+| `cursor` | integer | The id of the last event the harness had processed when the wake began. |
+| `names_answers` | boolean | Always `true`: under this wake every answer to a command names the message it answers.  A wake without the key is an older harness's. |
+| `bundle_version` | string or null | The agent's bundle version the wake loaded; `null` when it loaded none. |
+
+The background memory and skill review writes an event of the same type with
+`worker_id`, `review_memory` and `review_skills`.  It carries no `bundle_version`.
 
 `harness.crash` — worker failed mid-session.
 
