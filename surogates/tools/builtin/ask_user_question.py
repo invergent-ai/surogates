@@ -24,8 +24,9 @@ Round-trip
    does, with ``reason: "dismissed"``, when the user types a command
    instead: the harness ends the turn there and runs the command.  A
    question nobody answers in time (``reason: "timeout"``) ends the turn
-   there with no more tool calls (a task's worker is marked blocked
-   instead); the answer can still come later as a new message.
+   there with no more tool calls; the person's later reply arrives as a
+   new message (a task's worker is instead marked blocked until its
+   parent unblocks it).
 """
 
 from __future__ import annotations
@@ -150,9 +151,10 @@ ASK_USER_QUESTION_DESCRIPTION = (
     "Do NOT use for simple yes/no confirmation of dangerous commands (the "
     "terminal tool handles that).  If the user pauses the session "
     "instead of answering, you will receive ``cancelled: true`` -- stop and "
-    "wait for further instructions.  If nobody answers in time, the turn ends "
-    "there with no more tool calls (a task's worker is marked blocked instead); "
-    "the answer can still come later as a new message."
+    "wait for further instructions.  If no answer comes in time, the turn ends "
+    "there with no more tool calls; the person's later reply arrives as a new "
+    "message (a task's worker is instead marked blocked until its parent "
+    "unblocks it)."
 )
 
 
