@@ -29,6 +29,7 @@ from surogates.session.events import EventType
 from surogates.storage.backend import LocalBackend
 from tests.test_case_item_tools import STEP_COMPLETION, STEP_ITEM, _item, _store
 from tests.test_case_step_tools import (  # noqa: F401 - fake_keel is a fixture
+    USAGE,
     _calls,
     _ended_with,
     _queued_wake,
@@ -52,6 +53,8 @@ NUDGE = (
     "or return_item with your reason if you cannot."
 )
 RECORDED = {"recorded": True}
+#: What each end of an item whose log holds no wake and no helper carries besides how it ended.
+FACTS = {"usage": USAGE, "bundle_version": None}
 FOLLOW_UP = "Did you check the co-applicant?"
 # What leaks if a failure's text, or the case's data, reaches Keel.
 LEAKS = ("Ioana", "182000", "does not match", "rejected", "Refused")
@@ -95,7 +98,7 @@ async def test_an_item_turn_that_ends_in_words_is_nudged_once_then_given_back(fa
     [nudge] = [e.data for e in store.log if e.type == EventType.USER_MESSAGE.value and e.data["content"] == NUDGE]
     assert nudge["synthetic"] == "keel_step_nudge"
     assert _ended_with(store) == "completed"
-    assert fake_keel.bodies("/item/ended") == [{"status": "no-outcome", "detail": "completed"}]
+    assert fake_keel.bodies("/item/ended") == [{"status": "no-outcome", "detail": "completed", **FACTS}]
     assert len(fake_keel.requests) == 1
     if keel == "takes-it":
         # Keel gave the item back: it is over for the session.
@@ -117,7 +120,7 @@ async def test_an_item_turn_that_fails_tells_keel_and_ends_the_item(fake_keel, m
 
     assert len(sent) == 3
     assert _failed_with(store) == "provider_error"
-    assert fake_keel.bodies("/item/ended") == [{"status": "failed", "detail": "provider_error"}]
+    assert fake_keel.bodies("/item/ended") == [{"status": "failed", "detail": "provider_error", **FACTS}]
     _no_case_data_reached(fake_keel)
     # The item is over for the session whatever Keel answered.
     assert store.redacted()
@@ -179,7 +182,7 @@ async def test_an_item_the_dispatcher_gives_up_is_reported_as_failed(
         assert fake_keel.requests == []
         assert store.redactions == 1
         return
-    assert fake_keel.bodies("/item/ended") == [{"status": "failed", "detail": code}]
+    assert fake_keel.bodies("/item/ended") == [{"status": "failed", "detail": code, **FACTS}]
     _no_case_data_reached(fake_keel)
     assert store.redacted()
     assert store.redactions == 1

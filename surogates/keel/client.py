@@ -217,14 +217,27 @@ class KeelClient:
             body["usage"] = usage
         return await self._ended(session_id, "ended", body)
 
-    async def item_ended(self, session_id: object, *, status: str, detail: str) -> KeelAnswer:
+    async def item_ended(
+        self,
+        session_id: object,
+        *,
+        status: str,
+        detail: str,
+        usage: dict | None = None,
+        bundle_version: str | None = None,
+    ) -> KeelAnswer:
         """Tell Keel an item session's work item ended without a report (``no-outcome``) or failed (``failed``).
 
-        Keel gives the item back.  Waits for Keel at most
-        :data:`ENDED_TIMEOUT_SECONDS`.  Logs, by session id, an end Keel did
-        not take, and never raises.
+        The body is ``{"status", "detail", "bundle_version"}``, and ``"usage"``
+        (as :meth:`complete` takes it) when given: an end whose use could not
+        be read goes without.  Keel gives the item back.  Waits for Keel at
+        most :data:`ENDED_TIMEOUT_SECONDS`.  Logs, by session id, an end Keel
+        did not take, and never raises.
         """
-        return await self._ended(session_id, "item/ended", {"status": status, "detail": detail[:DETAIL_CHARS]})
+        body: dict[str, Any] = {"status": status, "detail": detail[:DETAIL_CHARS], "bundle_version": bundle_version}
+        if usage is not None:
+            body["usage"] = usage
+        return await self._ended(session_id, "item/ended", body)
 
     async def _ended(self, session_id: object, route: str, body: dict) -> KeelAnswer:
         """Send *body*, how session *session_id* ended, to its *route*, within :data:`ENDED_TIMEOUT_SECONDS`.

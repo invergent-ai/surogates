@@ -29,6 +29,13 @@ checks are the step tools' own.  Once a report ended the item, a later
 report in the same wake is answered here, without Keel.  No log line here
 carries the case's data.
 
+Each report carries what the item's session and its helpers have used so
+far, and the bundle version of the session's latest wake
+(:mod:`surogates.keel.run_facts`); a completion carries the pages read as a
+step's does.  A tool's report cannot go without the use: a store that cannot
+say fails the call, and the model calls again.  An end goes without it
+instead, since Keel must hear of every end.
+
 A turn of the item's session that ends with no report ending the item is
 told to Keel through :func:`report_item_no_outcome`, and Keel gives the item
 back; a session of the item that fails, at its turn's end or in the
@@ -45,6 +52,7 @@ from uuid import UUID
 
 from surogates.keel.client import KeelAnswer, KeelClient, keel_client
 from surogates.keel.items import ItemContract, item_contract_in
+from surogates.keel.run_facts import wake_bundle_version, work_usage, work_usage_or_none
 from surogates.keel.steps import CASE_ITEM_KEY, ITEM_ENDED, ITEM_STOPPED
 from surogates.tools.builtin.case_step import (
     _STOPPED,
@@ -54,6 +62,7 @@ from surogates.tools.builtin.case_step import (
     _ended_in_this_wake,
     _error,
     _mark,
+    _pages_read,
     _redact,
     _rejection,
     _remember_the_end,
@@ -174,16 +183,20 @@ def describe_item_completion(schema: dict[str, Any], contract: ItemContract) -> 
 
 
 async def _stopped(
-    client: KeelClient | None, store: Any, session_id: UUID, *, status: int | None = None, since: int | None = None,
+    client: KeelClient | None, store: Any, session_id: UUID, *, usage: dict[str, Any] | None = None,
+    bundle_version: str | None = None, status: int | None = None, since: int | None = None,
 ) -> str:
     """Keel refused the item's report for good, or there is no Keel to report to: Keel is told the item failed,
-    and its inputs leave the session."""
+    with the *usage* and the *bundle_version* the refused report carried, and its inputs leave the session.
+    With no Keel nothing is told, so none is read: *usage* is ``None``."""
     if client is None:
         logger.warning("Session %s: no link to Keel; its work item stops for people to take", session_id)
         text = f"{ITEM_STOPPED} this runtime has no link to Keel; people take the item."
     else:
         logger.warning("Session %s: Keel refused its work item's report (%s); the item stops", session_id, status)
-        await client.item_ended(session_id, status="failed", detail=f"keel-{status}")
+        await client.item_ended(
+            session_id, status="failed", detail=f"keel-{status}", usage=usage, bundle_version=bundle_version,
+        )
         text = f"{ITEM_STOPPED} Keel refused this item's report ({status}); people take the item."
     await _redact(store, session_id)
     await _mark(store, session_id, _STOPPED, since=since)
@@ -191,7 +204,8 @@ async def _stopped(
 
 
 async def _answered(
-    answer: KeelAnswer, *, tool: str, client: KeelClient, store: Any, session_id: UUID, since: int | None,
+    answer: KeelAnswer, *, tool: str, client: KeelClient, store: Any, session_id: UUID, usage: dict[str, Any] | None,
+    bundle_version: str | None, since: int | None,
 ) -> str:
     """What the model is told of Keel's *answer* to an item tool's report."""
     if answer.status == 200:
@@ -205,25 +219,43 @@ async def _answered(
         return _rejection(answer, tool)
     if answer.transient:
         return _error(f"Keel could not be reached; call {tool} again.")
-    return await _stopped(client, store, session_id, status=answer.status, since=since)
+    return await _stopped(
+        client, store, session_id, usage=usage, bundle_version=bundle_version, status=answer.status, since=since,
+    )
 
 
-async def _report(tool: str, kwargs: dict[str, Any], fields: dict[str, Any], *, shorten: str) -> str:
-    """Send the item's report, *fields* with the tool call's id, to *tool*'s route, and tell the model what came of it."""
+async def _report(
+    tool: str, kwargs: dict[str, Any], fields: dict[str, Any], *, shorten: str, session: Any | None = None,
+) -> str:
+    """Send the item's report, *fields* with the tool call's id, usage and bundle version to *tool*'s route, and
+    tell the model what came of it.  A completion also carries the pages read, from the item's *session* row,
+    read here when not given.
+
+    The usage is the work's, its helpers' included (:func:`work_usage`).  A report cannot be sent without it: a
+    store that cannot read it fails the call, as one that cannot read the pages does, and the model calls again.
+    A runtime with no link to Keel tells no one, so it reads none of it.
+    """
     store = kwargs["session_store"]
     session_id = UUID(str(kwargs["session_id"]))
     client = keel_client()
     if client is None:
         result = await _stopped(None, store, session_id)
     else:
+        usage = await work_usage(store, session_id)
+        bundle_version = await wake_bundle_version(store, session_id)
+        body = {**fields, "call_id": kwargs["tool_call_id"], "usage": usage, "bundle_version": bundle_version}
+        if tool == "complete_item":
+            if session is None:
+                session = await store.get_session(session_id)
+            body["pages_read"] = await _pages_read(store, session)
         since = await _began(store, session_id)
-        answer = await _sent(
-            client.session_call("POST", session_id, _ROUTES[tool], body={**fields, "call_id": kwargs["tool_call_id"]}),
-            tool=tool, shorten=shorten,
-        )
+        answer = await _sent(client.session_call("POST", session_id, _ROUTES[tool], body=body), tool=tool, shorten=shorten)
         if isinstance(answer, str):
             return answer
-        result = await _answered(answer, tool=tool, client=client, store=store, session_id=session_id, since=since)
+        result = await _answered(
+            answer, tool=tool, client=client, store=store, session_id=session_id, usage=usage,
+            bundle_version=bundle_version, since=since,
+        )
     if result.startswith((ITEM_ENDED, ITEM_STOPPED)):
         _remember_the_end(kwargs)
     return result
@@ -272,8 +304,8 @@ async def handle_complete_item(arguments: dict, **kwargs: Any) -> str:
     checked = await _completion(arguments, kwargs, contract, "complete_item")
     if isinstance(checked, str):
         return _error(checked)
-    fields, _ = checked
-    return await _report("complete_item", kwargs, fields, shorten="the output and its sources")
+    fields, session = checked
+    return await _report("complete_item", kwargs, fields, shorten="the output and its sources", session=session)
 
 
 async def handle_return_item(arguments: dict, **kwargs: Any) -> str:
@@ -302,17 +334,23 @@ async def item_awaiting_report(store: Any, session: Any) -> Any | None:
 async def report_item_no_outcome(store: Any, session: Any, *, reason: str) -> None:
     """Tell Keel that a turn of a work item's session ended with no report ending the item.
 
-    Keel gets ``no-outcome``, with *reason*, the turn end's own code, and
-    gives the item back: once Keel took it, the item is marked ``returned``
-    and its inputs leave the session.  Nothing is sent unless the item awaits
-    its report (:func:`item_awaiting_report`).  Never raises: the turn ends
-    whatever Keel answers.
+    Keel gets ``no-outcome``, with *reason*, the turn end's own code, the
+    work's usage when the store can say and the bundle version of the item's
+    latest wake, and gives the item back: once Keel took it, the item is
+    marked ``returned`` and its inputs leave the session.  Nothing is sent
+    unless the item awaits its report (:func:`item_awaiting_report`).  Never
+    raises: the turn ends whatever Keel answers.
     """
     if await item_awaiting_report(store, session) is None:
         return
     since = await _began(store, session.id)
+    usage = await work_usage_or_none(store, session.id)
+    bundle_version = await wake_bundle_version(store, session.id)
     answer = await _tell_keel(
-        session.id, lambda keel: keel.item_ended(session.id, status="no-outcome", detail=reason),
+        session.id,
+        lambda keel: keel.item_ended(
+            session.id, status="no-outcome", detail=reason, usage=usage, bundle_version=bundle_version,
+        ),
     )
     if answer is not None and answer.status == 200:
         await _redact(store, session.id)
@@ -323,14 +361,22 @@ async def report_item_failed(store: Any, session: Any, *, code: str) -> None:
     """Tell Keel that a work item's session failed, and take the item's inputs out of it.
 
     Keel gets ``failed`` with *code*, the failure's own short code, never its
-    text.  The item is over for the session whether or not Keel heard.  Both
-    the end of a turn and the dispatcher report through here.  Nothing is
-    sent, and nothing redacted, unless the item awaits its report
-    (:func:`item_awaiting_report`).  Never raises.
+    text, the work's usage when the store can say and the bundle version of
+    the item's latest wake.  The item is over for the session whether or not
+    Keel heard.  Both the end of a turn and the dispatcher report through
+    here.  Nothing is sent, and nothing redacted, unless the item awaits its
+    report (:func:`item_awaiting_report`).  Never raises.
     """
     if await item_awaiting_report(store, session) is None:
         return
-    await _tell_keel(session.id, lambda keel: keel.item_ended(session.id, status="failed", detail=code))
+    usage = await work_usage_or_none(store, session.id)
+    bundle_version = await wake_bundle_version(store, session.id)
+    await _tell_keel(
+        session.id,
+        lambda keel: keel.item_ended(
+            session.id, status="failed", detail=code, usage=usage, bundle_version=bundle_version,
+        ),
+    )
     await _redact(store, session.id)
 
 
