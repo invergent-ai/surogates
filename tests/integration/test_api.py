@@ -1246,34 +1246,6 @@ async def test_admin_create_mcp_server_duplicate(client: AsyncClient, session_fa
     assert resp2.status_code == 409
 
 
-async def test_admin_list_mcp_servers(client: AsyncClient, session_factory):
-    """Non-admin tenants see only their own org's MCP servers."""
-    org_a, _, token_a, _ = await _create_test_tenant(
-        session_factory, permissions={"admin"}
-    )
-    await client.post(
-        "/v1/admin/mcp-servers",
-        json={
-            "org_id": str(org_a),
-            "name": "org-a-server",
-            "transport": "stdio",
-            "command": "echo",
-        },
-        headers={"Authorization": f"Bearer {token_a}"},
-    )
-
-    _, _, token_b, _ = await _create_test_tenant(
-        session_factory, permissions={"sessions:read"}
-    )
-    resp = await client.get(
-        "/v1/admin/mcp-servers",
-        headers={"Authorization": f"Bearer {token_b}"},
-    )
-    assert resp.status_code == 200
-    names = {s["name"] for s in resp.json()["servers"]}
-    assert "org-a-server" not in names
-
-
 async def test_admin_update_mcp_server(client: AsyncClient, session_factory):
     """PUT updates fields and re-validates transport/command."""
     org_id, _, token, _ = await _create_test_tenant(session_factory)
@@ -1326,26 +1298,6 @@ async def test_admin_delete_mcp_server(client: AsyncClient, session_factory):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert get_resp.status_code == 404
-
-
-async def test_admin_mcp_cross_org_forbidden(client: AsyncClient, session_factory):
-    """Non-admin cannot register servers for a foreign org."""
-    org_a, _, _, _ = await _create_test_tenant(session_factory)
-    _, _, token_b, _ = await _create_test_tenant(
-        session_factory, permissions={"sessions:read"}
-    )
-
-    resp = await client.post(
-        "/v1/admin/mcp-servers",
-        json={
-            "org_id": str(org_a),
-            "name": "sneaky",
-            "transport": "stdio",
-            "command": "echo",
-        },
-        headers={"Authorization": f"Bearer {token_b}"},
-    )
-    assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -1477,95 +1429,6 @@ async def test_admin_delete_credential(client: AsyncClient, session_factory):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp2.status_code == 404
-
-
-async def test_admin_credentials_cross_org_forbidden(
-    client: AsyncClient, session_factory
-):
-    """Non-admin cannot write credentials for a foreign org."""
-    org_a, _, _, _ = await _create_test_tenant(session_factory)
-    _, _, token_b, _ = await _create_test_tenant(
-        session_factory, permissions={"sessions:read"}
-    )
-
-    resp = await client.post(
-        "/v1/admin/credentials",
-        json={"org_id": str(org_a), "name": "STEAL", "value": "x"},
-        headers={"Authorization": f"Bearer {token_b}"},
-    )
-    assert resp.status_code == 403
-
-
-async def test_admin_credentials_cross_user_forbidden(
-    client: AsyncClient, session_factory
-):
-    """Non-admin cannot touch another user's credentials in the same org."""
-    org_id, victim_user_id, _, _ = await _create_test_tenant(
-        session_factory, permissions={"sessions:read"}
-    )
-    attacker_user_id = uuid.uuid4()
-    await create_user(
-        session_factory, org_id,
-        user_id=attacker_user_id,
-        email=f"attacker-{attacker_user_id}@test.com",
-    )
-    attacker_token = create_access_token(
-        org_id, attacker_user_id, {"sessions:read"},
-    )
-
-    create_resp = await client.post(
-        "/v1/admin/credentials",
-        json={
-            "org_id": str(org_id),
-            "user_id": str(victim_user_id),
-            "name": "VICTIM_TOKEN",
-            "value": "overwrite",
-        },
-        headers={"Authorization": f"Bearer {attacker_token}"},
-    )
-    assert create_resp.status_code == 403
-
-    list_resp = await client.get(
-        f"/v1/admin/credentials?user_id={victim_user_id}",
-        headers={"Authorization": f"Bearer {attacker_token}"},
-    )
-    assert list_resp.status_code == 403
-
-    delete_resp = await client.delete(
-        f"/v1/admin/credentials?org_id={org_id}"
-        f"&user_id={victim_user_id}&name=VICTIM_TOKEN",
-        headers={"Authorization": f"Bearer {attacker_token}"},
-    )
-    assert delete_resp.status_code == 403
-
-
-async def test_admin_mcp_cross_user_forbidden(
-    client: AsyncClient, session_factory
-):
-    """Non-admin cannot touch another user's MCP server in the same org."""
-    org_id, victim_user_id, _, _ = await _create_test_tenant(session_factory)
-    attacker_user_id = uuid.uuid4()
-    await create_user(
-        session_factory, org_id,
-        user_id=attacker_user_id,
-        email=f"attacker-{attacker_user_id}@test.com",
-    )
-    attacker_token = create_access_token(
-        org_id, attacker_user_id, {"sessions:read"},
-    )
-
-    resp = await client.post(
-        "/v1/admin/mcp-servers",
-        json={
-            "org_id": str(org_id),
-            "user_id": str(victim_user_id),
-            "name": "malicious",
-            "transport": "stdio",
-            "command": "/bin/attacker",
-        },
-        headers={"Authorization": f"Bearer {attacker_token}"},
-    )
-    assert resp.status_code == 403
 
 
 async def test_admin_credential_roundtrip_via_vault(
@@ -1749,6 +1612,243 @@ async def test_admin_mcp_list_cross_org_for_admin(
     names = {s["name"] for s in resp.json()["servers"]}
     assert "a-server" in names
     assert "b-server" not in names
+
+
+# ---------------------------------------------------------------------------
+# Admin -- MCP servers and credentials need the admin permission
+# ---------------------------------------------------------------------------
+
+#: What the admin MCP API shows in place of every ``env`` value.
+REDACTED_ENV_VALUE = "__redacted__"
+
+_NON_ADMIN_PRINCIPALS = ["end-user", "channel-session", "service-account-session"]
+
+
+async def _non_admin_token(session_factory, org_id: UUID, principal: str) -> str:
+    """A token of the given kind, issued inside *org_id* and holding no ``admin``."""
+    from surogates.api.routes.auth import USER_PERMISSIONS
+    from surogates.tenant.auth.jwt import (
+        create_channel_session_token,
+        create_service_account_session_token,
+    )
+
+    if principal == "end-user":
+        user_id = await create_user(session_factory, org_id)
+        return create_access_token(org_id, user_id, USER_PERMISSIONS)
+    if principal == "channel-session":
+        session = await SessionStore(session_factory).create_session(
+            user_id=None, org_id=org_id, agent_id=TEST_AGENT_ID, channel="website",
+        )
+        return create_channel_session_token(
+            org_id, TEST_AGENT_ID, session.id, "website",
+        )
+    assert principal == "service-account-session"
+    service_account = await issue_service_account_token(session_factory, org_id)
+    return create_service_account_session_token(
+        org_id, service_account.id, uuid.uuid4(),
+    )
+
+
+async def _stored_mcp_env(session_factory, server_id: str) -> dict[str, str]:
+    from surogates.db.models import McpServer
+
+    async with session_factory() as db:
+        row = await db.get(McpServer, UUID(server_id))
+        return dict(row.env)
+
+
+async def test_admin_mcp_read_masks_env_values(client: AsyncClient, session_factory):
+    """Create, get and list show an MCP server's env keys with every value masked."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "masked",
+            "transport": "stdio",
+            "command": "echo",
+            "env": {"API_KEY": "sk-live-1234", "REGION": "eu-west-1"},
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    masked = {"API_KEY": REDACTED_ENV_VALUE, "REGION": REDACTED_ENV_VALUE}
+    assert created.json()["env"] == masked
+    server_id = created.json()["id"]
+
+    got = await client.get(f"/v1/admin/mcp-servers/{server_id}", headers=headers)
+    assert got.status_code == 200
+    assert got.json()["env"] == masked
+
+    listed = await client.get(
+        f"/v1/admin/mcp-servers?org_id={org_id}", headers=headers,
+    )
+    assert listed.status_code == 200
+    assert [s["env"] for s in listed.json()["servers"]] == [masked]
+    assert "sk-live-1234" not in listed.text and "eu-west-1" not in listed.text
+
+    # Masking is a view: the proxy still reads the real values.
+    assert await _stored_mcp_env(session_factory, server_id) == {
+        "API_KEY": "sk-live-1234", "REGION": "eu-west-1",
+    }
+
+
+async def test_admin_mcp_put_keeps_stored_env_value_for_placeholder(
+    client: AsyncClient, session_factory
+):
+    """A PUT that echoes the placeholder keeps the stored value; a bare one is dropped."""
+    org_id, _, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+    created = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "echoed",
+            "transport": "stdio",
+            "command": "echo",
+            "env": {"API_KEY": "sk-live-1234", "OLD": "gone"},
+        },
+        headers=headers,
+    )
+    server_id = created.json()["id"]
+
+    resp = await client.put(
+        f"/v1/admin/mcp-servers/{server_id}",
+        json={
+            "env": {
+                "API_KEY": REDACTED_ENV_VALUE,
+                "GHOST": REDACTED_ENV_VALUE,
+                "NEW": "n-1",
+            },
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["env"] == {
+        "API_KEY": REDACTED_ENV_VALUE, "NEW": REDACTED_ENV_VALUE,
+    }
+    assert await _stored_mcp_env(session_factory, server_id) == {
+        "API_KEY": "sk-live-1234", "NEW": "n-1",
+    }
+
+    # A PUT that leaves env out keeps it whole.
+    resp = await client.put(
+        f"/v1/admin/mcp-servers/{server_id}", json={"timeout": 30}, headers=headers,
+    )
+    assert resp.status_code == 200
+    assert await _stored_mcp_env(session_factory, server_id) == {
+        "API_KEY": "sk-live-1234", "NEW": "n-1",
+    }
+
+
+async def test_admin_mcp_response_cannot_carry_an_env_value():
+    """The response model refuses an env value that is not the placeholder."""
+    from pydantic import ValidationError
+
+    from surogates.api.routes.admin_mcp import McpServerResponse
+
+    fields = dict(
+        id=uuid.uuid4(), org_id=uuid.uuid4(), user_id=None, name="n",
+        transport="stdio", command="echo", args=[], url=None,
+        credential_refs=[], timeout=120, enabled=True,
+    )
+    McpServerResponse(env={"K": REDACTED_ENV_VALUE}, **fields)
+    with pytest.raises(ValidationError):
+        McpServerResponse(env={"K": "sk-live-1234"}, **fields)
+
+
+@pytest.mark.parametrize("principal", _NON_ADMIN_PRINCIPALS)
+async def test_admin_mcp_routes_refuse_non_admin_principals(
+    client: AsyncClient, session_factory, principal: str
+):
+    """Every verb of the admin MCP router is 403 without the admin permission."""
+    org_id, _, admin_token, _ = await _create_test_tenant(session_factory)
+    admin = {"Authorization": f"Bearer {admin_token}"}
+    seeded = await client.post(
+        "/v1/admin/mcp-servers",
+        json={
+            "org_id": str(org_id),
+            "name": "org-wide",
+            "transport": "stdio",
+            "command": "echo",
+            "env": {"API_KEY": "sk-live-1234"},
+        },
+        headers=admin,
+    )
+    server_id = seeded.json()["id"]
+    caller = {
+        "Authorization": "Bearer "
+        + await _non_admin_token(session_factory, org_id, principal),
+    }
+
+    refused = [
+        await client.post(
+            "/v1/admin/mcp-servers",
+            json={
+                "org_id": str(org_id), "name": "new",
+                "transport": "stdio", "command": "echo",
+            },
+            headers=caller,
+        ),
+        await client.get("/v1/admin/mcp-servers", headers=caller),
+        await client.get(f"/v1/admin/mcp-servers/{server_id}", headers=caller),
+        await client.put(
+            f"/v1/admin/mcp-servers/{server_id}",
+            json={"enabled": False}, headers=caller,
+        ),
+        await client.delete(f"/v1/admin/mcp-servers/{server_id}", headers=caller),
+    ]
+    assert [r.status_code for r in refused] == [403] * 5, [r.text for r in refused]
+
+    # Nothing the refused calls asked for happened.
+    after = await client.get(f"/v1/admin/mcp-servers/{server_id}", headers=admin)
+    assert after.status_code == 200
+    assert after.json()["enabled"] is True
+    listed = await client.get(f"/v1/admin/mcp-servers?org_id={org_id}", headers=admin)
+    assert [s["name"] for s in listed.json()["servers"]] == ["org-wide"]
+
+
+@pytest.mark.parametrize("principal", _NON_ADMIN_PRINCIPALS)
+async def test_admin_credentials_routes_refuse_non_admin_principals(
+    client: AsyncClient, session_factory, app, principal: str
+):
+    """Every verb of the admin credentials router is 403 without the admin permission."""
+    org_id, _, admin_token, _ = await _create_test_tenant(session_factory)
+    admin = {"Authorization": f"Bearer {admin_token}"}
+    seeded = await client.post(
+        "/v1/admin/credentials",
+        json={"org_id": str(org_id), "name": "ORG_KEY", "value": "keep-me"},
+        headers=admin,
+    )
+    assert seeded.status_code == 201
+    caller = {
+        "Authorization": "Bearer "
+        + await _non_admin_token(session_factory, org_id, principal),
+    }
+
+    refused = [
+        await client.post(
+            "/v1/admin/credentials",
+            json={"org_id": str(org_id), "name": "NEW_KEY", "value": "x"},
+            headers=caller,
+        ),
+        await client.post(
+            "/v1/admin/credentials",
+            json={"org_id": str(org_id), "name": "ORG_KEY", "value": "overwritten"},
+            headers=caller,
+        ),
+        await client.get(f"/v1/admin/credentials?org_id={org_id}", headers=caller),
+        await client.delete(
+            f"/v1/admin/credentials?org_id={org_id}&name=ORG_KEY", headers=caller,
+        ),
+    ]
+    assert [r.status_code for r in refused] == [403] * 4, [r.text for r in refused]
+
+    vault = app.state.credential_vault
+    assert await vault.retrieve(org_id, "ORG_KEY") == "keep-me"
+    assert await vault.retrieve(org_id, "NEW_KEY") is None
 
 
 # ---------------------------------------------------------------------------

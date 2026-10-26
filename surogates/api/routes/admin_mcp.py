@@ -4,15 +4,20 @@ Writes land in the ``mcp_servers`` table — the only source of MCP
 server configs the proxy reads at discovery time
 (:mod:`surogates.mcp_proxy.loader`).
 
-Routes mount under ``/v1/admin/mcp-servers``.  ``admin`` permission is
-required for cross-org operations; users without ``admin`` may only
-manage servers scoped to their own ``tenant.org_id`` / own
-``tenant.user_id``.
+Routes mount under ``/v1/admin/mcp-servers``.  Every route requires the
+``admin`` permission and a signed-in user; channel-session and
+service-account principals are refused (see
+:func:`._admin_scope.require_admin_principal`).
 
 Secrets must never be stored in ``env`` — use ``credential_refs`` to
 reference entries in the encrypted credential vault.  The proxy
 resolves refs at connection time and injects them into the MCP
 server's env (stdio) or headers (http).
+
+Responses show ``env`` keys with every value replaced by
+:data:`REDACTED_ENV_VALUE`.  A write that echoes the placeholder keeps
+the stored value for that key; a placeholder with no stored value is
+dropped.
 """
 
 from __future__ import annotations
@@ -22,19 +27,21 @@ import uuid
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from surogates.db.models import McpServer, Org, User
-from surogates.tenant.auth.middleware import get_current_tenant
-from surogates.tenant.context import TenantContext
 from surogates.tools.loader import MCPTransport
 
-from ._admin_scope import require_tenant_scope
+from ._admin_scope import require_admin_principal
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin_principal)])
+
+#: Shown in place of every ``env`` value.  Matches the placeholder the
+#: ops server puts on the same rows.
+REDACTED_ENV_VALUE = "__redacted__"
 
 
 class CredentialRef(BaseModel):
@@ -93,6 +100,13 @@ class McpServerResponse(BaseModel):
     timeout: int
     enabled: bool
 
+    @field_validator("env")
+    @classmethod
+    def _env_values_are_masked(cls, env: dict[str, str]) -> dict[str, str]:
+        if any(value != REDACTED_ENV_VALUE for value in env.values()):
+            raise ValueError("env values must be the redaction placeholder")
+        return env
+
 
 class McpServerListResponse(BaseModel):
     servers: list[McpServerResponse]
@@ -129,11 +143,31 @@ def _to_response(server: McpServer) -> McpServerResponse:
         command=server.command,
         args=list(server.args or []),
         url=server.url,
-        env=dict(server.env or {}),
+        env={key: REDACTED_ENV_VALUE for key in (server.env or {})},
         credential_refs=refs,
         timeout=server.timeout,
         enabled=server.enabled,
     )
+
+
+def _restore_redacted_env(
+    incoming: dict[str, str],
+    stored: dict[str, str] | None,
+) -> dict[str, str]:
+    """Put the stored value back wherever the client echoed the placeholder.
+
+    A placeholder with no stored counterpart is dropped: there is no
+    value to keep, and saving the placeholder would hand the server a
+    bogus variable.
+    """
+    stored = stored or {}
+    restored: dict[str, str] = {}
+    for key, value in incoming.items():
+        if value != REDACTED_ENV_VALUE:
+            restored[key] = value
+        elif key in stored:
+            restored[key] = stored[key]
+    return restored
 
 
 def _refs_to_json(refs: list[CredentialRef]) -> list[dict]:
@@ -149,10 +183,8 @@ def _refs_to_json(refs: list[CredentialRef]) -> list[dict]:
 async def create_mcp_server(
     body: McpServerCreate,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> McpServerResponse:
     """Register a new MCP server for an org or user."""
-    require_tenant_scope(tenant, body.org_id, body.user_id, resource="MCP servers")
     _assert_valid_transport_pair(body.transport, body.command, body.url)
 
     session_factory = request.app.state.session_factory
@@ -197,7 +229,7 @@ async def create_mcp_server(
             command=body.command,
             args=body.args,
             url=body.url,
-            env=body.env,
+            env=_restore_redacted_env(body.env, None),
             credential_refs=_refs_to_json(body.credential_refs),
             timeout=body.timeout,
             enabled=body.enabled,
@@ -212,32 +244,23 @@ async def create_mcp_server(
 @router.get("/mcp-servers", response_model=McpServerListResponse)
 async def list_mcp_servers(
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
     org_id: UUID | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> McpServerListResponse:
-    """List MCP servers visible to the tenant.
+    """List MCP servers, optionally filtered by ``org_id``.
 
-    Non-admins see their own org's org-wide servers plus their own
-    user-scoped servers.  Admins may filter by ``org_id`` or omit it
-    to list across the whole platform.  ``total`` is the true
-    unpaginated count.
+    Without a filter the list spans the whole platform.  ``total`` is
+    the true unpaginated count.
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
     session_factory = request.app.state.session_factory
-    is_admin = "admin" in tenant.permissions
 
     base = select(McpServer)
-    if is_admin:
-        if org_id is not None:
-            base = base.where(McpServer.org_id == org_id)
-    else:
-        base = base.where(McpServer.org_id == tenant.org_id).where(
-            (McpServer.user_id.is_(None)) | (McpServer.user_id == tenant.user_id)
-        )
+    if org_id is not None:
+        base = base.where(McpServer.org_id == org_id)
 
     async with session_factory() as session:
         count_stmt = select(func.count()).select_from(base.subquery())
@@ -256,7 +279,6 @@ async def list_mcp_servers(
 async def get_mcp_server(
     server_id: UUID,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> McpServerResponse:
     """Retrieve a single MCP server by ID."""
     session_factory = request.app.state.session_factory
@@ -269,9 +291,6 @@ async def get_mcp_server(
             detail=f"MCP server {server_id} not found.",
         )
 
-    require_tenant_scope(
-        tenant, server.org_id, server.user_id, resource="MCP servers",
-    )
     return _to_response(server)
 
 
@@ -280,7 +299,6 @@ async def update_mcp_server(
     server_id: UUID,
     body: McpServerUpdate,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> McpServerResponse:
     """Partially update an MCP server.  Omitted fields stay unchanged."""
     session_factory = request.app.state.session_factory
@@ -292,11 +310,9 @@ async def update_mcp_server(
                 detail=f"MCP server {server_id} not found.",
             )
 
-        require_tenant_scope(
-            tenant, server.org_id, server.user_id, resource="MCP servers",
-        )
-
         updates = body.model_dump(exclude_unset=True)
+        if updates.get("env") is not None:
+            updates["env"] = _restore_redacted_env(updates["env"], server.env)
         if "transport" in updates and updates["transport"] is not None:
             updates["transport"] = MCPTransport(updates["transport"]).value
         if "credential_refs" in updates and updates["credential_refs"] is not None:
@@ -325,7 +341,6 @@ async def update_mcp_server(
 async def delete_mcp_server(
     server_id: UUID,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Remove an MCP server registration."""
     session_factory = request.app.state.session_factory
@@ -336,10 +351,6 @@ async def delete_mcp_server(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"MCP server {server_id} not found.",
             )
-
-        require_tenant_scope(
-            tenant, server.org_id, server.user_id, resource="MCP servers",
-        )
 
         await session.delete(server)
         await session.commit()

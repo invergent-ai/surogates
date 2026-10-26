@@ -41,6 +41,8 @@ MCP servers are registered in the surogates `mcp_servers` table. Org-wide and us
 
 ### Register via Admin API
 
+The `/v1/admin/mcp-servers` and `/v1/admin/credentials` routes need a signed-in user whose token carries the `admin` permission. Reads show each `env` variable of an MCP server by name with its value masked as `__redacted__`. A `PUT` that sends `__redacted__` back for a variable keeps the stored value.
+
 Register an MCP server for an org:
 
 ```bash
