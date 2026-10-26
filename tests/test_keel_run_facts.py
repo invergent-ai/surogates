@@ -10,7 +10,6 @@ from uuid import uuid4
 import pytest
 
 from surogates.keel.run_facts import (
-    BUNDLE_VERSION_CHARS,
     MAX_COUNT,
     bundle_version_in,
     usage_report,
@@ -27,7 +26,6 @@ COST_CHARS = 40
 
 
 def test_a_bundle_version_is_sent_only_within_keels_bounds():
-    assert BUNDLE_VERSION_CHARS == 200
     assert bundle_version_in("v12") == "v12"
     assert bundle_version_in("x" * 200) == "x" * 200
     for refused in ("", "x" * 201, 12, None, ["v1"]):
@@ -66,7 +64,7 @@ def test_usage_is_reported_within_keels_bounds():
 
 
 class _Wakes:
-    """A store whose newest wake that records a bundle is *event*, or whose read fails."""
+    """A store whose newest wake that records a bundle holds *data* (none when *data* is None), or whose read fails."""
 
     def __init__(self, data: dict | None = None, *, fails: bool = False) -> None:
         self._data, self._fails = data, fails

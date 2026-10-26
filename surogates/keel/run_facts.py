@@ -8,9 +8,11 @@ version that does not fit is none.
 
 A report names the use of the session's work, which is the session's own and
 that of every helper under it, and the bundle version of the session's latest
-wake.  Reading either asks the store.  A report that cannot read them fails
-with the store; the telling of an end never does, since Keel must hear of the
-end whatever the database is doing.
+wake.  Reading either asks the store.  A report that cannot read its usage
+fails with the store.  A bundle version that cannot be read is none, and
+never fails a report.  The telling of an end never fails, since Keel must
+hear of the end whatever the database is doing: an end whose usage cannot be
+read goes without it.
 """
 
 from __future__ import annotations

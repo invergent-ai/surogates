@@ -1139,9 +1139,9 @@ async def test_a_session_trees_usage_sums_its_helpers_and_their_cache_reads(sess
     await _respond(session_store, root, 500, 50, 0.005, cache_read_tokens=0)
     await _respond(session_store, child, 200, 20, 0.002, cache_read_tokens=150)
     await _respond(session_store, grandchild, 100, 10, 0.001)
-    # No provider promised a number: a string, a negative and a fraction never fail the read,
-    # and only a positive number counts, by its integer part.
-    for odd in ("12", -5, 2.7):
+    # No provider promised a number: a string (numeric or not), a negative and a fraction never fail
+    # the read, and only a positive number counts, by its integer part.
+    for odd in ("12", "n/a", -5, 2.7):
         await _respond(session_store, grandchild, 0, 0, 0, cache_read_tokens=odd)
     await _respond(session_store, other, 9999, 9999, 1.0, cache_read_tokens=9999)
     await _respond(session_store, other_child, 9999, 9999, 1.0, cache_read_tokens=9999)
