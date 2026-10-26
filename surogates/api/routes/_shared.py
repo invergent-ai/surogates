@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from fastapi import HTTPException, Request, status
 
+from surogates.api.routes._admin_auth import is_admin_principal
 from surogates.tenant.context import PrincipalKind, TenantContext
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,69 @@ def require_not_channel_principal(tenant: TenantContext) -> None:
                 "sessions."
             ),
         )
+
+
+def _refuse_unless_shared_layer_standing(tenant: TenantContext, refusal: str) -> None:
+    """Let an org-wide service account or an admin principal through; refuse the rest.
+
+    An org-wide service account is one bound to no agent
+    (``tenant.service_account_agent_id is None``), like the control plane's
+    own machine identities.  A service account bound to one agent is a
+    customer's API key, handed to a third party: it never changes what the
+    whole organization shares.  The binding is carried by the bare key and by
+    the session token of the same account alike.  *refusal* is the 403's
+    detail.
+    """
+    kind, _ = tenant.principal()
+    org_wide_service_account = (
+        kind is PrincipalKind.JUDGE and tenant.service_account_agent_id is None
+    )
+    if org_wide_service_account or is_admin_principal(tenant):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
+def require_shared_layer_writer(
+    tenant: TenantContext, found: dict[str, Any], label: str,
+) -> None:
+    """Refuse a change to an item that is not in the caller's own layer.
+
+    *found* is what ``TenantStorage.skill_exists`` or ``agent_exists``
+    returned: ``{"key_prefix": ..., "layer": "user" | "org"}``.  An item in
+    the ``"user"`` layer belongs to the caller, so anyone may change it.  An
+    item in any other layer, or with none, is shared by the whole org, and
+    only an org-wide service account (one bound to no agent) or an admin
+    principal (:func:`~surogates.api.routes._admin_auth.is_admin_principal`)
+    may change it.  *label* names the item in the refusal, e.g.
+    ``"Skill 'notes'"``.
+    """
+    if found.get("layer") == "user":
+        return
+    _refuse_unless_shared_layer_standing(
+        tenant,
+        f"{label} is shared by the whole organization: only an admin "
+        "or an org-wide service account can change it.",
+    )
+
+
+def require_shared_layer_creator(tenant: TenantContext, label: str) -> None:
+    """Refuse a create whose target is the org-shared layer to a caller without standing.
+
+    :class:`~surogates.storage.tenant.TenantStorage` writes a new skill or
+    sub-agent to the caller's own layer when the caller has a user, and to
+    the org-shared layer when it has none.  A create with a user is the
+    caller's own and passes.  A create with no user lands in the layer the
+    whole org shares, so it needs the standing
+    :func:`require_shared_layer_writer` asks for.  *label* names what is
+    created, e.g. ``"A skill"``.
+    """
+    if tenant.user_id is not None:
+        return
+    _refuse_unless_shared_layer_standing(
+        tenant,
+        f"{label} created here would be shared by the whole organization: "
+        "only an admin or an org-wide service account can create it.",
+    )
 
 
 async def resolve_agent_id(request: Request) -> str | None:

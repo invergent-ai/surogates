@@ -69,6 +69,9 @@ _MUTATING_SKILL_HANDLERS = (
     "delete_skill",
     "write_skill_file",
     "remove_skill_file",
+    "activate_expert",
+    "retire_expert",
+    "collect_training_data",
 )
 
 

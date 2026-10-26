@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import uuid
+from dataclasses import dataclass
 from uuid import UUID
 
 import pytest
@@ -407,6 +408,75 @@ async def issue_service_account_token(
 
     return await ServiceAccountStore(session_factory).create(
         org_id=org_id, name=name,
+    )
+
+
+@dataclass(frozen=True)
+class OrgPrincipals:
+    """One org's callers, as bearer tokens: an end-user, an admin, and the machine ones.
+
+    ``service_account`` is an org-wide bare ``surg_sk_`` key, which the auth
+    middleware accepts only under ``/v1/api``; the others are JWTs accepted
+    under ``/v1``.  ``bound_service_account`` is the same kind of key minted
+    for one agent (a customer's API key), and ``bound_service_account_session``
+    is the session JWT of that account.
+    """
+
+    org_id: UUID
+    user_id: UUID
+    admin_id: UUID
+    user: str
+    admin: str
+    service_account: str
+    service_account_session: str
+    channel_session: str
+    bound_service_account: str
+    bound_service_account_session: str
+
+    def auth(self, principal: str) -> dict[str, str]:
+        """The ``Authorization`` header of the named principal."""
+        return {"Authorization": f"Bearer {getattr(self, principal)}"}
+
+
+async def org_principals(
+    session_factory: async_sessionmaker, org_id: UUID | None = None,
+) -> OrgPrincipals:
+    """Create an org (unless *org_id* names one) and a token for each kind of caller in it."""
+    from surogates.api.routes.auth import USER_PERMISSIONS
+    from surogates.tenant.auth.jwt import (
+        create_access_token,
+        create_channel_session_token,
+        create_service_account_session_token,
+    )
+    from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
+
+    org_id = await create_org(session_factory, org_id)
+    user_id = await create_user(session_factory, org_id)
+    admin_id = await create_user(session_factory, org_id)
+    service_account = await issue_service_account_token(session_factory, org_id)
+    bound_service_account = await ServiceAccountStore(session_factory).create(
+        org_id=org_id, name="customer-key", agent_id="customer-agent", kind=KIND_API_KEY,
+    )
+    channel_session = await SessionStore(session_factory).create_session(
+        user_id=None, org_id=org_id, agent_id="default", channel="website",
+    )
+    return OrgPrincipals(
+        org_id=org_id,
+        user_id=user_id,
+        admin_id=admin_id,
+        user=create_access_token(org_id, user_id, USER_PERMISSIONS),
+        admin=create_access_token(org_id, admin_id, USER_PERMISSIONS | {"admin"}),
+        service_account=service_account.token,
+        service_account_session=create_service_account_session_token(
+            org_id, service_account.id, uuid.uuid4(),
+        ),
+        channel_session=create_channel_session_token(
+            org_id, "default", channel_session.id, "website",
+        ),
+        bound_service_account=bound_service_account.token,
+        bound_service_account_session=create_service_account_session_token(
+            org_id, bound_service_account.id, uuid.uuid4(),
+        ),
     )
 
 
