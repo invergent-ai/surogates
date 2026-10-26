@@ -33,6 +33,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    require_shared_layer_creator,
     require_shared_layer_writer,
     resolve_agent_bundle as _resolve_agent_bundle,
     resolve_system_bundle as _resolve_system_bundle,
@@ -846,11 +847,11 @@ async def _writable_skill(
 ) -> dict:
     """The tenant-storage skill a write route changes, or why it can't.
 
-    A skill in the org-shared layer is changed only by an admin or a
-    service account (:func:`require_shared_layer_writer`).  Platform skills
-    (the built-in catalog and the agent's bundle) are read-only here;
-    answering "not found" for one sent an agent hunting for a skill it had
-    just loaded.
+    A skill in the org-shared layer is changed only by an admin or an
+    org-wide service account (:func:`require_shared_layer_writer`).
+    Platform skills (the built-in catalog and the agent's bundle) are
+    read-only here; answering "not found" for one sent an agent hunting for
+    a skill it had just loaded.
     """
     existing = await ts.skill_exists(name)
     if existing:
@@ -882,8 +883,13 @@ async def create_skill(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
-    """Create a new user skill."""
+    """Create a new user skill.
+
+    A caller with no user creates it in the org-shared layer, which needs an
+    org-wide service account (:func:`require_shared_layer_creator`).
+    """
     require_not_channel_principal(tenant)
+    require_shared_layer_creator(tenant, "A skill")
     raise_validation(validate_name(body.name))
     raise_validation(validate_category(body.category))
     raise_validation(validate_frontmatter(body.content))

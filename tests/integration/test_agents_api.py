@@ -411,8 +411,12 @@ async def test_agents_are_scoped_to_tenant(
 # ---------------------------------------------------------------------------
 #
 # A sub-agent found by name resolves to the caller's own layer first and to
-# the org-shared layer second.  Changing an org-shared one needs a service
-# account or an ``admin`` token; an end-user changes only their own.
+# the org-shared layer second.  Changing an org-shared one needs an org-wide
+# service account (one bound to no agent) or an ``admin`` token; an end-user
+# changes only their own, and a service account bound to one agent (a
+# customer's API key) changes none in the org-shared layer.  A sub-agent
+# created by a caller with no user lands in the org-shared layer, so that needs
+# the same standing.
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -497,6 +501,127 @@ async def test_a_service_account_or_an_admin_can_edit_and_delete_an_org_shared_s
     deleted = await _delete(client, name, headers, prefix)
     assert deleted.status_code == 204, deleted.text
     assert await _agent_file(shared, name) is None
+
+
+@pytest.mark.parametrize(
+    ("principal", "prefix"),
+    [
+        ("bound_service_account_session", "/v1"),
+        ("bound_service_account", "/v1/api"),
+    ],
+)
+async def test_an_agent_bound_service_account_cannot_edit_or_delete_an_org_shared_sub_agent(
+    app, client: AsyncClient, principals, principal: str, prefix: str,
+):
+    shared = _storage(app, principals.org_id, None)
+    name = f"shared-{principal}".replace("_", "-")
+    await shared.write_agent(name, _valid_agent_md(name=name))
+    before = await _agent_file(shared, name)
+    headers = principals.auth(principal)
+
+    edited = await _edit(client, name, headers, prefix)
+    assert edited.status_code == 403, edited.text
+    assert await _agent_file(shared, name) == before
+
+    deleted = await _delete(client, name, headers, prefix)
+    assert deleted.status_code == 403, deleted.text
+    assert await _agent_file(shared, name) == before
+
+
+def _create(client: AsyncClient, name: str, headers: dict, prefix: str = "/v1"):
+    return client.post(
+        f"{prefix}/agents",
+        json={"name": name, "content": _valid_agent_md(name=name)},
+        headers=headers,
+    )
+
+
+@pytest.mark.parametrize(
+    ("principal", "prefix"),
+    [("service_account_session", "/v1"), ("service_account", "/v1/api")],
+)
+async def test_an_org_wide_service_account_creates_a_sub_agent_in_the_org_shared_layer(
+    app, client: AsyncClient, principals, principal: str, prefix: str,
+):
+    name = f"made-{principal}".replace("_", "-")
+
+    resp = await _create(client, name, principals.auth(principal), prefix)
+
+    assert resp.status_code == 201, resp.text
+    found = await _storage(app, principals.org_id, None).agent_exists(name)
+    assert found is not None and found["layer"] == "org"
+
+
+async def test_a_case_type_accounts_session_creates_a_sub_agent_in_the_org_shared_layer(
+    app, client: AsyncClient, principals, session_factory,
+):
+    from surogates.tenant.auth.jwt import create_service_account_session_token
+    from surogates.tenant.auth.service_account import ServiceAccountStore
+
+    account_id = await ServiceAccountStore(session_factory).case_type_account(
+        principals.org_id, "claims",
+    )
+    token = create_service_account_session_token(principals.org_id, account_id, uuid.uuid4())
+
+    resp = await _create(client, "made-by-keel", {"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 201, resp.text
+    found = await _storage(app, principals.org_id, None).agent_exists("made-by-keel")
+    assert found is not None and found["layer"] == "org"
+
+
+@pytest.mark.parametrize(
+    ("principal", "prefix"),
+    [
+        ("bound_service_account_session", "/v1"),
+        ("bound_service_account", "/v1/api"),
+        ("channel_session", "/v1"),
+    ],
+)
+async def test_a_caller_with_no_standing_cannot_create_a_sub_agent_in_the_org_shared_layer(
+    app, client: AsyncClient, principals, principal: str, prefix: str,
+):
+    name = f"refused-{principal}".replace("_", "-")
+
+    resp = await _create(client, name, principals.auth(principal), prefix)
+
+    assert resp.status_code == 403, resp.text
+    assert await _storage(app, principals.org_id, None).agent_exists(name) is None
+
+
+@pytest.mark.parametrize(("principal", "owner"), [("user", "user_id"), ("admin", "admin_id")])
+async def test_a_signed_in_user_creates_a_sub_agent_in_their_own_layer(
+    app, client: AsyncClient, principals, principal: str, owner: str,
+):
+    name = f"made-by-{principal}"
+
+    resp = await _create(client, name, principals.auth(principal))
+
+    assert resp.status_code == 201, resp.text
+    found = await _storage(app, principals.org_id, getattr(principals, owner)).agent_exists(name)
+    assert found is not None and found["layer"] == "user"
+    assert await _storage(app, principals.org_id, None).agent_exists(name) is None
+
+
+async def test_a_user_copy_and_an_org_shared_copy_of_one_name_are_deleted_one_at_a_time(
+    app, client: AsyncClient, principals,
+):
+    name = "twice"
+    shared = _storage(app, principals.org_id, None)
+    own = _storage(app, principals.org_id, principals.user_id)
+    await shared.write_agent(name, _valid_agent_md(name=name, body="shared"))
+    await own.write_agent(name, _valid_agent_md(name=name, body="mine"))
+    shared_before = await _agent_file(shared, name)
+    headers = principals.auth("user")
+
+    first = await _delete(client, name, headers)
+    assert first.status_code == 204, first.text
+    assert await _agent_file(shared, name) == shared_before
+    assert (await own.agent_exists(name))["layer"] == "org"
+
+    second = await _delete(client, name, headers)
+    assert second.status_code == 403, second.text
+    assert await _agent_file(shared, name) == shared_before
 
 
 async def test_an_end_user_can_edit_and_delete_their_own_sub_agent(
