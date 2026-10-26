@@ -436,7 +436,7 @@ List skills for the current tenant (merged: platform + org + user).
 
 ### `POST /v1/skills`
 
-Create a new skill.
+Create a new skill. A caller with a user creates it in their own layer. A caller with no user creates it in the org-shared layer, which needs an org-wide service account (one bound to no agent).
 
 **Request:**
 ```json
@@ -461,7 +461,7 @@ Update a skill.
 
 Delete a skill.
 
-A user changes only the skills in their own layer. A skill in the org-shared layer is changed (by these routes, the supporting-file routes and the expert actions below) only by an admin or a service account.
+A user changes only the skills in their own layer. A skill in the org-shared layer is changed (by these routes, the supporting-file routes and the expert actions below) only by an admin or an org-wide service account (one bound to no agent).
 
 ### Expert-Specific Actions
 
@@ -528,7 +528,7 @@ Full sub-agent definition.
 
 ### `POST /v1/agents`
 
-Create a new user-scoped sub-agent. Writes an AGENT.md file to the caller's bucket at `tenant-{org_id}/users/{user_id}/agents/{name}/AGENT.md`.
+Create a new user-scoped sub-agent. Writes an AGENT.md file to the caller's bucket at `tenant-{org_id}/users/{user_id}/agents/{name}/AGENT.md`. A caller with no user creates it in the org-shared layer instead, which needs an org-wide service account (one bound to no agent).
 
 **Request:**
 ```json
@@ -552,7 +552,7 @@ The `name` field in the request body **must match** the `name:` key in the AGENT
 
 ### `PUT /v1/agents/{name}`
 
-Replace the full AGENT.md content of an existing user-scoped sub-agent. A sub-agent in the org-shared layer can be replaced only by an admin or a service account.
+Replace the full AGENT.md content of an existing user-scoped sub-agent. A sub-agent in the org-shared layer can be replaced only by an admin or an org-wide service account.
 
 **Request:**
 ```json
@@ -565,7 +565,7 @@ The frontmatter `name:` must still equal the path `name`.
 
 ### `DELETE /v1/agents/{name}`
 
-Delete a user-scoped sub-agent. A sub-agent in the org-shared layer can be deleted only by an admin or a service account. Platform and org-DB agents are read-only via this endpoint; use admin tooling for DB-overlay management.
+Delete a user-scoped sub-agent. A sub-agent in the org-shared layer can be deleted only by an admin or an org-wide service account. Platform and org-DB agents are read-only via this endpoint; use admin tooling for DB-overlay management.
 
 **Response: 204 No Content.**
 

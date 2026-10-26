@@ -31,6 +31,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    require_shared_layer_creator,
     require_shared_layer_writer,
     resolve_agent_bundle,
 )
@@ -340,8 +341,13 @@ async def create_agent(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> AgentActionResponse:
-    """Create a new user-scoped sub-agent type."""
+    """Create a new user-scoped sub-agent type.
+
+    A caller with no user creates it in the org-shared layer, which needs an
+    org-wide service account (:func:`require_shared_layer_creator`).
+    """
     require_not_channel_principal(tenant)
+    require_shared_layer_creator(tenant, "A sub-agent")
     raise_validation(_validate_agent_name(body.name))
     raise_validation(_validate_category(body.category))
     raise_validation(_validate_content(body.content))
