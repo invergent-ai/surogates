@@ -69,6 +69,7 @@ from surogates.keel.case_files import (
     write_case_file,
 )
 from surogates.keel.files import file_value
+from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import (
     ANSWER_MARKER,
     KICKOFF_MARKER,
@@ -141,8 +142,8 @@ class StepSessionRequest(BaseModel):
 class StepSessionCreated(BaseModel):
     session_id: UUID
     service_account_id: str
-    # Null: the worker resolves the agent's bundle when it wakes the session.
-    bundle_version: str | None = None
+    # The agent's bundle version at this call; null when the agent has none.
+    bundle_version: str | None
     created: bool
 
 
@@ -518,10 +519,11 @@ async def note_case_org(request: Request, case_id: UUID, org_id: UUID) -> None:
         logger.warning("keel-link: the org of case %s could not be recorded (%s)", case_id, type(exc).__name__)
 
 
-def _answer(session: Any, *, created: bool) -> JSONResponse:
+def _answer(session: Any, *, created: bool, bundle_version: str | None) -> JSONResponse:
     answer = StepSessionCreated(
         session_id=session.id,
         service_account_id=str(session.service_account_id),
+        bundle_version=bundle_version,
         created=created,
     )
     return JSONResponse(
@@ -536,7 +538,7 @@ async def create_step_session(request: Request) -> JSONResponse:
     require_link(request)
     body = await read_body(request, StepSessionRequest)
     agent_id = agent_id_of(request)
-    await resolve_agent(request, agent_id, body.org_id)
+    agent = await resolve_agent(request, agent_id, body.org_id)
     contract = body.contract
     screen(contract.inputs, case_id=contract.case_id)
 
@@ -571,7 +573,7 @@ async def create_step_session(request: Request) -> JSONResponse:
             message="The step session could not be created.",
         ) from None
     await note_case_org(request, contract.case_id, body.org_id)
-    return _answer(session, created=created)
+    return _answer(session, created=created, bundle_version=bundle_version_in(agent.get("bundle_version")))
 
 
 async def create_case_session(

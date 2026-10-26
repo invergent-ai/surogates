@@ -6,7 +6,7 @@
 
 | Route | What it does |
 |---|---|
-| `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started. |
+| `POST /v1/keel/step-sessions?agent_id=<agent>` | Starts the agent's session for one step, or finds the one Keel's key already started: `201` made, `200` found, each `{"session_id", "service_account_id", "bundle_version", "created"}`. `bundle_version` is the agent's bundle version as its runtime config names it at this call, null when it has none or names none Keel would take. |
 | `POST /v1/keel/step-sessions/{session_id}/messages` | Gives the step a person's answer to its raised hand, a reviewer's request to revise its draft, or a plain message from whoever works on the case, and wakes the session. Each key is delivered once: `202 {"delivered": false}` when it was. A plain message also answers `resting`, and wakes no step that rests on its report. See [A message to a step](#a-message-to-a-step). |
 | `POST /v1/keel/step-sessions/{session_id}/mentions` | Gives a draft step's agent a comment in one of the case's documents that mentions it, and wakes the session, a draft under review too: `202 {}`. Each key is written once. See [A comment that mentions the step's agent](#a-comment-that-mentions-the-steps-agent). |
 | `POST /v1/keel/step-sessions/{session_id}/cancel` | Ends the step: removes its inputs from the session's config, pauses the session and interrupts its turn. `200 {"status": "paused"}`, also when it was paused already; each call interrupts the turn again. |
@@ -14,7 +14,7 @@
 | `GET /v1/keel/step-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the session's events after the cursor `after`, without `llm.delta`: `200 {"events": [{"id", "type", "data", "created_at"}], "has_more"}`. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/step-sessions/{session_id}/events/stream?after=<id>` | The session's events after the cursor `after`, then each new one as it is written, as server-sent events. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/step-sessions/{session_id}/progress` | The session's status, its todo list as its agent last wrote it, and its last activity: `200 {"status", "todos", "todos_at", "last_activity"}`. See [Progress](#progress). |
-| `POST /v1/keel/item-sessions?agent_id=<agent>` | Starts the agent's session on one work item, or finds the one Keel's key already started: `201 {"session_id"}` made, `200 {"session_id"}` found. See [An agent's work item](#an-agents-work-item). |
+| `POST /v1/keel/item-sessions?agent_id=<agent>` | Starts the agent's session on one work item, or finds the one Keel's key already started: `201 {"session_id", "bundle_version"}` made, `200 {"session_id", "bundle_version"}` found, `bundle_version` as for a step. See [An agent's work item](#an-agents-work-item). |
 | `GET /v1/keel/item-sessions/{session_id}` | The item session's `session_id` and `status`. |
 | `POST /v1/keel/item-sessions/{session_id}/cancel` | Ends the item as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
 | `POST /v1/keel/item-sessions/{session_id}/messages` | Gives the item a plain message from whoever works on the case: `202 {"status": "queued"}` when it wakes the session, `202 {"status": "resting"}` when the item rests on its report or is over and keeps it unread. Each key is written once. See [A message to an item](#a-message-to-an-item). |
@@ -125,7 +125,7 @@ The answer is `202 {}`. Each key is written once: a repeated key writes and wake
 
 ## An agent's work item
 
-A case gives an agent a work item as it gives a person one: a step to do, a vote to cast, or a raised hand to answer. `POST /v1/keel/item-sessions?agent_id=<agent>` starts the agent's session on it. Its body is `{"org_id", "case_type", "idempotency_key", "session_id", "contract"}`: `case_type` is 1 to 200 characters and must be the contract's, and `idempotency_key` is 1 to 200 characters. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this item's session when that session has Keel's id, the agent, and the contract's `case_id` and `item_id`. Any other session under the key, or another session with Keel's id, is `409 key-in-use`.
+A case gives an agent a work item as it gives a person one: a step to do, a vote to cast, or a raised hand to answer. `POST /v1/keel/item-sessions?agent_id=<agent>` starts the agent's session on it. Its body is `{"org_id", "case_type", "idempotency_key", "session_id", "contract"}`: `case_type` is 1 to 200 characters and must be the contract's, and `idempotency_key` is 1 to 200 characters. The answer is `201 {"session_id", "bundle_version"}` when the call made the session, and `200 {"session_id", "bundle_version"}` when Keel's key already holds it; `bundle_version` is read as a step's is. The key holds this item's session when that session has Keel's id, the agent, and the contract's `case_id` and `item_id`. Any other session under the key, or another session with Keel's id, is `409 key-in-use`.
 
 ### The item's contract
 

@@ -65,6 +65,8 @@ class _Agents:
         }
         # Calls ops fails before it answers, per agent.
         self.failures = {"flaky-agent": 1, "down-agent": 2}
+        # The bundle version each listed agent's runtime config names; an agent not listed names none.
+        self.bundles: dict[str, object] = {AGENT: "v12"}
 
     async def get(self, agent_id: str) -> dict:
         if self.failures.get(agent_id, 0) > 0:
@@ -72,7 +74,7 @@ class _Agents:
             raise ConnectionError("ops is restarting")
         if agent_id not in self.orgs:
             raise LookupError(agent_id)
-        return {
+        config = {
             "agent_id": agent_id,
             "org_id": str(self.orgs[agent_id]),
             "project_id": "test-project",
@@ -80,6 +82,9 @@ class _Agents:
             "version": 3,
             "storage_key_prefix": f"test-project/{agent_id}",
         }
+        if agent_id in self.bundles:
+            config["bundle_version"] = self.bundles[agent_id]
+        return config
 
 
 def _wire_state(application, session_factory, redis_client) -> None:
@@ -228,9 +233,31 @@ async def test_keel_creates_a_step_session(link, org, session_store, session_fac
     assert created.json() == {
         "session_id": str(session.id),
         "service_account_id": str(account),
-        "bundle_version": None,
+        "bundle_version": "v12",
         "created": True,
     }
+
+
+async def test_a_step_create_answers_the_agents_bundle_version_at_that_call(link, link_app, org):
+    bundles = link_app.state.runtime_config_cache.bundles
+    request = body(org)
+
+    first = await post(link, request)
+    assert (first.status_code, first.json()["bundle_version"]) == (201, "v12")
+
+    bundles[AGENT] = "v13"
+    again = await post(link, request)
+    assert (again.status_code, again.json()["bundle_version"]) == (200, "v13")
+
+    # An agent whose runtime config names none.
+    none = await post(link, body(org, "keel:c:2:0"), agent="second-agent")
+    assert (none.status_code, none.json()["bundle_version"]) == (201, None)
+
+    # A value Keel would refuse the answer for is no version.
+    for number, version in enumerate(["x" * 201, "", 12], start=3):
+        bundles["second-agent"] = version
+        answer = await post(link, body(org, f"keel:c:{number}:0"), agent="second-agent")
+        assert (answer.status_code, answer.json()["bundle_version"]) == (201, None), repr(version)
 
 
 async def test_the_session_takes_keels_id(link, org, session_store):
