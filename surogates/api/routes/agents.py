@@ -31,6 +31,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    require_shared_layer_writer,
     resolve_agent_bundle,
 )
 from surogates.storage.tenant import TenantStorage
@@ -381,6 +382,7 @@ async def edit_agent(
         raise HTTPException(
             status_code=404, detail=f"Sub-agent '{name}' not found.",
         )
+    require_shared_layer_writer(tenant, existing, f"Sub-agent '{name}'")
 
     await ts.overwrite_agent(existing["key_prefix"], body.content)
     return AgentActionResponse(
@@ -402,4 +404,5 @@ async def delete_agent(
         raise HTTPException(
             status_code=404, detail=f"Sub-agent '{name}' not found.",
         )
+    require_shared_layer_writer(tenant, existing, f"Sub-agent '{name}'")
     await ts.delete_agent(existing["key_prefix"])

@@ -33,6 +33,7 @@ from surogates.api.routes._shared import (
     normalize_source,
     raise_validation,
     require_not_channel_principal,
+    require_shared_layer_writer,
     resolve_agent_bundle as _resolve_agent_bundle,
     resolve_system_bundle as _resolve_system_bundle,
 )
@@ -845,12 +846,15 @@ async def _writable_skill(
 ) -> dict:
     """The tenant-storage skill a write route changes, or why it can't.
 
-    Platform skills (the built-in catalog and the agent's bundle) are
-    read-only here; answering "not found" for one sent an agent hunting
-    for a skill it had just loaded.
+    A skill in the org-shared layer is changed only by an admin or a
+    service account (:func:`require_shared_layer_writer`).  Platform skills
+    (the built-in catalog and the agent's bundle) are read-only here;
+    answering "not found" for one sent an agent hunting for a skill it had
+    just loaded.
     """
     existing = await ts.skill_exists(name)
     if existing:
+        require_shared_layer_writer(tenant, existing, f"Skill '{name}'")
         return existing
     from surogates.tools.loader import SKILL_SOURCE_PLATFORM
 
@@ -1064,10 +1068,12 @@ async def activate_expert(
     ``endpoint`` configured (either in the SKILL.md frontmatter, the
     DB overlay, or provided in the request body).
     """
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    require_shared_layer_writer(tenant, existing, f"Skill '{name}'")
 
     content = await ts.read_skill(existing["key_prefix"])
     meta = _parse_frontmatter(content, name)
@@ -1113,10 +1119,12 @@ async def retire_expert(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> SkillActionResponse:
     """Set an expert skill's status to ``retired``."""
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    require_shared_layer_writer(tenant, existing, f"Skill '{name}'")
 
     content = await ts.read_skill(existing["key_prefix"])
     meta = _parse_frontmatter(content, name)
@@ -1147,10 +1155,12 @@ async def collect_training_data(
     Collects successful conversation trajectories involving this expert
     and writes them as JSONL to the skill's ``training/`` directory.
     """
+    require_not_channel_principal(tenant)
     ts = _get_tenant_storage(request, tenant)
     existing = await ts.skill_exists(name)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    require_shared_layer_writer(tenant, existing, f"Skill '{name}'")
 
     content = await ts.read_skill(existing["key_prefix"])
     meta = _parse_frontmatter(content, name)

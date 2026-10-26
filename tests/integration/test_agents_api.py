@@ -15,10 +15,11 @@ from httpx import ASGITransport, AsyncClient
 from surogates.db.models import Agent
 from surogates.session.store import SessionStore
 from surogates.storage.backend import LocalBackend
+from surogates.storage.tenant import TenantStorage
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 
-from .conftest import create_org, create_user
+from .conftest import OrgPrincipals, create_org, create_user, org_principals
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -403,3 +404,112 @@ async def test_agents_are_scoped_to_tenant(
     )
     names_b = {a["name"] for a in resp_b.json()["agents"]}
     assert "org-a-only" not in names_b
+
+
+# ---------------------------------------------------------------------------
+# Sub-agents in the org-shared layer
+# ---------------------------------------------------------------------------
+#
+# A sub-agent found by name resolves to the caller's own layer first and to
+# the org-shared layer second.  Changing an org-shared one needs a service
+# account or an ``admin`` token; an end-user changes only their own.
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def principals(session_factory) -> OrgPrincipals:
+    return await org_principals(session_factory)
+
+
+def _storage(app, org_id: UUID, user_id: UUID | None) -> TenantStorage:
+    return TenantStorage(
+        backend=app.state.storage,
+        org_id=org_id,
+        user_id=user_id,
+        bucket=app.state.settings.storage.bucket,
+    )
+
+
+async def _agent_file(ts: TenantStorage, name: str) -> str | None:
+    """The AGENT.md the storage finds under *name*, or ``None`` when there is none."""
+    found = await ts.agent_exists(name)
+    return None if found is None else await ts.read_agent(found["key_prefix"])
+
+
+def _edit(client: AsyncClient, name: str, headers: dict, prefix: str = "/v1"):
+    return client.put(
+        f"{prefix}/agents/{name}",
+        json={"content": _valid_agent_md(name=name, body="rewritten")},
+        headers=headers,
+    )
+
+
+def _delete(client: AsyncClient, name: str, headers: dict, prefix: str = "/v1"):
+    return client.delete(f"{prefix}/agents/{name}", headers=headers)
+
+
+async def test_an_end_user_cannot_edit_an_org_shared_sub_agent(
+    app, client: AsyncClient, principals,
+):
+    shared = _storage(app, principals.org_id, None)
+    await shared.write_agent("shared-edit", _valid_agent_md(name="shared-edit"))
+    before = await _agent_file(shared, "shared-edit")
+
+    resp = await _edit(client, "shared-edit", principals.auth("user"))
+
+    assert resp.status_code == 403, resp.text
+    assert await _agent_file(shared, "shared-edit") == before
+
+
+async def test_an_end_user_cannot_delete_an_org_shared_sub_agent(
+    app, client: AsyncClient, principals,
+):
+    shared = _storage(app, principals.org_id, None)
+    await shared.write_agent("shared-delete", _valid_agent_md(name="shared-delete"))
+    before = await _agent_file(shared, "shared-delete")
+
+    resp = await _delete(client, "shared-delete", principals.auth("user"))
+
+    assert resp.status_code == 403, resp.text
+    assert before is not None
+    assert await _agent_file(shared, "shared-delete") == before
+
+
+@pytest.mark.parametrize(
+    ("principal", "prefix"),
+    [
+        ("admin", "/v1"),
+        ("service_account_session", "/v1"),
+        ("service_account", "/v1/api"),
+    ],
+)
+async def test_a_service_account_or_an_admin_can_edit_and_delete_an_org_shared_sub_agent(
+    app, client: AsyncClient, principals, principal: str, prefix: str,
+):
+    shared = _storage(app, principals.org_id, None)
+    name = f"shared-{principal}".replace("_", "-")
+    await shared.write_agent(name, _valid_agent_md(name=name))
+    headers = principals.auth(principal)
+
+    edited = await _edit(client, name, headers, prefix)
+    assert edited.status_code == 200, edited.text
+    assert "rewritten" in await _agent_file(shared, name)
+
+    deleted = await _delete(client, name, headers, prefix)
+    assert deleted.status_code == 204, deleted.text
+    assert await _agent_file(shared, name) is None
+
+
+async def test_an_end_user_can_edit_and_delete_their_own_sub_agent(
+    app, client: AsyncClient, principals,
+):
+    own = _storage(app, principals.org_id, principals.user_id)
+    await own.write_agent("mine", _valid_agent_md(name="mine"))
+    headers = principals.auth("user")
+
+    edited = await _edit(client, "mine", headers)
+    assert edited.status_code == 200, edited.text
+    assert "rewritten" in await _agent_file(own, "mine")
+
+    deleted = await _delete(client, "mine", headers)
+    assert deleted.status_code == 204, deleted.text
+    assert await _agent_file(own, "mine") is None

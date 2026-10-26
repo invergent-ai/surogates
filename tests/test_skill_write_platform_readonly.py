@@ -9,11 +9,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 
 from surogates.api.routes import skills as routes
+from surogates.tenant.context import TenantContext
 from surogates.tools.loader import SKILL_SOURCE_PLATFORM, SKILL_SOURCE_USER, SkillDef
 
 
@@ -44,6 +46,13 @@ def _request(monkeypatch: pytest.MonkeyPatch, catalog: list[SkillDef]) -> Any:
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=_session_factory)))
 
 
+def _user() -> TenantContext:
+    return TenantContext(
+        org_id=uuid4(), user_id=uuid4(), org_config={}, user_preferences={},
+        permissions=frozenset(), asset_root="",
+    )
+
+
 def _skill(name: str, source: str) -> SkillDef:
     return SkillDef(name=name, description="", content="", source=source)
 
@@ -68,5 +77,6 @@ async def test_an_unknown_skill_is_not_found(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_tenant_skill_is_returned(monkeypatch):
     request = _request(monkeypatch, [])
-    found = await routes._writable_skill(_Storage({"key_prefix": "skills/notes"}), "notes", request, tenant=None)
-    assert found == {"key_prefix": "skills/notes"}
+    existing = {"key_prefix": "skills/notes", "layer": "user"}
+    found = await routes._writable_skill(_Storage(existing), "notes", request, tenant=_user())
+    assert found == existing

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from fastapi import HTTPException, Request, status
 
+from surogates.api.routes._admin_auth import is_admin_principal
 from surogates.tenant.context import PrincipalKind, TenantContext
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,33 @@ def require_not_channel_principal(tenant: TenantContext) -> None:
                 "sessions."
             ),
         )
+
+
+def require_shared_layer_writer(
+    tenant: TenantContext, found: dict[str, Any], label: str,
+) -> None:
+    """Refuse a change to an item that is not in the caller's own layer.
+
+    *found* is what ``TenantStorage.skill_exists`` or ``agent_exists``
+    returned: ``{"key_prefix": ..., "layer": "user" | "org"}``.  An item in
+    the ``"user"`` layer belongs to the caller, so anyone may change it.  An
+    item in any other layer is shared by the whole org, and only a
+    service-account principal or an admin principal
+    (:func:`~surogates.api.routes._admin_auth.is_admin_principal`) may change
+    it.  *label* names the item in the refusal, e.g. ``"Skill 'notes'"``.
+    """
+    if found.get("layer") == "user":
+        return
+    kind, _ = tenant.principal()
+    if kind is PrincipalKind.JUDGE or is_admin_principal(tenant):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            f"{label} is shared by the whole organization: only an admin "
+            "or a service account can change it."
+        ),
+    )
 
 
 async def resolve_agent_id(request: Request) -> str | None:
