@@ -34,7 +34,7 @@ EXPERT = (
     "description: Answers billing questions\n"
     "type: expert\n"
     "expert_status: draft\n"
-    "expert_endpoint: https://old.example/v1\n"
+    "endpoint: https://old.example/v1\n"
     "---\n"
     "Original body\n"
 )
