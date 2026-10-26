@@ -335,6 +335,7 @@ describe("a thread's card, live", () => {
       events.emit("worker.spawned", {
         worker_id: THREAD, title: "Draft A", goal: "Draft the A memo.", started_by: "user", proposal_id: PROPOSAL, key: "1",
       }, 2);
+      events.emit("stream.live", {}, 0);
     });
     projectStream.emit("ready");
     await settle();
@@ -382,6 +383,7 @@ describe("a thread's card, live", () => {
         events.emit("thread.proposed", { proposal_id: PROPOSAL, threads: [
           { key: "1", title: "Check the totals", goal: "Check the totals in Budget.xlsx.", where: "device" },
         ] }, 1);
+        events.emit("stream.live", {}, 0);
       });
       await settle();
       const card = container.querySelector('[data-testid="proposed-thread"]')!;

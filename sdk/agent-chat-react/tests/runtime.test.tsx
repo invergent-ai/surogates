@@ -175,7 +175,7 @@ describe("useAgentChatRuntime", () => {
     expect(calls.opened[0]).toMatchObject({ sessionId: "s-1", after: 0 });
   });
 
-  it("marks session history as loading until replay events arrive", () => {
+  it("keeps session history loading while replayed events arrive, until the stream says it is live", () => {
     const calls: AdapterCalls = {
       opened: [],
       sent: [],
@@ -192,6 +192,13 @@ describe("useAgentChatRuntime", () => {
       calls.opened[0]?.stream.emit("user.message", 1, {
         content: "loaded message",
       });
+    });
+
+    expect(runtime.api.isLoadingHistory).toBe(true);
+    expect(runtime.api.messages[0]?.content).toBe("loaded message");
+
+    act(() => {
+      calls.opened[0]?.stream.emit("stream.live", 0, {});
     });
 
     expect(runtime.api.isLoadingHistory).toBe(false);

@@ -253,6 +253,7 @@ describe("AgentChat", () => {
     act(() => {
       stream.emit("user.message", 1, { content: "hello from stream" });
       stream.emit("llm.response", 2, { message: { content: "assistant reply" } });
+      stream.emit("stream.live", 0, {});
     });
 
     expect(container.textContent).toContain("hello from stream");
@@ -274,12 +275,365 @@ describe("AgentChat", () => {
     expect(container.textContent).not.toContain("Start a conversation");
     expect(container.textContent).toContain("Loading conversation");
 
+    // The replay builds the history up behind the loading state: nothing of it shows, so nothing scrolls.
     act(() => {
       stream.emit("user.message", 1, { content: "previous session message" });
+      stream.emit("llm.response", 2, { message: { content: "previous reply" } });
+    });
+
+    expect(container.textContent).toContain("Loading conversation");
+    expect(container.textContent).not.toContain("previous session message");
+
+    // The replay is over: the whole conversation shows at once.
+    act(() => {
+      stream.emit("stream.live", 0, {});
     });
 
     expect(container.textContent).toContain("previous session message");
+    expect(container.textContent).toContain("previous reply");
     expect(container.textContent).not.toContain("Loading conversation");
+  });
+
+  it("shows the history the first poll found when the stream never says it is live", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      const adapter = {
+        ...createAdapter(stream),
+        async pollEvents() {
+          return {
+            events: [{ id: 1, type: "user.message", data: { content: "polled message" } }],
+            hasMore: false,
+          };
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      // The first tick found the history: more may be behind it, so it waits for a tick that finds nothing.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(container.textContent).toContain("polled message");
+      expect(container.textContent).not.toContain("Loading conversation");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps loading while the stream still sends history between ticks, until it says it is live", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      // No pollEvents: the stream is the only channel, as in a host without polling.
+      const adapter = createAdapter(stream);
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        stream.emit("user.message", 1, { content: "long history start" });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      // A tick that saw events comes again 1.5 s on, so the history has to keep arriving at that pace.
+      act(() => {
+        stream.emit("llm.response", 2, { message: { content: "long history reply" } });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      act(() => {
+        stream.emit("user.message", 3, { content: "long history follow-up" });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      act(() => {
+        stream.emit("stream.live", 0, {});
+      });
+
+      expect(container.textContent).not.toContain("Loading conversation");
+      expect(container.textContent).toContain("long history start");
+      expect(container.textContent).toContain("long history reply");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops loading at the first tick that sees the stream stalled", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      const adapter = createAdapter(stream);
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        stream.emit("user.message", 1, { content: "stalled history" });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      // Events came in before this tick: not yet.
+      expect(container.textContent).toContain("Loading conversation");
+
+      // The tick that saw events comes again 1.5 s on, finds the stream quiet and ends the load.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+
+      expect(container.textContent).not.toContain("Loading conversation");
+      expect(container.textContent).toContain("stalled history");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends the load 1.5 s after a tick that saw events, whatever state the session is in", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      // Finished and not a mission: the state whose ticks are furthest apart.
+      const adapter = createAdapter(stream, { session: { ...session("s-1"), status: "completed" } });
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        stream.emit("llm.response", 1, { message: { content: "a finished reply" } });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+
+      expect(container.textContent).not.toContain("Loading conversation");
+      expect(container.textContent).toContain("a finished reply");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is not reached by a tick of the previous session whose status read fails after the switch", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams: FakeEventStream[] = [];
+      let failStale: (() => void) | null = null;
+      let firstRead = true;
+      const adapter = {
+        ...createAdapter(new FakeEventStream()),
+        openEventStream() {
+          const next = new FakeEventStream();
+          streams.push(next);
+          return next;
+        },
+        getSession(input: { sessionId: string }) {
+          // The mount's read of s-1 answers; the first tick's read of it hangs, then fails.
+          if (input.sessionId === "s-1" && !firstRead) {
+            return new Promise<AgentChatSession>((_, reject) => {
+              failStale = () => reject(new Error("status unavailable"));
+            });
+          }
+          firstRead = false;
+          return Promise.resolve(session(input.sessionId));
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        streams[0].emit("user.message", 50, { content: "old session" });
+        streams[0].emit("stream.live", 0, {});
+      });
+      // s-1's first tick is now waiting for its status.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_100);
+      });
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-2" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        streams[1].emit("user.message", 1, { content: "new session" });
+      });
+      await act(async () => {
+        failStale?.();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_100);
+      });
+
+      expect(container.textContent).toContain("Loading conversation");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("judges a new session's history by its own events, not the previous session's", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams: FakeEventStream[] = [];
+      const adapter = {
+        ...createAdapter(new FakeEventStream()),
+        openEventStream() {
+          const next = new FakeEventStream();
+          streams.push(next);
+          return next;
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        streams[0].emit("user.message", 50, { content: "old session" });
+        streams[0].emit("stream.live", 0, {});
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-2" />);
+        await Promise.resolve();
+      });
+      act(() => {
+        streams[1].emit("user.message", 1, { content: "new session" });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+
+      expect(container.textContent).toContain("Loading conversation");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps loading while polls keep finding events, until a tick finds none", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      const log = [
+        { id: 1, type: "user.message", data: { content: "page one" } },
+        { id: 2, type: "llm.response", data: { message: { content: "page two" } } },
+      ];
+      let released = 1;
+      const adapter = {
+        ...createAdapter(stream),
+        async pollEvents(input: { after: number }) {
+          return { events: log.slice(0, released).filter((event) => event.id > input.after), hasMore: false };
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      // Tick one polls event 1; tick two (1.5 s on) polls event 2; tick three finds nothing.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      released = 2;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+
+      expect(container.textContent).not.toContain("Loading conversation");
+      expect(container.textContent).toContain("page one");
+      expect(container.textContent).toContain("page two");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops loading after the first poll even when the history has nothing to show", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      const adapter = {
+        ...createAdapter(stream, { session: { ...session("s-1"), messageCount: 3 } }),
+        async pollEvents() {
+          return { events: [], hasMore: false };
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      expect(container.textContent).toContain("Loading conversation");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+
+      expect(container.textContent).not.toContain("Loading conversation");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows builtin and adapter slash commands from the composer command menu", async () => {
@@ -1426,6 +1780,7 @@ describe("AgentChat", () => {
     });
     act(() => {
       stream.emit("user.message", 1, { content: "Tidy my notes" });
+      stream.emit("stream.live", 0, {});
     });
     const transcript = container.querySelector("[data-transcript]");
     expect(transcript?.textContent).toContain("Tidy my notes");
@@ -1663,6 +2018,7 @@ describe("AgentChat", () => {
         name: "ask_user_question",
         arguments: { questions: [{ prompt: "Keep the drafts?" }, { prompt: "Rename the notes?" }] },
       });
+      stream.emit("stream.live", 0, {});
     });
     expect(container.textContent).toContain("Which folder first?");
     expect(container.textContent).toContain("Waiting for an answer");
@@ -1689,6 +2045,7 @@ describe("AgentChat", () => {
     act(() => {
       stream.emit("user.message", 1, { content: "Check the payslips" });
       stream.emit("llm.response", 2, { message: { content: "Both payslips match." } });
+      stream.emit("stream.live", 0, {});
     });
     expect(container.textContent).toContain("Check the payslips");
     expect(container.textContent).toContain("Both payslips match.");
@@ -1736,6 +2093,7 @@ describe("AgentChat", () => {
         name: "ask_user_question",
         arguments: { questions: [{ prompt: "Keep the drafts?" }, { prompt: "Rename the notes?" }] },
       });
+      stream.emit("stream.live", 0, {});
     });
     expect(container.textContent).toContain("Which folder first?");
     expect(buttons()).not.toContain("Notes");
@@ -1778,6 +2136,7 @@ describe("AgentChat", () => {
     act(() => {
       together.stream.emit("user.message", 1, { content: "Check the payslips" });
       said.forEach((content, at) => together.stream.emit("llm.response", at + 2, { notice: true, content }));
+      together.stream.emit("stream.live", 0, {});
     });
     expect(rows(together.view).map(runOf)).toEqual([said, said, said]);
 
@@ -1787,6 +2146,7 @@ describe("AgentChat", () => {
       split.stream.emit("llm.response", 2, { notice: true, content: said[1] });
       split.stream.emit("user.message", 3, { content: "Go on" });
       split.stream.emit("llm.response", 4, { notice: true, content: said[2] });
+      split.stream.emit("stream.live", 0, {});
     });
     const firstRun = [said[0], said[1]];
     expect(rows(split.view).map(runOf)).toEqual([firstRun, firstRun, [said[2]]]);
@@ -1807,6 +2167,7 @@ describe("AgentChat", () => {
       stream.emit("tool.result", 5, { tool_call_id: "read-1", name: "read_file", content: "two payslips" });
       stream.emit("llm.request", 6, {});
       stream.emit("llm.response", 7, { message: { content: "Both match." } });
+      stream.emit("stream.live", 0, {});
     });
   }
 
@@ -1908,6 +2269,7 @@ describe("AgentChat", () => {
       });
       stream.emit("tool.result", 2, { tool_call_id: "expert-1", content: "Appropriate." });
       stream.emit("expert.result", 3, { summary: "Appropriate." });
+      stream.emit("stream.live", 0, {});
     });
     expect(container.textContent).toContain("Rate this expert's response:");
     await act(async () => {
@@ -1946,6 +2308,7 @@ describe("AgentChat", () => {
       stream.emit("expert.result", 3, {
         summary: "The architecture is appropriate for an SDK example.",
       });
+      stream.emit("stream.live", 0, {});
     });
 
     expect(container.textContent).toContain("Consulted expert");
@@ -1994,6 +2357,7 @@ describe("AgentChat", () => {
         content: "SELECT * FROM orders LIMIT 10;",
         iterations_used: 2,
       });
+      stream.emit("stream.live", 0, {});
     });
 
     // The synthesized frame renders just like the LLM-initiated one.
@@ -2030,6 +2394,7 @@ describe("AgentChat", () => {
         success: false,
         error: "Expert 'sql_writer' has no endpoint configured.",
       });
+      stream.emit("stream.live", 0, {});
     });
 
     expect(container.textContent).toContain("Consulted expert");
@@ -2074,6 +2439,7 @@ describe("AgentChat", () => {
         success: true,
         content: "SELECT 1;",
       });
+      stream.emit("stream.live", 0, {});
     });
 
     // Exactly one "Consulted expert" frame in the DOM.
@@ -2122,6 +2488,7 @@ describe("AgentChat", () => {
           reason: "Sandbox pod sandbox-0df712402538 failed to become ready",
         }),
       });
+      stream.emit("stream.live", 0, {});
     });
 
     expect(container.textContent).toContain(
@@ -2181,6 +2548,7 @@ describe("AgentChat", () => {
           status: "queued",
         }),
       });
+      stream.emit("stream.live", 0, {});
     });
 
     expect(container.textContent).toContain("Patch skill");
