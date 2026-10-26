@@ -5,8 +5,9 @@
 // fixed order and a neutral for the rest, each defined for both themes in
 // tokens.css. A colour follows its series, never its rank: the first series
 // is always the first colour, wherever the chart sorts it. A fifth series
-// folds into "other", the neutral, instead of taking a colour that looks
-// like another's.
+// folds into "other", the neutral: the caller marks it `other`, and
+// seriesConfig refuses an unmarked fifth. Colour-blind readers tell each
+// colour from the next in the order, not every pair: tokens.css names them.
 
 import type { ReactNode } from "react";
 

@@ -50,9 +50,16 @@
   --chart-3: #d08700;
   --chart-4: #a65f00;
   --chart-5: #894b00;
-  /* The categorical chart colours, in their fixed order, validated for
-     colour-blind readers in both themes. The neutral is for the series
-     folded into "other". */
+  /* The categorical chart colours, in their fixed order, and a neutral for
+     the series folded into "other". Simulated for protan, deutan and tritan
+     readers in both themes, each colour stays apart from the next in this
+     order: 1 and 2, 2 and 3, 3 and 4, 4 and the neutral. Pairs further
+     apart do not all stay apart: 1 and 4 in both themes, 3 and the neutral
+     in the light theme, and 1 and 3 for tritan readers in the dark theme.
+     Where such a pair can touch (a stack whose series between them are
+     zero, a scatter), the chart also names its series by direct labels or
+     a table. Series 3 is under 3:1 on the light surfaces: its values need
+     a label or a table there. */
   --chart-series-1: light-dark(#2a78d6, #3987e5);
   --chart-series-2: light-dark(#eb6834, #d95926);
   --chart-series-3: light-dark(#1baf7a, #199e70);
