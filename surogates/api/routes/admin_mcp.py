@@ -7,7 +7,7 @@ server configs the proxy reads at discovery time
 Routes mount under ``/v1/admin/mcp-servers``.  Every route requires the
 ``admin`` permission and a signed-in user; channel-session and
 service-account principals are refused (see
-:func:`._admin_scope.require_admin_principal`).
+:func:`._admin_auth.require_admin_principal`).
 
 Secrets must never be stored in ``env`` — use ``credential_refs`` to
 reference entries in the encrypted credential vault.  The proxy
@@ -33,7 +33,7 @@ from sqlalchemy import func, select
 from surogates.db.models import McpServer, Org, User
 from surogates.tools.loader import MCPTransport
 
-from ._admin_scope import require_admin_principal
+from ._admin_auth import require_admin_principal
 
 logger = logging.getLogger(__name__)
 

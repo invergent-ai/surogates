@@ -8,7 +8,7 @@ injects them at connection time so secrets never enter the sandbox.
 Routes mount under ``/v1/admin/credentials``.  Every route requires the
 ``admin`` permission and a signed-in user; channel-session and
 service-account principals are refused (see
-:func:`._admin_scope.require_admin_principal`).
+:func:`._admin_auth.require_admin_principal`).
 
 The plaintext value is **never** returned by any endpoint.
 """
@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from surogates.db.models import Org, ServiceAccount, User
 from surogates.tenant.credentials import CredentialVault
 
-from ._admin_scope import require_admin_principal
+from ._admin_auth import require_admin_principal
 
 logger = logging.getLogger(__name__)
 

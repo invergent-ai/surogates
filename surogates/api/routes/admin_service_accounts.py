@@ -1,8 +1,8 @@
 """Admin CRUD for service-account API keys.
 
-Routes mount under ``/v1/admin/service-accounts``.  ``admin``
-permission is required for cross-org operations; regular users may
-only manage service accounts scoped to their own org.
+Routes mount under ``/v1/admin/service-accounts``.  Every route
+requires a signed-in user holding the ``admin`` permission (see
+:func:`._admin_auth.require_admin_principal`).
 
 The raw token is returned **exactly once** on creation and cannot be
 recovered later.  List and delete operations never expose the secret —
@@ -23,24 +23,13 @@ from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
 
+from ._admin_auth import require_admin_principal
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
-
-
-def _require_admin(tenant: TenantContext) -> None:
-    """Enforce platform-admin access to service-account management.
-
-    Issuance must be admin-only: service-account tokens are long-lived
-    credentials that can submit prompts until revoked, so a compromised
-    non-admin user must not be able to bootstrap persistent programmatic
-    access by minting their own.
-    """
-    if "admin" not in tenant.permissions:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Managing service accounts requires the 'admin' permission.",
-        )
+# Issuance is admin-only: service-account tokens are long-lived
+# credentials that can submit prompts until revoked.
+router = APIRouter(dependencies=[Depends(require_admin_principal)])
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +91,6 @@ def _store(request: Request) -> ServiceAccountStore:
 async def create_service_account(
     body: ServiceAccountCreate,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> ServiceAccountCreated:
     """Issue a new service-account API key.
 
@@ -110,8 +98,6 @@ async def create_service_account(
     ``token`` exactly once — callers must store it, it is not
     recoverable.
     """
-    _require_admin(tenant)
-
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
         org = await session.get(Org, body.org_id)
@@ -147,7 +133,6 @@ async def list_service_accounts(
     Requires the ``admin`` permission.  Omitting ``org_id`` defaults to
     the admin's own org.  Tokens are never returned.
     """
-    _require_admin(tenant)
     target_org = org_id if org_id is not None else tenant.org_id
 
     rows = await _store(request).list_for_org(target_org)
@@ -173,7 +158,6 @@ async def list_service_accounts(
 async def revoke_service_account(
     service_account_id: UUID,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
     """Revoke a service-account token.
 
@@ -183,8 +167,6 @@ async def revoke_service_account(
     client; already-revoked or unknown ids return 404, and so does a
     case-type account, which Keel owns and no admin revokes.
     """
-    _require_admin(tenant)
-
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
         sa = await session.get(ServiceAccount, service_account_id)

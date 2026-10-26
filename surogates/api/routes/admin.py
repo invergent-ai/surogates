@@ -1,4 +1,8 @@
-"""Admin endpoints -- org and user management."""
+"""Admin endpoints -- org, user and channel-identity management.
+
+Every route requires a signed-in user holding the ``admin`` permission
+(see :func:`._admin_auth.require_admin_principal`).
+"""
 
 from __future__ import annotations
 
@@ -18,9 +22,11 @@ from surogates.tenant.context import TenantContext
 from surogates.tenant.memberships import belongs_to
 from surogates.tenant.models import OrgCreate, OrgResponse, UserCreate, UserResponse
 
+from ._admin_auth import require_admin_principal
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin_principal)])
 
 
 # ---------------------------------------------------------------------------
@@ -47,15 +53,8 @@ class UserListResponse(BaseModel):
 async def create_org(
     body: OrgCreate,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> OrgResponse:
     """Create a new organisation."""
-    if "admin" not in tenant.permissions:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permission required.",
-        )
-
     session_factory = request.app.state.session_factory
     new_org = Org(
         id=uuid.uuid4(),
@@ -79,17 +78,10 @@ async def create_org(
 @router.get("/orgs", response_model=OrgListResponse)
 async def list_orgs(
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
     limit: int = 50,
     offset: int = 0,
 ) -> OrgListResponse:
-    """List all organisations (admin only)."""
-    if "admin" not in tenant.permissions:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permission required.",
-        )
-
+    """List all organisations."""
     if limit < 1:
         limit = 1
     if limit > 200:
@@ -125,15 +117,8 @@ async def list_orgs(
 async def get_org(
     org_id: UUID,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> OrgResponse:
     """Retrieve a single organisation by ID."""
-    if "admin" not in tenant.permissions and tenant.org_id != org_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permission required.",
-        )
-
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
         result = await session.execute(select(Org).where(Org.id == org_id))
@@ -167,15 +152,8 @@ async def create_user(
     org_id: UUID,
     body: UserCreate,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
 ) -> UserResponse:
     """Create a new user within an organisation."""
-    if "admin" not in tenant.permissions and tenant.org_id != org_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permission required.",
-        )
-
     session_factory = request.app.state.session_factory
 
     # Verify the org exists.
@@ -252,17 +230,10 @@ async def create_user(
 async def list_users(
     org_id: UUID,
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
     limit: int = 50,
     offset: int = 0,
 ) -> UserListResponse:
     """List users within an organisation."""
-    if "admin" not in tenant.permissions and tenant.org_id != org_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permission required.",
-        )
-
     if limit < 1:
         limit = 1
     if limit > 200:
