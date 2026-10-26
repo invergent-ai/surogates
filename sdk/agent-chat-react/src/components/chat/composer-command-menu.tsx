@@ -38,6 +38,10 @@ const SEARCH_HINT: Record<ComposerMenuMode, string> = {
 
 interface ComposerCommandMenuProps {
   menuMode: ComposerMenuMode;
+  /** False drops the builtin commands from every mode. */
+  commandsEnabled: boolean;
+  /** False drops the skills, and their empty state, from every mode. */
+  skillsEnabled: boolean;
   /** Mirrors the textarea query; only read in the controlled modes. */
   searchQuery: string;
   onSearchChange: (next: string) => void;
@@ -57,6 +61,8 @@ const ROW_CLASS = `grid ${NAME_COLUMNS} min-h-11 items-center gap-4 rounded-[10p
 
 export function ComposerCommandMenu({
   menuMode,
+  commandsEnabled,
+  skillsEnabled,
   searchQuery,
   onSearchChange,
   skillsLoading,
@@ -71,13 +77,28 @@ export function ComposerCommandMenu({
   // skills / scheduled scopes run cmdk's own uncontrolled filtering so a
   // mirror write can't widen their scope back to "all".
   const controlledSearch = menuMode === "commands" || menuMode === "all";
-  const showCommands = menuMode === "commands" || menuMode === "all";
-  const showSkills = menuMode === "skills" || menuMode === "all";
+  const showCommands =
+    commandsEnabled && (menuMode === "commands" || menuMode === "all");
+  const showSkills =
+    skillsEnabled && (menuMode === "skills" || menuMode === "all");
+  // The ``/`` menu with one of its two groups switched off reads as the
+  // other: its placeholder and empty message name what it lists.
+  const labelMode: ComposerMenuMode =
+    menuMode !== "all"
+      ? menuMode
+      : !commandsEnabled
+        ? "skills"
+        : !skillsEnabled
+          ? "commands"
+          : "all";
 
   // Zero attached skills is a first-class state with its own call to
   // action, distinct from "your search matched nothing" (cmdk's empty).
   const skillsUnattached =
-    menuMode === "skills" && !skillsLoading && adapterCommands.length === 0;
+    showSkills &&
+    menuMode === "skills" &&
+    !skillsLoading &&
+    adapterCommands.length === 0;
 
   return (
     <PopoverContent
@@ -119,7 +140,7 @@ export function ComposerCommandMenu({
           <SearchIcon className="size-4.5 shrink-0 text-muted-foreground" />
           <CommandPrimitive.Input
             data-slot="command-input"
-            placeholder={SEARCH_PLACEHOLDER[menuMode]}
+            placeholder={SEARCH_PLACEHOLDER[labelMode]}
             className="h-10 min-w-0 flex-1 bg-transparent text-base text-foreground outline-hidden placeholder:text-muted-foreground"
             {...(controlledSearch
               ? { value: searchQuery, onValueChange: onSearchChange }
@@ -145,9 +166,9 @@ export function ComposerCommandMenu({
             */}
             {!(skillsLoading && showSkills) && (
               <CommandEmpty className="px-3 py-8 text-center text-sm text-muted-foreground">
-                {menuMode === "skills"
+                {labelMode === "skills"
                   ? "No skills match your search."
-                  : menuMode === "scheduled"
+                  : labelMode === "scheduled"
                     ? "No scheduled tasks found."
                     : "No commands found."}
               </CommandEmpty>

@@ -211,6 +211,15 @@ interface ChatComposerProps {
   missionsEnabled?: boolean;
   goalsEnabled?: boolean;
   compressEnabled?: boolean;
+  // ── Composer menus (per-host) ────────────────────────────────────
+  // Default to shown. ``commandsEnabled={false}`` drops the Commands
+  // toggle and every builtin command from the menu;
+  // ``skillsEnabled={false}`` drops the Skills toggle, the skills in the
+  // menu and their empty state, and skips the skills fetch. With both
+  // off, typing ``/`` opens no menu and the message is sent as typed.
+  // The Scheduled toggle follows ``loopsEnabled``.
+  commandsEnabled?: boolean;
+  skillsEnabled?: boolean;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -419,6 +428,8 @@ function ChatComposerInner({
   missionsEnabled = true,
   goalsEnabled = true,
   compressEnabled = true,
+  commandsEnabled = true,
+  skillsEnabled = true,
   viewMode = "simple",
   onViewModeChange,
 }: ChatComposerProps) {
@@ -463,10 +474,14 @@ function ChatComposerInner({
   // field. Slash commands route around sendMessage entirely (/goal goes
   // to defineOutcome), so the question would stay open and unanswered
   // until it times out.
+  //
+  // Typing `/` opens the menu only while it has commands or skills to
+  // offer; with both switched off the leading `/` is plain text.
+  const slashMenuAvailable = commandsEnabled || skillsEnabled;
   const showSlashMenu =
     !menuDismissed &&
     !awaitingAnswer &&
-    (textInput.value.startsWith("/") || buttonMenuOpen);
+    ((slashMenuAvailable && textInput.value.startsWith("/")) || buttonMenuOpen);
 
   // Re-open when user types a new `/` after dismissal.
   useEffect(() => {
@@ -492,7 +507,9 @@ function ChatComposerInner({
   // Platform built-ins (docx, pdf, pptx, xlsx, kanban, …) are dropped here so
   // the slash menu lists only the skills a tenant authored or attached.
   useEffect(() => {
-    if (!(showSlashMenu && (menuMode === "skills" || menuMode === "all"))) {
+    if (
+      !(skillsEnabled && showSlashMenu && (menuMode === "skills" || menuMode === "all"))
+    ) {
       return;
     }
     const pending = adapter.listSlashCommands?.();
@@ -512,7 +529,7 @@ function ChatComposerInner({
     return () => {
       cancelled = true;
     };
-  }, [adapter, showSlashMenu, menuMode]);
+  }, [adapter, skillsEnabled, showSlashMenu, menuMode]);
 
   const builtinCommands = useMemo<SlashCommand[]>(
     () => {
@@ -903,7 +920,10 @@ function ChatComposerInner({
               placeholder={
                 disabled
                   ? disabledReason ?? "Session disabled"
-                  : placeholder ?? "Send a message…  ( / for commands )"
+                  : placeholder ??
+                    (slashMenuAvailable
+                      ? "Send a message…  ( / for commands )"
+                      : "Send a message…")
               }
               disabled={disabled}
             />
@@ -1013,27 +1033,31 @@ function ChatComposerInner({
                   </Command>
                 </ResponsivePanel>
               )}
-              {!disabled && (
+              {!disabled && (commandsEnabled || skillsEnabled || loopsEnabled) && (
                 <>
                   {showToolsPanel && (
                     <span aria-hidden="true" className="mx-1.5 h-5.5 w-px bg-border" />
                   )}
                   {/* While a question is open the menu cannot open: a slash
                       command would route around the answer and leave it parked. */}
-                  <ComposerMenuToggle
-                    icon={TerminalIcon}
-                    label="Commands"
-                    pressed={menuOpen && menuMode === "commands"}
-                    disabled={awaitingAnswer}
-                    onClick={() => toggleMenu("commands")}
-                  />
-                  <ComposerMenuToggle
-                    icon={SparklesIcon}
-                    label="Skills"
-                    pressed={menuOpen && menuMode === "skills"}
-                    disabled={awaitingAnswer}
-                    onClick={() => toggleMenu("skills")}
-                  />
+                  {commandsEnabled && (
+                    <ComposerMenuToggle
+                      icon={TerminalIcon}
+                      label="Commands"
+                      pressed={menuOpen && menuMode === "commands"}
+                      disabled={awaitingAnswer}
+                      onClick={() => toggleMenu("commands")}
+                    />
+                  )}
+                  {skillsEnabled && (
+                    <ComposerMenuToggle
+                      icon={SparklesIcon}
+                      label="Skills"
+                      pressed={menuOpen && menuMode === "skills"}
+                      disabled={awaitingAnswer}
+                      onClick={() => toggleMenu("skills")}
+                    />
+                  )}
                   {loopsEnabled && (
                     <ComposerMenuToggle
                       icon={ClockIcon}
@@ -1162,6 +1186,8 @@ function ChatComposerInner({
       </PopoverAnchor>
       <ComposerCommandMenu
         menuMode={menuMode}
+        commandsEnabled={commandsEnabled}
+        skillsEnabled={skillsEnabled}
         searchQuery={searchQuery}
         onSearchChange={handleSearchChange}
         skillsLoading={skillsLoading}
