@@ -50,7 +50,7 @@ from surogates.tasks.dispatcher import _finalize_ended_sessions
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
 import surogates.tools.builtin.ask_user_question as ask_user_question_module
-from surogates.harness.loop import QUESTION_TIMED_OUT_REQUEST
+from surogates.harness.loop import QUESTION_TIMED_OUT_CHANNEL_REQUEST, QUESTION_TIMED_OUT_REQUEST
 from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND, TIMED_OUT_DETAIL
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
@@ -2703,6 +2703,29 @@ async def test_a_question_that_times_out_ends_its_turn_with_one_reply_and_no_too
     assert (got["cancelled"], got["reason"], got["detail"]) == (True, "timeout", TIMED_OUT_DETAIL)
     assert len(workers.requests) == 2
     assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_REQUEST
+    assert (await workers.said(chat))[-1] == "I'll wait for your answer."
+    assert await workers.status(chat) == "completed"
+    assert (await finish_reasons(workers, chat))[-1] == "question_timed_out"
+
+
+@pytest.mark.slow
+async def test_a_channel_question_that_times_out_ends_its_turn_with_one_reply_in_their_language(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    async with workers.api.app.state.session_factory() as db:
+        await db.execute(text("UPDATE sessions SET channel = 'whatsapp' WHERE id = :chat"), {"chat": chat})
+        await db.commit()
+    workers.replies.append(ASKS)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(chat), 10)
+
+    # On a channel too: one reply that calls no tools, asked for in the person's language.
+    assert (await what_the_question_got(workers, chat))["reason"] == "timeout"
+    assert len(workers.requests) == 2
+    assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_CHANNEL_REQUEST
     assert (await workers.said(chat))[-1] == "I'll wait for your answer."
     assert await workers.status(chat) == "completed"
     assert (await finish_reasons(workers, chat))[-1] == "question_timed_out"
