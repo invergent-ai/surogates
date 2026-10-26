@@ -170,7 +170,12 @@ class KeelClient:
         )
 
     async def complete(self, session_id: object, body: dict) -> KeelAnswer:
-        """Report a step session's result: ``{"call_id", "outcome", "output", "sources", "pages_read", "usage"}``.
+        """Report a step session's result: ``{"call_id", "outcome", "output", "sources", "pages_read", "usage",
+        "bundle_version"}``.
+
+        ``usage`` is ``{"input_tokens", "output_tokens", "cache_read_tokens", "estimated_cost_usd"}``, the use so far of
+        the session and its helpers; ``bundle_version`` is the bundle version the session's latest wake ran with, or
+        null.
 
         Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
         :class:`BodyNotJSON` for one holding NaN or an infinity.
@@ -178,7 +183,12 @@ class KeelClient:
         return await self.session_call("POST", session_id, "complete", body=body)
 
     async def raise_hand(self, session_id: object, body: dict) -> KeelAnswer:
-        """Raise a hand on a step session's step: ``{"call_id", "question", "choices", "evidence", "pages_read", "usage"}``.
+        """Raise a hand on a step session's step: ``{"call_id", "question", "choices", "evidence", "pages_read", "usage",
+        "bundle_version"}``.
+
+        ``usage`` is ``{"input_tokens", "output_tokens", "cache_read_tokens", "estimated_cost_usd"}``, the use so far of
+        the session and its helpers; ``bundle_version`` is the bundle version the session's latest wake ran with, or
+        null.
 
         Raises :class:`BodyTooLarge`, and sends nothing, for a body over :data:`MAX_BODY_BYTES`, and
         :class:`BodyNotJSON` for one holding NaN or an infinity.
@@ -192,14 +202,17 @@ class KeelClient:
         reason: str,
         detail: str,
         usage: dict | None = None,
+        bundle_version: str | None = None,
     ) -> KeelAnswer:
         """Tell Keel a step session's turn ended without a report (``no-outcome``) or failed (``failed``).
 
-        Waits for Keel at most :data:`ENDED_TIMEOUT_SECONDS`.  Logs, by
-        session id, an end Keel did not take, and never raises: the turn ends
-        whatever Keel answers.
+        The body is ``{"reason", "detail", "bundle_version"}``, and ``"usage"``
+        (as :meth:`complete` takes it) when given: an end whose use could not
+        be read goes without.  Waits for Keel at most
+        :data:`ENDED_TIMEOUT_SECONDS`.  Logs, by session id, an end Keel did
+        not take, and never raises: the turn ends whatever Keel answers.
         """
-        body: dict[str, Any] = {"reason": reason, "detail": detail[:DETAIL_CHARS]}
+        body: dict[str, Any] = {"reason": reason, "detail": detail[:DETAIL_CHARS], "bundle_version": bundle_version}
         if usage is not None:
             body["usage"] = usage
         return await self._ended(session_id, "ended", body)

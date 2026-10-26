@@ -42,10 +42,16 @@ from surogates.office.mentions import mention_message
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.session.models import Session
-from surogates.session.store import _redacted_case_config, _reported_case_config, _unreported_case_config
+from surogates.session.store import (
+    TreeUsage,
+    _redacted_case_config,
+    _reported_case_config,
+    _unreported_case_config,
+)
 from surogates.storage.backend import LocalBackend
 from surogates.storage.tenant import boundary_workspace_key
 from surogates.tools.builtin import office as office_tools
+from surogates.tools.builtin.case_step import report_no_outcome, report_step_failed
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_case_step_isolation import CONTRACT
@@ -57,6 +63,8 @@ BUCKET = "case-workspaces"
 PAGE = {"kb_id": "kb-uuid", "path": "policies/income.md", "sha256": "a" * 64}
 OTHER_PAGE = {"kb_id": "kb-uuid", "path": "policies/applicants.md", "sha256": "b" * 64}
 ACCEPTED = {"result": "completed", "message": "Keel completed the step."}
+#: What the step's session row says it used, when its log holds no cache read: the usage a report of the step carries.
+USAGE = {"input_tokens": 1200, "output_tokens": 340, "cache_read_tokens": 0, "estimated_cost_usd": "0.0123"}
 COMPLETION = {
     "outcome": "complete",
     "output": {"docs_complete": True, "income": 5200},
@@ -109,15 +117,19 @@ class _StepStore(FakeStore):
         self.storage = storage
         self.log: list[SimpleNamespace] = []
         self.redactions = 0
+        #: The sessions under the step's: the helpers it started.
+        self.helpers: list[Session] = []
 
     async def emit_event(self, session_id, event_type, data, *, lease_token=None) -> int:
         event_id = await super().emit_event(session_id, event_type, data, lease_token=lease_token)
         self.log.append(SimpleNamespace(id=event_id, session_id=session_id, type=event_type.value, data=data))
         return event_id
 
-    def write(self, event_type: EventType, data: dict) -> SimpleNamespace:
-        """An event another writer adds to the step's log."""
-        event = SimpleNamespace(id=self.next_event_id, session_id=self.row.id, type=event_type.value, data=data)
+    def write(self, event_type: EventType, data: dict, *, session_id=None) -> SimpleNamespace:
+        """An event another writer adds to the log, the step's by default."""
+        event = SimpleNamespace(
+            id=self.next_event_id, session_id=session_id or self.row.id, type=event_type.value, data=data,
+        )
         self.next_event_id += 1
         self.log.append(event)
         return event
@@ -141,6 +153,39 @@ class _StepStore(FakeStore):
         return any(
             (before is None or e.id < before) and (with_key is None or with_key in (e.data or {}))
             for e in await self.get_events(session_id, after=after, types=[type])
+        )
+
+    async def last_event(self, session_id, *types, containing=None, with_key=None, without_key=None, before=None):
+        """The log's newest event of one of *types* that holds *containing*, has the key *with_key* and not the key
+        *without_key*, of those before event *before* when given; None when none does."""
+        wanted = {t.value for t in types}
+        matching = [
+            e for e in self.log
+            if e.session_id == session_id and e.type in wanted and (before is None or e.id < before)
+            and all((e.data or {}).get(key) == value for key, value in (containing or {}).items())
+            and (with_key is None or with_key in (e.data or {}))
+            and (without_key is None or without_key not in (e.data or {}))
+        ]
+        return max(matching, key=lambda e: e.id, default=None)
+
+    async def session_tree_usage(self, session_id) -> TreeUsage:
+        """What the step's session and its helpers used: the counters of their rows, and the cache reads their
+        model responses name, each counted by its integer part when a number above 0 and as 0 otherwise."""
+        assert session_id == self.row.id
+        tree = [self.row, *self.helpers]
+        ids = {session.id for session in tree}
+
+        def cache_read(value) -> int:
+            return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0
+
+        return TreeUsage(
+            input_tokens=sum(int(session.input_tokens or 0) for session in tree),
+            output_tokens=sum(int(session.output_tokens or 0) for session in tree),
+            cache_read_tokens=sum(
+                cache_read(e.data.get("cache_read_tokens"))
+                for e in self.log if e.session_id in ids and e.type == EventType.LLM_RESPONSE.value
+            ),
+            estimated_cost_usd=sum((Decimal(session.estimated_cost_usd or 0) for session in tree), Decimal(0)),
         )
 
     async def update_session_status(self, session_id, status) -> None:
@@ -246,6 +291,21 @@ class _QueuedStore(_StepStore):
         return message
 
 
+class _UsageDown(_StepStore):
+    """The step's store whose database cannot say what the work used: for its first *failing* reads, or for all."""
+
+    def __init__(self, session: Session, storage: LocalBackend, *, failing: int | None = None) -> None:
+        super().__init__(session, storage)
+        self._failing = failing
+
+    async def session_tree_usage(self, session_id) -> TreeUsage:
+        if self._failing is None or self._failing > 0:
+            if self._failing is not None:
+                self._failing -= 1
+            raise RuntimeError("database down: secret-body")
+        return await super().session_tree_usage(session_id)
+
+
 def _step(contract: dict) -> Session:
     now = datetime.now(UTC)
     return Session(
@@ -318,7 +378,8 @@ async def test_an_accepted_completion_carries_its_call_pages_and_usage(fake_keel
         "call_id": "c1",
         **COMPLETION,
         "pages_read": [OTHER_PAGE, PAGE],
-        "usage": {"input_tokens": 1200, "output_tokens": 340, "estimated_cost_usd": "0.0123"},
+        "usage": USAGE,
+        "bundle_version": None,
     }
     assert store.redacted()
 
@@ -485,10 +546,7 @@ async def test_the_door_answers_map_to_a_turn_end_or_a_retry(fake_keel, store, d
     elif ends == "stopped":
         status = door[0]
         assert result == f"Step stopped: Keel refused this step's report ({status}); people take the step."
-        assert ended == [{
-            "reason": "failed", "detail": f"keel-{status}",
-            "usage": {"input_tokens": 1200, "output_tokens": 340, "estimated_cost_usd": "0.0123"},
-        }]
+        assert ended == [{"reason": "failed", "detail": f"keel-{status}", "usage": USAGE, "bundle_version": None}]
         assert fake_keel.requests[-1].url.path == f"/api/harness/sessions/{store.row.id}/ended"
         assert store.redacted()
     else:
@@ -498,6 +556,21 @@ async def test_the_door_answers_map_to_a_turn_end_or_a_retry(fake_keel, store, d
 
 
 async def test_a_runtime_without_keel_stops_the_step(store):
+    previous = keel_client()
+    use_keel_client(None)
+    try:
+        result = await _call("complete_step", COMPLETION, store)
+    finally:
+        use_keel_client(previous)
+
+    assert result.startswith("Step stopped:")
+    assert store.redacted()
+    assert store.reported() == "stopped"
+
+
+async def test_a_runtime_without_keel_stops_the_step_whatever_its_database_says_of_the_usage(tmp_path):
+    # There is no Keel to tell what the work used: nothing is read for it.
+    store = _UsageDown(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
     previous = keel_client()
     use_keel_client(None)
     try:
@@ -587,8 +660,7 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     assert request.url.path == f"/api/harness/sessions/{store.row.id}/raise-hand"
     assert request.headers["authorization"] == "Bearer door-key"
     assert json.loads(request.content) == {
-        "call_id": "c7", **hand, "pages_read": [PAGE],
-        "usage": {"input_tokens": 1200, "output_tokens": 340, "estimated_cost_usd": "0.0123"},
+        "call_id": "c7", **hand, "pages_read": [PAGE], "usage": USAGE, "bundle_version": None,
     }
     # The step resumes in this session once a person answers: its inputs stay.
     assert not store.redacted()
@@ -1254,14 +1326,19 @@ class _CountingStore(_StepStore):
         return {
             "input_tokens": sum(r["input_tokens"] for r in responses),
             "output_tokens": sum(r["output_tokens"] for r in responses),
+            "cache_read_tokens": sum(r.get("cache_read_tokens", 0) for r in responses),
             "estimated_cost_usd": format(cost, "f"),
         }
 
 
-def _using(reply, input_tokens: int, output_tokens: int):
-    """*reply*, its call having used *input_tokens* and *output_tokens* of a priced model."""
+def _using(reply, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0):
+    """*reply*, its call having used *input_tokens* and *output_tokens* of a priced model, and read
+    *cache_read_tokens* of its input from the provider's cache."""
     message, usage = reply
-    return message, {**usage, "model": PRICED, "input_tokens": input_tokens, "output_tokens": output_tokens}
+    return message, {
+        **usage, "model": PRICED, "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+    }
 
 
 #: How a report reaches Keel: Keel's answer, the tool and its arguments, and the routes the report takes.
@@ -1285,13 +1362,14 @@ async def test_a_report_carries_what_every_call_of_its_turn_used_its_own_include
     store = _CountingStore(tmp_path)
 
     await _wake(monkeypatch, store, [
-        _using(_calls("read_file", {"path": "in/checklist.pdf"}, "c1"), 1_000, 120),
-        _using(_calls(tool, arguments, "c2"), 33_912, 1_787),
+        _using(_calls("read_file", {"path": "in/checklist.pdf"}, "c1"), 1_000, 120, 300),
+        _using(_calls(tool, arguments, "c2"), 33_912, 1_787, 900),
     ], sandbox={"read_file": "Checklist: payslips, ID."}, streaming=streaming)
 
     assert _ended_with(store) == "case_step_ended"
     used = store.used()
-    assert used["input_tokens"] == 34_912 and Decimal(used["estimated_cost_usd"]) > 0
+    assert used["input_tokens"] == 34_912 and used["cache_read_tokens"] == 1_200
+    assert Decimal(used["estimated_cost_usd"]) > 0
     assert [body["usage"] for route in routes for body in fake_keel.bodies(route)] == [used] * len(routes)
 
 
@@ -1301,11 +1379,16 @@ async def test_each_report_of_a_wake_carries_what_its_turn_used_through_its_own_
     store = _CountingStore(tmp_path)
 
     await _wake(monkeypatch, store, [
-        _using(_calls("complete_step", {**COMPLETION, "sources": {}}, "c1"), 30_000, 900),
-        _using(_calls("complete_step", COMPLETION, "c2"), 33_912, 1_787),
+        _using(_calls("complete_step", {**COMPLETION, "sources": {}}, "c1"), 30_000, 900, 300),
+        _using(_calls("complete_step", COMPLETION, "c2"), 33_912, 1_787, 900),
     ], streaming=True)
 
-    assert [body["usage"] for body in fake_keel.bodies("/complete")] == [store.used(1), store.used(2)]
+    reports = [body["usage"] for body in fake_keel.bodies("/complete")]
+    assert reports == [store.used(1), store.used(2)]
+    # What the first call read from the cache is in the first report, and in the second with the second call's.
+    assert [report["cache_read_tokens"] for report in reports] == [300, 1_200]
+    first, second = reports
+    assert all(Decimal(str(second[key])) >= Decimal(str(first[key])) for key in first)
 
 
 async def test_a_turn_ending_without_a_report_tells_keel_what_every_call_used(fake_keel, monkeypatch, tmp_path):
@@ -1330,3 +1413,106 @@ async def test_a_wake_records_the_bundle_version_it_ran_with(fake_keel, monkeypa
     [wake] = [e.data for e in store.log if e.type == EventType.HARNESS_WAKE.value]
     assert {"worker_id", "cursor"} <= wake.keys()
     assert wake["bundle_version"] == version
+
+
+def _woken_with(store: _StepStore, *versions: str | None) -> None:
+    """The step's session woken once for each of *versions*, each wake recording the bundle it ran with."""
+    for version in versions:
+        store.write(EventType.HARNESS_WAKE, {"worker_id": "w1", "cursor": 0, "bundle_version": version})
+
+
+@pytest.mark.parametrize(("wakes", "carried"), [
+    (["v11", "v12"], "v12"),
+    ([], None),
+    (["v11", "x" * 201], None),
+], ids=["the-latest-wake", "no-wake", "a-version-keel-would-refuse"])
+@pytest.mark.parametrize("report", list(REPORTS))
+async def test_every_report_carries_the_bundle_version_of_its_latest_wake(fake_keel, store, report, wakes, carried):
+    door, tool, arguments, routes = REPORTS[report]
+    fake_keel.answer(*door)
+    _woken_with(store, *wakes)
+    # A review of memory and skills reuses the wake's event and names no bundle: it hides no wake before it.
+    store.write(EventType.HARNESS_WAKE, {"worker_id": "w1", "review_memory": True, "review_skills": False})
+
+    await _call(tool, arguments, store)
+
+    assert [body["bundle_version"] for route in routes for body in fake_keel.bodies(route)] == [carried] * len(routes)
+
+
+async def test_a_steps_report_names_the_bundle_its_wake_loaded(fake_keel, monkeypatch, tmp_path):
+    store = _QueuedStore(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    _started(store)
+
+    await _queued_wake(monkeypatch, store, [_calls("complete_step", COMPLETION)], bundle=_Bundle("v12"))
+
+    [body] = fake_keel.bodies("/complete")
+    assert body["bundle_version"] == "v12"
+
+
+async def test_a_report_carries_what_its_helpers_used_and_the_cache_its_calls_read(fake_keel, store):
+    helper = _step({}).model_copy(update={
+        "id": uuid4(), "parent_id": store.row.id,
+        "input_tokens": 300, "output_tokens": 30, "estimated_cost_usd": Decimal("0.002"),
+    })
+    store.helpers.append(helper)
+    store.write(EventType.LLM_RESPONSE, {"cache_read_tokens": 400})
+    store.write(EventType.LLM_RESPONSE, {"cache_read_tokens": 150}, session_id=helper.id)
+
+    result = await _call("complete_step", COMPLETION, store)
+
+    assert result.startswith("Step ended:")
+    [body] = fake_keel.bodies("/complete")
+    assert body["usage"] == {
+        "input_tokens": 1500, "output_tokens": 370, "cache_read_tokens": 550, "estimated_cost_usd": "0.0143",
+    }
+
+
+async def test_a_failed_step_tells_keel_what_it_used(fake_keel, store):
+    _woken_with(store, "v12")
+
+    await report_step_failed(store, store.row, code="harness_crash")
+
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "failed", "detail": "harness_crash", "usage": USAGE, "bundle_version": "v12"},
+    ]
+    assert store.redacted()
+
+
+@pytest.mark.parametrize("end", ["failed", "no-outcome"])
+async def test_an_end_whose_usage_cannot_be_read_is_still_told(fake_keel, tmp_path, caplog, end):
+    # Keel hears how the step ended whatever the database says of its use; it keeps the last usage it saw.
+    store = _UsageDown(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)))
+    _woken_with(store, "v12")
+
+    with caplog.at_level(logging.WARNING):
+        if end == "failed":
+            await report_step_failed(store, store.row, code="harness_crash")
+        else:
+            await report_no_outcome(store, store.row, reason="completed")
+
+    detail = "harness_crash" if end == "failed" else "completed"
+    assert fake_keel.bodies("/ended") == [{"reason": end, "detail": detail, "bundle_version": "v12"}]
+    # The step is over for a failed session whether or not Keel heard; a turn with no outcome keeps its inputs.
+    assert store.redacted() is (end == "failed")
+    # Said by the session's id and the error's class, never in the database's words.
+    assert str(store.row.id) in caplog.text and "RuntimeError" in caplog.text
+    assert "secret-body" not in caplog.text
+
+
+@pytest.mark.parametrize("report", ["completed", "hand-raised"])
+async def test_a_report_whose_usage_cannot_be_read_is_made_again(fake_keel, monkeypatch, tmp_path, report):
+    # A report must carry the use of the work, so the call fails before it reaches Keel, as a failed read of the
+    # pages does; the model calls again, and the repeat reports.
+    door, tool, arguments, routes = REPORTS[report]
+    fake_keel.answer(*door)
+    store = _UsageDown(_step(deepcopy(CONTRACT)), LocalBackend(str(tmp_path)), failing=1)
+
+    sent = await _wake(monkeypatch, store, [_calls(tool, arguments, "c1"), _calls(tool, arguments, "c2")])
+
+    assert len(sent) == 2
+    assert json.loads(store.result("c1"))["error"].startswith("Tool execution failed")
+    [body] = fake_keel.bodies(routes[0])
+    assert body["call_id"] == "c2" and body["usage"] == USAGE
+    assert fake_keel.bodies("/ended") == []
+    assert store.result("c2").startswith("Step ended:")
+    assert _ended_with(store) == "case_step_ended"
