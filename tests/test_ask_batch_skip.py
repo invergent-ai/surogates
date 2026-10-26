@@ -93,4 +93,4 @@ def test_a_timed_out_question_with_guidance_on_its_result_still_ends_the_turn():
         json.dumps({"cancelled": True, "reason": "timeout"}),
         SimpleNamespace(action="warn", message="again", code="c", count=2),
     )
-    assert loop._unanswered_question([ASK], [{"tool_call_id": "a", "content": warned}]) == "timeout"
+    assert loop._unanswered_question([ASK], [{"tool_call_id": "a", "content": warned}]) == ("timeout", ASK)

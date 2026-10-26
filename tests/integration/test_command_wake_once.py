@@ -2743,6 +2743,51 @@ async def test_a_task_whose_question_times_out_blocks_on_it_instead_of_being_ret
     assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
 
 
+TWO_ASKS = (
+    {"role": "assistant", "content": "", "tool_calls": [
+        ASKS[0]["tool_calls"][0],
+        {"id": "call_ask_2", "type": "function", "function": {
+            "name": "ask_user_question", "arguments": json.dumps({"questions": [{"prompt": "Which region?"}]}),
+        }},
+    ]},
+    ASKS[1],
+)
+
+
+@pytest.mark.slow
+async def test_a_task_blocks_only_on_the_question_that_went_unanswered(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        task = Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
+            current_session_id=helper.id, attempt_count=1,
+        )
+        db.add(task)
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
+        await db.commit()
+    workers.replies.append(TWO_ASKS)
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    # The first question is answered; the second gets no answer in time.
+    await workers.store.emit_event(
+        helper.id, EventType.ASK_USER_QUESTION_RESPONSE,
+        {"tool_call_id": "call_ask", "responses": [{"question": "Which quarter?", "answer": "Q3"}]},
+    )
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(helper.id), 10)
+
+    assert json.loads(await what_a_call_got(workers, helper.id, "call_ask_2"))["reason"] == "timeout"
+    async with workers.api.app.state.session_factory() as db:
+        task = await db.get(Task, task.id)
+    # Its parent is asked only what went unanswered, not the question already answered.
+    assert (task.status, task.blocked_reason) == ("blocked", "Blocked: no answer to the question: Which region?")
+    [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
+    assert told.data["reason"] == task.blocked_reason
+
+
 @pytest.mark.slow
 async def test_a_task_that_cannot_block_on_its_timed_out_question_still_ends_its_turn(workers, monkeypatch):
     monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)

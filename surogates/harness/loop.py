@@ -4218,7 +4218,7 @@ class AgentHarness(
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
             )
-            unanswered = _unanswered_question(tool_calls_raw, tool_results)
+            unanswered, unanswered_call = _unanswered_question(tool_calls_raw, tool_results)
 
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
@@ -4389,7 +4389,7 @@ class AgentHarness(
                 # cannot block fails its attempt, for the dispatcher to retry:
                 # a reply to nobody would finish the task with it.
                 if session.task_id is not None:
-                    if await self._block_task_on_question(session, tool_calls_raw):
+                    if await self._block_task_on_question(session, unanswered_call):
                         await self._complete_session(
                             session, messages, lease,
                             reason="question_timed_out",
@@ -5864,11 +5864,11 @@ class AgentHarness(
     # /compress command handler
     # ------------------------------------------------------------------
 
-    async def _block_task_on_question(self, session: Session, tool_calls_raw: list[dict]) -> bool:
-        """Block *session*'s task on its unanswered question, through ``worker_block``: whether it blocked."""
+    async def _block_task_on_question(self, session: Session, call: dict) -> bool:
+        """Block *session*'s task on its unanswered question *call*, through ``worker_block``: whether it blocked."""
         from surogates.tasks.tools import _worker_block_handler
 
-        prompts = "; ".join(_question_prompts(tool_calls_raw)) or "(no prompt)"
+        prompts = "; ".join(_question_prompts(call)) or "(no prompt)"
         try:
             got = await _worker_block_handler(
                 {"reason": f"Blocked: no answer to the question: {prompts}"},
@@ -6688,26 +6688,21 @@ QUESTION_TIMED_OUT_CHANNEL_REQUEST = (
 )
 
 
-def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -> str | None:
-    """Why a question of *tool_calls_raw*'s went unanswered (its result's ``reason``), or ``None``."""
-    asked = {call.get("id") for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
+def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -> tuple[str | None, dict | None]:
+    """Why a question of *tool_calls_raw*'s went unanswered (its result's ``reason``), and its call; or ``(None, None)``."""
+    asked = {call.get("id"): call for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
     for result in tool_results:
         if result.get("tool_call_id") in asked and (got := cancelled_result(result.get("content"))) is not None:
-            return got.get("reason")
-    return None
+            return got.get("reason"), asked[result.get("tool_call_id")]
+    return None, None
 
 
-def _question_prompts(tool_calls_raw: list[dict]) -> list[str]:
-    """The prompts of every question *tool_calls_raw* asked."""
-    prompts: list[str] = []
-    for call in tool_calls_raw:
-        if call.get("function", {}).get("name") != "ask_user_question":
-            continue
-        questions = _parse_tool_args_for_guardrail(call).get("questions")
-        if not isinstance(questions, list):
-            continue
-        prompts += [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
-    return prompts
+def _question_prompts(call: dict) -> list[str]:
+    """The prompts of the questions *call* asked."""
+    questions = _parse_tool_args_for_guardrail(call).get("questions")
+    if not isinstance(questions, list):
+        return []
+    return [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
 
 
 def _whiteboard_sketch_turn_done(
