@@ -137,6 +137,17 @@ _LOCK_NOT_AVAILABLE = "55P03"
 
 
 @dataclass(frozen=True, slots=True)
+class TreeUsage:
+    """What a session and every session under it used (``SessionStore.session_tree_usage``)."""
+
+    input_tokens: int
+    output_tokens: int
+    #: Input tokens the provider served from its cache, summed over the tree's model responses.
+    cache_read_tokens: int
+    estimated_cost_usd: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class BrowserControlTold:
     """What the telling of a take-over or a hand back did (``SessionStore.tell_browser_control``)."""
 
@@ -1069,6 +1080,44 @@ class SessionStore:
                 {"id": session_id},
             )
         return [row[0] for row in rows]
+
+    async def session_tree_usage(self, session_id: UUID) -> TreeUsage:
+        """What the session and every session under it by ``parent_id`` used, at any depth.
+
+        The counters are those of the rows, which only grow, so a later read is
+        never less than an earlier one.  The cache reads are in no column: they
+        are the sum over the tree's ``llm.response`` events of the
+        ``cache_read_tokens`` each names, which counts by its integer part when
+        it is a number above 0 and as 0 when it is anything else.  A session
+        that does not exist used nothing.
+        """
+        async with self._sf() as db:
+            row = (await db.execute(
+                text(
+                    """
+                    WITH RECURSIVE tree(id) AS (
+                        SELECT id FROM sessions WHERE id = :id
+                        UNION
+                        SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+                    )
+                    SELECT
+                        (SELECT COALESCE(SUM(input_tokens), 0) FROM sessions WHERE id IN (SELECT id FROM tree)),
+                        (SELECT COALESCE(SUM(output_tokens), 0) FROM sessions WHERE id IN (SELECT id FROM tree)),
+                        (SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM sessions WHERE id IN (SELECT id FROM tree)),
+                        (SELECT COALESCE(SUM(CASE WHEN jsonb_typeof(data -> 'cache_read_tokens') = 'number'
+                                                  THEN GREATEST(floor((data ->> 'cache_read_tokens')::numeric), 0)
+                                                  ELSE 0 END), 0)
+                           FROM events WHERE session_id IN (SELECT id FROM tree) AND type = 'llm.response')
+                    """
+                ),
+                {"id": session_id},
+            )).one()
+        return TreeUsage(
+            input_tokens=int(row[0]),
+            output_tokens=int(row[1]),
+            cache_read_tokens=int(row[3]),
+            estimated_cost_usd=Decimal(row[2]),
+        )
 
     async def update_session_title_if_empty(
         self,
