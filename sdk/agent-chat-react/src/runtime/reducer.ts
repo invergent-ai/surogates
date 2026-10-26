@@ -54,13 +54,21 @@ export function createInitialAgentChatState(
   };
 }
 
+/**
+ * What the stream sends when the stored history is all replayed. Until then the thread keeps its loading state,
+ * so it opens at the end of the finished conversation instead of growing, and scrolling, as the replay arrives.
+ */
+function endsHistoryReplay(event: AgentChatRuntimeEvent): boolean {
+  return event.type === "stream.live" || event.type === "session.done" || event.type === "stream.timeout";
+}
+
 export function applyAgentChatEvent(
   state: AgentChatState,
   event: AgentChatRuntimeEvent,
 ): AgentChatState {
   let nextState: AgentChatState = {
     ...state,
-    isLoadingHistory: false,
+    isLoadingHistory: state.isLoadingHistory && !endsHistoryReplay(event),
     lastEventId: Math.max(state.lastEventId, event.eventId),
     sessionDone: state.sessionDone || event.type === "session.done",
   };

@@ -247,9 +247,10 @@ describe("readOnlyAdapter", () => {
         stream.emit("user.message", 1, { content: "Check the payslips" });
         stream.emit("llm.response", 2, { message: { content: "Both payslips match." } });
       });
-      // Past the chat's first reconcile, which polls for what the stream missed: this source has no poll.
+      // Past the chat's reconciles, which poll for what the stream missed (this source has no poll). The first
+      // (4 s) still sees the stream delivering; the second, 1.5 s on, finds it quiet and ends the history load.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(4500);
+        await vi.advanceTimersByTimeAsync(6000);
       });
       vi.useRealTimers();
       await new Promise((resolve) => setTimeout(resolve, 0));

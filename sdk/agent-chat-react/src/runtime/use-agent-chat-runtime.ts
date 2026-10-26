@@ -143,6 +143,17 @@ export interface UseAgentChatRuntimeInput {
   agentId?: string;
   sessionId: string | null;
   onSessionChange?: (sessionId: string) => void;
+  /**
+   * The mode a chat opens in when its user has not chosen one: what they
+   * chose before (localStorage, or the adapter's `getChatViewMode`) wins.
+   * Default "simple".
+   */
+  defaultViewMode?: "simple" | "expert";
+  /**
+   * The mode is always `defaultViewMode ?? "simple"`: what the user chose
+   * before is not read, and `setViewMode` changes and stores nothing.
+   */
+  viewModeLocked?: boolean;
 }
 
 export function useAgentChatRuntime({
@@ -150,14 +161,18 @@ export function useAgentChatRuntime({
   agentId,
   sessionId,
   onSessionChange,
+  defaultViewMode,
+  viewModeLocked = false,
 }: UseAgentChatRuntimeInput): AgentChatRuntimeApi {
+  const lockedViewMode = viewModeLocked ? (defaultViewMode ?? "simple") : null;
   const [state, setState] = useState<AgentChatState>(() =>
     createInitialAgentChatState({
       isLoadingHistory: Boolean(sessionId),
       // Seed from localStorage so the first paint matches the user's
       // last choice without flashing the default. The async adapter
       // load can still upgrade this later.
-      viewMode: readPersistedViewMode() ?? "simple",
+      viewMode:
+        lockedViewMode ?? readPersistedViewMode() ?? defaultViewMode ?? "simple",
     }),
   );
   const [session, setSession] = useState<AgentChatSession | null>(null);
@@ -167,6 +182,10 @@ export function useAgentChatRuntime({
   const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousSessionIdRef = useRef<string | null>(sessionId);
   const sessionIdRef = useRef<string | null>(sessionId);
+  // The highest event id known when the previous reconcile tick ended; a tick
+  // that finds nothing beyond it, from the stream or its own poll, has seen
+  // the history stop arriving.
+  const tickEventIdRef = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -302,8 +321,12 @@ export function useAgentChatRuntime({
     //    within this tick (React state hasn't committed yet between awaits),
     //    so a long backlog catches up without re-fetching the same range.
     let appliedNew = false;
+    // What the stream delivered since the previous tick ended.
+    const startEventId = stateRef.current.lastEventId;
+    const streamAdvanced = startEventId > tickEventIdRef.current;
+    let knownEventId = startEventId;
     if (adapter.pollEvents) {
-      let cursor = stateRef.current.lastEventId;
+      let cursor = startEventId;
       try {
         for (let page = 0; page < 5; page++) {
           const res = await adapter.pollEvents({
@@ -321,6 +344,7 @@ export function useAgentChatRuntime({
           if (known.length > 0) {
             applyPolledEvents(known);
             appliedNew = true;
+            for (const event of known) knownEventId = Math.max(knownEventId, event.id);
           }
           // Advance past every returned id (handled or not) so unhandled
           // types don't make the next page re-fetch the same window.
@@ -339,7 +363,6 @@ export function useAgentChatRuntime({
     let statusKnown = false;
     try {
       const session = await adapter.getSession({ sessionId: targetSessionId });
-      if (sessionIdRef.current !== targetSessionId) return RECONCILE_IDLE;
       statusKnown = true;
       live = session.status === "active";
       isMission = Boolean(
@@ -349,8 +372,18 @@ export function useAgentChatRuntime({
     } catch {
       // Status unknown — keep the backstop running at the active cadence.
     }
+    // Whether the read succeeded or failed, a tick of a session left behind must not touch the current one.
+    if (sessionIdRef.current !== targetSessionId) return RECONCILE_IDLE;
 
     if (live) reviveStreamIfNeeded(targetSessionId);
+
+    // The ticks are the stream's backstop for ending the history load: a stream that never said it is live
+    // (dropped, or an old server) must not leave the thread on its loading state. A history still arriving,
+    // on either channel, is not stalled, so only a tick that saw no progress since the last one ends the load.
+    tickEventIdRef.current = knownEventId;
+    if (!streamAdvanced && !appliedNew) {
+      setState((prev) => (prev.isLoadingHistory ? { ...prev, isLoadingHistory: false } : prev));
+    }
 
     // Adopt the authoritative status when it contradicts the local
     // running flag. Event drainage is the normal repair path, but when
@@ -377,7 +410,8 @@ export function useAgentChatRuntime({
       );
     }
 
-    if (appliedNew) return RECONCILE_FAST;
+    // A history still arriving is checked again soon, in every state: the load lingers only briefly after its last event.
+    if (appliedNew || (streamAdvanced && stateRef.current.isLoadingHistory)) return RECONCILE_FAST;
     if (live || !statusKnown) return RECONCILE_ACTIVE;
     return isMission || stateRef.current.isRunning
       ? RECONCILE_MISSION_IDLE
@@ -415,13 +449,18 @@ export function useAgentChatRuntime({
     clearReconnectTimer();
     closeStream();
 
+    const currentState = stateRef.current;
+    // A chat given a defaultViewMode keeps its mode through this reset, so the
+    // reset does not undo that default or the user's choice. One without a
+    // default opens in Simple again, as it always has.
+    const keptViewMode = defaultViewMode ? currentState.viewMode : undefined;
+
     if (!sessionId) {
       setSession(null);
-      setState(createInitialAgentChatState());
+      setState(createInitialAgentChatState({ viewMode: keptViewMode }));
       return;
     }
 
-    const currentState = stateRef.current;
     const preservePendingFirstMessage =
       previousSessionId === null &&
       currentState.isRunning &&
@@ -431,14 +470,19 @@ export function useAgentChatRuntime({
       );
     const initialState = preservePendingFirstMessage
       ? {
-          ...createInitialAgentChatState({ isLoadingHistory: false }),
+          ...createInitialAgentChatState({
+            isLoadingHistory: false,
+            viewMode: keptViewMode,
+          }),
           messages: currentState.messages,
           isRunning: true,
         }
       : createInitialAgentChatState({
           isLoadingHistory: true,
+          viewMode: keptViewMode,
         });
     stateRef.current = initialState;
+    tickEventIdRef.current = 0;
     setSession(null);
     setState(initialState);
     openStream(sessionId, 0);
@@ -717,6 +761,7 @@ export function useAgentChatRuntime({
   // adapter; setViewMode writes through to both stores so a later
   // reload picks up the change even if the adapter call is in flight.
   useEffect(() => {
+    if (viewModeLocked) return;
     if (!adapter.getChatViewMode) {
       const cached = readPersistedViewMode();
       if (cached !== null) {
@@ -743,10 +788,11 @@ export function useAgentChatRuntime({
     return () => {
       cancelled = true;
     };
-  }, [adapter]);
+  }, [adapter, viewModeLocked]);
 
   const setViewMode = useCallback(
     (mode: "simple" | "expert") => {
+      if (viewModeLocked) return;
       setState((prev) =>
         prev.viewMode === mode ? prev : { ...prev, viewMode: mode },
       );
@@ -755,7 +801,7 @@ export function useAgentChatRuntime({
         void adapter.setChatViewMode(mode).catch(() => undefined);
       }
     },
-    [adapter],
+    [adapter, viewModeLocked],
   );
 
   return {
@@ -773,7 +819,7 @@ export function useAgentChatRuntime({
     retry,
     markSending,
     markSendError,
-    viewMode: state.viewMode,
+    viewMode: lockedViewMode ?? state.viewMode,
     setViewMode,
     researchSources: state.researchSources,
   };

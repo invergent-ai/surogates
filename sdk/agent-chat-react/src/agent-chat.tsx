@@ -116,6 +116,34 @@ export interface AgentChatProps {
    */
   skillsEnabled?: boolean;
   /**
+   * The composer's Simple/Advanced switch. Default true. When false, the
+   * switch is not drawn and the mode cannot change: it is `defaultViewMode`
+   * (Simple when that is left out) whatever the user or the adapter's
+   * `getChatViewMode` held before, and nothing is stored. The Whiteboard
+   * segment is not offered either, so a board session shows its transcript
+   * only.
+   */
+  viewModeToggleEnabled?: boolean;
+  /**
+   * The mode a chat opens in; "expert" is the one the UI calls Advanced.
+   * With the switch shown, a mode the user chose before (localStorage, or the
+   * adapter's `getChatViewMode`) wins over it. Default "simple".
+   */
+  defaultViewMode?: "simple" | "expert";
+  /**
+   * The Files fold under the composer. Default true. When false, the fold has
+   * no Files tab; the Browser tab, when the chat has a browser, stays, and the
+   * fold is not drawn at all when neither is left.
+   */
+  filesEnabled?: boolean;
+  /**
+   * Adding files to a message. Default true. When false, the composer's plus
+   * button offers no attach items (it stays only when it holds the browser
+   * profile picker), and a file dropped on the composer or pasted into it is
+   * ignored, without an error.
+   */
+  attachmentsEnabled?: boolean;
+  /**
    * Called when the user clicks the integrations band under the composer.
    * Hosts navigate to their Integrations route. When omitted, the band is
    * not rendered.
@@ -196,6 +224,10 @@ export function AgentChat({
   compressEnabled = true,
   commandsEnabled = true,
   skillsEnabled = true,
+  viewModeToggleEnabled = true,
+  defaultViewMode,
+  filesEnabled = true,
+  attachmentsEnabled = true,
   onOpenIntegrations,
   onOpenBilling,
   composerFooter,
@@ -229,6 +261,8 @@ export function AgentChat({
     agentId,
     sessionId,
     onSessionChange,
+    defaultViewMode,
+    viewModeLocked: !viewModeToggleEnabled,
   });
   // A project's master: the server stamps its role and project into its config.
   const sessionConfig = runtime.session?.config;
@@ -597,7 +631,7 @@ export function AgentChat({
                       onOpen: handleToggleBrowser,
                     }
                   : null,
-                files: workspaceAvailable
+                files: workspaceAvailable && filesEnabled
                   ? {
                       panel: (
                         <WorkspacePanel
@@ -614,7 +648,7 @@ export function AgentChat({
                   : null,
               }}
               viewMode={viewMode}
-              onViewModeChange={runtime.setViewMode}
+              onViewModeChange={viewModeToggleEnabled ? runtime.setViewMode : undefined}
               deepResearchEnabled={deepResearchEnabled}
               researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
@@ -625,6 +659,7 @@ export function AgentChat({
               compressEnabled={compressEnabled}
               commandsEnabled={commandsEnabled}
               skillsEnabled={skillsEnabled}
+              attachmentsEnabled={attachmentsEnabled}
               researchSources={runtime.researchSources}
               hideTurnSummary={hideTurnSummary}
               agentId={agentId}

@@ -220,6 +220,11 @@ interface ChatComposerProps {
   // The Scheduled toggle follows ``loopsEnabled``.
   commandsEnabled?: boolean;
   skillsEnabled?: boolean;
+  // Adding files to a message. Default shown. ``attachmentsEnabled={false}``
+  // drops the attach items from the plus button (the button itself stays only
+  // for the browser-profile picker) and ignores files dropped on the composer
+  // or pasted into it, without an error.
+  attachmentsEnabled?: boolean;
 }
 
 // ── Outer wrapper (provides controlled text state) ───────────────────
@@ -430,6 +435,7 @@ function ChatComposerInner({
   compressEnabled = true,
   commandsEnabled = true,
   skillsEnabled = true,
+  attachmentsEnabled = true,
   viewMode = "simple",
   onViewModeChange,
 }: ChatComposerProps) {
@@ -821,7 +827,7 @@ function ChatComposerInner({
   // read them as the pending answer (see _resolve_pending_question), so
   // offering them while a question is open would park it until it times out.
   // The profile has no such constraint.
-  const canAttach = !disabled && !awaitingAnswer;
+  const canAttach = attachmentsEnabled && !disabled && !awaitingAnswer;
   const canPickProfile = Boolean(
     browserProfilesEnabled &&
       onSelectBrowserProfile &&
@@ -908,6 +914,7 @@ function ChatComposerInner({
           multiple
           maxFiles={MAX_IMAGES_PER_MESSAGE + MAX_ATTACHMENTS_PER_MESSAGE}
           maxFileSize={MAX_ATTACHMENT_BYTES}
+          attachmentsEnabled={canAttach}
           onError={handlePromptInputError}
           beamActive={status === "streaming"}
         >
@@ -950,7 +957,11 @@ function ChatComposerInner({
                   trigger={
                     <PromptInputButton
                       aria-label="Composer tools"
-                      tooltip="Attach files and browser profile"
+                      tooltip={
+                        canAttach
+                          ? "Attach files and browser profile"
+                          : "Browser profile"
+                      }
                       className="size-11 rounded-xl border-input bg-transparent text-foreground/80 hover:bg-accent hover:text-foreground md:size-11"
                     >
                       <PlusIcon className="size-4.5" />

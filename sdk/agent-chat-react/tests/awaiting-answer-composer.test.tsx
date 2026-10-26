@@ -216,3 +216,133 @@ describe("composer while an answer is awaited", () => {
     expect(pauseSession).not.toHaveBeenCalled();
   });
 });
+
+// A file offered while a question waits for its text would be sent with the
+// answer, and the server then does not read the text as the answer: the
+// question sits until its timeout. A disabled composer takes no files either.
+describe("files offered to a composer that cannot take them", () => {
+  function note(): File {
+    return new File(["hello"], "notes.txt", { type: "text/plain" });
+  }
+
+  function dropFile(dom: HTMLElement, file: File) {
+    const form = dom.querySelector("form");
+    if (!form) throw new Error("composer form not rendered");
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { types: ["Files"], files: [file] },
+    });
+    act(() => {
+      form.dispatchEvent(event);
+    });
+  }
+
+  // `withText` is a clipboard that carries text beside the file, as copied spreadsheet cells do.
+  function pasteFile(dom: HTMLElement, file: File, withText = false): Event {
+    const textarea = dom.querySelector("textarea");
+    if (!textarea) throw new Error("composer textarea not rendered");
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    const items = [{ kind: "file", getAsFile: () => file }];
+    if (withText) items.unshift({ kind: "string", getAsFile: () => null as unknown as File });
+    Object.defineProperty(event, "clipboardData", { value: { items } });
+    act(() => {
+      textarea.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  function attached(dom: HTMLElement): boolean {
+    return dom.querySelector("button[aria-label='Remove notes.txt']") !== null;
+  }
+
+  function renderOpen() {
+    return mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[]}
+        isRunning={false}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+  }
+
+  it("attaches a dropped file when nothing stands in the way", async () => {
+    const dom = renderOpen();
+
+    dropFile(dom, note());
+    await act(async () => {});
+
+    expect(attached(dom)).toBe(true);
+  });
+
+  it("attaches a pasted file when nothing stands in the way", async () => {
+    const dom = renderOpen();
+
+    pasteFile(dom, note());
+    await act(async () => {});
+
+    expect(attached(dom)).toBe(true);
+  });
+
+  it("attaches no dropped file while a question waits for its answer", async () => {
+    const dom = renderWithPendingAsk({ onSend: noop, onStop: noop });
+
+    dropFile(dom, note());
+    await act(async () => {});
+
+    expect(attached(dom)).toBe(false);
+  });
+
+  it("attaches no pasted file while a question waits for its answer", async () => {
+    const dom = renderWithPendingAsk({ onSend: noop, onStop: noop });
+
+    pasteFile(dom, note());
+    await act(async () => {});
+
+    expect(attached(dom)).toBe(false);
+  });
+
+  it("lets text pasted beside an image go into the field while a question waits, attaching nothing", async () => {
+    const dom = renderWithPendingAsk({ onSend: noop, onStop: noop });
+
+    const event = pasteFile(dom, note(), true);
+    await act(async () => {});
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(attached(dom)).toBe(false);
+  });
+
+  it("keeps a pasted file from the field when it is attached", async () => {
+    const dom = renderOpen();
+
+    const event = pasteFile(dom, note(), true);
+    await act(async () => {});
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(attached(dom)).toBe(true);
+  });
+
+  it("attaches no dropped or pasted file when the composer is disabled", async () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[]}
+        isRunning={false}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+        disabled
+      />,
+    );
+
+    dropFile(dom, note());
+    pasteFile(dom, note());
+    await act(async () => {});
+
+    expect(attached(dom)).toBe(false);
+  });
+});

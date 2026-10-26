@@ -112,6 +112,7 @@ describe("reconciler status sync", () => {
     act(() => {
       stream.emit("user.message", 1, { content: "hi" });
       stream.emit("llm.request", 2, {});
+      stream.emit("stream.live", 0, {});
     });
 
     // Past the 250ms indicator delay: the client believes a turn is
@@ -135,6 +136,7 @@ describe("reconciler status sync", () => {
     act(() => {
       stream.emit("user.message", 1, { content: "hi" });
       stream.emit("llm.request", 2, {});
+      stream.emit("stream.live", 0, {});
     });
 
     await advance(300);

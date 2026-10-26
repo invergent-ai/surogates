@@ -78,6 +78,7 @@ import type {
   KeyboardEventHandler,
   PropsWithChildren,
   ReactNode,
+  Ref,
   RefObject,
 } from "react";
 import {
@@ -196,6 +197,8 @@ const captureScreenshot = async (): Promise<File | null> => {
 // ============================================================================
 
 export interface AttachmentsContext {
+  // False when files offered to `add` are ignored; a paste then leaves its clipboard to the field.
+  enabled: boolean;
   files: PromptInputFileUIPart[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
@@ -345,6 +348,7 @@ export const PromptInputProvider = ({
     () => ({
       add,
       clear,
+      enabled: true,
       fileInputRef,
       files: attachmentFiles,
       openFileDialog,
@@ -513,6 +517,14 @@ export type PromptInputProps = Omit<
   multiple?: boolean;
   // When true, accepts drops anywhere on document. Default false (opt-in).
   globalDrop?: boolean;
+  // Default true. When false, files offered by a drop, a paste or the file
+  // dialog are ignored: nothing is attached and no error is reported. A file
+  // drop is still default-prevented, so the browser does not open the file.
+  attachmentsEnabled?: boolean;
+  // React 19 hands a ref to a function component as a prop. A parent that
+  // wraps this form in a Radix `asChild` (the composer's popover anchor)
+  // passes one; it must reach the form beside `formRef`, not replace it.
+  ref?: Ref<HTMLFormElement>;
   // Render a hidden input with given name and keep it in sync for native form posts. Default false.
   syncHiddenInput?: boolean;
   // Minimal constraints
@@ -534,11 +546,16 @@ export type PromptInputProps = Omit<
   beamActive?: boolean;
 };
 
+// oxlint-disable-next-line eslint(no-empty-function)
+const ignoreFiles = () => {};
+
 export const PromptInput = ({
   className,
   accept,
   multiple,
   globalDrop,
+  attachmentsEnabled = true,
+  ref,
   syncHiddenInput,
   maxFiles,
   maxFileSize,
@@ -555,6 +572,17 @@ export const PromptInput = ({
   // Refs
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
+  const setFormRef = useCallback(
+    (node: HTMLFormElement | null) => {
+      formRef.current = node;
+      if (typeof ref === "function") {
+        ref(node);
+      } else if (ref) {
+        ref.current = node;
+      }
+    },
+    [ref]
+  );
 
   // ----- Local attachments (only used when no provider)
   const [items, setItems] = useState<PromptInputFileUIPart[]>([]);
@@ -727,7 +755,11 @@ export const PromptInput = ({
     []
   );
 
-  const add = usingProvider ? addWithProviderValidation : addLocal;
+  const add = attachmentsEnabled
+    ? usingProvider
+      ? addWithProviderValidation
+      : addLocal
+    : ignoreFiles;
   const remove = usingProvider ? controller.attachments.remove : removeLocal;
   const openFileDialog = usingProvider
     ? controller.attachments.openFileDialog
@@ -768,6 +800,11 @@ export const PromptInput = ({
     const onDragOver = (e: DragEvent) => {
       if (e.dataTransfer?.types?.includes("Files")) {
         e.preventDefault();
+        // Still taken, so the browser does not open the file, but the cursor
+        // must not promise a drop that will be ignored.
+        if (!attachmentsEnabled) {
+          e.dataTransfer.dropEffect = "none";
+        }
       }
     };
     const onDrop = (e: DragEvent) => {
@@ -784,7 +821,7 @@ export const PromptInput = ({
       form.removeEventListener("dragover", onDragOver);
       form.removeEventListener("drop", onDrop);
     };
-  }, [add, globalDrop]);
+  }, [add, attachmentsEnabled, globalDrop]);
 
   useEffect(() => {
     if (!globalDrop) {
@@ -794,6 +831,11 @@ export const PromptInput = ({
     const onDragOver = (e: DragEvent) => {
       if (e.dataTransfer?.types?.includes("Files")) {
         e.preventDefault();
+        // Still taken, so the browser does not open the file, but the cursor
+        // must not promise a drop that will be ignored.
+        if (!attachmentsEnabled) {
+          e.dataTransfer.dropEffect = "none";
+        }
       }
     };
     const onDrop = (e: DragEvent) => {
@@ -810,7 +852,7 @@ export const PromptInput = ({
       document.removeEventListener("dragover", onDragOver);
       document.removeEventListener("drop", onDrop);
     };
-  }, [add, globalDrop]);
+  }, [add, attachmentsEnabled, globalDrop]);
 
   useEffect(
     () => () => {
@@ -840,12 +882,13 @@ export const PromptInput = ({
     () => ({
       add,
       clear: clearAttachments,
+      enabled: attachmentsEnabled,
       fileInputRef: inputRef,
       files: files.map((item) => ({ ...item, id: item.id })),
       openFileDialog,
       remove,
     }),
-    [files, add, remove, clearAttachments, openFileDialog]
+    [files, add, attachmentsEnabled, remove, clearAttachments, openFileDialog]
   );
 
   const refsCtx = useMemo<ReferencedSourcesContext>(
@@ -942,8 +985,8 @@ export const PromptInput = ({
       <form
         className={cn("w-full", className)}
         onSubmit={handleSubmit}
-        ref={formRef}
         {...props}
+        ref={setFormRef}
       >
         {/* No explicit borderRadius: the beam wraps this box in a rounded
             clip, and any radius that does not match the box's own erases
@@ -1054,7 +1097,8 @@ export const PromptInputTextarea = ({
     (event) => {
       const items = event.clipboardData?.items;
 
-      if (!items) {
+      // Nothing to attach: the clipboard's text, if any, pastes as usual.
+      if (!items || !attachments.enabled) {
         return;
       }
 
