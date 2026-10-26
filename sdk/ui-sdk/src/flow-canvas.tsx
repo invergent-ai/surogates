@@ -78,10 +78,14 @@ export interface FlowCanvasProps {
   /**
    * Given, each line `insertable` allows carries a + at its middle, after its
    * label. A click on it, or Enter or Space while it has the focus, gives
-   * that edge of `graph.edges`.
+   * that edge of `graph.edges`. Pass a stable callback: a new one rebuilds
+   * every line.
    */
   onInsert?: (edge: FlowGraphEdge) => void;
-  /** Which lines carry a +, when `onInsert` is given; every line when left out. */
+  /**
+   * Which lines carry a +, when `onInsert` is given; every line when left
+   * out. Pass a stable callback: a new one rebuilds every line.
+   */
   insertable?: (edge: FlowGraphEdge) => boolean;
   className?: string;
 }

@@ -3,9 +3,10 @@
 //
 // A line of a flow on a canvas that inserts: drawn as React Flow's own line,
 // with its label at its middle and, when the app inserts on it, a + after
-// the label. The + is named for where it adds, by the line's label and its
-// ends. A click on it gives the line to the app and goes no further, so it
-// neither picks a node nor lets one go.
+// the label. Only the + takes the pointer: over the label the canvas still
+// pans and zooms. The + is named for where it adds, by the line's label and
+// its ends. A click on it gives the line to the app and goes no further, so
+// it neither picks a node nor lets one go.
 "use client";
 
 import {
@@ -63,7 +64,7 @@ export function InsertEdge({
         <EdgeLabelRenderer>
           <div
             data-slot="flow-edge-label"
-            className="nodrag nopan pointer-events-auto absolute flex items-center gap-1"
+            className="absolute flex items-center gap-1"
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
             }}
@@ -78,6 +79,7 @@ export function InsertEdge({
                 type="button"
                 variant="outline"
                 size="icon-xs"
+                className="nodrag nopan pointer-events-auto"
                 aria-label={insertName(data)}
                 onClick={(event) => {
                   event.stopPropagation();
