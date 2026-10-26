@@ -50,6 +50,14 @@
   --chart-3: #d08700;
   --chart-4: #a65f00;
   --chart-5: #894b00;
+  /* The categorical chart colours, in their fixed order, validated for
+     colour-blind readers in both themes. The neutral is for the series
+     folded into "other". */
+  --chart-series-1: light-dark(#2a78d6, #3987e5);
+  --chart-series-2: light-dark(#eb6834, #d95926);
+  --chart-series-3: light-dark(#1baf7a, #199e70);
+  --chart-series-4: light-dark(#6250d6, #9085e9);
+  --chart-series-other: light-dark(#898781, #6d6b67);
   --sidebar: light-dark(#f9f9f7, #0b0b0b);
   --sidebar-foreground: light-dark(#0b0b0b, #f0efec);
   --sidebar-primary: light-dark(#20201f, #f59e0b);

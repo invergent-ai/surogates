@@ -63,6 +63,7 @@ the kit carries Work's own components:
 | `stat-card` | `StatCard`, `InfoHint`, `ChannelChip` | A stat tile: label, value, hint, detail. |
 | `figure-grid` | `FigureGrid`, `Figure` | Stat tiles as the items of a named list, two to a row on a phone and as many as fit above it, with an optional caption under them. |
 | `period-select` | `PeriodSelect`, `PERIOD_CHOICES`, `periodWords` | A small select of the last days (7, 30, 90 by default) beside a muted label. A period outside the choices still shows, in its numeric place; `onChange` gets the number of days. |
+| `chart-palette` | `CHART_SERIES`, `CHART_OTHER`, `seriesConfig` | Four categorical colours in a fixed order and a neutral for the rest, in both themes; `seriesConfig` gives a chart's config from them. |
 | `control-styles` | `CONTROL_*` | Class strings for native controls that cannot be a component. |
 | `command` | `Command`, `CommandList`, `CommandGroup`, `CommandItem`, … | A searchable list (cmdk) with Work's menu rows; `data-checked` on an item lights its amber check. |
 | `hover-card` | `HoverCard`, `HoverCardTrigger`, `HoverCardContent` | A card shown on hover, on the popover surface. |
