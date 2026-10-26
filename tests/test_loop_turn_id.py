@@ -21,7 +21,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.harness.budget import IterationBudget
-from surogates.harness.loop import AgentHarness
+from surogates.harness.loop import AgentHarness, QUESTION_TIMED_OUT_CHANNEL_REQUEST, QUESTION_TIMED_OUT_REQUEST
 from surogates.session.events import EventType
 from surogates.session.files import ComputerAway
 from surogates.session.models import Session
@@ -504,3 +504,37 @@ async def test_a_halted_channel_turn_still_replies_to_the_person(
     response = next(c.args[2] for c in store.emit_event.await_args_list if c.args[1] == EventType.LLM_RESPONSE)
     assert (response["message"]["content"], response["finish_reason"]) == ("Am notat. Revin imediat.", reason)
     assert harness._complete_session.await_args.kwargs["reason"] == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("channel", "expected"), [
+    ("web", QUESTION_TIMED_OUT_REQUEST),
+    ("whatsapp", QUESTION_TIMED_OUT_CHANNEL_REQUEST),
+])
+async def test_a_timed_out_question_gets_one_tools_off_reply(
+    monkeypatch: pytest.MonkeyPatch, channel: str, expected: str,
+) -> None:
+    """A question nobody answered in time ends its turn with one reply that
+    calls no tools: the model once built what nobody had approved."""
+    sent: list[dict] = []
+
+    async def fake_call_llm_with_retry(**kwargs: Any) -> tuple[dict, dict]:
+        sent.append(kwargs["create_kwargs"])
+        return {"role": "assistant", "content": "I'll wait for your answer."}, {}
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    store = AsyncMock()
+    harness = _make_loop_harness(session_store=store)
+    session = _make_session().model_copy(update={"channel": channel})
+
+    await harness._request_final_summary(
+        session, [{"role": "user", "content": "Draft the report."}], "system",
+        SimpleNamespace(lease_token=uuid4()), request="Draft the report.",
+        reason="question_timed_out",
+    )
+
+    assert "tools" not in sent[0]
+    assert sent[0]["messages"][-1]["content"] == expected
+    response = next(c.args[2] for c in store.emit_event.await_args_list if c.args[1] == EventType.LLM_RESPONSE)
+    assert response["finish_reason"] == "question_timed_out"
+    assert harness._complete_session.await_args.kwargs["reason"] == "question_timed_out"

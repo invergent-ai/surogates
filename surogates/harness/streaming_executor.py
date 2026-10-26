@@ -201,6 +201,8 @@ class StreamingToolExecutor:
         self._discarded: bool = False
         # Set by get_all_results, which runs once the response is saved.
         self._saved: bool = False
+        # An ask_user_question in this batch came back unanswered: the calls after it do not run.
+        self._question_unanswered: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -400,6 +402,8 @@ class StreamingToolExecutor:
         """
         from surogates.harness.tool_exec import (
             _emit_guardrail_tool_result,
+            _emit_skipped_tool_result,
+            question_went_unanswered,
             _parse_tool_args_for_guardrail,
             execute_single_tool,
         )
@@ -414,6 +418,11 @@ class StreamingToolExecutor:
         )
 
         try:
+            if self._question_unanswered:
+                tool.result = await _emit_skipped_tool_result(
+                    tool.tool_call, session=self._session, lease=self._lease, store=self._store,
+                )
+                return
             if guardrails is not None:
                 before = guardrails.before_call(tool_name, guardrail_args)
                 if not before.allows_execution:
@@ -460,6 +469,9 @@ class StreamingToolExecutor:
                 interrupt_check=self._interrupt_check,
                 offered_tools=self._offered_tools,
             )
+            # Read before any guardrail guidance is appended: that makes it no longer JSON.
+            if question_went_unanswered(tool_name, result.get("content")):
+                self._question_unanswered = True
             if guardrails is not None:
                 after = guardrails.after_call(
                     tool_name,

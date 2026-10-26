@@ -31,6 +31,8 @@ from surogates.harness.landing import last_turn_end, name_turn
 from surogates.harness.local_landing import lands
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_context_replay import BROWSER_HANDED_BACK
+from surogates.harness.message_utils import make_skipped_tool_result
+from surogates.harness.tool_exec import SKIPPED_BEHIND_QUESTION
 from surogates.harness.loop_pending import _actionable_pending_events
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.missions.evaluator import apply_verdict
@@ -44,9 +46,12 @@ from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.interactive_input import pending_input_for_session
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
+from surogates.tasks.dispatcher import _finalize_ended_sessions
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
-from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND
+import surogates.tools.builtin.ask_user_question as ask_user_question_module
+from surogates.harness.loop import QUESTION_TIMED_OUT_CHANNEL_REQUEST, QUESTION_TIMED_OUT_REQUEST
+from surogates.tools.builtin.ask_user_question import DISMISSED_BY_A_COMMAND, TIMED_OUT_DETAIL
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response
@@ -2634,11 +2639,7 @@ async def a_question_waits(workers: Workers, chat: UUID) -> asyncio.Task:
 
 async def what_the_question_got(workers: Workers, chat: UUID) -> dict:
     """What the question's call gave the model."""
-    [result] = [
-        event for event in await workers.store.get_events(chat, types=[EventType.TOOL_RESULT])
-        if event.data["tool_call_id"] == "call_ask"
-    ]
-    return json.loads(result.data["content"])
+    return json.loads(await what_a_call_got(workers, chat, "call_ask"))
 
 
 @pytest.mark.slow
@@ -2680,6 +2681,245 @@ async def test_a_question_dismissed_while_its_user_said_more_goes_on_with_what_t
     assert workers.ran == []
     await workers.wake(chat)
     assert workers.ran == ["_handle_goal_command"]
+
+
+async def finish_reasons(workers: Workers, chat: UUID) -> list:
+    return [event.data.get("finish_reason") for event in await workers.store.get_events(chat, types=[EventType.LLM_RESPONSE])]
+
+
+@pytest.mark.slow
+async def test_a_question_that_times_out_ends_its_turn_with_one_reply_and_no_tools(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    workers.replies.append(ASKS)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(chat), 10)
+
+    # Nobody answered: the turn ends with one reply that calls no tools, not with work nobody approved.
+    got = await what_the_question_got(workers, chat)
+    assert (got["cancelled"], got["reason"], got["detail"]) == (True, "timeout", TIMED_OUT_DETAIL)
+    assert len(workers.requests) == 2
+    assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_REQUEST
+    assert (await workers.said(chat))[-1] == "I'll wait for your answer."
+    assert await workers.status(chat) == "completed"
+    assert (await finish_reasons(workers, chat))[-1] == "question_timed_out"
+
+
+@pytest.mark.slow
+async def test_a_channel_question_that_times_out_ends_its_turn_with_one_reply_in_their_language(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    async with workers.api.app.state.session_factory() as db:
+        await db.execute(text("UPDATE sessions SET channel = 'whatsapp' WHERE id = :chat"), {"chat": chat})
+        await db.commit()
+    workers.replies.append(ASKS)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(chat), 10)
+
+    # On a channel too: one reply that calls no tools, asked for in the person's language.
+    assert (await what_the_question_got(workers, chat))["reason"] == "timeout"
+    assert len(workers.requests) == 2
+    assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_CHANNEL_REQUEST
+    assert (await workers.said(chat))[-1] == "I'll wait for your answer."
+    assert await workers.status(chat) == "completed"
+    assert (await finish_reasons(workers, chat))[-1] == "question_timed_out"
+
+
+@pytest.mark.slow
+async def test_a_task_whose_question_times_out_blocks_on_it_instead_of_being_retried(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        task = Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
+            current_session_id=helper.id, attempt_count=1,
+        )
+        db.add(task)
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
+        await db.commit()
+    workers.replies.append(ASKS)
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(helper.id), 10)
+
+    # Nobody is there to wait with: the task blocks on its question, for its parent to answer, and is not retried.
+    assert (await what_the_question_got(workers, helper.id))["reason"] == "timeout"
+    async with workers.api.app.state.session_factory() as db:
+        task = await db.get(Task, task.id)
+    assert (task.status, task.blocked_reason, task.attempt_count) == (
+        "blocked", "Blocked: no answer to the question: Which quarter?", 0,
+    )
+    assert len(workers.requests) == 1  # no tools-off reply to nobody
+    assert await workers.status(helper.id) == "completed"
+    [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
+    assert told.data["reason"] == task.blocked_reason
+    # Blocked is its parent's whole news: no report that the task finished as well.
+    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
+
+
+TWO_ASKS = (
+    {"role": "assistant", "content": "", "tool_calls": [
+        ASKS[0]["tool_calls"][0],
+        {"id": "call_ask_2", "type": "function", "function": {
+            "name": "ask_user_question", "arguments": json.dumps({"questions": [{"prompt": "Which region?"}]}),
+        }},
+    ]},
+    ASKS[1],
+)
+
+
+@pytest.mark.slow
+async def test_a_task_blocks_only_on_the_question_that_went_unanswered(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        task = Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
+            current_session_id=helper.id, attempt_count=1,
+        )
+        db.add(task)
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
+        await db.commit()
+    workers.replies.append(TWO_ASKS)
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    # The first question is answered; the second gets no answer in time.
+    await workers.store.emit_event(
+        helper.id, EventType.ASK_USER_QUESTION_RESPONSE,
+        {"tool_call_id": "call_ask", "responses": [{"question": "Which quarter?", "answer": "Q3"}]},
+    )
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(helper.id), 10)
+
+    assert json.loads(await what_a_call_got(workers, helper.id, "call_ask_2"))["reason"] == "timeout"
+    async with workers.api.app.state.session_factory() as db:
+        task = await db.get(Task, task.id)
+    # Its parent is asked only what went unanswered, not the question already answered.
+    assert (task.status, task.blocked_reason) == ("blocked", "Blocked: no answer to the question: Which region?")
+    [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
+    assert told.data["reason"] == task.blocked_reason
+
+
+@pytest.mark.slow
+async def test_a_task_that_cannot_block_on_its_timed_out_question_still_ends_its_turn(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr("surogates.tasks.tools._worker_block_handler", broken)
+    chat = await workers.chat()
+    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
+    async with workers.api.app.state.session_factory() as db:
+        task = Task(
+            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
+            current_session_id=helper.id, attempt_count=1,
+        )
+        db.add(task)
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
+        await db.commit()
+    workers.replies.append(ASKS)
+    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(helper.id), 10)
+
+    # The block failed: the attempt fails, with nothing raised, no reply to nobody and no report that it finished.
+    assert len(workers.requests) == 1
+    assert await workers.status(helper.id) == "failed"
+    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
+    # So the dispatcher retries the task, rather than finishing it with a reply to nobody.
+    async with workers.api.app.state.session_factory() as db:
+        await _finalize_ended_sessions(db, session_store=workers.store)
+        await db.commit()
+    async with workers.api.app.state.session_factory() as db:
+        task = await db.get(Task, task.id)
+    assert (task.status, task.result) == ("ready", None)
+
+
+@pytest.mark.slow
+async def test_a_question_that_times_out_while_its_user_said_more_goes_on_with_what_they_said(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 2)
+    chat = await workers.chat()
+    waiting = await a_question_waits(workers, chat)
+
+    # What a channel that takes no typed words for an answer delivers: a message, for the turn to read.
+    await workers.store.emit_event(chat, EventType.USER_MESSAGE, {"content": "Use the Q3 figures."})
+    await asyncio.wait_for(waiting, 10)
+
+    # The question timed out, and the turn goes on with what its user said.
+    assert (await what_the_question_got(workers, chat))["reason"] == "timeout"
+    assert workers.requests[-1][-1] == {"role": "user", "content": "Use the Q3 figures."}
+    assert "question_timed_out" not in await finish_reasons(workers, chat)
+
+
+BATCH = (
+    {"role": "assistant", "content": "", "tool_calls": [
+        ASKS[0]["tool_calls"][0],
+        {"id": "call_after", "type": "function", "function": {"name": "todo", "arguments": "{}"}},
+    ]},
+    ASKS[1],
+)
+
+
+async def what_a_call_got(workers: Workers, chat: UUID, call_id: str) -> str:
+    [result] = [
+        event for event in await workers.store.get_events(chat, types=[EventType.TOOL_RESULT])
+        if event.data["tool_call_id"] == call_id
+    ]
+    return result.data["content"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("streaming", ["1", "0"])
+async def test_calls_after_an_unanswered_question_in_its_batch_are_skipped(workers, monkeypatch, streaming):
+    monkeypatch.setenv("SUROGATES_STREAMING_ENABLED", streaming)
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
+    chat = await workers.chat()
+    workers.replies.append(BATCH)
+    workers.replies.append(_final_response("I'll wait for your answer."))
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch  # the real tools: the question waits for its user
+    await asyncio.wait_for(asking.wake(chat), 10)
+
+    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIPPED_BEHIND_QUESTION)["content"]
+    assert await what_a_call_got(workers, chat, "call_after") == skipped
+
+
+@pytest.mark.slow
+async def test_calls_after_an_answered_question_in_its_batch_still_run(workers, monkeypatch):
+    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 30)
+    chat = await workers.chat()
+    workers.replies.append(BATCH)
+    await workers.says(chat, "Draft the report.")
+    asking = workers.worker()
+    del asking._tools.dispatch
+    waiting = asyncio.create_task(asking.wake(chat))
+    async with asyncio.timeout(10):
+        while not await workers.store.get_events(chat, types=[EventType.INBOX_INPUT_REQUIRED]):
+            await asyncio.sleep(0.02)
+    await workers.store.emit_event(
+        chat, EventType.ASK_USER_QUESTION_RESPONSE,
+        {"tool_call_id": "call_ask", "responses": [{"question": "Which quarter?", "answer": "Q3"}]},
+    )
+    await asyncio.wait_for(waiting, 10)
+
+    assert (await what_the_question_got(workers, chat)).get("cancelled") is not True
+    skipped = make_skipped_tool_result(BATCH[0]["tool_calls"][1], SKIPPED_BEHIND_QUESTION)["content"]
+    assert await what_a_call_got(workers, chat, "call_after") != skipped
 
 
 # -- A routine's run --

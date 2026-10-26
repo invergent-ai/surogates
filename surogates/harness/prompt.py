@@ -809,6 +809,15 @@ class PromptBuilder:
                 "`skill_manage(action='patch')`."
             )
 
+        index = "<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
+        if "skill_view" not in self._available_tools:
+            return (
+                "# Available Skills\n"
+                "## Skills\n"
+                "These skills are in this agent's library. You can't open them in "
+                "this session, so treat their names and descriptions as context only."
+                f"{management_hint}\n\n{index}"
+            )
         return (
             "# Available Skills\n"
             "## Skills (mandatory)\n"
@@ -818,10 +827,7 @@ class PromptBuilder:
             "of loading: skills contain specialized commands, workflows, "
             "project conventions, and quality standards that may differ from "
             "general-purpose knowledge."
-            f"{management_hint}\n\n"
-            "<available_skills>\n"
-            + "\n".join(index_lines)
-            + "\n</available_skills>\n\n"
+            f"{management_hint}\n\n{index}\n\n"
             "Only proceed without loading a skill if genuinely none are relevant "
             "to the task."
         )

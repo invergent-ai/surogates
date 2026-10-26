@@ -100,7 +100,14 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
-from surogates.harness.tool_exec import _open_local_copy, _turn_now, execute_single_tool, execute_tool_calls
+from surogates.harness.tool_exec import (
+    _open_local_copy,
+    _parse_tool_args_for_guardrail,
+    _turn_now,
+    cancelled_result,
+    execute_single_tool,
+    execute_tool_calls,
+)
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.sandbox.history import PRUNE_DAYS
@@ -115,6 +122,7 @@ from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
+from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
 from surogates.keel.steps import (
     CASE_ITEM_TOOLS,
     CASE_STEP_NUDGE,
@@ -4210,7 +4218,7 @@ class AgentHarness(
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
             )
-            question_dismissed = _question_dismissed(tool_calls_raw, tool_results)
+            unanswered, unanswered_call = _unanswered_question(tool_calls_raw, tool_results)
 
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
@@ -4358,17 +4366,46 @@ class AgentHarness(
             # A question its user dismissed by typing a command ends the turn,
             # as the model's answer would: the command's own wake runs it, and
             # the model reads at its next turn that the question went
-            # unanswered.  Not while something else its user said waits for
-            # the model: the turn goes on with it.
-            if question_dismissed and not await self._said_to_the_model(session, steer_cursor):
-                logger.info(
-                    "Session %s: its user dismissed a question with a command; ending turn", session.id,
-                )
-                await self._complete_session(
-                    session, messages, lease,
-                    reason="question_dismissed",
-                    cost_tracker=cost_tracker,
-                    turn_id=turn_id,
+            # unanswered.  A question nobody answered in time ends it too, with
+            # one reply that calls no tools: going on built what nobody had
+            # approved.  Not while something else its user said waits for the
+            # model: the turn goes on with it.
+            if unanswered in (DISMISSED, TIMED_OUT) and not await self._said_to_the_model(session, steer_cursor):
+                if unanswered == DISMISSED:
+                    logger.info(
+                        "Session %s: its user dismissed a question with a command; ending turn", session.id,
+                    )
+                    await self._complete_session(
+                        session, messages, lease,
+                        reason="question_dismissed",
+                        cost_tracker=cost_tracker,
+                        turn_id=turn_id,
+                    )
+                    return
+                logger.info("Session %s: a question timed out; ending turn", session.id)
+                # A task's worker blocks instead, as ``worker_block`` does: its
+                # parent is told what it asked, and the task waits for the
+                # answer rather than being retried to ask it again.  One that
+                # cannot block fails its attempt, for the dispatcher to retry:
+                # a reply to nobody would finish the task with it.
+                if session.task_id is not None:
+                    if await self._block_task_on_question(session, unanswered_call):
+                        await self._complete_session(
+                            session, messages, lease,
+                            reason="question_timed_out",
+                            cost_tracker=cost_tracker,
+                            turn_id=turn_id,
+                            notify_parent=False,
+                        )
+                    else:
+                        await self._fail_session(
+                            session, messages, lease, reason="question_block_failed", cost_tracker=cost_tracker,
+                        )
+                    return
+                await self._request_final_summary(
+                    session, messages, system_prompt, lease,
+                    request=request, cost_tracker=cost_tracker, turn_id=turn_id,
+                    iteration_index=turn_iteration_index, reason="question_timed_out",
                 )
                 return
 
@@ -5827,6 +5864,25 @@ class AgentHarness(
     # /compress command handler
     # ------------------------------------------------------------------
 
+    async def _block_task_on_question(self, session: Session, call: dict) -> bool:
+        """Block *session*'s task on its unanswered question *call*, through ``worker_block``: whether it blocked."""
+        from surogates.tasks.tools import _worker_block_handler
+
+        prompts = "; ".join(_question_prompts(call)) or "(no prompt)"
+        try:
+            got = await _worker_block_handler(
+                {"reason": f"Blocked: no answer to the question: {prompts}"},
+                session_store=self._store, redis=self._redis,
+                session_id=str(session.id), session_factory=self._session_factory,
+            )
+            blocked = json.loads(got).get("ok") is True
+        except Exception:
+            logger.warning("Session %s: its task could not block on the question", session.id, exc_info=True)
+            return False
+        if not blocked:
+            logger.warning("Session %s: its task could not block on the question: %s", session.id, got)
+        return blocked
+
     async def _request_final_summary(
         self,
         session: Session,
@@ -5840,7 +5896,10 @@ class AgentHarness(
         iteration_index: int | None = None,
         reason: str = "budget_exhausted",
     ) -> None:
-        """Request one final LLM response with no tools when the budget is exhausted.
+        """Request one final LLM response with no tools, ending the turn for *reason*.
+
+        A ``question_timed_out`` end asks for one waiting line instead of
+        the summary.
 
         Also ends a messaging-channel turn a guard stopped (*reason*): the
         person on WhatsApp sees only what is delivered, and a turn halted
@@ -5854,14 +5913,19 @@ class AgentHarness(
         The model is asked to summarise its work so far without issuing
         any more tool calls.  The summary is emitted as an ``LLM_RESPONSE``
         event.  If the summary call fails, the session is completed with
-        the ``budget_exhausted`` reason and no summary.
+        *reason* and no summary.
         """
         logger.info(
-            "Session %s: budget exhausted, requesting final summary",
-            session.id,
+            "Session %s: %s, requesting a final tools-off response",
+            session.id, reason,
         )
 
-        if session.channel in ADAPTER_CHANNELS:
+        if reason == "question_timed_out":
+            summary_request = (
+                QUESTION_TIMED_OUT_CHANNEL_REQUEST if session.channel in ADAPTER_CHANNELS
+                else QUESTION_TIMED_OUT_REQUEST
+            )
+        elif session.channel in ADAPTER_CHANNELS:
             summary_request = (
                 "Your tool calls cannot run any more this turn. Without calling any tools, "
                 "reply now to the person you are talking with, in their language: answer "
@@ -6613,21 +6677,32 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
     return None
 
 
-def _question_dismissed(tool_calls_raw: list[dict], tool_results: list[dict]) -> bool:
-    """Whether a question of *tool_calls_raw*'s went unanswered because its user typed a command instead."""
-    from surogates.tools.builtin.ask_user_question import DISMISSED
+QUESTION_TIMED_OUT_REQUEST = (
+    "Your question got no answer in time. Without calling any tools, tell the user in one "
+    "short line that you'll wait for their answer. Don't say you did or will do anything else."
+)
+QUESTION_TIMED_OUT_CHANNEL_REQUEST = (
+    "Your question got no answer in time. Without calling any tools, tell the person you are "
+    "talking with, in their language, in one short line, that you'll wait for their answer. "
+    "Don't say you did or will do anything else."
+)
 
-    asked = {call.get("id") for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
+
+def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -> tuple[str | None, dict | None]:
+    """Why a question of *tool_calls_raw*'s went unanswered (its result's ``reason``), and its call; or ``(None, None)``."""
+    asked = {call.get("id"): call for call in tool_calls_raw if call.get("function", {}).get("name") == "ask_user_question"}
     for result in tool_results:
-        if result.get("tool_call_id") not in asked:
-            continue
-        try:
-            got = json.loads(result.get("content") or "")
-        except (TypeError, ValueError):
-            continue
-        if isinstance(got, dict) and got.get("reason") == DISMISSED:
-            return True
-    return False
+        if result.get("tool_call_id") in asked and (got := cancelled_result(result.get("content"))) is not None:
+            return got.get("reason"), asked[result.get("tool_call_id")]
+    return None, None
+
+
+def _question_prompts(call: dict) -> list[str]:
+    """The prompts of the questions *call* asked."""
+    questions = _parse_tool_args_for_guardrail(call).get("questions")
+    if not isinstance(questions, list):
+        return []
+    return [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
 
 
 def _whiteboard_sketch_turn_done(

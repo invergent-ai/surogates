@@ -22,7 +22,11 @@ Round-trip
 7. If the user pauses the session instead of answering, the handler exits
    with ``cancelled: true`` so the LLM sees a clean termination.  So it
    does, with ``reason: "dismissed"``, when the user types a command
-   instead: the harness ends the turn there and runs the command.
+   instead: the harness ends the turn there and runs the command.  A
+   question nobody answers in time (``reason: "timeout"``) ends the turn
+   there with no more tool calls; the person's later reply arrives as a
+   new message (a task's worker is instead marked blocked until its
+   parent unblocks it).
 """
 
 from __future__ import annotations
@@ -79,6 +83,13 @@ DISMISSED_BY_A_COMMAND = (
     "Ask it again if you still need the answer."
 )
 
+#: Why a question went unanswered when nobody answered it within the wait.
+TIMED_OUT = "timeout"
+TIMED_OUT_DETAIL = (
+    "No answer came in time, so the question was not answered. "
+    "If you still need the answer, ask it again once they write to you."
+)
+
 #: Why a question went unanswered when its person sent something else on a
 #: channel (a photo, another question).  The message itself reaches the model
 #: next, so the turn goes on with it.
@@ -100,6 +111,7 @@ STEP_CAME_DUE_DETAIL = (
 
 _DETAILS = {
     DISMISSED: DISMISSED_BY_A_COMMAND,
+    TIMED_OUT: TIMED_OUT_DETAIL,
     WROTE_SOMETHING_ELSE: WROTE_SOMETHING_ELSE_DETAIL,
     STEP_CAME_DUE: STEP_CAME_DUE_DETAIL,
 }
@@ -139,7 +151,10 @@ ASK_USER_QUESTION_DESCRIPTION = (
     "Do NOT use for simple yes/no confirmation of dangerous commands (the "
     "terminal tool handles that).  If the user pauses the session "
     "instead of answering, you will receive ``cancelled: true`` -- stop and "
-    "wait for further instructions."
+    "wait for further instructions.  If no answer comes in time, the turn ends "
+    "there with no more tool calls; the person's later reply arrives as a new "
+    "message (a task's worker is instead marked blocked until its parent "
+    "unblocks it)."
 )
 
 
@@ -410,7 +425,7 @@ async def _wait_for_response(
                     "ask_user_question tool %s timed out after %ds", tool_call_id,
                     _MAX_WAIT_SECONDS,
                 )
-                return {"cancelled": True, "reason": "timeout"}
+                return {"cancelled": True, "reason": TIMED_OUT}
 
             # Lease renewal keeps ownership while the user composes an answer.
             if lease_token is not None and now >= next_renew:
