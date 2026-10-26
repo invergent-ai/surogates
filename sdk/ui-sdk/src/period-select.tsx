@@ -40,9 +40,8 @@ export function PeriodSelect({
   className?: string;
 }) {
   const labelId = useId();
-  const days = choices.includes(value)
-    ? choices
-    : [...choices, value].sort((a, b) => a - b);
+  // Each period once, in numeric order, the shown one among them.
+  const days = [...new Set([...choices, value])].sort((a, b) => a - b);
 
   return (
     <div className={cn("flex items-center gap-2", className)}>

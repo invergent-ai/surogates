@@ -26,6 +26,7 @@ export function FigureGrid({
   return (
     <div className={className}>
       <ul
+        role="list"
         aria-label={label}
         className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(auto-fit,minmax(8.5rem,1fr))]"
       >

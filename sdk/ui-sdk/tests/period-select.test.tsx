@@ -103,6 +103,19 @@ describe("period select", () => {
     ]);
   });
 
+  it("a period listed twice is one option, and a shown one among the choices adds none", async () => {
+    const view = render(
+      <PeriodSelect value={30} onChange={() => {}} choices={[30, 7, 7, 90, 30]} />,
+    );
+    const options = await open(view);
+
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Last 7 days",
+      "Last 30 days",
+      "Last 90 days",
+    ]);
+  });
+
   it("a period picked shows, and is handed over as a number", async () => {
     const view = render(<Host start={30} />);
     const options = await open(view);

@@ -56,15 +56,16 @@ describe("figure grid", () => {
     expect(listOf(bare, "Bare").nextElementSibling).toBeNull();
   });
 
-  it("a figure's info is read from its label", () => {
+  it("a figure with info shows a More info hint by its label", () => {
     const view = render(
       <FigureGrid label="Figures">
         <Figure label="Runs" value="12" info="Sessions started in the period" />
+        <Figure label="Failed" value="3" />
       </FigureGrid>,
     );
+    const [runs, failed] = Array.from(listOf(view, "Figures").children);
 
-    expect(
-      view.querySelector("[aria-label='More info']"),
-    ).not.toBeNull();
+    expect(runs?.querySelector("[aria-label='More info']")).not.toBeNull();
+    expect(failed?.querySelector("[aria-label='More info']")).toBeNull();
   });
 });
