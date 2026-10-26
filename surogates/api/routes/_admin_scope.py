@@ -1,40 +1,35 @@
-"""Shared tenant-scope authorization helper for admin routes."""
+"""Shared authorization for the admin MCP-server and credential routes."""
 
 from __future__ import annotations
 
-from uuid import UUID
+from fastapi import Depends, HTTPException, status
 
-from fastapi import HTTPException, status
+from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.context import PrincipalKind, TenantContext
 
-from surogates.tenant.context import TenantContext
 
+async def require_admin_principal(
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> TenantContext:
+    """Router dependency: let a signed-in user holding ``admin`` through.
 
-def require_tenant_scope(
-    tenant: TenantContext,
-    org_id: UUID,
-    user_id: UUID | None,
-    *,
-    resource: str,
-) -> None:
-    """Raise 403 unless the tenant may manage the given (org, user) scope.
-
-    Platform admins bypass all checks.  Regular users are pinned to
-    their own org, and within that org they may only manage org-wide
-    rows (``user_id`` is ``None``) or their own user-scoped rows.
-    ``resource`` is interpolated into the 403 detail for a helpful
-    message.
+    Channel-session and service-account principals (bare or
+    session-scoped) are refused outright, whatever permissions they
+    carry: they never administer MCP servers or credentials.  Any other
+    caller needs the ``admin`` permission.
     """
-    if "admin" in tenant.permissions:
-        return
-
-    if tenant.org_id != org_id:
+    kind, _ = tenant.principal()
+    if kind is not PrincipalKind.USER:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Cannot manage {resource} outside your organisation.",
+            detail=(
+                "This endpoint is not available to channel-session or "
+                "service-account principals."
+            ),
         )
-
-    if user_id is not None and user_id != tenant.user_id:
+    if "admin" not in tenant.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Cannot manage another user's {resource}.",
+            detail="This endpoint requires the 'admin' permission.",
         )
+    return tenant
