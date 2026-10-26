@@ -5,7 +5,8 @@
 // edge with its label, and, when a run is traced, the path it took in amber
 // and the nodes open now lit. A node may carry a mark, such as the problems
 // found at it. A person pans and zooms, and, when the app gives `onSelect`,
-// picks a node by click or keyboard; nothing moves, connects or deletes.
+// picks a node by click or keyboard; nothing moves, connects or deletes. An
+// app may put a + on lines, with `onInsert`, to insert there.
 // Ported from Studio's skill canvas: its layout, its path replay and its
 // node.
 //
@@ -26,10 +27,12 @@ import {
 } from "./flow-canvas/flow-node";
 import {
   type FlowGraph,
+  type FlowGraphEdge,
   type FlowGraphNode,
   layoutFlow,
   traceFlow,
 } from "./flow-canvas/graph";
+import { InsertEdge, type InsertEdgeType } from "./flow-canvas/insert-edge";
 import { cn } from "./lib/utils";
 
 export {
@@ -50,6 +53,7 @@ export {
 } from "./flow-canvas/flow-node";
 
 const NODE_TYPES = { flow: FlowNodeView };
+const EDGE_TYPES = { insert: InsertEdge };
 
 // One empty list and one empty set of marks for the defaults, so a canvas
 // given neither keeps its trace and its nodes from one render to the next.
@@ -71,6 +75,14 @@ export interface FlowCanvasProps {
   onSelect?: (key: string | null) => void;
   /** The marks on nodes, by node key. */
   marks?: Readonly<Record<string, FlowNodeMark>>;
+  /**
+   * Given, each line `insertable` allows carries a + at its middle, after its
+   * label. A click on it, or Enter or Space while it has the focus, gives
+   * that edge of `graph.edges`.
+   */
+  onInsert?: (edge: FlowGraphEdge) => void;
+  /** Which lines carry a +, when `onInsert` is given; every line when left out. */
+  insertable?: (edge: FlowGraphEdge) => boolean;
   className?: string;
 }
 
@@ -86,6 +98,8 @@ export function FlowCanvas({
   selected = null,
   onSelect,
   marks = NO_MARKS,
+  onInsert,
+  insertable,
   className,
 }: FlowCanvasProps) {
   const { resolvedTheme } = useTheme();
@@ -126,20 +140,32 @@ export function FlowCanvas({
   );
 
   // A walked edge is drawn in amber, and the one into a node open now runs.
-  const edges = useMemo<Edge[]>(
-    () =>
-      graph.edges.map((edge, i) => ({
-        id: `e${i}`,
-        source: edge.source,
-        target: edge.target,
-        label: edge.label || undefined,
-        ...(trace.walked.has(i) && {
-          animated: trace.nodes[edge.target] === "current",
-          style: { stroke: "var(--accent-amber)", strokeWidth: 2 },
-        }),
-      })),
-    [graph, trace],
-  );
+  // On a canvas that inserts, every line draws its own label, and a line
+  // `insertable` allows carries a + after it.
+  const edges = useMemo<(Edge | InsertEdgeType)[]>(() => {
+    const names = new Map(graph.nodes.map((node) => [node.key, node.name]));
+    return graph.edges.map((edge, i) => ({
+      id: `e${i}`,
+      source: edge.source,
+      target: edge.target,
+      ...(onInsert
+        ? {
+            type: "insert" as const,
+            data: {
+              label: edge.label || null,
+              sourceName: names.get(edge.source) ?? edge.source,
+              targetName: names.get(edge.target) ?? edge.target,
+              onInsert:
+                insertable && !insertable(edge) ? null : () => onInsert(edge),
+            },
+          }
+        : { label: edge.label || undefined }),
+      ...(trace.walked.has(i) && {
+        animated: trace.nodes[edge.target] === "current",
+        style: { stroke: "var(--accent-amber)", strokeWidth: 2 },
+      }),
+    }));
+  }, [graph, trace, onInsert, insertable]);
 
   // React Flow picks nodes by keyboard only when they are selectable, which
   // would also let them be deleted, so the canvas listens itself.
@@ -169,6 +195,7 @@ export function FlowCanvas({
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
+        edgeTypes={EDGE_TYPES}
         onNodeClick={
           onSelect &&
           ((_event, node: FlowNodeType) => {

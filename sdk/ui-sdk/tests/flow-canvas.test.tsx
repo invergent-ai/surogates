@@ -3,8 +3,8 @@
 //
 // A read-only flow: laid out top to bottom, each node by name and kind, each
 // edge with its label, the path taken and the open nodes marked, a node a
-// person picks by click or keyboard and the marks on nodes, and nothing a
-// person drags, connects or deletes changes it.
+// person picks by click or keyboard, the marks on nodes and the + an app may
+// put on lines, and nothing a person drags, connects or deletes changes it.
 import { ThemeProvider } from "next-themes";
 import { act } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -16,7 +16,7 @@ import {
   layoutFlow,
   traceFlow,
 } from "../src/flow-canvas";
-import { cleanup, click, render, settle } from "./dom";
+import { buttonNamed, cleanup, click, render, settle } from "./dom";
 import { standInForReactFlow } from "./react-flow-dom";
 
 beforeAll(standInForReactFlow);
@@ -143,6 +143,20 @@ function schemeOf(view: HTMLElement): string | null {
   if (flow?.classList.contains("dark")) return "dark";
   if (flow?.classList.contains("light")) return "light";
   return null;
+}
+
+/** The + named `name`. */
+function plusNamed(view: HTMLElement, name: string): HTMLButtonElement {
+  const button = buttonNamed(view, name);
+  if (!button) throw new Error(`no button "${name}"`);
+  return button;
+}
+
+/** The names of the buttons that add on a line. */
+function plusNames(view: HTMLElement): string[] {
+  return Array.from(view.querySelectorAll("button"))
+    .map((button) => button.getAttribute("aria-label") ?? "")
+    .filter((name) => name.startsWith("Add "));
 }
 
 function expectWhole(view: HTMLElement): void {
@@ -391,6 +405,60 @@ describe("flow canvas", () => {
     }
     expect(onSelect).not.toHaveBeenCalled();
     expect(nodeOf(view, "check").getAttribute("role")).toBe("button");
+  });
+
+  it("each line carries a + named for its ends, and a click on it gives that edge", async () => {
+    const onInsert = vi.fn();
+    const view = await canvas({ onInsert });
+
+    expect(plusNames(view)).toHaveLength(5);
+
+    click(plusNamed(view, "Add on Complete, between Check documents and Review"));
+    expect(onInsert).toHaveBeenLastCalledWith({
+      source: "check",
+      target: "review",
+      label: "Complete",
+    });
+
+    click(plusNamed(view, "Add between Start and Check documents"));
+    expect(onInsert).toHaveBeenLastCalledWith({
+      source: "#start",
+      target: "check",
+      label: null,
+    });
+    expect(onInsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("insertable leaves a line without a +", async () => {
+    const view = await canvas({
+      onInsert: vi.fn(),
+      insertable: (edge) => edge.source !== "review",
+    });
+
+    const names = plusNames(view);
+    expect(names.filter((name) => name.includes("between Review and"))).toEqual(
+      [],
+    );
+    expect(names).toHaveLength(3);
+    // A line without a + still shows its label.
+    expect(view.textContent).toContain("Send back");
+  });
+
+  it("without onInsert no + shows, and the lines keep their labels", async () => {
+    const view = await canvas();
+
+    expect(plusNames(view)).toEqual([]);
+    expect(view.textContent).toContain("Send back");
+  });
+
+  it("a + picks nothing and lets nothing go", async () => {
+    const onSelect = vi.fn();
+    const onInsert = vi.fn();
+    const view = await canvas({ onSelect, onInsert, selected: "review" });
+
+    click(plusNamed(view, "Add on Approve, between Review and Route by risk"));
+    expect(onInsert).toHaveBeenCalledTimes(1);
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("without a theme, the canvas takes the system's colour scheme", async () => {
