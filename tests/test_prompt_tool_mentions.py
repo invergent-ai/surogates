@@ -28,7 +28,7 @@ def _builder(tools: set[str]) -> PromptBuilder:
 
 def test_page_note_points_at_a_section_not_the_whole_page():
     note = _page_view_context_note({"page": "Vault", "docPath": "work/settings/vault"})
-    assert "work/settings/vault" in note
+    assert 'To explain this page, its settings or concepts, its doc is "work/settings/vault"' in note
     assert "section" in note
     assert "read_doc(" not in note
 

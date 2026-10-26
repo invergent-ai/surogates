@@ -410,8 +410,9 @@ def _page_view_context_note(view_context: dict[str, Any]) -> str:
     doc_path = view_context.get("docPath")
     if doc_path:
         note += (
-            f' This page is documented at "{doc_path}": search that doc or read '
-            "only the section you need, not the whole page."
+            f' To explain this page, its settings or concepts, its doc is "{doc_path}": '
+            "look up the section you need (a docs search gives section ids) and read "
+            "only that section, not the whole page."
         )
 
     resource = view_context.get("resource")
