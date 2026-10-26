@@ -461,6 +461,8 @@ Update a skill.
 
 Delete a skill.
 
+A user changes only the skills in their own layer. A skill in the org-shared layer is changed (by these routes, the supporting-file routes and the expert actions below) only by an admin or a service account.
+
 ### Expert-Specific Actions
 
 These endpoints are only valid for skills with `type=expert`:
@@ -550,7 +552,7 @@ The `name` field in the request body **must match** the `name:` key in the AGENT
 
 ### `PUT /v1/agents/{name}`
 
-Replace the full AGENT.md content of an existing user-scoped sub-agent.
+Replace the full AGENT.md content of an existing user-scoped sub-agent. A sub-agent in the org-shared layer can be replaced only by an admin or a service account.
 
 **Request:**
 ```json
@@ -563,7 +565,7 @@ The frontmatter `name:` must still equal the path `name`.
 
 ### `DELETE /v1/agents/{name}`
 
-Delete a user-scoped sub-agent. Platform and org-DB agents are read-only via this endpoint; use admin tooling for DB-overlay management.
+Delete a user-scoped sub-agent. A sub-agent in the org-shared layer can be deleted only by an admin or a service account. Platform and org-DB agents are read-only via this endpoint; use admin tooling for DB-overlay management.
 
 **Response: 204 No Content.**
 
