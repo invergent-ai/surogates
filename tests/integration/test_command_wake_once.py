@@ -46,6 +46,7 @@ from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.interactive_input import pending_input_for_session
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
+from surogates.tasks.dispatcher import _finalize_ended_sessions
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
 import surogates.tools.builtin.ask_user_question as ask_user_question_module
@@ -2762,17 +2763,22 @@ async def test_a_task_that_cannot_block_on_its_timed_out_question_still_ends_its
         await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
         await db.commit()
     workers.replies.append(ASKS)
-    workers.replies.append(_final_response("I'll wait for your answer."))
     await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
     asking = workers.worker()
     del asking._tools.dispatch  # the real tools: the question waits for its user
     await asyncio.wait_for(asking.wake(helper.id), 10)
 
-    # The block failed: the turn falls back to the one tools-off reply and ends, with nothing raised.
-    assert workers.requests[-1][-1]["content"] == QUESTION_TIMED_OUT_REQUEST
-    assert (await workers.said(helper.id))[-1] == "I'll wait for your answer."
-    assert await workers.status(helper.id) == "completed"
-    assert (await finish_reasons(workers, helper.id))[-1] == "question_timed_out"
+    # The block failed: the attempt fails, with nothing raised, no reply to nobody and no report that it finished.
+    assert len(workers.requests) == 1
+    assert await workers.status(helper.id) == "failed"
+    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
+    # So the dispatcher retries the task, rather than finishing it with a reply to nobody.
+    async with workers.api.app.state.session_factory() as db:
+        await _finalize_ended_sessions(db, session_store=workers.store)
+        await db.commit()
+    async with workers.api.app.state.session_factory() as db:
+        task = await db.get(Task, task.id)
+    assert (task.status, task.result) == ("ready", None)
 
 
 @pytest.mark.slow

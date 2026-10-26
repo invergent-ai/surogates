@@ -95,9 +95,17 @@ not answered. Ask it again if you still need the answer."
 - Adding `detail` to the timeout result is safe: the readers found (ops Studio
   `session-thread.tsx`, the agent-chat-react SDK) use only `cancelled` and `reason`, and the
   `dismissed` result already carries a `detail`.
+- A task's worker has nobody to wait with: on a timeout it blocks its task through
+  `worker_block` (its parent gets TASK_BLOCKED naming only the question that went unanswered)
+  and ends with no tools-off reply and no WORKER_COMPLETE. If the block fails (the handler
+  raised, or a refusal), the attempt fails through `_fail_session`: the session ends `failed`,
+  so the dispatcher classifies it CRASHED and retries the task while attempts remain, instead of
+  finishing it with "I'll wait" as its result. A refusal because the task is no longer running
+  or no longer this attempt stays harmless, since finalise then skips the task.
 - DOC-12: `docPath` is only sent by Studio for the copilot, and the note's builder does not know
-  the session's tools, so the note names no tool: it gives the doc path and says to search that
-  doc or read only the section needed, not the whole page.
+  the session's tools, so the note names no tool: it says what the doc is for, gives its path,
+  and says to look up the section needed (a docs search gives section ids) and read only that,
+  not the whole page.
 - DOC-13: the prompt builder already has `self._available_tools` (it gates `guidance/skills` on
   it); use it for the reworded index.
 

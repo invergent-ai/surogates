@@ -4385,15 +4385,22 @@ class AgentHarness(
                 logger.info("Session %s: a question timed out; ending turn", session.id)
                 # A task's worker blocks instead, as ``worker_block`` does: its
                 # parent is told what it asked, and the task waits for the
-                # answer rather than being retried to ask it again.
-                if session.task_id is not None and await self._block_task_on_question(session, tool_calls_raw):
-                    await self._complete_session(
-                        session, messages, lease,
-                        reason="question_timed_out",
-                        cost_tracker=cost_tracker,
-                        turn_id=turn_id,
-                        notify_parent=False,
-                    )
+                # answer rather than being retried to ask it again.  One that
+                # cannot block fails its attempt, for the dispatcher to retry:
+                # a reply to nobody would finish the task with it.
+                if session.task_id is not None:
+                    if await self._block_task_on_question(session, tool_calls_raw):
+                        await self._complete_session(
+                            session, messages, lease,
+                            reason="question_timed_out",
+                            cost_tracker=cost_tracker,
+                            turn_id=turn_id,
+                            notify_parent=False,
+                        )
+                    else:
+                        await self._fail_session(
+                            session, messages, lease, reason="question_block_failed", cost_tracker=cost_tracker,
+                        )
                     return
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
