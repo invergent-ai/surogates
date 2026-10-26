@@ -1615,13 +1615,18 @@ async def test_admin_mcp_list_cross_org_for_admin(
 
 
 # ---------------------------------------------------------------------------
-# Admin -- MCP servers and credentials need the admin permission
+# Admin -- every admin route needs the admin permission
 # ---------------------------------------------------------------------------
 
 #: What the admin MCP API shows in place of every ``env`` value.
 REDACTED_ENV_VALUE = "__redacted__"
 
-_NON_ADMIN_PRINCIPALS = ["end-user", "channel-session", "service-account-session"]
+_NON_ADMIN_PRINCIPALS = [
+    "end-user",
+    "channel-session",
+    "service-account-session",
+    "service-account",
+]
 
 
 async def _non_admin_token(session_factory, org_id: UUID, principal: str) -> str:
@@ -1635,6 +1640,10 @@ async def _non_admin_token(session_factory, org_id: UUID, principal: str) -> str
     if principal == "end-user":
         user_id = await create_user(session_factory, org_id)
         return create_access_token(org_id, user_id, USER_PERMISSIONS)
+    if principal == "service-account":
+        # A bare ``surg_sk_`` key: the auth middleware refuses it on every
+        # route outside ``/v1/api`` before any route dependency runs.
+        return (await issue_service_account_token(session_factory, org_id)).token
     if principal == "channel-session":
         session = await SessionStore(session_factory).create_session(
             user_id=None, org_id=org_id, agent_id=TEST_AGENT_ID, channel="website",
@@ -1849,6 +1858,209 @@ async def test_admin_credentials_routes_refuse_non_admin_principals(
     vault = app.state.credential_vault
     assert await vault.retrieve(org_id, "ORG_KEY") == "keep-me"
     assert await vault.retrieve(org_id, "NEW_KEY") is None
+
+
+async def _org_user_ids(client: AsyncClient, org_id: UUID, headers: dict) -> set[str]:
+    resp = await client.get(
+        f"/v1/admin/orgs/{org_id}/users?limit=200", headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    return {u["id"] for u in resp.json()["users"]}
+
+
+async def _org_count(client: AsyncClient, headers: dict) -> int:
+    resp = await client.get("/v1/admin/orgs?limit=1", headers=headers)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["total"]
+
+
+async def test_admin_get_org_and_list_users(client: AsyncClient, session_factory):
+    """An admin reads an org and lists its users."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    got = await client.get(f"/v1/admin/orgs/{org_id}", headers=headers)
+    assert got.status_code == 200, got.text
+    assert got.json()["id"] == str(org_id)
+
+    created = await client.post(
+        f"/v1/admin/orgs/{org_id}/users",
+        json={
+            "email": "listed@test.com",
+            "display_name": "Listed",
+            "password": "secret123",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert await _org_user_ids(client, org_id, headers) == {
+        str(user_id), created.json()["id"],
+    }
+
+
+@pytest.mark.parametrize("principal", _NON_ADMIN_PRINCIPALS)
+async def test_admin_org_routes_refuse_non_admin_principals(
+    client: AsyncClient, session_factory, principal: str
+):
+    """Every verb of the admin org router is 403 without the admin permission."""
+    org_id, _, admin_token, _ = await _create_test_tenant(session_factory)
+    admin = {"Authorization": f"Bearer {admin_token}"}
+    caller = {
+        "Authorization": "Bearer "
+        + await _non_admin_token(session_factory, org_id, principal),
+    }
+    users_before = await _org_user_ids(client, org_id, admin)
+    orgs_before = await _org_count(client, admin)
+
+    refused = [
+        await client.get(f"/v1/admin/orgs/{org_id}", headers=caller),
+        await client.post(
+            f"/v1/admin/orgs/{org_id}/users",
+            json={
+                "email": "added@test.com",
+                "display_name": "Added",
+                "auth_provider": "database",
+                "password": "secret123",
+            },
+            headers=caller,
+        ),
+        await client.get(f"/v1/admin/orgs/{org_id}/users", headers=caller),
+        await client.post(
+            "/v1/admin/orgs", json={"name": "refused-org"}, headers=caller,
+        ),
+        await client.get("/v1/admin/orgs", headers=caller),
+    ]
+    assert [r.status_code for r in refused] == [403] * 5, [r.text for r in refused]
+
+    # Nothing the refused calls asked for happened.
+    assert await _org_user_ids(client, org_id, admin) == users_before
+    assert await _org_count(client, admin) == orgs_before
+
+
+async def _channel_identity_ids(client: AsyncClient, headers: dict) -> set[str]:
+    resp = await client.get("/v1/admin/channel-identities", headers=headers)
+    assert resp.status_code == 200, resp.text
+    return {i["id"] for i in resp.json()}
+
+
+async def test_admin_channel_identity_roundtrip(client: AsyncClient, session_factory):
+    """An admin links, lists and unlinks a platform identity."""
+    org_id, user_id, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = await client.post(
+        "/v1/admin/channel-identities",
+        json={
+            "user_id": str(user_id),
+            "platform": "slack",
+            "platform_user_id": "U0123ABCDEF",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    identity_id = created.json()["id"]
+    assert await _channel_identity_ids(client, headers) == {identity_id}
+
+    listed = await client.get(
+        "/v1/admin/channel-identities?platform=slack", headers=headers,
+    )
+    assert [i["platform_user_id"] for i in listed.json()] == ["U0123ABCDEF"]
+
+    deleted = await client.delete(
+        f"/v1/admin/channel-identities/{identity_id}", headers=headers,
+    )
+    assert deleted.status_code == 204
+    assert await _channel_identity_ids(client, headers) == set()
+
+
+@pytest.mark.parametrize("principal", _NON_ADMIN_PRINCIPALS)
+async def test_admin_channel_identity_routes_refuse_non_admin_principals(
+    client: AsyncClient, session_factory, principal: str
+):
+    """Every verb of the channel-identity routes is 403 without the admin permission."""
+    org_id, admin_user_id, admin_token, _ = await _create_test_tenant(session_factory)
+    admin = {"Authorization": f"Bearer {admin_token}"}
+    member_id = await create_user(session_factory, org_id)
+    seeded = await client.post(
+        "/v1/admin/channel-identities",
+        json={
+            "user_id": str(member_id),
+            "platform": "slack",
+            "platform_user_id": "U-SEEDED",
+        },
+        headers=admin,
+    )
+    assert seeded.status_code == 201, seeded.text
+    seeded_id = seeded.json()["id"]
+    caller = {
+        "Authorization": "Bearer "
+        + await _non_admin_token(session_factory, org_id, principal),
+    }
+
+    refused = [
+        await client.post(
+            "/v1/admin/channel-identities",
+            json={
+                "user_id": str(admin_user_id),
+                "platform": "slack",
+                "platform_user_id": "U-NEW",
+            },
+            headers=caller,
+        ),
+        await client.get("/v1/admin/channel-identities", headers=caller),
+        await client.delete(
+            f"/v1/admin/channel-identities/{seeded_id}", headers=caller,
+        ),
+    ]
+    assert [r.status_code for r in refused] == [403] * 3, [r.text for r in refused]
+
+    # No identity appeared and the seeded one is still there.
+    assert await _channel_identity_ids(client, admin) == {seeded_id}
+
+
+@pytest.mark.parametrize("principal", _NON_ADMIN_PRINCIPALS)
+async def test_admin_service_account_routes_refuse_non_admin_principals(
+    client: AsyncClient, session_factory, principal: str
+):
+    """Every verb of the admin service-account router is 403 without the admin permission."""
+    org_id, _, admin_token, _ = await _create_test_tenant(session_factory)
+    admin = {"Authorization": f"Bearer {admin_token}"}
+    seeded = await client.post(
+        "/v1/admin/service-accounts",
+        json={"org_id": str(org_id), "name": "pipeline"},
+        headers=admin,
+    )
+    assert seeded.status_code == 201, seeded.text
+    seeded_id = seeded.json()["id"]
+    caller = {
+        "Authorization": "Bearer "
+        + await _non_admin_token(session_factory, org_id, principal),
+    }
+    accounts_before = await client.get(
+        f"/v1/admin/service-accounts?org_id={org_id}", headers=admin,
+    )
+
+    refused = [
+        await client.post(
+            "/v1/admin/service-accounts",
+            json={"org_id": str(org_id), "name": "minted"},
+            headers=caller,
+        ),
+        await client.get(
+            f"/v1/admin/service-accounts?org_id={org_id}", headers=caller,
+        ),
+        await client.delete(
+            f"/v1/admin/service-accounts/{seeded_id}", headers=caller,
+        ),
+    ]
+    assert [r.status_code for r in refused] == [403] * 3, [r.text for r in refused]
+
+    # Nothing was issued, and the seeded account is not revoked.
+    after = await client.get(
+        f"/v1/admin/service-accounts?org_id={org_id}", headers=admin,
+    )
+    assert after.json() == accounts_before.json()
+    assert after.json()["service_accounts"][0]["revoked_at"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,9 @@
-"""Shared authorization for the admin MCP-server and credential routes."""
+"""Shared authorization for the ``/v1/admin`` routers.
+
+:func:`require_admin_principal` is the router-level dependency of every
+admin router: org and user management, channel identities, MCP servers,
+credentials and service accounts.  A new admin router attaches it too.
+"""
 
 from __future__ import annotations
 
@@ -15,8 +20,8 @@ async def require_admin_principal(
 
     Channel-session and service-account principals (bare or
     session-scoped) are refused outright, whatever permissions they
-    carry: they never administer MCP servers or credentials.  Any other
-    caller needs the ``admin`` permission.
+    carry: they never use the admin routes.  Any other caller needs the
+    ``admin`` permission.
     """
     kind, _ = tenant.principal()
     if kind is not PrincipalKind.USER:
