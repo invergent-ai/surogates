@@ -333,6 +333,7 @@ async def test_a_run_logs_in_as_its_schedule_captured_not_as_its_chat_now(
     detached = await scheduled_store.create(
         org_id=org_id, user_id=user_id, agent_id="agent-a", name="Post 2",
         prompt="post", schedule=parse_schedule("10m"), source="loop",
+        created_from_session_id=None,
         next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
     )
     async with session_factory() as db:
