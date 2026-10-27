@@ -17,6 +17,9 @@ Supports:
   / ``DELEGATION_FAILED`` events on the parent with a tool-call trace
   built from the child's event log. A short trace summary is appended
   to the tool result text so the LLM can judge child reliability.
+- **Progress**: while polling, emits ``DELEGATION_PROGRESS`` on the parent
+  for the child's newest tool call, so the parent's chat is not silent
+  while it waits.
 - **Stale detection**: while polling, emits ``DELEGATION_STALE`` once
   per child when the child has been idle past a threshold (different
   thresholds for "idle" vs "in tool"); the hard timeout still applies.
@@ -664,6 +667,7 @@ async def _poll_child_completion(
     last_event_count = 0
     last_progress_time = loop.time()
     stale_emitted = False
+    tool_calls = 0
 
     while loop.time() < deadline:
         events = await session_store.get_events(child_id)
@@ -697,6 +701,18 @@ async def _poll_child_completion(
                 }
 
         if len(events) > last_event_count:
+            calls = [e for e in events[last_event_count:] if e.type == EventType.TOOL_CALL.value]
+            if calls:
+                tool_calls += len(calls)
+                await session_store.emit_event(
+                    parent_session_id,
+                    EventType.DELEGATION_PROGRESS,
+                    {
+                        "child_session_id": str(child_id),
+                        "tool": (calls[-1].data or {}).get("name"),
+                        "tool_calls": tool_calls,
+                    },
+                )
             last_event_count = len(events)
             last_progress_time = loop.time()
             stale_emitted = False

@@ -179,6 +179,8 @@ class EventType(str, Enum):
     DELEGATION_COMPLETE = "delegation.complete"
     DELEGATION_FAILED = "delegation.failed"
     DELEGATION_STALE = "delegation.stale"
+    # The child's latest tool call, so its parent's chat shows it working.
+    DELEGATION_PROGRESS = "delegation.progress"
 
     # Expert delegation
     EXPERT_DELEGATION = "expert.delegation"
