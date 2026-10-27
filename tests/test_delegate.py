@@ -1013,3 +1013,50 @@ async def test_blocklist_appears_in_excluded_tools_when_no_allowlist(
     assert "spawn_worker" in excluded
     assert "send_worker_message" in excluded
     assert "stop_worker" in excluded
+
+
+# ─── progress ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_parent_hears_each_tool_call_its_child_makes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _parent_session()
+    placeholder = uuid4()
+    log = [
+        _event(placeholder, EventType.USER_MESSAGE, {"content": "go"}),
+        _event(placeholder, EventType.TOOL_CALL, {"name": "browser_navigate", "tool_call_id": "c1"}),
+        _event(placeholder, EventType.TOOL_RESULT, {"tool_call_id": "c1"}),
+        _event(placeholder, EventType.TOOL_CALL, {"name": "browser_click", "tool_call_id": "c2"}),
+        _event(placeholder, EventType.TOOL_RESULT, {"tool_call_id": "c2"}),
+        _event(placeholder, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "posted"}}),
+        _event(placeholder, EventType.SESSION_COMPLETE, {}),
+    ]
+
+    class GrowingStore(FakeStore):
+        """The child's log as a poll sees it while the child works."""
+
+        seen = 1
+
+        async def get_events(self, session_id):
+            events = list(self._child_events[: self.seen])
+            self.seen += 2
+            return events
+
+    store = GrowingStore(parent, child_events=log)
+    _install_stub_child_session(monkeypatch, store)
+    monkeypatch.setattr(delegate_module, "_POLL_INTERVAL_SECONDS", 0.0)
+
+    result = await _delegate_handler(
+        {"goal": "post it"},
+        session_store=store,
+        redis=None,
+        tenant=object(),
+        session_id=str(parent.id),
+        budget=IterationBudget(max_total=10),
+    )
+
+    assert "posted" in result
+    progress = [d for t, d in store.parent_emitted if t == EventType.DELEGATION_PROGRESS]
+    assert [(p["tool"], p["tool_calls"]) for p in progress] == [("browser_navigate", 1), ("browser_click", 2)]

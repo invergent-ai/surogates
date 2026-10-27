@@ -38,5 +38,7 @@ class ScheduledSession(BaseModel):
     locked_until: datetime | None = None
     expires_at: datetime | None = None
     created_from_session_id: UUID | None = None
+    context: dict = Field(default_factory=dict)
+    max_run_seconds: int | None = None
     created_at: datetime
     updated_at: datetime

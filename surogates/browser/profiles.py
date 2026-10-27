@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, update
+from sqlalchemy import any_, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.db.models import BrowserProfile
@@ -24,6 +24,7 @@ class BrowserProfileRow:
     created_at: datetime
     last_used_at: datetime | None
     has_state: bool
+    use_in_channels: list[str] = field(default_factory=list)
 
 
 def _row(p: BrowserProfile) -> BrowserProfileRow:
@@ -35,6 +36,7 @@ def _row(p: BrowserProfile) -> BrowserProfileRow:
         created_at=p.created_at,
         last_used_at=p.last_used_at,
         has_state=p.storage_state_enc is not None,
+        use_in_channels=list(p.use_in_channels or []),
     )
 
 
@@ -142,6 +144,45 @@ class BrowserProfileStore:
                     .values(name=name)
                 )
         return result.rowcount > 0
+
+    async def set_use_in_channels(
+        self, profile_id, org_id, *, service_account_id, channels: list[str]
+    ) -> bool:
+        clause = self._principal_clause(None, service_account_id)
+        async with self._session_factory() as s:
+            async with s.begin():
+                result = await s.execute(
+                    update(BrowserProfile)
+                    .where(
+                        BrowserProfile.id == profile_id,
+                        BrowserProfile.org_id == org_id,
+                        clause,
+                    )
+                    .values(use_in_channels=sorted(set(channels)))
+                )
+        return result.rowcount > 0
+
+    async def used_in_channel(
+        self, org_id, *, service_account_id, channel: str
+    ) -> UUID | None:
+        """The profile *service_account_id* (an agent) uses on *channel* unbound.
+
+        The oldest one when several name it.
+        """
+        async with self._session_factory() as s:
+            return (
+                await s.execute(
+                    select(BrowserProfile.id)
+                    .where(
+                        BrowserProfile.org_id == org_id,
+                        BrowserProfile.service_account_id == service_account_id,
+                        channel == any_(BrowserProfile.use_in_channels),
+                        BrowserProfile.storage_state_enc.is_not(None),
+                    )
+                    .order_by(BrowserProfile.created_at.asc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
 
     async def delete(
         self, profile_id, org_id, *, user_id, service_account_id

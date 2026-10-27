@@ -96,6 +96,7 @@ from surogates.channels.memory_boundary import (
     is_eval_session,
     session_memory_boundary,
 )  # noqa: E402
+from surogates.session.execution_context import is_unattended  # noqa: E402
 
 #: Channels whose sessions belong to a person while the agent acts as
 #: itself: the managed channels, plus the buy page, whose sessions carry the
@@ -295,11 +296,12 @@ def _filter_effective_tools(
         # boundary (session_memory_boundary), never the agent's shared one.
         result.discard("skill_manage")
 
-    # An evaluation row has no human behind it, and ``ask_user_question``
-    # blocks the turn for up to 30 minutes waiting for one. Left in place it
+    # An evaluation row, a routine's run and a helper have no human behind
+    # them, and ``ask_user_question`` blocks the turn waiting for one; a
+    # routine's question can't even be answered (its run is read-only). Left in place it
     # stalls the row until the caller's timeout, which reads as a hung agent
     # rather than as a tool that could never have been answered.
-    if is_eval_session(session):
+    if is_eval_session(session) or is_unattended(session):
         result.discard("ask_user_question")
 
     # worker_block / worker_complete / worker_context are only meaningful
@@ -2399,6 +2401,7 @@ async def run_worker(settings: Settings) -> None:
             registry=browser_registry,
             redis=redis_client,
             emit=_emit_browser_event,
+            close=browser_pool.destroy_for_session,
         ),
         name="browser-registry-reaper",
     )

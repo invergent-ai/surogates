@@ -613,6 +613,12 @@ ALTER TABLE scheduled_sessions
     ADD COLUMN IF NOT EXISTS service_account_id uuid
         REFERENCES service_accounts(id);
 
+-- Who a run acts for and what it logs in as, captured when the schedule is
+-- made; a run's own time limit.
+ALTER TABLE scheduled_sessions
+    ADD COLUMN IF NOT EXISTS context jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS max_run_seconds integer;
+
 -- Replace the old (org, user, agent) index with one that covers both
 -- principal shapes.  Old index is dropped explicitly because the name
 -- is changing.
@@ -1374,3 +1380,7 @@ WHERE o.state IN ('queued', 'awaiting_reply')
           THEN split_part(o.dedupe_key, ':', 2)::uuid
   END
   AND x.org_id = o.org_id AND x.resolved_at IS NOT NULL;
+
+-- An agent-owned browser profile used, without being bound, on these channels.
+ALTER TABLE browser_profiles
+    ADD COLUMN IF NOT EXISTS use_in_channels text[] NOT NULL DEFAULT '{}'::text[];

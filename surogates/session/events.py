@@ -179,6 +179,8 @@ class EventType(str, Enum):
     DELEGATION_COMPLETE = "delegation.complete"
     DELEGATION_FAILED = "delegation.failed"
     DELEGATION_STALE = "delegation.stale"
+    # The child's latest tool call, so its parent's chat shows it working.
+    DELEGATION_PROGRESS = "delegation.progress"
 
     # Expert delegation
     EXPERT_DELEGATION = "expert.delegation"
@@ -314,6 +316,8 @@ class EventType(str, Enum):
     BROWSER_DESTROYED = "browser.destroyed"
     # A local-folder session's computer has no supported browser.
     BROWSER_UNAVAILABLE = "browser.unavailable"
+    # A browser that started logged out because its saved login could not be used.
+    BROWSER_PROFILE_UNAVAILABLE = "browser.profile_unavailable"
     BROWSER_CONTROL_GRANTED = "browser.control_granted"
     BROWSER_CONTROL_RETURNED = "browser.control_returned"
 

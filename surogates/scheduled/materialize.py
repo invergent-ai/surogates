@@ -34,6 +34,7 @@ from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
 from surogates.session.events import EventType
+from surogates.session.execution_context import inherit_context
 from surogates.session.provisioning import (
     create_agent_session,
     create_child_session,
@@ -83,6 +84,9 @@ async def materialize_scheduled_run(
         except SessionNotFoundError:
             parent = None
 
+    # What the schedule captured when it was made; rows from before it was
+    # captured take the creating chat's current context instead.
+    captured = getattr(schedule, "context", None) or None
     try:
         if parent is not None:
             session = await create_child_session(
@@ -91,6 +95,7 @@ async def materialize_scheduled_run(
                 channel="scheduled",
                 config=scheduled_config,
                 idempotency_key=idempotency_key,
+                context=captured,
             )
         else:
             session = await create_agent_session(
@@ -102,7 +107,7 @@ async def materialize_scheduled_run(
                 service_account_id=schedule.service_account_id,
                 agent_id=schedule.agent_id,
                 channel="scheduled",
-                config=scheduled_config,
+                config={**scheduled_config, **inherit_context(None, None, captured)},
                 parent_id=None,
                 idempotency_key=idempotency_key,
             )
@@ -135,12 +140,17 @@ async def materialize_scheduled_run(
     return session.id
 
 
+#: How long a scheduled run may stay open when its schedule sets no limit.
+DEFAULT_MAX_RUN_SECONDS = 30 * 60
+
+
 async def recover_stalled_loops(
     *,
     scheduled_store: Any,
     redis: Any,
     stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
     limit: int = 100,
+    session_store: Any = None,
 ) -> None:
     """Sweep dynamic loops whose run stalled, across all tenants, and reap
     schedules that have passed their ``expires_at``.
@@ -158,7 +168,16 @@ async def recover_stalled_loops(
     last run and its next due instant expires *unclaimed* (the claim query
     excludes expired rows), so it never reaches the completion code and stays
     ``active`` forever. :meth:`expire_active_schedules` transitions those.
+
+    And, given *session_store*, runs open past their time limit are failed
+    first, so a stalled loop's run is not requeued past it.
     """
+    if session_store is not None:
+        for run_id in await session_store.fail_overdue_scheduled_runs(
+            default_seconds=DEFAULT_MAX_RUN_SECONDS, limit=limit,
+        ):
+            logger.warning("Failed scheduled run %s: past its time limit", run_id)
+
     expired = await scheduled_store.expire_active_schedules(limit=limit)
     for schedule in expired:
         logger.info(
