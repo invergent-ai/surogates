@@ -260,7 +260,7 @@ async def create_child_session(
 
     for field in CONTEXT_FIELDS:
         merged_config.pop(field, None)
-    merged_config.update(inherit_context(parent_config, parent.channel, context))
+    merged_config.update(inherit_context(parent_config, getattr(parent, "channel", None), context))
 
     # A boundary comes from the parent only: one named in *config* would
     # reach another conversation's or project's memory.
