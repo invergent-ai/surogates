@@ -39,6 +39,7 @@ from surogates.runtime.governance import (
     build_governance_gate,
 )
 from surogates.tools.builtin.team import team_tool_exclusions
+from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
 from surogates.whiteboard.session import is_whiteboard_session
@@ -1273,6 +1274,36 @@ async def _stop_worker_invalidator(state: dict) -> None:
     state["runtime_invalidator_task"] = None
 
 
+async def _resolve_speaker(
+    session: Any, acting: Any, session_store: Any, session_factory: Any,
+) -> tuple[str, str] | None:
+    """(display name, email) of the signed-in person this session talks to.
+
+    The acting user, not the credential principal: a managed-channel
+    session runs as the agent's service account while the human is the
+    acting user.  An ops console chat runs as the operator's service
+    account, so the operator comes from the ``operator`` stamp that
+    surogate-ops writes at creation, trusted only on a session whose
+    account carries the ops-chat name proof.  A multi-party thread has no
+    single person to name.
+    """
+    config = getattr(session, "config", None) or {}
+    if config.get("multi_party"):
+        return None
+    if acting.user_id is not None:
+        from surogates.db.models import User
+
+        async with session_factory() as db:
+            user = await db.get(User, acting.user_id)
+        return (user.display_name, user.email) if user is not None else None
+    operator = config.get("operator")
+    if isinstance(operator, dict) and await is_ops_chat_service_account(
+        session_store, getattr(session, "service_account_id", None),
+    ):
+        return (str(operator.get("name") or ""), str(operator.get("email") or ""))
+    return None
+
+
 def _memory_user_id(session, tenant) -> str | None:
     """The user id whose personal memory this turn uses, or None for shared.
 
@@ -2131,6 +2162,9 @@ async def run_worker(settings: Settings) -> None:
             soul_md_content=soul_md_content,
             agent_md_content=agent_md_content,
             slash_commands=ctx.slash_commands,
+            speaker=await _resolve_speaker(
+                session, acting, session_store, session_factory,
+            ),
             # The gate is agent-level AND package-level: a plan without
             # the brainstorming capability turns the guidance off for
             # this sender even when the agent has it on.

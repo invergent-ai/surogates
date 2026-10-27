@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
 from surogates.devices.binding import device_of
+from surogates.harness.loop_context_replay import sanitize_sender_name
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
@@ -117,8 +118,12 @@ class PromptBuilder:
         agent_md_content: str | None = None,
         slash_commands: SlashCommandConfig | None = None,
         brainstorming_gate: bool = True,
+        speaker: tuple[str, str] | None = None,
     ) -> None:
         self.tenant = tenant
+        # (display name, email) of the signed-in person on the other side of
+        # a one-to-one session, so the agent never asks who it is talking to.
+        self._speaker: tuple[str, str] | None = speaker
         self.skills: list = skills or []
         self._available_tools: set[str] = available_tools or set()
         self._memory_manager: MemoryManager | None = memory_manager
@@ -855,6 +860,9 @@ class PromptBuilder:
             f"- **Current date**: {today}",
             f"- **Organisation**: {self.tenant.org_id}",
         ]
+        speaker = self._speaker_line()
+        if speaker:
+            parts.append(speaker)
 
         model_id = self._get_model_id()
         model_info = get_model_info(model_id)
@@ -917,6 +925,19 @@ class PromptBuilder:
             parts.append("\n" + self._prompts.get("guidance/whiteboard"))
 
         return "\n".join(parts)
+
+    def _speaker_line(self) -> str:
+        if self._speaker is None:
+            return ""
+        name, email = (sanitize_sender_name(value or "") for value in self._speaker)
+        email = email.replace("<", "").replace(">", "")
+        who = " ".join(filter(None, (name, f"<{email}>" if email else "")))
+        if not who:
+            return ""
+        return (
+            f"- **You are speaking with**: {who} "
+            "(signed in; do not ask who they are)"
+        )
 
     def _kb_section(self) -> str:
         """Render attached knowledge bases as a system prompt block.
