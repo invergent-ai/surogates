@@ -636,7 +636,7 @@ async def _browser_click_handler(
     has_ref = "ref" in arguments
     has_coords = "x" in arguments and "y" in arguments
     if not has_ref and not has_coords:
-        return json.dumps({"error": "invalid_arguments", "detail": "click requires ref or x/y"})
+        return _refused("invalid_arguments", "click requires ref or x/y")
 
     preflight = await _resolve_session_browser(
         tenant=tenant,
@@ -664,9 +664,9 @@ async def _browser_click_handler(
             else:
                 dialogs = await client.click_at(arguments["x"], arguments["y"], **common)
         except KeyError as exc:
-            return json.dumps({"error": "unknown_ref", "detail": str(exc)})
+            return _refused("unknown_ref", str(exc))
         except ClickTimeoutError as exc:
-            return json.dumps({"error": "click_timeout", "detail": str(exc)})
+            return _refused("click_timeout", str(exc))
     body: dict[str, Any] = {"clicked": True}
     if dialogs:
         body["dialogs"] = dialogs
