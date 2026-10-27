@@ -316,7 +316,7 @@ class DockerSandbox:
             s = self._storage
             env["SANDBOX_S3FS_INLINE"] = "1"
             env["S3_BUCKET_PATH"] = bucket_spec or ""
-            env["S3_ENDPOINT"] = getattr(s, "endpoint", "")
+            env["S3_ENDPOINT"] = _rewrite_host_for_container(getattr(s, "endpoint", ""))
             env["S3_REGION"] = getattr(s, "region", "") or "auto"
             env["AWS_ACCESS_KEY_ID"] = getattr(s, "access_key", "")
             env["AWS_SECRET_ACCESS_KEY"] = getattr(s, "secret_key", "")
