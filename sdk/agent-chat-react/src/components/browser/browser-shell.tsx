@@ -34,14 +34,24 @@ interface BrowserShellProps {
   onClose?: () => void;
   onMaximize?: () => void;
   /**
-   * Called when the socket drops *unexpectedly* — not on unmount, so an
-   * intentional teardown never looks like a failure to the pane.
+   * Called when the connection ends for good: the server closed it with a
+   * code that means the browser is gone or refused, never on a drop the
+   * shell reconnects from, and never on unmount.
    */
   onDisconnect?: (clean: boolean) => void;
   testId?: string;
 }
 
-type Connection = "connecting" | "connected" | "disconnected";
+type Connection = "connecting" | "connected" | "reconnecting" | "closed" | "disconnected";
+
+// Close codes after which the browser is still there to come back to: an
+// abnormal drop, a server error, the shell failing (4500), the browser not
+// answering in time (4502), or its CDP connection dying under the viewer (4503).
+const RECONNECT_CODES = new Set([1006, 1011, 4500, 4502, 4503]);
+// The browser is gone: the session has none, or it was closed.
+const CLOSED_CODE = 4404;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
 
 // Keys the protocol accepts. Mirrors NAMED_KEYS in surogates/browser/shell.py:
 // letters and function keys are absent on purpose, so no Ctrl+Shift+I and no
@@ -112,6 +122,9 @@ export function BrowserShell({
 
   const [state, setState] = useState<Connection>("connecting");
   const [frame, setFrame] = useState<string | null>(null);
+  // Whether this connection has painted a frame yet. The last frame of an
+  // earlier connection stays up underneath, dimmed, until a new one lands.
+  const [framed, setFramed] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [nav, setNav] = useState({ url: "", title: "" });
   // The address bar is editable: the user types a URL and presses Enter to
@@ -122,66 +135,90 @@ export function BrowserShell({
   const editingRef = useRef(false);
 
   useEffect(() => {
-    setState("connecting");
     let disposed = false;
-    const socket = new WebSocket(toWsUrl(src));
-    socketRef.current = socket;
+    let socket: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
 
-    socket.onopen = () => {
-      if (!disposed) setState("connected");
-    };
-    socket.onerror = () => {
-      if (!disposed) setState("disconnected");
-    };
-    socket.onclose = (event: { wasClean?: boolean }) => {
-      if (disposed) return;
-      setState("disconnected");
-      onDisconnectRef.current?.(event?.wasClean ?? false);
-    };
-    socket.onmessage = (event: { data: unknown }) => {
-      if (disposed) return;
-      const data = event.data;
-      if (typeof data !== "string") {
-        // A frame. Revoke the previous URL or every frame leaks one.
-        const next = URL.createObjectURL(
-          data instanceof Blob ? data : new Blob([data as ArrayBuffer]),
-        );
-        if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = next;
-        setFrame(next);
-        return;
-      }
-      let message: Record<string, unknown>;
-      try {
-        message = JSON.parse(data);
-      } catch {
-        return;
-      }
-      if (message.t === "tabs") {
-        const next = (message.tabs as Tab[]) ?? [];
-        setTabs(next);
-        // The tabs snapshot is the only address the server sends at connect
-        // and after a tab switch — nav messages only arrive on navigation.
-        const active = next.find((tab) => tab.active);
-        if (active) {
-          setNav({ url: active.url, title: active.title });
+    const connect = () => {
+      const current = new WebSocket(toWsUrl(src));
+      socket = current;
+      socketRef.current = current;
+      setFramed(false);
+
+      current.onopen = () => {
+        if (disposed) return;
+        attempt = 0;
+        setState("connected");
+      };
+      current.onclose = (event: { code?: number; wasClean?: boolean }) => {
+        if (disposed) return;
+        const code = event?.code ?? 1006;
+        if (RECONNECT_CODES.has(code)) {
+          setState("reconnecting");
+          const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
+          attempt += 1;
+          retry = setTimeout(connect, delay);
+          return;
         }
-      } else if (message.t === "nav") {
-        setNav({
-          url: String(message.url ?? ""),
-          title: String(message.title ?? ""),
-        });
-      }
+        setState(code === CLOSED_CODE ? "closed" : "disconnected");
+        onDisconnectRef.current?.(event?.wasClean ?? false);
+      };
+      current.onmessage = (event: { data: unknown }) => {
+        if (disposed) return;
+        const data = event.data;
+        if (typeof data !== "string") {
+          // A frame. Revoke the previous URL or every frame leaks one.
+          const next = URL.createObjectURL(
+            data instanceof Blob ? data : new Blob([data as ArrayBuffer]),
+          );
+          if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+          objectUrlRef.current = next;
+          setFrame(next);
+          setFramed(true);
+          return;
+        }
+        let message: Record<string, unknown>;
+        try {
+          message = JSON.parse(data);
+        } catch {
+          return;
+        }
+        if (message.t === "tabs") {
+          const next = (message.tabs as Tab[]) ?? [];
+          setTabs(next);
+          // The tabs snapshot is the only address the server sends at connect
+          // and after a tab switch — nav messages only arrive on navigation.
+          const active = next.find((tab) => tab.active);
+          if (active) {
+            setNav({ url: active.url, title: active.title });
+          }
+        } else if (message.t === "nav") {
+          setNav({
+            url: String(message.url ?? ""),
+            title: String(message.title ?? ""),
+          });
+        } else if (message.t === "status" && message.state === "busy") {
+          // The page is not answering yet; frames resume when it does.
+          setFramed(false);
+        }
+      };
     };
+
+    setState("connecting");
+    connect();
     return () => {
       // Detach before closing so an intentional unmount does not look like a
       // drop — only externally-driven closes reach onDisconnect.
       disposed = true;
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onclose = null;
-      socket.onerror = null;
-      socket.close();
+      if (retry) clearTimeout(retry);
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.close();
+      }
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
       objectUrlRef.current = null;
       socketRef.current = null;
@@ -407,14 +444,12 @@ export function BrowserShell({
             }
           }}
         />
-        {state !== "connected" && (
+        {(state !== "connected" || !framed) && (
           <div
             data-testid="browser-shell-overlay"
             className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/70 text-sm text-muted-foreground"
           >
-            {state === "connecting"
-              ? "Connecting to browser…"
-              : "Browser disconnected."}
+            {OVERLAY[state === "connected" ? "waiting" : state]}
           </div>
         )}
         {hasControl && (
@@ -427,6 +462,14 @@ export function BrowserShell({
     </div>
   );
 }
+
+const OVERLAY: Record<Exclude<Connection, "connected"> | "waiting", string> = {
+  connecting: "Connecting to browser…",
+  reconnecting: "Reconnecting…",
+  waiting: "Waiting for the page…",
+  closed: "Browser closed.",
+  disconnected: "Browser disconnected.",
+};
 
 /* Icons: 14px lucide paths, matching the set the rest of the pane uses. */
 const svg = {

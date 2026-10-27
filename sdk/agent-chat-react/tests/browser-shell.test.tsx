@@ -69,6 +69,13 @@ async function render(element: ReactElement): Promise<HTMLDivElement> {
   return container;
 }
 
+function overlay(node: HTMLElement): string | null {
+  return (
+    node.querySelector("[data-testid='browser-shell-overlay']")?.textContent ??
+    null
+  );
+}
+
 function push(message: Record<string, unknown>): Promise<void> {
   return act(async () => {
     FakeSocket.last?.onmessage?.({ data: JSON.stringify(message) });
@@ -333,9 +340,9 @@ describe("BrowserShell", () => {
     expect(idle.innerHTML).toBe(held);
   });
 
-  it("reports an unexpected close", async () => {
+  it("reports a close that means the browser is gone", async () => {
     const onDisconnect = vi.fn();
-    await render(
+    const node = await render(
       <BrowserShell
         src="wss://x/shell"
         hasControl
@@ -343,9 +350,81 @@ describe("BrowserShell", () => {
       />,
     );
     await act(async () => {
-      FakeSocket.last?.onclose?.({ code: 1006, wasClean: false });
+      FakeSocket.last?.onclose?.({ code: 4404, wasClean: true });
     });
-    expect(onDisconnect).toHaveBeenCalledWith(false);
+    expect(onDisconnect).toHaveBeenCalledWith(true);
+    expect(overlay(node)).toBe("Browser closed.");
+  });
+
+  it.each([1006, 1011, 4500, 4502, 4503])(
+    "reconnects with backoff after a %i close, without reporting it",
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const onDisconnect = vi.fn();
+        const node = await render(
+          <BrowserShell src="wss://x/shell" hasControl onDisconnect={onDisconnect} />,
+        );
+        const first = FakeSocket.last;
+        await act(async () => {
+          first?.onclose?.({ code, wasClean: false });
+        });
+        expect(overlay(node)).toBe("Reconnecting…");
+        expect(FakeSocket.last).toBe(first);
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+        expect(FakeSocket.last).not.toBe(first);
+        expect(FakeSocket.last?.url).toBe("wss://x/shell");
+
+        // A second drop before the socket opened waits twice as long.
+        const second = FakeSocket.last;
+        await act(async () => {
+          second?.onclose?.({ code, wasClean: false });
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+        expect(FakeSocket.last).toBe(second);
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+        expect(FakeSocket.last).not.toBe(second);
+        expect(onDisconnect).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("says it is waiting for the page until the first frame lands", async () => {
+    const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
+    expect(overlay(node)).toBe("Waiting for the page…");
+    await act(async () => {
+      FakeSocket.last?.onmessage?.({ data: new Blob([new Uint8Array([1])]) });
+    });
+    expect(overlay(node)).toBeNull();
+    await push({ t: "status", state: "busy" });
+    expect(overlay(node)).toBe("Waiting for the page…");
+  });
+
+  it("stops reconnecting once unmounted", async () => {
+    vi.useFakeTimers();
+    try {
+      await render(<BrowserShell src="wss://x/shell" hasControl />);
+      const first = FakeSocket.last;
+      await act(async () => {
+        first?.onclose?.({ code: 1006, wasClean: false });
+      });
+      await act(async () => root?.unmount());
+      root = null;
+      await act(async () => {
+        vi.advanceTimersByTime(20000);
+      });
+      expect(FakeSocket.last).toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not report a close caused by unmounting", async () => {
