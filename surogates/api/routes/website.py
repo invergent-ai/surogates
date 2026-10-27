@@ -39,12 +39,14 @@ import asyncio
 import logging
 import time
 import uuid
+from http.cookies import SimpleCookie
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from surogates.channels.memory_boundary import visitor_boundary
 from surogates.channels.website_keys import (
     PUBLISHABLE_KEY_PREFIX,
     is_publishable_key,
@@ -94,6 +96,11 @@ router = APIRouter()
 
 
 WEBSITE_CHANNEL = "website"
+# The visitor's own id on this API's domain, outliving any one session so a
+# returning visitor finds the memory their earlier visits left. Partitioned,
+# so a browser keeps a separate id per embedding site.
+VISITOR_COOKIE_NAME = "surogates_website_visitor"
+_VISITOR_COOKIE_MAX_AGE = 365 * 24 * 3600
 # Upper bound on a single visitor message.  Website widgets are an
 # interactive surface; we cap much lower than the API channel so a
 # single misbehaving client cannot submit multi-megabyte prompts.
@@ -231,6 +238,42 @@ def _set_session_cookie(
         samesite="none",
         path="/",
     )
+
+
+def _visitor_id(request: Request, response: Response) -> str:
+    """The visitor's id from their cookie, minting one when it is missing or not a UUID.
+
+    The cookie is set again on every bootstrap so a visitor who keeps
+    returning keeps their id.
+    """
+    try:
+        visitor = str(UUID(request.cookies.get(VISITOR_COOKIE_NAME, "")))
+    except ValueError:
+        visitor = str(uuid.uuid4())
+    cookie = SimpleCookie()
+    cookie[VISITOR_COOKIE_NAME] = visitor
+    morsel = cookie[VISITOR_COOKIE_NAME]
+    morsel["max-age"] = _VISITOR_COOKIE_MAX_AGE
+    morsel["path"] = "/"
+    morsel["secure"] = True
+    morsel["httponly"] = True
+    morsel["samesite"] = "none"
+    # Written by hand: Starlette sets ``Partitioned`` only on Python 3.14+.
+    response.headers.append("set-cookie", f"{morsel.OutputString()}; Partitioned")
+    return visitor
+
+
+def _visitor_memory_boundary(
+    agent_id: str, config: dict, visitor_id: str,
+) -> str:
+    """The ``visitor:`` memory boundary for a session with *config*.
+
+    A verified buyer's Firebase uid follows them across devices; an
+    anonymous visitor is known by their cookie.
+    """
+    buyer = config.get("commerce_buyer") or {}
+    identity = buyer.get("firebase_uid") or visitor_id
+    return visitor_boundary(agent_id, config.get("embed_end_user_id"), identity)
 
 
 def _clear_session_cookie(response: Response) -> None:
@@ -692,6 +735,7 @@ async def bootstrap_website_session(
     normalized_origin = normalize_origin(request_origin)
 
     publishable_key = _extract_bearer(request) or ""
+    visitor_id = _visitor_id(request, response)
 
     single_session = multi_session_disabled(routing_config)
     if single_session:
@@ -708,26 +752,28 @@ async def bootstrap_website_session(
             # Firebase token expecting exactly that — so a reused session
             # must absorb the token too, or a signed-in buyer would 402
             # forever against their buyer-less canonical session.
+            current = dict(existing.config or {})
+            pinned: dict = {}
             if body is not None and body.firebase_id_token:
                 buyer = await _resolve_commerce_buyer(
                     request, agent_id, body.firebase_id_token,
                 )
-                if buyer is not None and (
-                    (existing.config or {}).get("commerce_buyer") != buyer
-                ):
-                    await store.update_session_config_key(
-                        existing.id, "commerce_buyer", buyer,
-                    )
+                if buyer is not None:
+                    pinned["commerce_buyer"] = buyer
             # Absorb the per-buyer embed identity onto a reused session too,
             # or a canonical session created before the key carried an
             # embed_end_user_id would skip the allowance gate on every turn.
             embed_eu = routing_config.get("embed_end_user_id")
-            if embed_eu and (existing.config or {}).get(
-                "embed_end_user_id",
-            ) != str(embed_eu):
-                await store.update_session_config_key(
-                    existing.id, "embed_end_user_id", str(embed_eu),
-                )
+            if embed_eu:
+                pinned["embed_end_user_id"] = str(embed_eu)
+            # The boundary follows whoever the visitor now is: signing in
+            # moves the conversation onto the buyer's own memory.
+            pinned["memory_boundary"] = _visitor_memory_boundary(
+                agent_id, {**current, **pinned}, visitor_id,
+            )
+            for key, value in pinned.items():
+                if current.get(key) != value:
+                    await store.update_session_config_key(existing.id, key, value)
             response.status_code = status.HTTP_200_OK
             return _issue_bootstrap_response(
                 response,
@@ -779,6 +825,8 @@ async def bootstrap_website_session(
         )
         if buyer is not None:
             config["commerce_buyer"] = buyer
+
+    config["memory_boundary"] = _visitor_memory_boundary(agent_id, config, visitor_id)
 
     session = await store.create_session(
         session_id=session_id,

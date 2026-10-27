@@ -199,6 +199,7 @@ async def test_bootstrap_happy_path_creates_session_and_cookie(
     assert session.user_id is None
     assert session.org_id == org_id
     assert session.config["website_origin"] == _DEFAULT_ORIGIN
+    assert session.config["memory_boundary"].startswith("visitor:")
 
 
 async def test_bootstrap_404_when_channel_disabled(

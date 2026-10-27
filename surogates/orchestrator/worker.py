@@ -92,8 +92,10 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 from surogates.channels.constants import REALTIME_CHANNELS
 from surogates.channels.memory_boundary import (
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
+    VISITOR_BOUNDARY_PREFIX,
     is_case_agent_config,
     is_eval_session,
+    session_memory_boundary,
 )  # noqa: E402
 
 
@@ -251,8 +253,9 @@ def _filter_effective_tools(
        principal that :func:`_select_harness_token` will mint a token
        for.  Otherwise the LLM would call the tool and get the
        unhelpful "Artifacts require an API client" error.
-    2. Anonymous-channel sessions never see ``memory`` or
-       ``skill_manage``: the route gates refuse them anyway (see
+    2. Anonymous-channel sessions never see ``skill_manage``, nor
+       ``memory`` unless the session has a website visitor's own
+       ``visitor:`` partition: the route gates refuse them anyway (see
        ``api/routes/memory.py`` and the mutating ``/v1/skills``
        handlers), and exposing the schemas would invite the LLM to
        try.  Belt + braces: route gate is the hard boundary, tool-set
@@ -286,7 +289,8 @@ def _filter_effective_tools(
         and session.channel in ANONYMOUS_CHANNELS
     )
     if session_is_anonymous_channel:
-        result.discard("memory")
+        if not (session_memory_boundary(session) or "").startswith(VISITOR_BOUNDARY_PREFIX):
+            result.discard("memory")
         result.discard("skill_manage")
 
     # An evaluation row has no human behind it, and ``ask_user_question``
@@ -2079,9 +2083,9 @@ async def run_worker(settings: Settings) -> None:
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
-        # anonymous-channel sessions never see ``memory`` /
-        # ``skill_manage`` (the routes refuse them, and exposing the
-        # schemas would invite the LLM to try).  ``_filter_effective_tools``
+        # anonymous-channel sessions never see ``skill_manage``, nor
+        # ``memory`` outside a website visitor's own partition (the routes
+        # refuse them, and exposing the schemas would invite the LLM to try).  ``_filter_effective_tools``
         # documents the rules.
         effective_tools = _filter_effective_tools(
             tools=effective_tools,
