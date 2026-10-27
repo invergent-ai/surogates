@@ -56,6 +56,50 @@ FOLLOWUP_TOOL_NAMES: frozenset[str] = frozenset({
     *CONTACT_TOOL_NAMES,
 })
 
+
+async def followup_tool_exclusions(
+    session_factory: Any, session: Any, *, programs_enabled: bool,
+) -> frozenset[str]:
+    """The follow-up tools this session must not be offered.
+
+    One answer for the prompt and the schemas: every follow-up tool needs
+    the Programs capability except ``escalate``, which any agent may offer
+    once someone can receive it, its operator inbox or, with Programs on,
+    the team or a Program's own inbox.
+    """
+    excluded = set() if programs_enabled else set(FOLLOWUP_TOOL_NAMES - {"escalate"})
+    if not await escalation_can_reach_someone(
+        session_factory, session, programs_enabled=programs_enabled,
+    ):
+        excluded.add("escalate")
+    return frozenset(excluded)
+
+
+async def escalation_can_reach_someone(
+    session_factory: Any, session: Any, *, programs_enabled: bool,
+) -> bool:
+    settings = await followup_store.get_settings(
+        session_factory, org_id=session.org_id, agent_id=session.agent_id,
+    )
+    if settings is not None and settings.escalation_service_account_id:
+        return True
+    if not programs_enabled:
+        return False
+    if settings is not None and settings.alert_recipient_user_ids:
+        return True
+    async with session_factory() as db:
+        configs = (
+            await db.execute(
+                sa.select(ProgramScheduleRow.config).where(
+                    ProgramScheduleRow.org_id == session.org_id,
+                    ProgramScheduleRow.agent_id == session.agent_id,
+                    ProgramScheduleRow.active.is_(True),
+                )
+            )
+        ).scalars().all()
+    return any((config or {}).get("escalation_service_account_id") for config in configs)
+
+
 FOLLOWUP_ENROLL_SCHEMA = ToolSchema(
     name="followup_enroll",
     description=(

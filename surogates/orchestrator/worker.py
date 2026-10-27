@@ -40,7 +40,7 @@ from surogates.runtime.governance import (
 )
 from surogates.tools.builtin.team import team_tool_exclusions
 from surogates.tools.owner_scope import is_ops_chat_service_account
-from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES
+from surogates.tools.builtin.followup import followup_tool_exclusions
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
 from surogates.whiteboard.session import is_whiteboard_session
 from surogates.harness.prompt_library import default_library as default_prompt_library
@@ -238,9 +238,6 @@ def _filter_effective_tools(
     # Defaults to the safe answer, matching ``drop_unusable_tools``: an
     # unknown board capability must never hand out the drawing tool.
     whiteboard_enabled: bool = False,
-    # Same safe default: an agent not known to run Programs gets none of the
-    # follow-up tools.
-    programs_enabled: bool = False,
     # The case types Keel lets this agent start: none, no ``start_case``.
     # Only a root session that works on no case is offered it.
     intake: Sequence[dict] = (),
@@ -357,13 +354,6 @@ def _filter_effective_tools(
         result |= WHITEBOARD_TOOL_NAMES
     else:
         result -= WHITEBOARD_TOOL_NAMES
-
-    # The follow-up tools act on the person the conversation belongs to and
-    # on the agent's Programs.  An agent without the Programs capability has
-    # no protocols to enrol in and nobody configured to escalate to, so the
-    # schemas would only cost tokens and invite failed calls.
-    if not programs_enabled:
-        result -= FOLLOWUP_TOOL_NAMES
 
     # idea_tree / dispatch_experiments / merge_experiment are the research
     # coordinator's deterministic spine. They are present only while a
@@ -2098,7 +2088,6 @@ async def run_worker(settings: Settings) -> None:
             session=session,
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
             whiteboard_enabled=ctx.whiteboard_enabled,
-            programs_enabled=ctx.programs_enabled,
             intake=intake,
             allow_listed=governance_gate.allow_listed(KEEL_DESIGNER_TOOLS),
         )
@@ -2128,6 +2117,12 @@ async def run_worker(settings: Settings) -> None:
         # the team tools reach across everyone followed, so a followed
         # person's session must never be offered them whatever its config says.
         entitlement_excluded_tools |= await team_tool_exclusions(
+            session_factory, session, programs_enabled=ctx.programs_enabled,
+        )
+        # Same channel for the follow-up tools, so the prompt and the schemas
+        # agree: an agent without Programs, or with nobody to receive an
+        # escalation, was offered escalate by one and not the other.
+        entitlement_excluded_tools |= await followup_tool_exclusions(
             session_factory, session, programs_enabled=ctx.programs_enabled,
         )
         if entitlement_excluded_tools:
