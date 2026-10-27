@@ -313,7 +313,8 @@ async def is_opener(
         ).first() is not None
 
 
-#: Why a held text was given up, as the reason key of the team's notice.
+#: Why a held text was given up, as the reason key of the team's notice;
+#: the first that applies is the one said.
 _WITHDRAWN_WHY = {
     followup_store.REMOVED_FROM_AGENT: "why_removed",
     followup_store.RESOLVED_BEFORE_READ: "why_resolved",
@@ -364,11 +365,8 @@ async def answer_withdrawn(
         return False
     if await _busy(session_factory, session_id, now):
         return False
-    why = (
-        "why_removed"
-        if any(r.reason == followup_store.REMOVED_FROM_AGENT for r in withdrawn)
-        else "why_resolved"
-    )
+    reasons = {r.reason for r in withdrawn}
+    why = next(key for reason, key in _WITHDRAWN_WHY.items() if reason in reasons)
     settings = await followup_store.get_settings(
         session_factory, org_id=org_id, agent_id=agent_id,
     )
@@ -902,7 +900,7 @@ async def _remind(
         kind="alert", severity="red", created_by="reminder", topic="urgent",
         text=wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
-        dedupe_prefix=followup_store.REMINDER_PREFIX + escalation.removeprefix(followup_store.ESCALATION_PREFIX),
+        dedupe_prefix=followup_store.reminder_key(escalation),
         fallback_senders={row.platform: row.channel_identifier},
     )
     async with session_factory() as db:

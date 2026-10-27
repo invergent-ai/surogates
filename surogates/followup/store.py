@@ -1248,12 +1248,14 @@ def escalation_id_of(key: str | None) -> uuid.UUID | None:
     (``escalation:<step or ->:<hex>:<recipient>``), its red alert's reminder
     (``reminder:…`` alike) or a missed-replies alert
     (``missed:<id>:<recipient>``); ``None`` for anything else."""
-    parts = (key or "").split(":")
-    head = parts[0] + ":"
-    if head in (ESCALATION_PREFIX, REMINDER_PREFIX) and len(parts) >= 3:
-        raw = parts[2]
-    elif head == MISSED_PREFIX and len(parts) >= 2:
-        raw = parts[1]
+    key = key or ""
+    if key.startswith(REMINDER_PREFIX):
+        key = ESCALATION_PREFIX + key.removeprefix(REMINDER_PREFIX)
+    escalation = escalation_of(key)
+    if escalation is not None:
+        raw = escalation_hex(escalation)
+    elif key.startswith(MISSED_PREFIX):
+        raw = key.split(":")[1]
     else:
         return None
     try:
@@ -1308,7 +1310,7 @@ async def retire_escalation_alerts(
             for escalation_id, invitation_id in found
             for prefix in (
                 f"{escalation_key(escalation_id, invitation_id)}:",
-                f"{REMINDER_PREFIX}{invitation_id or '-'}:{escalation_id.hex}:",
+                f"{reminder_key(escalation_key(escalation_id, invitation_id))}:",
                 f"{MISSED_PREFIX}{escalation_id}:",
             )
         ]
@@ -1330,6 +1332,11 @@ def escalation_key(escalation_id: uuid.UUID, invitation_id: uuid.UUID | None = N
     """``escalation:<step or ->:<id hex>``: what groups one escalation's
     alerts, its Inbox item and its reminder."""
     return f"{ESCALATION_PREFIX}{invitation_id or '-'}:{escalation_id.hex}"
+
+
+def reminder_key(escalation: str) -> str:
+    """``reminder:<step or ->:<id hex>``: the red alert reminder of the escalation key *escalation*."""
+    return REMINDER_PREFIX + escalation.removeprefix(ESCALATION_PREFIX)
 
 
 def escalation_of(key: str | None) -> str | None:
