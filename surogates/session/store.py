@@ -486,9 +486,10 @@ class SessionStore:
     ) -> None:
         self._sf = session_factory
         self._redis = redis
-        # Session channel cache: session_id → (channel, config).
+        # Session channel cache: session_id → (channel, config, relayed
+        # from a scheduled run).
         # Populated lazily when a deliverable event is emitted.
-        self._channel_cache: dict[UUID, tuple[str, dict]] = {}
+        self._channel_cache: dict[UUID, tuple[str, dict, bool]] = {}
 
     async def answer_file_waits(self, session_id: UUID, *, before: int) -> int:
         """Retire *session_id*'s waits on you over its files raised before event *before*; how many.
@@ -1783,6 +1784,7 @@ class SessionStore:
                         return
                     channel = row.channel or "web"
                     config = row.config or {}
+                    scheduled = channel == "scheduled"
                     # Scheduled/loop runs carry channel="scheduled" and do not
                     # hold the origin channel's routing config, so their
                     # deliverable events would strand under the "scheduled"
@@ -1790,7 +1792,7 @@ class SessionStore:
                     # the channel that created the schedule via the parent
                     # session. A detached run (no parent) has no origin channel,
                     # so there is nothing to deliver.
-                    if channel == "scheduled":
+                    if scheduled:
                         parent_id = getattr(row, "parent_id", None)
                         if parent_id is None:
                             return
@@ -1799,9 +1801,9 @@ class SessionStore:
                             return
                         channel = parent.channel or "web"
                         config = parent.config or {}
-                    self._channel_cache[session_id] = (channel, config)
+                    self._channel_cache[session_id] = (channel, config, scheduled)
 
-            channel, config = self._channel_cache[session_id]
+            channel, config, scheduled = self._channel_cache[session_id]
 
             # Only channels with a registered delivery adapter get outbox rows.
             # Everything else (web/website SSE, api/task/delegation/worker
@@ -1857,6 +1859,15 @@ class SessionStore:
             payload = _build_channel_payload(event_type, data, channel)
             if not payload:
                 return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
+            # Nobody is waiting on a scheduled run, so there is no inbound
+            # placeholder to edit: every narration line and coding heartbeat
+            # would land as its own post. The cron prompt promises only the
+            # final response is delivered.
+            if scheduled and (
+                payload.get("intermediate")
+                or event_type == EventType.CODE_RUN_CHANNEL_UPDATE
+            ):
+                return
 
             # Enqueue to the delivery outbox.
             from surogates.db.models import DeliveryOutbox
