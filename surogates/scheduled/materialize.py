@@ -140,12 +140,17 @@ async def materialize_scheduled_run(
     return session.id
 
 
+#: How long a scheduled run may stay open when its schedule sets no limit.
+DEFAULT_MAX_RUN_SECONDS = 30 * 60
+
+
 async def recover_stalled_loops(
     *,
     scheduled_store: Any,
     redis: Any,
     stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
     limit: int = 100,
+    session_store: Any = None,
 ) -> None:
     """Sweep dynamic loops whose run stalled, across all tenants, and reap
     schedules that have passed their ``expires_at``.
@@ -163,7 +168,16 @@ async def recover_stalled_loops(
     last run and its next due instant expires *unclaimed* (the claim query
     excludes expired rows), so it never reaches the completion code and stays
     ``active`` forever. :meth:`expire_active_schedules` transitions those.
+
+    And, given *session_store*, runs open past their time limit are failed
+    first, so a stalled loop's run is not requeued past it.
     """
+    if session_store is not None:
+        for run_id in await session_store.fail_overdue_scheduled_runs(
+            default_seconds=DEFAULT_MAX_RUN_SECONDS, limit=limit,
+        ):
+            logger.warning("Failed scheduled run %s: past its time limit", run_id)
+
     expired = await scheduled_store.expire_active_schedules(limit=limit)
     for schedule in expired:
         logger.info(

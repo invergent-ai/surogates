@@ -588,3 +588,51 @@ async def test_mark_run_failed_reschedules_and_releases_claim(
     assert refreshed.status == "active"
     assert refreshed.next_run_at is not None
     assert refreshed.next_run_at > datetime.now(timezone.utc)
+
+
+async def test_a_run_open_past_its_time_limit_is_failed_and_one_within_it_is_not(
+    session_factory, redis_client,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    runs = {}
+    for name, limit in (("default", None), ("long", 7200)):
+        await scheduled_store.create(
+            org_id=org_id, user_id=user_id, agent_id="agent-a", name=name,
+            prompt="post", schedule=parse_schedule("10m"), source="loop",
+            created_from_session_id=None,
+            next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE scheduled_sessions SET max_run_seconds = 7200 WHERE org_id = :o AND name = 'long'"),
+            {"o": org_id},
+        )
+        await db.commit()
+    await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+    for row in await _claim_one(scheduled_store):
+        runs[row.name] = await materialize_scheduled_run(
+            row, **_deps(session_factory, redis_client, scheduled_store, session_store),
+        )
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE sessions SET created_at = now() - interval '45 minutes' WHERE id IN (:a, :b)"),
+            {"a": runs["default"], "b": runs["long"]},
+        )
+        await db.commit()
+
+    await recover_stalled_loops(
+        scheduled_store=scheduled_store, redis=redis_client, session_store=session_store,
+    )
+
+    overdue = await session_store.get_session(runs["default"])
+    within = await session_store.get_session(runs["long"])
+    assert overdue.status == "failed"
+    assert within.status == "active"
+    fails = [
+        e for e in await session_store.get_events(runs["default"])
+        if e.type == EventType.SESSION_FAIL.value
+    ]
+    assert fails and fails[-1].data["reason"] == "run_time_limit"
