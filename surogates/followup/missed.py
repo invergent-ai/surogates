@@ -319,7 +319,7 @@ async def _alert_if_streak(
         session_factory, settings, org_id=inv.org_id,
         agent_id=inv.agent_id, kind="alert", text=text,
         created_by="missed-checkins", subject_user_id=person_id,
-        dedupe_prefix=f"missed:{inv.id}", topic="missed_replies",
+        dedupe_prefix=f"{followup_store.MISSED_PREFIX}{inv.id}", topic="missed_replies",
         # The Program's own sender, on its own channel: a Slack Program's
         # team id is no WhatsApp sender.
         fallback_senders={

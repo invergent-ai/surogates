@@ -82,6 +82,7 @@ __all__ = [
     "record_inbound",
     "render_text",
     "resolve_escalation",
+    "retire_escalation_alerts",
     "senders_of",
     "update_enrollment",
     "update_settings",
@@ -1209,10 +1210,65 @@ async def resolve_escalation(
     )
     if row is not None and resolved:
         await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+        await retire_escalation_alerts(session_factory, org_id=org_id, escalation_ids=[escalation_id])
     return row
 
 
 ESCALATION_PREFIX = "escalation:"
+#: A red alert's one reminder: ``reminder:<step or ->:<id hex>:<recipient>``.
+REMINDER_PREFIX = "reminder:"
+#: A missed-replies alert: ``missed:<escalation id>:<recipient>``.
+MISSED_PREFIX = "missed:"
+RESOLVED_BEFORE_READ = "Escalation resolved before it was read"
+
+
+def _alerts_about(escalation_hex_: Any, escalation_dashed: Any) -> Any:
+    """Outreach rows an escalation sent: its alerts, its red alert's
+    reminder, its missed-replies alerts.  Takes the id as SQL expressions,
+    so the match also correlates against ``escalations``."""
+    key = OutreachMessageRow.dedupe_key
+    return sa.or_(
+        *(
+            key.like(sa.literal(f"{prefix}%:") + escalation_hex_ + sa.literal(":%"))
+            for prefix in (ESCALATION_PREFIX, REMINDER_PREFIX)
+        ),
+        key.like(sa.literal(MISSED_PREFIX) + escalation_dashed + sa.literal(":%")),
+    )
+
+
+#: An outreach row about an escalation already resolved: a held alert that
+#: must not reach the team when they next write.  A taken case still
+#: delivers: whoever took it may need what it says.
+ABOUT_RESOLVED_ESCALATION = sa.exists().where(
+    EscalationRow.org_id == OutreachMessageRow.org_id,
+    EscalationRow.agent_id == OutreachMessageRow.agent_id,
+    EscalationRow.resolved_at.isnot(None),
+    _alerts_about(
+        sa.func.replace(sa.cast(EscalationRow.id, sa.String), "-", ""),
+        sa.cast(EscalationRow.id, sa.String),
+    ),
+)
+
+
+async def retire_escalation_alerts(
+    session_factory: Any, *, org_id: uuid.UUID, escalation_ids: Iterable[uuid.UUID],
+) -> int:
+    """Give up the alerts still held for resolved escalations, so the team's
+    next message does not deliver a case already dealt with."""
+    ids = list(escalation_ids)
+    if not ids:
+        return 0
+    async with session_factory() as db:
+        result = await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.org_id == org_id)
+            .where(OutreachMessageRow.state.in_(("queued", "awaiting_reply")))
+            .where(sa.or_(*(_alerts_about(sa.literal(i.hex), sa.literal(str(i))) for i in ids)))
+            .values(state="replaced", reason=RESOLVED_BEFORE_READ)
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    return int(result.rowcount or 0)
 
 
 def escalation_key(escalation_id: uuid.UUID, invitation_id: uuid.UUID | None = None) -> str:
@@ -1276,6 +1332,7 @@ async def handle_escalations(
         await db.commit()
     for escalation_id in resolve:
         await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+    await retire_escalation_alerts(session_factory, org_id=org_id, escalation_ids=resolve)
 
 
 async def raise_escalation_inbox_item(

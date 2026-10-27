@@ -326,7 +326,10 @@ async def deliver_pending(
                 .where(OutreachMessageRow.platform == platform)
                 .where(OutreachMessageRow.channel_identifier == channel_identifier)
                 .where(sa.or_(
-                    OutreachMessageRow.state.in_(_HELD),
+                    sa.and_(
+                        OutreachMessageRow.state.in_(_HELD),
+                        ~followup_store.ABOUT_RESOLVED_ESCALATION,
+                    ),
                     sa.and_(
                         OutreachMessageRow.kind == "operator",
                         OutreachMessageRow.state == "failed",
@@ -813,7 +816,7 @@ async def _remind(
         kind="alert", severity="red", created_by="reminder", topic="urgent",
         text=wording(settings, "red_alert_reminder", minutes=minutes, text=row.text),
         subject_user_id=row.subject_user_id,
-        dedupe_prefix="reminder:" + escalation.removeprefix(followup_store.ESCALATION_PREFIX),
+        dedupe_prefix=followup_store.REMINDER_PREFIX + escalation.removeprefix(followup_store.ESCALATION_PREFIX),
         fallback_senders={row.platform: row.channel_identifier},
     )
     async with session_factory() as db:
@@ -1064,7 +1067,10 @@ async def send_queued_outreach(
                             OutreachMessageRow.not_before <= now,
                         ),
                     ),
-                    sa.and_(OutreachMessageRow.state == "awaiting_reply", answered),
+                    sa.and_(
+                        OutreachMessageRow.state == "awaiting_reply", answered,
+                        ~followup_store.ABOUT_RESOLVED_ESCALATION,
+                    ),
                 ))
                 .order_by(OutreachMessageRow.created_at)
                 .limit(BATCH)
